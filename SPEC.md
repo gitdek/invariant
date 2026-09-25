@@ -77,3 +77,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 | :-- | :-- | :-- |
 | D-0019 | The exact text of the two-phase commit statements and its known bug | proposed |
 | D-0022 | A `decided` status for execution-level calls | proposed |
+| [D-0023](decisions/D-0023-more-languages.md) | More target languages: TypeScript, Python | open |

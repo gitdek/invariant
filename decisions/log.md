@@ -27,7 +27,8 @@ Ordered and append-only. To change a decision, add a new entry that supersedes i
 | D-0020 | 2026-09-25 | two-way | decided | Gobra also checks integer overflow. Each example is its own Go module, like the repositories the factory will work in. | Claude |
 | D-0021 | 2026-09-25 | two-way | decided | CI runs the gate as the `invariant/gate` check and publishes the receipt in the run summary. It also runs integration tests showing the gate rejects a weakened invariant, a vacuous model and a known bug that no longer applies. | Claude |
 | D-0022 | 2026-09-25 | two-way | proposed | Add a `decided` status for two-way-door calls made while carrying out ratified work. Such a call stands unless the owner reverses it, and it rolls into the spec. | Claude |
+| [D-0023](D-0023-more-languages.md) | 2026-09-25 | one-way | open | Whether to support TypeScript and Python targets, and how. | — |
 
-**Source.** D-0000 to D-0015 come from the kickoff design review between @gitdek and Claude on 2026-09-25 (Claude Code session `2f96fee2`). @gitdek ratified D-0009 to D-0015 in the same session, and restated D-0012 explicitly. D-0016 to D-0022 were logged while building slice 1 in that session.
+**Source.** D-0000 to D-0015 come from the kickoff design review between @gitdek and Claude on 2026-09-25 (Claude Code session `2f96fee2`). @gitdek ratified D-0009 to D-0015 in the same session, and restated D-0012 explicitly. D-0016 to D-0023 were logged while building slice 1 in that session.
 
 **Status.** `ratified`: the owner approved it. `decided`: a two-way-door call made while carrying out ratified work; it stands unless the owner reverses it (proposed in D-0022). `proposed`: drafted and awaiting ratification. `open`: a fork nobody has decided. `superseded`: replaced by a later entry.
