@@ -1,0 +1,7 @@
+{
+  "name": "two-phase commit (Python, proved)",
+  "module": ".invariant/specs/TwoPhase.tla",
+  "code": "twophase",
+  "language": "python",
+  "conformance": "conformance.py"
+}

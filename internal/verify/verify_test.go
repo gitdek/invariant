@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,51 @@ func TestAgree(t *testing.T) {
 	}
 	if a := agree(Design{Passed: false}, Exploration{OK: true, States: 288, Depth: 11}); a.Passed {
 		t.Error("without a finished TLC run there's nothing to agree with")
+	}
+}
+
+func TestPythonFunctions(t *testing.T) {
+	src := `# +nagini
+class State:
+    def __init__(self) -> None:
+        Ensures(True)
+
+    def size(self) -> int:
+        return 3
+
+
+def step(s: State) -> None:
+    Requires(True)
+
+    def helper() -> None:
+        pass
+`
+	all, contracts := pythonFunctions(src)
+	if !reflect.DeepEqual(all, []string{"State.__init__", "State.size", "step"}) || !reflect.DeepEqual(contracts, []string{"State.__init__", "step"}) {
+		t.Errorf("functions = %v, contracts = %v", all, contracts)
+	}
+}
+
+func TestNaginiErrors(t *testing.T) {
+	out := strings.Join([]string{
+		"Verification failed",
+		"Errors:",
+		"Postcondition of tm_commit might not hold. Assertion s.commit_msg might not hold. (core.py@78.12--78.38).",
+		"Branch conditions: ",
+		`  (not (field "commit_msg" does not exist)) at core.py@84.4--84.34`,
+		`  (not (field "tm_done" does not exist)) at core.py@83.4--83.20`,
+		"The precondition of s.rm[r] might not hold. (core.py@124.4--124.13).",
+		"Verification took 21.24 seconds.",
+	}, "\n")
+	want := []string{
+		"core.py:78:12: Postcondition of tm_commit might not hold. Assertion s.commit_msg might not hold.",
+		"core.py:124:4: The precondition of s.rm[r] might not hold.",
+	}
+	if got := naginiErrors("core.py", out); !reflect.DeepEqual(got, want) {
+		t.Errorf("errors = %q", got)
+	}
+	if got := naginiErrors("core.py", "Traceback (most recent call last):\nImportError: nope"); len(got) != 1 || !strings.Contains(got[0], "ImportError") {
+		t.Errorf("output without an error list should come back whole: %q", got)
 	}
 }
 

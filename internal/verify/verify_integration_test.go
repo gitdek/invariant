@@ -20,6 +20,7 @@ const (
 	example           = "../../examples/02-twophase-commit"
 	typescriptExample = "../../examples/02-twophase-commit-ts"
 	pythonExample     = "../../examples/02-twophase-commit-py"
+	provedPython      = "../../examples/02-twophase-commit-py-proved"
 )
 
 // copyExample copies the Go example to a temporary directory, applying each
@@ -196,5 +197,35 @@ func TestEarlyCommitInCodeFailsConformance(t *testing.T) {
 				t.Errorf("the bad step should be the commit: %+v", r.Conformance.BadStep)
 			}
 		})
+	}
+}
+
+// Nagini proves the Python core, and its driver explores the core
+// completely, so the receipt says "proved" and every model state is visited.
+func TestProvedPythonPasses(t *testing.T) {
+	t.Parallel()
+	r := run(t, copyProject(t, provedPython, nil))
+	if !r.Passed || r.Assurance != "proved" || r.Code == nil || r.Code.Verifier != "Nagini" {
+		t.Fatalf("passed = %v, assurance = %q, failed = %v\n%s", r.Passed, r.Assurance, Failed(r), Feedback(r))
+	}
+	if int64(r.Conformance.States) != r.Conformance.ModelStates {
+		t.Errorf("visited %d of %d model states; the driver should cover them all", r.Conformance.States, r.Conformance.ModelStates)
+	}
+}
+
+// A proof covers every state a contract allows, not only the states a run
+// reaches. This tm_commit is right in every reachable state, where the
+// coordinator can't have aborted yet, so the tests and conformance pass. Its
+// precondition doesn't rule an abort out, and Nagini rejects it.
+func TestNaginiSeesPastTheReachableStates(t *testing.T) {
+	t.Parallel()
+	r := run(t, copyProject(t, provedPython, map[string]func(string) string{
+		"twophase/core.py": replace(t, "    s.commit_msg = True\n", "    s.commit_msg = not s.abort_msg\n"),
+	}))
+	if r.Passed || !contains(Failed(r), "code") || !strings.Contains(strings.Join(r.Code.Errors, "\n"), "tm_commit") {
+		t.Fatalf("failed = %v, errors = %v; want Nagini to reject tm_commit", Failed(r), r.Code.Errors)
+	}
+	if !r.Build.Passed || !r.Conformance.Passed {
+		t.Error("the tests and conformance should pass; only the proof can see this")
 	}
 }

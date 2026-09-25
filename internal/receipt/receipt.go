@@ -62,6 +62,9 @@ func Markdown(r *verify.Report) string {
 			fmt.Fprintf(&b, "| %s | `%s` |\n", img[0], shortImage(img[1]))
 		}
 	}
+	if t.NaginiRecipe != "" {
+		fmt.Fprintf(&b, "| Nagini sandbox | recipe `%s` |\n", short(t.NaginiRecipe))
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
 	}
@@ -147,6 +150,9 @@ func agreementEvidence(a verify.Agreement) string {
 func codeResult(c verify.Code) string {
 	if c.Passed {
 		return fmt.Sprintf("proved: %d of %d functions verified", len(c.Functions), len(c.Functions))
+	}
+	if len(c.Errors) == 1 {
+		return "1 verification error"
 	}
 	return fmt.Sprintf("%d verification errors", len(c.Errors))
 }

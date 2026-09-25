@@ -146,6 +146,7 @@ type Toolchain struct {
 	GoImage      string `json:"go_image,omitempty"`
 	NodeImage    string `json:"node_image,omitempty"`
 	PythonImage  string `json:"python_image,omitempty"`
+	NaginiRecipe string `json:"nagini_recipe,omitempty"`
 	Go           string `json:"go,omitempty"`
 }
 
@@ -192,6 +193,9 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		r.Toolchain.NodeImage = tc.NodeImage
 	case Python:
 		r.Toolchain.PythonImage = tc.PythonImage
+		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
+			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
+		}
 	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
 	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}

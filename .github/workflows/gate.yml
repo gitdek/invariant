@@ -13,7 +13,7 @@ jobs:
     # The required status check the auto-merge policy keys on (D-0004).
     name: invariant/gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -36,6 +36,9 @@ jobs:
         run: |
           go run ./cmd/invariant verify examples/02-twophase-commit-ts
           go run ./cmd/invariant verify examples/02-twophase-commit-py
+
+      - name: Prove the Python core with Nagini
+        run: go run ./cmd/invariant verify examples/02-twophase-commit-py-proved
 
       - name: Publish the receipt
         if: always()

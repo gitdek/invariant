@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0030 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0031 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -23,7 +23,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - The reachability witnesses.
   - The known bugs, as TLA+ actions the invariants must catch.
 - Each pin covers a statement and every definition it depends on, stopping at the factory's `Init` and `Next`. `D-0026`
-- The factory owns the model (`Init`, the actions and `Next`), the Go implementation and its Gobra contracts. Each contract restates one TLA+ action. `D-0011` `D-0026`
+- The factory owns the model (`Init`, the actions and `Next`), the implementation and its contracts. Each contract restates one TLA+ action. `D-0011` `D-0026` `D-0031`
 - A person records a ratification with `invariant pin`. `D-0017`
 
 ## System
@@ -32,14 +32,16 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Invariant targets Go, TypeScript and Python, the languages of @gitdek's projects. `D-0023`
 - Every language gets a proof path and a conformance path, and each receipt says which one ran. Proofs fit new code written for a verifier; existing code is tested against the model. `D-0024`
   - Go: proved with Gobra, and tied to the model by agreement. `D-0003` `D-0026`
-  - TypeScript and Python: tested against the model by conformance. No proof path yet. `D-0024` `D-0029`
+  - Python: new cores are proved with Nagini, in files marked `# +nagini`, and still tested against the model by conformance. Existing code is tested by conformance alone. `D-0024` `D-0029` `D-0031`
+  - TypeScript: tested against the model by conformance. No proof path yet. `D-0024` `D-0029`
 - Conformance: a project's driver calls the code's operations at random and records each state in the spec's vocabulary. TLC checks that every run starts in a state `Init` allows and that every step that changes the state is a `Next` step. Runs use a fixed seed, so receipts reproduce. `D-0029`
-- Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra. Lean 4 has no role in v1. `D-0003` `D-0010`
+- Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra, and Python cores with Nagini. Lean 4 has no role in v1. `D-0003` `D-0010` `D-0031`
 - Verifiers run in Docker and are pinned. `D-0000` `D-0013` `D-0016` `D-0020`
   - TLC is v1.7.4, pinned by SHA-256, running in `eclipse-temurin` pinned by digest.
   - Gobra is pinned by digest, and it also checks integer overflow.
   - Builds, tests and exploration run in `golang:1.27-alpine`, pinned by digest, on a throwaway copy.
   - TypeScript runs in `node:24-alpine` and Python in `python:3.13-alpine`, both pinned by digest and limited to the standard library. Type checking isn't run yet. `D-0030`
+  - Nagini 1.3.1 runs in an image built from a recipe inside Invariant, for linux/amd64 only. The base is pinned by digest and every Python package by wheel hash, and receipts name the recipe by its hash. The Java runtime isn't pinned yet. `D-0031`
   - Nothing runs with network access or with the host's environment.
 - Invariant converts TLC counterexamples into JSON traces. `D-0016`
 - Each project is its own Go module. `D-0020`
@@ -67,7 +69,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Every known bug is caught.
   - Go: the code, explored from `Init()` through `Successors()`, reaches exactly the states TLC found, at the same depth.
   - TypeScript and Python: every step the code took is a step the model allows.
-  - Gobra verifies the code in files marked `// +gobra`, and the receipt names anything it didn't see.
+  - Gobra verifies Go files marked `// +gobra`, Nagini verifies Python files marked `# +nagini`, and the receipt names any function neither saw. `D-0031`
   - CI is green.
   - The diff stays in scope: no new module dependencies, no cgo, no edits to `.github/` or pinned specs.
 - The pinned-statement checks and the scope rules must exist before the factory opens its first PR. `D-0004` `D-0014`
@@ -78,8 +80,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Slices, in order: `D-0005` `D-0013` `D-0024`
   1. The gate, proven on `examples/02-twophase-commit`. Done.
   2. Synthesis for Go. Done.
-  3. TypeScript and Python: conformance for existing code (done), then a Nagini spike (next).
-  4. GitHub.
+  3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
+  4. GitHub. Next.
 
 ## Project
 

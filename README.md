@@ -14,7 +14,7 @@
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-6e7781?style=flat-square">
   <img alt="Go 1.27" src="https://img.shields.io/badge/Go-1.27-00ADD8?style=flat-square&logo=go&logoColor=white">
   <img alt="Design: TLA+ / TLC" src="https://img.shields.io/badge/design-TLA%2B%20%2F%20TLC-0CA678?style=flat-square">
-  <img alt="Code: Gobra" src="https://img.shields.io/badge/code-Gobra-0CA678?style=flat-square">
+  <img alt="Code: Gobra and Nagini" src="https://img.shields.io/badge/code-Gobra%20%C2%B7%20Nagini-0CA678?style=flat-square">
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6e7781?style=flat-square">
 </p>
 
@@ -67,9 +67,9 @@ The factory owns both the model and the code, and each Go function's contract re
 | Reachability | TLA+ · TLC | A ratified witness can't be reached, so the invariants might hold only because nothing happens |
 | Known bugs | TLA+ · TLC | A ratified bug, added to the model as an extra action, slips past the invariants |
 | Agreement | Invariant | Go: the code, explored from its initial state, doesn't reach exactly the states TLC found in the model |
-| Conformance | Invariant · TLC | TypeScript and Python: the real code, driven at random, takes a step the model doesn't allow |
-| Code | Gobra | A function doesn't verify against its contract, or an index or integer operation could fail |
-| Build | `go test` · `go vet` | Anything is red. Runs in a sandbox with no network and no secrets. |
+| Conformance | Invariant · TLC | TypeScript and Python: the real code, driven through its operations, takes a step the model doesn't allow |
+| Code | Gobra · Nagini | A function doesn't verify against its contract, or an index or integer operation could fail |
+| Build | vet · tests | Anything is red. Runs in a sandbox with no network and no secrets. |
 | Scope | Invariant | The diff adds dependencies, uses cgo, or edits CI config or pinned specs. This check arrives with the GitHub integration. |
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
@@ -84,8 +84,11 @@ The same ratified two-phase commit, pinned by the same hashes, checked in each o
 | [Go, written by the factory](examples/02-twophase-commit-synthesized) | **Proved**, in the same way | Written from the ratified statements alone. It passed on its first gate run |
 | [TypeScript](examples/02-twophase-commit-ts) | **Tested against the model.** Ordinary code, driven at random. TLC checks every step it takes. | 1,000 runs, no step outside the model, 283 of 288 states visited |
 | [Python](examples/02-twophase-commit-py) | **Tested against the model**, in the same way | 1,000 runs, no step outside the model, 275 of 288 states visited |
+| [Python, proved](examples/02-twophase-commit-py-proved) | **Proved.** Nagini verifies every step function against a contract that restates a TLA+ action. | Explored completely: all 288 of the model's states, no step outside it |
 
 The receipt always says which kind of evidence it is. Plant the early-commit bug in the TypeScript or the Python and the gate rejects it at the exact step: the coordinator commits after a single vote.
+
+A proof goes further than any run. Plant a `tm_commit` in the proved Python that goes wrong only if the coordinator had already aborted. No run can reach that state, so the tests and conformance pass. The contract doesn't rule it out, so Nagini rejects it.
 
 ## Try it
 
@@ -98,7 +101,7 @@ go run ./cmd/invariant verify examples/02-twophase-commit
 It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
 
 <p align="center">
-  <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit. Every check passed: 4 of 4 pins match; TLC found no violations or deadlocks in 288 distinct states; 2 of 2 witnesses were reached; 1 of 1 known bugs was caught; Gobra verified 10 of 10 functions; go vet and go test passed." width="100%">
+  <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit. Every check passed: 6 of 6 pins match; TLC found no violations or deadlocks in 288 distinct states; 2 of 2 witnesses were reached; 1 of 1 known bugs was caught; the code reaches the model's 288 states; Gobra verified 10 of 10 functions; go vet and go test passed." width="100%">
 </p>
 
 <details>
@@ -111,10 +114,10 @@ It prints a receipt. This is the real one for the [two-phase commit example](exa
 | Reachability | ✅ 2 of 2 witnesses reached | `AllCommitted` in 10 steps, `AllAborted` in 3 steps |
 | Known bugs | ✅ 1 of 1 caught | early-commit: `TCConsistent` violated after 5 steps |
 | Agreement | ✅ code reaches the model's states | 288 states, depth 11 |
-| Code · Gobra | ✅ 10 of 10 functions verified | 10 with contracts, overflow checked, not verified: Successors |
+| Code · Gobra | ✅ proved: 10 of 10 functions verified | 10 with contracts, overflow checked, not verified: Successors |
 | Build | ✅ go vet, go test | sandboxed, no network |
 
-These results cover `RM = {r1, r2, r3}`. Within those bounds, TLC's search is exhaustive. The receipt claims nothing beyond them.
+Checked within `RM = {r1, r2, r3}`. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.
 
 </details>
 
@@ -125,7 +128,7 @@ Pre-alpha. The gate works end to end in Go, TypeScript and Python, and the facto
 - [x] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](examples/02-twophase-commit).
 - [x] **Slice 2 · Synthesis.** Headless Claude Code rebuilt the model and the code from the ratified statements and the request alone. It [passed on its first gate run](examples/02-twophase-commit-synthesized), in 12 turns and under two minutes.
 - [x] **Slice 3a · TypeScript and Python conformance.** Existing code is tested against the model, and the receipt says so.
-- [ ] **Slice 3b · Nagini spike.** Proofs for new Python code.
+- [x] **Slice 3b · Nagini spike.** Nagini proves a [Python core](examples/02-twophase-commit-py-proved) of two-phase commit, 8 of 8 functions, and catches a bug no run can reach.
 - [ ] **Slice 4 · GitHub.** An issue becomes a decision request, then a ratification, then a pull request, then an auto-merge.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md).

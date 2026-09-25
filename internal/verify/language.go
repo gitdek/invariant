@@ -322,11 +322,21 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. There's no proof path yet
-// (D-0024: Nagini, after a spike).
+// container, with the standard library only. Files marked # +nagini are
+// proved with Nagini (D-0031); the rest are tested against the model.
 type Python struct{ Image string }
 
-func (Python) Verify(context.Context, string) (*Code, error) { return nil, nil }
+func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
+	proved, plain, err := naginiSources(pkg)
+	if err != nil || len(proved) == 0 {
+		return nil, err
+	}
+	image, err := toolchain.NaginiImage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return runNagini(ctx, image, pkg, proved, plain)
+}
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
 	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `cd /src
@@ -345,8 +355,12 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	defer os.RemoveAll(work)
-	src, out := filepath.Join(work, "src"), filepath.Join(work, "out")
+	src, out, runtime := filepath.Join(work, "src"), filepath.Join(work, "out"), filepath.Join(work, "runtime")
 	if err := copyTree(p.Dir, src); err != nil {
+		return Build{}, Evidence{}, err
+	}
+	// Python finds the nagini_contracts stand-in first, so proved cores run.
+	if err := writeNaginiRuntime(runtime); err != nil {
 		return Build{}, Evidence{}, err
 	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
@@ -354,7 +368,8 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	}
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
+		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),

@@ -3,8 +3,10 @@
 package toolchain
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -118,4 +120,36 @@ func fileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// NaginiDockerfile is the recipe for the Nagini sandbox: a Python base pinned
+// by digest, a Java runtime for Viper, and Nagini, with every Python package
+// pinned by wheel hash (D-0031).
+//
+//go:embed nagini.Dockerfile
+var NaginiDockerfile []byte
+
+// NaginiRecipe identifies the Nagini sandbox by its recipe. Laptops and CI
+// build it themselves, so the recipe, not a local image ID, is what a
+// receipt records.
+func NaginiRecipe() string {
+	sum := sha256.Sum256(NaginiDockerfile)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// NaginiImage returns the Nagini sandbox's tag, building it from the recipe
+// the first time. Building needs the network; verifying never does.
+func NaginiImage(ctx context.Context) (string, error) {
+	tag := "invariant-nagini:" + NaginiRecipe()[len("sha256:"):][:12]
+	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
+		return tag, nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "build", "--platform", "linux/amd64", "-t", tag, "-")
+	cmd.Stdin = bytes.NewReader(NaginiDockerfile)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("building the Nagini sandbox: %w\n%s", err, out.String())
+	}
+	return tag, nil
 }
