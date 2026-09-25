@@ -1,0 +1,14 @@
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# TLC working state
+states/
+*.st
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

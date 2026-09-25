@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 124" width="880" height="124" role="img" aria-label="Issue, formalize, people ratify, synthesize, gate, merge. Counterexamples from the gate loop back to synthesis.">
+<defs><marker id="a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1L9,5L1,9" fill="none" stroke="#8C959F" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
+<rect x="21" y="44" width="92" height="44" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="67.0" y="71.5" font-size="15" font-weight="600" fill="#1F2328">Issue</text>
+<text x="67.0" y="110" font-size="12" fill="#656D76">what's asked</text>
+<path d="M120,66.0H150" stroke="#8C959F" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="157" y="44" width="118" height="44" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="216.0" y="71.5" font-size="15" font-weight="600" fill="#1F2328">Formalize</text>
+<text x="216.0" y="110" font-size="12" fill="#656D76">statements + forks</text>
+<path d="M282,66.0H312" stroke="#8C959F" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="319" y="44" width="104" height="44" rx="10" fill="#E6F7F0" stroke="#0CA678" stroke-width="1.5"/>
+<text x="371.0" y="71.5" font-size="15" font-weight="600" fill="#0B7A58">Ratify</text>
+<text x="371.0" y="110" font-size="12" fill="#656D76">people decide</text>
+<path d="M430,66.0H460" stroke="#8C959F" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="467" y="44" width="124" height="44" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="529.0" y="71.5" font-size="15" font-weight="600" fill="#1F2328">Synthesize</text>
+<text x="529.0" y="110" font-size="12" fill="#656D76">Go + TLA+ model</text>
+<path d="M598,66.0H628" stroke="#8C959F" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="635" y="44" width="84" height="44" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="677.0" y="71.5" font-size="15" font-weight="600" fill="#1F2328">Gate</text>
+<text x="677.0" y="110" font-size="12" fill="#656D76">TLC · Gobra · scope</text>
+<path d="M726,66.0H756" stroke="#8C959F" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="763" y="44" width="96" height="44" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="811.0" y="71.5" font-size="15" font-weight="600" fill="#1F2328">Merge</text>
+<text x="811.0" y="110" font-size="12" fill="#656D76">PR + receipt</text>
+<path d="M677.0,41C677.0,4 529.0,4 529.0,39" fill="none" stroke="#8C959F" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="603.0" y="37" font-size="12" fill="#656D76">counterexample</text>
+</g></svg>
