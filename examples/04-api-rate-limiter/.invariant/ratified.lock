@@ -1,0 +1,91 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-25T22:39:03Z",
+    "issue": 3,
+    "comment": "https://github.com/gitdek/invariant/issues/3#issuecomment-5840633638",
+    "proposal": "sha256:645f2d6b79c8dff534328c7bc16b1d7f03fce1024e031acf87a8bdd213125dd1"
+  },
+  "bounds": {
+    "Apis": "{a1, a2}",
+    "Capacity": "2",
+    "MaxCalls": "4",
+    "MaxTime": "3"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "The system starts in Init, and every step is a Next step.",
+      "sha256": "sha256:800ac2a35c71f3494555b2da0d881a2c8acc25ec23082d00e514912c17ed54bf"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "Each API's bucket always holds between zero and its capacity in tokens, and every call is tracked with when it was made and when it went out.",
+      "sha256": "sha256:58b40d82f42c715dc685e94afcac5df0c2695964a5a8fc6fc1e0d952efe88c19"
+    },
+    {
+      "name": "WithinRate",
+      "kind": "invariant",
+      "says": "Over any stretch of time, an API never receives more calls than its bucket's capacity plus one per refill period in that stretch.",
+      "sha256": "sha256:56bbce074ebf9c76267bec029136cd99c56bdc0510261b8058141c9278b1749d"
+    },
+    {
+      "name": "FirstInFirstOut",
+      "kind": "invariant",
+      "says": "Calls to an API wait and go out in exactly the order they were made.",
+      "sha256": "sha256:3f05224aaae0a31804339be1d1f51f0c65a3e2fb2c41ae21c6849032f730deaa"
+    },
+    {
+      "name": "NoNeedlessWait",
+      "kind": "invariant",
+      "says": "A call only waits while its API's bucket has no tokens left.",
+      "sha256": "sha256:816d3735c06127b177168348d8ee6ea218400153136c7e32a2f929dbad40c8cf"
+    },
+    {
+      "name": "NoCallLost",
+      "kind": "invariant",
+      "says": "Every call that was made has either gone out or is still waiting.",
+      "sha256": "sha256:9ed20d96b0cf7211a1e19240e0b63149ec8d05e46e862d582ccfba87a298a108"
+    },
+    {
+      "name": "BurstGoesOut",
+      "kind": "witness",
+      "says": "A full bucket's worth of calls can go out immediately at the start.",
+      "sha256": "sha256:6fb0ea1097d9f2f01f204502eebf08dfd75eee6b8e65b84566f5129ce555c5b8"
+    },
+    {
+      "name": "CallWaits",
+      "kind": "witness",
+      "says": "A call can have to wait for a token.",
+      "sha256": "sha256:21ec83ab123fa8a4405bf176d04f166b7a0066c1ad7a3ae95085684d7343afdd"
+    },
+    {
+      "name": "WaitingCallGoesOut",
+      "kind": "witness",
+      "says": "A call that waited can go out once a token refills.",
+      "sha256": "sha256:3593f395de2afcb3355dcb94fcca23845e93675ebfff52e3dbb21ac1d764527c"
+    },
+    {
+      "name": "BucketRefills",
+      "kind": "witness",
+      "says": "A bucket that was spent from can refill back to full.",
+      "sha256": "sha256:4cdd36e9b9cb5b508885950594d9a9e71c07b342628d61974b439f77c06cb3ec"
+    },
+    {
+      "name": "SendWithoutToken",
+      "kind": "bug",
+      "says": "A call goes out even though its API's bucket is empty.",
+      "expect": "WithinRate",
+      "sha256": "sha256:3941b95bc5843118ee7a345d63e295fa24a563d15ae9e81d02702faa3d7d440d"
+    },
+    {
+      "name": "JumpQueue",
+      "kind": "bug",
+      "says": "A refilled token goes to the newest waiting call instead of the oldest.",
+      "expect": "FirstInFirstOut",
+      "sha256": "sha256:fcd6e8b3a7f61844e77002c6d4505fd34173a3b256a147253ec5c22e0274122a"
+    }
+  ]
+}

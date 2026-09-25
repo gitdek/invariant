@@ -1,0 +1,6 @@
+{
+  "description": "API rate limiter, written by Invariant and checked against its ratified TLA+ model.",
+  "name": "api-rate-limiter",
+  "private": true,
+  "type": "module"
+}
