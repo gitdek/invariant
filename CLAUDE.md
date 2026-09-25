@@ -16,4 +16,4 @@
 - `go run ./cmd/invariant synthesize examples/02-twophase-commit`: have headless Claude Code rebuild the model and code from the ratified statements, then gate the result. It uses the owner's Claude account, so only run it when asked.
 - `go run ./cmd/invariant watch -repo gitdek/invariant -app-id 5079269`: the factory, acting as its App's bot, `invariant-code-factory[bot]`. The App's key is `~/.config/invariant/factory.pem`: never read it, print it or commit it. It turns issues into merged pull requests and runs its agents on the owner's Claude account, so only run it when asked. `formalize` drafts statements for a request file the same way.
 - `go run ./cmd/invariant scope -base origin/main` and `go run ./cmd/invariant ratification -repo gitdek/invariant PROJECT...`: the checks CI runs on factory pull requests.
-- Never post `/invariant` commands on the owner's behalf. Choosing forks and ratifying are the owner's decisions.
+- Choosing forks and ratifying are the owner's decisions, so never post `/invariant` commands on your own initiative. Post one on the owner's behalf only when they explicitly ask for that exact command, and say that you did.
