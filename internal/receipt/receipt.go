@@ -131,10 +131,14 @@ func codeEvidence(c verify.Code) string {
 }
 
 func buildResult(b verify.Build) string {
-	if b.Passed {
-		return "go vet, go test"
+	parts := make([]string, len(b.Steps))
+	for i, s := range b.Steps {
+		parts[i] = s.Name
+		if !b.Passed {
+			parts[i] += " " + mark(s.Passed)
+		}
 	}
-	return fmt.Sprintf("go vet %s, go test %s", mark(b.Vet), mark(b.Test))
+	return strings.Join(parts, ", ")
 }
 
 func failures(r *verify.Report) []string {

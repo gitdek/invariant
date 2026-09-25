@@ -15,9 +15,9 @@ func fixture(t *testing.T, name string) string {
 	return string(b)
 }
 
-// passed.out is a real TLC 2.19 run of TwoPhase.tla with RM = {r1, r2, r3}.
+// passed.txt is a real TLC 2.19 run of TwoPhase.tla with RM = {r1, r2, r3}.
 func TestParsePassed(t *testing.T) {
-	r := Parse(fixture(t, "passed.out"), 0)
+	r := Parse(fixture(t, "passed.txt"), 0)
 	if r.Outcome != Passed {
 		t.Fatalf("Outcome = %s (%s); want passed", r.Outcome, r.Message)
 	}
@@ -30,9 +30,9 @@ func TestParsePassed(t *testing.T) {
 	}
 }
 
-// violated.out is the same spec with the coordinator committing early.
+// violated.txt is the same spec with the coordinator committing early.
 func TestParseViolated(t *testing.T) {
-	r := Parse(fixture(t, "violated.out"), 12)
+	r := Parse(fixture(t, "violated.txt"), 12)
 	if r.Outcome != Violated || r.Invariant != "TCConsistent" {
 		t.Fatalf("Outcome = %s, Invariant = %q; want violated TCConsistent", r.Outcome, r.Invariant)
 	}

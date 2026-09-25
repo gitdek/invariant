@@ -15,19 +15,19 @@ func fixture(t *testing.T, name string) string {
 	return string(b)
 }
 
-// passed.out is a real Gobra run over examples/02-twophase-commit/twophase
+// passed.txt is a real Gobra run over examples/02-twophase-commit/twophase
 // with --overflow.
 func TestParsePassed(t *testing.T) {
-	r := Parse(fixture(t, "passed.out"), 0)
+	r := Parse(fixture(t, "passed.txt"), 0)
 	if !r.Passed || len(r.Errors) != 0 {
 		t.Fatalf("Passed = %v, Errors = %v; want a clean pass", r.Passed, r.Errors)
 	}
 }
 
-// failed.out is the same package with RMPrepare no longer sending its
+// failed.txt is the same package with RMPrepare no longer sending its
 // Prepared message.
 func TestParseFailed(t *testing.T) {
-	r := Parse(fixture(t, "failed.out"), 1)
+	r := Parse(fixture(t, "failed.txt"), 1)
 	want := []string{"twophase.go:97:9: Postcondition might not hold."}
 	if r.Passed || !reflect.DeepEqual(r.Errors, want) {
 		t.Fatalf("Passed = %v, Errors = %q; want %q", r.Passed, r.Errors, want)

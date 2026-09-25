@@ -17,7 +17,8 @@ type Manifest struct {
 	Name          string `json:"name"`
 	Module        string `json:"module"`        // the TLA+ module, relative to the project
 	Specification string `json:"specification"` // the operator TLC checks, such as "Spec"
-	Code          string `json:"code"`          // the Go package, relative to the project
+	Code          string `json:"code"`          // the implementation's package, relative to the project
+	Language      string `json:"language"`      // the implementation's language; only "go" so far
 }
 
 // Lock records what a person ratified: the statements and their pinned text,

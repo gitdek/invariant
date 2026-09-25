@@ -3,20 +3,17 @@
 package verify
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gitdek/invariant/internal/gobra"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/tlc"
@@ -97,12 +94,18 @@ type Code struct {
 	Errors    []string `json:"errors,omitempty"`
 }
 
-// Build is go vet and go test on the implementation.
+// Build is the language's own static checks and tests, such as go vet and
+// go test.
 type Build struct {
+	Passed bool        `json:"passed"`
+	Steps  []BuildStep `json:"steps"`
+	Output string      `json:"output,omitempty"`
+}
+
+// BuildStep is one build or test command.
+type BuildStep struct {
+	Name   string `json:"name"`
 	Passed bool   `json:"passed"`
-	Vet    bool   `json:"vet"`
-	Test   bool   `json:"test"`
-	Output string `json:"output,omitempty"`
 }
 
 // Toolchain records exactly what did the checking.
@@ -131,6 +134,10 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		return nil, err
 	}
 	src := string(raw)
+	lang, err := languageFor(p, tc)
+	if err != nil {
+		return nil, err
+	}
 	if name, err := tla.ModuleName(src); err != nil || name != p.ModuleName() {
 		return nil, fmt.Errorf("%s: the MODULE header must name %s", p.Manifest.Module, p.ModuleName())
 	}
@@ -262,20 +269,13 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		})
 	}
 
-	spawn(func() error {
-		res, err := gobra.Run(ctx, tc.GobraImage, p.CodeDir(), true)
-		if err != nil {
-			return err
-		}
-		r.Code = Code{Verifier: "Gobra", Passed: res.Passed, Functions: res.Functions, Contracts: res.Contracts, Overflow: res.Overflow, Errors: res.Errors}
-		return nil
+	spawn(func() (err error) {
+		r.Code, err = lang.Verify(ctx, p.CodeDir())
+		return err
 	})
 
 	spawn(func() error {
-		vetOut, vetErr := goCmd(ctx, p.CodeDir(), "vet", ".")
-		testOut, testErr := goCmd(ctx, p.CodeDir(), "test", "-count=1", ".")
-		r.Build = Build{Vet: vetErr == nil, Test: testErr == nil, Output: strings.TrimSpace(vetOut + testOut)}
-		r.Build.Passed = r.Build.Vet && r.Build.Test
+		r.Build = lang.Build(ctx, p.CodeDir())
 		return nil
 	})
 
@@ -398,20 +398,4 @@ func describe(res tlc.Result) string {
 	default:
 		return "TLC failed: " + res.Message
 	}
-}
-
-func goCmd(ctx context.Context, dir string, args ...string) (string, error) {
-	var out bytes.Buffer
-	cmd := exec.CommandContext(ctx, "go", args...)
-	cmd.Dir, cmd.Stdout, cmd.Stderr = dir, &out, &out
-	err := cmd.Run()
-	return out.String(), err
-}
-
-func goVersion(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, "go", "env", "GOVERSION").Output()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(string(out))
 }
