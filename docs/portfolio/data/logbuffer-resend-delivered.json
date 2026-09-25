@@ -1,0 +1,105 @@
+{
+  "module": "LogBuffer",
+  "check": "known bug resend-delivered",
+  "violated": "ShippedOnce",
+  "tlc": "TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)",
+  "states": [
+    {
+      "index": 1,
+      "action": "Initial predicate",
+      "changed": [],
+      "vars": {
+        "buf": [],
+        "log": [],
+        "retrying": false,
+        "sent": [],
+        "written": {
+          "p1": 0,
+          "p2": 0
+        }
+      },
+      "tla": {
+        "buf": "\u003c\u003c\u003e\u003e",
+        "log": "\u003c\u003c\u003e\u003e",
+        "retrying": "FALSE",
+        "sent": "\u003c\u003c\u003e\u003e",
+        "written": "(p1 :\u003e 0 @@ p2 :\u003e 0)"
+      }
+    },
+    {
+      "index": 2,
+      "action": "Write",
+      "changed": [
+        "buf",
+        "written",
+        "log"
+      ],
+      "vars": {
+        "buf": [
+          [
+            "p1",
+            1
+          ]
+        ],
+        "log": [
+          [
+            "p1",
+            1
+          ]
+        ],
+        "retrying": false,
+        "sent": [],
+        "written": {
+          "p1": 1,
+          "p2": 0
+        }
+      },
+      "tla": {
+        "buf": "\u003c\u003c\u003c\u003cp1, 1\u003e\u003e\u003e\u003e",
+        "log": "\u003c\u003c\u003c\u003cp1, 1\u003e\u003e\u003e\u003e",
+        "retrying": "FALSE",
+        "sent": "\u003c\u003c\u003e\u003e",
+        "written": "(p1 :\u003e 1 @@ p2 :\u003e 0)"
+      }
+    },
+    {
+      "index": 3,
+      "action": "ResendDelivered",
+      "changed": [
+        "buf",
+        "sent"
+      ],
+      "vars": {
+        "buf": [],
+        "log": [
+          [
+            "p1",
+            1
+          ]
+        ],
+        "retrying": false,
+        "sent": [
+          [
+            "p1",
+            1
+          ],
+          [
+            "p1",
+            1
+          ]
+        ],
+        "written": {
+          "p1": 1,
+          "p2": 0
+        }
+      },
+      "tla": {
+        "buf": "\u003c\u003c\u003e\u003e",
+        "log": "\u003c\u003c\u003c\u003cp1, 1\u003e\u003e\u003e\u003e",
+        "retrying": "FALSE",
+        "sent": "\u003c\u003c\u003c\u003cp1, 1\u003e\u003e, \u003c\u003cp1, 1\u003e\u003e\u003e\u003e",
+        "written": "(p1 :\u003e 1 @@ p2 :\u003e 0)"
+      }
+    }
+  ]
+}
