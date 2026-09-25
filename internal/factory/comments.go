@@ -155,14 +155,14 @@ func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.
 	fmt.Fprintf(&b, "◉ Written by Invariant for #%d, against the statements ratified there.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "- **Project:** `%s`\n- **Ratified proposal:** `%s`\n", m.Project, short(m.Hash))
 	if res != nil {
-		passedOn := "never passed"
+		gate := fmt.Sprintf("the gate never passed in %d runs", len(res.GateRuns))
 		for _, g := range res.GateRuns {
 			if g.Passed {
-				passedOn = fmt.Sprintf("passed on run %d", g.Run)
+				gate = fmt.Sprintf("the gate passed on run %d", g.Run)
 				break
 			}
 		}
-		fmt.Fprintf(&b, "- **Synthesis:** %s, %d turns, gate %s of %d\n", res.Usage.Backend, res.Usage.Turns, passedOn, max(len(res.GateRuns), 1))
+		fmt.Fprintf(&b, "- **Synthesis:** %s, %d turns, %s\n", res.Usage.Backend, res.Usage.Turns, gate)
 		if len(res.Tampered) > 0 {
 			fmt.Fprintf(&b, "- **Discarded:** the agent edited protected files (%s), and its edits were thrown away\n", strings.Join(res.Tampered, ", "))
 		}

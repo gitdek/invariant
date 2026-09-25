@@ -7,8 +7,11 @@ Run the gate first, then this script:
 
 Every number, state and line of code in these graphics comes from that run's
 receipt and counterexample trace, or from the example's source files (D-0015).
-The animations are SVG SMIL, which GitHub renders in READMEs.
+The factory's timeline comes from factory-run.json, which
+snapshot_factory_run.py records from GitHub. The animations are SVG SMIL,
+which GitHub renders in READMEs.
 """
+from datetime import datetime
 import html
 import json
 import xml.dom.minidom
@@ -563,6 +566,116 @@ def receipt_card(r):
                    f"Invariant receipt for {r['project']}: every check passed. " + " ".join(f"{a}: {b}." for a, b, _ in rows))
 
 
+# ---------------------------------------------------------------- 6. the factory
+
+def clock(stamp):
+    return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+
+
+def clip(text, n):
+    """Shorten text to at most n characters, at a word boundary."""
+    if len(text) <= n:
+        return text
+    cut = text[:n - 1]
+    if " " in cut:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip(" ,.;:") + "…"
+
+
+def factory_events(run):
+    """The run's events, in order: who, what, and the evidence, all read from
+    the snapshot."""
+    issue, pr = run["issue"], run["pr"]
+    events = [(issue["opened"], "person", f"@{issue['by']}", f"opened #{issue['number']}", clip(issue["title"], 58))]
+    body = pr["body"]
+    forks = {}
+    for c in run["comments"]:
+        m = c["marker"]
+        if m is None:
+            lines = [l.strip().strip("`") for l in c["body"].splitlines() if l.strip().strip("`").startswith("/invariant ")]
+            verb = lines[0].split()[1] if lines else ""
+            if verb == "choose":
+                picks = []
+                for l in lines:
+                    fork, option = l.split()[2:4]
+                    says = next(o["says"] for o in forks[fork]["options"] if o["id"] == option)
+                    picks.append(f"{fork} {option}: {clip(says, 28)}")
+                events.append((c["at"], "person", f"@{c['by']}", "decided", " · ".join(picks)))
+            elif verb == "ratify":
+                events.append((c["at"], "person", f"@{c['by']}", "ratified", "proposal " + lines[0].split()[2]))
+            continue
+        kind = m["kind"]
+        if kind == "forks":
+            forks = {f["id"]: f for f in m["forks"]}
+            events.append((c["at"], "factory", "Invariant", f"asked {len(m['forks'])} questions instead of guessing",
+                           " · ".join(f"{f['id']} {clip(f['question'], 30)}" for f in m["forks"])))
+        elif kind == "proposal":
+            p = m["proposal"]
+            n = {k: sum(s["kind"] == k for s in p["statements"]) for k in ("invariant", "witness", "bug")}
+            tlc = re.search(r"TLC explored ([\d,]+) states", c["body"])
+            events.append((c["at"], "factory", "Invariant", f"proposed {len(p['statements'])} statements",
+                           f"{n['invariant']} invariants, {n['witness']} witnesses, {n['bug']} known bugs · TLC {tlc.group(1)} states"))
+        elif kind == "pr":
+            code = re.search(r"Code · (\w+) \| ✅ proved: (\d+) of (\d+) functions", body)
+            agree = re.search(r"Agreement \| ✅ [^|]*\| ([\d,]+) states", body)
+            events.append((pr["opened"], "factory", "Invariant", f"opened #{pr['number']}: proved",
+                           f"{code.group(1)} {code.group(2)} of {code.group(3)} functions · code reaches all {agree.group(1)} states"))
+        elif kind == "merged":
+            events.append((pr["merged"], "factory", "Invariant", f"merged #{pr['number']} on green",
+                           f"invariant/gate passed in CI · {pr['merge_commit'][:7]}"))
+    return events
+
+
+def factory_card(run):
+    """The factory's first issue, from opened to merged, as it happened."""
+    c, W = DARK, 860
+    events = factory_events(run)
+    T = 3.0 + len(events) * 1.1 + 4.0
+    top, gap = 78, 50
+    H = top + gap * len(events) + 66
+    start = clock(events[0][0])
+    out = [card(W, H, c, f"Invariant · issue #{run['issue']['number']} → merged", run["repo"]), f'<g font-family="{SANS}">']
+    rail_x = 132
+    rail = f"M{rail_x} {top} V{top + gap * (len(events) - 1)}"
+    length = gap * (len(events) - 1)
+    out.append(f'<path d="{rail}" stroke="{c["line"]}" stroke-width="2"/>')
+    out.append(f'<path d="{rail}" stroke="{c["accent"]}" stroke-width="2" stroke-dasharray="{length}" stroke-dashoffset="{length}">'
+               f'{ramp("stroke-dashoffset", str(length), "0", 0.6, 0.6 + (len(events) - 1) * 1.1, T)}</path>')
+    for i, (at, who, actor, action, detail) in enumerate(events):
+        s = 0.6 + i * 1.1
+        y = top + i * gap
+        elapsed = clock(at) - start
+        mins, secs = divmod(int(elapsed.total_seconds()), 60)
+        stamp = clock(at).strftime("%H:%M:%S")
+        since = "" if i == 0 else f"+{mins}m {secs:02d}s"
+        person = who == "person"
+        colour = c["blue"] if person else c["accent"]
+        node = (f'<circle cx="{rail_x}" cy="{y}" r="7" fill="{c["bg"]}" stroke="{colour}" stroke-width="2"/>' if person else
+                f'<circle cx="{rail_x}" cy="{y}" r="7" fill="{colour}"/><circle cx="{rail_x}" cy="{y}" r="11" fill="none" '
+                f'stroke="{colour}" stroke-opacity="0.35"/>')
+        out.append(f'<g opacity="0">{shown(s, T - 0.6, T)}'
+                   f'<text x="30" y="{y - 2}" font-family="{MONO}" font-size="12" fill="{c["text"]}">{stamp}</text>'
+                   f'<text x="30" y="{y + 14}" font-family="{MONO}" font-size="11" fill="{c["muted"]}">{since}</text>'
+                   f'{node}'
+                   f'<text x="160" y="{y - 2}" font-size="14" fill="{c["text"]}"><tspan font-weight="600" fill="{colour}">{esc(actor)}</tspan> {esc(action)}</text>'
+                   f'<text x="160" y="{y + 16}" font-family="{MONO}" font-size="12" fill="{c["muted"]}">{esc(detail)}</text></g>')
+    total = clock(events[-1][0]) - start
+    people = sum(1 for e in events if e[1] == "person")
+    done = 0.6 + len(events) * 1.1
+    y = H - 34
+    out.append(f'<path d="M20 {H - 60}H{W - 20}" stroke="{c["line"]}"/>')
+    out.append(f'<g opacity="0">{shown(done, T - 0.6, T)}'
+               f'<rect x="32" y="{y - 20}" width="236" height="30" rx="15" fill="#8250DF" fill-opacity="0.18" stroke="#A371F7"/>'
+               f'<text x="150" y="{y}" text-anchor="middle" font-size="13" font-weight="600" fill="#A371F7">'
+               f'✓ issue to merge in {int(total.total_seconds()) // 60} minutes</text>'
+               f'<text x="{W - 32}" y="{y}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'{people} decisions by a person · every merge gated by CI</text></g>')
+    out.append('</g>')
+    label = (f"Invariant's first issue, #{run['issue']['number']}, from opened to merged in "
+             f"{int(total.total_seconds()) // 60} minutes: " + " ".join(f"{e[2]} {e[3]} ({e[4]})." for e in events))
+    return svg_doc(W, H, "\n".join(out), label)
+
+
 def main():
     receipt = json.load(open(sys.argv[1] if len(sys.argv) > 1 else os.path.join(RUN, "receipt.json")))
     trace = json.load(open(sys.argv[2] if len(sys.argv) > 2 else os.path.join(RUN, "traces", "early-commit.json")))
@@ -578,6 +691,8 @@ def main():
     write(os.path.join(HERE, "counterexample.svg"), poster(trace_card(trace, receipt), 15.0))
     write(os.path.join(HERE, "model-and-code.svg"), poster(dual_card(receipt), 9.4))
     write(os.path.join(HERE, "receipt.svg"), poster(receipt_card(receipt), 8.0))
+    run = json.load(open(os.path.join(HERE, "factory-run.json")))
+    write(os.path.join(HERE, "factory-run.svg"), poster(factory_card(run), 12.0))
 
 
 if __name__ == "__main__":

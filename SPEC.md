@@ -88,7 +88,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   1. The gate, proven on `examples/02-twophase-commit`. Done.
   2. Synthesis for Go. Done.
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
-  4. GitHub: the factory is built. Its first live issue, a bounded buffer, is next. `D-0035` `D-0036`
+  4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
 
 ## Project
 

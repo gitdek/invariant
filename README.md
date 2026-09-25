@@ -42,6 +42,23 @@ Invariant splits the work where it belongs:
 4. **Synthesize.** Invariant writes the Go implementation and the TLA+ model. It keeps repairing them against counterexamples until the gate passes.
 5. **Gate and merge.** CI re-runs every check on the committed artifacts. The pull request merges only if every check passes.
 
+## Watch it take an issue
+
+<p align="center">
+  <img src="docs/assets/factory-run.svg" alt="The factory's first issue, as it happened on GitHub. 17:58 @gitdek opened #1, a bounded buffer for log shipping. 42 seconds later Invariant asked 2 questions instead of guessing: what happens when the buffer is full, and when a send fails. @gitdek decided: producers wait, and a failed line is retried first. Invariant proposed 13 statements, checked by TLC in 87 states. @gitdek ratified. Invariant opened #2 with proved code: Gobra verified 5 of 5 functions, and the code reaches all 87 states. Invariant merged #2 once CI's gate passed, 26 minutes after the issue was opened." width="100%">
+</p>
+
+This is the factory's first real issue, as it happened on GitHub. [#1](https://github.com/gitdek/invariant/issues/1) asked for a bounded buffer for log shipping and left two decisions open: what happens when the buffer is full, and what happens when a send fails. Invariant didn't choose. It asked, drafted 13 statements with @gitdek's answers, and had TLC check them against a draft model before anyone was asked to ratify them. After @gitdek ratified, it wrote the code, proved it with Gobra, and opened [#2](https://github.com/gitdek/invariant/pull/2). It merged #2 itself once CI's gate passed on that exact commit.
+
+People steer the factory with comments on the issue, and only people with write access are heard:
+
+| On the issue | What happens |
+| :-- | :-- |
+| `/invariant solve`, or the `invariant` label | The factory takes the issue |
+| `/invariant choose F1 A` | Decides a question the factory asked |
+| `/invariant revise` | The factory drafts again, reading the comments |
+| `/invariant ratify <hash>` | Ratifies exactly the proposal with that hash, and the factory builds it |
+
 ## Watch it catch a bug
 
 <p align="center">
@@ -70,7 +87,8 @@ The factory owns both the model and the code, and each Go function's contract re
 | Conformance | Invariant · TLC | TypeScript and Python: the real code, driven through its operations, takes a step the model doesn't allow |
 | Code | Gobra · Nagini | A function doesn't verify against its contract, or an index or integer operation could fail |
 | Build | vet · tests | Anything is red. Runs in a sandbox with no network and no secrets. |
-| Scope | Invariant | The diff adds dependencies, uses cgo, or edits CI config or pinned specs. This check arrives with the GitHub integration. |
+| Scope | Invariant | A factory pull request changes anything outside its one project, adds a dependency, uses cgo, or edits CI config or a ratified lock |
+| Ratification | Invariant · GitHub | A factory project's lock isn't exactly the proposal a person with write access ratified on its issue |
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
 
@@ -121,17 +139,25 @@ Checked within `RM = {r1, r2, r3}`. Within these bounds TLC's search is exhausti
 
 </details>
 
+To run the factory on a repository of your own, with `gh` logged in and Claude Code installed:
+
+```bash
+go run ./cmd/invariant watch -repo owner/name
+```
+
+It runs on your machine, polls GitHub through `gh`, and runs its agents with your Claude Code, confined to their workspace. Then open an issue with the `invariant` label.
+
 ## Status
 
-Pre-alpha. The gate works end to end in Go, TypeScript and Python, and the factory can build a verified Go implementation from ratified statements alone.
+Pre-alpha. The gate works end to end in Go, TypeScript and Python, and the factory turns an issue into a merged pull request whose Go code is proved against statements a person ratified on the issue.
 
 - [x] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](examples/02-twophase-commit).
 - [x] **Slice 2 · Synthesis.** Headless Claude Code rebuilt the model and the code from the ratified statements and the request alone. It [passed on its first gate run](examples/02-twophase-commit-synthesized), in 12 turns and under two minutes.
 - [x] **Slice 3a · TypeScript and Python conformance.** Existing code is tested against the model, and the receipt says so.
 - [x] **Slice 3b · Nagini spike.** Nagini proves a [Python core](examples/02-twophase-commit-py-proved) of two-phase commit, 8 of 8 functions, and catches a bug no run can reach.
-- [ ] **Slice 4 · GitHub.** An issue becomes a decision request, then a ratification, then a pull request, then an auto-merge.
+- [x] **Slice 4 · GitHub.** [Issue #1](https://github.com/gitdek/invariant/issues/1) became a decision request, then a ratification, then [pull request #2](https://github.com/gitdek/invariant/pull/2), which the factory merged itself once CI's gate passed. The result is [`examples/03-log-buffer`](examples/03-log-buffer).
 
-The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md).
+The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md). Slice 4's are in [D-0036](decisions/D-0036-slice-4-plan.md).
 
 ## How decisions get made here
 

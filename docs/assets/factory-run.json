@@ -1,0 +1,643 @@
+{
+  "repo": "gitdek/invariant",
+  "issue": {
+    "number": 1,
+    "title": "Add a bounded buffer for log shipping",
+    "by": "gitdek",
+    "opened": "2026-09-25T17:58:44Z",
+    "closed": "2026-09-25T18:25:02Z",
+    "url": "https://github.com/gitdek/invariant/issues/1"
+  },
+  "comments": [
+    {
+      "at": "2026-09-25T17:59:26Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837053774",
+      "body": "\u25c9 **Invariant** \u00b7 a decision for you\n\nBefore I write down what must be true for this issue, I need you to decide:\n\n**F1. When a producer writes a line and the buffer is already at capacity, what should happen?**\n\n- **A.** The producer waits until the shipper frees a slot, so no line is ever lost.\n- **B.** The new line is dropped and the producer carries on, so the buffer keeps the older lines.\n- **C.** The oldest line in the buffer is discarded to make room for the new one, so the buffer keeps the newest lines.\n- **D.** The write is refused with an error returned to the producer, which decides what to do next.\n\n**F2. When the shipper fails to send a line, what should happen to that line?**\n\n- **A.** The line stays at the front of the buffer and the shipper retries it before sending any later line.\n- **B.** The line is dropped and the shipper moves on to the next line.\n\nAnswer each one with a comment like `/invariant choose F1 A`, one line per question. Or say what you want in your own words, then comment `/invariant revise`.",
+      "marker": {
+        "kind": "forks",
+        "reply_to": [
+          0
+        ],
+        "forks": [
+          {
+            "id": "F1",
+            "question": "When a producer writes a line and the buffer is already at capacity, what should happen?",
+            "options": [
+              {
+                "id": "A",
+                "says": "The producer waits until the shipper frees a slot, so no line is ever lost."
+              },
+              {
+                "id": "B",
+                "says": "The new line is dropped and the producer carries on, so the buffer keeps the older lines."
+              },
+              {
+                "id": "C",
+                "says": "The oldest line in the buffer is discarded to make room for the new one, so the buffer keeps the newest lines."
+              },
+              {
+                "id": "D",
+                "says": "The write is refused with an error returned to the producer, which decides what to do next."
+              }
+            ]
+          },
+          {
+            "id": "F2",
+            "question": "When the shipper fails to send a line, what should happen to that line?",
+            "options": [
+              {
+                "id": "A",
+                "says": "The line stays at the front of the buffer and the shipper retries it before sending any later line."
+              },
+              {
+                "id": "B",
+                "says": "The line is dropped and the shipper moves on to the next line."
+              }
+            ]
+          }
+        ],
+        "proposal": {
+          "name": "bounded log buffer",
+          "slug": "bounded-log-buffer",
+          "module": "BoundedLogBuffer",
+          "package": "logbuffer",
+          "bounds": {},
+          "statements": [],
+          "forks": [
+            {
+              "id": "F1",
+              "question": "When a producer writes a line and the buffer is already at capacity, what should happen?",
+              "options": [
+                {
+                  "id": "A",
+                  "says": "The producer waits until the shipper frees a slot, so no line is ever lost."
+                },
+                {
+                  "id": "B",
+                  "says": "The new line is dropped and the producer carries on, so the buffer keeps the older lines."
+                },
+                {
+                  "id": "C",
+                  "says": "The oldest line in the buffer is discarded to make room for the new one, so the buffer keeps the newest lines."
+                },
+                {
+                  "id": "D",
+                  "says": "The write is refused with an error returned to the producer, which decides what to do next."
+                }
+              ]
+            },
+            {
+              "id": "F2",
+              "question": "When the shipper fails to send a line, what should happen to that line?",
+              "options": [
+                {
+                  "id": "A",
+                  "says": "The line stays at the front of the buffer and the shipper retries it before sending any later line."
+                },
+                {
+                  "id": "B",
+                  "says": "The line is dropped and the shipper moves on to the next line."
+                }
+              ]
+            }
+          ],
+          "module_text": ""
+        }
+      }
+    },
+    {
+      "at": "2026-09-25T18:02:54Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263",
+      "body": "/invariant choose F1 A\n/invariant choose F2 A",
+      "marker": null
+    },
+    {
+      "at": "2026-09-25T18:04:09Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837129621",
+      "body": "\u25c9 **Invariant** \u00b7 proposal for ratification\n\nHere's what I propose must always be true for **bounded log shipping buffer**. Once you ratify it, these statements are pinned by hash, and I can't change them.\n\n| Statement | Kind | Says |\n| :-- | :-- | :-- |\n| `Spec` | spec | The system starts in Init, and every step is a Next step. |\n| `TypeOK` | invariant | The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not. |\n| `BoundedCapacity` | invariant | The buffer never holds more lines than its capacity. |\n| `NoLineLost` | invariant | Every line a producer has written is either still in the buffer or has been shipped. |\n| `ShippedOnce` | invariant | No line is shipped more than once. |\n| `ShippedInOrder` | invariant | The shipped lines are exactly the oldest written lines, in the order they were written. |\n| `BufferInOrder` | invariant | The buffer holds exactly the written lines not yet shipped, oldest first. |\n| `BufferFull` | witness | The buffer can fill up to its capacity. |\n| `RetryPending` | witness | A send can fail and leave its line in the buffer to be retried. |\n| `AllShipped` | witness | Every producer can finish writing and every line can be shipped. |\n| `WriteOverCapacity` | bug | A producer adds a line to a buffer that is already full. It must break `BoundedCapacity`. |\n| `DropOnFailure` | bug | When a send fails, the line is thrown away instead of retried. It must break `NoLineLost`. |\n| `ResendDelivered` | bug | A send that actually went through is treated as failed and retried, so the line is shipped twice. It must break `ShippedOnce`. |\n\n**Already checked** against a draft model, within `Capacity = 2`, `MaxLines = 2`, `Producers = {p1, p2}`: TLC explored 87 states and found no violation and no deadlock, all 3 witnesses were reached, and the known bugs `WriteOverCapacity`, `DropOnFailure`, `ResendDelivered` were caught.\n\n**Decided on this issue:**\n\n- F1. When a producer writes a line and the buffer is already at capacity, what should happen? **A.** The producer waits until the shipper frees a slot, so no line is ever lost. (@gitdek)\n- F2. When the shipper fails to send a line, what should happen to that line? **A.** The line stays at the front of the buffer and the shipper retries it before sending any later line. (@gitdek)\n\n<details>\n<summary>The statements in TLA+</summary>\n\n```tla\nvars == <<buf, sent, log, written, retrying>>\n\nLines == Producers \\X (1..MaxLines)\n\nRange(s) == {s[i] : i \\in DOMAIN s}\n\nTypeOK ==\n    /\\ buf \\in Seq(Lines)\n    /\\ sent \\in Seq(Lines)\n    /\\ log \\in Seq(Lines)\n    /\\ written \\in [Producers -> 0..MaxLines]\n    /\\ retrying \\in BOOLEAN\n\nBoundedCapacity == Len(buf) <= Capacity\n\nNoLineLost == \\A i \\in 1..Len(log) : log[i] \\in Range(sent) \\cup Range(buf)\n\nShippedOnce == \\A i, j \\in 1..Len(sent) : i # j => sent[i] # sent[j]\n\nShippedInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ sent = SubSeq(log, 1, Len(sent))\n\nBufferInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ buf = SubSeq(log, Len(sent) + 1, Len(log))\n\nBufferFull == Len(buf) = Capacity\n\nRetryPending == retrying /\\ buf # <<>>\n\nAllShipped ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ Len(sent) = Len(log)\n    /\\ Len(log) > 0\n\nWriteOverCapacity ==\n    \\E p \\in Producers :\n        /\\ written[p] < MaxLines\n        /\\ Len(buf) = Capacity\n        /\\ LET line == <<p, written[p] + 1>> IN\n            /\\ buf' = Append(buf, line)\n            /\\ log' = Append(log, line)\n        /\\ written' = [written EXCEPT ![p] = @ + 1]\n        /\\ UNCHANGED <<sent, retrying>>\n\nDropOnFailure ==\n    /\\ buf # <<>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<sent, log, written>>\n\nResendDelivered ==\n    /\\ buf # <<>>\n    /\\ sent' = sent \\o <<Head(buf), Head(buf)>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\nSpec == Init /\\ [][Next]_vars\n```\n\n</details>\n\nTo ratify exactly this, comment `/invariant ratify e5dca8da9f15`. To change anything, say what in a comment, then comment `/invariant revise`.",
+      "marker": {
+        "kind": "proposal",
+        "reply_to": [
+          5837111263,
+          5837111263
+        ],
+        "answers": [
+          {
+            "fork": "F1",
+            "question": "When a producer writes a line and the buffer is already at capacity, what should happen?",
+            "option": "A",
+            "says": "The producer waits until the shipper frees a slot, so no line is ever lost.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          },
+          {
+            "fork": "F2",
+            "question": "When the shipper fails to send a line, what should happen to that line?",
+            "option": "A",
+            "says": "The line stays at the front of the buffer and the shipper retries it before sending any later line.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          }
+        ],
+        "proposal": {
+          "name": "bounded log shipping buffer",
+          "slug": "log-buffer",
+          "module": "LogBuffer",
+          "package": "logbuffer",
+          "bounds": {
+            "Capacity": "2",
+            "MaxLines": "2",
+            "Producers": "{p1, p2}"
+          },
+          "statements": [
+            {
+              "name": "Spec",
+              "kind": "spec",
+              "says": "The system starts in Init, and every step is a Next step.",
+              "sha256": "sha256:71e5ada548bff4ac8eff84c638f1ac1602bb574438b452e47af110cc0ef0fd22"
+            },
+            {
+              "name": "TypeOK",
+              "kind": "invariant",
+              "says": "The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not.",
+              "sha256": "sha256:fa8713a219f2db415522087fa38e8f9b109f0cedc291b83fc9e99537030e4eea"
+            },
+            {
+              "name": "BoundedCapacity",
+              "kind": "invariant",
+              "says": "The buffer never holds more lines than its capacity.",
+              "sha256": "sha256:a303924cda7f441cba52b1eed405fcc5f877bff1b8c2087d2d8fcb85d854d125"
+            },
+            {
+              "name": "NoLineLost",
+              "kind": "invariant",
+              "says": "Every line a producer has written is either still in the buffer or has been shipped.",
+              "sha256": "sha256:4195c3ffbb4e77bd8bc732dfb718079b3d1b8a76198523e7c00062e9e9bb3d1d"
+            },
+            {
+              "name": "ShippedOnce",
+              "kind": "invariant",
+              "says": "No line is shipped more than once.",
+              "sha256": "sha256:4d3b8a454385945894ffb6d01a8b37e8fcdac2a86bcaa6c18206a9ba32f58e95"
+            },
+            {
+              "name": "ShippedInOrder",
+              "kind": "invariant",
+              "says": "The shipped lines are exactly the oldest written lines, in the order they were written.",
+              "sha256": "sha256:769363f454b14684bb032e130bc188c6a97261f1c3005ac78dbdc1c94c169ef8"
+            },
+            {
+              "name": "BufferInOrder",
+              "kind": "invariant",
+              "says": "The buffer holds exactly the written lines not yet shipped, oldest first.",
+              "sha256": "sha256:862c93131d2a9fb67e786e8a0fe98a748159b461821e4866c6925f70b44687f8"
+            },
+            {
+              "name": "BufferFull",
+              "kind": "witness",
+              "says": "The buffer can fill up to its capacity.",
+              "sha256": "sha256:80f0d0944730619b084ac770a14fd9c9d21648941dad1cb491fdc4eab8c25ee1"
+            },
+            {
+              "name": "RetryPending",
+              "kind": "witness",
+              "says": "A send can fail and leave its line in the buffer to be retried.",
+              "sha256": "sha256:96682c6fe092cb3a3c439cdc91f8bd5139315efec8a17e89f147d32114b0d4d1"
+            },
+            {
+              "name": "AllShipped",
+              "kind": "witness",
+              "says": "Every producer can finish writing and every line can be shipped.",
+              "sha256": "sha256:3ea60c920056d9770354b8846d6a924d4acb0907c3f08fd4fcac8f08cd97d25e"
+            },
+            {
+              "name": "WriteOverCapacity",
+              "kind": "bug",
+              "says": "A producer adds a line to a buffer that is already full.",
+              "expect": "BoundedCapacity",
+              "sha256": "sha256:1079fc99b89e09541dd4330725f773db32c853e6c391cb9767dbe8bc4d14b57a"
+            },
+            {
+              "name": "DropOnFailure",
+              "kind": "bug",
+              "says": "When a send fails, the line is thrown away instead of retried.",
+              "expect": "NoLineLost",
+              "sha256": "sha256:f5da4e6db520cf2211a01ee54a63d603496936d502680a92c23860bf2d62b696"
+            },
+            {
+              "name": "ResendDelivered",
+              "kind": "bug",
+              "says": "A send that actually went through is treated as failed and retried, so the line is shipped twice.",
+              "expect": "ShippedOnce",
+              "sha256": "sha256:54ab9512cf75812dadb391ac8da5284b230fc2c4340795d0e565be9c26dfad02"
+            }
+          ],
+          "module_text": "---- MODULE LogBuffer ----\nEXTENDS Naturals, Sequences\n\nCONSTANTS Producers, Capacity, MaxLines\n\nVARIABLES buf, sent, log, written, retrying\n\nvars == <<buf, sent, log, written, retrying>>\n\n\\* A line is identified by the producer that wrote it and its per-producer number.\nLines == Producers \\X (1..MaxLines)\n\nRange(s) == {s[i] : i \\in DOMAIN s}\n\nTypeOK ==\n    /\\ buf \\in Seq(Lines)\n    /\\ sent \\in Seq(Lines)\n    /\\ log \\in Seq(Lines)\n    /\\ written \\in [Producers -> 0..MaxLines]\n    /\\ retrying \\in BOOLEAN\n\nBoundedCapacity == Len(buf) <= Capacity\n\nNoLineLost == \\A i \\in 1..Len(log) : log[i] \\in Range(sent) \\cup Range(buf)\n\nShippedOnce == \\A i, j \\in 1..Len(sent) : i # j => sent[i] # sent[j]\n\nShippedInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ sent = SubSeq(log, 1, Len(sent))\n\nBufferInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ buf = SubSeq(log, Len(sent) + 1, Len(log))\n\nBufferFull == Len(buf) = Capacity\n\nRetryPending == retrying /\\ buf # <<>>\n\nAllShipped ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ Len(sent) = Len(log)\n    /\\ Len(log) > 0\n\nInit ==\n    /\\ buf = <<>>\n    /\\ sent = <<>>\n    /\\ log = <<>>\n    /\\ written = [p \\in Producers |-> 0]\n    /\\ retrying = FALSE\n\n\\* A producer writes its next line; it waits (is not enabled) while the buffer is full.\nWrite(p) ==\n    /\\ written[p] < MaxLines\n    /\\ Len(buf) < Capacity\n    /\\ LET line == <<p, written[p] + 1>> IN\n        /\\ buf' = Append(buf, line)\n        /\\ log' = Append(log, line)\n    /\\ written' = [written EXCEPT ![p] = @ + 1]\n    /\\ UNCHANGED <<sent, retrying>>\n\n\\* The shipper sends the oldest line successfully and removes it.\nShip ==\n    /\\ buf # <<>>\n    /\\ sent' = Append(sent, Head(buf))\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\n\\* Sending the oldest line fails; it stays at the front to be retried.\nShipFail ==\n    /\\ buf # <<>>\n    /\\ ~retrying\n    /\\ retrying' = TRUE\n    /\\ UNCHANGED <<buf, sent, log, written>>\n\n\\* Every producer has written all its lines and everything has been shipped.\nDone ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ UNCHANGED vars\n\nNext ==\n    \\/ \\E p \\in Producers : Write(p)\n    \\/ Ship\n    \\/ ShipFail\n    \\/ Done\n\n\\* A known bug: a producer appends a line even though the buffer is full.\nWriteOverCapacity ==\n    \\E p \\in Producers :\n        /\\ written[p] < MaxLines\n        /\\ Len(buf) = Capacity\n        /\\ LET line == <<p, written[p] + 1>> IN\n            /\\ buf' = Append(buf, line)\n            /\\ log' = Append(log, line)\n        /\\ written' = [written EXCEPT ![p] = @ + 1]\n        /\\ UNCHANGED <<sent, retrying>>\n\n\\* A known bug: when a send fails, the line is dropped instead of retried.\nDropOnFailure ==\n    /\\ buf # <<>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<sent, log, written>>\n\n\\* A known bug: a send that actually went through is treated as failed and retried,\n\\* so the line goes out twice before it is removed.\nResendDelivered ==\n    /\\ buf # <<>>\n    /\\ sent' = sent \\o <<Head(buf), Head(buf)>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\nSpec == Init /\\ [][Next]_vars\n====\n",
+          "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23"
+        }
+      }
+    },
+    {
+      "at": "2026-09-25T18:10:59Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837225662",
+      "body": "/invariant ratify e5dca8da9f15",
+      "marker": null
+    },
+    {
+      "at": "2026-09-25T18:11:18Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837229965",
+      "body": "\u25c9 **Invariant** \u00b7 ratified\n\nRatified by @gitdek. I pinned 13 statements in `examples/03-log-buffer` on branch `invariant/issue-1-log-buffer` (proposal `sha256:e5dca8da9f15`). Writing the code now.",
+      "marker": {
+        "kind": "ratified",
+        "reply_to": [
+          5837225662
+        ],
+        "answers": [
+          {
+            "fork": "F1",
+            "question": "When a producer writes a line and the buffer is already at capacity, what should happen?",
+            "option": "A",
+            "says": "The producer waits until the shipper frees a slot, so no line is ever lost.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          },
+          {
+            "fork": "F2",
+            "question": "When the shipper fails to send a line, what should happen to that line?",
+            "option": "A",
+            "says": "The line stays at the front of the buffer and the shipper retries it before sending any later line.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          }
+        ],
+        "proposal": {
+          "name": "bounded log shipping buffer",
+          "slug": "log-buffer",
+          "module": "LogBuffer",
+          "package": "logbuffer",
+          "bounds": {
+            "Capacity": "2",
+            "MaxLines": "2",
+            "Producers": "{p1, p2}"
+          },
+          "statements": [
+            {
+              "name": "Spec",
+              "kind": "spec",
+              "says": "The system starts in Init, and every step is a Next step.",
+              "sha256": "sha256:71e5ada548bff4ac8eff84c638f1ac1602bb574438b452e47af110cc0ef0fd22"
+            },
+            {
+              "name": "TypeOK",
+              "kind": "invariant",
+              "says": "The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not.",
+              "sha256": "sha256:fa8713a219f2db415522087fa38e8f9b109f0cedc291b83fc9e99537030e4eea"
+            },
+            {
+              "name": "BoundedCapacity",
+              "kind": "invariant",
+              "says": "The buffer never holds more lines than its capacity.",
+              "sha256": "sha256:a303924cda7f441cba52b1eed405fcc5f877bff1b8c2087d2d8fcb85d854d125"
+            },
+            {
+              "name": "NoLineLost",
+              "kind": "invariant",
+              "says": "Every line a producer has written is either still in the buffer or has been shipped.",
+              "sha256": "sha256:4195c3ffbb4e77bd8bc732dfb718079b3d1b8a76198523e7c00062e9e9bb3d1d"
+            },
+            {
+              "name": "ShippedOnce",
+              "kind": "invariant",
+              "says": "No line is shipped more than once.",
+              "sha256": "sha256:4d3b8a454385945894ffb6d01a8b37e8fcdac2a86bcaa6c18206a9ba32f58e95"
+            },
+            {
+              "name": "ShippedInOrder",
+              "kind": "invariant",
+              "says": "The shipped lines are exactly the oldest written lines, in the order they were written.",
+              "sha256": "sha256:769363f454b14684bb032e130bc188c6a97261f1c3005ac78dbdc1c94c169ef8"
+            },
+            {
+              "name": "BufferInOrder",
+              "kind": "invariant",
+              "says": "The buffer holds exactly the written lines not yet shipped, oldest first.",
+              "sha256": "sha256:862c93131d2a9fb67e786e8a0fe98a748159b461821e4866c6925f70b44687f8"
+            },
+            {
+              "name": "BufferFull",
+              "kind": "witness",
+              "says": "The buffer can fill up to its capacity.",
+              "sha256": "sha256:80f0d0944730619b084ac770a14fd9c9d21648941dad1cb491fdc4eab8c25ee1"
+            },
+            {
+              "name": "RetryPending",
+              "kind": "witness",
+              "says": "A send can fail and leave its line in the buffer to be retried.",
+              "sha256": "sha256:96682c6fe092cb3a3c439cdc91f8bd5139315efec8a17e89f147d32114b0d4d1"
+            },
+            {
+              "name": "AllShipped",
+              "kind": "witness",
+              "says": "Every producer can finish writing and every line can be shipped.",
+              "sha256": "sha256:3ea60c920056d9770354b8846d6a924d4acb0907c3f08fd4fcac8f08cd97d25e"
+            },
+            {
+              "name": "WriteOverCapacity",
+              "kind": "bug",
+              "says": "A producer adds a line to a buffer that is already full.",
+              "expect": "BoundedCapacity",
+              "sha256": "sha256:1079fc99b89e09541dd4330725f773db32c853e6c391cb9767dbe8bc4d14b57a"
+            },
+            {
+              "name": "DropOnFailure",
+              "kind": "bug",
+              "says": "When a send fails, the line is thrown away instead of retried.",
+              "expect": "NoLineLost",
+              "sha256": "sha256:f5da4e6db520cf2211a01ee54a63d603496936d502680a92c23860bf2d62b696"
+            },
+            {
+              "name": "ResendDelivered",
+              "kind": "bug",
+              "says": "A send that actually went through is treated as failed and retried, so the line is shipped twice.",
+              "expect": "ShippedOnce",
+              "sha256": "sha256:54ab9512cf75812dadb391ac8da5284b230fc2c4340795d0e565be9c26dfad02"
+            }
+          ],
+          "module_text": "---- MODULE LogBuffer ----\nEXTENDS Naturals, Sequences\n\nCONSTANTS Producers, Capacity, MaxLines\n\nVARIABLES buf, sent, log, written, retrying\n\nvars == <<buf, sent, log, written, retrying>>\n\n\\* A line is identified by the producer that wrote it and its per-producer number.\nLines == Producers \\X (1..MaxLines)\n\nRange(s) == {s[i] : i \\in DOMAIN s}\n\nTypeOK ==\n    /\\ buf \\in Seq(Lines)\n    /\\ sent \\in Seq(Lines)\n    /\\ log \\in Seq(Lines)\n    /\\ written \\in [Producers -> 0..MaxLines]\n    /\\ retrying \\in BOOLEAN\n\nBoundedCapacity == Len(buf) <= Capacity\n\nNoLineLost == \\A i \\in 1..Len(log) : log[i] \\in Range(sent) \\cup Range(buf)\n\nShippedOnce == \\A i, j \\in 1..Len(sent) : i # j => sent[i] # sent[j]\n\nShippedInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ sent = SubSeq(log, 1, Len(sent))\n\nBufferInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ buf = SubSeq(log, Len(sent) + 1, Len(log))\n\nBufferFull == Len(buf) = Capacity\n\nRetryPending == retrying /\\ buf # <<>>\n\nAllShipped ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ Len(sent) = Len(log)\n    /\\ Len(log) > 0\n\nInit ==\n    /\\ buf = <<>>\n    /\\ sent = <<>>\n    /\\ log = <<>>\n    /\\ written = [p \\in Producers |-> 0]\n    /\\ retrying = FALSE\n\n\\* A producer writes its next line; it waits (is not enabled) while the buffer is full.\nWrite(p) ==\n    /\\ written[p] < MaxLines\n    /\\ Len(buf) < Capacity\n    /\\ LET line == <<p, written[p] + 1>> IN\n        /\\ buf' = Append(buf, line)\n        /\\ log' = Append(log, line)\n    /\\ written' = [written EXCEPT ![p] = @ + 1]\n    /\\ UNCHANGED <<sent, retrying>>\n\n\\* The shipper sends the oldest line successfully and removes it.\nShip ==\n    /\\ buf # <<>>\n    /\\ sent' = Append(sent, Head(buf))\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\n\\* Sending the oldest line fails; it stays at the front to be retried.\nShipFail ==\n    /\\ buf # <<>>\n    /\\ ~retrying\n    /\\ retrying' = TRUE\n    /\\ UNCHANGED <<buf, sent, log, written>>\n\n\\* Every producer has written all its lines and everything has been shipped.\nDone ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ UNCHANGED vars\n\nNext ==\n    \\/ \\E p \\in Producers : Write(p)\n    \\/ Ship\n    \\/ ShipFail\n    \\/ Done\n\n\\* A known bug: a producer appends a line even though the buffer is full.\nWriteOverCapacity ==\n    \\E p \\in Producers :\n        /\\ written[p] < MaxLines\n        /\\ Len(buf) = Capacity\n        /\\ LET line == <<p, written[p] + 1>> IN\n            /\\ buf' = Append(buf, line)\n            /\\ log' = Append(log, line)\n        /\\ written' = [written EXCEPT ![p] = @ + 1]\n        /\\ UNCHANGED <<sent, retrying>>\n\n\\* A known bug: when a send fails, the line is dropped instead of retried.\nDropOnFailure ==\n    /\\ buf # <<>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<sent, log, written>>\n\n\\* A known bug: a send that actually went through is treated as failed and retried,\n\\* so the line goes out twice before it is removed.\nResendDelivered ==\n    /\\ buf # <<>>\n    /\\ sent' = sent \\o <<Head(buf), Head(buf)>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\nSpec == Init /\\ [][Next]_vars\n====\n",
+          "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23"
+        },
+        "project": "examples/03-log-buffer",
+        "branch": "invariant/issue-1-log-buffer",
+        "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23"
+      }
+    },
+    {
+      "at": "2026-09-25T18:13:06Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837255563",
+      "body": "\u25c9 **Invariant** \u00b7 pull request\n\nThe code is written, and it passed the gate here: it's **proved**. I opened #2, and I'll merge it once CI's `invariant/gate` passes on it.",
+      "marker": {
+        "kind": "pr",
+        "answers": [
+          {
+            "fork": "F1",
+            "question": "When a producer writes a line and the buffer is already at capacity, what should happen?",
+            "option": "A",
+            "says": "The producer waits until the shipper frees a slot, so no line is ever lost.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          },
+          {
+            "fork": "F2",
+            "question": "When the shipper fails to send a line, what should happen to that line?",
+            "option": "A",
+            "says": "The line stays at the front of the buffer and the shipper retries it before sending any later line.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          }
+        ],
+        "proposal": {
+          "name": "bounded log shipping buffer",
+          "slug": "log-buffer",
+          "module": "LogBuffer",
+          "package": "logbuffer",
+          "bounds": {
+            "Capacity": "2",
+            "MaxLines": "2",
+            "Producers": "{p1, p2}"
+          },
+          "statements": [
+            {
+              "name": "Spec",
+              "kind": "spec",
+              "says": "The system starts in Init, and every step is a Next step.",
+              "sha256": "sha256:71e5ada548bff4ac8eff84c638f1ac1602bb574438b452e47af110cc0ef0fd22"
+            },
+            {
+              "name": "TypeOK",
+              "kind": "invariant",
+              "says": "The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not.",
+              "sha256": "sha256:fa8713a219f2db415522087fa38e8f9b109f0cedc291b83fc9e99537030e4eea"
+            },
+            {
+              "name": "BoundedCapacity",
+              "kind": "invariant",
+              "says": "The buffer never holds more lines than its capacity.",
+              "sha256": "sha256:a303924cda7f441cba52b1eed405fcc5f877bff1b8c2087d2d8fcb85d854d125"
+            },
+            {
+              "name": "NoLineLost",
+              "kind": "invariant",
+              "says": "Every line a producer has written is either still in the buffer or has been shipped.",
+              "sha256": "sha256:4195c3ffbb4e77bd8bc732dfb718079b3d1b8a76198523e7c00062e9e9bb3d1d"
+            },
+            {
+              "name": "ShippedOnce",
+              "kind": "invariant",
+              "says": "No line is shipped more than once.",
+              "sha256": "sha256:4d3b8a454385945894ffb6d01a8b37e8fcdac2a86bcaa6c18206a9ba32f58e95"
+            },
+            {
+              "name": "ShippedInOrder",
+              "kind": "invariant",
+              "says": "The shipped lines are exactly the oldest written lines, in the order they were written.",
+              "sha256": "sha256:769363f454b14684bb032e130bc188c6a97261f1c3005ac78dbdc1c94c169ef8"
+            },
+            {
+              "name": "BufferInOrder",
+              "kind": "invariant",
+              "says": "The buffer holds exactly the written lines not yet shipped, oldest first.",
+              "sha256": "sha256:862c93131d2a9fb67e786e8a0fe98a748159b461821e4866c6925f70b44687f8"
+            },
+            {
+              "name": "BufferFull",
+              "kind": "witness",
+              "says": "The buffer can fill up to its capacity.",
+              "sha256": "sha256:80f0d0944730619b084ac770a14fd9c9d21648941dad1cb491fdc4eab8c25ee1"
+            },
+            {
+              "name": "RetryPending",
+              "kind": "witness",
+              "says": "A send can fail and leave its line in the buffer to be retried.",
+              "sha256": "sha256:96682c6fe092cb3a3c439cdc91f8bd5139315efec8a17e89f147d32114b0d4d1"
+            },
+            {
+              "name": "AllShipped",
+              "kind": "witness",
+              "says": "Every producer can finish writing and every line can be shipped.",
+              "sha256": "sha256:3ea60c920056d9770354b8846d6a924d4acb0907c3f08fd4fcac8f08cd97d25e"
+            },
+            {
+              "name": "WriteOverCapacity",
+              "kind": "bug",
+              "says": "A producer adds a line to a buffer that is already full.",
+              "expect": "BoundedCapacity",
+              "sha256": "sha256:1079fc99b89e09541dd4330725f773db32c853e6c391cb9767dbe8bc4d14b57a"
+            },
+            {
+              "name": "DropOnFailure",
+              "kind": "bug",
+              "says": "When a send fails, the line is thrown away instead of retried.",
+              "expect": "NoLineLost",
+              "sha256": "sha256:f5da4e6db520cf2211a01ee54a63d603496936d502680a92c23860bf2d62b696"
+            },
+            {
+              "name": "ResendDelivered",
+              "kind": "bug",
+              "says": "A send that actually went through is treated as failed and retried, so the line is shipped twice.",
+              "expect": "ShippedOnce",
+              "sha256": "sha256:54ab9512cf75812dadb391ac8da5284b230fc2c4340795d0e565be9c26dfad02"
+            }
+          ],
+          "module_text": "---- MODULE LogBuffer ----\nEXTENDS Naturals, Sequences\n\nCONSTANTS Producers, Capacity, MaxLines\n\nVARIABLES buf, sent, log, written, retrying\n\nvars == <<buf, sent, log, written, retrying>>\n\n\\* A line is identified by the producer that wrote it and its per-producer number.\nLines == Producers \\X (1..MaxLines)\n\nRange(s) == {s[i] : i \\in DOMAIN s}\n\nTypeOK ==\n    /\\ buf \\in Seq(Lines)\n    /\\ sent \\in Seq(Lines)\n    /\\ log \\in Seq(Lines)\n    /\\ written \\in [Producers -> 0..MaxLines]\n    /\\ retrying \\in BOOLEAN\n\nBoundedCapacity == Len(buf) <= Capacity\n\nNoLineLost == \\A i \\in 1..Len(log) : log[i] \\in Range(sent) \\cup Range(buf)\n\nShippedOnce == \\A i, j \\in 1..Len(sent) : i # j => sent[i] # sent[j]\n\nShippedInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ sent = SubSeq(log, 1, Len(sent))\n\nBufferInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ buf = SubSeq(log, Len(sent) + 1, Len(log))\n\nBufferFull == Len(buf) = Capacity\n\nRetryPending == retrying /\\ buf # <<>>\n\nAllShipped ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ Len(sent) = Len(log)\n    /\\ Len(log) > 0\n\nInit ==\n    /\\ buf = <<>>\n    /\\ sent = <<>>\n    /\\ log = <<>>\n    /\\ written = [p \\in Producers |-> 0]\n    /\\ retrying = FALSE\n\n\\* A producer writes its next line; it waits (is not enabled) while the buffer is full.\nWrite(p) ==\n    /\\ written[p] < MaxLines\n    /\\ Len(buf) < Capacity\n    /\\ LET line == <<p, written[p] + 1>> IN\n        /\\ buf' = Append(buf, line)\n        /\\ log' = Append(log, line)\n    /\\ written' = [written EXCEPT ![p] = @ + 1]\n    /\\ UNCHANGED <<sent, retrying>>\n\n\\* The shipper sends the oldest line successfully and removes it.\nShip ==\n    /\\ buf # <<>>\n    /\\ sent' = Append(sent, Head(buf))\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\n\\* Sending the oldest line fails; it stays at the front to be retried.\nShipFail ==\n    /\\ buf # <<>>\n    /\\ ~retrying\n    /\\ retrying' = TRUE\n    /\\ UNCHANGED <<buf, sent, log, written>>\n\n\\* Every producer has written all its lines and everything has been shipped.\nDone ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ UNCHANGED vars\n\nNext ==\n    \\/ \\E p \\in Producers : Write(p)\n    \\/ Ship\n    \\/ ShipFail\n    \\/ Done\n\n\\* A known bug: a producer appends a line even though the buffer is full.\nWriteOverCapacity ==\n    \\E p \\in Producers :\n        /\\ written[p] < MaxLines\n        /\\ Len(buf) = Capacity\n        /\\ LET line == <<p, written[p] + 1>> IN\n            /\\ buf' = Append(buf, line)\n            /\\ log' = Append(log, line)\n        /\\ written' = [written EXCEPT ![p] = @ + 1]\n        /\\ UNCHANGED <<sent, retrying>>\n\n\\* A known bug: when a send fails, the line is dropped instead of retried.\nDropOnFailure ==\n    /\\ buf # <<>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<sent, log, written>>\n\n\\* A known bug: a send that actually went through is treated as failed and retried,\n\\* so the line goes out twice before it is removed.\nResendDelivered ==\n    /\\ buf # <<>>\n    /\\ sent' = sent \\o <<Head(buf), Head(buf)>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\nSpec == Init /\\ [][Next]_vars\n====\n",
+          "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23"
+        },
+        "project": "examples/03-log-buffer",
+        "branch": "invariant/issue-1-log-buffer",
+        "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23",
+        "pr": 2
+      }
+    },
+    {
+      "at": "2026-09-25T18:25:03Z",
+      "by": "gitdek",
+      "url": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837424675",
+      "body": "\u25c9 **Invariant** \u00b7 merged\n\nCI's `invariant/gate` passed on #2 ([run](https://github.com/gitdek/invariant/actions/runs/36172011322/job/108193577692)), and I merged it as 3ce3ba3a5ca07acd2bb422902c945fb43a80de59.",
+      "marker": {
+        "kind": "merged",
+        "answers": [
+          {
+            "fork": "F1",
+            "question": "When a producer writes a line and the buffer is already at capacity, what should happen?",
+            "option": "A",
+            "says": "The producer waits until the shipper frees a slot, so no line is ever lost.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          },
+          {
+            "fork": "F2",
+            "question": "When the shipper fails to send a line, what should happen to that line?",
+            "option": "A",
+            "says": "The line stays at the front of the buffer and the shipper retries it before sending any later line.",
+            "by": "gitdek",
+            "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263"
+          }
+        ],
+        "proposal": {
+          "name": "bounded log shipping buffer",
+          "slug": "log-buffer",
+          "module": "LogBuffer",
+          "package": "logbuffer",
+          "bounds": {
+            "Capacity": "2",
+            "MaxLines": "2",
+            "Producers": "{p1, p2}"
+          },
+          "statements": [
+            {
+              "name": "Spec",
+              "kind": "spec",
+              "says": "The system starts in Init, and every step is a Next step.",
+              "sha256": "sha256:71e5ada548bff4ac8eff84c638f1ac1602bb574438b452e47af110cc0ef0fd22"
+            },
+            {
+              "name": "TypeOK",
+              "kind": "invariant",
+              "says": "The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not.",
+              "sha256": "sha256:fa8713a219f2db415522087fa38e8f9b109f0cedc291b83fc9e99537030e4eea"
+            },
+            {
+              "name": "BoundedCapacity",
+              "kind": "invariant",
+              "says": "The buffer never holds more lines than its capacity.",
+              "sha256": "sha256:a303924cda7f441cba52b1eed405fcc5f877bff1b8c2087d2d8fcb85d854d125"
+            },
+            {
+              "name": "NoLineLost",
+              "kind": "invariant",
+              "says": "Every line a producer has written is either still in the buffer or has been shipped.",
+              "sha256": "sha256:4195c3ffbb4e77bd8bc732dfb718079b3d1b8a76198523e7c00062e9e9bb3d1d"
+            },
+            {
+              "name": "ShippedOnce",
+              "kind": "invariant",
+              "says": "No line is shipped more than once.",
+              "sha256": "sha256:4d3b8a454385945894ffb6d01a8b37e8fcdac2a86bcaa6c18206a9ba32f58e95"
+            },
+            {
+              "name": "ShippedInOrder",
+              "kind": "invariant",
+              "says": "The shipped lines are exactly the oldest written lines, in the order they were written.",
+              "sha256": "sha256:769363f454b14684bb032e130bc188c6a97261f1c3005ac78dbdc1c94c169ef8"
+            },
+            {
+              "name": "BufferInOrder",
+              "kind": "invariant",
+              "says": "The buffer holds exactly the written lines not yet shipped, oldest first.",
+              "sha256": "sha256:862c93131d2a9fb67e786e8a0fe98a748159b461821e4866c6925f70b44687f8"
+            },
+            {
+              "name": "BufferFull",
+              "kind": "witness",
+              "says": "The buffer can fill up to its capacity.",
+              "sha256": "sha256:80f0d0944730619b084ac770a14fd9c9d21648941dad1cb491fdc4eab8c25ee1"
+            },
+            {
+              "name": "RetryPending",
+              "kind": "witness",
+              "says": "A send can fail and leave its line in the buffer to be retried.",
+              "sha256": "sha256:96682c6fe092cb3a3c439cdc91f8bd5139315efec8a17e89f147d32114b0d4d1"
+            },
+            {
+              "name": "AllShipped",
+              "kind": "witness",
+              "says": "Every producer can finish writing and every line can be shipped.",
+              "sha256": "sha256:3ea60c920056d9770354b8846d6a924d4acb0907c3f08fd4fcac8f08cd97d25e"
+            },
+            {
+              "name": "WriteOverCapacity",
+              "kind": "bug",
+              "says": "A producer adds a line to a buffer that is already full.",
+              "expect": "BoundedCapacity",
+              "sha256": "sha256:1079fc99b89e09541dd4330725f773db32c853e6c391cb9767dbe8bc4d14b57a"
+            },
+            {
+              "name": "DropOnFailure",
+              "kind": "bug",
+              "says": "When a send fails, the line is thrown away instead of retried.",
+              "expect": "NoLineLost",
+              "sha256": "sha256:f5da4e6db520cf2211a01ee54a63d603496936d502680a92c23860bf2d62b696"
+            },
+            {
+              "name": "ResendDelivered",
+              "kind": "bug",
+              "says": "A send that actually went through is treated as failed and retried, so the line is shipped twice.",
+              "expect": "ShippedOnce",
+              "sha256": "sha256:54ab9512cf75812dadb391ac8da5284b230fc2c4340795d0e565be9c26dfad02"
+            }
+          ],
+          "module_text": "---- MODULE LogBuffer ----\nEXTENDS Naturals, Sequences\n\nCONSTANTS Producers, Capacity, MaxLines\n\nVARIABLES buf, sent, log, written, retrying\n\nvars == <<buf, sent, log, written, retrying>>\n\n\\* A line is identified by the producer that wrote it and its per-producer number.\nLines == Producers \\X (1..MaxLines)\n\nRange(s) == {s[i] : i \\in DOMAIN s}\n\nTypeOK ==\n    /\\ buf \\in Seq(Lines)\n    /\\ sent \\in Seq(Lines)\n    /\\ log \\in Seq(Lines)\n    /\\ written \\in [Producers -> 0..MaxLines]\n    /\\ retrying \\in BOOLEAN\n\nBoundedCapacity == Len(buf) <= Capacity\n\nNoLineLost == \\A i \\in 1..Len(log) : log[i] \\in Range(sent) \\cup Range(buf)\n\nShippedOnce == \\A i, j \\in 1..Len(sent) : i # j => sent[i] # sent[j]\n\nShippedInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ sent = SubSeq(log, 1, Len(sent))\n\nBufferInOrder ==\n    /\\ Len(sent) <= Len(log)\n    /\\ buf = SubSeq(log, Len(sent) + 1, Len(log))\n\nBufferFull == Len(buf) = Capacity\n\nRetryPending == retrying /\\ buf # <<>>\n\nAllShipped ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ Len(sent) = Len(log)\n    /\\ Len(log) > 0\n\nInit ==\n    /\\ buf = <<>>\n    /\\ sent = <<>>\n    /\\ log = <<>>\n    /\\ written = [p \\in Producers |-> 0]\n    /\\ retrying = FALSE\n\n\\* A producer writes its next line; it waits (is not enabled) while the buffer is full.\nWrite(p) ==\n    /\\ written[p] < MaxLines\n    /\\ Len(buf) < Capacity\n    /\\ LET line == <<p, written[p] + 1>> IN\n        /\\ buf' = Append(buf, line)\n        /\\ log' = Append(log, line)\n    /\\ written' = [written EXCEPT ![p] = @ + 1]\n    /\\ UNCHANGED <<sent, retrying>>\n\n\\* The shipper sends the oldest line successfully and removes it.\nShip ==\n    /\\ buf # <<>>\n    /\\ sent' = Append(sent, Head(buf))\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\n\\* Sending the oldest line fails; it stays at the front to be retried.\nShipFail ==\n    /\\ buf # <<>>\n    /\\ ~retrying\n    /\\ retrying' = TRUE\n    /\\ UNCHANGED <<buf, sent, log, written>>\n\n\\* Every producer has written all its lines and everything has been shipped.\nDone ==\n    /\\ \\A p \\in Producers : written[p] = MaxLines\n    /\\ buf = <<>>\n    /\\ UNCHANGED vars\n\nNext ==\n    \\/ \\E p \\in Producers : Write(p)\n    \\/ Ship\n    \\/ ShipFail\n    \\/ Done\n\n\\* A known bug: a producer appends a line even though the buffer is full.\nWriteOverCapacity ==\n    \\E p \\in Producers :\n        /\\ written[p] < MaxLines\n        /\\ Len(buf) = Capacity\n        /\\ LET line == <<p, written[p] + 1>> IN\n            /\\ buf' = Append(buf, line)\n            /\\ log' = Append(log, line)\n        /\\ written' = [written EXCEPT ![p] = @ + 1]\n        /\\ UNCHANGED <<sent, retrying>>\n\n\\* A known bug: when a send fails, the line is dropped instead of retried.\nDropOnFailure ==\n    /\\ buf # <<>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<sent, log, written>>\n\n\\* A known bug: a send that actually went through is treated as failed and retried,\n\\* so the line goes out twice before it is removed.\nResendDelivered ==\n    /\\ buf # <<>>\n    /\\ sent' = sent \\o <<Head(buf), Head(buf)>>\n    /\\ buf' = Tail(buf)\n    /\\ retrying' = FALSE\n    /\\ UNCHANGED <<log, written>>\n\nSpec == Init /\\ [][Next]_vars\n====\n",
+          "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23"
+        },
+        "project": "examples/03-log-buffer",
+        "branch": "invariant/issue-1-log-buffer",
+        "hash": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23",
+        "pr": 2
+      }
+    }
+  ],
+  "pr": {
+    "number": 2,
+    "title": "Add a bounded buffer for log shipping",
+    "opened": "2026-09-25T18:13:04Z",
+    "merged": "2026-09-25T18:25:00Z",
+    "merge_commit": "3ce3ba3a5ca07acd2bb422902c945fb43a80de59",
+    "body": "Closes #1.\n\n\u25c9 Written by Invariant for #1, against the statements ratified there.\n\n- **Project:** `examples/03-log-buffer`\n- **Ratified proposal:** `sha256:e5dca8da9f15`\n- **Synthesis:** claude-code, 8 turns, gate passed on run 1 of 1\n\n## \u25c9 Invariant receipt \u00b7 bounded log shipping buffer\n\n**\u2705 Pass.** Every check passed. The code is **proved**. Fingerprint `sha256:dfaf31c67a3f`\n\n| Check | Result | Evidence |\n| :-- | :-- | :-- |\n| Pinned statements | \u2705 13 of 13 match | ratified by @gitdek on [#1](https://github.com/gitdek/invariant/issues/1#issuecomment-5837225662) |\n| Design \u00b7 TLC | \u2705 no violations, no deadlock | 87 distinct states (159 generated), depth 9 |\n| Reachability | \u2705 3 of 3 witnesses reached | `BufferFull` in 2 steps, `RetryPending` in 2 steps, `AllShipped` in 8 steps |\n| Known bugs | \u2705 3 of 3 caught | write-over-capacity: `BoundedCapacity` violated after 3 steps, drop-on-failure: `NoLineLost` violated after 2 steps, resend-delivered: `ShippedOnce` violated after 2 steps |\n| Agreement | \u2705 code reaches the model's states | 87 states, depth 9 |\n| Code \u00b7 Gobra | \u2705 proved: 5 of 5 functions verified | 5 with contracts, overflow checked, not verified: Successors |\n| Build | \u2705 go vet, go test | sandboxed, no network |\n\nChecked within `Capacity = 2`, `MaxLines = 2`, `Producers = {p1, p2}`. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n\n<details>\n<summary>Ratified statements</summary>\n\n| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n| `Spec` | spec | The system starts in Init, and every step is a Next step. | \u2705 `sha256:71e5ada548bf` |\n| `TypeOK` | invariant | The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not. | \u2705 `sha256:fa8713a219f2` |\n| `BoundedCapacity` | invariant | The buffer never holds more lines than its capacity. | \u2705 `sha256:a303924cda7f` |\n| `NoLineLost` | invariant | Every line a producer has written is either still in the buffer or has been shipped. | \u2705 `sha256:4195c3ffbb4e` |\n| `ShippedOnce` | invariant | No line is shipped more than once. | \u2705 `sha256:4d3b8a454385` |\n| `ShippedInOrder` | invariant | The shipped lines are exactly the oldest written lines, in the order they were written. | \u2705 `sha256:769363f454b1` |\n| `BufferInOrder` | invariant | The buffer holds exactly the written lines not yet shipped, oldest first. | \u2705 `sha256:862c93131d2a` |\n| `BufferFull` | witness | The buffer can fill up to its capacity. | \u2705 `sha256:80f0d0944730` |\n| `RetryPending` | witness | A send can fail and leave its line in the buffer to be retried. | \u2705 `sha256:96682c6fe092` |\n| `AllShipped` | witness | Every producer can finish writing and every line can be shipped. | \u2705 `sha256:3ea60c920056` |\n| `WriteOverCapacity` | bug | A producer adds a line to a buffer that is already full. | \u2705 `sha256:1079fc99b89e` |\n| `DropOnFailure` | bug | When a send fails, the line is thrown away instead of retried. | \u2705 `sha256:f5da4e6db520` |\n| `ResendDelivered` | bug | A send that actually went through is treated as failed and retried, so the line is shipped twice. | \u2705 `sha256:54ab9512cf75` |\n\n</details>\n\n<details>\n<summary>Toolchain</summary>\n\n| Tool | Pinned at |\n| :-- | :-- |\n| TLC | TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802) \u00b7 tla2tools.jar v1.7.4 `sha256:936a262061c9` |\n| Java | `eclipse-temurin@sha256:49e21e16e3c8` |\n| Gobra | `ghcr.io/viperproject/gobra@sha256:775879e84835` |\n| Go sandbox | `golang@sha256:8a5910f31396` |\n| Go | go1.27.1 |\n\n</details>\n\n<sub>Generated 2026-09-25T18:13:02Z from tool output only. Fingerprint `sha256:dfaf31c67a3f78c8909ce205f89823204aa20237a2b2b69553cba0817064d31f`</sub>\n",
+    "url": "https://github.com/gitdek/invariant/pull/2"
+  }
+}
