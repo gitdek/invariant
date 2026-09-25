@@ -1,0 +1,41 @@
+{
+  "decision": "D-0019",
+  "bounds": {
+    "RM": "{r1, r2, r3}"
+  },
+  "statements": [
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "Every variable always holds a value of the expected type.",
+      "sha256": "sha256:e3fb0270df491a92b7c66de31cdab06d612e3b1ac8e9d36017881f9be7a9e0e1"
+    },
+    {
+      "name": "TCConsistent",
+      "kind": "invariant",
+      "says": "No resource manager commits while another aborts.",
+      "sha256": "sha256:e3999c24b8daff4f1245c856cd4f4af8700d8e871c73ad85e0cb213231dfeaa0"
+    },
+    {
+      "name": "AllCommitted",
+      "kind": "witness",
+      "says": "Every resource manager can end up committed.",
+      "sha256": "sha256:aa3963a9e306be0ae6e70acd741b1df6062268af143d14bd5ac27d098b20dec5"
+    },
+    {
+      "name": "AllAborted",
+      "kind": "witness",
+      "says": "Every resource manager can end up aborted.",
+      "sha256": "sha256:dc2a1880f366a36797805255f9fa6631f641e9f2884eccca40f53b84ebd9260e"
+    }
+  ],
+  "mutants": [
+    {
+      "name": "early-commit",
+      "says": "The coordinator commits once any resource manager has prepared, instead of waiting for all of them.",
+      "replace": "tmPrepared = RM",
+      "with": "tmPrepared # {}",
+      "expect": "TCConsistent"
+    }
+  ]
+}

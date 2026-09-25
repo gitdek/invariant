@@ -3,11 +3,14 @@ id: D-0011
 title: What gets ratified, and what ties the Go to the TLA+ model
 date: 2026-09-25
 door: one-way
-status: open
+status: ratified
+ratified_by: "@gitdek"
 source: kickoff design review (Claude Code session 2f96fee2)
 ---
 
-# D-0011 · What gets ratified, and what ties the Go to the TLA+ model (open)
+# D-0011 · What gets ratified, and what ties the Go to the TLA+ model
+
+**Decision.** People ratify the invariants, the checking bounds and the reachability witnesses. The factory owns the rest. The first option below.
 
 **The fork.** [D-0002](D-0002-people-ratify-statements.md) says people ratify the statements that code is proved against. With TLA+ and Gobra there are three layers that could count as statements:
 

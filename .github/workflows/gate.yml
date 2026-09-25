@@ -1,0 +1,48 @@
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    # The required status check the auto-merge policy keys on (D-0004).
+    name: invariant/gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and unit tests
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Verify the two-phase commit example
+        run: go run ./cmd/invariant verify -out out/02-twophase-commit examples/02-twophase-commit
+
+      - name: Publish the receipt
+        if: always()
+        run: |
+          if [ -f out/02-twophase-commit/receipt.md ]; then
+            cat out/02-twophase-commit/receipt.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the receipt and traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: receipt-02-twophase-commit
+          path: out/02-twophase-commit
+          if-no-files-found: ignore
+
+      - name: Show the gate rejects a weakened invariant, a vacuous model and a lost mutant
+        run: go test -tags integration -count=1 -timeout 15m ./internal/verify/

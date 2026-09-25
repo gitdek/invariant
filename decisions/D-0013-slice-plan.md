@@ -3,14 +3,15 @@ id: D-0013
 title: Slice plan, and slice 1 acceptance criteria
 date: 2026-09-25
 door: two-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: Claude
 source: kickoff design review (Claude Code session 2f96fee2)
 ---
 
-# D-0013 · Slice plan, and slice 1 acceptance criteria (proposed)
+# D-0013 · Slice plan, and slice 1 acceptance criteria
 
-**Proposal.** Build in three slices:
+**Plan.** Build in three slices:
 
 1. **The gate**, proven on a hand-built two-phase commit. CLI only: no model APIs, no GitHub.
 2. **Synthesis.** The factory rebuilds the two-phase commit implementation from the ratified statements and passes the same gate.

@@ -3,11 +3,14 @@ id: D-0010
 title: Role of Lean 4
 date: 2026-09-25
 door: one-way
-status: open
+status: ratified
+ratified_by: "@gitdek"
 source: kickoff design review (Claude Code session 2f96fee2)
 ---
 
-# D-0010 · Role of Lean 4 (open)
+# D-0010 · Role of Lean 4
+
+**Decision.** Drop Lean 4 for v1. TLA+ and TLC check designs, and Gobra checks code. The first option below.
 
 **The fork.** The brief names Lean 4 in its title and its pitch. After [D-0003](D-0003-go-with-gobra.md), Lean has no job in code-level proofs: Gobra verifies the Go directly, and TLC checks the design.
 

@@ -3,11 +3,14 @@ id: D-0012
 title: License
 date: 2026-09-25
 door: one-way
-status: open
+status: ratified
+ratified_by: "@gitdek"
 source: kickoff design review (Claude Code session 2f96fee2)
 ---
 
-# D-0012 · License (open)
+# D-0012 · License
+
+**Decision.** Apache-2.0. See [`LICENSE`](../LICENSE).
 
 **The fork.** The repository is private now and will go public later ([D-0007](log.md)). A public repository without a license can be read but not legally reused. Changing the license after outside contributions arrive is hard, so this is a one-way door.
 

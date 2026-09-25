@@ -15,6 +15,7 @@
   <img alt="Go 1.27" src="https://img.shields.io/badge/Go-1.27-00ADD8?style=flat-square&logo=go&logoColor=white">
   <img alt="Design: TLA+ / TLC" src="https://img.shields.io/badge/design-TLA%2B%20%2F%20TLC-0CA678?style=flat-square">
   <img alt="Code: Gobra" src="https://img.shields.io/badge/code-Gobra-0CA678?style=flat-square">
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6e7781?style=flat-square">
 </p>
 
 <br>
@@ -45,30 +46,53 @@ Invariant splits the work where it belongs:
 
 | Check | Tool | Fails when |
 | :-- | :-- | :-- |
-| Design | TLA+ · TLC | An invariant is violated, or the system can deadlock, within the stated bounds |
-| Code | Gobra | A function doesn't verify against its contract |
-| Integrity | Invariant | A pinned statement changed, or the bounds were weakened |
-| Scope | Invariant | The diff adds dependencies, or edits CI config or pinned specs |
+| Pins | Invariant | A ratified statement's text has changed |
+| Design | TLA+ · TLC | An invariant is violated, or the system can deadlock, within the ratified bounds |
+| Reachability | TLA+ · TLC | A ratified witness can't be reached, so the invariants might hold only because nothing happens |
+| Known bugs | TLA+ · TLC | A ratified known bug slips past the invariants |
+| Code | Gobra | A function doesn't verify against its contract, or an index or integer operation could fail |
 | Build | `go test` · `go vet` | Anything is red |
+| Scope | Invariant | The diff adds dependencies, uses cgo, or edits CI config or pinned specs. This check arrives with the GitHub integration. |
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
 
+## Try it
+
+With Go and Docker installed, run:
+
+```bash
+go run ./cmd/invariant verify examples/02-twophase-commit
+```
+
+It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
+
+| Check | Result | Evidence |
+| :-- | :-- | :-- |
+| Pinned statements | ✅ 4 of 4 match | recorded in D-0019 |
+| Design · TLC | ✅ no violations, no deadlock | 288 distinct states (1,146 generated), depth 11 |
+| Reachability | ✅ 2 of 2 witnesses reached | `AllCommitted` in 10 steps, `AllAborted` in 3 steps |
+| Known bugs | ✅ 1 of 1 caught | early-commit: `TCConsistent` violated after 5 steps |
+| Code · Gobra | ✅ 10 of 10 functions verified | 10 with contracts, overflow checked |
+| Build | ✅ go vet, go test | |
+
+These results cover `RM = {r1, r2, r3}`. Within those bounds, TLC's search is exhaustive. The receipt claims nothing beyond them.
+
 ## Status
 
-Pre-alpha. The design and the first decisions are in place. Code starts with the gate.
+Pre-alpha. The gate works end to end on the first example. Synthesis comes next.
 
-- [ ] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](https://en.wikipedia.org/wiki/Two-phase_commit_protocol).
+- [x] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](examples/02-twophase-commit).
 - [ ] **Slice 2 · Synthesis.** The factory rebuilds that implementation from the ratified statements and passes the same gate.
 - [ ] **Slice 3 · GitHub.** An issue becomes a decision request, then a ratification, then a pull request, then an auto-merge.
 
-The slice plan is still a proposal: [D-0013](decisions/D-0013-slice-plan.md).
+The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md).
 
 ## How decisions get made here
 
 This repository runs on its own rule: **a decision that isn't written down didn't happen.**
 
 - [`decisions/log.md`](decisions/log.md) is the ordered record of what was decided, when, and by whom. Decisions that are hard to reverse also record the options considered, the reasoning, and what would reopen them.
-- [`SPEC.md`](SPEC.md) is the current state, rolled up from ratified decisions only. If the spec says something the record doesn't support, the spec is wrong.
+- [`SPEC.md`](SPEC.md) is the current state, rolled up from the record. If the spec says something the record doesn't support, the spec is wrong.
 
 <br>
 
