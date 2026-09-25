@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,8 @@ type Report struct {
 	Pins        []Pin             `json:"pins"`
 	Design      Design            `json:"design"`
 	Witnesses   []Witness         `json:"witnesses"`
-	Mutants     []Mutant          `json:"mutants"`
+	Bugs        []Bug             `json:"bugs"`
+	Agreement   Agreement         `json:"agreement"`
 	Code        Code              `json:"code"`
 	Build       Build             `json:"build"`
 	Toolchain   Toolchain         `json:"toolchain"`
@@ -38,7 +40,8 @@ type Report struct {
 	GeneratedAt string            `json:"generated_at"`
 }
 
-// Pin compares a ratified statement's pinned hash with its text today.
+// Pin compares a ratified statement's pinned hash with its text today,
+// including everything the statement depends on.
 type Pin struct {
 	Name  string `json:"name"`
 	Kind  string `json:"kind"`
@@ -51,14 +54,16 @@ type Pin struct {
 
 // Design is TLC's check of every ratified invariant within the bounds.
 type Design struct {
-	Passed          bool     `json:"passed"`
-	Outcome         string   `json:"outcome"`
-	Invariants      []string `json:"invariants"`
-	Violated        string   `json:"violated,omitempty"`
-	Message         string   `json:"message,omitempty"`
-	DistinctStates  int64    `json:"distinct_states"`
-	StatesGenerated int64    `json:"states_generated"`
-	Depth           int      `json:"depth"`
+	Passed          bool        `json:"passed"`
+	Outcome         string      `json:"outcome"`
+	Spec            string      `json:"spec"`
+	Invariants      []string    `json:"invariants"`
+	Violated        string      `json:"violated,omitempty"`
+	Message         string      `json:"message,omitempty"`
+	DistinctStates  int64       `json:"distinct_states"`
+	StatesGenerated int64       `json:"states_generated"`
+	Depth           int         `json:"depth"`
+	Trace           []tlc.State `json:"trace,omitempty"` // the counterexample, when there is one
 }
 
 // Witness shows a ratified witness is reachable, so the invariants aren't
@@ -71,9 +76,11 @@ type Witness struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Mutant shows the invariants catch a known bug.
-type Mutant struct {
-	Name     string `json:"name"`
+// Bug shows the invariants catch a ratified bug: with the bug's action added
+// to Next, TLC must find the expected invariant violated.
+type Bug struct {
+	Name     string `json:"name"`  // the bug's TLA+ action
+	Label    string `json:"label"` // the same name in kebab case, for files and receipts
 	Says     string `json:"says"`
 	Expect   string `json:"expect"`
 	Caught   bool   `json:"caught"`
@@ -84,18 +91,31 @@ type Mutant struct {
 	Message  string `json:"message,omitempty"`
 }
 
+// Agreement compares the implementation's state space with the model's:
+// exploring the code from its initial state must reach exactly the states TLC
+// found, at the same depth.
+type Agreement struct {
+	Passed     bool   `json:"passed"`
+	States     int64  `json:"states"`
+	Depth      int    `json:"depth"`
+	WantStates int64  `json:"want_states"`
+	WantDepth  int    `json:"want_depth"`
+	Message    string `json:"message,omitempty"`
+}
+
 // Code is the code-level verifier's result.
 type Code struct {
-	Verifier  string   `json:"verifier"`
-	Passed    bool     `json:"passed"`
-	Functions []string `json:"functions"`
-	Contracts []string `json:"contracts"`
-	Overflow  bool     `json:"overflow_checked"`
-	Errors    []string `json:"errors,omitempty"`
+	Verifier   string   `json:"verifier"`
+	Passed     bool     `json:"passed"`
+	Functions  []string `json:"functions"`
+	Contracts  []string `json:"contracts"`
+	Unverified []string `json:"unverified,omitempty"` // functions the verifier never saw
+	Overflow   bool     `json:"overflow_checked"`
+	Errors     []string `json:"errors,omitempty"`
 }
 
 // Build is the language's own static checks and tests, such as go vet and
-// go test.
+// go test, run in a sandbox.
 type Build struct {
 	Passed bool        `json:"passed"`
 	Steps  []BuildStep `json:"steps"`
@@ -115,6 +135,7 @@ type Toolchain struct {
 	TLCJarSHA256 string `json:"tlc_jar_sha256"`
 	JavaImage    string `json:"java_image"`
 	GobraImage   string `json:"gobra_image"`
+	GoImage      string `json:"go_image"`
 	Go           string `json:"go"`
 }
 
@@ -154,20 +175,15 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		Pins:     checkPins(src, p.Lock.Statements),
 		Toolchain: Toolchain{
 			TLCRelease: toolchain.TLCRelease, TLCJarSHA256: toolchain.TLCJarSHA256,
-			JavaImage: tc.JavaImage, GobraImage: tc.GobraImage, Go: goVersion(ctx),
+			JavaImage: tc.JavaImage, GobraImage: tc.GobraImage, GoImage: tc.GoImage, Go: goVersion(ctx),
 		},
 	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
-	cfg := tlc.Config{Specification: p.Manifest.Specification, Constants: p.Lock.Bounds, Invariants: p.Invariants()}
-
-	var witnesses []project.Statement
-	for _, s := range p.Lock.Statements {
-		if s.Kind == project.Witness {
-			witnesses = append(witnesses, s)
-		}
-	}
+	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}
+	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
-	r.Mutants = make([]Mutant, len(p.Lock.Mutants))
+	r.Bugs = make([]Bug, len(bugs))
+	var explored Exploration
 
 	// Every check is independent, so they all run at once. Each goroutine
 	// writes only its own part of the report.
@@ -201,9 +217,10 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		}
 		r.Toolchain.TLC = res.Version
 		r.Design = Design{
-			Passed: res.Outcome == tlc.Passed, Outcome: string(res.Outcome), Invariants: cfg.Invariants,
-			Violated: res.Invariant, Message: res.Message,
+			Passed: res.Outcome == tlc.Passed, Outcome: string(res.Outcome), Spec: cfg.Specification,
+			Invariants: cfg.Invariants, Violated: res.Invariant, Message: res.Message,
 			DistinctStates: res.DistinctStates, StatesGenerated: res.StatesGenerated, Depth: res.Depth,
+			Trace: res.Trace,
 		}
 		return nil
 	})
@@ -234,36 +251,31 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		})
 	}
 
-	for i, m := range p.Lock.Mutants {
+	for i, b := range bugs {
 		spawn(func() error {
-			out := Mutant{Name: m.Name, Says: m.Says, Expect: m.Expect}
-			defer func() { r.Mutants[i] = out }()
-			mutated, err := tla.Mutate(src, m.Replace, m.With)
-			if err != nil {
-				out.Message = err.Error()
-				return nil
-			}
-			if changed := changedStatements(src, mutated, p.Lock.Statements); len(changed) > 0 {
-				out.Message = "the mutation changes ratified statements (" + strings.Join(changed, ", ") + "); a mutant may only change the model"
-				return nil
-			}
-			d, err := stage(work, "mutant-"+m.Name, p, mutated, "")
+			out := Bug{Name: b.Name, Label: kebab(b.Name), Says: b.Says, Expect: b.Expect}
+			defer func() { r.Bugs[i] = out }()
+			// The bug runs alongside the model: every behavior the model allows,
+			// plus the bug's own steps.
+			name := "Bug_" + b.Name
+			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\nInvariant_BuggySpec == Init /\\ [][Next \\/ %s]_vars\n====\n", name, p.ModuleName(), b.Name)
+			d, err := stage(work, name, p, src, wrapper)
 			if err != nil {
 				return err
 			}
-			res, err := runner.Check(ctx, d, p.ModuleName(), cfg)
+			res, err := runner.Check(ctx, d, name, tlc.Config{Specification: "Invariant_BuggySpec", Constants: cfg.Constants, Invariants: cfg.Invariants})
 			if err != nil {
 				return err
 			}
 			out.Outcome, out.Violated = string(res.Outcome), res.Invariant
-			if res.Outcome == tlc.Violated && res.Invariant == m.Expect {
+			if res.Outcome == tlc.Violated && res.Invariant == b.Expect {
 				out.Caught, out.Steps = true, len(res.Trace)-1
 			} else {
-				out.Message = "expected " + m.Expect + " to be violated; " + describe(res)
+				out.Message = "expected " + b.Expect + " to be violated; " + describe(res)
 			}
 			if outDir != "" && len(res.Trace) > 0 {
-				out.Trace = m.Name + ".json"
-				return writeTrace(filepath.Join(outDir, "traces", out.Trace), res, p.ModuleName(), "mutant "+m.Name)
+				out.Trace = out.Label + ".json"
+				return writeTrace(filepath.Join(outDir, "traces", out.Trace), res, p.ModuleName(), "known bug "+out.Label)
 			}
 			return nil
 		})
@@ -274,28 +286,46 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		return err
 	})
 
-	spawn(func() error {
-		r.Build = lang.Build(ctx, p.CodeDir())
-		return nil
+	spawn(func() (err error) {
+		r.Build, explored, err = lang.Check(ctx, p.Dir, p.CodeDir())
+		return err
 	})
 
 	wg.Wait()
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	r.Passed = r.Design.Passed && r.Code.Passed && r.Build.Passed
+	r.Agreement = agree(r.Design, explored)
+	r.Passed = r.Design.Passed && r.Agreement.Passed && r.Code.Passed && r.Build.Passed
 	for _, pin := range r.Pins {
 		r.Passed = r.Passed && pin.Match
 	}
 	for _, w := range r.Witnesses {
 		r.Passed = r.Passed && w.Reached
 	}
-	for _, m := range r.Mutants {
-		r.Passed = r.Passed && m.Caught
+	for _, b := range r.Bugs {
+		r.Passed = r.Passed && b.Caught
 	}
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	return r, nil
+}
+
+// agree compares the implementation's exploration with TLC's.
+func agree(d Design, e Exploration) Agreement {
+	a := Agreement{States: e.States, Depth: e.Depth, WantStates: d.DistinctStates, WantDepth: d.Depth}
+	switch {
+	case !e.OK:
+		a.Message = e.Message
+	case !d.Passed:
+		a.Message = "TLC didn't finish checking the model, so there's no state space to compare against"
+	case e.States != d.DistinctStates || e.Depth != d.Depth:
+		a.Message = fmt.Sprintf("the implementation reaches %d states in %d levels; the model reaches %d in %d",
+			e.States, e.Depth, d.DistinctStates, d.Depth)
+	default:
+		a.Passed = true
+	}
+	return a
 }
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
@@ -304,9 +334,9 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 // and a CI run of the same commit have the same fingerprint.
 func Fingerprint(r Report) string {
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go = "", "", "", ""
-	r.Mutants = append([]Mutant(nil), r.Mutants...)
-	for i := range r.Mutants {
-		r.Mutants[i].Trace = ""
+	r.Bugs = append([]Bug(nil), r.Bugs...)
+	for i := range r.Bugs {
+		r.Bugs[i].Trace = ""
 	}
 	b, _ := json.Marshal(r)
 	sum := sha256.Sum256(b)
@@ -317,29 +347,15 @@ func checkPins(src string, statements []project.Statement) []Pin {
 	pins := make([]Pin, 0, len(statements))
 	for _, s := range statements {
 		pin := Pin{Name: s.Name, Kind: s.Kind, Says: s.Says, Want: s.SHA256}
-		if def, err := tla.Definition(src, s.Name); err != nil {
+		if h, err := tla.PinHash(src, s.Name, project.Model); err != nil {
 			pin.Error = err.Error()
 		} else {
-			pin.Got = tla.Hash(def)
+			pin.Got = h
 			pin.Match = pin.Got == pin.Want
 		}
 		pins = append(pins, pin)
 	}
 	return pins
-}
-
-// changedStatements names the ratified statements whose text differs
-// between two versions of a module.
-func changedStatements(before, after string, statements []project.Statement) []string {
-	var changed []string
-	for _, s := range statements {
-		a, errA := tla.Definition(before, s.Name)
-		b, errB := tla.Definition(after, s.Name)
-		if errA != nil || errB != nil || tla.Hash(a) != tla.Hash(b) {
-			changed = append(changed, s.Name)
-		}
-	}
-	return changed
 }
 
 // stage copies the project's TLA+ modules into a fresh directory, with the
@@ -402,4 +418,11 @@ func describe(res tlc.Result) string {
 	default:
 		return "TLC failed: " + res.Message
 	}
+}
+
+var wordStart = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+
+// kebab turns EarlyCommit into early-commit.
+func kebab(name string) string {
+	return strings.ToLower(wordStart.ReplaceAllString(name, "$1-$2"))
 }

@@ -11,7 +11,7 @@ source: kickoff design review (Claude Code session 2f96fee2)
 
 # D-0013 · Slice plan, and slice 1 acceptance criteria
 
-**Plan.** Build in three slices:
+**Plan.** Build in three slices. [D-0024](D-0024-checking-typescript-and-python.md) later inserted TypeScript and Python as slice 3, which makes GitHub slice 4.
 
 1. **The gate**, proven on a hand-built two-phase commit. CLI only: no model APIs, no GitHub.
 2. **Synthesis.** The factory rebuilds the two-phase commit implementation from the ratified statements and passes the same gate.

@@ -60,16 +60,3 @@ func TestHashIgnoresFormattingButNotMeaning(t *testing.T) {
 		t.Errorf("Hash = %q; want a sha256: prefix", Hash(def))
 	}
 }
-
-func TestMutate(t *testing.T) {
-	got, err := Mutate(module, "x <= 3", "x <= 4")
-	if err != nil || !strings.Contains(got, "x <= 4") {
-		t.Fatalf("Mutate = %v; want the replacement applied", err)
-	}
-	if _, err := Mutate(module, "x' = 7", "x' = 8"); err == nil {
-		t.Error("Mutate with no match succeeded; want an error")
-	}
-	if _, err := Mutate(module, "x", "y"); err == nil {
-		t.Error("Mutate with many matches succeeded; want an error")
-	}
-}

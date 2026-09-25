@@ -1,12 +1,5 @@
 ------------------------------ MODULE TwoPhase ------------------------------
-(***************************************************************************)
-(* Two-phase commit, after Gray and Lamport, "Consensus on Transaction     *)
-(* Commit" (2006). A transaction manager (TM) commits only once every      *)
-(* resource manager (RM) has prepared. Until it prepares, an RM may choose *)
-(* to abort. Messages are never lost or removed, so msgs only grows.       *)
-(***************************************************************************)
 CONSTANT RM            \* the resource managers
-
 VARIABLES
     rmState,           \* rmState[r] is the state of resource manager r
     tmState,           \* the state of the transaction manager
@@ -16,9 +9,6 @@ VARIABLES
 vars == <<rmState, tmState, tmPrepared, msgs>>
 
 Messages == [type : {"Prepared"}, rm : RM] \cup [type : {"Commit", "Abort"}]
-
-\* Ratified statements. Their text, and the text of everything they depend on,
-\* is pinned in ../ratified.lock. The factory may not change them.
 
 TypeOK ==
     /\ rmState \in [RM -> {"working", "prepared", "committed", "aborted"}]
@@ -42,7 +32,10 @@ EarlyCommit ==
     /\ msgs' = msgs \cup {[type |-> "Commit"]}
     /\ UNCHANGED <<rmState, tmPrepared>>
 
-\* The model.
+\* ---------------------------------------------------------------------------
+\* The model. The factory writes Init, one operator per action, and Next
+\* here. Everything else in this module is pinned and must not change.
+\* ---------------------------------------------------------------------------
 
 Init ==
     /\ rmState = [r \in RM |-> "working"]
@@ -50,12 +43,14 @@ Init ==
     /\ tmPrepared = {}
     /\ msgs = {}
 
+\* The TM receives a Prepared message from resource manager r.
 TMRcvPrepared(r) ==
     /\ tmState = "init"
     /\ [type |-> "Prepared", rm |-> r] \in msgs
     /\ tmPrepared' = tmPrepared \cup {r}
     /\ UNCHANGED <<rmState, tmState, msgs>>
 
+\* The TM commits once every resource manager has prepared.
 TMCommit ==
     /\ tmState = "init"
     /\ tmPrepared = RM
@@ -63,28 +58,33 @@ TMCommit ==
     /\ msgs' = msgs \cup {[type |-> "Commit"]}
     /\ UNCHANGED <<rmState, tmPrepared>>
 
+\* The TM aborts at any time before it has decided.
 TMAbort ==
     /\ tmState = "init"
     /\ tmState' = "done"
     /\ msgs' = msgs \cup {[type |-> "Abort"]}
     /\ UNCHANGED <<rmState, tmPrepared>>
 
+\* Resource manager r prepares and tells the TM.
 RMPrepare(r) ==
     /\ rmState[r] = "working"
     /\ rmState' = [rmState EXCEPT ![r] = "prepared"]
     /\ msgs' = msgs \cup {[type |-> "Prepared", rm |-> r]}
     /\ UNCHANGED <<tmState, tmPrepared>>
 
+\* Resource manager r aborts on its own before it has prepared.
 RMChooseToAbort(r) ==
     /\ rmState[r] = "working"
     /\ rmState' = [rmState EXCEPT ![r] = "aborted"]
     /\ UNCHANGED <<tmState, tmPrepared, msgs>>
 
+\* Resource manager r follows the TM's Commit decision.
 RMRcvCommitMsg(r) ==
     /\ [type |-> "Commit"] \in msgs
     /\ rmState' = [rmState EXCEPT ![r] = "committed"]
     /\ UNCHANGED <<tmState, tmPrepared, msgs>>
 
+\* Resource manager r follows the TM's Abort decision.
 RMRcvAbortMsg(r) ==
     /\ [type |-> "Abort"] \in msgs
     /\ rmState' = [rmState EXCEPT ![r] = "aborted"]

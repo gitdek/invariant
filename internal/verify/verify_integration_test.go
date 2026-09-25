@@ -18,9 +18,9 @@ import (
 
 const example = "../../examples/02-twophase-commit"
 
-// copyExample copies the example to a temporary directory and applies edit
-// to its TLA+ module.
-func copyExample(t *testing.T, edit func(spec string) string) string {
+// copyExample copies the example to a temporary directory, applying each edit
+// to the file whose path ends with its key.
+func copyExample(t *testing.T, edits map[string]func(string) string) string {
 	t.Helper()
 	dst := t.TempDir()
 	err := filepath.WalkDir(example, func(path string, d os.DirEntry, err error) error {
@@ -36,8 +36,10 @@ func copyExample(t *testing.T, edit func(spec string) string) string {
 		if err != nil {
 			return err
 		}
-		if strings.HasSuffix(path, "TwoPhase.tla") {
-			b = []byte(edit(string(b)))
+		for suffix, edit := range edits {
+			if strings.HasSuffix(path, suffix) {
+				b = []byte(edit(string(b)))
+			}
 		}
 		return os.WriteFile(target, b, 0o644)
 	})
@@ -62,19 +64,19 @@ func run(t *testing.T, dir string) *Report {
 }
 
 func replace(t *testing.T, from, to string) func(string) string {
-	return func(spec string) string {
-		if strings.Count(spec, from) != 1 {
-			t.Fatalf("%q must occur exactly once in the spec", from)
+	return func(src string) string {
+		if strings.Count(src, from) != 1 {
+			t.Fatalf("%q must occur exactly once", from)
 		}
-		return strings.Replace(spec, from, to, 1)
+		return strings.Replace(src, from, to, 1)
 	}
 }
 
 func TestHonestExamplePasses(t *testing.T) {
 	t.Parallel()
-	r := run(t, copyExample(t, func(s string) string { return s }))
+	r := run(t, copyExample(t, nil))
 	if !r.Passed {
-		t.Fatalf("the unmodified example failed: %+v", r)
+		t.Fatalf("the unmodified example failed: %v\n%s", Failed(r), Feedback(r))
 	}
 }
 
@@ -82,18 +84,26 @@ func TestHonestExamplePasses(t *testing.T) {
 // would happily confirm the weaker statement.
 func TestWeakenedInvariantFails(t *testing.T) {
 	t.Parallel()
-	weaken := replace(t, `~(rmState[r1] = "aborted" /\ rmState[r2] = "committed")`, `TRUE`)
-	r := run(t, copyExample(t, weaken))
-	if r.Passed {
-		t.Fatal("the gate passed a weakened TCConsistent")
-	}
-	for _, p := range r.Pins {
-		if p.Name == "TCConsistent" && p.Match {
-			t.Error("TCConsistent's pin still matches after weakening it")
-		}
+	r := run(t, copyExample(t, map[string]func(string) string{
+		"TwoPhase.tla": replace(t, `~(rmState[r1] = "aborted" /\ rmState[r2] = "committed")`, `TRUE`),
+	}))
+	if r.Passed || !contains(Failed(r), "pin TCConsistent") {
+		t.Fatalf("failed = %v; want TCConsistent's pin to fail", Failed(r))
 	}
 	if !r.Design.Passed {
 		t.Error("TLC should pass the weakened spec; the pin is what must catch it")
+	}
+}
+
+// Redefining something a statement depends on must fail its pin too:
+// TypeOK is only as strong as Messages.
+func TestChangedDependencyFails(t *testing.T) {
+	t.Parallel()
+	r := run(t, copyExample(t, map[string]func(string) string{
+		"TwoPhase.tla": replace(t, `[type : {"Prepared"}, rm : RM]`, `[type : {"Prepared", "Commit", "Abort"}, rm : RM]`),
+	}))
+	if r.Passed || !contains(Failed(r), "pin TypeOK") {
+		t.Fatalf("failed = %v; want TypeOK's pin to fail", Failed(r))
 	}
 }
 
@@ -101,28 +111,42 @@ func TestWeakenedInvariantFails(t *testing.T) {
 // AllCommitted witness must catch that.
 func TestVacuousModelFails(t *testing.T) {
 	t.Parallel()
-	neverCommit := replace(t, "    \\/ TMCommit\n", "")
-	r := run(t, copyExample(t, neverCommit))
-	if r.Passed {
-		t.Fatal("the gate passed a model that can never commit")
-	}
-	for _, w := range r.Witnesses {
-		if w.Name == "AllCommitted" && w.Reached {
-			t.Error("AllCommitted was reached in a model without TMCommit")
-		}
+	r := run(t, copyExample(t, map[string]func(string) string{"TwoPhase.tla": replace(t, "    \\/ TMCommit\n", "")}))
+	if r.Passed || !contains(Failed(r), "witness AllCommitted") {
+		t.Fatalf("failed = %v; want the AllCommitted witness to fail", Failed(r))
 	}
 }
 
-// Removing the text the known bug patches must fail the mutant check, so
-// the planted bug can't quietly stop being tested.
-func TestUnappliableMutantFails(t *testing.T) {
+// A model too narrow to show the known bug's damage must fail the bug
+// check: here resource managers can no longer abort on their own.
+func TestModelTooNarrowForTheBugFails(t *testing.T) {
 	t.Parallel()
-	rename := replace(t, "/\\ tmPrepared = RM\n", "/\\ RM \\subseteq tmPrepared\n")
-	r := run(t, copyExample(t, rename))
-	if r.Passed {
-		t.Fatal("the gate passed although the known bug could no longer be applied")
+	r := run(t, copyExample(t, map[string]func(string) string{"TwoPhase.tla": replace(t, "        \\/ RMChooseToAbort(r)\n", "")}))
+	if r.Passed || !contains(Failed(r), "bug EarlyCommit") {
+		t.Fatalf("failed = %v; want the EarlyCommit bug check to fail", Failed(r))
 	}
-	if len(r.Mutants) != 1 || r.Mutants[0].Caught {
-		t.Errorf("mutants = %+v; want the early-commit mutant reported as not caught", r.Mutants)
+}
+
+// Code that reaches fewer states than the model must fail agreement, even
+// when Gobra and the tests are happy: here the coordinator never aborts.
+func TestCodeThatDisagreesWithTheModelFails(t *testing.T) {
+	t.Parallel()
+	r := run(t, copyExample(t, map[string]func(string) string{
+		"explore.go": replace(t, "\tif s.TM == TMInit {\n\t\tnext = append(next, TMAbort(s))\n\t}\n", ""),
+	}))
+	if r.Passed || !contains(Failed(r), "agreement") {
+		t.Fatalf("failed = %v; want agreement to fail", Failed(r))
 	}
+	if !r.Code.Passed {
+		t.Error("Gobra should still pass; agreement is what must catch it")
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }

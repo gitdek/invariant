@@ -29,6 +29,9 @@ jobs:
       - name: Verify the two-phase commit example
         run: go run ./cmd/invariant verify -out out/02-twophase-commit examples/02-twophase-commit
 
+      - name: Verify the factory-synthesized two-phase commit
+        run: go run ./cmd/invariant verify examples/02-twophase-commit-synthesized
+
       - name: Publish the receipt
         if: always()
         run: |
@@ -44,5 +47,5 @@ jobs:
           path: out/02-twophase-commit
           if-no-files-found: ignore
 
-      - name: Show the gate rejects a weakened invariant, a vacuous model and a lost mutant
-        run: go test -tags integration -count=1 -timeout 15m ./internal/verify/
+      - name: Show the gate rejects gaming, and synthesis can't touch the lock
+        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/

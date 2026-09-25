@@ -25,9 +25,10 @@ func Markdown(r *verify.Report) string {
 	row(&b, "Pinned statements", pinsOK(r), pinsResult(r), "recorded in "+r.Decision)
 	row(&b, "Design · TLC", r.Design.Passed, designResult(r.Design), designEvidence(r.Design))
 	row(&b, "Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), witnessEvidence(r))
-	row(&b, "Known bugs", mutantsOK(r), fmt.Sprintf("%d of %d caught", count(r.Mutants, func(m verify.Mutant) bool { return m.Caught }), len(r.Mutants)), mutantEvidence(r))
+	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
+	row(&b, "Agreement", r.Agreement.Passed, agreementResult(r.Agreement), agreementEvidence(r.Agreement))
 	row(&b, "Code · "+r.Code.Verifier, r.Code.Passed, codeResult(r.Code), codeEvidence(r.Code))
-	row(&b, "Build", r.Build.Passed, buildResult(r.Build), "")
+	row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
 
 	fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
 
@@ -49,6 +50,7 @@ func Markdown(r *verify.Report) string {
 	fmt.Fprintf(&b, "| TLC | %s · tla2tools.jar %s `sha256:%s` |\n", t.TLC, t.TLCRelease, t.TLCJarSHA256[:12])
 	fmt.Fprintf(&b, "| Java | `%s` |\n", shortImage(t.JavaImage))
 	fmt.Fprintf(&b, "| Gobra | `%s` |\n", shortImage(t.GobraImage))
+	fmt.Fprintf(&b, "| Go sandbox | `%s` |\n", shortImage(t.GoImage))
 	fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()
@@ -99,20 +101,34 @@ func witnessEvidence(r *verify.Report) string {
 	return strings.Join(parts, ", ")
 }
 
-func mutantsOK(r *verify.Report) bool {
-	return count(r.Mutants, func(m verify.Mutant) bool { return m.Caught }) == len(r.Mutants)
+func bugsOK(r *verify.Report) bool {
+	return count(r.Bugs, func(g verify.Bug) bool { return g.Caught }) == len(r.Bugs)
 }
 
-func mutantEvidence(r *verify.Report) string {
+func bugEvidence(r *verify.Report) string {
 	var parts []string
-	for _, m := range r.Mutants {
-		if m.Caught {
-			parts = append(parts, fmt.Sprintf("%s: `%s` violated after %s", m.Name, m.Violated, steps(m.Steps)))
+	for _, g := range r.Bugs {
+		if g.Caught {
+			parts = append(parts, fmt.Sprintf("%s: `%s` violated after %s", g.Label, g.Violated, steps(g.Steps)))
 		} else {
-			parts = append(parts, m.Name+": not caught")
+			parts = append(parts, g.Label+": not caught")
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+func agreementResult(a verify.Agreement) string {
+	if a.Passed {
+		return "code reaches the model's states"
+	}
+	return "code and model differ"
+}
+
+func agreementEvidence(a verify.Agreement) string {
+	if a.States == 0 && !a.Passed {
+		return "not explored"
+	}
+	return fmt.Sprintf("%s states, depth %d", thousands(a.States), a.Depth)
 }
 
 func codeResult(c verify.Code) string {
@@ -126,6 +142,9 @@ func codeEvidence(c verify.Code) string {
 	s := fmt.Sprintf("%d with contracts", len(c.Contracts))
 	if c.Overflow {
 		s += ", overflow checked"
+	}
+	if len(c.Unverified) > 0 {
+		s += fmt.Sprintf(", not verified: %s", strings.Join(c.Unverified, ", "))
 	}
 	return s
 }
@@ -159,10 +178,13 @@ func failures(r *verify.Report) []string {
 			out = append(out, fmt.Sprintf("Witness `%s`: %s", w.Name, w.Message))
 		}
 	}
-	for _, m := range r.Mutants {
-		if !m.Caught {
-			out = append(out, fmt.Sprintf("Mutant %s: %s", m.Name, m.Message))
+	for _, g := range r.Bugs {
+		if !g.Caught {
+			out = append(out, fmt.Sprintf("Known bug `%s`: %s", g.Name, g.Message))
 		}
+	}
+	if !r.Agreement.Passed {
+		out = append(out, "Agreement: "+r.Agreement.Message)
 	}
 	for _, e := range r.Code.Errors {
 		out = append(out, r.Code.Verifier+": "+e)

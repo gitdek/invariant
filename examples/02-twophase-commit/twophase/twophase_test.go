@@ -2,33 +2,6 @@ package twophase
 
 import "testing"
 
-// successors applies every step whose precondition holds, the same way TLC
-// expands the spec's Next.
-func successors(s State) []State {
-	var next []State
-	if CanTMCommit(s) {
-		next = append(next, TMCommit(s))
-	}
-	if s.TM == TMInit {
-		next = append(next, TMAbort(s))
-	}
-	for r := 0; r < N; r++ {
-		if s.TM == TMInit && s.PreparedMsg[r] {
-			next = append(next, TMRcvPrepared(s, r))
-		}
-		if s.RM[r] == Working {
-			next = append(next, RMPrepare(s, r), RMChooseToAbort(s, r))
-		}
-		if s.CommitMsg {
-			next = append(next, RMRcvCommitMsg(s, r))
-		}
-		if s.AbortMsg {
-			next = append(next, RMRcvAbortMsg(s, r))
-		}
-	}
-	return next
-}
-
 // explore visits every state reachable from Init, breadth first, and
 // returns them with the number of levels searched.
 func explore(step func(State) []State) (seen map[State]bool, depth int) {
@@ -52,14 +25,14 @@ func explore(step func(State) []State) (seen map[State]bool, depth int) {
 // spec with RM = {r1, r2, r3}. Matching counts are strong evidence the step
 // functions implement the model's actions, no more and no fewer.
 func TestStateSpaceMatchesModel(t *testing.T) {
-	seen, depth := explore(successors)
+	seen, depth := explore(Successors)
 	if len(seen) != 288 || depth != 11 {
 		t.Fatalf("reached %d states in %d levels; TLC reports 288 states, depth 11", len(seen), depth)
 	}
 }
 
 func TestEveryReachableStateIsConsistent(t *testing.T) {
-	seen, _ := explore(successors)
+	seen, _ := explore(Successors)
 	var allCommitted, allAborted bool
 	for s := range seen {
 		if !Consistent(s) {
@@ -78,7 +51,7 @@ func TestEveryReachableStateIsConsistent(t *testing.T) {
 // inconsistent state, just as TLC does with the mutated spec.
 func TestEarlyCommitIsCaught(t *testing.T) {
 	early := func(s State) []State {
-		next := successors(s)
+		next := Successors(s)
 		if s.TM == TMInit && !CanTMCommit(s) {
 			for r := 0; r < N; r++ {
 				if s.TMPrepared[r] {

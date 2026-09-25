@@ -5,6 +5,9 @@
 // restates the action: `requires` is the enabling condition and `ensures` is
 // the effect, including everything the action leaves unchanged. Gobra checks
 // every contract, and every array index, before this code can merge.
+
+// +gobra
+
 package twophase
 
 // N is the number of resource managers. It matches the bound TLC checks:

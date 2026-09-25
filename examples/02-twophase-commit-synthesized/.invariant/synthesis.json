@@ -1,0 +1,29 @@
+{
+  "project": "two-phase commit",
+  "usage": {
+    "backend": "claude-code",
+    "model": "claude-opus-5-5",
+    "turns": 12,
+    "cost_usd": 0.35879459999999996,
+    "outcome": "success",
+    "summary": "The gate passed on the first run, using 1 of the 4 runs. Every check is green:\n\n- **Design:** TLC explored 288 states, to a depth of 11, and found no invariant violations and no deadlock.\n- **Reachability:** it reached both `AllCommitted` and `AllAborted`.\n- **Known bugs:** with `EarlyCommit` added to `Next`, TLC found `TCConsistent` violated, as required.\n- **Agreement:** the Go code reaches the same 288 states.\n- **Code:** Gobra verified all 8 functions.\n- **Build:** `go vet` and `go test` pass.\n\n**Model** (`.invariant/specs/TwoPhase.tla`): I added `Init`, seven actions and `Next`, and left the pinned definitions as they were. The coordinator has three actions: record a resource manager's Prepared message, commit once every resource manager has prepared, or abort while it hasn't decided yet. Each resource manager has four: prepare, abort on its own while still working, and follow a Commit or an Abort message.\n\nThe receive actions don't check the resource manager's current state, so they stay enabled once the decision message has been sent. That is what keeps finished runs from counting as deadlocks: the final states can always step back to themselves. When I tried requiring \"prepared\" before a commit is received, the all-committed state had no enabled action and counted as a deadlock.\n\n**Code** (`twophase/`):\n- **`twophase.go`** (verified by Gobra): the `State` struct maps the four spec variables one to one, using fixed-size arrays, booleans and `uint8`. The file also has `Init` and one step function per action, each with a contract giving its enabling condition, its effect and what it leaves unchanged.\n- **`explore.go`**: `Successors`, which applies every action enabled in a state.\n- **`twophase_test.go`**: explores every reachable state and checks for no deadlock, valid resource-manager states, no commit alongside an abort, and that both witnesses are reached.",
+    "tool_calls": {
+      "Edit": 2,
+      "Glob": 1,
+      "Read": 3,
+      "ToolSearch": 1,
+      "Write": 3,
+      "mcp__invariant__gate": 1
+    },
+    "gate_tool": "connected"
+  },
+  "gate_runs": [
+    {
+      "run": 1,
+      "passed": true,
+      "at": "2026-09-25T14:44:59Z"
+    }
+  ],
+  "tampered": null,
+  "seconds": 115.384590917
+}

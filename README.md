@@ -45,10 +45,10 @@ Invariant splits the work where it belongs:
 ## Watch it catch a bug
 
 <p align="center">
-  <img src="docs/assets/counterexample.svg" alt="Replay of a real TLC counterexample. r1 prepares; the buggy coordinator commits after hearing from r1 alone; r1 commits; r2 aborts. TCConsistent is violated in 5 steps." width="100%">
+  <img src="docs/assets/counterexample.svg" alt="Replay of a real TLC counterexample. r1 prepares and the coordinator records its vote; r2 aborts on its own; the buggy coordinator commits anyway, on r1's vote alone; r1 commits. TCConsistent is violated in 5 steps." width="100%">
 </p>
 
-Passing TLC only means something if the invariants could have failed. So the gate plants known bugs in the model and requires TLC to catch each one. This is the real counterexample for the two-phase commit example's planted bug: a coordinator that commits after hearing from one resource manager instead of all three. TLC finds the shortest path to an inconsistent commit, which takes five steps.
+Passing TLC only means something if the invariants could have failed. So the gate plants known bugs in the model and requires TLC to catch each one. This is the real counterexample for the two-phase commit example's planted bug: a coordinator that commits after hearing from one resource manager instead of all three. TLC finds the shortest path to an inconsistent commit. In five steps, r2 aborts on its own, the coordinator commits anyway on r1's vote alone, and r1 commits.
 
 ## One action, one contract
 
@@ -62,12 +62,13 @@ The factory owns both the model and the code, and each Go function's contract re
 
 | Check | Tool | Fails when |
 | :-- | :-- | :-- |
-| Pins | Invariant | A ratified statement's text has changed |
+| Pins | Invariant | A ratified statement's text, or anything it depends on, has changed |
 | Design | TLA+ · TLC | An invariant is violated, or the system can deadlock, within the ratified bounds |
 | Reachability | TLA+ · TLC | A ratified witness can't be reached, so the invariants might hold only because nothing happens |
-| Known bugs | TLA+ · TLC | A ratified known bug slips past the invariants |
+| Known bugs | TLA+ · TLC | A ratified bug, added to the model as an extra action, slips past the invariants |
+| Agreement | Invariant | The code, explored from its initial state, doesn't reach exactly the states TLC found in the model |
 | Code | Gobra | A function doesn't verify against its contract, or an index or integer operation could fail |
-| Build | `go test` · `go vet` | Anything is red |
+| Build | `go test` · `go vet` | Anything is red. Runs in a sandbox with no network and no secrets. |
 | Scope | Invariant | The diff adds dependencies, uses cgo, or edits CI config or pinned specs. This check arrives with the GitHub integration. |
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
@@ -91,12 +92,13 @@ It prints a receipt. This is the real one for the [two-phase commit example](exa
 
 | Check | Result | Evidence |
 | :-- | :-- | :-- |
-| Pinned statements | ✅ 4 of 4 match | recorded in D-0019 |
+| Pinned statements | ✅ 6 of 6 match | recorded in D-0027 |
 | Design · TLC | ✅ no violations, no deadlock | 288 distinct states (1,146 generated), depth 11 |
 | Reachability | ✅ 2 of 2 witnesses reached | `AllCommitted` in 10 steps, `AllAborted` in 3 steps |
 | Known bugs | ✅ 1 of 1 caught | early-commit: `TCConsistent` violated after 5 steps |
-| Code · Gobra | ✅ 10 of 10 functions verified | 10 with contracts, overflow checked |
-| Build | ✅ go vet, go test | |
+| Agreement | ✅ code reaches the model's states | 288 states, depth 11 |
+| Code · Gobra | ✅ 10 of 10 functions verified | 10 with contracts, overflow checked, not verified: Successors |
+| Build | ✅ go vet, go test | sandboxed, no network |
 
 These results cover `RM = {r1, r2, r3}`. Within those bounds, TLC's search is exhaustive. The receipt claims nothing beyond them.
 
@@ -104,11 +106,12 @@ These results cover `RM = {r1, r2, r3}`. Within those bounds, TLC's search is ex
 
 ## Status
 
-Pre-alpha. The gate works end to end on the first example. Synthesis comes next.
+Pre-alpha. The gate works end to end, and the factory can build a verified implementation from ratified statements alone. TypeScript and Python come next.
 
 - [x] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](examples/02-twophase-commit).
-- [ ] **Slice 2 · Synthesis.** The factory rebuilds that implementation from the ratified statements and passes the same gate.
-- [ ] **Slice 3 · GitHub.** An issue becomes a decision request, then a ratification, then a pull request, then an auto-merge.
+- [x] **Slice 2 · Synthesis.** Headless Claude Code rebuilt the model and the code from the ratified statements and the request alone. It [passed on its first gate run](examples/02-twophase-commit-synthesized), in 12 turns and under two minutes.
+- [ ] **Slice 3 · TypeScript and Python.** A conformance check for existing code, then a spike on Nagini proofs for Python.
+- [ ] **Slice 4 · GitHub.** An issue becomes a decision request, then a ratification, then a pull request, then an auto-merge.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md).
 

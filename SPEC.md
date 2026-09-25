@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0025 · 2026-09-25
+**Rolled up through** D-0028 · 2026-09-25
 
 ## What Invariant is
 
@@ -16,25 +16,33 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## What gets ratified
 
-- Each project's `.invariant/ratified.lock` records four things. `D-0011` `D-0013`
+- Each project's `.invariant/ratified.lock` records five things. `D-0011` `D-0013` `D-0026`
+  - The spec, `Init /\ [][Next]_vars`.
   - The invariants.
   - The bounds TLC checks them within.
   - The reachability witnesses.
-  - The known bugs the invariants must catch.
-- The factory owns the TLA+ model, the Go implementation and its Gobra contracts. Each contract restates one TLA+ action. `D-0011`
+  - The known bugs, as TLA+ actions the invariants must catch.
+- Each pin covers a statement and every definition it depends on, stopping at the factory's `Init` and `Next`. `D-0026`
+- The factory owns the model (`Init`, the actions and `Next`), the Go implementation and its Gobra contracts. Each contract restates one TLA+ action. `D-0011` `D-0026`
 - A person records a ratification with `invariant pin`. `D-0017`
 
 ## System
 
 - Invariant is written in Go. `D-0001`
 - Invariant targets Go, TypeScript and Python, the languages of @gitdek's projects. `D-0023`
+- Every language gets a proof path and a conformance path, and each receipt says which one ran. Proofs fit new code written for a verifier; existing code is tested against the model. `D-0024`
 - Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra. Lean 4 has no role in v1. `D-0003` `D-0010`
 - Verifiers run in Docker and are pinned. `D-0000` `D-0013` `D-0016` `D-0020`
   - TLC is v1.7.4, pinned by SHA-256, running in `eclipse-temurin` pinned by digest.
   - Gobra is pinned by digest, and it also checks integer overflow.
+  - Builds, tests and exploration run in `golang:1.27-alpine`, pinned by digest, on a throwaway copy.
+  - Nothing runs with network access or with the host's environment.
 - Invariant converts TLC counterexamples into JSON traces. `D-0016`
 - Each project is its own Go module. `D-0020`
 - Synthesis backends are pluggable: direct model APIs, or headless coding agents such as Claude Code and Codex. `D-0000`
+- Synthesis runs locally through the official coding-agent CLIs in their documented headless modes, on @gitdek's own accounts. Anything shared, hosted or run in CI uses an API key. `D-0028`
+- A synthesis agent starts from a skeleton that holds only the pinned definitions. It works outside the repository, with file tools and the gate as its only tools. Every gate run checks a project assembled from the original lock, manifest, request and `go.mod`, plus the agent's model and code. `D-0026`
+- The agent gets at most four gate runs: one attempt and three repairs. Each run is capped by an estimated-cost budget, a turn limit and a timeout. `D-0000` `D-0026`
 - The factory is triggered by `issues.opened`, by `/invariant solve` issue comments, and by `repository_dispatch`. `D-0000` `D-0014`
   - Only users with write access can trigger it.
   - Synthesis runs with no secrets and no network.
@@ -43,7 +51,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Every pull request carries a receipt that CI generates from tool output only. `D-0000` `D-0013`
   - It lists the states explored, the bounds, the functions verified, the statement hashes and the tool versions.
   - Its fingerprint matches between a local run and a CI run of the same commit.
-- The CLI's `verify`, `pin` and `trace` commands are built. `init` and `synthesize` are specified but not yet built. `D-0000` `D-0013` `D-0017`
+- The CLI's `verify`, `synthesize`, `pin` and `trace` commands are built. `init` is specified but not yet built. `D-0000` `D-0013` `D-0017` `D-0026`
 
 ## Merging
 
@@ -53,7 +61,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - TLC reports no invariant violation and no deadlock.
   - Every witness is reachable.
   - Every known bug is caught.
-  - Gobra verifies the code.
+  - The code, explored from `Init()` through `Successors()`, reaches exactly the states TLC found, at the same depth.
+  - Gobra verifies the code in files marked `// +gobra`, and the receipt names anything it didn't see.
   - CI is green.
   - The diff stays in scope: no new module dependencies, no cgo, no edits to `.github/` or pinned specs.
 - The pinned-statement checks and the scope rules must exist before the factory opens its first PR. `D-0004` `D-0014`
@@ -61,7 +70,11 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Current focus
 
-- Slices, in order: the gate, proven on `examples/02-twophase-commit`; then synthesis; then GitHub. `D-0005` `D-0013`
+- Slices, in order: `D-0005` `D-0013` `D-0024`
+  1. The gate, proven on `examples/02-twophase-commit`. Done.
+  2. Synthesis for Go. Done.
+  3. TypeScript and Python: conformance for existing code, then a Nagini spike.
+  4. GitHub.
 
 ## Project
 
@@ -77,6 +90,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 | ID | Question | Status |
 | :-- | :-- | :-- |
-| D-0019 | The exact text of the two-phase commit statements and its known bug | proposed |
-| D-0022 | A `decided` status for execution-level calls | proposed |
-| [D-0024](decisions/D-0024-checking-typescript-and-python.md) | How TypeScript and Python code gets checked, and when | proposed |
+| D-0027 | The two-phase commit lock in its new form: `Spec` and `EarlyCommit` pinned, and `TypeOK` covering `Messages` | proposed |

@@ -33,15 +33,15 @@ type Result struct {
 // State is one step of a counterexample trace. Values are TLA+ text as TLC
 // printed it; ParseValue turns them into data.
 type State struct {
-	Index  int
-	Action string // "Initial predicate" for the first state
-	Vars   []Var
+	Index  int    `json:"index"`
+	Action string `json:"action"` // "Initial predicate" for the first state
+	Vars   []Var  `json:"vars"`
 }
 
 // Var is one variable's value in a State.
 type Var struct {
-	Name  string
-	Value string
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // TLC's -tool mode wraps each message in markers carrying a message code.

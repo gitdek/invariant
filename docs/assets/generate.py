@@ -265,7 +265,8 @@ EXPLAIN = {
     "RMPrepare": "{r} prepares and sends Prepared to the coordinator.",
     "RMChooseToAbort": "{r} hasn't prepared yet, so it may abort on its own. It does.",
     "TMRcvPrepared": "The coordinator records {r}'s Prepared.",
-    "TMCommit": "The buggy coordinator commits after hearing from {heard} alone.",
+    "TMCommit": "Every resource manager has prepared, so the coordinator commits.",
+    "EarlyCommit": "The buggy coordinator commits after hearing from {heard} alone.",
     "TMAbort": "The coordinator aborts.",
     "RMRcvCommitMsg": "{r} receives Commit and commits.",
     "RMRcvAbortMsg": "{r} receives Abort and aborts.",
@@ -348,13 +349,13 @@ def trace_card(trace, receipt):
             out.append(f'<g opacity="0">{shown(s, s + 1.0, T)}{travel(path, s, s + 1.0, T)}'
                        f'<circle r="5" fill="{c["blue"]}"/><text y="-9" text-anchor="middle" font-size="11" '
                        f'fill="{c["blue"]}">Prepared</text></g>')
-        if action in ("TMCommit", "TMAbort"):
-            kind, tone = ("Commit", c["green"]) if action == "TMCommit" else ("Abort", c["red"])
-            for rm in rms:
+        if action in ("TMCommit", "EarlyCommit", "TMAbort"):
+            kind, tone = ("Abort", c["red"]) if action == "TMAbort" else ("Commit", c["green"])
+            for n, rm in enumerate(rms):
                 path = f"M{hub[0]},{hub[1]}L{lane[rm][0]},{lane[rm][1]}"
+                label = (f'<text y="-9" text-anchor="middle" font-size="11" fill="{tone}">{kind}</text>' if n == 0 else "")
                 out.append(f'<g opacity="0">{shown(s, s + 1.0, T)}{travel(path, s, s + 1.0, T)}'
-                           f'<circle r="5" fill="{tone}"/><text y="-9" text-anchor="middle" font-size="11" '
-                           f'fill="{tone}">{kind}</text></g>')
+                           f'<circle r="5" fill="{tone}"/>{label}</g>')
         final = i == len(states) - 1
         out.append(f'<text x="40" y="{H - 44}" font-size="14" font-weight="600" fill="{c["text"]}" opacity="0">'
                    f'{shown(s, violated_at if final else e, T)}Step {i + 1} of {len(states)} · '
@@ -512,21 +513,24 @@ def dual_card(receipt):
 
 def receipt_card(r):
     """The receipt, checking itself off row by row."""
-    c, W, H = DARK, 860, 384
+    c, W, H = DARK, 860, 424
     T = 12.0
     d, code = r["design"], r["code"]
     reached = [w for w in r["witnesses"] if w["reached"]]
-    caught = [m for m in r["mutants"] if m["caught"]]
+    caught = [b for b in r["bugs"] if b["caught"]]
+    a = r["agreement"]
     rows = [
         ("Pinned statements", f"{sum(p['match'] for p in r['pins'])} of {len(r['pins'])} match", f"recorded in {r['decision']}"),
         ("Design · TLC", "no violations, no deadlock", f"{d['distinct_states']} distinct states, depth {d['depth']}"),
         ("Reachability", f"{len(reached)} of {len(r['witnesses'])} witnesses reached",
          ", ".join(f"{w['name']} in {w['steps']} steps" for w in reached)),
-        ("Known bugs", f"{len(caught)} of {len(r['mutants'])} caught",
-         ", ".join(f"{m['name']} after {m['steps']} steps" for m in caught)),
+        ("Known bugs", f"{len(caught)} of {len(r['bugs'])} caught",
+         ", ".join(f"{b['label']} after {b['steps']} steps" for b in caught)),
+        ("Agreement", "code reaches the model's states", f"{a['states']} states, depth {a['depth']}"),
         (f"Code · {code['verifier']}", f"{len(code['functions'])} of {len(code['functions'])} functions verified",
-         "overflow checked" if code["overflow_checked"] else ""),
-        ("Build", ", ".join(s["name"] for s in r["build"]["steps"]), "passing"),
+         ", ".join((["overflow checked"] if code["overflow_checked"] else [])
+                   + [f"{name} unverified" for name in code.get("unverified") or []])),
+        ("Build", ", ".join(s["name"] for s in r["build"]["steps"]), "sandboxed, no network"),
     ]
     bounds = ", ".join(f"{k} = {v}" for k, v in sorted(r["bounds"].items()))
     out = [card(W, H, c, f"Invariant receipt · {r['project']}", "invariant verify"), f'<g font-family="{SANS}">']
@@ -545,14 +549,14 @@ def receipt_card(r):
                    f'<text x="{W - 32}" y="{y + 5}" text-anchor="end" font-family="{MONO}" font-size="12" '
                    f'fill="{c["muted"]}">{esc(evidence)}</text></g>')
     done = 0.6 + len(rows) * 0.55 + 0.4
-    out.append(f'<path d="M20 306H{W - 20}" stroke="{c["line"]}"/>')
+    out.append(f'<path d="M20 346H{W - 20}" stroke="{c["line"]}"/>')
     out.append(f'<g opacity="0">{shown(done, T - 0.6, T)}'
-               f'<rect x="32" y="326" width="208" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
-               f'<text x="136" y="346" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
+               f'<rect x="32" y="366" width="208" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
+               f'<text x="136" y="386" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
                f'✓ invariant/gate passed</text>'
-               f'<text x="{W - 32}" y="336" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'<text x="{W - 32}" y="376" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
                f'exhaustive within {esc(bounds)}</text>'
-               f'<text x="{W - 32}" y="354" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'<text x="{W - 32}" y="394" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
                f'fingerprint {esc(r["fingerprint"][:19])}…</text></g>')
     out.append('</g>')
     return svg_doc(W, H, "\n".join(out),
@@ -562,6 +566,7 @@ def receipt_card(r):
 def main():
     receipt = json.load(open(sys.argv[1] if len(sys.argv) > 1 else os.path.join(RUN, "receipt.json")))
     trace = json.load(open(sys.argv[2] if len(sys.argv) > 2 else os.path.join(RUN, "traces", "early-commit.json")))
+    receipt.setdefault("bugs", receipt.get("mutants", []))
     if not receipt["passed"]:
         sys.exit("the receipt is failing; fix the gate before regenerating the README graphics")
     write(os.path.join(ROOT, "docs", "brand", "logo-animated.svg"), logo(LIGHT))

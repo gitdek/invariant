@@ -27,7 +27,10 @@ type Result struct {
 	// bounds of every index, whether or not they carry a contract.
 	Functions []string
 	Contracts []string
-	Overflow  bool // integer overflow was checked too
+	// Unverified lists functions in files without the // +gobra header. Gobra
+	// never sees them; the receipt says so.
+	Unverified []string
+	Overflow   bool // integer overflow was checked too
 }
 
 var (
@@ -53,14 +56,19 @@ func Parse(out string, exitCode int) Result {
 	return r
 }
 
+// Header marks a file for Gobra. When any file in a package carries it,
+// Gobra verifies only those files; the rest are plain Go, such as the
+// exploration code the agreement check runs.
+const Header = "// +gobra"
+
 // Run verifies the package in dir with the Gobra image, which is pinned by
-// digest and published for linux/amd64 only.
+// digest and published for linux/amd64 only. It runs with no network.
 func Run(ctx context.Context, image, dir string, overflow bool) (Result, error) {
-	files, err := sources(dir)
+	files, skipped, err := sources(dir)
 	if err != nil {
 		return Result{}, err
 	}
-	args := []string{"run", "--rm", "--platform", "linux/amd64", "-v", dir + ":/work:ro", image}
+	args := []string{"run", "--rm", "--network", "none", "--platform", "linux/amd64", "-v", dir + ":/work:ro", image}
 	if overflow {
 		args = append(args, "--overflow")
 	}
@@ -81,27 +89,54 @@ func Run(ctx context.Context, image, dir string, overflow bool) (Result, error) 
 	}
 	r := Parse(out.String(), code)
 	r.Overflow = overflow
-	r.Functions, r.Contracts, err = functions(dir, files)
+	if r.Functions, r.Contracts, err = functions(dir, files); err != nil {
+		return r, err
+	}
+	r.Unverified, _, err = functions(dir, skipped)
 	return r, err
 }
 
-// sources lists the package's non-test Go files.
-func sources(dir string) ([]string, error) {
+// sources splits the package's non-test Go files into the ones Gobra
+// verifies and the ones it skips.
+func sources(dir string) (verified, skipped []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var files []string
+	var all []string
 	for _, e := range entries {
 		if n := e.Name(); strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
-			files = append(files, n)
+			all = append(all, n)
 		}
 	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no Go files in %s", dir)
+	if len(all) == 0 {
+		return nil, nil, fmt.Errorf("no Go files in %s", dir)
 	}
-	sort.Strings(files)
-	return files, nil
+	sort.Strings(all)
+	for _, n := range all {
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			return nil, nil, err
+		}
+		if hasHeader(string(b)) {
+			verified = append(verified, n)
+		} else {
+			skipped = append(skipped, n)
+		}
+	}
+	if len(verified) == 0 {
+		return all, nil, nil
+	}
+	return verified, skipped, nil
+}
+
+func hasHeader(src string) bool {
+	for _, line := range strings.Split(src, "\n") {
+		if strings.TrimSpace(line) == Header {
+			return true
+		}
+	}
+	return false
 }
 
 // functions names every function declared in files, and those whose doc

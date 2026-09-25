@@ -3,12 +3,13 @@ id: D-0024
 title: How TypeScript and Python code gets checked
 date: 2026-09-25
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: Claude
 source: follow-up to D-0023 (Claude Code session 2f96fee2)
 ---
 
-# D-0024 · How TypeScript and Python code gets checked (proposed)
+# D-0024 · How TypeScript and Python code gets checked
 
 **Context.** [D-0023](D-0023-more-languages.md) commits Invariant to Go, TypeScript and Python, because those are the languages of @gitdek's projects. Most code in those projects already exists and was never written for a verifier. Proofs suit new, self-contained cores, like the two-phase commit state machine. Conformance testing, which checks running code against the model, suits everything else.
 

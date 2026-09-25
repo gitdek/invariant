@@ -12,3 +12,4 @@
 - `go test ./...`: unit tests. Each example is its own Go module, so the root module doesn't include it.
 - `go test -tags integration ./internal/verify/`: the gate against the real verifiers, including the ways it must fail. Needs Docker.
 - `go run ./cmd/invariant verify examples/02-twophase-commit`: run the gate and print the receipt.
+- `go run ./cmd/invariant synthesize examples/02-twophase-commit`: have headless Claude Code rebuild the model and code from the ratified statements, then gate the result. It uses the owner's Claude account, so only run it when asked.

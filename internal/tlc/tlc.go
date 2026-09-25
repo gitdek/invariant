@@ -45,14 +45,14 @@ func (c Config) render() string {
 	return b.String()
 }
 
-// Check model-checks module (a file in dir) against cfg. Deadlock checking is
-// always on: Check never passes -deadlock.
+// Check model-checks module (a file in dir) against cfg, with no network.
+// Deadlock checking is always on: Check never passes -deadlock.
 func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Result, error) {
 	if err := os.WriteFile(filepath.Join(dir, "Invariant.cfg"), []byte(cfg.render()), 0o644); err != nil {
 		return Result{}, err
 	}
 	jarDir, jar := filepath.Split(r.Jar)
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none",
 		"-v", dir+":/work", "-v", filepath.Clean(jarDir)+":/opt/tla:ro", "-w", "/work",
 		r.Image, "java", "-XX:+UseParallelGC", "-cp", "/opt/tla/"+jar, "tlc2.TLC",
 		"-tool", "-workers", "1", "-metadir", "/tmp/states", "-config", "Invariant.cfg", module+".tla")

@@ -27,6 +27,10 @@ const (
 
 	// GobraImage is ghcr.io/viperproject/gobra, built 2026-09-08. linux/amd64 only.
 	GobraImage = "ghcr.io/viperproject/gobra@sha256:775879e8483561186291653d4c8a818c222eafd38f4b50a42d4b8873eebc9481"
+
+	// GoImage builds, tests and explores Go implementations in a sandbox.
+	// golang:1.27-alpine (Go 1.27.1), multi-arch index digest.
+	GoImage = "golang@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414"
 )
 
 // Toolchain is a ready-to-use set of pinned verifiers.
@@ -34,6 +38,7 @@ type Toolchain struct {
 	JavaImage  string
 	TLCJar     string // local path, checksum verified
 	GobraImage string
+	GoImage    string
 }
 
 // Ensure checks that Docker is running and fetches the TLC jar into the user
@@ -50,7 +55,7 @@ func Ensure(ctx context.Context) (Toolchain, error) {
 	if err := fetch(ctx, TLCJarURL, jar, TLCJarSHA256); err != nil {
 		return Toolchain{}, fmt.Errorf("TLC %s: %w", TLCRelease, err)
 	}
-	return Toolchain{JavaImage: JavaImage, TLCJar: jar, GobraImage: GobraImage}, nil
+	return Toolchain{JavaImage: JavaImage, TLCJar: jar, GobraImage: GobraImage, GoImage: GoImage}, nil
 }
 
 // fetch makes sure path holds the file at url with the given SHA-256.

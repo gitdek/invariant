@@ -43,9 +43,12 @@ func TestParseNoSummary(t *testing.T) {
 
 func TestFunctions(t *testing.T) {
 	dir := "../../examples/02-twophase-commit/twophase"
-	files, err := sources(dir)
+	files, skipped, err := sources(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(skipped) != 1 || skipped[0] != "explore.go" {
+		t.Errorf("skipped = %v; want only explore.go, which has no %s header", skipped, Header)
 	}
 	all, withContract, err := functions(dir, files)
 	if err != nil {
