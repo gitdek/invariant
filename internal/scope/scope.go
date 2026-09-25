@@ -1,7 +1,8 @@
 // Package scope checks that a factory pull request stays in bounds (D-0014):
-// it changes one project and nothing else, adds no module dependencies, uses
-// no cgo, leaves CI configuration alone, and changes no ratified lock except
-// by adding a new, ratified project.
+// it changes one project and nothing else, adds no dependencies (Go modules,
+// npm packages or Python requirements), uses no cgo, leaves CI configuration
+// alone, and changes no ratified lock except by adding a new, ratified
+// project.
 package scope
 
 import (
@@ -95,6 +96,26 @@ func Check(ctx context.Context, dir, base, head string) (Result, error) {
 		}
 	}
 	for _, f := range r.Files {
+		switch name := path.Base(f); {
+		case name == "package.json":
+			after, err := g.show(head, f)
+			if err != nil {
+				continue // deleted
+			}
+			before, _ := g.show(base, f)
+			had := npmDependencies(before)
+			for _, dep := range sorted(npmDependencies(after)) {
+				if !had[dep] {
+					r.Problems = append(r.Problems, "it adds a package dependency: "+dep)
+				}
+			}
+		case pythonDependencyFile(name):
+			if g.exists(head, f) {
+				r.Problems = append(r.Problems, "it adds or changes a Python dependency file: "+f)
+			}
+		}
+	}
+	for _, f := range r.Files {
 		if !strings.HasSuffix(f, ".go") {
 			continue
 		}
@@ -114,6 +135,41 @@ func Check(ctx context.Context, dir, base, head string) (Result, error) {
 		}
 	}
 	return r, nil
+}
+
+// npmDependencies lists every package a package.json depends on, of any
+// kind.
+func npmDependencies(text string) map[string]bool {
+	out := map[string]bool{}
+	var pkg map[string]json.RawMessage
+	if json.Unmarshal([]byte(text), &pkg) != nil {
+		return out
+	}
+	for _, field := range []string{"dependencies", "devDependencies", "peerDependencies", "optionalDependencies"} {
+		var deps map[string]any
+		if json.Unmarshal(pkg[field], &deps) == nil {
+			for name := range deps {
+				out[name] = true
+			}
+		}
+	}
+	var bundled []string
+	if json.Unmarshal(pkg["bundleDependencies"], &bundled) == nil {
+		for _, name := range bundled {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// pythonDependencyFile says whether a file is where Python projects declare
+// what to install. The factory's Python uses the standard library only.
+func pythonDependencyFile(name string) bool {
+	switch name {
+	case "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "Pipfile.lock", "poetry.lock":
+		return true
+	}
+	return strings.HasPrefix(name, "requirements") && strings.HasSuffix(name, ".txt")
 }
 
 // requires lists the modules a go.mod requires.

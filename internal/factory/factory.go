@@ -74,8 +74,15 @@ type Factory struct {
 	Projects   string // the directory new projects go in, such as examples
 	Work       string // where transcripts and logs go
 	Check      string // the CI check that gates a merge: invariant/gate
-	Log        func(format string, args ...any)
-	Now        func() time.Time
+	Language   string // the code's language when an issue has no language label (D-0040)
+	// Self is the factory's own login when it acts as its App's bot
+	// (D-0041). Then only the bot's comments count as the factory's posts,
+	// and no bot's comment is ever a command. Empty means the factory posts
+	// as the person gh is logged in as, and its posts are told apart by
+	// their markers alone.
+	Self string
+	Log  func(format string, args ...any)
+	Now  func() time.Time
 
 	writers map[string]bool
 }
@@ -84,6 +91,9 @@ type Factory struct {
 // label on an issue it's working on.
 const (
 	LabelTrigger     = "invariant"
+	LabelGo          = "invariant:go"
+	LabelTypeScript  = "invariant:typescript"
+	LabelPython      = "invariant:python"
 	LabelAsking      = "invariant:asking"
 	LabelProposal    = "invariant:awaiting-ratification"
 	LabelBuilding    = "invariant:building"
@@ -94,6 +104,9 @@ const (
 
 var labels = []struct{ name, color, description string }{
 	{LabelTrigger, "0CA678", "Ask Invariant to take this issue"},
+	{LabelGo, "00ADD8", "Invariant writes this issue's code in Go"},
+	{LabelTypeScript, "3178C6", "Invariant writes this issue's code in TypeScript"},
+	{LabelPython, "3776AB", "Invariant writes this issue's code in Python"},
 	{LabelAsking, "38D9A9", "Invariant asked a question"},
 	{LabelProposal, "38D9A9", "Invariant proposed statements to ratify"},
 	{LabelBuilding, "0CA678", "Invariant is writing the code"},
@@ -154,7 +167,7 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 		return t, err
 	}
 	for _, c := range comments {
-		if m, ok := DecodeMarker(c.Body); ok {
+		if m, ok := DecodeMarker(c.Body); ok && (f.Self == "" || c.User.Login == f.Self) {
 			t.Posts = append(t.Posts, Post{Comment: c, Marker: m})
 		}
 	}
@@ -174,7 +187,10 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 		}
 	}
 	for _, c := range comments {
-		if _, ok := DecodeMarker(c.Body); ok {
+		if c.User.Type == "Bot" || c.User.Login == f.Self {
+			continue // a bot, the factory included, never directs the factory
+		}
+		if _, ok := DecodeMarker(c.Body); ok && f.Self == "" {
 			continue
 		}
 		ok, err := f.writer(ctx, c.User.Login)
@@ -202,7 +218,7 @@ func (f *Factory) labeledBy(ctx context.Context, issue github.Issue) (string, er
 	}
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
-		if e.Event == "labeled" && e.Label != nil && e.Label.Name == LabelTrigger {
+		if e.Event == "labeled" && e.Label != nil && e.Label.Name == LabelTrigger && e.Actor.Type != "Bot" {
 			if ok, err := f.writer(ctx, e.Actor.Login); err != nil || ok {
 				return e.Actor.Login, err
 			}
@@ -359,11 +375,25 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 	}
 }
 
+// language is the language an issue's label asks for, or the repository's
+// default (D-0040).
+func (f *Factory) language(issue github.Issue) string {
+	for label, lang := range map[string]string{LabelGo: "go", LabelTypeScript: "typescript", LabelPython: "python"} {
+		if issue.HasLabel(label) {
+			return lang
+		}
+	}
+	if f.Language != "" {
+		return f.Language
+	}
+	return "go"
+}
+
 // request is what people have said on the issue, for the formalizer and the
 // project's request.md.
 func (f *Factory) request(t Thread, answers []formalize.Answer, previous *formalize.Proposal) formalize.Request {
-	req := formalize.Request{Repo: f.Repository, Issue: t.Issue.Number, Title: t.Issue.Title, Body: withoutCommands(t.Issue.Body),
-		Author: t.Issue.User.Login, Answers: answers, Previous: previous}
+	req := formalize.Request{Repo: f.Repository, Language: f.language(t.Issue), Issue: t.Issue.Number, Title: t.Issue.Title,
+		Body: withoutCommands(t.Issue.Body), Author: t.Issue.User.Login, Answers: answers, Previous: previous}
 	for _, c := range t.People {
 		if body := withoutCommands(c.Body); body != "" {
 			req.Thread = append(req.Thread, formalize.Message{By: c.User.Login, Body: body})
@@ -417,8 +447,7 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if err := p.Write(root, req.Markdown(), rat); err != nil {
 		return Post{}, err
 	}
-	gomod := fmt.Sprintf("module github.com/%s/%s\n\ngo 1.27.1\n", f.Repository, dir)
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(gomod), 0o644); err != nil {
+	if err := scaffold(root, f.Repository, dir, p); err != nil {
 		return Post{}, err
 	}
 	readme := projectReadme(t, dir, p, state.Marker.Answers, c.By, c.URL)
@@ -476,6 +505,24 @@ func (f *Factory) branchFor(ctx context.Context, issue int, p *formalize.Proposa
 			return branch, sc.Project, "origin/" + branch, nil
 		}
 	}
+}
+
+// scaffold writes the language's own project file: a go.mod for Go, and a
+// package.json with no dependencies for TypeScript. Python needs none.
+func scaffold(root, repo, dir string, p *formalize.Proposal) error {
+	switch p.Manifest().Language {
+	case "go":
+		gomod := fmt.Sprintf("module github.com/%s/%s\n\ngo 1.27.1\n", repo, dir)
+		return os.WriteFile(filepath.Join(root, "go.mod"), []byte(gomod), 0o644)
+	case "typescript":
+		pkg, err := json.MarshalIndent(map[string]any{"name": p.Slug, "private": true, "type": "module",
+			"description": capitalize(p.Name) + ", written by Invariant and checked against its ratified TLA+ model."}, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, "package.json"), append(pkg, '\n'), 0o644)
+	}
+	return nil
 }
 
 // projectDir picks the directory for a new project: the next number in

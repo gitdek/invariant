@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0037 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0043 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -34,6 +34,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Go: proved with Gobra, and tied to the model by agreement. `D-0003` `D-0026`
   - Python: new cores are proved with Nagini, in files marked `# +nagini`, and still tested against the model by conformance. Existing code is tested by conformance alone. `D-0024` `D-0029` `D-0031`
   - TypeScript: tested against the model by conformance. No proof path yet. `D-0024` `D-0029`
+- The factory writes all three languages. Go is proved with Gobra, and Python is a core proved with Nagini. TypeScript is a state machine tested against the model in every state it can reach. An issue picks its language with an `invariant:typescript`, `invariant:python` or `invariant:go` label, and without one, the repository's default applies. `D-0038` `D-0039` `D-0040` `D-0043`
+- When a project's conformance driver explores every state the code can reach, its manifest says so. The gate then requires the driver to visit every state the model reaches, so the code and the model reach exactly the same states. `D-0043`
 - Conformance: a project's driver calls the code's operations at random and records each state in the spec's vocabulary. TLC checks that every run starts in a state `Init` allows and that every step that changes the state is a `Next` step. Runs use a fixed seed, so receipts reproduce. `D-0029`
 - Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra, and Python cores with Nagini. Lean 4 has no role in v1. `D-0003` `D-0010` `D-0031`
 - Verifiers run in Docker and are pinned. `D-0000` `D-0013` `D-0016` `D-0020`
@@ -55,6 +57,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - It keeps no state of its own. Each of its comments records the issue's state in a hidden marker, and a status label shows it. `D-0036`
   - The agents never touch GitHub. Only the factory's own code posts, pushes and merges. Synthesis runs with no secrets and no network. `D-0014` `D-0036`
   - Agents get only the file tools and Invariant's own tool, and they can't read the home directory. `D-0037`
+  - Given its GitHub App (`invariant watch -app-id`), the factory acts as the App's bot. It comments, pushes and merges with the App's token. Only the bot's comments count as its posts, and no bot's comment directs it or ratifies anything. Without the App, it posts as @gitdek. `D-0041`
 - Formalization: an agent drafts the statements, their bounds and a draft model for an issue. When the issue allows materially different behaviors, it lists them as forks in a decision request instead of choosing. The factory posts a proposal only after TLC has checked it against the draft model. `D-0002` `D-0036`
 - Ratification happens on the issue. The proposal shows each statement in plain language and TLA+, with the hash of the whole proposal. A writer ratifies by commenting `/invariant ratify <hash>`. The lock records who ratified it, where, and what. `D-0034`
 - Each ratified issue becomes a new project under `examples/`. Its ratification is the first commit on the issue's branch, and synthesis starts from the drafted model. `D-0033` `D-0036`
@@ -77,18 +80,20 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - TypeScript and Python: every step the code took is a step the model allows.
   - Gobra verifies Go files marked `// +gobra`, Nagini verifies Python files marked `# +nagini`, and the receipt names any function neither saw. `D-0031`
   - CI is green.
-  - The diff stays in scope. It changes one project and nothing else. It adds no module dependencies, uses no cgo and doesn't edit `.github/`. It changes no ratified lock, except by adding a new, ratified project. `D-0014` `D-0036`
+  - The diff stays in scope. It changes one project and nothing else. It adds no dependencies: no Go modules, npm packages or Python requirements. It uses no cgo and doesn't edit `.github/`. It changes no ratified lock, except by adding a new, ratified project. `D-0014` `D-0036` `D-0043`
   - Every factory project's ratification checks out on GitHub: a writer's comment ratified exactly the proposal its lock holds. `D-0034` `D-0036`
 - The pinned-statement checks and the scope rules must exist before the factory opens its first PR. `D-0004` `D-0014`
 - After a merge, the branch is deleted and the originating issue is notified with the proof artifacts. `D-0000`
 
 ## Current focus
 
-- Slices, in order: `D-0005` `D-0013` `D-0024`
+- Slices, in order: `D-0005` `D-0013` `D-0024` `D-0042`
   1. The gate, proven on `examples/02-twophase-commit`. Done.
   2. Synthesis for Go. Done.
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
+  5. TypeScript and Python synthesis. Done. `D-0042` `D-0043`
+  6. Changing existing projects, so that Invariant can start building itself. Next. `D-0042`
 
 ## Project
 

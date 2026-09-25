@@ -49,6 +49,8 @@ func VerifyRatification(ctx context.Context, gh Comments, repo string, lock proj
 		return fmt.Errorf("the ratifying comment is on #%d, not #%d", c.Issue(), r.Issue)
 	case c.User.Login != r.By:
 		return fmt.Errorf("the ratifying comment is by @%s, not @%s", c.User.Login, r.By)
+	case c.User.Type == "Bot":
+		return fmt.Errorf("the ratifying comment is by a bot, @%s, and only people ratify", c.User.Login)
 	}
 	if _, factory := DecodeMarker(c.Body); factory {
 		return fmt.Errorf("the ratifying comment is the factory's own")

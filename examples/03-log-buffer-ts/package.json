@@ -1,0 +1,6 @@
+{
+  "name": "log-buffer",
+  "private": true,
+  "type": "module",
+  "description": "Bounded log shipping buffer, written by Invariant and checked against its ratified TLA+ model."
+}

@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -185,15 +186,44 @@ func Skeleton(p *project.Project) (string, error) {
 }
 
 // protected lists the files that belong to the people, not the factory: the
-// manifest, the lock, the request, and the module's go.mod and go.sum.
-func protected() []string {
-	return []string{".invariant/invariant.json", ".invariant/ratified.lock", ".invariant/request.md", "go.mod", "go.sum"}
+// manifest, the lock, the request, and the file where the language keeps its
+// dependencies (go.mod and go.sum, or package.json).
+func protected(language string) []string {
+	files := []string{".invariant/invariant.json", ".invariant/ratified.lock", ".invariant/request.md"}
+	switch language {
+	case "typescript":
+		return append(files, "package.json")
+	case "python":
+		return files
+	default:
+		return append(files, "go.mod", "go.sum")
+	}
+}
+
+// owned says whether a file in the agent's workspace is the agent's to
+// write: the module, anything in the code's directory, the conformance
+// driver, and for Python, the tests beside the driver. Nothing else the
+// agent writes reaches the project.
+func owned(m project.Manifest, rel string) bool {
+	switch {
+	case rel == m.Module, m.Conformance != "" && rel == m.Conformance:
+		return true
+	case strings.HasPrefix(rel, m.Code+"/"):
+		switch path.Base(rel) {
+		case "go.mod", "go.sum", "package.json":
+			return false
+		}
+		return true
+	case m.Language == "python" && !strings.Contains(rel, "/"):
+		return strings.HasPrefix(rel, "test_") && strings.HasSuffix(rel, ".py")
+	}
+	return false
 }
 
 // Prepare fills the agent's workspace: copies of the protected files, the
 // skeleton in place of the module, and an empty package directory.
 func Prepare(p *project.Project, skeleton, ws string) error {
-	for _, rel := range protected() {
+	for _, rel := range protected(p.Manifest.Language) {
 		if err := copyFile(filepath.Join(p.Dir, rel), filepath.Join(ws, rel)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -205,14 +235,14 @@ func Prepare(p *project.Project, skeleton, ws string) error {
 }
 
 // Assemble builds a project from the people's files and the factory's work:
-// the protected files come from the original project, and only the model and
-// the code come from the workspace. So nothing the agent does to the lock,
-// the request or go.mod can reach the gate.
+// the protected files come from the original project, and only the files the
+// agent owns come from the workspace. So nothing the agent does to the lock,
+// the request or the dependencies can reach the gate.
 func Assemble(p *project.Project, ws, dst string) error {
 	if err := os.RemoveAll(dst); err != nil {
 		return err
 	}
-	for _, rel := range protected() {
+	for _, rel := range protected(p.Manifest.Language) {
 		if err := copyFile(filepath.Join(p.Dir, rel), filepath.Join(dst, rel)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
@@ -220,26 +250,25 @@ func Assemble(p *project.Project, ws, dst string) error {
 	if err := copyFile(filepath.Join(ws, p.Manifest.Module), filepath.Join(dst, p.Manifest.Module)); err != nil {
 		return err
 	}
-	code := filepath.Join(ws, p.Manifest.Code)
 	if err := os.MkdirAll(filepath.Join(dst, p.Manifest.Code), 0o755); err != nil {
 		return err
 	}
-	return filepath.WalkDir(code, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(ws, func(file string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
 			return err
 		}
-		if n := d.Name(); n == "go.mod" || n == "go.sum" {
+		rel, _ := filepath.Rel(ws, file)
+		if rel = filepath.ToSlash(rel); rel == p.Manifest.Module || !owned(p.Manifest, rel) {
 			return nil
 		}
-		rel, _ := filepath.Rel(ws, path)
-		return copyFile(path, filepath.Join(dst, rel))
+		return copyFile(file, filepath.Join(dst, filepath.FromSlash(rel)))
 	})
 }
 
 // Tampered lists the protected files the agent changed in its workspace.
 func Tampered(p *project.Project, ws string) ([]string, error) {
 	var changed []string
-	for _, rel := range protected() {
+	for _, rel := range protected(p.Manifest.Language) {
 		want, errWant := os.ReadFile(filepath.Join(p.Dir, rel))
 		got, errGot := os.ReadFile(filepath.Join(ws, rel))
 		if os.IsNotExist(errWant) && os.IsNotExist(errGot) {

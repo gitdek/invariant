@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -20,12 +21,16 @@ import (
 type Client struct {
 	Repo string // owner/name
 	GH   string // the gh CLI; "gh" when empty
+	// Token, when set, is who the client acts as: the factory's App, handed
+	// to gh as GH_TOKEN. Without it, gh acts as whoever is logged in.
+	Token func(ctx context.Context) (string, error)
 }
 
 type User struct {
 	Login string `json:"login"`
 	Name  string `json:"name,omitempty"`
 	ID    int64  `json:"id,omitempty"`
+	Type  string `json:"type,omitempty"` // User or Bot
 }
 
 type Label struct {
@@ -296,6 +301,13 @@ func (c Client) pages(ctx context.Context, path string, out any) error {
 func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, c.gh(), args...)
 	cmd.Stdin = stdin
+	if c.Token != nil {
+		token, err := c.Token(ctx)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

@@ -51,10 +51,14 @@ func (g *fakeGitHub) open(n int, by, title, body string, labels ...string) {
 	g.issues[n] = issue
 }
 
-// say adds a person's comment.
+// say adds a comment. Logins ending in [bot] are bots.
 func (g *fakeGitHub) say(issue int, by, body string) github.Comment {
 	g.nextID++
-	c := github.Comment{ID: g.nextID, Body: body, User: github.User{Login: by},
+	kind := "User"
+	if strings.HasSuffix(by, "[bot]") {
+		kind = "Bot"
+	}
+	c := github.Comment{ID: g.nextID, Body: body, User: github.User{Login: by, Type: kind},
 		URL:      fmt.Sprintf("https://github.com/o/r/issues/%d#issuecomment-%d", issue, g.nextID),
 		IssueURL: fmt.Sprintf("https://api.github.com/repos/o/r/issues/%d", issue), CreatedAt: "2026-09-25T11:00:00Z"}
 	g.comments[issue] = append(g.comments[issue], c)
@@ -268,7 +272,9 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 	}
 	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
 		Witnesses: []verify.Witness{{Name: "CanFill", Reached: true, Steps: 2}}, Bugs: []verify.Bug{{Name: "PutWhenFull", Caught: true}}}
-	return &formalize.Result{Proposal: bufferProposal(s.t), Report: report}, nil
+	p := bufferProposal(s.t)
+	p.Language = req.Language
+	return &formalize.Result{Proposal: p, Report: report}, nil
 }
 
 // fakeBuilder writes a Go package into the ratified project, the way

@@ -43,7 +43,8 @@ Usage:
   invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
   invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
   invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
-  invariant watch -repo OWNER/NAME [-once]     turn the repository's issues into merged pull requests
+  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L]
+                                               turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
   invariant ratification -repo OWNER/NAME PROJECT...
                                                check factory projects' ratifications on GitHub
@@ -209,6 +210,7 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	runs := fs.Int("gate-runs", 4, "the most gate runs the agent gets: one attempt and three repairs")
 	timeout := fs.Duration("timeout", 40*time.Minute, "wall-clock cap on the agent's run")
 	claude := fs.String("claude", "claude", "the Claude Code CLI")
+	draft := fs.Bool("draft", false, "start from the module's drafted model instead of a skeleton of the pinned definitions")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		fmt.Fprint(os.Stderr, usage)
@@ -225,7 +227,7 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	r, err := synth.Synthesize(ctx, synth.Options{
-		Project: fs.Arg(0), Out: *out, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc,
+		Project: fs.Arg(0), Out: *out, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc, KeepModel: *draft,
 		Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
 	})
 	if r != nil && r.Final != nil {
@@ -428,6 +430,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	once := fs.Bool("once", false, "poll once and exit")
 	base := fs.String("base", "main", "the branch pull requests merge into")
 	projects := fs.String("projects", "examples", "the directory new projects go in")
+	language := fs.String("language", "go", "the code's language when an issue has no language label: go, typescript or python")
 	cache, _ := os.UserCacheDir()
 	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "where the clone, transcripts and logs go")
 	model := fs.String("model", "opus", "the model the agents use")
@@ -437,8 +440,11 @@ func watchCmd(ctx context.Context, args []string) int {
 	runs := fs.Int("gate-runs", 4, "the most gate runs a synthesis gets")
 	timeout := fs.Duration("timeout", 40*time.Minute, "wall-clock cap on an agent's run")
 	claude := fs.String("claude", "claude", "the Claude Code CLI")
+	appID := fs.Int64("app-id", 0, "the factory's GitHub App; without one, the factory acts as whoever gh is logged in as")
+	home, _ := os.UserHomeDir()
+	appKey := fs.String("app-key", filepath.Join(home, ".config", "invariant", "factory.pem"), "the App's private key")
 	fs.Parse(args)
-	if *repo == "" || fs.NArg() != 0 {
+	if *repo == "" || fs.NArg() != 0 || formalize.Languages[*language] == "" {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
@@ -446,17 +452,35 @@ func watchCmd(ctx context.Context, args []string) int {
 	fail := func(err error) int { logger.Print(err); return 2 }
 
 	gh := github.Client{Repo: *repo}
-	me, err := gh.Viewer(ctx)
-	if err != nil {
-		return fail(fmt.Errorf("gh must be logged in: %w", err))
-	}
-	name := me.Name
-	if name == "" {
-		name = me.Login
-	}
 	dir := filepath.Join(*work, filepath.FromSlash(*repo))
-	clone := factory.Clone{Dir: filepath.Join(dir, "clone"), Remote: "https://github.com/" + *repo + ".git",
-		Name: name, Email: fmt.Sprintf("%d+%s@users.noreply.github.com", me.ID, me.Login)}
+	clone := factory.Clone{Dir: filepath.Join(dir, "clone"), Remote: "https://github.com/" + *repo + ".git"}
+	var bot, actor string
+	if *appID != 0 {
+		// The factory acts as its App's bot (D-0041): it comments, pushes and
+		// merges with the App's installation token. Reading the repository
+		// still uses your git credentials.
+		app := &github.App{ID: *appID, KeyPath: *appKey, Repo: *repo}
+		id, err := app.Identity(ctx)
+		if err != nil {
+			return fail(fmt.Errorf("the factory's App: %w", err))
+		}
+		if _, err := app.Token(ctx); err != nil {
+			return fail(err)
+		}
+		gh.Token, clone.Token = app.Token, app.Token
+		bot, actor = id.Login, id.Login
+		clone.Name, clone.Email = id.Login, id.Email()
+	} else {
+		me, err := gh.Viewer(ctx)
+		if err != nil {
+			return fail(fmt.Errorf("gh must be logged in: %w", err))
+		}
+		actor = me.Login
+		clone.Name, clone.Email = me.Name, fmt.Sprintf("%d+%s@users.noreply.github.com", me.ID, me.Login)
+		if clone.Name == "" {
+			clone.Name = me.Login
+		}
+	}
 	if err := clone.Ensure(ctx); err != nil {
 		return fail(err)
 	}
@@ -469,7 +493,7 @@ func watchCmd(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	f := &factory.Factory{
-		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate",
+		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate", Language: *language, Self: bot,
 		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
 		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns},
 			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc},
@@ -479,7 +503,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	if err := f.Prepare(ctx); err != nil {
 		return fail(err)
 	}
-	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, me.Login, clone.Name, clone.Email)
+	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
 		if err := f.Poll(ctx); err != nil {
 			return fail(err)

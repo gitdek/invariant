@@ -58,6 +58,7 @@ People steer the factory with comments on the issue, and only people with write 
 | `/invariant choose F1 A` | Decides a question the factory asked |
 | `/invariant revise` | The factory drafts again, reading the comments |
 | `/invariant ratify <hash>` | Ratifies exactly the proposal with that hash, and the factory builds it |
+| The `invariant:typescript` or `invariant:python` label | The factory writes the code in that language. Go is the default here |
 
 ## Watch it catch a bug
 
@@ -108,6 +109,14 @@ The receipt always says which kind of evidence it is. Plant the early-commit bug
 
 A proof goes further than any run. Plant a `tm_commit` in the proved Python that goes wrong only if the coordinator had already aborted. No run can reach that state, so the tests and conformance pass. The contract doesn't rule it out, so Nagini rejects it.
 
+The factory writes all three languages itself. The log buffer @gitdek ratified on [#1](https://github.com/gitdek/invariant/issues/1) was rebuilt from the statements alone, in each language, and every version passed on its first gate run:
+
+| The factory's log buffer | How the code is checked | Evidence |
+| :-- | :-- | :-- |
+| [Go](examples/03-log-buffer), merged in [#2](https://github.com/gitdek/invariant/pull/2) | **Proved.** Gobra verifies 5 of 5 functions | The code reaches exactly the model's 87 states |
+| [TypeScript](examples/03-log-buffer-ts) | **Tested against the model** in every state it can reach. The driver explores the state machine completely | All 87 of the model's states, no step outside it |
+| [Python](examples/03-log-buffer-py) | **Proved.** Nagini verifies 5 of 5 functions | All 87 of the model's states, no step outside it |
+
 ## Try it
 
 With Go and Docker installed, run:
@@ -149,13 +158,15 @@ It runs on your machine, polls GitHub through `gh`, and runs its agents with you
 
 ## Status
 
-Pre-alpha. The gate works end to end in Go, TypeScript and Python, and the factory turns an issue into a merged pull request whose Go code is proved against statements a person ratified on the issue.
+Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory turns an issue into a merged pull request, with the code written in any of the three and checked against statements a person ratified on the issue.
 
 - [x] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](examples/02-twophase-commit).
 - [x] **Slice 2 · Synthesis.** Headless Claude Code rebuilt the model and the code from the ratified statements and the request alone. It [passed on its first gate run](examples/02-twophase-commit-synthesized), in 12 turns and under two minutes.
 - [x] **Slice 3a · TypeScript and Python conformance.** Existing code is tested against the model, and the receipt says so.
 - [x] **Slice 3b · Nagini spike.** Nagini proves a [Python core](examples/02-twophase-commit-py-proved) of two-phase commit, 8 of 8 functions, and catches a bug no run can reach.
 - [x] **Slice 4 · GitHub.** [Issue #1](https://github.com/gitdek/invariant/issues/1) became a decision request, then a ratification, then [pull request #2](https://github.com/gitdek/invariant/pull/2), which the factory merged itself once CI's gate passed. The result is [`examples/03-log-buffer`](examples/03-log-buffer).
+- [x] **Slice 5 · TypeScript and Python.** The factory writes both from ratified statements alone. The log buffer passed the gate on its first run in [TypeScript](examples/03-log-buffer-ts), tested in all 87 states, and in [Python](examples/03-log-buffer-py), proved with Nagini.
+- [ ] **Slice 6 · Changing existing projects.** Then Invariant can start building itself.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md). Slice 4's are in [D-0036](decisions/D-0036-slice-4-plan.md).
 

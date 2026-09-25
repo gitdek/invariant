@@ -51,11 +51,14 @@ type Draft struct {
 	Name        string              `json:"name"`    // the project, in a few plain words
 	Slug        string              `json:"slug"`    // its directory name, in kebab case
 	Module      string              `json:"module"`  // the TLA+ module's name
-	Package     string              `json:"package"` // the Go package's name
+	Package     string              `json:"package"` // the code's package name
 	Bounds      map[string]string   `json:"bounds"`
 	Statements  []project.Statement `json:"statements"`
 	Forks       []Fork              `json:"forks,omitempty"`
 	Unsupported string              `json:"unsupported,omitempty"` // why the factory can't take the issue
+	// Language is the code's language: go, typescript or python. The factory
+	// sets it from the issue's labels (D-0040); the agent doesn't choose it.
+	Language string `json:"language,omitempty"`
 }
 
 // Proposal is a draft the factory has pinned: its statements carry the hash
@@ -137,7 +140,7 @@ func (d Draft) validateNames() error {
 	case !moduleRE.MatchString(d.Module):
 		return fmt.Errorf("proposal.json: module %q must be a CamelCase TLA+ module name", d.Module)
 	case !packageRE.MatchString(d.Package):
-		return fmt.Errorf("proposal.json: package %q must be a short lowercase Go package name", d.Package)
+		return fmt.Errorf("proposal.json: package %q must be a short lowercase package name", d.Package)
 	}
 	return nil
 }
@@ -162,9 +165,25 @@ func (p *Proposal) Pin() error {
 	return nil
 }
 
-// Manifest is the project's manifest.
+// Manifest is the project's manifest. TypeScript lives in src and Python in
+// its package, each with a conformance driver that explores every state the
+// code can reach (D-0038, D-0039).
 func (p *Proposal) Manifest() project.Manifest {
-	return project.Manifest{Name: p.Name, Module: ".invariant/specs/" + p.Module + ".tla", Code: p.Package, Language: "go"}
+	m := project.Manifest{Name: p.Name, Module: ".invariant/specs/" + p.Module + ".tla", Code: p.Package, Language: "go"}
+	switch p.Language {
+	case "typescript":
+		m.Language, m.Code, m.Conformance, m.Exhaustive = "typescript", "src", "conformance.ts", true
+	case "python":
+		m.Language, m.Conformance, m.Exhaustive = "python", "conformance.py", true
+	}
+	return m
+}
+
+// Languages the factory writes, and how their code is checked.
+var Languages = map[string]string{
+	"go":         "in Go, proved with Gobra",
+	"typescript": "in TypeScript, tested against the model in every state it can reach",
+	"python":     "in Python, proved with Nagini",
 }
 
 // Write lays the proposal out as a project in dir: the manifest, the lock,

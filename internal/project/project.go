@@ -20,10 +20,15 @@ type Manifest struct {
 	Module   string `json:"module"`   // the TLA+ module, relative to the project
 	Code     string `json:"code"`     // the implementation's package, relative to the project
 	Language string `json:"language"` // "go", "typescript" or "python"
-	// Conformance is the driver that runs the code at random and records its
-	// states in the spec's vocabulary, relative to the project. TypeScript
-	// and Python projects need one.
+	// Conformance is the driver that runs the code and records its states in
+	// the spec's vocabulary, relative to the project. TypeScript and Python
+	// projects need one.
 	Conformance string `json:"conformance,omitempty"`
+	// Exhaustive says the driver explores every state the code can reach,
+	// rather than sampling runs, so the gate requires it to visit every
+	// state the model reaches. The factory's TypeScript and Python are
+	// written this way (D-0038, D-0039).
+	Exhaustive bool `json:"exhaustive,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,

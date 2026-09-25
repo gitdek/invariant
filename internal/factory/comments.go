@@ -40,7 +40,8 @@ func forksComment(forks []formalize.Fork, m Marker) string {
 
 func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Here's what I propose must always be true for **%s**. Once you ratify it, these statements are pinned by hash, and I can't change them.\n\n", p.Name)
+	fmt.Fprintf(&b, "Here's what I propose must always be true for **%s**. Once you ratify it, these statements are pinned by hash, and I can't change them. "+
+		"Then I'll write the code %s.\n\n", p.Name, formalize.Languages[p.Manifest().Language])
 	b.WriteString("| Statement | Kind | Says |\n| :-- | :-- | :-- |\n")
 	for _, s := range p.Statements {
 		says := s.Says

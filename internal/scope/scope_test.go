@@ -70,6 +70,8 @@ func TestOutOfScope(t *testing.T) {
 		"dependency":      {newProject(map[string]string{"examples/02-new/go.mod": "module example.com/new\n\ngo 1.27.1\n\nrequire (\n\tgolang.org/x/sync v0.1.0 // indirect\n)\n"}), "it adds a module dependency: golang.org/x/sync"},
 		"one-line import": {newProject(map[string]string{"examples/02-new/go.mod": "module example.com/new\n\ngo 1.27.1\n\nrequire github.com/evil/dep v1.0.0\n"}), "it adds a module dependency: github.com/evil/dep"},
 		"cgo":             {newProject(map[string]string{"examples/02-new/buffer/c.go": "package buffer\n\nimport \"C\"\n"}), "examples/02-new/buffer/c.go uses cgo"},
+		"npm":             {newProject(map[string]string{"examples/02-new/package.json": `{"name": "new", "devDependencies": {"left-pad": "^1.3.0"}}`}), "it adds a package dependency: left-pad"},
+		"pip":             {newProject(map[string]string{"examples/02-new/requirements.txt": "requests==2.32.0\n"}), "it adds or changes a Python dependency file: examples/02-new/requirements.txt"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := repo(t)
@@ -83,6 +85,18 @@ func TestOutOfScope(t *testing.T) {
 				t.Errorf("problems = %q; want %q", r.Problems, tc.want)
 			}
 		})
+	}
+}
+
+// A package.json with no dependencies is how a factory TypeScript project
+// declares itself.
+func TestAPackageWithoutDependenciesIsInScope(t *testing.T) {
+	dir := repo(t)
+	write(t, dir, newProject(map[string]string{"examples/02-new/package.json": `{"name": "new", "private": true, "type": "module"}`}))
+	commit(t, dir, "new project")
+	r, err := Check(context.Background(), dir, "main", "HEAD")
+	if err != nil || !r.OK() {
+		t.Fatalf("result = %+v, err = %v", r, err)
 	}
 }
 

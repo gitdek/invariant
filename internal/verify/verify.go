@@ -359,6 +359,13 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 				return nil, err
 			}
 		}
+		// An exhaustive driver has seen every state the code can reach. With
+		// every step a Next step, visiting every state the model reaches means
+		// the code and the model reach exactly the same states.
+		if c.Exhaustive = p.Manifest.Exhaustive; c.Exhaustive && c.Passed && int64(c.States) < c.ModelStates {
+			c.Passed = false
+			c.Message = fmt.Sprintf("the driver explores every state the code can reach, and it reached %d of the model's %d", c.States, c.ModelStates)
+		}
 		r.Conformance = &c
 	}
 	r.Assurance = "tested against the model"

@@ -19,6 +19,7 @@ import (
 // comments, the forks they've decided, and the draft they asked to revise.
 type Request struct {
 	Repo     string // owner/name
+	Language string // the language the code will be written in
 	Issue    int
 	Title    string
 	Body     string
@@ -131,6 +132,9 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	r.CheckRuns, _ = readRuns(checkLog)
 
 	p, report, err := Check(ctx, ws, f.Toolchain)
+	if p != nil {
+		p.Language = req.Language
+	}
 	switch {
 	case err != nil && runErr != nil:
 		r.Problem = fmt.Sprintf("the agent's run failed (%v), and it left no usable draft: %v", runErr, err)

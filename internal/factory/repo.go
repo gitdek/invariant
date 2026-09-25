@@ -3,6 +3,7 @@ package factory
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,9 @@ type Clone struct {
 	Remote string // the repository's URL
 	Name   string // the author of the factory's commits
 	Email  string
+	// Token, when set, is who pushes: the factory's App (D-0041). It reaches
+	// git through the environment, never a command line or git's config.
+	Token func(ctx context.Context) (string, error)
 }
 
 // Ensure clones the repository, unless it already has.
@@ -89,7 +93,16 @@ func (c Clone) Commit(ctx context.Context, worktree, dir, message string) (strin
 
 // Push pushes a worktree's branch. It never forces.
 func (c Clone) Push(ctx context.Context, worktree, branch string) error {
-	_, err := run(ctx, worktree, "git", "push", "--quiet", "origin", "HEAD:refs/heads/"+branch)
+	var env []string
+	if c.Token != nil {
+		token, err := c.Token(ctx)
+		if err != nil {
+			return err
+		}
+		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+		env = []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + basic}
+	}
+	_, err := runEnv(ctx, worktree, env, "git", "push", "--quiet", "origin", "HEAD:refs/heads/"+branch)
 	return err
 }
 
@@ -112,8 +125,15 @@ func (c Clone) git(ctx context.Context, args ...string) (string, error) {
 }
 
 func run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return runEnv(ctx, dir, nil, name, args...)
+}
+
+func runEnv(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

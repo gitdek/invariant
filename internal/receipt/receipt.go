@@ -176,8 +176,13 @@ func codeResult(c verify.Code) string {
 }
 
 func conformanceResult(c conformance.Result) string {
-	if c.Passed {
+	switch {
+	case c.Passed && c.Exhaustive:
+		return "tested against the model: every reachable state, no step outside it"
+	case c.Passed:
 		return "tested against the model: no step outside it"
+	case c.BadStart == "" && c.BadStep == nil && c.Exhaustive && c.States > 0:
+		return "the code misses states the model reaches"
 	}
 	return "the code left the model"
 }

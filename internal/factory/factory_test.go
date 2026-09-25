@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -353,12 +354,17 @@ func TestVerifyRatification(t *testing.T) {
 		return github.Comment{ID: id, User: github.User{Login: by}, Body: body,
 			IssueURL: "https://api.github.com/repos/o/r/issues/" + strconv.Itoa(issue)}
 	}
-	gh := fakeComments{perms: map[string]string{"gitdek": "admin", "reader": "read"}, comments: map[int64]github.Comment{
+	gh := fakeComments{perms: map[string]string{"gitdek": "admin", "reader": "read", "invariant-factory[bot]": "write"}, comments: map[int64]github.Comment{
 		1: ratifying(1, 12, "gitdek", "Looks right.\n/invariant ratify "+hex[:12]),
 		2: ratifying(2, 12, "reader", "/invariant ratify "+hex[:12]),
 		3: ratifying(3, 12, "gitdek", "/invariant ratify 000000000000"),
 		4: ratifying(4, 12, "gitdek", post("proposal", "`/invariant ratify "+hex[:12]+"`", Marker{Kind: KindProposal})),
 		5: ratifying(5, 13, "gitdek", "/invariant ratify "+hex[:12]),
+		6: func() github.Comment {
+			c := ratifying(6, 12, "invariant-factory[bot]", "/invariant ratify "+hex[:12])
+			c.User.Type = "Bot"
+			return c
+		}(),
 	}}
 	lock := func(id int64, by string, issue int) project.Lock {
 		return project.Lock{Bounds: p.Bounds, Statements: p.Statements, Ratified: &project.Ratification{By: by, Issue: issue, Proposal: p.Hash,
@@ -383,10 +389,102 @@ func TestVerifyRatification(t *testing.T) {
 		"factory's own": {lock(4, "gitdek", 12), "o/r", "the factory's own"},
 		"wrong author":  {func() project.Lock { l := lock(1, "gitdek", 12); l.Ratified.By = "someone"; return l }(), "o/r", "not @someone"},
 		"wrong issue":   {lock(5, "gitdek", 12), "o/r", "is on #13, not #12"},
+		"bot":           {lock(6, "invariant-factory[bot]", 12), "o/r", "only people ratify"},
 		"missing":       {lock(99, "gitdek", 12), "o/r", "can't be read"},
 	} {
 		if err := VerifyRatification(ctx, gh, tc.repo, tc.lock); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v; want %q", name, err, tc.want)
 		}
+	}
+}
+
+// A language label decides the code's language, the project's layout, and
+// how the code will be checked (D-0038 to D-0040).
+func TestLanguageLabels(t *testing.T) {
+	for _, tc := range []struct {
+		label, lang, says, code, driver string
+		files, absent                   []string
+	}{
+		{LabelTypeScript, "typescript", "in TypeScript, tested against the model in every state it can reach", "src", "conformance.ts",
+			[]string{"package.json"}, []string{"go.mod"}},
+		{LabelPython, "python", "in Python, proved with Nagini", "buffer", "conformance.py", nil, []string{"go.mod", "package.json"}},
+		{"", "go", "in Go, proved with Gobra", "buffer", "", []string{"go.mod"}, []string{"package.json"}},
+	} {
+		t.Run(tc.lang, func(t *testing.T) {
+			r := newRig(t)
+			r.form.forks = nil
+			labels := []string{LabelTrigger}
+			if tc.label != "" {
+				labels = append(labels, tc.label)
+			}
+			r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.", labels...)
+			r.poll()
+			if got := r.form.requests[0].Language; got != tc.lang {
+				t.Fatalf("the formalizer was asked for %q; want %q", got, tc.lang)
+			}
+			p := r.gh.last(1)
+			if !strings.Contains(p.Comment.Body, "Then I'll write the code "+tc.says+".") {
+				t.Errorf("the proposal should say how the code will be checked:\n%s", p.Comment.Body)
+			}
+			r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Marker.Proposal.Hash, "sha256:"))
+			r.poll()
+			pr := r.expect(1, KindPR, append(labels, LabelPR)...)
+			ref, dir := pr.Marker.Branch, pr.Marker.Project
+			var m project.Manifest
+			if err := json.Unmarshal([]byte(git(t, r.origin, "show", ref+":"+dir+"/.invariant/invariant.json")), &m); err != nil {
+				t.Fatal(err)
+			}
+			if m.Language != tc.lang || m.Code != tc.code || m.Conformance != tc.driver || m.Exhaustive != (tc.lang != "go") {
+				t.Errorf("manifest = %+v", m)
+			}
+			for _, f := range tc.files {
+				git(t, r.origin, "cat-file", "-e", ref+":"+dir+"/"+f)
+			}
+			for _, f := range tc.absent {
+				if out, err := exec.Command("git", "-C", r.origin, "cat-file", "-e", ref+":"+dir+"/"+f).CombinedOutput(); err == nil {
+					t.Errorf("%s shouldn't have %s (%s)", tc.lang, f, out)
+				}
+			}
+			if tc.lang == "typescript" {
+				var pkg map[string]any
+				json.Unmarshal([]byte(git(t, r.origin, "show", ref+":"+dir+"/package.json")), &pkg)
+				if pkg["type"] != "module" || pkg["dependencies"] != nil {
+					t.Errorf("package.json = %v", pkg)
+				}
+			}
+		})
+	}
+}
+
+// As its App's bot, the factory trusts only its own posts, and no bot's
+// comment is ever a command (D-0041).
+func TestAppIdentity(t *testing.T) {
+	r := newRig(t)
+	r.gh.me, r.f.Self = "invariant-factory[bot]", "invariant-factory[bot]"
+	r.gh.perms["dependabot[bot]"] = "write"
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "/invariant solve")
+	r.poll()
+	forks := r.expect(1, KindForks, LabelAsking)
+	if forks.Comment.User.Login != "invariant-factory[bot]" {
+		t.Fatalf("the factory posted as %s", forks.Comment.User.Login)
+	}
+	// Another bot can't answer, even with write access.
+	r.gh.say(1, "dependabot[bot]", "/invariant choose F1 A")
+	// A person pasting a factory marker doesn't make it the factory's post.
+	forged := Marker{Kind: KindProposal, Proposal: bufferProposal(t)}
+	r.gh.say(1, "gitdek", post("proposal for ratification", "forged", forged))
+	r.poll()
+	if len(r.form.requests) != 1 {
+		t.Fatalf("a bot's command or a forged marker moved the factory: %d formalizations", len(r.form.requests))
+	}
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(forged.Proposal.Hash, "sha256:"))
+	r.poll()
+	if note := r.gh.last(1); note.Marker.Kind != KindNote || !strings.Contains(note.Comment.Body, "no proposal waiting") {
+		t.Fatalf("a forged proposal must not be ratifiable:\n%s", note.Comment.Body)
+	}
+	r.gh.say(1, "gitdek", "/invariant choose F1 A")
+	r.poll()
+	if p := r.expect(1, KindProposal, LabelProposal); p.Comment.User.Login != "invariant-factory[bot]" {
+		t.Fatalf("proposal by %s", p.Comment.User.Login)
 	}
 }

@@ -26,10 +26,11 @@ import (
 type Result struct {
 	Passed      bool   `json:"passed"`
 	Runs        int    `json:"runs"`
-	Steps       int    `json:"steps"`        // steps recorded, including refusals
-	States      int    `json:"states"`       // distinct states the code visited
-	ModelStates int64  `json:"model_states"` // distinct states TLC found in the model
-	Transitions int    `json:"transitions"`  // distinct steps that changed the state
+	Steps       int    `json:"steps"`                // steps recorded, including refusals
+	States      int    `json:"states"`               // distinct states the code visited
+	ModelStates int64  `json:"model_states"`         // distinct states TLC found in the model
+	Transitions int    `json:"transitions"`          // distinct steps that changed the state
+	Exhaustive  bool   `json:"exhaustive,omitempty"` // the driver claims to explore every state the code can reach
 	BadStart    string `json:"bad_start,omitempty"`
 	BadStep     *Step  `json:"bad_step,omitempty"`
 	Message     string `json:"message,omitempty"`

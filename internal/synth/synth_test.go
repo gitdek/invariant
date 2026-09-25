@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -148,4 +149,80 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+func TestOwnedByLanguage(t *testing.T) {
+	ts := project.Manifest{Module: ".invariant/specs/Buf.tla", Code: "src", Language: "typescript", Conformance: "conformance.ts"}
+	py := project.Manifest{Module: ".invariant/specs/Buf.tla", Code: "buffer", Language: "python", Conformance: "conformance.py"}
+	gm := project.Manifest{Module: ".invariant/specs/Buf.tla", Code: "buffer", Language: "go"}
+	for _, tc := range []struct {
+		m    project.Manifest
+		file string
+		want bool
+	}{
+		{ts, ".invariant/specs/Buf.tla", true}, {ts, "src/machine.ts", true}, {ts, "src/machine.test.ts", true},
+		{ts, "conformance.ts", true}, {ts, "package.json", false}, {ts, "src/package.json", false},
+		{ts, "README.md", false}, {ts, ".invariant/ratified.lock", false},
+		{py, "buffer/core.py", true}, {py, "test_buffer.py", true}, {py, "conformance.py", true},
+		{py, "requirements.txt", false}, {py, "setup.py", false}, {py, "docs/test_x.py", false},
+		{gm, "buffer/buffer.go", true}, {gm, "buffer/go.mod", false}, {gm, "go.mod", false}, {gm, "test_buffer.py", false},
+	} {
+		if got := owned(tc.m, tc.file); got != tc.want {
+			t.Errorf("%s: owned(%s) = %v", tc.m.Language, tc.file, got)
+		}
+	}
+}
+
+// Assemble keeps the people's files and takes only what the agent owns.
+func TestAssembleTypeScript(t *testing.T) {
+	src, ws, dst := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "out")
+	m := project.Manifest{Name: "buf", Module: ".invariant/specs/Buf.tla", Code: "src", Language: "typescript", Conformance: "conformance.ts", Exhaustive: true}
+	write := func(dir string, files map[string]string) {
+		for name, text := range files {
+			if err := writeFile(filepath.Join(dir, name), text); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write(src, map[string]string{".invariant/ratified.lock": "lock", ".invariant/request.md": "req", "package.json": `{"name": "buf"}`, ".invariant/specs/Buf.tla": "draft"})
+	write(ws, map[string]string{".invariant/ratified.lock": "tampered", ".invariant/request.md": "req", "package.json": `{"dependencies": {"left-pad": "1"}}`,
+		".invariant/specs/Buf.tla": "model", "src/machine.ts": "code", "src/machine.test.ts": "test", "conformance.ts": "driver", "NOTES.md": "stray"})
+	p := &project.Project{Dir: src, Manifest: m}
+	if err := Assemble(p, ws, dst); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{".invariant/ratified.lock": "lock", "package.json": `{"name": "buf"}`, ".invariant/specs/Buf.tla": "model",
+		"src/machine.ts": "code", "src/machine.test.ts": "test", "conformance.ts": "driver"} {
+		if b, err := os.ReadFile(filepath.Join(dst, name)); err != nil || string(b) != want {
+			t.Errorf("%s = %q, %v; want %q", name, b, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dst, "NOTES.md")); err == nil {
+		t.Error("a file the agent doesn't own must not reach the project")
+	}
+	if got, _ := Tampered(p, ws); !reflect.DeepEqual(got, []string{".invariant/ratified.lock", "package.json"}) {
+		t.Errorf("tampered = %v", got)
+	}
+}
+
+func TestPromptByLanguage(t *testing.T) {
+	lock := project.Lock{Bounds: map[string]string{"Cap": "2"}, Statements: []project.Statement{{Name: "Spec", Kind: project.Spec, Says: "s"}}}
+	for lang, wants := range map[string][]string{
+		"typescript": {"TypeScript code", "Node 24 runs", "`src/machine.ts`", "`conformance.ts`", `{"$set": [...]}`, "every state TLC finds", "and package.json are protected", "node --test"},
+		"python":     {"Python code", "`buffer/core.py`", "`# +nagini`", "`test_buffer.py`", "`conformance.py`", "# Nagini, briefly", "Acc(list_pred(", `{"$mv": "p1"}`},
+	} {
+		m := project.Manifest{Module: ".invariant/specs/Buf.tla", Code: map[string]string{"typescript": "src", "python": "buffer"}[lang], Language: lang,
+			Conformance: map[string]string{"typescript": "conformance.ts", "python": "conformance.py"}[lang], Exhaustive: true}
+		got := Prompt(&project.Project{Manifest: m, Lock: lock}, "---- MODULE Buf ----\n====\n", "# Add a buffer", 4, true)
+		for _, want := range wants {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s prompt lacks %q", lang, want)
+			}
+		}
+		for _, unwanted := range []string{"Gobra", "go.mod", "Successors(s State)"} {
+			if strings.Contains(got, unwanted) {
+				t.Errorf("%s prompt mentions %q", lang, unwanted)
+			}
+		}
+	}
 }

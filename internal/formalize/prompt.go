@@ -10,7 +10,11 @@ func Prompt(req Request, checks int) string {
 		previous = "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
 	}
-	return fmt.Sprintf(`You're the formalization step of Invariant, a code factory. Someone with write access to %s asked the factory to take on issue #%d. Nothing gets built until a person ratifies formal statements that say what must be true. Then the factory writes the code and proves it against exactly those statements. Your job is to draft the statements in TLA+, with a draft model that shows they hang together. When the issue leaves a real decision open, your job is to ask instead of guessing.
+	language := req.Language
+	if language == "" {
+		language = "go"
+	}
+	return fmt.Sprintf(`You're the formalization step of Invariant, a code factory. Someone with write access to %s asked the factory to take on issue #%d. Nothing gets built until a person ratifies formal statements that say what must be true. Then the factory writes the code, %s, and checks it against exactly those statements. Your job is to draft the statements in TLA+, with a draft model that shows they hang together. When the issue leaves a real decision open, your job is to ask instead of guessing.
 
 # The request
 
@@ -27,7 +31,7 @@ Write two files in the current directory.
    - `+"`Spec == Init /\\ [][Next]_vars`"+`, last.
 
    Start every top-level definition at column 0 and indent its continuation lines. That's how Invariant finds the definitions it pins. EXTEND only standard modules: Naturals, Integers, Sequences, FiniteSets and TLC.
-2. **`+"`proposal.json`"+`**, shaped like the example at the end. `+"`name`"+` is the project in a few plain words, `+"`slug`"+` a short kebab-case directory name, `+"`module`"+` the module's name and `+"`package`"+` a short lowercase Go package name. `+"`bounds`"+` gives every CONSTANT a value, as a TLC config would. Undeclared names in a set, like `+"`p1`"+`, are model values.
+2. **`+"`proposal.json`"+`**, shaped like the example at the end. `+"`name`"+` is the project in a few plain words, `+"`slug`"+` a short kebab-case directory name, `+"`module`"+` the module's name and `+"`package`"+` a short lowercase package name for the code. `+"`bounds`"+` gives every CONSTANT a value, as a TLC config would. Undeclared names in a set, like `+"`p1`"+`, are model values.
 
 # The statements
 
@@ -60,7 +64,7 @@ Look for every place where the issue allows materially different behavior that a
 
 Each option says in one plain sentence what the system would do. When you ask, leave `+"`statements`"+` empty and don't write the module: people answer first, and you'll be asked again with their answers. Don't ask about anything that doesn't change what must be true, such as names, data structures or the checking bounds. Choose those yourself. Never ask again about something already decided above.
 
-If the issue isn't something this factory can build as a new, self-contained Go project, set `+"`unsupported`"+` to one sentence saying why, and leave everything else empty.
+If the issue isn't something this factory can build as a new, self-contained project, set `+"`unsupported`"+` to one sentence saying why, and leave everything else empty.
 
 # Check your draft
 
@@ -124,5 +128,5 @@ Spec == Init /\ [][Next]_vars
   "forks": []
 }
 `+"```"+`
-`, req.Repo, req.Issue, req.Markdown(), previous, checks)
+`, req.Repo, req.Issue, Languages[language], req.Markdown(), previous, checks)
 }
