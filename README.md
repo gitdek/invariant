@@ -66,12 +66,26 @@ The factory owns both the model and the code, and each Go function's contract re
 | Design | TLA+ · TLC | An invariant is violated, or the system can deadlock, within the ratified bounds |
 | Reachability | TLA+ · TLC | A ratified witness can't be reached, so the invariants might hold only because nothing happens |
 | Known bugs | TLA+ · TLC | A ratified bug, added to the model as an extra action, slips past the invariants |
-| Agreement | Invariant | The code, explored from its initial state, doesn't reach exactly the states TLC found in the model |
+| Agreement | Invariant | Go: the code, explored from its initial state, doesn't reach exactly the states TLC found in the model |
+| Conformance | Invariant · TLC | TypeScript and Python: the real code, driven at random, takes a step the model doesn't allow |
 | Code | Gobra | A function doesn't verify against its contract, or an index or integer operation could fail |
 | Build | `go test` · `go vet` | Anything is red. Runs in a sandbox with no network and no secrets. |
 | Scope | Invariant | The diff adds dependencies, uses cgo, or edits CI config or pinned specs. This check arrives with the GitHub integration. |
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
+
+## One model, three languages
+
+The same ratified two-phase commit, pinned by the same hashes, checked in each of the languages Invariant targets:
+
+| Implementation | How the code is checked | Evidence |
+| :-- | :-- | :-- |
+| [Go](examples/02-twophase-commit) | **Proved.** Gobra verifies every function against a contract that restates a TLA+ action. | The code reaches exactly the model's 288 states |
+| [Go, written by the factory](examples/02-twophase-commit-synthesized) | **Proved**, in the same way | Written from the ratified statements alone. It passed on its first gate run |
+| [TypeScript](examples/02-twophase-commit-ts) | **Tested against the model.** Ordinary code, driven at random. TLC checks every step it takes. | 1,000 runs, no step outside the model, 283 of 288 states visited |
+| [Python](examples/02-twophase-commit-py) | **Tested against the model**, in the same way | 1,000 runs, no step outside the model, 275 of 288 states visited |
+
+The receipt always says which kind of evidence it is. Plant the early-commit bug in the TypeScript or the Python and the gate rejects it at the exact step: the coordinator commits after a single vote.
 
 ## Try it
 
@@ -106,11 +120,12 @@ These results cover `RM = {r1, r2, r3}`. Within those bounds, TLC's search is ex
 
 ## Status
 
-Pre-alpha. The gate works end to end, and the factory can build a verified implementation from ratified statements alone. TypeScript and Python come next.
+Pre-alpha. The gate works end to end in Go, TypeScript and Python, and the factory can build a verified Go implementation from ratified statements alone.
 
 - [x] **Slice 1 · The gate.** TLC, Gobra, and receipts on a hand-built [two-phase commit](examples/02-twophase-commit).
 - [x] **Slice 2 · Synthesis.** Headless Claude Code rebuilt the model and the code from the ratified statements and the request alone. It [passed on its first gate run](examples/02-twophase-commit-synthesized), in 12 turns and under two minutes.
-- [ ] **Slice 3 · TypeScript and Python.** A conformance check for existing code, then a spike on Nagini proofs for Python.
+- [x] **Slice 3a · TypeScript and Python conformance.** Existing code is tested against the model, and the receipt says so.
+- [ ] **Slice 3b · Nagini spike.** Proofs for new Python code.
 - [ ] **Slice 4 · GitHub.** An issue becomes a decision request, then a ratification, then a pull request, then an auto-merge.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md).

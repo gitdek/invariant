@@ -16,11 +16,20 @@ import (
 	"github.com/gitdek/invariant/internal/toolchain"
 )
 
-const example = "../../examples/02-twophase-commit"
+const (
+	example           = "../../examples/02-twophase-commit"
+	typescriptExample = "../../examples/02-twophase-commit-ts"
+	pythonExample     = "../../examples/02-twophase-commit-py"
+)
 
-// copyExample copies the example to a temporary directory, applying each edit
-// to the file whose path ends with its key.
+// copyExample copies the Go example to a temporary directory, applying each
+// edit to the file whose path ends with its key.
 func copyExample(t *testing.T, edits map[string]func(string) string) string {
+	t.Helper()
+	return copyProject(t, example, edits)
+}
+
+func copyProject(t *testing.T, example string, edits map[string]func(string) string) string {
 	t.Helper()
 	dst := t.TempDir()
 	err := filepath.WalkDir(example, func(path string, d os.DirEntry, err error) error {
@@ -149,4 +158,43 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// Conformance: the TypeScript and Python implementations are tested against
+// the same model, and the gate says so rather than claiming a proof.
+func TestConformingImplementationsPass(t *testing.T) {
+	for _, dir := range []string{typescriptExample, pythonExample} {
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			t.Parallel()
+			r := run(t, copyProject(t, dir, nil))
+			if !r.Passed || r.Conformance == nil || r.Code != nil || r.Assurance != "tested against the model" {
+				t.Fatalf("passed = %v, assurance = %q, failed = %v\n%s", r.Passed, r.Assurance, Failed(r), Feedback(r))
+			}
+			if r.Conformance.States < 250 {
+				t.Errorf("the driver visited only %d of %d model states", r.Conformance.States, r.Conformance.ModelStates)
+			}
+		})
+	}
+}
+
+// The same early-commit bug, planted in ordinary TypeScript and Python code,
+// must be caught: the coordinator commits after a single vote, which no
+// action of the model allows.
+func TestEarlyCommitInCodeFailsConformance(t *testing.T) {
+	cases := map[string]map[string]func(string) string{
+		typescriptExample: {"src/transaction.ts": replace(t, "this.#votes.size < this.participants.length", "this.#votes.size === 0")},
+		pythonExample:     {"twophase/transaction.py": replace(t, "len(self._votes) < len(self.participants)", "not self._votes")},
+	}
+	for dir, edits := range cases {
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			t.Parallel()
+			r := run(t, copyProject(t, dir, edits))
+			if r.Passed || !contains(Failed(r), "conformance") || r.Conformance.BadStep == nil {
+				t.Fatalf("failed = %v; want conformance to catch the early commit", Failed(r))
+			}
+			if !strings.Contains(r.Conformance.BadStep.To, `tmState = "done"`) {
+				t.Errorf("the bad step should be the commit: %+v", r.Conformance.BadStep)
+			}
+		})
+	}
 }

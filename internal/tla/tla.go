@@ -143,6 +143,29 @@ func PinHash(src, name string, stop map[string]bool) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// Variables names the module's variables, from its VARIABLE declarations.
+func Variables(src string) []string {
+	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
+	var names []string
+	for i := 0; i < len(lines); i++ {
+		m := declaration.FindStringSubmatch(lines[i])
+		if m == nil || !strings.HasPrefix(m[1], "VARIABLE") {
+			continue
+		}
+		text := lineComment.ReplaceAllString(strings.TrimPrefix(lines[i], m[1]), " ")
+		for i+1 < len(lines) && strings.HasPrefix(lines[i+1], " ") && strings.TrimSpace(lines[i+1]) != "" {
+			i++
+			text += " " + lineComment.ReplaceAllString(lines[i], " ")
+		}
+		for _, n := range strings.Split(text, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}
+
 // ModelMarker opens the part of a skeleton the factory writes.
 const ModelMarker = `\* ---------------------------------------------------------------------------
 \* The model. The factory writes Init, one operator per action, and Next

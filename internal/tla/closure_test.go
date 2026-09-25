@@ -76,6 +76,12 @@ func TestPinHashCoversDependencies(t *testing.T) {
 	}
 }
 
+func TestVariables(t *testing.T) {
+	if got := Variables(spec); !reflect.DeepEqual(got, []string{"balance", "log"}) {
+		t.Errorf("Variables = %v; want [balance log]", got)
+	}
+}
+
 func TestSkeleton(t *testing.T) {
 	keep := map[string]bool{"vars": true, "Amounts": true, "TypeOK": true, "Solvent": true, "Overdraw": true, "Spec": true}
 	got, err := Skeleton(spec, keep, "Spec")

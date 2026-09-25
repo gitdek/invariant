@@ -32,6 +32,11 @@ jobs:
       - name: Verify the factory-synthesized two-phase commit
         run: go run ./cmd/invariant verify examples/02-twophase-commit-synthesized
 
+      - name: Test the TypeScript and Python implementations against the model
+        run: |
+          go run ./cmd/invariant verify examples/02-twophase-commit-ts
+          go run ./cmd/invariant verify examples/02-twophase-commit-py
+
       - name: Publish the receipt
         if: always()
         run: |

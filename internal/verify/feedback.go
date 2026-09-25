@@ -44,20 +44,30 @@ func Feedback(r *Report) string {
 				bug.Says, bug.Name, bug.Expect, bug.Message))
 		}
 	}
-	if !r.Agreement.Passed {
+	if a := r.Agreement; a != nil && !a.Passed {
 		section("Agreement", "Exploring the Go code from Init with Successors must reach exactly the states TLC reaches in the model. "+
-			r.Agreement.Message+".")
+			a.Message+".")
 	}
-	if !r.Code.Passed {
-		section("Code: "+r.Code.Verifier, r.Code.Errors...)
+	if c := r.Conformance; c != nil && !c.Passed {
+		lines := []string{c.Message + "."}
+		if c.BadStart != "" {
+			lines = append(lines, "The first state of a run: "+c.BadStart)
+		}
+		if c.BadStep != nil {
+			lines = append(lines, "From: "+c.BadStep.From, "To:   "+c.BadStep.To, "No action of the model makes that step.")
+		}
+		section("Conformance", lines...)
+	}
+	if c := r.Code; c != nil && !c.Passed {
+		section("Code: "+c.Verifier, c.Errors...)
 	}
 	if !r.Build.Passed {
 		section("Build: go vet and go test", "```", lastLines(r.Build.Output, 60), "```")
 	}
 	if len(failed) == 0 {
 		return fmt.Sprintf("The gate passed. Every check passed: TLC explored %d states (depth %d), every witness was reached, "+
-			"every known bug was caught, the Go code reaches the same %d states, %s verified %d functions, and the build is green.",
-			d.DistinctStates, d.Depth, r.Agreement.States, r.Code.Verifier, len(r.Code.Functions))
+			"every known bug was caught, the code-level evidence holds (%s), and the build is green.",
+			d.DistinctStates, d.Depth, r.Assurance)
 	}
 	return fmt.Sprintf("The gate failed. What to fix: %s.\n%s", strings.Join(failed, "; "), b.String())
 }
@@ -83,10 +93,13 @@ func Failed(r *Report) []string {
 			out = append(out, "bug "+b.Name)
 		}
 	}
-	if !r.Agreement.Passed {
+	if r.Agreement != nil && !r.Agreement.Passed {
 		out = append(out, "agreement")
 	}
-	if !r.Code.Passed {
+	if r.Conformance != nil && !r.Conformance.Passed {
+		out = append(out, "conformance")
+	}
+	if r.Code != nil && !r.Code.Passed {
 		out = append(out, "code")
 	}
 	if !r.Build.Passed {

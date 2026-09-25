@@ -17,7 +17,11 @@ type Manifest struct {
 	Name     string `json:"name"`
 	Module   string `json:"module"`   // the TLA+ module, relative to the project
 	Code     string `json:"code"`     // the implementation's package, relative to the project
-	Language string `json:"language"` // the implementation's language; only "go" so far
+	Language string `json:"language"` // "go", "typescript" or "python"
+	// Conformance is the driver that runs the code at random and records its
+	// states in the spec's vocabulary, relative to the project. TypeScript
+	// and Python projects need one.
+	Conformance string `json:"conformance,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,

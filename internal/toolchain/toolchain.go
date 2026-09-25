@@ -31,14 +31,24 @@ const (
 	// GoImage builds, tests and explores Go implementations in a sandbox.
 	// golang:1.27-alpine (Go 1.27.1), multi-arch index digest.
 	GoImage = "golang@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414"
+
+	// NodeImage runs TypeScript code, its tests and its conformance driver.
+	// node:24-alpine (Node 24.21, which runs .ts directly), multi-arch digest.
+	NodeImage = "node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1"
+
+	// PythonImage runs Python code, its tests and its conformance driver.
+	// python:3.13-alpine (Python 3.13.15), multi-arch digest.
+	PythonImage = "python@sha256:79e7a9b9ff1cbceff819f856fb374477792a5967759d94df266de7b7b4120e6f"
 )
 
 // Toolchain is a ready-to-use set of pinned verifiers.
 type Toolchain struct {
-	JavaImage  string
-	TLCJar     string // local path, checksum verified
-	GobraImage string
-	GoImage    string
+	JavaImage   string
+	TLCJar      string // local path, checksum verified
+	GobraImage  string
+	GoImage     string
+	NodeImage   string
+	PythonImage string
 }
 
 // Ensure checks that Docker is running and fetches the TLC jar into the user
@@ -55,7 +65,7 @@ func Ensure(ctx context.Context) (Toolchain, error) {
 	if err := fetch(ctx, TLCJarURL, jar, TLCJarSHA256); err != nil {
 		return Toolchain{}, fmt.Errorf("TLC %s: %w", TLCRelease, err)
 	}
-	return Toolchain{JavaImage: JavaImage, TLCJar: jar, GobraImage: GobraImage, GoImage: GoImage}, nil
+	return Toolchain{JavaImage: JavaImage, TLCJar: jar, GobraImage: GobraImage, GoImage: GoImage, NodeImage: NodeImage, PythonImage: PythonImage}, nil
 }
 
 // fetch makes sure path holds the file at url with the given SHA-256.

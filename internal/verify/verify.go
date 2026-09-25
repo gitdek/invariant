@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gitdek/invariant/internal/conformance"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/tlc"
@@ -24,20 +25,27 @@ import (
 // Report is everything one verification established. Receipts render it,
 // and every value in it comes from tool output or the lock file.
 type Report struct {
-	Project     string            `json:"project"`
-	Passed      bool              `json:"passed"`
-	Decision    string            `json:"decision"`
-	Bounds      map[string]string `json:"bounds"`
-	Pins        []Pin             `json:"pins"`
-	Design      Design            `json:"design"`
-	Witnesses   []Witness         `json:"witnesses"`
-	Bugs        []Bug             `json:"bugs"`
-	Agreement   Agreement         `json:"agreement"`
-	Code        Code              `json:"code"`
-	Build       Build             `json:"build"`
-	Toolchain   Toolchain         `json:"toolchain"`
-	Fingerprint string            `json:"fingerprint"`
-	GeneratedAt string            `json:"generated_at"`
+	Project   string            `json:"project"`
+	Passed    bool              `json:"passed"`
+	Decision  string            `json:"decision"`
+	Bounds    map[string]string `json:"bounds"`
+	Pins      []Pin             `json:"pins"`
+	Design    Design            `json:"design"`
+	Witnesses []Witness         `json:"witnesses"`
+	Bugs      []Bug             `json:"bugs"`
+	// Code-level evidence: agreement for a state machine explored from its
+	// initial state, conformance for code run by a driver, and a proof when
+	// the language has a verifier for the code.
+	Agreement   *Agreement          `json:"agreement,omitempty"`
+	Conformance *conformance.Result `json:"conformance,omitempty"`
+	Code        *Code               `json:"code,omitempty"`
+	// Assurance says how the code was checked: "proved", or "tested against
+	// the model". A receipt never blurs the two (D-0024).
+	Assurance   string    `json:"assurance"`
+	Build       Build     `json:"build"`
+	Toolchain   Toolchain `json:"toolchain"`
+	Fingerprint string    `json:"fingerprint"`
+	GeneratedAt string    `json:"generated_at"`
 }
 
 // Pin compares a ratified statement's pinned hash with its text today,
@@ -134,9 +142,11 @@ type Toolchain struct {
 	TLCRelease   string `json:"tlc_release"`
 	TLCJarSHA256 string `json:"tlc_jar_sha256"`
 	JavaImage    string `json:"java_image"`
-	GobraImage   string `json:"gobra_image"`
-	GoImage      string `json:"go_image"`
-	Go           string `json:"go"`
+	GobraImage   string `json:"gobra_image,omitempty"`
+	GoImage      string `json:"go_image,omitempty"`
+	NodeImage    string `json:"node_image,omitempty"`
+	PythonImage  string `json:"python_image,omitempty"`
+	Go           string `json:"go,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -169,21 +179,26 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 	defer os.RemoveAll(work)
 
 	r := &Report{
-		Project:  p.Manifest.Name,
-		Decision: p.Lock.Decision,
-		Bounds:   p.Lock.Bounds,
-		Pins:     checkPins(src, p.Lock.Statements),
-		Toolchain: Toolchain{
-			TLCRelease: toolchain.TLCRelease, TLCJarSHA256: toolchain.TLCJarSHA256,
-			JavaImage: tc.JavaImage, GobraImage: tc.GobraImage, GoImage: tc.GoImage, Go: goVersion(ctx),
-		},
+		Project:   p.Manifest.Name,
+		Decision:  p.Lock.Decision,
+		Bounds:    p.Lock.Bounds,
+		Pins:      checkPins(src, p.Lock.Statements),
+		Toolchain: Toolchain{TLCRelease: toolchain.TLCRelease, TLCJarSHA256: toolchain.TLCJarSHA256, JavaImage: tc.JavaImage},
+	}
+	switch lang.(type) {
+	case Go:
+		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
+	case TypeScript:
+		r.Toolchain.NodeImage = tc.NodeImage
+	case Python:
+		r.Toolchain.PythonImage = tc.PythonImage
 	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
 	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}
 	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
 	r.Bugs = make([]Bug, len(bugs))
-	var explored Exploration
+	var evidence Evidence
 
 	// Every check is independent, so they all run at once. Each goroutine
 	// writes only its own part of the report.
@@ -287,7 +302,7 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 	})
 
 	spawn(func() (err error) {
-		r.Build, explored, err = lang.Check(ctx, p.Dir, p.CodeDir())
+		r.Build, evidence, err = lang.Check(ctx, p)
 		return err
 	})
 
@@ -295,8 +310,36 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	r.Agreement = agree(r.Design, explored)
-	r.Passed = r.Design.Passed && r.Agreement.Passed && r.Code.Passed && r.Build.Passed
+	if evidence.Exploration != nil {
+		a := agree(r.Design, *evidence.Exploration)
+		r.Agreement = &a
+	} else {
+		c := conformance.Result{ModelStates: r.Design.DistinctStates, Message: evidence.Message}
+		if evidence.Traces != nil {
+			d, err := stage(work, "conformance", p, src, "")
+			if err != nil {
+				return nil, err
+			}
+			if c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, evidence.Traces); err != nil {
+				return nil, err
+			}
+		}
+		r.Conformance = &c
+	}
+	r.Assurance = "tested against the model"
+	if r.Code != nil {
+		r.Assurance = "proved"
+	}
+	r.Passed = r.Design.Passed && r.Build.Passed && (r.Agreement != nil || r.Conformance != nil)
+	if r.Agreement != nil {
+		r.Passed = r.Passed && r.Agreement.Passed
+	}
+	if r.Conformance != nil {
+		r.Passed = r.Passed && r.Conformance.Passed
+	}
+	if r.Code != nil {
+		r.Passed = r.Passed && r.Code.Passed
+	}
 	for _, pin := range r.Pins {
 		r.Passed = r.Passed && pin.Match
 	}

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gitdek/invariant/internal/conformance"
 	"github.com/gitdek/invariant/internal/verify"
 )
 
@@ -16,7 +17,7 @@ func Markdown(r *verify.Report) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", r.Project)
 	if r.Passed {
-		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. Fingerprint `%s`\n\n", short(r.Fingerprint))
+		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", r.Assurance, short(r.Fingerprint))
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", short(r.Fingerprint))
 	}
@@ -26,8 +27,15 @@ func Markdown(r *verify.Report) string {
 	row(&b, "Design · TLC", r.Design.Passed, designResult(r.Design), designEvidence(r.Design))
 	row(&b, "Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), witnessEvidence(r))
 	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
-	row(&b, "Agreement", r.Agreement.Passed, agreementResult(r.Agreement), agreementEvidence(r.Agreement))
-	row(&b, "Code · "+r.Code.Verifier, r.Code.Passed, codeResult(r.Code), codeEvidence(r.Code))
+	if a := r.Agreement; a != nil {
+		row(&b, "Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
+	}
+	if c := r.Code; c != nil {
+		row(&b, "Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
+	}
+	if c := r.Conformance; c != nil {
+		row(&b, "Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
+	}
 	row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
 
 	fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
@@ -49,9 +57,14 @@ func Markdown(r *verify.Report) string {
 	t := r.Toolchain
 	fmt.Fprintf(&b, "| TLC | %s · tla2tools.jar %s `sha256:%s` |\n", t.TLC, t.TLCRelease, t.TLCJarSHA256[:12])
 	fmt.Fprintf(&b, "| Java | `%s` |\n", shortImage(t.JavaImage))
-	fmt.Fprintf(&b, "| Gobra | `%s` |\n", shortImage(t.GobraImage))
-	fmt.Fprintf(&b, "| Go sandbox | `%s` |\n", shortImage(t.GoImage))
-	fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
+	for _, img := range [][2]string{{"Gobra", t.GobraImage}, {"Go sandbox", t.GoImage}, {"Node sandbox", t.NodeImage}, {"Python sandbox", t.PythonImage}} {
+		if img[1] != "" {
+			fmt.Fprintf(&b, "| %s | `%s` |\n", img[0], shortImage(img[1]))
+		}
+	}
+	if t.Go != "" {
+		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
+	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()
 }
@@ -133,9 +146,23 @@ func agreementEvidence(a verify.Agreement) string {
 
 func codeResult(c verify.Code) string {
 	if c.Passed {
-		return fmt.Sprintf("%d of %d functions verified", len(c.Functions), len(c.Functions))
+		return fmt.Sprintf("proved: %d of %d functions verified", len(c.Functions), len(c.Functions))
 	}
 	return fmt.Sprintf("%d verification errors", len(c.Errors))
+}
+
+func conformanceResult(c conformance.Result) string {
+	if c.Passed {
+		return "tested against the model: no step outside it"
+	}
+	return "the code left the model"
+}
+
+func conformanceEvidence(c conformance.Result) string {
+	if int64(c.States) > c.ModelStates {
+		return fmt.Sprintf("%d runs, %s steps, %d states visited, more than the model's %s", c.Runs, thousands(int64(c.Steps)), c.States, thousands(c.ModelStates))
+	}
+	return fmt.Sprintf("%d runs, %s steps, %d of %s model states visited", c.Runs, thousands(int64(c.Steps)), c.States, thousands(c.ModelStates))
 }
 
 func codeEvidence(c verify.Code) string {
@@ -183,11 +210,23 @@ func failures(r *verify.Report) []string {
 			out = append(out, fmt.Sprintf("Known bug `%s`: %s", g.Name, g.Message))
 		}
 	}
-	if !r.Agreement.Passed {
-		out = append(out, "Agreement: "+r.Agreement.Message)
+	if a := r.Agreement; a != nil && !a.Passed {
+		out = append(out, "Agreement: "+a.Message)
 	}
-	for _, e := range r.Code.Errors {
-		out = append(out, r.Code.Verifier+": "+e)
+	if c := r.Conformance; c != nil && !c.Passed {
+		msg := "Conformance: " + c.Message
+		if c.BadStep != nil {
+			msg += fmt.Sprintf(". From `%s` to `%s`", c.BadStep.From, c.BadStep.To)
+		}
+		if c.BadStart != "" {
+			msg += fmt.Sprintf(". The run started in `%s`", c.BadStart)
+		}
+		out = append(out, msg)
+	}
+	if c := r.Code; c != nil {
+		for _, e := range c.Errors {
+			out = append(out, c.Verifier+": "+e)
+		}
 	}
 	if !r.Build.Passed {
 		out = append(out, "Build:\n\n```\n"+r.Build.Output+"\n```")
