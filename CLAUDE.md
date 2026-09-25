@@ -14,6 +14,6 @@
 - `go run ./cmd/invariant verify examples/02-twophase-commit`: run the gate and print the receipt.
 - `go run ./cmd/invariant verify examples/02-twophase-commit-py-proved`: the same, with Nagini proving the Python core. The first run builds the Nagini image for linux/amd64, which downloads about 260 MB.
 - `go run ./cmd/invariant synthesize examples/02-twophase-commit`: have headless Claude Code rebuild the model and code from the ratified statements, then gate the result. It uses the owner's Claude account, so only run it when asked.
-- `go run ./cmd/invariant watch -repo gitdek/invariant [-app-id ID] [-language go]`: the factory. It turns issues into merged pull requests, posting as the owner and running agents on the owner's Claude account, so only run it when asked. `formalize` drafts statements for a request file the same way.
+- `go run ./cmd/invariant watch -repo gitdek/invariant -app-id 5079269`: the factory, acting as its App's bot, `invariant-code-factory[bot]`. The App's key is `~/.config/invariant/factory.pem`: never read it, print it or commit it. It turns issues into merged pull requests, posting as the owner and running agents on the owner's Claude account, so only run it when asked. `formalize` drafts statements for a request file the same way.
 - `go run ./cmd/invariant scope -base origin/main` and `go run ./cmd/invariant ratification -repo gitdek/invariant PROJECT...`: the checks CI runs on factory pull requests.
 - Never post `/invariant` commands on the owner's behalf. Choosing forks and ratifying are the owner's decisions.
