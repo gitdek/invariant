@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0031 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0032 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -41,7 +41,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Gobra is pinned by digest, and it also checks integer overflow.
   - Builds, tests and exploration run in `golang:1.27-alpine`, pinned by digest, on a throwaway copy.
   - TypeScript runs in `node:24-alpine` and Python in `python:3.13-alpine`, both pinned by digest and limited to the standard library. Type checking isn't run yet. `D-0030`
-  - Nagini 1.3.1 runs in an image built from a recipe inside Invariant, for linux/amd64 only. The base is pinned by digest and every Python package by wheel hash, and receipts name the recipe by its hash. The Java runtime isn't pinned yet. `D-0031`
+  - Nagini 1.3.1 runs in an image built from a recipe inside Invariant, for linux/amd64 only. Every input is pinned: the base by digest, the Java runtime by copying it from TLC's Temurin image, and every Python package by wheel hash. Receipts name the recipe by its hash. `D-0031` `D-0032`
   - Nothing runs with network access or with the host's environment.
 - Invariant converts TLC counterexamples into JSON traces. `D-0016`
 - Each project is its own Go module. `D-0020`

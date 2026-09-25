@@ -25,7 +25,7 @@ core.py:78:12: Postcondition of tm_commit might not hold. Assertion s.commit_msg
 
 ## The sandbox
 
-Nagini runs with no network, in an image Invariant builds from [its own recipe](../../internal/toolchain/nagini.Dockerfile). The base is pinned by digest, and every Python package by the hash of its exact wheel. The image is linux/amd64 only, because Nagini pins a different Z3 on ARM. One image keeps receipts identical between a laptop and CI, and Apple silicon runs it under emulation. The first run builds it, which downloads about 200 MB.
+Nagini runs with no network, in an image Invariant builds from [its own recipe](../../internal/toolchain/nagini.Dockerfile). Every input is pinned. The base is pinned by digest. The Java runtime is copied from the Temurin image TLC runs in. Every Python package is pinned by the hash of its exact wheel. The image is linux/amd64 only, because Nagini pins a different Z3 on ARM. One image keeps receipts identical between a laptop and CI, and Apple silicon runs it under emulation. The first run builds it, which downloads about 260 MB.
 
 The core also runs as ordinary Python. A no-op stand-in for Nagini's contract library takes the real one's place, so the tests and the driver run in `python:3.13-alpine`, like any other Python project.
 

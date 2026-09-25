@@ -123,8 +123,8 @@ func fileSHA256(path string) (string, error) {
 }
 
 // NaginiDockerfile is the recipe for the Nagini sandbox: a Python base pinned
-// by digest, a Java runtime for Viper, and Nagini, with every Python package
-// pinned by wheel hash (D-0031).
+// by digest, the Java runtime from JavaImage, and Nagini, with every Python
+// package pinned by wheel hash (D-0031, D-0032).
 //
 //go:embed nagini.Dockerfile
 var NaginiDockerfile []byte

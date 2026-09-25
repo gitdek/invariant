@@ -1,16 +1,17 @@
-# The Nagini sandbox (D-0031): Python 3.12, a Java runtime for the Viper
-# verifier, and Nagini. It's built for linux/amd64 only. Nagini pins a
+# The Nagini sandbox (D-0031, D-0032): Python 3.12, a Java runtime for the
+# Viper verifier, and Nagini. It's built for linux/amd64 only. Nagini pins a
 # different Z3 on ARM, and one image everywhere keeps receipts identical
 # between a laptop and CI.
 #
-# The base is pinned by digest, and every Python package by the hash of the
-# exact wheel, so the recipe's hash names what gets installed. The Java
-# runtime comes from Debian and isn't pinned yet.
+# Every input is pinned. The base is pinned by digest. The Java runtime is
+# copied from the Temurin image TLC runs in (toolchain.JavaImage). Every
+# Python package is pinned by the hash of its exact wheel. So the recipe's
+# hash names what gets installed.
+FROM --platform=linux/amd64 eclipse-temurin@sha256:49e21e16e3c86eb7816a44a67549910ed090fbeb40c29c525d58bf5e02e91b0f AS java
 FROM --platform=linux/amd64 python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
-RUN apt-get update \
- && apt-get install -y --no-install-recommends openjdk-21-jre-headless \
- && rm -rf /var/lib/apt/lists/*
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+COPY --from=java /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH=/opt/java/openjdk/bin:$PATH
 RUN pip install --no-cache-dir --no-deps --require-hashes -r /dev/stdin <<EOF
 nagini==1.3.1 --hash=sha256:56d85c9a55baa3a769d849138ff2e49c0a1627424e680aea96f76fce96c4206c
 jpype1==1.7.1 --hash=sha256:4de86ec7f9f381c7aea8cbbecaa189c020e5fb700620bd96f4762f954757656b
