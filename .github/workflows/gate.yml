@@ -7,15 +7,18 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 jobs:
   gate:
-    # The required status check the auto-merge policy keys on (D-0004).
+    # The check the factory merges its pull requests on (D-0004, D-0033).
     name: invariant/gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:
@@ -26,19 +29,34 @@ jobs:
           go vet ./...
           go test ./...
 
-      - name: Verify the two-phase commit example
-        run: go run ./cmd/invariant verify -out out/02-twophase-commit examples/02-twophase-commit
+      - name: Build the gate
+        run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
 
-      - name: Verify the factory-synthesized two-phase commit
-        run: go run ./cmd/invariant verify examples/02-twophase-commit-synthesized
+      - name: Keep a factory pull request in scope
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
+        env:
+          BASE: ${{ github.base_ref }}
+        run: '"$RUNNER_TEMP/invariant" scope -base "origin/$BASE" HEAD'
 
-      - name: Test the TypeScript and Python implementations against the model
+      # Every project in the repository, found rather than listed, so a
+      # factory pull request is gated without touching this file.
+      - name: Verify every project
         run: |
-          go run ./cmd/invariant verify examples/02-twophase-commit-ts
-          go run ./cmd/invariant verify examples/02-twophase-commit-py
+          status=0
+          for manifest in $(git ls-files '*/.invariant/invariant.json'); do
+            project="${manifest%/.invariant/invariant.json}"
+            echo "::group::$project"
+            "$RUNNER_TEMP/invariant" verify -out "out/$(basename "$project")" "$project" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
 
-      - name: Prove the Python core with Nagini
-        run: go run ./cmd/invariant verify examples/02-twophase-commit-py-proved
+      - name: Check who ratified each project
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          projects=$(git ls-files '*/.invariant/invariant.json' | sed 's#/.invariant/invariant.json$##')
+          "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects
 
       - name: Publish the receipt
         if: always()
@@ -47,13 +65,13 @@ jobs:
             cat out/02-twophase-commit/receipt.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload the receipt and traces
+      - name: Upload the receipts and traces
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: receipt-02-twophase-commit
-          path: out/02-twophase-commit
+          name: receipts
+          path: out
           if-no-files-found: ignore
 
       - name: Show the gate rejects gaming, and synthesis can't touch the lock
-        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/
+        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/

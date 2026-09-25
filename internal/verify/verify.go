@@ -25,9 +25,16 @@ import (
 // Report is everything one verification established. Receipts render it,
 // and every value in it comes from tool output or the lock file.
 type Report struct {
-	Project   string            `json:"project"`
-	Passed    bool              `json:"passed"`
-	Decision  string            `json:"decision"`
+	Project  string `json:"project"`
+	Passed   bool   `json:"passed"`
+	Decision string `json:"decision"`
+	// Ratified says who ratified a factory project, and Proposal hashes what
+	// its lock holds now. The two must agree.
+	Ratified *project.Ratification `json:"ratified,omitempty"`
+	Proposal string                `json:"proposal,omitempty"`
+	// ModelOnly marks a check of the model alone, with no code and no build,
+	// as the factory runs on a draft before anyone ratifies it.
+	ModelOnly bool              `json:"model_only,omitempty"`
 	Bounds    map[string]string `json:"bounds"`
 	Pins      []Pin             `json:"pins"`
 	Design    Design            `json:"design"`
@@ -153,6 +160,17 @@ type Toolchain struct {
 // Run verifies the project in dir. When outDir isn't empty, it writes each
 // counterexample to outDir/traces as JSON.
 func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Report, error) {
+	return gate(ctx, dir, outDir, tc, false)
+}
+
+// RunModel checks the project's model alone: its pins, TLC, the witnesses and
+// the known bugs. The factory runs it on a draft before asking anyone to
+// ratify the draft's statements.
+func RunModel(ctx context.Context, dir string, tc toolchain.Toolchain) (*Report, error) {
+	return gate(ctx, dir, "", tc, true)
+}
+
+func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool) (*Report, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -166,9 +184,11 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		return nil, err
 	}
 	src := string(raw)
-	lang, err := languageFor(p, tc)
-	if err != nil {
-		return nil, err
+	var lang Language
+	if !model {
+		if lang, err = languageFor(p, tc); err != nil {
+			return nil, err
+		}
 	}
 	if name, err := tla.ModuleName(src); err != nil || name != p.ModuleName() {
 		return nil, fmt.Errorf("%s: the MODULE header must name %s", p.Manifest.Module, p.ModuleName())
@@ -182,9 +202,13 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 	r := &Report{
 		Project:   p.Manifest.Name,
 		Decision:  p.Lock.Decision,
+		ModelOnly: model,
 		Bounds:    p.Lock.Bounds,
 		Pins:      checkPins(src, p.Lock.Statements),
 		Toolchain: Toolchain{TLCRelease: toolchain.TLCRelease, TLCJarSHA256: toolchain.TLCJarSHA256, JavaImage: tc.JavaImage},
+	}
+	if l := p.Lock; l.Ratified != nil {
+		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
 	}
 	switch lang.(type) {
 	case Go:
@@ -300,19 +324,26 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 		})
 	}
 
-	spawn(func() (err error) {
-		r.Code, err = lang.Verify(ctx, p.CodeDir())
-		return err
-	})
-
-	spawn(func() (err error) {
-		r.Build, evidence, err = lang.Check(ctx, p)
-		return err
-	})
+	if !model {
+		spawn(func() (err error) {
+			r.Code, err = lang.Verify(ctx, p.CodeDir())
+			return err
+		})
+		spawn(func() (err error) {
+			r.Build, evidence, err = lang.Check(ctx, p)
+			return err
+		})
+	}
 
 	wg.Wait()
 	if firstErr != nil {
 		return nil, firstErr
+	}
+	if model {
+		r.Passed = r.Design.Passed && modelPassed(r)
+		r.Fingerprint = Fingerprint(*r)
+		r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+		return r, nil
 	}
 	if evidence.Exploration != nil {
 		a := agree(r.Design, *evidence.Exploration)
@@ -344,18 +375,32 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 	if r.Code != nil {
 		r.Passed = r.Passed && r.Code.Passed
 	}
-	for _, pin := range r.Pins {
-		r.Passed = r.Passed && pin.Match
-	}
-	for _, w := range r.Witnesses {
-		r.Passed = r.Passed && w.Reached
-	}
-	for _, b := range r.Bugs {
-		r.Passed = r.Passed && b.Caught
-	}
+	r.Passed = r.Passed && modelPassed(r)
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	return r, nil
+}
+
+// modelPassed says whether the checks every run makes, code or not, passed:
+// the pins, the ratification, the witnesses and the known bugs.
+func modelPassed(r *Report) bool {
+	ok := r.RatificationMatches()
+	for _, pin := range r.Pins {
+		ok = ok && pin.Match
+	}
+	for _, w := range r.Witnesses {
+		ok = ok && w.Reached
+	}
+	for _, b := range r.Bugs {
+		ok = ok && b.Caught
+	}
+	return ok
+}
+
+// RatificationMatches says whether the lock still holds what was ratified.
+// Hand-built projects are ratified in decisions/log.md instead, so they pass.
+func (r *Report) RatificationMatches() bool {
+	return r.Ratified == nil || r.Proposal == r.Ratified.Proposal
 }
 
 // agree compares the implementation's exploration with TLC's.

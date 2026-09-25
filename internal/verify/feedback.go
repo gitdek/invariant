@@ -14,6 +14,9 @@ func Feedback(r *Report) string {
 		failed = append(failed, title)
 		fmt.Fprintf(&b, "\n## %s\n\n%s\n", title, strings.Join(lines, "\n"))
 	}
+	if !r.RatificationMatches() {
+		section("Ratification", fmt.Sprintf("The lock's statements or bounds no longer match the proposal @%s ratified. Restore the lock.", r.Ratified.By))
+	}
 	for _, p := range r.Pins {
 		switch {
 		case p.Error != "":
@@ -61,8 +64,12 @@ func Feedback(r *Report) string {
 	if c := r.Code; c != nil && !c.Passed {
 		section("Code: "+c.Verifier, c.Errors...)
 	}
-	if !r.Build.Passed {
+	if !r.Build.Passed && !r.ModelOnly {
 		section("Build: go vet and go test", "```", lastLines(r.Build.Output, 60), "```")
+	}
+	if len(failed) == 0 && r.ModelOnly {
+		return fmt.Sprintf("The model checks out. TLC explored %d states (depth %d) and found no invariant violated and no deadlock, "+
+			"every witness was reached, and every known bug was caught.", d.DistinctStates, d.Depth)
 	}
 	if len(failed) == 0 {
 		return fmt.Sprintf("The gate passed. Every check passed: TLC explored %d states (depth %d), every witness was reached, "+
@@ -75,6 +82,9 @@ func Feedback(r *Report) string {
 // Failed names the checks a report failed.
 func Failed(r *Report) []string {
 	var out []string
+	if !r.RatificationMatches() {
+		out = append(out, "ratification")
+	}
 	for _, p := range r.Pins {
 		if !p.Match {
 			out = append(out, "pin "+p.Name)
@@ -102,7 +112,7 @@ func Failed(r *Report) []string {
 	if r.Code != nil && !r.Code.Passed {
 		out = append(out, "code")
 	}
-	if !r.Build.Passed {
+	if !r.Build.Passed && !r.ModelOnly {
 		out = append(out, "build")
 	}
 	return out

@@ -1,0 +1,154 @@
+// Package factory turns issues into merged pull requests (slice 4). It reads
+// an issue and its comments, asks people about forks, posts a proposal for
+// ratification, commits what was ratified, builds the code, opens a pull
+// request, and merges it once CI's gate passes. It keeps no state of its
+// own: everything it knows is on GitHub, in its own comments, so it can stop
+// and start at any time.
+package factory
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"regexp"
+	"strings"
+
+	"github.com/gitdek/invariant/internal/formalize"
+	"github.com/gitdek/invariant/internal/github"
+)
+
+// People direct the factory with commands, each on a line of its own in an
+// issue or a comment.
+const (
+	Solve  = "solve"  // /invariant solve: take on this issue
+	Choose = "choose" // /invariant choose F1 A: decide a fork
+	Revise = "revise" // /invariant revise: draft again, reading the comments
+	Ratify = "ratify" // /invariant ratify <hash>: ratify the current proposal
+)
+
+// Command is one instruction from a person with write access.
+type Command struct {
+	Verb    string
+	Args    []string
+	Comment int64 // the comment it came in; 0 for the issue itself
+	By      string
+	URL     string
+	At      string
+}
+
+// ParseCommands finds the commands in a comment's text. A command is a line
+// of its own, possibly in backticks, outside code blocks and quotes.
+func ParseCommands(body string) []Command {
+	var out []Command
+	fenced := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			fenced = !fenced
+			continue
+		}
+		if fenced || strings.HasPrefix(line, ">") {
+			continue
+		}
+		f := strings.Fields(strings.Trim(line, "`"))
+		if len(f) < 2 || f[0] != "/invariant" {
+			continue
+		}
+		switch verb := strings.ToLower(f[1]); verb {
+		case Solve, Choose, Revise, Ratify:
+			out = append(out, Command{Verb: verb, Args: f[2:]})
+		}
+	}
+	return out
+}
+
+// Kinds of factory post. Each records what state the issue is in.
+const (
+	KindForks       = "forks"       // asked people to decide forks
+	KindProposal    = "proposal"    // proposed statements for ratification
+	KindStuck       = "stuck"       // couldn't draft statements that check out
+	KindUnsupported = "unsupported" // the issue isn't one the factory can take
+	KindRatified    = "ratified"    // committed the ratified statements; building
+	KindPR          = "pr"          // opened a pull request; waiting for CI's gate
+	KindFailed      = "failed"      // the build or CI's gate failed; people need to look
+	KindMerged      = "merged"      // merged
+	KindClosed      = "closed"      // the pull request was closed without merging
+	KindNote        = "note"        // answered a command without changing anything
+)
+
+// Marker is the state a factory post records, hidden at its end.
+type Marker struct {
+	Kind     string              `json:"kind"`
+	ReplyTo  []int64             `json:"reply_to,omitempty"` // the commands it answers; 0 is the issue itself
+	Forks    []formalize.Fork    `json:"forks,omitempty"`
+	Answers  []formalize.Answer  `json:"answers,omitempty"` // the forks decided so far
+	Proposal *formalize.Proposal `json:"proposal,omitempty"`
+	Project  string              `json:"project,omitempty"` // the project's directory
+	Branch   string              `json:"branch,omitempty"`
+	Hash     string              `json:"hash,omitempty"` // the ratified proposal
+	PR       int                 `json:"pr,omitempty"`
+}
+
+// The marker is base64 inside an HTML comment, so nothing in it, such as
+// TLA+ text, can end the comment early, and GitHub doesn't render it.
+var markerRE = regexp.MustCompile(`<!-- invariant:([A-Za-z0-9+/=]+) -->`)
+
+func (m Marker) encode() string {
+	b, _ := json.Marshal(m)
+	return "<!-- invariant:" + base64.StdEncoding.EncodeToString(b) + " -->"
+}
+
+// DecodeMarker reads the marker in a comment, if it has one.
+func DecodeMarker(body string) (Marker, bool) {
+	match := markerRE.FindStringSubmatch(body)
+	if match == nil {
+		return Marker{}, false
+	}
+	b, err := base64.StdEncoding.DecodeString(match[1])
+	var m Marker
+	if err != nil || json.Unmarshal(b, &m) != nil || m.Kind == "" {
+		return Marker{}, false
+	}
+	return m, true
+}
+
+// Post is one of the factory's comments.
+type Post struct {
+	Comment github.Comment
+	Marker  Marker
+}
+
+// Thread is an issue as the factory reads it.
+type Thread struct {
+	Issue    github.Issue
+	Posts    []Post           // the factory's comments, oldest first
+	Commands []Command        // commands from people with write access, oldest first
+	People   []github.Comment // comments from people with write access
+}
+
+// State is the factory's latest post, not counting notes. ok is false for
+// an issue the factory hasn't touched.
+func (t Thread) State() (post Post, ok bool) {
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		if t.Posts[i].Marker.Kind != KindNote {
+			return t.Posts[i], true
+		}
+	}
+	return Post{}, false
+}
+
+// Pending lists the commands no post has answered yet, oldest first.
+func (t Thread) Pending() []Command {
+	answered := map[int64]bool{}
+	for _, p := range t.Posts {
+		for _, id := range p.Marker.ReplyTo {
+			answered[id] = true
+		}
+	}
+	var out []Command
+	for _, c := range t.Commands {
+		if !answered[c.Comment] {
+			out = append(out, c)
+		}
+	}
+	return out
+}

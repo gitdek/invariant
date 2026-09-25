@@ -33,6 +33,14 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
+	allowed := "Read,Write,Edit,Glob,Grep"
+	tools := job.Tools
+	if len(tools) == 0 {
+		tools = []string{"gate"}
+	}
+	for _, t := range tools {
+		allowed += ",mcp__invariant__" + t
+	}
 	args := []string{
 		"-p", job.Prompt,
 		"--output-format", "stream-json", "--verbose",
@@ -40,7 +48,7 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 		"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
 		"--max-turns", strconv.Itoa(c.MaxTurns),
 		"--mcp-config", string(config), "--strict-mcp-config",
-		"--allowedTools", "Read,Write,Edit,Glob,Grep,mcp__invariant__gate",
+		"--allowedTools", allowed,
 		"--disallowedTools", "Bash,WebFetch,WebSearch,Task,NotebookEdit",
 		"--permission-mode", "acceptEdits",
 		"--setting-sources", "project",

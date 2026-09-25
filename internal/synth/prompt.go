@@ -18,8 +18,15 @@ var kindMeaning = map[string]string{
 }
 
 // Prompt is the synthesis task: the request, what was ratified, the rules,
-// and the skeleton.
-func Prompt(p *project.Project, skeleton, request string, gateRuns int) string {
+// and the module to start from. With draft set, the module holds a draft
+// model the factory wrote with the statements, not just a skeleton.
+func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft bool) string {
+	modelTask := "The skeleton below holds the pinned definitions and a marked place for the model. Write `Init`, one operator per action, and `Next` there, above `Spec`. Use only the declared constants and variables."
+	moduleHeading := "The skeleton of"
+	if draft {
+		modelTask = "It's already drafted in the module below, and TLC has checked it against the statements. Keep it unless the code needs it changed, and change only `Init`, the actions and `Next`."
+		moduleHeading = "The module"
+	}
 	pkg := filepath.Base(p.Manifest.Code)
 	var statements strings.Builder
 	statements.WriteString("| Statement | Kind | What it says |\n| --- | --- | --- |\n")
@@ -56,7 +63,7 @@ TLC checks everything with these constants: %s.
 
 # Your job
 
-1. **The model**, in `+"`%s`"+`. The skeleton below holds the pinned definitions and a marked place for the model. Write `+"`Init`"+`, one operator per action, and `+"`Next`"+` there, above `+"`Spec`"+`. Use only the declared constants and variables.
+1. **The model**, in `+"`%s`"+`. %s
 2. **The code**, in `+"`%s/`"+` as Go package `+"`%s`"+`. It must implement your model exactly.
    - A comparable `+"`State`"+` struct that represents the spec's variables for the bounds above, one to one. Use fixed-size arrays, booleans and small integer types; no slices, maps or pointers.
    - `+"`func Init() State`"+`: the initial state.
@@ -110,10 +117,10 @@ func Inc(s State, i int) (t State) {
 - Contracts can use `+"`forall`"+`, `+"`exists`"+`, `+"`==>`"+` and `+"`==`"+` on whole arrays (`+"`t.Count == s.Count`"+`).
 - Calls to a function with a contract must satisfy its `+"`requires`"+`, so guard them.
 
-# The skeleton of `+"`%s`"+`
+# %s `+"`%s`"+`
 
 `+"```tla"+`
 %s`+"```"+`
 `, strings.TrimSpace(request), p.Manifest.Module, statements.String(), kinds.String(), strings.Join(bounds, ", "),
-		p.Manifest.Module, p.Manifest.Code, pkg, gateRuns, p.Manifest.Module, skeleton)
+		p.Manifest.Module, modelTask, p.Manifest.Code, pkg, gateRuns, moduleHeading, p.Manifest.Module, skeleton)
 }

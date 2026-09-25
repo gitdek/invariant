@@ -33,7 +33,8 @@ type Backend interface {
 type Job struct {
 	Workspace  string    // the agent's working directory
 	Prompt     string    // the task
-	GateServer []string  // the command that starts the gate's MCP server
+	GateServer []string  // the command that starts Invariant's MCP server
+	Tools      []string  // the server's tools the agent may call; just the gate when empty
 	Transcript io.Writer // where the backend records the agent's events
 }
 
@@ -59,11 +60,15 @@ type GateRun struct {
 
 // Options configures a synthesis.
 type Options struct {
-	Project   string // the project whose ratified statements to build against
-	Out       string // where the result, receipt and logs go
-	Backend   Backend
-	Binary    string // this invariant binary, which serves the gate tool
-	GateRuns  int    // the most gate runs the agent gets: one attempt and its repairs
+	Project string // the project whose ratified statements to build against
+	Out     string // where the result, receipt and logs go
+	Backend Backend
+	Binary  string // this invariant binary, which serves the gate tool
+	// KeepModel starts the agent from the whole module, draft model and all,
+	// instead of a skeleton of the pinned definitions. The factory does this
+	// for a project whose model it drafted with the statements.
+	KeepModel bool
+	GateRuns  int // the most gate runs the agent gets: one attempt and its repairs
 	Timeout   time.Duration
 	Toolchain toolchain.Toolchain
 }
@@ -102,6 +107,13 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if o.KeepModel {
+		raw, err := os.ReadFile(p.ModulePath())
+		if err != nil {
+			return nil, err
+		}
+		skeleton = string(raw)
+	}
 	if err := os.RemoveAll(out); err != nil {
 		return nil, err
 	}
@@ -129,7 +141,7 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	defer cancel()
 	usage, runErr := o.Backend.Run(runCtx, Job{
 		Workspace:  ws,
-		Prompt:     Prompt(p, skeleton, request, o.GateRuns),
+		Prompt:     Prompt(p, skeleton, request, o.GateRuns, o.KeepModel),
 		GateServer: []string{o.Binary, "mcp", "-ratified", src, "-max-runs", fmt.Sprint(o.GateRuns), "-log", gateLog, ws},
 		Transcript: transcript,
 	})

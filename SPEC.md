@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0032 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0036 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -49,19 +49,24 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Synthesis runs locally through the official coding-agent CLIs in their documented headless modes, on @gitdek's own accounts. Anything shared, hosted or run in CI uses an API key. `D-0028`
 - A synthesis agent starts from a skeleton that holds only the pinned definitions. It works outside the repository, with file tools and the gate as its only tools. Every gate run checks a project assembled from the original lock, manifest, request and `go.mod`, plus the agent's model and code. `D-0026`
 - The agent gets at most four gate runs: one attempt and three repairs. Each run is capped by an estimated-cost budget, a turn limit and a timeout. `D-0000` `D-0026`
-- The factory is triggered by `issues.opened`, by `/invariant solve` issue comments, and by `repository_dispatch`. `D-0000` `D-0014`
-  - Only users with write access can trigger it.
-  - Synthesis runs with no secrets and no network.
+- The factory runs as `invariant watch` on @gitdek's machine. It polls GitHub through the `gh` CLI with @gitdek's login, and runs its agents with Claude Code on @gitdek's account. `D-0028` `D-0036`
+  - It takes an issue when a writer opens it with a `/invariant solve` line, gives it the `invariant` label, or comments `/invariant solve`. `repository_dispatch` waits for a hosted factory. `D-0000` `D-0036`
+  - Only people with write access can direct it: `/invariant solve`, `choose`, `revise` and `ratify`. Everyone else is ignored. `D-0014` `D-0036`
+  - It keeps no state of its own. Each of its comments records the issue's state in a hidden marker, and a status label shows it. `D-0036`
+  - The agents never touch GitHub. Only the factory's own code posts, pushes and merges. Synthesis runs with no secrets and no network. `D-0014` `D-0036`
+- Formalization: an agent drafts the statements, their bounds and a draft model for an issue. When the issue allows materially different behaviors, it lists them as forks in a decision request instead of choosing. The factory posts a proposal only after TLC has checked it against the draft model. `D-0002` `D-0036`
+- Ratification happens on the issue. The proposal shows each statement in plain language and TLA+, with the hash of the whole proposal. A writer ratifies by commenting `/invariant ratify <hash>`. The lock records who ratified it, where, and what. `D-0034`
+- Each ratified issue becomes a new project under `examples/`. Its ratification is the first commit on the issue's branch, and synthesis starts from the drafted model. `D-0033` `D-0036`
 - Each piece of work happens on a branch named `invariant/issue-<id>-<slug>`. Formal artifacts live under `.invariant/specs/`. `D-0000`
 - When a check fails, the counterexamples and verifier errors feed back into synthesis for up to three repair attempts. If it still fails, the PR is labeled `invariant:human-review-needed` and the counterexample is posted on the issue. `D-0000`
 - Every pull request carries a receipt that CI generates from tool output only. `D-0000` `D-0013`
   - It lists the states explored, the bounds, the functions verified, the statement hashes and the tool versions.
   - Its fingerprint matches between a local run and a CI run of the same commit.
-- The CLI's `verify`, `synthesize`, `pin` and `trace` commands are built. `init` is specified but not yet built. `D-0000` `D-0013` `D-0017` `D-0026`
+- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin` and `trace` commands are built. `init` is specified but not yet built. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036`
 
 ## Merging
 
-- Pull requests auto-merge starting with the first factory PR. `invariant/gate` is a required status check, and GitHub's native auto-merge merges once it passes. `D-0004` `D-0021`
+- Factory pull requests merge on green, starting with the first. `invariant/gate` is the check. GitHub Free can't require a check or auto-merge on a private repository, so for now the factory merges its own pull request, pinned to the head commit that passed. When the repository goes public, `invariant/gate` becomes a required check and GitHub's native auto-merge takes over. `D-0004` `D-0021` `D-0033`
 - The gate passes only when all of these hold. `D-0004` `D-0013` `D-0014`
   - The pinned statements match.
   - TLC reports no invariant violation and no deadlock.
@@ -71,7 +76,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - TypeScript and Python: every step the code took is a step the model allows.
   - Gobra verifies Go files marked `// +gobra`, Nagini verifies Python files marked `# +nagini`, and the receipt names any function neither saw. `D-0031`
   - CI is green.
-  - The diff stays in scope: no new module dependencies, no cgo, no edits to `.github/` or pinned specs.
+  - The diff stays in scope. It changes one project and nothing else. It adds no module dependencies, uses no cgo and doesn't edit `.github/`. It changes no ratified lock, except by adding a new, ratified project. `D-0014` `D-0036`
+  - Every factory project's ratification checks out on GitHub: a writer's comment ratified exactly the proposal its lock holds. `D-0034` `D-0036`
 - The pinned-statement checks and the scope rules must exist before the factory opens its first PR. `D-0004` `D-0014`
 - After a merge, the branch is deleted and the originating issue is notified with the proof artifacts. `D-0000`
 
@@ -81,7 +87,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   1. The gate, proven on `examples/02-twophase-commit`. Done.
   2. Synthesis for Go. Done.
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
-  4. GitHub. Next.
+  4. GitHub: the factory is built. Its first live issue, a bounded buffer, is next. `D-0035` `D-0036`
 
 ## Project
 

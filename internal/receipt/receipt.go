@@ -23,7 +23,7 @@ func Markdown(r *verify.Report) string {
 	}
 
 	b.WriteString("| Check | Result | Evidence |\n| :-- | :-- | :-- |\n")
-	row(&b, "Pinned statements", pinsOK(r), pinsResult(r), "recorded in "+r.Decision)
+	row(&b, "Pinned statements", pinsOK(r) && r.RatificationMatches(), pinsResult(r), provenance(r))
 	row(&b, "Design · TLC", r.Design.Passed, designResult(r.Design), designEvidence(r.Design))
 	row(&b, "Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), witnessEvidence(r))
 	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
@@ -36,7 +36,9 @@ func Markdown(r *verify.Report) string {
 	if c := r.Conformance; c != nil {
 		row(&b, "Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
 	}
-	row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
+	if !r.ModelOnly {
+		row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
+	}
 
 	fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
 
@@ -55,7 +57,7 @@ func Markdown(r *verify.Report) string {
 	b.WriteString("\n</details>\n\n<details>\n<summary>Toolchain</summary>\n\n")
 	b.WriteString("| Tool | Pinned at |\n| :-- | :-- |\n")
 	t := r.Toolchain
-	fmt.Fprintf(&b, "| TLC | %s · tla2tools.jar %s `sha256:%s` |\n", t.TLC, t.TLCRelease, t.TLCJarSHA256[:12])
+	fmt.Fprintf(&b, "| TLC | %s · tla2tools.jar %s `%s` |\n", t.TLC, t.TLCRelease, short("sha256:"+t.TLCJarSHA256))
 	fmt.Fprintf(&b, "| Java | `%s` |\n", shortImage(t.JavaImage))
 	for _, img := range [][2]string{{"Gobra", t.GobraImage}, {"Go sandbox", t.GoImage}, {"Node sandbox", t.NodeImage}, {"Python sandbox", t.PythonImage}} {
 		if img[1] != "" {
@@ -74,6 +76,22 @@ func Markdown(r *verify.Report) string {
 
 func row(b *strings.Builder, check string, ok bool, result, evidence string) {
 	fmt.Fprintf(b, "| %s | %s %s | %s |\n", check, mark(ok), result, evidence)
+}
+
+// provenance says where the statements were ratified: an entry in
+// decisions/log.md for a hand-built project, or a comment on an issue for a
+// factory project.
+func provenance(r *verify.Report) string {
+	switch {
+	case r.Ratified != nil && !r.RatificationMatches():
+		return fmt.Sprintf("the lock no longer matches what @%s ratified on #%d", r.Ratified.By, r.Ratified.Issue)
+	case r.Ratified != nil:
+		return fmt.Sprintf("ratified by @%s on [#%d](%s)", r.Ratified.By, r.Ratified.Issue, r.Ratified.Comment)
+	case r.Decision != "":
+		return "recorded in " + r.Decision
+	default:
+		return "not ratified yet"
+	}
 }
 
 func pinsOK(r *verify.Report) bool {
@@ -195,6 +213,9 @@ func buildResult(b verify.Build) string {
 
 func failures(r *verify.Report) []string {
 	var out []string
+	if !r.RatificationMatches() {
+		out = append(out, fmt.Sprintf("Ratification: the lock's statements or bounds no longer match the proposal @%s ratified (`%s`)", r.Ratified.By, short(r.Ratified.Proposal)))
+	}
 	for _, p := range r.Pins {
 		switch {
 		case p.Error != "":
@@ -234,7 +255,7 @@ func failures(r *verify.Report) []string {
 			out = append(out, c.Verifier+": "+e)
 		}
 	}
-	if !r.Build.Passed {
+	if !r.Build.Passed && !r.ModelOnly {
 		out = append(out, "Build:\n\n```\n"+r.Build.Output+"\n```")
 	}
 	return out

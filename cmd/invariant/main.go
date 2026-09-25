@@ -2,9 +2,13 @@
 //
 //	invariant verify [-out DIR] DIR      run every gate check on a project
 //	invariant synthesize [-out DIR] DIR  have a coding agent write the model and code, then gate them
+//	invariant formalize [-out DIR] FILE  have a coding agent draft statements for a request
+//	invariant watch -repo OWNER/NAME     turn the repository's issues into merged pull requests
+//	invariant scope [-base REF] [HEAD]   check that a factory pull request stays in bounds
+//	invariant ratification -repo R DIR   check a factory project's ratification on GitHub
 //	invariant pin DIR                    record the current statement text as ratified
 //	invariant trace FILE                 replay a counterexample trace
-//	invariant mcp ...                    serve the gate as an MCP tool (synthesize starts it)
+//	invariant mcp ...                    serve the gate or the check to an agent (synthesize and formalize start it)
 package main
 
 import (
@@ -12,6 +16,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,9 +24,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/factory"
+	"github.com/gitdek/invariant/internal/formalize"
+	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/mcp"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/receipt"
+	"github.com/gitdek/invariant/internal/scope"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/tlc"
 	"github.com/gitdek/invariant/internal/toolchain"
@@ -31,10 +40,15 @@ import (
 const usage = `Invariant proves code against statements people ratified.
 
 Usage:
-  invariant verify [-out DIR] PROJECT       run every gate check and print the receipt
-  invariant synthesize [-out DIR] PROJECT   have a coding agent write the model and code, then gate them
-  invariant pin PROJECT                     record the statements' current text as ratified
-  invariant trace FILE                      replay a counterexample trace
+  invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
+  invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
+  invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
+  invariant watch -repo OWNER/NAME [-once]     turn the repository's issues into merged pull requests
+  invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
+  invariant ratification -repo OWNER/NAME PROJECT...
+                                               check factory projects' ratifications on GitHub
+  invariant pin PROJECT                        record the statements' current text as ratified
+  invariant trace FILE                         replay a counterexample trace
 
 Not built yet: init (see decisions/D-0013-slice-plan.md).
 `
@@ -56,6 +70,14 @@ func main() {
 		code = traceCmd(args)
 	case "synthesize":
 		code = synthesizeCmd(ctx, args)
+	case "formalize":
+		code = formalizeCmd(ctx, args)
+	case "watch":
+		code = watchCmd(ctx, args)
+	case "scope":
+		code = scopeCmd(ctx, args)
+	case "ratification":
+		code = ratificationCmd(ctx, args)
 	case "mcp":
 		code = mcpCmd(ctx, args)
 	case "init":
@@ -236,20 +258,29 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 func mcpCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	ratified := fs.String("ratified", "", "the original project, whose protected files every gate run uses")
+	formal := fs.Bool("formalize", false, "serve the check tool to a formalizing agent, instead of the gate")
 	maxRuns := fs.Int("max-runs", 4, "the most gate runs to allow")
 	logPath := fs.String("log", "", "append a line per gate run to this file")
 	fs.Parse(args)
-	if fs.NArg() != 1 || *ratified == "" {
-		fmt.Fprintln(os.Stderr, "usage: invariant mcp -ratified PROJECT [-max-runs N] [-log FILE] WORKSPACE")
+	if fs.NArg() != 1 || (*ratified == "") == !*formal {
+		fmt.Fprintln(os.Stderr, "usage: invariant mcp (-ratified PROJECT | -formalize) [-max-runs N] [-log FILE] WORKSPACE")
 		return 2
 	}
 	ws := fs.Arg(0)
-	p, err := project.Load(*ratified)
+	tc, err := toolchain.Ensure(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	tc, err := toolchain.Ensure(ctx)
+	if *formal {
+		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath)}}
+		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 1
+		}
+		return 0
+	}
+	p, err := project.Load(*ratified)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
@@ -292,4 +323,228 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// checkTool runs the gate's model checks on a formalizing agent's draft.
+func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) mcp.Tool {
+	runs := 0
+	return mcp.Tool{
+		Name: "check",
+		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
+			"the witnesses and the known bugs. It reports what failed, with counterexamples. You have %d checks in total.", maxRuns),
+		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
+			if runs >= maxRuns {
+				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
+			}
+			runs++
+			record := func(passed bool, failed ...string) {
+				if logPath != "" {
+					synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: passed, Failed: failed, At: time.Now().UTC().Format(time.RFC3339)})
+				}
+			}
+			p, r, err := formalize.Check(ctx, ws, tc)
+			switch {
+			case err != nil:
+				record(false, "draft: "+err.Error())
+				return fmt.Sprintf("The draft can't be checked: %v\n\n(Check %d of %d.)", err, runs, maxRuns), true
+			case r == nil:
+				record(true)
+				return fmt.Sprintf("proposal.json asks questions or says the issue is unsupported (%d forks), so there's nothing "+
+					"to model-check. If that's what you mean to send, you're done.\n\n(Check %d of %d.)", len(p.Forks), runs, maxRuns), false
+			}
+			record(r.Passed, verify.Failed(r)...)
+			return verify.Feedback(r) + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
+		},
+	}
+}
+
+func formalizeCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("formalize", flag.ExitOnError)
+	out := fs.String("out", "out/formalize", "where the draft, the transcript and the check log go")
+	model := fs.String("model", "opus", "the model the agent uses")
+	budget := fs.Float64("budget", 3, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
+	turns := fs.Int("max-turns", 60, "cap on the agent's turns")
+	checks := fs.Int("checks", 4, "the most model checks the agent gets")
+	timeout := fs.Duration("timeout", 25*time.Minute, "wall-clock cap on the agent's run")
+	claude := fs.String("claude", "claude", "the Claude Code CLI")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	text, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	title, body, _ := strings.Cut(strings.TrimSpace(string(text)), "\n")
+	req := formalize.Request{Repo: "local", Issue: 0, Title: strings.TrimLeft(title, "# "), Body: body, Author: "you"}
+	tc, err := toolchain.Ensure(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	f := formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
+		Binary: self, CheckRuns: *checks, Timeout: *timeout, Toolchain: tc}
+	r, err := f.Formalize(ctx, req, *out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	fmt.Printf("%s, %d turns, about $%.2f by the agent's own estimate. Checks: %d.\n\n", r.Usage.Model, r.Usage.Turns, r.Usage.CostUSD, len(r.CheckRuns))
+	switch p := r.Proposal; {
+	case r.Problem != "":
+		fmt.Println("No usable draft:", r.Problem)
+		return 1
+	case p.Unsupported != "":
+		fmt.Println("Unsupported:", p.Unsupported)
+	case len(p.Forks) > 0:
+		for _, fork := range p.Forks {
+			fmt.Printf("%s. %s\n", fork.ID, fork.Question)
+			for _, o := range fork.Options {
+				fmt.Printf("   %s. %s\n", o.ID, o.Says)
+			}
+		}
+	default:
+		fmt.Printf("Proposal %s for %s, within %v:\n", p.Hash, p.Name, p.Bounds)
+		for _, s := range p.Statements {
+			fmt.Printf("  %-12s %-9s %s\n", s.Name, s.Kind, s.Says)
+		}
+		fmt.Printf("\nChecked: TLC explored %d states; witnesses and known bugs as above. Draft in %s.\n", r.Report.Design.DistinctStates, *out)
+	}
+	return 0
+}
+
+func watchCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("watch", flag.ExitOnError)
+	repo := fs.String("repo", "", "the repository to watch, as owner/name")
+	every := fs.Duration("every", time.Minute, "how often to poll GitHub")
+	once := fs.Bool("once", false, "poll once and exit")
+	base := fs.String("base", "main", "the branch pull requests merge into")
+	projects := fs.String("projects", "examples", "the directory new projects go in")
+	cache, _ := os.UserCacheDir()
+	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "where the clone, transcripts and logs go")
+	model := fs.String("model", "opus", "the model the agents use")
+	fbudget := fs.Float64("formalize-budget", 3, "cap on a formalization's estimated cost, in USD")
+	budget := fs.Float64("budget", 5, "cap on a synthesis's estimated cost, in USD")
+	turns := fs.Int("max-turns", 80, "cap on an agent's turns")
+	runs := fs.Int("gate-runs", 4, "the most gate runs a synthesis gets")
+	timeout := fs.Duration("timeout", 40*time.Minute, "wall-clock cap on an agent's run")
+	claude := fs.String("claude", "claude", "the Claude Code CLI")
+	fs.Parse(args)
+	if *repo == "" || fs.NArg() != 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
+	fail := func(err error) int { logger.Print(err); return 2 }
+
+	gh := github.Client{Repo: *repo}
+	me, err := gh.Viewer(ctx)
+	if err != nil {
+		return fail(fmt.Errorf("gh must be logged in: %w", err))
+	}
+	name := me.Name
+	if name == "" {
+		name = me.Login
+	}
+	dir := filepath.Join(*work, filepath.FromSlash(*repo))
+	clone := factory.Clone{Dir: filepath.Join(dir, "clone"), Remote: "https://github.com/" + *repo + ".git",
+		Name: name, Email: fmt.Sprintf("%d+%s@users.noreply.github.com", me.ID, me.Login)}
+	if err := clone.Ensure(ctx); err != nil {
+		return fail(err)
+	}
+	tc, err := toolchain.Ensure(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fail(err)
+	}
+	f := &factory.Factory{
+		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate",
+		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
+		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns},
+			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc},
+		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
+			Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc}},
+	}
+	if err := f.Prepare(ctx); err != nil {
+		return fail(err)
+	}
+	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, me.Login, clone.Name, clone.Email)
+	if *once {
+		if err := f.Poll(ctx); err != nil {
+			return fail(err)
+		}
+		return 0
+	}
+	if err := f.Watch(ctx, *every); err != nil && ctx.Err() == nil {
+		return fail(err)
+	}
+	return 0
+}
+
+func scopeCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("scope", flag.ExitOnError)
+	base := fs.String("base", "origin/main", "the ref the pull request merges into")
+	dir := fs.String("C", ".", "the git repository")
+	fs.Parse(args)
+	head := "HEAD"
+	if fs.NArg() == 1 {
+		head = fs.Arg(0)
+	}
+	r, err := scope.Check(ctx, *dir, *base, head)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	if !r.OK() {
+		fmt.Printf("❌ Out of scope:\n- %s\n", strings.Join(r.Problems, "\n- "))
+		return 1
+	}
+	kind := "changes"
+	if r.New {
+		kind = "adds"
+	}
+	fmt.Printf("✅ In scope: it %s one project, %s, in %d files.\n", kind, r.Project, len(r.Files))
+	return 0
+}
+
+func ratificationCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("ratification", flag.ExitOnError)
+	repo := fs.String("repo", os.Getenv("GITHUB_REPOSITORY"), "the repository ratifying comments must be in, as owner/name")
+	fs.Parse(args)
+	if fs.NArg() == 0 || *repo == "" {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	gh := github.Client{Repo: *repo}
+	code := 0
+	for _, dir := range fs.Args() {
+		p, err := project.Load(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invariant: %s: %v\n", dir, err)
+			code = 2
+			continue
+		}
+		r := p.Lock.Ratified
+		switch {
+		case r == nil:
+			fmt.Printf("✅ %s: ratified by hand, recorded in %s\n", dir, p.Lock.Decision)
+		case factory.VerifyRatification(ctx, gh, *repo, p.Lock) == nil:
+			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
+		default:
+			fmt.Printf("❌ %s: %v\n", dir, factory.VerifyRatification(ctx, gh, *repo, p.Lock))
+			code = 1
+		}
+	}
+	return code
 }

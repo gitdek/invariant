@@ -1,0 +1,340 @@
+package factory
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gitdek/invariant/internal/formalize"
+	"github.com/gitdek/invariant/internal/github"
+	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/synth"
+	"github.com/gitdek/invariant/internal/verify"
+)
+
+// fakeGitHub is an in-memory repository on GitHub. Pull requests point at
+// branches in a real git origin, so their heads are real commits.
+type fakeGitHub struct {
+	t        *testing.T
+	origin   string
+	me       string
+	issues   map[int]*github.Issue
+	comments map[int][]github.Comment
+	events   map[int][]github.Event
+	perms    map[string]string
+	prs      map[int]*github.PullRequest
+	checks   map[string][]github.CheckRun
+	merged   []int
+	deleted  []string
+	bodies   map[int]string
+	nextID   int64
+	nextPR   int
+}
+
+func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
+	return &fakeGitHub{t: t, origin: origin, me: "gitdek", issues: map[int]*github.Issue{}, comments: map[int][]github.Comment{},
+		events: map[int][]github.Event{}, perms: map[string]string{"gitdek": "admin", "mallory": "read"},
+		prs: map[int]*github.PullRequest{}, checks: map[string][]github.CheckRun{}, bodies: map[int]string{}, nextID: 1000, nextPR: 100}
+}
+
+func (g *fakeGitHub) open(n int, by, title, body string, labels ...string) {
+	issue := &github.Issue{Number: n, Title: title, Body: body, User: github.User{Login: by}, State: "open",
+		URL: fmt.Sprintf("https://github.com/o/r/issues/%d", n), CreatedAt: "2026-09-25T10:00:00Z"}
+	for _, l := range labels {
+		issue.Labels = append(issue.Labels, github.Label{Name: l})
+		g.events[n] = append(g.events[n], github.Event{Event: "labeled", Actor: github.User{Login: by}, Label: &github.Label{Name: l}})
+	}
+	g.issues[n] = issue
+}
+
+// say adds a person's comment.
+func (g *fakeGitHub) say(issue int, by, body string) github.Comment {
+	g.nextID++
+	c := github.Comment{ID: g.nextID, Body: body, User: github.User{Login: by},
+		URL:      fmt.Sprintf("https://github.com/o/r/issues/%d#issuecomment-%d", issue, g.nextID),
+		IssueURL: fmt.Sprintf("https://api.github.com/repos/o/r/issues/%d", issue), CreatedAt: "2026-09-25T11:00:00Z"}
+	g.comments[issue] = append(g.comments[issue], c)
+	return c
+}
+
+// posts are the factory's comments on an issue.
+func (g *fakeGitHub) posts(issue int) []Post {
+	var out []Post
+	for _, c := range g.comments[issue] {
+		if m, ok := DecodeMarker(c.Body); ok {
+			out = append(out, Post{c, m})
+		}
+	}
+	return out
+}
+
+func (g *fakeGitHub) last(issue int) Post {
+	ps := g.posts(issue)
+	if len(ps) == 0 {
+		g.t.Fatalf("#%d has no factory posts", issue)
+	}
+	return ps[len(ps)-1]
+}
+
+func (g *fakeGitHub) labelsOf(issue int) []string {
+	var out []string
+	for _, l := range g.issues[issue].Labels {
+		out = append(out, l.Name)
+	}
+	return out
+}
+
+func (g *fakeGitHub) OpenIssues(context.Context) ([]github.Issue, error) {
+	var out []github.Issue
+	for _, i := range g.issues {
+		if i.State == "open" {
+			out = append(out, *i)
+		}
+	}
+	return out, nil
+}
+
+func (g *fakeGitHub) Comments(_ context.Context, n int) ([]github.Comment, error) {
+	return append([]github.Comment(nil), g.comments[n]...), nil
+}
+
+func (g *fakeGitHub) Events(_ context.Context, n int) ([]github.Event, error) {
+	return g.events[n], nil
+}
+
+func (g *fakeGitHub) Permission(_ context.Context, login string) (string, error) {
+	if p, ok := g.perms[login]; ok {
+		return p, nil
+	}
+	return "none", nil
+}
+
+func (g *fakeGitHub) PostComment(_ context.Context, n int, body string) (github.Comment, error) {
+	return g.say(n, g.me, body), nil
+}
+
+func (g *fakeGitHub) EnsureLabel(context.Context, string, string, string) error { return nil }
+
+func (g *fakeGitHub) AddLabels(_ context.Context, n int, labels ...string) error {
+	if i, ok := g.issues[n]; ok {
+		for _, l := range labels {
+			if !i.HasLabel(l) {
+				i.Labels = append(i.Labels, github.Label{Name: l})
+			}
+		}
+	}
+	return nil
+}
+
+func (g *fakeGitHub) RemoveLabel(_ context.Context, n int, label string) error {
+	if i, ok := g.issues[n]; ok {
+		var keep []github.Label
+		for _, l := range i.Labels {
+			if l.Name != label {
+				keep = append(keep, l)
+			}
+		}
+		i.Labels = keep
+	}
+	return nil
+}
+
+func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullRequest) (github.PullRequest, error) {
+	g.nextPR++
+	out := &github.PullRequest{Number: g.nextPR, State: "open", Draft: pr.Draft, URL: fmt.Sprintf("https://github.com/o/r/pull/%d", g.nextPR),
+		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}}
+	g.prs[out.Number] = out
+	g.bodies[out.Number] = pr.Body
+	return *out, nil
+}
+
+func (g *fakeGitHub) head(branch string) string {
+	out, err := exec.Command("git", "-C", g.origin, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		g.t.Fatalf("branch %s isn't in origin: %v", branch, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (g *fakeGitHub) PullRequest(_ context.Context, n int) (github.PullRequest, error) {
+	pr, ok := g.prs[n]
+	if !ok {
+		return github.PullRequest{}, github.ErrNotFound
+	}
+	if pr.State == "open" {
+		pr.Head.SHA = g.head(pr.Head.Ref)
+	}
+	return *pr, nil
+}
+
+func (g *fakeGitHub) CheckRuns(_ context.Context, sha, name string) ([]github.CheckRun, error) {
+	var out []github.CheckRun
+	for _, r := range g.checks[sha] {
+		if r.Name == name {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// ci records a completed invariant/gate run on a pull request's head.
+func (g *fakeGitHub) ci(pr int, conclusion string) {
+	sha := g.head(g.prs[pr].Head.Ref)
+	g.nextID++
+	g.checks[sha] = append(g.checks[sha], github.CheckRun{ID: g.nextID, Name: "invariant/gate", Status: "completed",
+		Conclusion: conclusion, URL: fmt.Sprintf("https://github.com/o/r/actions/runs/%d", g.nextID), HeadSHA: sha})
+}
+
+func (g *fakeGitHub) Merge(_ context.Context, n int, sha, method string) (string, error) {
+	pr := g.prs[n]
+	if pr.Head.SHA != sha {
+		return "", fmt.Errorf("head moved")
+	}
+	pr.Merged, pr.State = true, "closed"
+	g.merged = append(g.merged, n)
+	return "abc123merge", nil
+}
+
+func (g *fakeGitHub) DeleteBranch(_ context.Context, branch string) error {
+	g.deleted = append(g.deleted, branch)
+	return nil
+}
+
+// scriptedFormalizer answers with forks until the forks are decided, then
+// with a real, pinned proposal.
+type scriptedFormalizer struct {
+	t        *testing.T
+	requests []formalize.Request
+	forks    []formalize.Fork
+	fail     string
+}
+
+const bufferModule = `---- MODULE BoundedBuffer ----
+EXTENDS Naturals, Sequences
+CONSTANTS Cap, Msgs
+VARIABLES buf
+
+vars == <<buf>>
+
+WithinCap == Len(buf) <= Cap
+
+TypeOK == buf \in Seq(Msgs)
+
+CanFill == Len(buf) = Cap
+
+Init == buf = <<>>
+
+Put(m) == Len(buf) < Cap /\ buf' = Append(buf, m)
+
+Take == Len(buf) > 0 /\ buf' = Tail(buf)
+
+Next == (\E m \in Msgs : Put(m)) \/ Take
+
+PutWhenFull == \E m \in Msgs : buf' = Append(buf, m)
+
+Spec == Init /\ [][Next]_vars
+====
+`
+
+func bufferProposal(t *testing.T) *formalize.Proposal {
+	p := &formalize.Proposal{ModuleText: bufferModule, Draft: formalize.Draft{
+		Name: "bounded buffer", Slug: "bounded-buffer", Module: "BoundedBuffer", Package: "buffer",
+		Bounds: map[string]string{"Cap": "2", "Msgs": "{m1, m2}"},
+		Statements: []project.Statement{
+			{Name: "Spec", Kind: project.Spec, Says: "The system starts in Init, and every step is a Next step."},
+			{Name: "WithinCap", Kind: project.Invariant, Says: "The buffer never holds more than its capacity."},
+			{Name: "TypeOK", Kind: project.Invariant, Says: "The buffer always holds a sequence of messages."},
+			{Name: "CanFill", Kind: project.Witness, Says: "The buffer can fill up."},
+			{Name: "PutWhenFull", Kind: project.Bug, Says: "A producer adds a message to a full buffer.", Expect: "WithinCap"},
+		},
+	}}
+	if err := p.Pin(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request, out string) (*formalize.Result, error) {
+	s.requests = append(s.requests, req)
+	if s.fail != "" {
+		return &formalize.Result{Problem: s.fail}, nil
+	}
+	if len(req.Answers) < len(s.forks) {
+		return &formalize.Result{Proposal: &formalize.Proposal{Draft: formalize.Draft{Forks: s.forks}}}, nil
+	}
+	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
+		Witnesses: []verify.Witness{{Name: "CanFill", Reached: true, Steps: 2}}, Bugs: []verify.Bug{{Name: "PutWhenFull", Caught: true}}}
+	return &formalize.Result{Proposal: bufferProposal(s.t), Report: report}, nil
+}
+
+// fakeBuilder writes a Go package into the ratified project, the way
+// synthesis would, and reports the gate result it's told to.
+type fakeBuilder struct {
+	pass  bool
+	built []string
+}
+
+func (b *fakeBuilder) Build(_ context.Context, dir, out string) (*synth.Result, error) {
+	b.built = append(b.built, dir)
+	result := filepath.Join(out, "result")
+	if err := copyResult(dir, result); err != nil {
+		return nil, err
+	}
+	code := "// +gobra\n\npackage buffer\n\nconst Cap = 2\n"
+	if err := os.MkdirAll(filepath.Join(result, "buffer"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(result, "buffer", "buffer.go"), []byte(code), 0o644); err != nil {
+		return nil, err
+	}
+	final := &verify.Report{Project: "bounded buffer", Passed: b.pass, Assurance: "proved",
+		Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3}, Build: verify.Build{Passed: b.pass}}
+	return &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3},
+		GateRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}, nil
+}
+
+// gitRepos makes an origin with one project already under examples, and the
+// factory's clone of it.
+func gitRepos(t *testing.T) (origin string, clone Clone) {
+	t.Helper()
+	root := t.TempDir()
+	origin = filepath.Join(root, "origin.git")
+	seed := filepath.Join(root, "seed")
+	git(t, root, "init", "--quiet", "--bare", "-b", "main", origin)
+	git(t, root, "init", "--quiet", "-b", "main", seed)
+	for name, text := range map[string]string{
+		"README.md": "# repo\n",
+		"examples/02-twophase-commit/.invariant/invariant.json": `{"name": "two-phase commit"}`,
+		"examples/02-twophase-commit/.invariant/ratified.lock":  `{"decision": "D-0027"}`,
+	} {
+		path := filepath.Join(seed, name)
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, []byte(text), 0o644)
+	}
+	git(t, seed, "add", "-A")
+	git(t, seed, "-c", "user.name=Seed", "-c", "user.email=seed@example.com", "commit", "--quiet", "-m", "seed")
+	git(t, seed, "push", "--quiet", origin, "main")
+	clone = Clone{Dir: filepath.Join(root, "clone"), Remote: origin, Name: "Joseph", Email: "7275925+gitdek@users.noreply.github.com"}
+	if err := clone.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return origin, clone
+}
+
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (g *fakeGitHub) prBody(n int) string { return g.bodies[n] }

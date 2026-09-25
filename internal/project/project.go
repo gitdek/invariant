@@ -3,6 +3,8 @@
 package project
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,9 +30,40 @@ type Manifest struct {
 // and the bounds TLC checks them within. The factory may not edit it;
 // changing it is a decision.
 type Lock struct {
-	Decision   string            `json:"decision"`
+	// Decision names the entry in decisions/log.md that ratified a
+	// hand-built project. A factory project has Ratified instead.
+	Decision   string            `json:"decision,omitempty"`
+	Ratified   *Ratification     `json:"ratified,omitempty"`
 	Bounds     map[string]string `json:"bounds"`
 	Statements []Statement       `json:"statements"`
+}
+
+// Ratification records who ratified a factory project's statements, and
+// where: a person with write access replied to the factory's proposal on its
+// issue with /invariant ratify and the proposal's hash (D-0034).
+type Ratification struct {
+	By       string `json:"by"`       // the GitHub login that ratified
+	At       string `json:"at"`       // when, in RFC 3339
+	Issue    int    `json:"issue"`    // the issue the proposal answers
+	Comment  string `json:"comment"`  // the ratifying comment's URL
+	Proposal string `json:"proposal"` // the ProposalHash that was ratified
+}
+
+// ProposalHash identifies what a person ratifies: the bounds, and every
+// statement with its plain-language meaning and its pin. A ratifying comment
+// names it, and anyone can recompute it from the lock.
+func ProposalHash(bounds map[string]string, statements []Statement) string {
+	b, _ := json.Marshal(struct {
+		Bounds     map[string]string `json:"bounds"`
+		Statements []Statement       `json:"statements"`
+	}{bounds, statements})
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// Validate checks a lock and manifest together, as Load does.
+func Validate(m Manifest, l Lock) error {
+	return (&Project{Manifest: m, Lock: l}).validate()
 }
 
 // Statement kinds.
@@ -107,6 +140,13 @@ func (p *Project) validate() error {
 	}
 	if len(invariants) == 0 {
 		return fmt.Errorf("%s: no invariants", lockFile)
+	}
+	names := map[string]bool{}
+	for _, s := range l.Statements {
+		if names[s.Name] {
+			return fmt.Errorf("%s: statement %s appears twice", lockFile, s.Name)
+		}
+		names[s.Name] = true
 	}
 	for _, s := range l.Statements {
 		if s.Kind == Bug && !invariants[s.Expect] {
