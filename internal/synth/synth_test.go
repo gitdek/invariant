@@ -111,3 +111,41 @@ func TestPrompt(t *testing.T) {
 		t.Error("with a draft model, the prompt should say the model is drafted")
 	}
 }
+
+// The agent's sandbox: the file tools and Invariant's tool, and nothing in
+// the home directory.
+func TestClaudeCodeSandbox(t *testing.T) {
+	args, err := ClaudeCode{Model: "opus", BudgetUSD: 5, MaxTurns: 80}.args(Job{Prompt: "p", GateServer: []string{"invariant", "mcp"}, Tools: []string{"check"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		if strings.HasPrefix(args[i], "--") {
+			flags[args[i]] = args[i+1]
+		}
+	}
+	if flags["--tools"] != "Read,Write,Edit,Glob,Grep" {
+		t.Errorf("--tools = %q; the agent must get only the file tools", flags["--tools"])
+	}
+	if flags["--allowedTools"] != "Read,Write,Edit,Glob,Grep,mcp__invariant__check" {
+		t.Errorf("--allowedTools = %q", flags["--allowedTools"])
+	}
+	for _, deny := range []string{"Bash", "WebFetch", "Read(~/**)", "Grep(~/**)", "Glob(~/**)", "Write(~/**)", "Edit(~/**)"} {
+		if !strings.Contains(","+flags["--disallowedTools"]+",", ","+deny+",") {
+			t.Errorf("--disallowedTools lacks %s", deny)
+		}
+	}
+	if flags["--mcp-config"] == "" || !contains(args, "--strict-mcp-config") {
+		t.Error("the agent must get Invariant's MCP server and no other")
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}

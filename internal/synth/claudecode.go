@@ -14,9 +14,13 @@ import (
 )
 
 // ClaudeCode runs the official Claude Code CLI headlessly (claude -p), on the
-// user's own account and machine (D-0027). The agent can read and edit files
-// in its workspace and call the gate. It has no shell, no web and no
-// subagents, so any code it writes runs only inside the gate's sandbox.
+// user's own account and machine (D-0028). The agent has the file tools and
+// Invariant's own MCP tools, and nothing else: no shell, no web, no
+// subagents, so any code it writes runs only inside the gate's sandbox. It
+// can't read anything in the user's home directory either, so nothing it
+// writes, which the factory may commit, can carry a secret from the host
+// (D-0037). Its workspace must be outside the home directory, as the system
+// temporary directory is.
 type ClaudeCode struct {
 	Binary    string  // the claude CLI
 	Model     string  // "opus", "sonnet" or a full model name
@@ -26,14 +30,17 @@ type ClaudeCode struct {
 
 func (c ClaudeCode) Name() string { return "claude-code" }
 
-func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
+// fileTools are the only built-in tools an agent gets.
+const fileTools = "Read,Write,Edit,Glob,Grep"
+
+func (c ClaudeCode) args(job Job) ([]string, error) {
 	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
 		"invariant": map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]},
 	}})
 	if err != nil {
-		return Usage{}, err
+		return nil, err
 	}
-	allowed := "Read,Write,Edit,Glob,Grep"
+	allowed := fileTools
 	tools := job.Tools
 	if len(tools) == 0 {
 		tools = []string{"gate"}
@@ -41,18 +48,28 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	for _, t := range tools {
 		allowed += ",mcp__invariant__" + t
 	}
-	args := []string{
+	return []string{
 		"-p", job.Prompt,
 		"--output-format", "stream-json", "--verbose",
 		"--model", c.Model,
 		"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
 		"--max-turns", strconv.Itoa(c.MaxTurns),
 		"--mcp-config", string(config), "--strict-mcp-config",
+		// --tools sets which built-in tools exist at all; --allowedTools only
+		// pre-approves some of them.
+		"--tools", fileTools,
 		"--allowedTools", allowed,
-		"--disallowedTools", "Bash,WebFetch,WebSearch,Task,NotebookEdit",
+		"--disallowedTools", "Bash,WebFetch,WebSearch,Task,NotebookEdit,Read(~/**),Edit(~/**),Write(~/**),Glob(~/**),Grep(~/**)",
 		"--permission-mode", "acceptEdits",
 		"--setting-sources", "project",
 		"--no-session-persistence",
+	}, nil
+}
+
+func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
+	args, err := c.args(job)
+	if err != nil {
+		return Usage{}, err
 	}
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace

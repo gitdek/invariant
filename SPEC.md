@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0036 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0037 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -54,6 +54,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Only people with write access can direct it: `/invariant solve`, `choose`, `revise` and `ratify`. Everyone else is ignored. `D-0014` `D-0036`
   - It keeps no state of its own. Each of its comments records the issue's state in a hidden marker, and a status label shows it. `D-0036`
   - The agents never touch GitHub. Only the factory's own code posts, pushes and merges. Synthesis runs with no secrets and no network. `D-0014` `D-0036`
+  - Agents get only the file tools and Invariant's own tool, and they can't read the home directory. `D-0037`
 - Formalization: an agent drafts the statements, their bounds and a draft model for an issue. When the issue allows materially different behaviors, it lists them as forks in a decision request instead of choosing. The factory posts a proposal only after TLC has checked it against the draft model. `D-0002` `D-0036`
 - Ratification happens on the issue. The proposal shows each statement in plain language and TLA+, with the hash of the whole proposal. A writer ratifies by commenting `/invariant ratify <hash>`. The lock records who ratified it, where, and what. `D-0034`
 - Each ratified issue becomes a new project under `examples/`. Its ratification is the first commit on the issue's branch, and synthesis starts from the drafted model. `D-0033` `D-0036`
