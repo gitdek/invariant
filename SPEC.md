@@ -92,7 +92,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   2. Synthesis for Go. Done.
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
-  5. TypeScript and Python synthesis. Done. `D-0042` `D-0043`
+  5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
   6. Changing existing projects, so that Invariant can start building itself. Next. `D-0042`
 
 ## Project
