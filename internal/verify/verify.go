@@ -299,11 +299,15 @@ func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Repo
 }
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
-// results and verifier pins. It leaves out timestamps, test timings and the
-// Go toolchain's patch version, so a local run and a CI run of the same
-// commit have the same fingerprint.
+// results and verifier pins. It leaves out timestamps, test timings, the Go
+// toolchain's patch version and where traces were written, so a local run
+// and a CI run of the same commit have the same fingerprint.
 func Fingerprint(r Report) string {
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go = "", "", "", ""
+	r.Mutants = append([]Mutant(nil), r.Mutants...)
+	for i := range r.Mutants {
+		r.Mutants[i].Trace = ""
+	}
 	b, _ := json.Marshal(r)
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])

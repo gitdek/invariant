@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.svg">
-    <img src="docs/brand/logo.svg" alt="Invariant" width="460">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-animated-dark.svg">
+    <img src="docs/brand/logo-animated.svg" alt="Invariant: a state orbiting a fixed point that never moves" width="480">
   </picture>
 </p>
 
@@ -42,6 +42,22 @@ Invariant splits the work where it belongs:
 4. **Synthesize.** Invariant writes the Go implementation and the TLA+ model. It keeps repairing them against counterexamples until the gate passes.
 5. **Gate and merge.** CI re-runs every check on the committed artifacts. The pull request merges only if every check passes.
 
+## Watch it catch a bug
+
+<p align="center">
+  <img src="docs/assets/counterexample.svg" alt="Replay of a real TLC counterexample. r1 prepares; the buggy coordinator commits after hearing from r1 alone; r1 commits; r2 aborts. TCConsistent is violated in 5 steps." width="100%">
+</p>
+
+Passing TLC only means something if the invariants could have failed. So the gate plants known bugs in the model and requires TLC to catch each one. This is the real counterexample for the two-phase commit example's planted bug: a coordinator that commits after hearing from one resource manager instead of all three. TLC finds the shortest path to an inconsistent commit, which takes five steps.
+
+## One action, one contract
+
+<p align="center">
+  <img src="docs/assets/model-and-code.svg" alt="The TLA+ action RMPrepare beside the Go function RMPrepare. Its Gobra requires clauses restate the action's enabling condition, and its ensures clauses restate the effect and everything left unchanged." width="100%">
+</p>
+
+The factory owns both the model and the code, and each Go function's contract restates exactly one TLA+ action. `requires` is the action's enabling condition. `ensures` is its effect, including everything the action leaves unchanged. TLC checks the model, Gobra checks the code, and a test confirms that both reach the same 288 states.
+
 ## The gate
 
 | Check | Tool | Fails when |
@@ -66,6 +82,13 @@ go run ./cmd/invariant verify examples/02-twophase-commit
 
 It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
 
+<p align="center">
+  <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit. Every check passed: 4 of 4 pins match; TLC found no violations or deadlocks in 288 distinct states; 2 of 2 witnesses were reached; 1 of 1 known bugs was caught; Gobra verified 10 of 10 functions; go vet and go test passed." width="100%">
+</p>
+
+<details>
+<summary>The receipt as text</summary>
+
 | Check | Result | Evidence |
 | :-- | :-- | :-- |
 | Pinned statements | ✅ 4 of 4 match | recorded in D-0019 |
@@ -76,6 +99,8 @@ It prints a receipt. This is the real one for the [two-phase commit example](exa
 | Build | ✅ go vet, go test | |
 
 These results cover `RM = {r1, r2, r3}`. Within those bounds, TLC's search is exhaustive. The receipt claims nothing beyond them.
+
+</details>
 
 ## Status
 
@@ -97,5 +122,6 @@ This repository runs on its own rule: **a decision that isn't written down didn'
 <br>
 
 <p align="center">
-  <sub>Built by <a href="https://github.com/gitdek">@gitdek</a> · <a href="https://puglisij.com">puglisij.com</a></sub>
+  <sub>Built by <a href="https://github.com/gitdek">@gitdek</a> · <a href="https://puglisij.com">puglisij.com</a><br>
+  Every graphic above is generated from real <code>invariant verify</code> output by <a href="docs/assets/generate.py"><code>docs/assets/generate.py</code></a>.</sub>
 </p>

@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0021 · 2026-09-25
+**Rolled up through** D-0025 · 2026-09-25
 
 ## What Invariant is
 
@@ -27,7 +27,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 ## System
 
 - Invariant is written in Go. `D-0001`
-- Designs are model-checked with TLA+ and TLC. Generated code is Go, verified with Gobra. Lean 4 has no role in v1. `D-0003` `D-0010`
+- Invariant targets Go, TypeScript and Python, the languages of @gitdek's projects. `D-0023`
+- Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra. Lean 4 has no role in v1. `D-0003` `D-0010`
 - Verifiers run in Docker and are pinned. `D-0000` `D-0013` `D-0016` `D-0020`
   - TLC is v1.7.4, pinned by SHA-256, running in `eclipse-temurin` pinned by digest.
   - Gobra is pinned by digest, and it also checks integer overflow.
@@ -65,6 +66,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 ## Project
 
 - Brand: a mark of one state orbiting a fixed point, with the invariant in the accent color. `D-0006` `D-0009`
+- The README's graphics are animated, and they're generated from real `invariant verify` output. `D-0015` `D-0025`
 - Hosted at `github.com/gitdek/invariant`. Private now, public later. `D-0007`
 - Licensed under Apache-2.0. `D-0012`
 - A portfolio piece on puglisij.com, with a project card, the Trace Explorer, the Dual Proof Terminal and the PR receipt badge. `D-0008`
@@ -77,4 +79,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 | :-- | :-- | :-- |
 | D-0019 | The exact text of the two-phase commit statements and its known bug | proposed |
 | D-0022 | A `decided` status for execution-level calls | proposed |
-| [D-0023](decisions/D-0023-more-languages.md) | More target languages: TypeScript, Python | open |
+| [D-0024](decisions/D-0024-checking-typescript-and-python.md) | How TypeScript and Python code gets checked, and when | proposed |

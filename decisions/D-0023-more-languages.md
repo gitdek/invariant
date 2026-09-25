@@ -3,11 +3,14 @@ id: D-0023
 title: More target languages
 date: 2026-09-25
 door: one-way
-status: open
+status: ratified
+ratified_by: "@gitdek"
 source: "@gitdek's questions while slice 1 was being built (Claude Code session 2f96fee2)"
 ---
 
-# D-0023 · More target languages (open)
+# D-0023 · More target languages
+
+**Decision.** Invariant supports Go, TypeScript and Python targets, because @gitdek's projects are mostly in those three languages. Go keeps Gobra ([D-0003](D-0003-go-with-gobra.md)). How TypeScript and Python code gets checked is [D-0024](D-0024-checking-typescript-and-python.md).
 
 **The fork.** @gitdek asked how Invariant would generate and verify TypeScript and Python.
 
@@ -30,4 +33,3 @@ Build and scope rules change too:
 
 *Claude suggests Python with Nagini first, because it's the closest match to what the gate already does.*
 
-**Nothing is decided yet.** Revisit after slice 3, or sooner if a real use needs another language.

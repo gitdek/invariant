@@ -11,7 +11,6 @@ import os
 import sys
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
-os.makedirs(OUT, exist_ok=True)
 
 S = 5.0   # wordmark stroke
 R = 21.0  # ring radius
@@ -97,6 +96,7 @@ def svg(viewbox, w, h, body, title="Invariant"):
 
 
 def write(name, text):
+    os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, name), "w") as fh:
         fh.write(text)
 
@@ -107,20 +107,27 @@ MX, MY = PAD + R + S / 2, 41.5
 WX = MX + R + S / 2 + GAP
 W = WX + WORD_W + PAD
 TOP, BOT = 12.5, 70.0
-for name, c in (("logo.svg", LIGHT), ("logo-dark.svg", DARK)):
-    body = mark(MX, MY, c, "    ") + "\n    " + wordmark(WX, c, "    ")
-    write(name, svg(f"0 {f(TOP)} {f(W)} {f(BOT - TOP)}", f(W * 2), f((BOT - TOP) * 2), body))
 
-# Standalone mark, square.
-for name, c in (("mark.svg", LIGHT), ("mark-dark.svg", DARK)):
-    write(name, svg("-27 -27 54 54", 256, 256, mark(0, 0, c, "    ", ICON)))
 
-# App-style tile for avatars, favicons and the portfolio card.
-tile = (
-    '<rect x="-28" y="-28" width="56" height="56" rx="12.5" fill="#0E1116" stroke="none"/>\n'
-    '    <g transform="scale(0.64)">\n      '
-    + mark(0, 0, DARK, "      ", ICON)
-    + "\n    </g>"
-)
-write("mark-tile.svg", svg("-28 -28 56 56", 512, 512, tile))
-print("wrote", sorted(os.listdir(OUT)))
+def main():
+    for name, c in (("logo.svg", LIGHT), ("logo-dark.svg", DARK)):
+        body = mark(MX, MY, c, "    ") + "\n    " + wordmark(WX, c, "    ")
+        write(name, svg(f"0 {f(TOP)} {f(W)} {f(BOT - TOP)}", f(W * 2), f((BOT - TOP) * 2), body))
+
+    # Standalone mark, square.
+    for name, c in (("mark.svg", LIGHT), ("mark-dark.svg", DARK)):
+        write(name, svg("-27 -27 54 54", 256, 256, mark(0, 0, c, "    ", ICON)))
+
+    # App-style tile for avatars, favicons and the portfolio card.
+    tile = (
+        '<rect x="-28" y="-28" width="56" height="56" rx="12.5" fill="#0E1116" stroke="none"/>\n'
+        '    <g transform="scale(0.64)">\n      '
+        + mark(0, 0, DARK, "      ", ICON)
+        + "\n    </g>"
+    )
+    write("mark-tile.svg", svg("-28 -28 56 56", 512, 512, tile))
+    print("wrote", sorted(os.listdir(OUT)))
+
+
+if __name__ == "__main__":
+    main()
