@@ -99,3 +99,30 @@ func TestSeedAmendment(t *testing.T) {
 		t.Error("the prompt should say this is an amendment")
 	}
 }
+
+// A statement whose own text stays the same can still change, through a
+// definition it depends on: Spec changes when vars gains a variable.
+func TestDiffThroughAHelper(t *testing.T) {
+	c := current(t)
+	p, err := Read(workspace(t, map[string]func(string) string{
+		"BoundedBuffer.tla": func(s string) string { return strings.Replace(s, "vars == <<buf>>", "vars == <<buf, dropped>>", 1) },
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Amend(c); err != nil {
+		t.Fatal(err)
+	}
+	d := Diff(c, p)
+	for _, ch := range d.Statements {
+		if ch.Name != "Spec" {
+			continue
+		}
+		if ch.How != Changed || !ch.OwnTextSame() || !reflect.DeepEqual(ch.Through, []string{"vars"}) {
+			t.Errorf("Spec should change only through vars: %+v", ch)
+		}
+	}
+	if len(d.Definitions) != 1 || d.Definitions[0].Name != "vars" || !strings.Contains(d.Definitions[0].NewText, "dropped") {
+		t.Errorf("definitions = %+v", d.Definitions)
+	}
+}

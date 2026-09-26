@@ -556,7 +556,7 @@ func TestAmendment(t *testing.T) {
 	}
 	for _, want := range []string{"amendment for ratification", "It amends the statements ratified in #1", "**This removes `CanFill`.**",
 		"**This changes the invariant `WithinCap`.**", "| `CanFill` | **removed** witness |", "*(was: The buffer never holds more than its capacity.)*",
-		"Unchanged: `Spec`, `TypeOK`, `PutWhenFull`.", "WithinCap == Len(buf) < Cap + 1"} {
+		"Unchanged: `Spec`, `TypeOK` and `PutWhenFull`.", "WithinCap == Len(buf) < Cap + 1"} {
 		if !strings.Contains(proposal.Comment.Body, want) {
 			t.Errorf("the amendment's proposal lacks %q:\n%s", want, proposal.Comment.Body)
 		}
@@ -642,6 +642,14 @@ func TestProjectLine(t *testing.T) {
 		".github/workflows": true, "a/./b": true, "has space": true} {
 		if got := badDir(dir) != ""; got != bad {
 			t.Errorf("badDir(%q) = %v", dir, got)
+		}
+	}
+}
+
+func TestList(t *testing.T) {
+	for names, want := range map[string]string{"": "", "a": "`a`", "a b": "`a` and `b`", "a b c": "`a`, `b` and `c`"} {
+		if got := list(strings.Fields(names)); got != want {
+			t.Errorf("list(%q) = %q; want %q", names, got, want)
 		}
 	}
 }

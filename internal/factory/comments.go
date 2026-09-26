@@ -83,9 +83,9 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	names := func(cs []formalize.Change) string {
 		var out []string
 		for _, c := range cs {
-			out = append(out, "`"+c.Name+"`")
+			out = append(out, c.Name)
 		}
-		return strings.Join(out, ", ")
+		return list(out)
 	}
 	if removed := ch.Of(formalize.Removed); len(removed) > 0 {
 		fmt.Fprintf(&b, "**This removes %s.** Nothing will hold the code to it any more.\n\n", names(removed))
@@ -96,8 +96,12 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 			loosened = append(loosened, c)
 		}
 	}
-	if len(loosened) > 0 {
+	switch len(loosened) {
+	case 0:
+	case 1:
 		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text below.\n\n", names(loosened))
+	default:
+		fmt.Fprintf(&b, "**This changes the invariants %s.** A changed invariant can promise less than before, so compare their old and new text below.\n\n", names(loosened))
 	}
 	b.WriteString("| Statement | Change | Says |\n| :-- | :-- | :-- |\n")
 	for _, c := range ch.Statements {
@@ -109,7 +113,11 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 			if c.Old.Says != c.New.Says {
 				says += " *(was: " + c.Old.Says + ")*"
 			}
-			fmt.Fprintf(&b, "| `%s` | changed %s | %s |\n", c.Name, c.New.Kind, says)
+			how := "changed " + c.New.Kind
+			if c.OwnTextSame() && len(c.Through) > 0 {
+				how += ", only through " + list(c.Through)
+			}
+			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", c.Name, how, says)
 		case formalize.Removed:
 			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, c.Old.Says)
 		}
@@ -145,10 +153,16 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 		case formalize.Added:
 			fmt.Fprintf(&tla, "**`%s`**, added:\n\n```tla\n%s\n```\n\n", c.Name, c.NewText)
 		case formalize.Changed:
+			if c.OwnTextSame() {
+				continue // shown through the definitions it depends on, below
+			}
 			fmt.Fprintf(&tla, "**`%s`**, before:\n\n```tla\n%s\n```\n\nafter:\n\n```tla\n%s\n```\n\n", c.Name, c.OldText, c.NewText)
 		case formalize.Removed:
 			fmt.Fprintf(&tla, "**`%s`**, removed:\n\n```tla\n%s\n```\n\n", c.Name, c.OldText)
 		}
+	}
+	for _, d := range ch.Definitions {
+		fmt.Fprintf(&tla, "**`%s`**, which statements above depend on, before:\n\n```tla\n%s\n```\n\nafter:\n\n```tla\n%s\n```\n\n", d.Name, d.OldText, d.NewText)
 	}
 	if tla.Len() > 0 {
 		fmt.Fprintf(&b, "\n<details>\n<summary>What changes, in TLA+</summary>\n\n%s</details>\n", tla.String())
@@ -156,6 +170,19 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
 	return post("amendment for ratification", b.String(), m)
+}
+
+// list writes names in code and joins them: `a`, `a` and `b`, or
+// `a`, `b` and `c`.
+func list(names []string) string {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = "`" + n + "`"
+	}
+	if len(quoted) < 2 {
+		return strings.Join(quoted, "")
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " and " + quoted[len(quoted)-1]
 }
 
 // checked says in a sentence what the model check of a draft found.
