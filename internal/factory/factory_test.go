@@ -653,3 +653,48 @@ func TestList(t *testing.T) {
 		}
 	}
 }
+
+// After a person fixes what made CI fail, /invariant retry has the factory
+// look again, and it merges once the gate passes on the new head.
+func TestRetryAfterAFailedGate(t *testing.T) {
+	r := newRig(t)
+	pr := ratified(t, r)
+	r.gh.ci(pr.Marker.PR, "failure")
+	r.poll()
+	r.expect(1, KindFailed, LabelHumanReview)
+
+	// Someone fixes the problem and pushes to the branch, and CI passes.
+	fix := t.TempDir()
+	git(t, fix, "clone", "--quiet", "--branch", pr.Marker.Branch, r.origin, ".")
+	os.WriteFile(filepath.Join(fix, pr.Marker.Project, "buffer", "buffer.go"), []byte("// +gobra\n\npackage buffer\n\n// Fixed.\n"), 0o644)
+	git(t, fix, "-c", "user.name=X", "-c", "user.email=x@example.com", "commit", "--quiet", "-am", "fix")
+	git(t, fix, "push", "--quiet", "origin", pr.Marker.Branch)
+	r.gh.ci(pr.Marker.PR, "success")
+	r.poll()
+	if len(r.gh.merged) != 0 {
+		t.Fatal("a failed pull request waits for a person to say retry")
+	}
+	r.gh.say(1, "mallory", "/invariant retry")
+	r.poll()
+	r.expect(1, KindFailed, LabelHumanReview)
+
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	r.expect(1, KindPR, LabelPR)
+	r.poll()
+	r.expect(1, KindMerged, LabelMerged)
+	if !reflect.DeepEqual(r.gh.merged, []int{pr.Marker.PR}) {
+		t.Errorf("merged = %v", r.gh.merged)
+	}
+}
+
+func TestRetryWithNothingToRetry(t *testing.T) {
+	r := newRig(t)
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "/invariant solve")
+	r.poll()
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	if note := r.expect(1, KindNote, LabelAsking); !strings.Contains(note.Comment.Body, "no failed pull request") {
+		t.Errorf("note = %s", note.Comment.Body)
+	}
+}

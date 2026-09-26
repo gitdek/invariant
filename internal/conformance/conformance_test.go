@@ -62,3 +62,19 @@ func TestEncodeState(t *testing.T) {
 		t.Errorf("a state missing a variable should fail: %v", err)
 	}
 }
+
+func TestBatches(t *testing.T) {
+	steps := [][2]int{{0, 5}, {5, 9}, {9, 0}, {2, 3}, {3, 2}}
+	got := batches(steps, 2)
+	if len(got) != 3 || len(got[0]) != 2 || len(got[2]) != 1 {
+		t.Fatalf("batches = %v", got)
+	}
+	local, pairs := renumber(got[0])
+	// State 5 appears in both steps and gets one local index.
+	if !reflect.DeepEqual(local, []int{0, 5, 9}) || !reflect.DeepEqual(pairs, []string{"<<1, 2>>", "<<2, 3>>"}) {
+		t.Errorf("local = %v, pairs = %v", local, pairs)
+	}
+	if len(batches(nil, 2)) != 0 {
+		t.Error("no steps, no batches")
+	}
+}

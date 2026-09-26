@@ -278,6 +278,16 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			return f.note(ctx, t, c, "There's no open question to answer right now.")
 		}
 		return f.choose(ctx, t, state, pending)
+	case Retry:
+		if kind != KindFailed || state.Marker.PR == 0 {
+			return f.note(ctx, t, c, "There's no failed pull request to look at again right now.")
+		}
+		// Watch the pull request again. Nothing merges unless CI's gate passes
+		// on its current head, it stays in scope, and its lock is still the
+		// ratified proposal.
+		m := state.Marker
+		m.Kind, m.ReplyTo = KindPR, []int64{c.Comment}
+		return f.say(ctx, t.Issue.Number, post("pull request", fmt.Sprintf("Watching #%d again. I'll merge it once CI's `invariant/gate` passes on its current head.", m.PR), m), LabelPR)
 	case Ratify:
 		if kind != KindProposal {
 			return f.note(ctx, t, c, "There's no proposal waiting for ratification right now.")

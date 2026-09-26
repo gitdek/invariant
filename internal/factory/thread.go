@@ -23,6 +23,7 @@ const (
 	Choose = "choose" // /invariant choose F1 A: decide a fork
 	Revise = "revise" // /invariant revise: draft again, reading the comments
 	Ratify = "ratify" // /invariant ratify <hash>: ratify the current proposal
+	Retry  = "retry"  // /invariant retry: look at a failed pull request again, once people have fixed what failed
 )
 
 // Command is one instruction from a person with write access.
@@ -54,7 +55,7 @@ func ParseCommands(body string) []Command {
 			continue
 		}
 		switch verb := strings.ToLower(f[1]); verb {
-		case Solve, Choose, Revise, Ratify:
+		case Solve, Choose, Revise, Ratify, Retry:
 			out = append(out, Command{Verb: verb, Args: f[2:]})
 		}
 	}
