@@ -183,10 +183,12 @@ func conformanceResult(c conformance.Result) string {
 		return "tested against the model: every reachable state, no step outside it"
 	case c.Passed:
 		return "tested against the model: no step outside it"
-	case c.BadStart == "" && c.BadStep == nil && c.Exhaustive && c.States > 0:
+	case c.BadStart != "" || c.BadStep != nil:
+		return "the code left the model"
+	case c.Exhaustive && int64(c.States) < c.ModelStates:
 		return "the code misses states the model reaches"
 	}
-	return "the code left the model"
+	return "couldn't be checked"
 }
 
 func conformanceEvidence(c conformance.Result) string {

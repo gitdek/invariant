@@ -135,16 +135,23 @@ func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds ma
 		return r, nil
 	}
 
-	// Every step that changed the state must be a Next step.
-	if len(steps) > 0 {
-		var pairs []string
-		for p := range steps {
-			pairs = append(pairs, fmt.Sprintf("<<%d, %d>>", p[0]+1, p[1]+1))
+	// Every step that changed the state must be a Next step. TLC checks the
+	// steps in batches, each carrying only the states it uses, so memory
+	// stays flat however many steps the code took.
+	var all [][2]int
+	for p := range steps {
+		all = append(all, p)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i][0] < all[j][0] || all[i][0] == all[j][0] && all[i][1] < all[j][1] })
+	for _, batch := range batches(all, stepBatch) {
+		local, pairs := renumber(batch)
+		used := make([]string, len(local))
+		for i, s := range local {
+			used[i] = states[s]
 		}
-		sort.Strings(pairs)
 		stepModule := "---- MODULE Invariant_Conformance ----\n" + header +
 			"VARIABLES invariant_source, invariant_target, invariant_done\n" +
-			"Invariant_States == <<" + strings.Join(states, ",\n  ") + ">>\n" +
+			"Invariant_States == <<" + strings.Join(used, ",\n  ") + ">>\n" +
 			"Invariant_Steps == {" + strings.Join(pairs, ", ") + "}\n" +
 			"Invariant_CInit == \\E p \\in Invariant_Steps :\n" +
 			"    /\\ " + is("Invariant_States[p[1]]", vars, false) + "\n" +
@@ -170,14 +177,14 @@ func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds ma
 			step := &Step{From: stateText(stuck, vars)}
 			for _, v := range stuck.Vars {
 				i, err := strconv.Atoi(v.Value)
-				if err != nil || i < 1 || i > len(states) {
+				if err != nil || i < 1 || i > len(local) {
 					continue
 				}
 				switch v.Name {
 				case "invariant_source":
-					step.From = pretty[i-1]
+					step.From = pretty[local[i-1]]
 				case "invariant_target":
-					step.To = pretty[i-1]
+					step.To = pretty[local[i-1]]
 				}
 			}
 			r.BadStep = step
@@ -190,6 +197,42 @@ func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds ma
 	}
 	r.Passed = true
 	return r, nil
+}
+
+// stepBatch is how many steps TLC checks at once. A batch's module holds
+// only the states its steps use, so its size doesn't grow with the model.
+const stepBatch = 2000
+
+// batches splits steps into runs of at most n.
+func batches(steps [][2]int, n int) [][][2]int {
+	var out [][][2]int
+	for len(steps) > n {
+		out = append(out, steps[:n])
+		steps = steps[n:]
+	}
+	if len(steps) > 0 {
+		out = append(out, steps)
+	}
+	return out
+}
+
+// renumber gives the states a batch uses indexes of their own, from 1:
+// local[i-1] is the recorded state behind local index i, and pairs are the
+// batch's steps as TLA+ tuples of local indexes.
+func renumber(batch [][2]int) (local []int, pairs []string) {
+	index := map[int]int{}
+	id := func(s int) int {
+		if i, ok := index[s]; ok {
+			return i
+		}
+		local = append(local, s)
+		index[s] = len(local)
+		return len(local)
+	}
+	for _, p := range batch {
+		pairs = append(pairs, fmt.Sprintf("<<%d, %d>>", id(p[0]), id(p[1])))
+	}
+	return local, pairs
 }
 
 // is states that the variables equal the fields of record expression s, or,

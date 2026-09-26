@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0046 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0047 · 2026-09-26 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -36,7 +36,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - TypeScript: tested against the model by conformance. No proof path yet. `D-0024` `D-0029`
 - The factory writes all three languages. Go is proved with Gobra, and Python is a core proved with Nagini. TypeScript is a state machine tested against the model in every state it can reach. An issue picks its language with an `invariant:typescript`, `invariant:python` or `invariant:go` label, and without one, the repository's default applies. `D-0038` `D-0039` `D-0040` `D-0043`
 - When a project's conformance driver explores every state the code can reach, its manifest says so. The gate then requires the driver to visit every state the model reaches, so the code and the model reach exactly the same states. `D-0043`
-- Conformance: a project's driver calls the code's operations at random and records each state in the spec's vocabulary. TLC checks that every run starts in a state `Init` allows and that every step that changes the state is a `Next` step. Runs use a fixed seed, so receipts reproduce. `D-0029`
+- Conformance: a project's driver calls the code's operations at random and records each state in the spec's vocabulary. TLC checks that every run starts in a state `Init` allows and that every step that changes the state is a `Next` step. Runs use a fixed seed, so receipts reproduce. TLC checks the steps in batches, so memory stays flat as models grow. `D-0029` `D-0047`
 - Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra, and Python cores with Nagini. Lean 4 has no role in v1. `D-0003` `D-0010` `D-0031`
 - Verifiers run in Docker and are pinned. `D-0000` `D-0013` `D-0016` `D-0020`
   - TLC is v1.7.4, pinned by SHA-256, running in `eclipse-temurin` pinned by digest.
@@ -53,7 +53,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - The agent gets at most four gate runs: one attempt and three repairs. Each run is capped by an estimated-cost budget, a turn limit and a timeout. `D-0000` `D-0026`
 - The factory runs as `invariant watch` on @gitdek's machine. It polls GitHub through the `gh` CLI with @gitdek's login, and runs its agents with Claude Code on @gitdek's account. `D-0028` `D-0036`
   - It takes an issue when a writer opens it with a `/invariant solve` line, gives it the `invariant` label, or comments `/invariant solve`. `repository_dispatch` waits for a hosted factory. `D-0000` `D-0036`
-  - Only people with write access can direct it: `/invariant solve`, `choose`, `revise` and `ratify`. Everyone else is ignored. `D-0014` `D-0036`
+  - Only people with write access can direct it: `/invariant solve`, `choose`, `revise`, `ratify` and `retry`. Everyone else is ignored. `retry` has the factory look again at a pull request that failed, once someone has fixed the cause. `D-0014` `D-0036` `D-0047`
   - It keeps no state of its own. Each of its comments records the issue's state in a hidden marker, and a status label shows it. `D-0036`
   - The agents never touch GitHub. Only the factory's own code posts, pushes and merges. Synthesis runs with no secrets and no network. `D-0014` `D-0036`
   - Agents get only the file tools and Invariant's own tool, and they can't read the home directory. `D-0037`

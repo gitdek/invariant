@@ -60,6 +60,7 @@ People steer the factory with comments on the issue, and only people with write 
 | `/invariant ratify <hash>` | Ratifies exactly the proposal with that hash, and the factory builds it |
 | The `invariant:typescript` or `invariant:python` label | The factory writes the code in that language. Go is the default here |
 | A `Project: <dir>` line in the issue | Changes that existing project. The factory proposes a diff of its statements, and calls out anything removed or loosened |
+| `/invariant retry` | Looks again at a pull request that failed, once someone has fixed the cause |
 
 ## Watch it catch a bug
 
