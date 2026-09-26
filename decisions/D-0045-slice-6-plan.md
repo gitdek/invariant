@@ -3,7 +3,8 @@ id: D-0045
 title: Slice 6 plan and acceptance criteria
 date: 2026-09-25
 door: two-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: Claude
 source: slice 6 planning (Claude Code session 2f96fee2), carrying out D-0042
 ---
@@ -70,12 +71,12 @@ What stays ordinary code, changed by Claude and @gitdek with CI's tests: the Git
 2. Live, amendment: an issue changes an existing factory project through the factory, from issue to merge, with @gitdek ratifying the diff. For example: "the rate limiter should refuse a call when more than N calls are already waiting".
 3. Live, self-hosting: the factory's protocol is ratified by @gitdek on an issue, built by the factory as `factory/protocol`, and proved with Gobra. The watcher runs on it, and one issue changes the protocol through the factory.
 
-## Decisions this plan needs from @gitdek
+## Decided by @gitdek
 
-1. **How an issue names its project.** Recommended: a `Project: <dir>` line in the issue. Alternatives: an argument to `/invariant solve`, or a label per project.
-2. **Removing or weakening a ratified statement.** Recommended: allowed, but called out in bold at the top of the proposal. Your ratification is still the only thing that makes it happen. The alternative is to forbid it in amendments and require a new project.
-3. **Amending hand-built projects** (the two-phase commit family, ratified in the log). Recommended: allowed, with `amends` pointing at the logged lock. The alternative is to amend only projects the factory built.
-4. **The first self-hosted project.** Recommended: the factory's issue protocol, at `factory/protocol/`. Alternatives: the scope rules, or the proposal hash and ratification record.
+1. **How an issue names its project:** a `Project: <dir>` line in the issue. The alternatives were an argument to `/invariant solve`, or a label per project.
+2. **Removing or weakening a ratified statement:** allowed, but called out in bold at the top of the proposal. Only @gitdek's ratification makes it happen. The alternative was to forbid it in amendments and require a new project.
+3. **Amending hand-built projects:** allowed, with `amends` pointing at the lock recorded in the log. The alternative was to amend only projects the factory built.
+4. **The first self-hosted project:** the factory's issue protocol, at `factory/protocol/`. The alternatives were the scope rules, or the proposal hash and ratification record.
 
 ## Size
 

@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0044 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0045 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -93,7 +93,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
   5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
-  6. Changing existing projects, so that Invariant can start building itself. Next. `D-0042`
+  6. Next. Part A, amendments: an issue names an existing project with a `Project:` line, and the factory proposes a diff of its statements. Removals are called out, each ratification records the lock it amends, and synthesis starts from the current code. Part B: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0042` `D-0045`
 
 ## Project
 
