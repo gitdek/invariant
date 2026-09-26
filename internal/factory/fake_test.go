@@ -215,6 +215,9 @@ type scriptedFormalizer struct {
 	requests []formalize.Request
 	forks    []formalize.Fork
 	fail     string
+	// amend drafts an amendment of the current project, when the issue
+	// names one.
+	amend func(c *formalize.Current) *formalize.Proposal
 }
 
 const bufferModule = `---- MODULE BoundedBuffer ----
@@ -272,6 +275,13 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 	}
 	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
 		Witnesses: []verify.Witness{{Name: "CanFill", Reached: true, Steps: 2}}, Bugs: []verify.Bug{{Name: "PutWhenFull", Caught: true}}}
+	if c := req.Current; c != nil && s.amend != nil {
+		p := s.amend(c)
+		if err := p.Amend(c); err != nil {
+			return &formalize.Result{Problem: err.Error()}, nil
+		}
+		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
+	}
 	p := bufferProposal(s.t)
 	p.Language = req.Language
 	return &formalize.Result{Proposal: p, Report: report}, nil
@@ -280,17 +290,27 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // fakeBuilder writes a Go package into the ratified project, the way
 // synthesis would, and reports the gate result it's told to.
 type fakeBuilder struct {
-	pass  bool
-	built []string
+	pass    bool
+	built   []string
+	amended []bool
 }
 
-func (b *fakeBuilder) Build(_ context.Context, dir, out string) (*synth.Result, error) {
+func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*synth.Result, error) {
 	b.built = append(b.built, dir)
+	b.amended = append(b.amended, amend)
 	result := filepath.Join(out, "result")
 	if err := copyResult(dir, result); err != nil {
 		return nil, err
 	}
 	code := "// +gobra\n\npackage buffer\n\nconst Cap = 2\n"
+	if amend {
+		existing, err := os.ReadFile(filepath.Join(dir, "buffer", "buffer.go"))
+		if err != nil {
+			return nil, fmt.Errorf("an amendment must start from the existing code: %w", err)
+		}
+		code = string(existing) + "\n// Amended.\n"
+		os.Remove(filepath.Join(result, "buffer", "old.go")) // the agent dropped a file
+	}
 	if err := os.MkdirAll(filepath.Join(result, "buffer"), 0o755); err != nil {
 		return nil, err
 	}

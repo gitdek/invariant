@@ -85,6 +85,8 @@ func provenance(r *verify.Report) string {
 	switch {
 	case r.Ratified != nil && !r.RatificationMatches():
 		return fmt.Sprintf("the lock no longer matches what @%s ratified on #%d", r.Ratified.By, r.Ratified.Issue)
+	case r.Ratified != nil && r.Ratified.Previous != "":
+		return fmt.Sprintf("ratified by @%s on [#%d](%s), amending %s", r.Ratified.By, r.Ratified.Issue, r.Ratified.Comment, r.Ratified.Previous)
 	case r.Ratified != nil:
 		return fmt.Sprintf("ratified by @%s on [#%d](%s)", r.Ratified.By, r.Ratified.Issue, r.Ratified.Comment)
 	case r.Decision != "":

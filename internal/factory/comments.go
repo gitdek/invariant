@@ -7,6 +7,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
+	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/verify"
@@ -65,6 +66,96 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
 	return post("proposal for ratification", b.String(), m)
+}
+
+// amendmentComment proposes changes to an existing project: what's
+// ratified now, what changes, and a callout for anything removed or any
+// invariant changed, since that can loosen what was promised (D-0045).
+func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Changes, m Marker) string {
+	var b strings.Builder
+	t := p.Target
+	fmt.Fprintf(&b, "Here's how I propose to change **%s**, in `%s`. It amends the statements ratified in %s (proposal `%s`). "+
+		"Once you ratify it, the whole new set is pinned by hash. Then I'll change the code %s.\n\n",
+		p.Name, t.Dir, t.Previous, short(t.Amends), formalize.Languages[p.Manifest().Language])
+	if ch == nil {
+		ch = &formalize.Changes{}
+	}
+	names := func(cs []formalize.Change) string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, "`"+c.Name+"`")
+		}
+		return strings.Join(out, ", ")
+	}
+	if removed := ch.Of(formalize.Removed); len(removed) > 0 {
+		fmt.Fprintf(&b, "**This removes %s.** Nothing will hold the code to it any more.\n\n", names(removed))
+	}
+	var loosened []formalize.Change
+	for _, c := range ch.Of(formalize.Changed) {
+		if c.Old.Kind == project.Invariant {
+			loosened = append(loosened, c)
+		}
+	}
+	if len(loosened) > 0 {
+		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text below.\n\n", names(loosened))
+	}
+	b.WriteString("| Statement | Change | Says |\n| :-- | :-- | :-- |\n")
+	for _, c := range ch.Statements {
+		switch c.How {
+		case formalize.Added:
+			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, c.New.Says)
+		case formalize.Changed:
+			says := c.New.Says
+			if c.Old.Says != c.New.Says {
+				says += " *(was: " + c.Old.Says + ")*"
+			}
+			fmt.Fprintf(&b, "| `%s` | changed %s | %s |\n", c.Name, c.New.Kind, says)
+		case formalize.Removed:
+			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, c.Old.Says)
+		}
+	}
+	if same := ch.Of(formalize.Unchanged); len(same) > 0 {
+		fmt.Fprintf(&b, "\nUnchanged: %s.\n", names(same))
+	}
+	for _, bc := range ch.Bounds {
+		switch {
+		case bc.From == "":
+			fmt.Fprintf(&b, "\nNew bound: `%s = %s`.", bc.Name, bc.To)
+		case bc.To == "":
+			fmt.Fprintf(&b, "\nBound removed: `%s = %s`.", bc.Name, bc.From)
+		default:
+			fmt.Fprintf(&b, "\nBound changed: `%s`, from `%s` to `%s`.", bc.Name, bc.From, bc.To)
+		}
+	}
+	if len(ch.Bounds) > 0 {
+		b.WriteString("\n")
+	}
+	if r != nil {
+		fmt.Fprintf(&b, "\n**Already checked** against the amended model, within %s: %s\n", bounds(p.Bounds), checked(r))
+	}
+	if len(m.Answers) > 0 {
+		b.WriteString("\n**Decided on this issue:**\n\n")
+		for _, a := range m.Answers {
+			fmt.Fprintf(&b, "- %s. %s **%s.** %s (@%s)\n", a.Fork, a.Question, a.Option, a.Says, a.By)
+		}
+	}
+	var tla strings.Builder
+	for _, c := range ch.Statements {
+		switch c.How {
+		case formalize.Added:
+			fmt.Fprintf(&tla, "**`%s`**, added:\n\n```tla\n%s\n```\n\n", c.Name, c.NewText)
+		case formalize.Changed:
+			fmt.Fprintf(&tla, "**`%s`**, before:\n\n```tla\n%s\n```\n\nafter:\n\n```tla\n%s\n```\n\n", c.Name, c.OldText, c.NewText)
+		case formalize.Removed:
+			fmt.Fprintf(&tla, "**`%s`**, removed:\n\n```tla\n%s\n```\n\n", c.Name, c.OldText)
+		}
+	}
+	if tla.Len() > 0 {
+		fmt.Fprintf(&b, "\n<details>\n<summary>What changes, in TLA+</summary>\n\n%s</details>\n", tla.String())
+	}
+	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
+		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
+	return post("amendment for ratification", b.String(), m)
 }
 
 // checked says in a sentence what the model check of a draft found.

@@ -14,6 +14,22 @@ func Prompt(req Request, checks int) string {
 	if language == "" {
 		language = "go"
 	}
+	if c := req.Current; c != nil {
+		language = c.Manifest.Language
+		if language == "" {
+			language = "go"
+		}
+		previous += fmt.Sprintf(`
+# The project this changes
+
+This issue changes an existing project, `+"`%s`"+`. What's ratified today is already in the current directory. `+"`%s.tla`"+` holds its statements and its model, and `+"`proposal.json`"+` lists its statements as ratified (%s). Edit both files, and change only what the issue asks for:
+
+- Add, change or remove statements as the issue requires. Keep every other statement's text and meaning word for word. The factory compares your draft with the ratified lock and shows people exactly what changed, and it calls out every statement you remove or change.
+- Keep the module's name. Change the bounds, the model (`+"`Init`"+`, the actions and `+"`Next`"+`) and helper definitions as the change needs.
+- The ratified statements are decisions already made, so don't ask about them again. Ask only about what the issue leaves open.
+- If the issue isn't a change this project can take, set `+"`unsupported`"+` to one sentence saying why.
+`, c.Dir, c.ModuleName(), c.Previous())
+	}
 	return fmt.Sprintf(`You're the formalization step of Invariant, a code factory. Someone with write access to %s asked the factory to take on issue #%d. Nothing gets built until a person ratifies formal statements that say what must be true. Then the factory writes the code, %s, and checks it against exactly those statements. Your job is to draft the statements in TLA+, with a draft model that shows they hang together. When the issue leaves a real decision open, your job is to ask instead of guessing.
 
 # The request

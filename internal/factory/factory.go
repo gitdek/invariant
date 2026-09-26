@@ -45,9 +45,10 @@ type Formalizer interface {
 }
 
 // Builder writes and gates the code for a ratified project in dir, leaving
-// the finished project in out/result.
+// the finished project in out/result. For an amendment, it starts from the
+// project's existing code.
 type Builder interface {
-	Build(ctx context.Context, dir, out string) (*synth.Result, error)
+	Build(ctx context.Context, dir, out string, amend bool) (*synth.Result, error)
 }
 
 // Repo is the factory's own clone of the repository. Clone is the real one.
@@ -60,7 +61,7 @@ type Repo interface {
 	Push(ctx context.Context, worktree, branch string) error
 	RevParse(ctx context.Context, ref string) (string, error)
 	Show(ctx context.Context, ref, file string) ([]byte, error)
-	Scope(ctx context.Context, base, head string) (scope.Result, error)
+	Scope(ctx context.Context, base, head string, issue int) (scope.Result, error)
 }
 
 // Factory turns issues into merged pull requests.
@@ -351,7 +352,28 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 	n := t.Issue.Number
 	f.logf("#%d: formalizing", n)
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
-	res, err := f.Formalizer.Formalize(ctx, f.request(t, answers, previous), out)
+	req := f.request(t, answers, previous)
+	// A Project: line names the project the issue changes, or where a new
+	// one goes (D-0045).
+	var newDir string
+	if dir := projectLine(t.Issue.Body); dir != "" {
+		if problem := badDir(dir); problem != "" {
+			return f.say(ctx, n, stuckComment("The issue names the project `"+dir+"`, but "+problem+".", Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+		}
+		cur, err := f.current(ctx, dir)
+		if err != nil {
+			return err
+		}
+		if cur != nil {
+			req.Current, req.Language = cur, cur.Manifest.Language
+		} else {
+			newDir = dir
+		}
+	}
+	res, err := f.Formalizer.Formalize(ctx, req, out)
+	if err == nil && res.Proposal != nil && newDir != "" {
+		res.Proposal.Dir = newDir
+	}
 	switch {
 	case err != nil:
 		res = &formalize.Result{Problem: "the formalizer couldn't run: " + err.Error()}
@@ -369,10 +391,74 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 	case len(p.Forks) > 0:
 		m.Kind, m.Forks, m.Proposal = KindForks, p.Forks, p
 		return f.say(ctx, n, forksComment(p.Forks, m), LabelAsking)
+	case p.Target != nil:
+		m.Kind, m.Proposal = KindProposal, p
+		return f.say(ctx, n, amendmentComment(p, res.Report, res.Changes, m), LabelProposal)
 	default:
 		m.Kind, m.Proposal = KindProposal, p
 		return f.say(ctx, n, proposalComment(p, res.Report, m), LabelProposal)
 	}
+}
+
+// projectLine finds the project an issue names, in a line such as
+// "Project: examples/04-api-rate-limiter".
+func projectLine(body string) string {
+	fenced := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") {
+			fenced = !fenced
+			continue
+		}
+		if fenced {
+			continue
+		}
+		if name, dir, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "project") {
+			return strings.Trim(strings.TrimSpace(dir), "`/")
+		}
+	}
+	return ""
+}
+
+// badDir says what's wrong with a project directory an issue names.
+func badDir(dir string) string {
+	switch {
+	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || strings.HasPrefix(dir, "../"):
+		return "that isn't a clean path inside the repository"
+	case dir == ".github" || strings.HasPrefix(dir, ".github/"):
+		return "the factory never touches CI configuration"
+	case strings.ContainsAny(dir, " \t"):
+		return "a project's directory can't contain spaces"
+	}
+	return ""
+}
+
+// current reads the project in dir as it stands on the base branch, or
+// returns nil when there's no project there.
+func (f *Factory) current(ctx context.Context, dir string) (*formalize.Current, error) {
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return nil, err
+	}
+	ref := "origin/" + f.Base
+	b, err := f.Repo.Show(ctx, ref, dir+"/.invariant/invariant.json")
+	if err != nil {
+		return nil, nil
+	}
+	c := &formalize.Current{Dir: dir}
+	if err := json.Unmarshal(b, &c.Manifest); err != nil {
+		return nil, fmt.Errorf("%s's manifest: %w", dir, err)
+	}
+	if b, err = f.Repo.Show(ctx, ref, dir+"/.invariant/ratified.lock"); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &c.Lock); err != nil {
+		return nil, fmt.Errorf("%s's lock: %w", dir, err)
+	}
+	if b, err = f.Repo.Show(ctx, ref, dir+"/"+c.Manifest.Module); err != nil {
+		return nil, err
+	}
+	c.ModuleText = string(b)
+	return c, nil
 }
 
 // language is the language an issue's label asks for, or the repository's
@@ -418,11 +504,17 @@ func withoutCommands(body string) string {
 // branch, then builds it.
 func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) error {
 	posted, err := f.commitRatification(ctx, t, state, c)
+	if errors.Is(err, errStale) {
+		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything. Comment `/invariant revise` and I'll draft it again from the project as it is now.")
+	}
 	if err != nil {
 		return err
 	}
 	return f.build(ctx, t, posted)
 }
+
+// errStale means an amendment no longer amends the project as it is.
+var errStale = errors.New("the project changed since the amendment was drafted")
 
 // commitRatification pushes the ratification commit and says so on the
 // issue.
@@ -431,6 +523,15 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	f.logf("#%d: ratified by @%s", n, c.By)
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return Post{}, err
+	}
+	if p.Target != nil {
+		cur, err := f.current(ctx, p.Target.Dir)
+		if err != nil {
+			return Post{}, err
+		}
+		if cur == nil || project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements) != p.Target.Amends {
+			return Post{}, errStale
+		}
 	}
 	branch, dir, from, err := f.branchFor(ctx, n, p)
 	if err != nil {
@@ -442,17 +543,22 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	}
 	defer f.Repo.RemoveWorktree(ctx, wt)
 	rat := &project.Ratification{By: c.By, At: c.At, Issue: n, Comment: c.URL, Proposal: p.Hash}
+	if p.Target != nil {
+		rat.Amends, rat.Previous = p.Target.Amends, p.Target.Previous
+	}
 	req := f.request(t, state.Marker.Answers, nil)
 	root := filepath.Join(wt, filepath.FromSlash(dir))
 	if err := p.Write(root, req.Markdown(), rat); err != nil {
 		return Post{}, err
 	}
-	if err := scaffold(root, f.Repository, dir, p); err != nil {
-		return Post{}, err
-	}
-	readme := projectReadme(t, dir, p, state.Marker.Answers, c.By, c.URL)
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(readme), 0o644); err != nil {
-		return Post{}, err
+	if p.Target == nil {
+		if err := scaffold(root, f.Repository, dir, p); err != nil {
+			return Post{}, err
+		}
+		readme := projectReadme(t, dir, p, state.Marker.Answers, c.By, c.URL)
+		if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(readme), 0o644); err != nil {
+			return Post{}, err
+		}
 	}
 	// What's committed must be exactly what was proposed.
 	written, err := project.Load(root)
@@ -463,6 +569,10 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 		return Post{}, fmt.Errorf("the project written for ratification hashes to %s, not the proposal's %s", got, p.Hash)
 	}
 	msg := fmt.Sprintf("Ratify the statements for #%d\n\nRatified by @%s in %s.\nProposal %s.", n, c.By, c.URL, p.Hash)
+	if p.Target != nil {
+		msg = fmt.Sprintf("Ratify the amendment for #%d\n\nRatified by @%s in %s.\nProposal %s, amending %s (ratified in %s).",
+			n, c.By, c.URL, p.Hash, p.Target.Amends, p.Target.Previous)
+	}
 	if _, err := f.Repo.Commit(ctx, wt, dir, msg); err != nil && !errors.Is(err, ErrNothingToCommit) {
 		return Post{}, err
 	}
@@ -489,10 +599,10 @@ func (f *Factory) branchFor(ctx context.Context, issue int, p *formalize.Proposa
 			branch += fmt.Sprintf("-%d", i)
 		}
 		if _, err := f.Repo.RevParse(ctx, "origin/"+branch); err != nil {
-			dir, err := f.projectDir(ctx, p.Slug)
+			dir, err := f.dirFor(ctx, p)
 			return branch, dir, "origin/" + f.Base, err
 		}
-		sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, "origin/"+branch)
+		sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, "origin/"+branch, issue)
 		if err != nil {
 			return "", "", "", err
 		}
@@ -523,6 +633,18 @@ func scaffold(root, repo, dir string, p *formalize.Proposal) error {
 		return os.WriteFile(filepath.Join(root, "package.json"), append(pkg, '\n'), 0o644)
 	}
 	return nil
+}
+
+// dirFor is where a proposal's project lives: the project an amendment
+// changes, the directory its issue named, or a new numbered directory.
+func (f *Factory) dirFor(ctx context.Context, p *formalize.Proposal) (string, error) {
+	switch {
+	case p.Target != nil:
+		return p.Target.Dir, nil
+	case p.Dir != "":
+		return p.Dir, nil
+	}
+	return f.projectDir(ctx, p.Slug)
 }
 
 // projectDir picks the directory for a new project: the next number in
@@ -570,9 +692,14 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
-	res, runErr := f.Builder.Build(ctx, root, out)
+	amend := m.Proposal != nil && m.Proposal.Target != nil
+	res, runErr := f.Builder.Build(ctx, root, out, amend)
 	if res == nil || res.Final == nil {
 		return f.say(ctx, n, buildFailedComment(nil, res, runErr, next), LabelHumanReview)
+	}
+	// The agent's files replace the project's, so a file it removed is gone.
+	if err := removeOwned(root); err != nil {
+		return err
 	}
 	if err := copyResult(filepath.Join(out, "result"), root); err != nil {
 		return err
@@ -583,6 +710,10 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	}
 	msg := fmt.Sprintf("Implement #%d: %s\n\nWritten by Invariant against the statements ratified in the previous commit. It %s: %s.",
 		n, t.Issue.Title, verdict, res.Final.Assurance)
+	if amend {
+		msg = fmt.Sprintf("Implement #%d: %s\n\nChanged by Invariant to meet the amended statements ratified in the previous commit. It %s: %s.",
+			n, t.Issue.Title, verdict, res.Final.Assurance)
+	}
 	if _, err := f.Repo.Commit(ctx, wt, m.Project, msg); err != nil {
 		return err
 	}
@@ -605,6 +736,25 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	}
 	next.Kind = KindPR
 	return f.say(ctx, n, prComment(pr, res.Final, next), LabelPR)
+}
+
+// removeOwned deletes the files in a project that the agent owns, before
+// its result is copied in.
+func removeOwned(root string) error {
+	p, err := project.Load(root)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(file string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(root, file)
+		if synth.Owned(p.Manifest, filepath.ToSlash(rel)) {
+			return os.Remove(file)
+		}
+		return nil
+	})
 }
 
 // maxBuilds is how many builds of one issue the factory starts before it
@@ -672,7 +822,7 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	} else if sha != pr.Head.SHA {
 		return nil // the branch moved; wait for CI on its new head
 	}
-	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head)
+	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
 	if err != nil {
 		return err
 	}

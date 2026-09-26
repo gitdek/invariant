@@ -97,7 +97,7 @@ func TestPrompt(t *testing.T) {
 	}
 	skeleton, _ := Skeleton(p)
 	request, _ := p.Request()
-	got := Prompt(p, skeleton, request, 4, false)
+	got := Prompt(p, skeleton, request, 4, false, false)
 	for _, want := range []string{"Implement two-phase commit", "`TCConsistent`", "`EarlyCommit`", "It must violate TCConsistent.",
 		"`RM = {r1, r2, r3}`", "Go package `twophase`", "You have 4 gate runs", "func Successors(s State) []State",
 		tla.ModelMarker, "// +gobra", "The skeleton of"} {
@@ -108,7 +108,7 @@ func TestPrompt(t *testing.T) {
 	if strings.Contains(got, "RMRcvCommitMsg(s State") {
 		t.Error("the prompt must not contain the hand-built answer")
 	}
-	if draft := Prompt(p, skeleton, request, 4, true); !strings.Contains(draft, "It's already drafted") || strings.Contains(draft, "The skeleton of") {
+	if draft := Prompt(p, skeleton, request, 4, true, false); !strings.Contains(draft, "It's already drafted") || strings.Contains(draft, "The skeleton of") {
 		t.Error("with a draft model, the prompt should say the model is drafted")
 	}
 }
@@ -213,7 +213,7 @@ func TestPromptByLanguage(t *testing.T) {
 	} {
 		m := project.Manifest{Module: ".invariant/specs/Buf.tla", Code: map[string]string{"typescript": "src", "python": "buffer"}[lang], Language: lang,
 			Conformance: map[string]string{"typescript": "conformance.ts", "python": "conformance.py"}[lang], Exhaustive: true}
-		got := Prompt(&project.Project{Manifest: m, Lock: lock}, "---- MODULE Buf ----\n====\n", "# Add a buffer", 4, true)
+		got := Prompt(&project.Project{Manifest: m, Lock: lock}, "---- MODULE Buf ----\n====\n", "# Add a buffer", 4, true, false)
 		for _, want := range wants {
 			if !strings.Contains(got, want) {
 				t.Errorf("%s prompt lacks %q", lang, want)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
@@ -27,6 +28,29 @@ type Request struct {
 	Thread   []Message // people's comments, oldest first
 	Answers  []Answer  // the forks people decided
 	Previous *Proposal // the draft people asked to revise, if any
+	Current  *Current  // the project an amendment changes, if any (D-0045)
+}
+
+// Current is an existing project as it stands: what an amendment starts
+// from.
+type Current struct {
+	Dir        string
+	Manifest   project.Manifest
+	Lock       project.Lock
+	ModuleText string
+}
+
+// ModuleName is the TLA+ module's name, from its file name.
+func (c *Current) ModuleName() string {
+	return strings.TrimSuffix(filepath.Base(c.Manifest.Module), ".tla")
+}
+
+// Previous says where the lock an amendment replaces was ratified.
+func (c *Current) Previous() string {
+	if r := c.Lock.Ratified; r != nil {
+		return fmt.Sprintf("#%d", r.Issue)
+	}
+	return c.Lock.Decision
 }
 
 // Message is one comment a person made.
@@ -79,6 +103,7 @@ type Result struct {
 	Proposal  *Proposal       `json:"proposal,omitempty"` // forks to ask, a reason the issue is unsupported, or a draft to ratify
 	Report    *verify.Report  `json:"report,omitempty"`   // the factory's own check of a draft to ratify
 	Problem   string          `json:"problem,omitempty"`  // why there's nothing to ask or ratify, when there isn't
+	Changes   *Changes        `json:"changes,omitempty"`  // what an amendment changes
 	Usage     synth.Usage     `json:"usage"`
 	CheckRuns []synth.GateRun `json:"check_runs,omitempty"`
 }
@@ -96,6 +121,11 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	defer os.RemoveAll(ws)
 	if err := writeFile(filepath.Join(ws, "request.md"), req.Markdown()); err != nil {
 		return nil, err
+	}
+	if c := req.Current; c != nil {
+		if err := seedAmendment(ws, c); err != nil {
+			return nil, err
+		}
 	}
 	if p := req.Previous; p != nil {
 		b, err := json.MarshalIndent(p.Draft, "", "  ")
@@ -134,6 +164,11 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	p, report, err := Check(ctx, ws, f.Toolchain)
 	if p != nil {
 		p.Language = req.Language
+	}
+	if c := req.Current; p != nil && err == nil {
+		if err = p.Amend(c); err == nil && p.Ratifiable() {
+			r.Changes = Diff(c, p)
+		}
 	}
 	switch {
 	case err != nil && runErr != nil:
@@ -174,4 +209,44 @@ func readRuns(path string) ([]synth.GateRun, error) {
 		}
 	}
 	return runs, scanner.Err()
+}
+
+// Amend makes a draft an amendment of the project c: it keeps the project's
+// name, module, package and language, and records which lock it replaces.
+func (p *Proposal) Amend(c *Current) error {
+	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous()}
+	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), filepath.Base(c.Manifest.Code), c.Manifest.Language
+	if p.Ratifiable() && p.Module != c.ModuleName() {
+		return fmt.Errorf("an amendment keeps its module: %s, not %s", c.ModuleName(), p.Module)
+	}
+	return nil
+}
+
+// slugOf is a project directory's name without its number: log-buffer
+// for examples/03-log-buffer.
+func slugOf(dir string) string {
+	base := filepath.Base(dir)
+	if i := strings.Index(base, "-"); i > 0 && strings.Trim(base[:i], "0123456789") == "" {
+		return base[i+1:]
+	}
+	return base
+}
+
+// seedAmendment starts an amendment's workspace from the project as it is:
+// its module, and its ratified statements as a draft for the agent to edit.
+func seedAmendment(ws string, c *Current) error {
+	d := Draft{Name: c.Manifest.Name, Slug: slugOf(c.Dir), Module: c.ModuleName(), Package: filepath.Base(c.Manifest.Code),
+		Bounds: c.Lock.Bounds, Language: c.Manifest.Language}
+	for _, s := range c.Lock.Statements {
+		s.SHA256 = ""
+		d.Statements = append(d.Statements, s)
+	}
+	b, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(ws, "proposal.json"), string(b)+"\n"); err != nil {
+		return err
+	}
+	return writeFile(filepath.Join(ws, d.Module+".tla"), c.ModuleText)
 }

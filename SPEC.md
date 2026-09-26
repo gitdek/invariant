@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0045 · 2026-09-25 (every entry is ratified or decided)
+**Rolled up through** D-0046 · 2026-09-25 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -61,6 +61,11 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Formalization: an agent drafts the statements, their bounds and a draft model for an issue. When the issue allows materially different behaviors, it lists them as forks in a decision request instead of choosing. The factory posts a proposal only after TLC has checked it against the draft model. `D-0002` `D-0036`
 - Ratification happens on the issue. The proposal shows each statement in plain language and TLA+, with the hash of the whole proposal. A writer ratifies by commenting `/invariant ratify <hash>`. The lock records who ratified it, where, and what. `D-0034`
 - Each ratified issue becomes a new project under `examples/`. Its ratification is the first commit on the issue's branch, and synthesis starts from the drafted model. `D-0033` `D-0036`
+- An issue can name its project with a `Project: <dir>` line. `D-0045` `D-0046`
+  - If a project exists there, the issue is an amendment. The factory drafts the whole new set of statements from the project as it stands. The proposal shows what's added, changed, removed and unchanged, and calls out removals and changed invariants in bold.
+  - The ratification records the lock it amends and where that lock was ratified. Before committing it, the factory checks that the base branch still holds that lock.
+  - Synthesis changes the existing code instead of rewriting it.
+  - If no project exists there, a new project goes there.
 - Each piece of work happens on a branch named `invariant/issue-<id>-<slug>`. Formal artifacts live under `.invariant/specs/`. `D-0000`
 - When a check fails, the counterexamples and verifier errors feed back into synthesis for up to three repair attempts. If it still fails, the PR is labeled `invariant:human-review-needed` and the counterexample is posted on the issue. `D-0000`
 - Every pull request carries a receipt that CI generates from tool output only. `D-0000` `D-0013`
@@ -80,7 +85,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - TypeScript and Python: every step the code took is a step the model allows.
   - Gobra verifies Go files marked `// +gobra`, Nagini verifies Python files marked `# +nagini`, and the receipt names any function neither saw. `D-0031`
   - CI is green.
-  - The diff stays in scope. It changes one project and nothing else. It adds no dependencies: no Go modules, npm packages or Python requirements. It uses no cgo and doesn't edit `.github/`. It changes no ratified lock, except by adding a new, ratified project. `D-0014` `D-0036` `D-0043`
+  - The diff stays in scope. It changes one project and nothing else. It adds no dependencies: no Go modules, npm packages or Python requirements. It uses no cgo and doesn't edit `.github/`. It changes a ratified lock only by adding a new, ratified project, or as an amendment. An amendment's lock carries this pull request's issue's ratification, and amends exactly the lock on the base branch. `D-0014` `D-0036` `D-0043` `D-0045`
   - Every factory project's ratification checks out on GitHub: a writer's comment ratified exactly the proposal its lock holds. `D-0034` `D-0036`
 - The pinned-statement checks and the scope rules must exist before the factory opens its first PR. `D-0004` `D-0014`
 - After a merge, the branch is deleted and the originating issue is notified with the proof artifacts. `D-0000`
@@ -93,7 +98,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
   5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
-  6. Next. Part A, amendments: an issue names an existing project with a `Project:` line, and the factory proposes a diff of its statements. Removals are called out, each ratification records the lock it amends, and synthesis starts from the current code. Part B: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0042` `D-0045`
+  6. Part A, amendments: built, and its first live amendment is next. Part B: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0042` `D-0045` `D-0046`
 
 ## Project
 

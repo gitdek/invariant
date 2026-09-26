@@ -32,11 +32,16 @@ jobs:
       - name: Build the gate
         run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
 
+      # The branch names the issue: invariant/issue-<n>-<slug>. Only that
+      # issue's ratification may amend an existing project (D-0045).
       - name: Keep a factory pull request in scope
         if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
         env:
           BASE: ${{ github.base_ref }}
-        run: '"$RUNNER_TEMP/invariant" scope -base "origin/$BASE" HEAD'
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          issue=$(printf '%s' "$HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
+          "$RUNNER_TEMP/invariant" scope -base "origin/$BASE" -issue "${issue:-0}" HEAD
 
       # Every project in the repository, found rather than listed, so a
       # factory pull request is gated without touching this file.

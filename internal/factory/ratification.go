@@ -76,8 +76,8 @@ type Synthesis struct {
 	Options synth.Options
 }
 
-func (s Synthesis) Build(ctx context.Context, dir, out string) (*synth.Result, error) {
+func (s Synthesis) Build(ctx context.Context, dir, out string, amend bool) (*synth.Result, error) {
 	o := s.Options
-	o.Project, o.Out, o.KeepModel = dir, out, true
+	o.Project, o.Out, o.KeepModel, o.KeepCode = dir, out, true, amend
 	return synth.Synthesize(ctx, o)
 }

@@ -67,6 +67,20 @@ type Proposal struct {
 	Draft
 	ModuleText string `json:"module_text"` // the whole module: the statements and the draft model
 	Hash       string `json:"hash,omitempty"`
+	// Target is the existing project an amendment changes (D-0045). Dir is
+	// where a new project goes when its issue names one. Both are empty for
+	// a new project placed the usual way.
+	Target *Target `json:"target,omitempty"`
+	Dir    string  `json:"dir,omitempty"`
+}
+
+// Target is the project an amendment changes, as it stood when the
+// amendment was drafted.
+type Target struct {
+	Dir      string           `json:"dir"`
+	Manifest project.Manifest `json:"manifest"`
+	Amends   string           `json:"amends"`   // the ProposalHash of the lock it replaces
+	Previous string           `json:"previous"` // where that lock was ratified: "#3", or "D-0027"
 }
 
 // Ratifiable says whether the proposal is one a person can ratify: nothing
@@ -169,6 +183,9 @@ func (p *Proposal) Pin() error {
 // its package, each with a conformance driver that explores every state the
 // code can reach (D-0038, D-0039).
 func (p *Proposal) Manifest() project.Manifest {
+	if p.Target != nil {
+		return p.Target.Manifest
+	}
 	m := project.Manifest{Name: p.Name, Module: ".invariant/specs/" + p.Module + ".tla", Code: p.Package, Language: "go"}
 	switch p.Language {
 	case "typescript":

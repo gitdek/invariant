@@ -69,6 +69,10 @@ type Options struct {
 	// instead of a skeleton of the pinned definitions. The factory does this
 	// for a project whose model it drafted with the statements.
 	KeepModel bool
+	// KeepCode starts the agent from the project's existing code, for an
+	// amendment (D-0045). Without it, the agent never sees the code, so it
+	// can't copy an answer.
+	KeepCode  bool
 	GateRuns  int // the most gate runs the agent gets: one attempt and its repairs
 	Timeout   time.Duration
 	Toolchain toolchain.Toolchain
@@ -131,6 +135,11 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	if err := Prepare(p, skeleton, ws); err != nil {
 		return nil, err
 	}
+	if o.KeepCode {
+		if err := copyOwned(p, ws); err != nil {
+			return nil, err
+		}
+	}
 	transcript, err := os.Create(filepath.Join(out, "transcript.jsonl"))
 	if err != nil {
 		return nil, err
@@ -142,7 +151,7 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	defer cancel()
 	usage, runErr := o.Backend.Run(runCtx, Job{
 		Workspace:  ws,
-		Prompt:     Prompt(p, skeleton, request, o.GateRuns, o.KeepModel),
+		Prompt:     Prompt(p, skeleton, request, o.GateRuns, o.KeepModel, o.KeepCode),
 		GateServer: []string{o.Binary, "mcp", "-ratified", src, "-max-runs", fmt.Sprint(o.GateRuns), "-log", gateLog, ws},
 		Transcript: transcript,
 	})
@@ -200,10 +209,27 @@ func protected(language string) []string {
 	}
 }
 
-// owned says whether a file in the agent's workspace is the agent's to
-// write: the module, anything in the code's directory, the conformance
-// driver, and for Python, the tests beside the driver. Nothing else the
-// agent writes reaches the project.
+// Owned says whether a project file is the agent's to write: the module,
+// anything in the code's directory, the conformance driver, and for Python,
+// the tests beside the driver. Nothing else the agent writes reaches the
+// project.
+func Owned(m project.Manifest, rel string) bool { return owned(m, rel) }
+
+// copyOwned copies the project's own code into the agent's workspace, for
+// an amendment. The module is already there.
+func copyOwned(p *project.Project, ws string) error {
+	return filepath.WalkDir(p.Dir, func(file string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return err
+		}
+		rel, _ := filepath.Rel(p.Dir, file)
+		if rel = filepath.ToSlash(rel); rel == p.Manifest.Module || !owned(p.Manifest, rel) {
+			return nil
+		}
+		return copyFile(file, filepath.Join(ws, filepath.FromSlash(rel)))
+	})
+}
+
 func owned(m project.Manifest, rel string) bool {
 	switch {
 	case rel == m.Module, m.Conformance != "" && rel == m.Conformance:

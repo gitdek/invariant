@@ -3,8 +3,10 @@ package factory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -486,5 +488,160 @@ func TestAppIdentity(t *testing.T) {
 	r.poll()
 	if p := r.expect(1, KindProposal, LabelProposal); p.Comment.User.Login != "invariant-factory[bot]" {
 		t.Fatalf("proposal by %s", p.Comment.User.Login)
+	}
+}
+
+// seed puts a ratified factory project on the origin's main, as if an
+// earlier issue had built it.
+func seed(t *testing.T, r *rig, dir string, issue int, edits ...func(*formalize.Proposal)) project.Lock {
+	t.Helper()
+	p := bufferProposal(t)
+	for _, edit := range edits {
+		edit(p)
+		if err := p.Pin(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	work := t.TempDir()
+	git(t, work, "clone", "--quiet", r.origin, ".")
+	root := filepath.Join(work, dir)
+	rat := &project.Ratification{By: "gitdek", Issue: issue, Comment: fmt.Sprintf("https://github.com/o/r/issues/%d#issuecomment-1", issue), Proposal: p.Hash}
+	if err := p.Write(root, "# Add a bounded buffer\n", rat); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(root, "go.mod"), []byte("module m\n\ngo 1.27.1\n"), 0o644)
+	os.MkdirAll(filepath.Join(root, "buffer"), 0o755)
+	os.WriteFile(filepath.Join(root, "buffer", "buffer.go"), []byte("// +gobra\n\npackage buffer\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "buffer", "old.go"), []byte("// +gobra\n\npackage buffer\n\n// Removed by the amendment.\n"), 0o644)
+	git(t, work, "add", "-A")
+	git(t, work, "-c", "user.name=Seed", "-c", "user.email=seed@example.com", "commit", "--quiet", "-m", "seed "+dir)
+	git(t, work, "push", "--quiet", "origin", "HEAD:main")
+	return project.Lock{Ratified: rat, Bounds: p.Bounds, Statements: p.Statements}
+}
+
+// The amendment drops the CanFill witness and rewords WithinCap.
+func dropCanFill(c *formalize.Current) *formalize.Proposal {
+	p := &formalize.Proposal{ModuleText: strings.Replace(c.ModuleText, "WithinCap == Len(buf) <= Cap", "WithinCap == Len(buf) < Cap + 1", 1)}
+	p.Name, p.Slug, p.Module, p.Package = c.Manifest.Name, "bounded-buffer", "BoundedBuffer", "buffer"
+	p.Bounds = c.Lock.Bounds
+	for _, s := range c.Lock.Statements {
+		if s.Name == "CanFill" {
+			continue
+		}
+		if s.Name == "WithinCap" {
+			s.Says = "The buffer never holds more than its capacity, counted strictly."
+		}
+		s.SHA256 = ""
+		p.Statements = append(p.Statements, s)
+	}
+	if err := p.Pin(); err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// An issue that names a project amends it (D-0045): the proposal shows the
+// diff, the ratification records what it amends, the code is changed rather
+// than rewritten, and the amendment merges once CI's gate passes.
+func TestAmendment(t *testing.T) {
+	r := newRig(t)
+	r.form.forks, r.form.amend = nil, dropCanFill
+	dir := "examples/03-bounded-buffer"
+	old := seed(t, r, dir, 1)
+	r.gh.open(5, "gitdek", "Stop promising the buffer can fill", "It shouldn't have to fill.\n\nProject: examples/03-bounded-buffer\n\n/invariant solve")
+	r.poll()
+	proposal := r.expect(5, KindProposal, LabelProposal)
+	if req := r.form.requests[0]; req.Current == nil || req.Current.Dir != dir || len(req.Current.Lock.Statements) != 5 || !strings.Contains(req.Current.ModuleText, "CanFill ==") {
+		t.Fatalf("the formalizer should get the project as it stands: %+v", req.Current)
+	}
+	for _, want := range []string{"amendment for ratification", "It amends the statements ratified in #1", "**This removes `CanFill`.**",
+		"**This changes the invariant `WithinCap`.**", "| `CanFill` | **removed** witness |", "*(was: The buffer never holds more than its capacity.)*",
+		"Unchanged: `Spec`, `TypeOK`, `PutWhenFull`.", "WithinCap == Len(buf) < Cap + 1"} {
+		if !strings.Contains(proposal.Comment.Body, want) {
+			t.Errorf("the amendment's proposal lacks %q:\n%s", want, proposal.Comment.Body)
+		}
+	}
+	p := proposal.Marker.Proposal
+	r.gh.say(5, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Hash, "sha256:"))
+	r.poll()
+	pr := r.expect(5, KindPR, LabelPR)
+	if !reflect.DeepEqual(r.build.amended, []bool{true}) {
+		t.Errorf("the build should start from the existing code: %v", r.build.amended)
+	}
+	branch := pr.Marker.Branch
+	if branch != "invariant/issue-5-bounded-buffer" || pr.Marker.Project != dir {
+		t.Fatalf("marker = %+v", pr.Marker)
+	}
+	var lock project.Lock
+	json.Unmarshal([]byte(git(t, r.origin, "show", branch+":"+dir+"/.invariant/ratified.lock")), &lock)
+	if r := lock.Ratified; r == nil || r.Issue != 5 || r.Amends != project.ProposalHash(old.Bounds, old.Statements) || r.Previous != "#1" || len(lock.Statements) != 4 {
+		t.Errorf("the amended lock = %+v", lock.Ratified)
+	}
+	if code := git(t, r.origin, "show", branch+":"+dir+"/buffer/buffer.go"); !strings.Contains(code, "// Amended.") {
+		t.Errorf("the code should be changed, not rewritten: %q", code)
+	}
+	if out, err := exec.Command("git", "-C", r.origin, "cat-file", "-e", branch+":"+dir+"/buffer/old.go").CombinedOutput(); err == nil {
+		t.Errorf("a file the agent dropped should be gone (%s)", out)
+	}
+	if log := git(t, r.origin, "log", "--format=%s", "main.."+branch); !strings.Contains(log, "Ratify the amendment for #5") {
+		t.Errorf("log = %q", log)
+	}
+	r.gh.ci(pr.Marker.PR, "success")
+	r.poll()
+	r.expect(5, KindMerged, LabelMerged)
+}
+
+// An amendment drafted against a lock that has since changed ratifies
+// nothing.
+func TestStaleAmendment(t *testing.T) {
+	r := newRig(t)
+	r.form.forks, r.form.amend = nil, dropCanFill
+	dir := "examples/03-bounded-buffer"
+	seed(t, r, dir, 1)
+	r.gh.open(5, "gitdek", "Stop promising the buffer can fill", "Project: examples/03-bounded-buffer\n\n/invariant solve")
+	r.poll()
+	p := r.expect(5, KindProposal, LabelProposal).Marker.Proposal
+	seed(t, r, dir, 4, func(p *formalize.Proposal) { p.Statements[1].Says = "Someone else's amendment landed first." })
+	r.gh.say(5, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Hash, "sha256:"))
+	r.poll()
+	if note := r.expect(5, KindNote, LabelProposal); !strings.Contains(note.Comment.Body, "The project changed after I drafted this amendment") {
+		t.Errorf("note = %s", note.Comment.Body)
+	}
+	if len(r.build.built) != 0 {
+		t.Error("a stale amendment must not be built")
+	}
+}
+
+// A Project: line that names no existing project says where a new one goes.
+func TestNewProjectAtANamedPath(t *testing.T) {
+	r := newRig(t)
+	r.form.forks = nil
+	r.gh.open(6, "gitdek", "Formalize the factory's protocol", "Project: factory/protocol\n\n/invariant solve")
+	r.poll()
+	p := r.expect(6, KindProposal, LabelProposal)
+	r.gh.say(6, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Marker.Proposal.Hash, "sha256:"))
+	r.poll()
+	if pr := r.expect(6, KindPR, LabelPR); pr.Marker.Project != "factory/protocol" {
+		t.Errorf("project = %s", pr.Marker.Project)
+	}
+}
+
+func TestProjectLine(t *testing.T) {
+	for body, want := range map[string]string{
+		"Fix it.\n\nProject: examples/04-api-rate-limiter\n":   "examples/04-api-rate-limiter",
+		"project: `factory/protocol`":                          "factory/protocol",
+		"```\nProject: in/a/code/block\n```\nNo project here.": "",
+		"The project: is not a Project line.":                  "",
+		"Nothing named.":                                       "",
+	} {
+		if got := projectLine(body); got != want {
+			t.Errorf("projectLine(%q) = %q; want %q", body, got, want)
+		}
+	}
+	for dir, bad := range map[string]bool{"examples/04-x": false, "factory/protocol": false, "../escape": true, "/abs": true,
+		".github/workflows": true, "a/./b": true, "has space": true} {
+		if got := badDir(dir) != ""; got != bad {
+			t.Errorf("badDir(%q) = %v", dir, got)
+		}
 	}
 }

@@ -520,12 +520,13 @@ func scopeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("scope", flag.ExitOnError)
 	base := fs.String("base", "origin/main", "the ref the pull request merges into")
 	dir := fs.String("C", ".", "the git repository")
+	issue := fs.Int("issue", 0, "the issue the pull request answers; only its ratification may amend an existing project")
 	fs.Parse(args)
 	head := "HEAD"
 	if fs.NArg() == 1 {
 		head = fs.Arg(0)
 	}
-	r, err := scope.Check(ctx, *dir, *base, head)
+	r, err := scope.Check(ctx, *dir, *base, head, *issue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2

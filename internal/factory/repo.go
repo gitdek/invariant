@@ -116,8 +116,8 @@ func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
 	return []byte(out), err
 }
 
-func (c Clone) Scope(ctx context.Context, base, head string) (scope.Result, error) {
-	return scope.Check(ctx, c.Dir, base, head)
+func (c Clone) Scope(ctx context.Context, base, head string, issue int) (scope.Result, error) {
+	return scope.Check(ctx, c.Dir, base, head, issue)
 }
 
 func (c Clone) git(ctx context.Context, args ...string) (string, error) {

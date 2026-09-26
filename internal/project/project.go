@@ -52,6 +52,12 @@ type Ratification struct {
 	Issue    int    `json:"issue"`    // the issue the proposal answers
 	Comment  string `json:"comment"`  // the ratifying comment's URL
 	Proposal string `json:"proposal"` // the ProposalHash that was ratified
+	// Amends is the ProposalHash of the lock this ratification replaced,
+	// when it amended an existing project (D-0045), and Previous says
+	// where that lock was ratified: "#3", or "D-0027" for a hand-built
+	// project. Each lock names the one before it.
+	Amends   string `json:"amends,omitempty"`
+	Previous string `json:"previous,omitempty"`
 }
 
 // ProposalHash identifies what a person ratifies: the bounds, and every

@@ -22,7 +22,7 @@ var kindMeaning = map[string]string{
 // model the factory wrote with the statements, not just a skeleton. The code
 // is in the project's language: Go proved with Gobra, Python proved with
 // Nagini, or TypeScript explored completely (D-0038, D-0039).
-func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft bool) string {
+func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft, amend bool) string {
 	modelTask := "The skeleton below holds the pinned definitions and a marked place for the model. Write `Init`, one operator per action, and `Next` there, above `Spec`. Use only the declared constants and variables."
 	moduleHeading := "The skeleton of"
 	if draft {
@@ -52,12 +52,20 @@ func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft bo
 	if lang.name == "" {
 		lang = languages["go"]
 	}
+	amendment := ""
+	if amend {
+		amendment = `
+# The code already exists
+
+This is an amendment. The project's code is already in your workspace, and it implements the statements people ratified before this request. They've now ratified the amended statements above. Change the code, and the model if it needs it, to satisfy the amended statements. Keep what doesn't need to change: its structure, its names and its tests. The gate checks every statement in the lock, old and new, so a change that breaks an unchanged statement fails.
+`
+	}
 	return fmt.Sprintf(`You're the synthesis step of Invariant, a code factory. People have ratified formal statements about a system. Your job is to write the TLA+ model and the %s code that satisfy them, and to show they do by passing the gate.
 
 # The request
 
 %s
-
+%s
 # What was ratified
 
 These statements are pinned by hash in `+"`.invariant/ratified.lock`"+`. Their definitions are already in `+"`%s`"+`. Don't change them, or anything they depend on. The gate hashes their text and fails if it changes. The lock, the manifest, the request%s are protected: the gate always uses the originals.
@@ -82,7 +90,7 @@ TLC checks everything with these constants: %s.
 
 `+"```tla"+`
 %s`+"```"+`
-`, lang.name, strings.TrimSpace(request), p.Manifest.Module, lang.protected, statements.String(), kinds.String(), strings.Join(bounds, ", "),
+`, lang.name, strings.TrimSpace(request), amendment, p.Manifest.Module, lang.protected, statements.String(), kinds.String(), strings.Join(bounds, ", "),
 		p.Manifest.Module, modelTask, lang.task(p, gateRuns), lang.checks, lang.primer, moduleHeading, p.Manifest.Module, skeleton)
 }
 

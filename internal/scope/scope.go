@@ -38,8 +38,9 @@ const (
 )
 
 // Check compares head with base in the git repository at dir, the way a pull
-// request of head into base would change it.
-func Check(ctx context.Context, dir, base, head string) (Result, error) {
+// request of head into base would change it. issue is the issue the pull
+// request answers; only its ratification may amend an existing project.
+func Check(ctx context.Context, dir, base, head string, issue int) (Result, error) {
 	g := git{ctx: ctx, dir: dir}
 	out, err := g.run("diff", "--name-only", "--no-renames", base+"..."+head)
 	if err != nil {
@@ -84,7 +85,9 @@ func Check(ctx context.Context, dir, base, head string) (Result, error) {
 			r.Problems = append(r.Problems, "it adds a project whose lock has no ratification record")
 		}
 	} else if changed(r.Files, join(r.Project, lockFile)) {
-		r.Problems = append(r.Problems, "it changes the ratified lock of an existing project")
+		// An amendment (D-0045): the new lock must carry this issue's
+		// ratification, amending exactly the lock on the base branch.
+		r.Problems = append(r.Problems, amendment(g, base, head, join(r.Project, lockFile), issue)...)
 	}
 
 	before, _ := g.show(base, join(r.Project, "go.mod"))
@@ -135,6 +138,31 @@ func Check(ctx context.Context, dir, base, head string) (Result, error) {
 		}
 	}
 	return r, nil
+}
+
+// amendment checks a change to an existing project's lock.
+func amendment(g git, base, head, lockPath string, issue int) []string {
+	var before, after project.Lock
+	b, err := g.show(base, lockPath)
+	if err != nil || json.Unmarshal([]byte(b), &before) != nil {
+		return []string{"it changes a lock that can't be read on the base branch"}
+	}
+	a, err := g.show(head, lockPath)
+	if err != nil || json.Unmarshal([]byte(a), &after) != nil {
+		return []string{"it leaves a project's lock unreadable"}
+	}
+	r := after.Ratified
+	switch {
+	case r == nil:
+		return []string{"it changes the ratified lock of an existing project without a ratification"}
+	case issue == 0 || r.Issue != issue:
+		return []string{fmt.Sprintf("it changes an existing project's lock with a ratification from #%d, not this pull request's issue", r.Issue)}
+	case r.Amends != project.ProposalHash(before.Bounds, before.Statements):
+		return []string{"its amendment was drafted against a lock that has since changed"}
+	case project.ProposalHash(after.Bounds, after.Statements) != r.Proposal:
+		return []string{"its lock isn't the proposal that was ratified"}
+	}
+	return nil
 }
 
 // npmDependencies lists every package a package.json depends on, of any
