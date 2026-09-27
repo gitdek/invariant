@@ -395,7 +395,9 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 		}
 	}
 	if id == 0 {
-		return fmt.Errorf("gate run %d has no receipts", run.ID)
+		// A gate run with no projects to check has nothing to receipt.
+		r.src.receipts, r.src.projects = &receiptSet{run: *run, reports: map[string]*verify.Report{}, traces: map[string]map[string]tlc.TraceFile{}}, nil
+		return nil
 	}
 	raw, err := r.GitHub.Download(ctx, id)
 	if err != nil {
