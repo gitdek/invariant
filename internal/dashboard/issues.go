@@ -126,6 +126,7 @@ type Span struct {
 func Lane(issue github.Issue, comments []github.Comment, self string, now time.Time) Issue {
 	opened := parseTime(issue.CreatedAt)
 	l := Issue{Number: issue.Number, Title: issue.Title, Open: issue.State == "open", Opened: opened}
+	var said []saidAt
 	for _, lab := range issue.Labels {
 		if s, ok := stageLabels[lab.Name]; ok {
 			l.Stage = s
@@ -191,6 +192,7 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 				l.Answers++
 			}
 		}
+		said = append(said, saidAt{at, cmds})
 		l.Events = append(l.Events, Event{At: at, Issue: issue.Number, Who: WhoPerson, By: c.User.Login, Kind: cmds[0].Verb, Text: commandText(cmds)})
 	}
 	sort.SliceStable(l.Events, func(i, j int) bool { return l.Events[i].At.Before(l.Events[j].At) })
@@ -204,6 +206,17 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	}
 	if l.Open && latest != nil {
 		l.Waiting = waitingFor(*latest, latestAt)
+		// Once people have given what the post asked for, the next move is
+		// the factory's.
+		var since []factory.Command
+		for _, s := range said {
+			if s.at.After(latestAt) {
+				since = append(since, s.cmds...)
+			}
+		}
+		if l.Waiting != nil && answered(l.Waiting, since) {
+			l.Waiting = nil
+		}
 	}
 	if !l.Open {
 		if t := parseTime(issue.ClosedAt); !t.IsZero() {
@@ -255,6 +268,55 @@ func spanWho(from, to Event) string {
 		return WhoCI
 	}
 	return WhoFactory
+}
+
+// saidAt is the commands in one of people's comments, and when.
+type saidAt struct {
+	at   time.Time
+	cmds []factory.Command
+}
+
+// answered says whether people's commands since the factory's latest post
+// give what it asked for: an answer to every open question, a ratify naming
+// the proposal, a retry of what failed, or a revise.
+func answered(w *Waiting, cmds []factory.Command) bool {
+	chosen := map[string]bool{}
+	for _, c := range cmds {
+		switch c.Verb {
+		case factory.Revise:
+			if w.Kind != factory.KindFailed {
+				return true
+			}
+		case factory.Solve:
+			if w.Kind == factory.KindStuck {
+				return true
+			}
+		case factory.Retry:
+			if w.Kind == factory.KindFailed {
+				return true
+			}
+		case factory.Ratify:
+			if w.Kind == factory.KindProposal && len(c.Args) == 1 && w.Hash != "" {
+				named := strings.ToLower(strings.TrimPrefix(c.Args[0], "sha256:"))
+				if len(named) >= len(w.Hash) && strings.HasPrefix(named, w.Hash) {
+					return true
+				}
+			}
+		case factory.Choose:
+			if len(c.Args) == 2 {
+				chosen[strings.ToUpper(c.Args[0])] = true
+			}
+		}
+	}
+	if w.Kind != factory.KindForks || len(w.Forks) == 0 {
+		return false
+	}
+	for _, q := range w.Forks {
+		if !chosen[strings.ToUpper(q.ID)] {
+			return false
+		}
+	}
+	return true
 }
 
 // waitingFor says what the factory's latest post asks of a person, if

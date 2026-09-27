@@ -333,3 +333,40 @@ func TestTheFactorysIssues(t *testing.T) {
 		}
 	}
 }
+
+// Once people give what the factory asked for, the issue no longer needs
+// anyone: the next move is the factory's.
+func TestAnsweredIssuesNeedNoOne(t *testing.T) {
+	now := time.Date(2026, 9, 27, 4, 30, 0, 0, time.UTC)
+	asked, later := now.Add(-10*time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339)
+	issue := github.Issue{Number: 13, Title: "Add failure steps", State: "open", CreatedAt: now.Add(-time.Hour).Format(time.RFC3339),
+		Labels: []github.Label{{Name: factory.LabelAsking}}}
+	forks := factory.Marker{Kind: factory.KindForks, Forks: []formalize.Fork{
+		{ID: "F1", Question: "What can a writer do?", Options: []formalize.Option{{ID: "A"}, {ID: "C"}}},
+		{ID: "F2", Question: "Does retry reset the limit?", Options: []formalize.Option{{ID: "B"}}}}}
+	post := github.Comment{User: github.User{Login: "bot"}, CreatedAt: asked, Body: marker(t, forks)}
+	person := func(body string) github.Comment {
+		return github.Comment{User: github.User{Login: "gitdek", Type: "User"}, CreatedAt: later, Body: body}
+	}
+	for body, waiting := range map[string]bool{
+		"/invariant choose F1 C\n/invariant choose F2 B": false,
+		"/invariant choose F1 C":                         true,
+		"/invariant revise":                              false,
+		"Thinking about it.":                             true,
+	} {
+		if l := Lane(issue, []github.Comment{post, person(body)}, "", now); (l.Waiting != nil) != waiting {
+			t.Errorf("after %q: waiting %+v", body, l.Waiting)
+		}
+	}
+	proposal := factory.Marker{Kind: factory.KindProposal, Proposal: &formalize.Proposal{Hash: "sha256:11bff3f218d7d1da4c62"}}
+	post.Body = marker(t, proposal)
+	for body, waiting := range map[string]bool{
+		"/invariant ratify 11bff3f218d7":         false,
+		"/invariant ratify 11bff3f218d7d1da4c62": false,
+		"/invariant ratify 000000000000":         true,
+	} {
+		if l := Lane(issue, []github.Comment{post, person(body)}, "", now); (l.Waiting != nil) != waiting {
+			t.Errorf("after %q: waiting %+v", body, l.Waiting)
+		}
+	}
+}
