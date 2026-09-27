@@ -3,7 +3,8 @@ id: D-0075
 title: Slice 10 · ready to go public
 date: 2026-09-27
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: slice 10 planning, the morning slice 9's recovery core merged, with an audit of the repository's history
 ---
@@ -50,6 +51,15 @@ The audit was run on 2026-09-27, over 120 commits on every ref.
 2. **Who merges?** D-0033 planned for GitHub's auto-merge to take over. Recommend instead keeping the factory's own merge and having GitHub require the gate, so GitHub refuses any merge the gate didn't pass. The factory's merge is proved twice now, in `factory/protocol` and `factory/recovery`. Handing it to auto-merge would put an unproved path in its place.
 3. **The 13 merge commits with `joe@puglisij.com`?** Recommend keeping them, since the address is on his own domain. The alternative is rewriting history.
 4. **Outside contributors' workflow runs?** Recommend requiring approval for every run from an outside collaborator.
+
+## Ratified by @gitdek
+
+@gitdek answered all four questions with their recommendations on 2026-09-27, the afternoon the account's GitHub Actions minutes ran out:
+
+1. **When: once slice 9's live check has run its day,** on 2026-09-28. Public repositories get GitHub's runners without a limit. Until then, CI stays off, and nothing merges.
+2. **The factory keeps merging,** and GitHub requires the gate, so GitHub refuses any merge the gate didn't pass. This replaces D-0033's plan for auto-merge.
+3. **The merge commits stay as they are.** There were 19 by the time he answered, since six more merged after the audit. Later merges name the noreply address as their author, and GitHub's email privacy is turned on for the rest.
+4. **Every run from an outside collaborator needs approval.**
 
 ## What would reopen this
 

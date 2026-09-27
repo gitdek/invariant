@@ -3,7 +3,15 @@ name: gate
 on:
   push:
     branches: [main]
+    # Docs and decisions don't change what the gate checks (D-0079).
+    paths-ignore: ['**.md', 'docs/**', 'decisions/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'decisions/**']
+
+# A newer push to the same branch replaces a run that's still going.
+concurrency:
+  group: gate-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -44,11 +52,27 @@ jobs:
           "$RUNNER_TEMP/invariant" scope -base "origin/$BASE" -issue "${issue:-0}" HEAD
 
       # Every project in the repository, found rather than listed, so a
-      # factory pull request is gated without touching this file.
+      # factory pull request is gated without touching this file. A factory
+      # pull request changes one project and nothing else, as the step above
+      # checks, so it verifies that project alone (D-0079).
       - name: Verify every project
+        env:
+          BASE: ${{ github.base_ref }}
+          FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') }}
         run: |
+          manifests=$(git ls-files '*/.invariant/invariant.json')
+          if [ "$FACTORY" = "true" ]; then
+            manifests=$(git diff --name-only "origin/$BASE...HEAD" | while read -r f; do
+              d=$(dirname "$f")
+              while [ "$d" != "." ]; do
+                if [ -f "$d/.invariant/invariant.json" ]; then echo "$d/.invariant/invariant.json"; break; fi
+                d=$(dirname "$d")
+              done
+            done | sort -u)
+            if [ -z "$manifests" ]; then echo "The pull request changes no project."; exit 1; fi
+          fi
           status=0
-          for manifest in $(git ls-files '*/.invariant/invariant.json'); do
+          for manifest in $manifests; do
             project="${manifest%/.invariant/invariant.json}"
             echo "::group::$project"
             "$RUNNER_TEMP/invariant" verify -out "out/$(basename "$project")" "$project" || status=1
@@ -78,5 +102,9 @@ jobs:
           path: out
           if-no-files-found: ignore
 
+      # The gate's own tests, on a pull request that can change the gate. A
+      # factory pull request can't, and main gets only what a pull request
+      # already ran them on (D-0079).
       - name: Show the gate rejects gaming, and synthesis can't touch the lock
+        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'invariant/')
         run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/
