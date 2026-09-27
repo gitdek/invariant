@@ -57,6 +57,7 @@
     return hh ? `${d}d ${hh}h` : `${d}d`;
   }
   const stamp = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const clockOf = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   function tick() {
     document.querySelectorAll("[data-ago]").forEach((el) => (el.textContent = ago(el.dataset.ago)));
     document.querySelectorAll("[data-since]").forEach((el) => (el.textContent = dur((Date.now() - T(el.dataset.since)) / 1000)));
@@ -175,6 +176,12 @@
       rows.push(`<div><span class="k">CI</span><span>${gate}</span></div>`);
     }
     if (s.receipts) rows.push(`<div><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>, <span data-ago="${esc(s.receipts.updated)}"></span></span></div>`);
+    // The lease: which one watcher may act, and until when it must renew.
+    const lease = (l) => T(l.until) > Date.now()
+      ? `<code>${esc(l.holder)}</code> holds it until ${esc(clockOf(l.until))}`
+      : `<span class="muted">ran out at ${esc(clockOf(l.until))}, free for the next watcher</span>`;
+    const primary = (s.repos || []).find((r) => r.primary);
+    if (primary?.lease) rows.push(`<div><span class="k">Lease</span><span>${lease(primary.lease)}</span></div>`);
     for (const r of s.repos || []) {
       if (r.primary) continue;
       let gate = `<span class="muted">no gate run yet</span>`;
@@ -185,7 +192,8 @@
         else gate = `<span class="bad">✕ gate ${esc(g.conclusion)}</span>`;
       }
       const f = r.factory?.running ? "factory on" : "factory off";
-      rows.push(`<div><span class="k">${esc(r.short)}</span><span>${gate} · ${f} · ${r.projects} project${r.projects === 1 ? "" : "s"}</span></div>`);
+      const held = r.lease && T(r.lease.until) > Date.now() ? " · lease held" : "";
+      rows.push(`<div><span class="k">${esc(r.short)}</span><span>${gate} · ${f}${held} · ${r.projects} project${r.projects === 1 ? "" : "s"}</span></div>`);
     }
     $("#mainline").innerHTML = rows.join("");
   }

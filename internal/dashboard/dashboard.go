@@ -83,6 +83,7 @@ type sources struct {
 	readme   string
 	prd      string
 	merges   map[int]mergeCheck
+	lease    *Lease
 }
 
 type cachedComments struct {
@@ -145,6 +146,32 @@ type RepoState struct {
 	Gate     *RunRef `json:"gate,omitempty"`     // the newest gate run on the branch
 	Receipts *RunRef `json:"receipts,omitempty"` // the run its receipts come from
 	Projects int     `json:"projects"`
+	Lease    *Lease  `json:"lease,omitempty"` // which watcher may act (D-0069)
+}
+
+// Lease is a repository's lease as its ref says: the one watcher that may
+// act, and until when (D-0072).
+type Lease struct {
+	Holder string    `json:"holder"`
+	Until  time.Time `json:"until"`
+}
+
+// readLease reads a repository's lease from refs/invariant/lease, or nil
+// when it has none.
+func readLease(ctx context.Context, r *Repo) (*Lease, error) {
+	sha, err := r.GitHub.Ref(ctx, "invariant/lease")
+	if err != nil || sha == "" {
+		return nil, err
+	}
+	msg, err := r.GitHub.CommitMessage(ctx, sha)
+	if err != nil {
+		return nil, err
+	}
+	var l Lease
+	if err := json.Unmarshal([]byte(strings.TrimSpace(msg)), &l); err != nil || l.Holder == "" {
+		return nil, fmt.Errorf("the lease at %s can't be read", sha)
+	}
+	return &l, nil
 }
 
 // Watcher is the factory's watcher, as its status file tells it.
@@ -375,6 +402,11 @@ func (s *Server) refresh(ctx context.Context) error {
 			}
 		}
 		s.checkMerges(ctx, r)
+		if lease, err := readLease(ctx, r); err != nil {
+			fail("lease", err)
+		} else {
+			r.src.lease = lease
+		}
 	}
 
 	snap := s.assemble(time.Now().UTC())
@@ -624,7 +656,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	pins, built := map[string]bool{}, map[string]bool{}
 	var watchers []namedWatcher
 	for i, r := range s.Repos {
-		rs := RepoState{Name: r.Name, Short: r.Short(), Primary: i == 0}
+		rs := RepoState{Name: r.Name, Short: r.Short(), Primary: i == 0, Lease: r.src.lease}
 		if st, err := ReadStatus(r.Status); err == nil && st.PID != 0 {
 			w := Watcher{Running: st.Running(), Issue: st.Issue, Doing: st.Doing, Since: st.Since}
 			started, beat := st.Started, st.Heartbeat
