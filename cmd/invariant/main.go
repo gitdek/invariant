@@ -14,9 +14,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/dashboard"
 	"github.com/gitdek/invariant/internal/factory"
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
@@ -50,6 +53,8 @@ Usage:
                                                check factory projects' ratifications on GitHub
   invariant pin PROJECT                        record the statements' current text as ratified
   invariant trace FILE                         replay a counterexample trace
+  invariant dashboard -repo OWNER/NAME [-addr HOST:PORT]
+                                               serve a live view of the factory and its evidence
 
 Not built yet: init (see decisions/D-0013-slice-plan.md).
 `
@@ -81,6 +86,8 @@ func main() {
 		code = ratificationCmd(ctx, args)
 	case "mcp":
 		code = mcpCmd(ctx, args)
+	case "dashboard":
+		code = dashboardCmd(ctx, args)
 	case "init":
 		fmt.Fprintf(os.Stderr, "invariant %s isn't built yet (see decisions/D-0013-slice-plan.md)\n", cmd)
 		code = 2
@@ -503,6 +510,23 @@ func watchCmd(ctx context.Context, args []string) int {
 	if err := f.Prepare(ctx); err != nil {
 		return fail(err)
 	}
+	// What the factory is doing goes in a status file for the dashboard
+	// (D-0049). It holds no secrets: the process, the repository, and the
+	// issue and step in hand.
+	statusPath := dashboard.StatusPath(*work, *repo)
+	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Started: time.Now().UTC(), Every: every.Seconds()}
+	f.Activity = func(issue int, doing string) {
+		now := time.Now().UTC()
+		status.Heartbeat = now
+		if issue != status.Issue || doing != status.Doing {
+			status.Issue, status.Doing, status.Since = issue, doing, &now
+		}
+		if err := dashboard.WriteStatus(statusPath, status); err != nil {
+			logger.Printf("status: %v", err)
+		}
+	}
+	f.Activity(0, "")
+	defer os.Remove(statusPath)
 	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
 		if err := f.Poll(ctx); err != nil {
@@ -572,4 +596,47 @@ func ratificationCmd(ctx context.Context, args []string) int {
 		}
 	}
 	return code
+}
+
+func dashboardCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
+	repo := fs.String("repo", "", "the repository to show, as owner/name")
+	addr := fs.String("addr", "127.0.0.1:8484", "where to serve the page. Keep it on localhost, and share it through a tunnel")
+	every := fs.Duration("every", 30*time.Second, "how often to read GitHub")
+	base := fs.String("base", "main", "the branch the factory merges into")
+	cache, _ := os.UserCacheDir()
+	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "the watcher's work directory, where it writes what it's doing")
+	fs.Parse(args)
+	if *repo == "" || fs.NArg() != 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
+	s := &dashboard.Server{
+		Repo: *repo, Branch: *base, GitHub: github.Client{Repo: *repo},
+		Cache: filepath.Join(cache, "invariant", "dashboard"), Status: dashboard.StatusPath(*work, *repo),
+		Every: *every, Log: logger.Printf,
+	}
+	// State graphs come from TLC, so they need Docker. Without it, the page
+	// still shows everything else.
+	if tc, err := toolchain.Ensure(ctx); err != nil {
+		logger.Printf("no state graphs: %v", err)
+	} else {
+		s.Runner = &tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
+	}
+	s.Start(ctx)
+	srv := &http.Server{Addr: *addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
+	go func() {
+		<-ctx.Done()
+		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shut)
+	}()
+	logger.Printf("serving the dashboard for %s at http://%s", *repo, *addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Print(err)
+		return 2
+	}
+	return 0
 }

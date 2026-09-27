@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0047 · 2026-09-26 (every entry is ratified or decided)
+**Rolled up through** D-0052 · 2026-09-26 (every ratified or decided entry. D-0048 is proposed, so it isn't here yet)
 
 ## What Invariant is
 
@@ -48,6 +48,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Invariant converts TLC counterexamples into JSON traces. `D-0016`
 - Each project is its own Go module. `D-0020`
 - Synthesis backends are pluggable: direct model APIs, or headless coding agents such as Claude Code and Codex. `D-0000`
+- Invariant is agent-agnostic. It works with Codex as well as Claude Code, its product and docs name roles rather than an agent, and its working rules live in `AGENTS.md`, which `CLAUDE.md` imports. The factory's agents run on Claude Code today, and a Codex backend is planned. `D-0028` `D-0052`
 - Synthesis runs locally through the official coding-agent CLIs in their documented headless modes, on @gitdek's own accounts. Anything shared, hosted or run in CI uses an API key. `D-0028`
 - A synthesis agent starts from a skeleton that holds only the pinned definitions. It works outside the repository, with file tools and the gate as its only tools. Every gate run checks a project assembled from the original lock, manifest, request and `go.mod`, plus the agent's model and code. `D-0026`
 - The agent gets at most four gate runs: one attempt and three repairs. Each run is capped by an estimated-cost budget, a turn limit and a timeout. `D-0000` `D-0026`
@@ -71,7 +72,10 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - Every pull request carries a receipt that CI generates from tool output only. `D-0000` `D-0013`
   - It lists the states explored, the bounds, the functions verified, the statement hashes and the tool versions.
   - Its fingerprint matches between a local run and a CI run of the same commit.
-- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin` and `trace` commands are built. `init` is specified but not yet built. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036`
+- A live dashboard shows what the factory is working on, each project's evidence, the roadmap and the decisions. `invariant dashboard` serves it from @gitdek's machine, and a Cloudflare tunnel publishes it at `invariant.puglisij.com`, open to anyone with the link. It moves to puglisij.com/invariant later. It has a light and a dark theme. `D-0049` `D-0050`
+  - It only reads: GitHub through `gh`, CI's receipts from main, and TLC's own state graphs. It shows no code, comment bodies, emails or keys. `D-0051`
+  - The watcher writes what it's doing to a status file for it. `D-0051`
+- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin`, `trace` and `dashboard` commands are built. `init` is specified but not yet built. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036` `D-0051`
 
 ## Merging
 

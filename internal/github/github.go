@@ -47,6 +47,7 @@ type Issue struct {
 	URL         string    `json:"html_url"`
 	CreatedAt   string    `json:"created_at"`
 	UpdatedAt   string    `json:"updated_at"`
+	ClosedAt    string    `json:"closed_at,omitempty"`
 	PullRequest *struct{} `json:"pull_request,omitempty"` // set when the issue is a pull request
 }
 
@@ -97,6 +98,8 @@ type PullRequest struct {
 	Head           Ref    `json:"head"`
 	Base           Ref    `json:"base"`
 	MergeCommitSHA string `json:"merge_commit_sha"`
+	MergedAt       string `json:"merged_at,omitempty"`
+	MergedBy       *User  `json:"merged_by,omitempty"`
 }
 
 // NewPullRequest is a pull request to open.
