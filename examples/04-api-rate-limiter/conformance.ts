@@ -12,6 +12,9 @@ export function abstract(s: State): unknown {
     tokens: fn((a) => s.tokens[a]),
     waiting: fn((a) => ({ $seq: s.waiting[a].map((w) => ({ id: w.id, madeAt: w.madeAt })) })),
     sent: fn((a) => ({ $seq: s.sent[a].map((c) => ({ id: c.id, madeAt: c.madeAt, at: c.at })) })),
+    refused: fn((a) => ({
+      $seq: s.refused[a].map((r) => ({ madeAt: r.madeAt, tokens: r.tokens, queued: r.queued })),
+    })),
     made: fn((a) => s.made[a]),
     clock: s.clock,
   };

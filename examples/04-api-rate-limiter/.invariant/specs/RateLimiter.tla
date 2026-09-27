@@ -1,20 +1,24 @@
 ---- MODULE RateLimiter ----
 EXTENDS Naturals, Sequences
 
-CONSTANTS Apis, Capacity, MaxCalls, MaxTime
+CONSTANTS Apis, Capacity, MaxCalls, MaxTime, MaxWaiting
 
-VARIABLES tokens, waiting, sent, made, clock
+VARIABLES tokens, waiting, sent, refused, made, clock
 
-vars == <<tokens, waiting, sent, made, clock>>
+vars == <<tokens, waiting, sent, refused, made, clock>>
 
 Waiter == [id : 1..MaxCalls, madeAt : 0..MaxTime]
 
 SentCall == [id : 1..MaxCalls, madeAt : 0..MaxTime, at : 0..MaxTime]
 
+\* A refused call, with the bucket and queue it met when it was made.
+RefusedCall == [madeAt : 0..MaxTime, tokens : 0..Capacity, queued : 0..MaxCalls]
+
 TypeOK ==
     /\ tokens \in [Apis -> 0..Capacity]
     /\ waiting \in [Apis -> Seq(Waiter)]
     /\ sent \in [Apis -> Seq(SentCall)]
+    /\ refused \in [Apis -> Seq(RefusedCall)]
     /\ made \in [Apis -> 0..MaxCalls]
     /\ clock \in 0..MaxTime
 
@@ -33,9 +37,18 @@ FirstInFirstOut ==
 NoNeedlessWait ==
     \A a \in Apis : waiting[a] # <<>> => tokens[a] = 0
 
-\* Every call made has either gone out or is still waiting.
+\* Every call made has gone out, is still waiting, or was refused.
 NoCallLost ==
-    \A a \in Apis : made[a] = Len(sent[a]) + Len(waiting[a])
+    \A a \in Apis : made[a] = Len(sent[a]) + Len(waiting[a]) + Len(refused[a])
+
+\* No more than MaxWaiting calls ever wait for the same API.
+BoundedWait ==
+    \A a \in Apis : Len(waiting[a]) <= MaxWaiting
+
+\* A call is only refused when its bucket was empty and the queue was full.
+NoNeedlessRefusal ==
+    \A a \in Apis : \A i \in 1..Len(refused[a]) :
+        refused[a][i].tokens = 0 /\ refused[a][i].queued = MaxWaiting
 
 BurstGoesOut == \E a \in Apis : clock = 0 /\ Len(sent[a]) = Capacity
 
@@ -46,25 +59,35 @@ WaitingCallGoesOut ==
 
 BucketRefills == \E a \in Apis : Len(sent[a]) > 0 /\ tokens[a] = Capacity
 
+CallRefused == \E a \in Apis : refused[a] # <<>>
+
 Init ==
     /\ tokens = [a \in Apis |-> Capacity]
     /\ waiting = [a \in Apis |-> <<>>]
     /\ sent = [a \in Apis |-> <<>>]
+    /\ refused = [a \in Apis |-> <<>>]
     /\ made = [a \in Apis |-> 0]
     /\ clock = 0
 
-\* A call is made: it goes out now if a token is free and nobody waits, else it queues.
+\* A call is made: it goes out now if a token is free and nobody waits,
+\* else it queues if fewer than MaxWaiting wait, else it is refused.
 MakeCall(a) ==
     /\ made[a] < MaxCalls
     /\ made' = [made EXCEPT ![a] = @ + 1]
-    /\ IF tokens[a] > 0 /\ waiting[a] = <<>>
-          THEN /\ tokens' = [tokens EXCEPT ![a] = @ - 1]
-               /\ sent' = [sent EXCEPT ![a] =
-                      Append(@, [id |-> made[a] + 1, madeAt |-> clock, at |-> clock])]
-               /\ UNCHANGED waiting
-          ELSE /\ waiting' = [waiting EXCEPT ![a] =
-                      Append(@, [id |-> made[a] + 1, madeAt |-> clock])]
-               /\ UNCHANGED <<tokens, sent>>
+    /\ LET id == Len(sent[a]) + Len(waiting[a]) + 1
+       IN IF tokens[a] > 0 /\ waiting[a] = <<>>
+             THEN /\ tokens' = [tokens EXCEPT ![a] = @ - 1]
+                  /\ sent' = [sent EXCEPT ![a] =
+                         Append(@, [id |-> id, madeAt |-> clock, at |-> clock])]
+                  /\ UNCHANGED <<waiting, refused>>
+          ELSE IF Len(waiting[a]) < MaxWaiting
+             THEN /\ waiting' = [waiting EXCEPT ![a] =
+                         Append(@, [id |-> id, madeAt |-> clock])]
+                  /\ UNCHANGED <<tokens, sent, refused>>
+          ELSE /\ refused' = [refused EXCEPT ![a] =
+                      Append(@, [madeAt |-> clock, tokens |-> tokens[a],
+                                 queued |-> Len(waiting[a])])]
+               /\ UNCHANGED <<tokens, sent, waiting>>
     /\ UNCHANGED clock
 
 \* One tick: every bucket refills one token, spent at once on the oldest waiting call.
@@ -79,7 +102,7 @@ Tick ==
                                 madeAt |-> Head(waiting[a]).madeAt,
                                 at |-> clock + 1])]
     /\ waiting' = [a \in Apis |-> IF waiting[a] = <<>> THEN <<>> ELSE Tail(waiting[a])]
-    /\ UNCHANGED made
+    /\ UNCHANGED <<made, refused>>
 
 \* The checked run is over: time and calls are used up.
 Done ==
@@ -98,7 +121,7 @@ SendWithoutToken ==
         /\ made' = [made EXCEPT ![a] = @ + 1]
         /\ sent' = [sent EXCEPT ![a] =
                Append(@, [id |-> made[a] + 1, madeAt |-> clock, at |-> clock])]
-        /\ UNCHANGED <<tokens, waiting, clock>>
+        /\ UNCHANGED <<tokens, waiting, refused, clock>>
 
 \* A known bug: a refilled token goes to the newest waiting call instead of the oldest.
 JumpQueue ==
@@ -110,7 +133,30 @@ JumpQueue ==
            IN sent' = [sent EXCEPT ![a] =
                   Append(@, [id |-> w.id, madeAt |-> w.madeAt, at |-> clock + 1])]
         /\ waiting' = [waiting EXCEPT ![a] = SubSeq(@, 1, Len(@) - 1)]
-        /\ UNCHANGED <<tokens, made>>
+        /\ UNCHANGED <<tokens, made, refused>>
+
+\* A known bug: a call queues even though MaxWaiting calls already wait.
+QueuePastLimit ==
+    \E a \in Apis :
+        /\ made[a] < MaxCalls
+        /\ tokens[a] = 0
+        /\ Len(waiting[a]) >= MaxWaiting
+        /\ made' = [made EXCEPT ![a] = @ + 1]
+        /\ waiting' = [waiting EXCEPT ![a] =
+               Append(@, [id |-> Len(sent[a]) + Len(waiting[a]) + 1, madeAt |-> clock])]
+        /\ UNCHANGED <<tokens, sent, refused, clock>>
+
+\* A known bug: a call is refused while there is still room in the queue.
+RefuseEarly ==
+    \E a \in Apis :
+        /\ made[a] < MaxCalls
+        /\ tokens[a] = 0
+        /\ Len(waiting[a]) < MaxWaiting
+        /\ made' = [made EXCEPT ![a] = @ + 1]
+        /\ refused' = [refused EXCEPT ![a] =
+               Append(@, [madeAt |-> clock, tokens |-> tokens[a],
+                          queued |-> Len(waiting[a])])]
+        /\ UNCHANGED <<tokens, sent, waiting, clock>>
 
 Spec == Init /\ [][Next]_vars
 ====

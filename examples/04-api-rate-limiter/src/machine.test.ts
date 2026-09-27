@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import {
-  APIS, CAPACITY, MAX_CALLS, MAX_TIME, done, init, key, makeCall, successors, tick,
+  APIS, CAPACITY, MAX_CALLS, MAX_TIME, MAX_WAITING, done, init, key, makeCall, successors, tick,
 } from "./machine.ts";
 import type { State } from "./machine.ts";
 
@@ -38,6 +38,17 @@ test("empty bucket makes calls wait, then they go out in order on ticks", () => 
   assert.strictEqual(s.tokens.a2, CAPACITY);
 });
 
+test("a call is refused once MAX_WAITING calls already wait", () => {
+  let s = init();
+  for (let i = 0; i < CAPACITY + MAX_WAITING; i++) s = makeCall(s, "a1")!;
+  assert.strictEqual(s.refused.a1.length, 0);
+  s = makeCall(s, "a1")!;
+  assert.deepStrictEqual(s.refused.a1, [{ madeAt: 0, tokens: 0, queued: MAX_WAITING }]);
+  assert.strictEqual(s.waiting.a1.length, MAX_WAITING);
+  s = tick(s)!;
+  assert.deepStrictEqual(s.sent.a1.at(-1), { id: CAPACITY + 1, madeAt: 0, at: 1 });
+});
+
 test("bucket refills to full", () => {
   let s = makeCall(init(), "a2")!;
   s = tick(s)!;
@@ -61,7 +72,12 @@ test("every reachable state satisfies the invariants", () => {
     for (const a of APIS) {
       assert.ok(s.tokens[a] >= 0 && s.tokens[a] <= CAPACITY);
       assert.ok(s.made[a] <= MAX_CALLS);
-      assert.strictEqual(s.made[a], s.sent[a].length + s.waiting[a].length);
+      assert.strictEqual(s.made[a], s.sent[a].length + s.waiting[a].length + s.refused[a].length);
+      assert.ok(s.waiting[a].length <= MAX_WAITING);
+      for (const r of s.refused[a]) {
+        assert.strictEqual(r.tokens, 0);
+        assert.strictEqual(r.queued, MAX_WAITING);
+      }
       if (s.waiting[a].length > 0) assert.strictEqual(s.tokens[a], 0);
       s.sent[a].forEach((c, i) => assert.strictEqual(c.id, i + 1));
       s.waiting[a].forEach((w, i) => assert.strictEqual(w.id, s.sent[a].length + i + 1));

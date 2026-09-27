@@ -1,29 +1,32 @@
 {
   "ratified": {
     "by": "gitdek",
-    "at": "2026-09-25T22:39:03Z",
-    "issue": 3,
-    "comment": "https://github.com/gitdek/invariant/issues/3#issuecomment-5840633638",
-    "proposal": "sha256:645f2d6b79c8dff534328c7bc16b1d7f03fce1024e031acf87a8bdd213125dd1"
+    "at": "2026-09-26T18:05:57Z",
+    "issue": 5,
+    "comment": "https://github.com/gitdek/invariant/issues/5#issuecomment-5848586100",
+    "proposal": "sha256:93f4926d456289ed75a82508a8229a25073126be0f819a3a5c8b8b9476a495a6",
+    "amends": "sha256:645f2d6b79c8dff534328c7bc16b1d7f03fce1024e031acf87a8bdd213125dd1",
+    "previous": "#3"
   },
   "bounds": {
     "Apis": "{a1, a2}",
     "Capacity": "2",
-    "MaxCalls": "4",
-    "MaxTime": "3"
+    "MaxCalls": "5",
+    "MaxTime": "3",
+    "MaxWaiting": "2"
   },
   "statements": [
     {
       "name": "Spec",
       "kind": "spec",
       "says": "The system starts in Init, and every step is a Next step.",
-      "sha256": "sha256:800ac2a35c71f3494555b2da0d881a2c8acc25ec23082d00e514912c17ed54bf"
+      "sha256": "sha256:873345f5b720f08aff6fee7320b9effc04fd740b1686cad148ba3c1e983d740b"
     },
     {
       "name": "TypeOK",
       "kind": "invariant",
-      "says": "Each API's bucket always holds between zero and its capacity in tokens, and every call is tracked with when it was made and when it went out.",
-      "sha256": "sha256:58b40d82f42c715dc685e94afcac5df0c2695964a5a8fc6fc1e0d952efe88c19"
+      "says": "Each API's bucket always holds between zero and its capacity in tokens, and every call is tracked with when it was made and when it went out or was refused.",
+      "sha256": "sha256:c913279019f92371b57d65a83237f12544cb5b5e93b5d6ee726e96a61f49fbe8"
     },
     {
       "name": "WithinRate",
@@ -46,8 +49,20 @@
     {
       "name": "NoCallLost",
       "kind": "invariant",
-      "says": "Every call that was made has either gone out or is still waiting.",
-      "sha256": "sha256:9ed20d96b0cf7211a1e19240e0b63149ec8d05e46e862d582ccfba87a298a108"
+      "says": "Every call that was made has gone out, is still waiting, or was refused.",
+      "sha256": "sha256:0c8d0ccf077c372bdaccb51edd8c531b3dbcf82dfa840c4c3470c15e5e6c48e7"
+    },
+    {
+      "name": "BoundedWait",
+      "kind": "invariant",
+      "says": "No more than MaxWaiting calls are ever waiting for the same API.",
+      "sha256": "sha256:d1d69cb98d0aead6feae3e009ae5b620c082820b46bb96d737236f52a04a3ed3"
+    },
+    {
+      "name": "NoNeedlessRefusal",
+      "kind": "invariant",
+      "says": "A call is only refused when its API's bucket was empty and MaxWaiting calls were already waiting for that API.",
+      "sha256": "sha256:cbadff9e47ad59cfdc4881d37dac125658f6313273937c30cc6ab6632e025a5c"
     },
     {
       "name": "BurstGoesOut",
@@ -74,18 +89,38 @@
       "sha256": "sha256:4cdd36e9b9cb5b508885950594d9a9e71c07b342628d61974b439f77c06cb3ec"
     },
     {
+      "name": "CallRefused",
+      "kind": "witness",
+      "says": "A call can be refused because too many calls are already waiting.",
+      "sha256": "sha256:51d6e515dd4ce110a48f7b2ff62b9d833bc52d166e9d0176925764dbe4689035"
+    },
+    {
       "name": "SendWithoutToken",
       "kind": "bug",
       "says": "A call goes out even though its API's bucket is empty.",
       "expect": "WithinRate",
-      "sha256": "sha256:3941b95bc5843118ee7a345d63e295fa24a563d15ae9e81d02702faa3d7d440d"
+      "sha256": "sha256:135ca5d517c000e30fe0d08422a32ba53d28c89866049f1275df1becafcc5440"
     },
     {
       "name": "JumpQueue",
       "kind": "bug",
       "says": "A refilled token goes to the newest waiting call instead of the oldest.",
       "expect": "FirstInFirstOut",
-      "sha256": "sha256:fcd6e8b3a7f61844e77002c6d4505fd34173a3b256a147253ec5c22e0274122a"
+      "sha256": "sha256:2dda7982ec48ad5bd9bab46b20fdebcce998ff9e00a2bcb42a418e135a850211"
+    },
+    {
+      "name": "QueuePastLimit",
+      "kind": "bug",
+      "says": "A call is put in the queue even though MaxWaiting calls are already waiting.",
+      "expect": "BoundedWait",
+      "sha256": "sha256:2c55c763550b344bacbf3e065dd3181459589ab52a2ce8727eaded248ec66c80"
+    },
+    {
+      "name": "RefuseEarly",
+      "kind": "bug",
+      "says": "A call is refused while there is still room in its API's queue.",
+      "expect": "NoNeedlessRefusal",
+      "sha256": "sha256:2d7c5a41e7eb7374dfd038e6bd29c8233473564cc352c64bb61285f189d3d887"
     }
   ]
 }
