@@ -33,16 +33,14 @@ A model describes a system and the environment it runs in. The code should hold 
 
 ## What a spike found
 
-A spike, not committed, wrote the log buffer's core this way: a buffer of any capacity, lines written without limit, and contracts over quantified slice permissions. It's excerpted below.
+A spike, not committed, wrote the log buffer's core this way: a ring buffer of any capacity, with lines written without limit and no constant from the bounds. **Gobra proved all of it, `New`, `Write` and `Ship`, with overflow checks, in about 24 seconds.** It's plain Go, with its contracts in comments, and it's in the appendix. What made it work is what the prompt will teach:
 
-- **`New` and `Write` verified** at every capacity, with overflow checks, in about 20 seconds.
-- **Two Gobra pitfalls,** which the prompt will warn about:
-  - With `--overflow`, a pure function can't read an int field through a predicate's unfolding, so permissions are spelled out field by field.
-  - A remainder by a symbolic length, `(head+i) % len(slots)`, kept the solver busy for over ten minutes, so index arithmetic stays linear.
-- **`Ship` didn't verify yet.** It shifts the lines down, which is the slice's main risk: parametric proofs take more engineering than fixed-size ones. The agent will need a worked example and its four gate runs. Three attempts didn't verify:
-  - A loop that shifts in place: its loop invariants need triggers the solver will instantiate.
-  - Go's `copy`, in place: Gobra specifies `copy` only for slices that don't overlap.
-  - `copy` into a fresh slice: its permission precondition wasn't met yet.
+- **Spell out permissions field by field.** With `--overflow`, a pure function can't read an int field through a predicate's unfolding.
+- **Keep index arithmetic linear.** A remainder by a symbolic length, `(head+i) % len(slots)`, kept the solver busy for over ten minutes. The code wraps an index with an `if`, and the spec wraps it with a ghost conditional, which Go itself doesn't have.
+- **Say what the buffer holds through a ghost view,** `At(i)`, the i-th oldest line. Each operation's contract is then short and exact: `Ship` returns the old `At(0)`, and every `At(i)` becomes the old `At(i+1)`.
+- **Avoid loops over slices where a ring will do.** Two earlier tries shifted the lines down on each ship, and neither verified. A loop that shifts in place needs loop invariants the solver can instantiate. Go's `copy` is specified only for slices that don't overlap.
+
+So the main risk moves. Parametric proofs are feasible and fast. The work is teaching the agent these patterns, with the log buffer as the worked example, within its four gate runs.
 
 ## Options considered
 
@@ -78,25 +76,94 @@ Existing projects keep their receipts, and nobody rewrites them unless an issue 
 
 If parametric proofs take the agent more than its four gate runs on most issues, then the prompt or the gate-run budget changes, or option B becomes the fallback for some languages.
 
-## Appendix: the spike's `Write`
+## Appendix: the spike, which Gobra proves
 
 ```go
-// Buffer holds its lines oldest first in Lines[0:N], in Cap = len(Lines) slots.
+// +gobra
+
+// A spike for slice 8: a ring buffer of any capacity, with O(1) writes and
+// ships and no model bounds. The index arithmetic is linear: code wraps with
+// an if, and the spec wraps with a ghost conditional.
+package logbuffer
+
+// MaxCapacity keeps index arithmetic far from overflow. It's the machine's
+// limit, not the model's.
+const MaxCapacity = 1 << 30
+
+type Line struct {
+	P int
+	N int
+}
+
+// Buffer is a ring of slots holding N lines, the oldest at Head.
 type Buffer struct {
-	Lines []Line
+	Slots []Line
+	Head  int
 	N     int
 }
 
+// @ requires acc(&b.Slots, _) && acc(&b.Head, _) && acc(&b.N, _)
+// @ decreases
+// @ pure
+func (b *Buffer) Ok() bool {
+	return 0 < len(b.Slots) && len(b.Slots) <= MaxCapacity &&
+		0 <= b.Head && b.Head < len(b.Slots) && 0 <= b.N && b.N <= len(b.Slots)
+}
+
+// @ ghost
+// @ requires 0 <= x && x < 2*n && 0 < n
+// @ ensures 0 <= r && r < n
+// @ decreases
+// @ pure func wrap(x, n int) (r int) { return x < n ? x : x - n }
+
+// @ ghost
+// @ requires acc(&b.Slots, _) && acc(&b.Head, _) && acc(&b.N, _) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j], _)
+// @ requires 0 <= i && i < b.N
+// @ decreases
+// @ pure func (b *Buffer) At(i int) Line { return b.Slots[wrap(b.Head+i, len(b.Slots))] }
+
+// New makes an empty buffer of the given capacity.
+// @ requires 0 < capacity && capacity <= MaxCapacity
+// @ ensures acc(&b.Slots) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures len(b.Slots) == capacity && b.N == 0
+func New(capacity int) (b *Buffer) {
+	return &Buffer{Slots: make([]Line, capacity)}
+}
+
 // Write adds a line, newest, when there's room.
-// @ requires acc(&b.Lines, 1/2) && acc(&b.N) && b.Ok()
-// @ requires forall j int :: { &b.Lines[j] } 0 <= j && j < len(b.Lines) ==> acc(&b.Lines[j])
-// @ requires b.N < len(b.Lines)
-// @ ensures acc(&b.Lines, 1/2) && acc(&b.N) && b.Ok()
-// @ ensures forall j int :: { &b.Lines[j] } 0 <= j && j < len(b.Lines) ==> acc(&b.Lines[j])
-// @ ensures b.N == old(b.N) + 1 && b.Lines[old(b.N)] == l
-// @ ensures forall j int :: { b.Lines[j] } 0 <= j && j < old(b.N) ==> b.Lines[j] == old(b.Lines[j])
+// @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ requires b.N < len(b.Slots)
+// @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures b.N == old(b.N) + 1 && b.At(old(b.N)) == l
+// @ ensures forall i int :: { b.At(i) } 0 <= i && i < old(b.N) ==> b.At(i) == old(b.At(i))
 func (b *Buffer) Write(l Line) {
-	b.Lines[b.N] = l
+	i := b.Head + b.N
+	if i >= len(b.Slots) {
+		i = i - len(b.Slots)
+	}
+	b.Slots[i] = l
 	b.N = b.N + 1
+}
+
+// Ship takes the oldest line out, when there is one.
+// @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ requires 0 < b.N
+// @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures l == old(b.At(0)) && b.N == old(b.N) - 1
+// @ ensures forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
+func (b *Buffer) Ship() (l Line) {
+	l = b.Slots[b.Head]
+	b.Head = b.Head + 1
+	if b.Head == len(b.Slots) {
+		b.Head = 0
+	}
+	b.N = b.N - 1
+	return l
 }
 ```
