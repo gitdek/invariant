@@ -117,3 +117,22 @@ func TestRenamingKeepsTheComparisons(t *testing.T) {
 		t.Errorf("the head and another commit must stay apart: %v", r.heads)
 	}
 }
+
+// Only a retry that builds a stopped build again counts stops afresh; a
+// retry of a failed pull request doesn't, as the protocol has it.
+func TestStopsCountAfreshOnlyOnARebuild(t *testing.T) {
+	retry := Command{Verb: Retry, Comment: 10}
+	stopped := Post{Marker: Marker{Kind: KindFailed, Failure: FailStopped}}
+	th := Thread{Commands: []Command{retry}, Posts: []Post{stopped, stopped}}
+	if got := th.Stops(); got != 2 {
+		t.Fatalf("two stops: %d", got)
+	}
+	watchedAgain := Post{Marker: Marker{Kind: KindPR, ReplyTo: []int64{10}, PR: 7}}
+	if got := (Thread{Commands: th.Commands, Posts: append(th.Posts, watchedAgain)}).Stops(); got != 2 {
+		t.Errorf("a retry of a pull request counted stops afresh: %d", got)
+	}
+	builtAgain := Post{Marker: Marker{Kind: KindRatified, ReplyTo: []int64{10}}}
+	if got := (Thread{Commands: th.Commands, Posts: append(th.Posts, builtAgain)}).Stops(); got != 0 {
+		t.Errorf("a rebuild didn't count stops afresh: %d", got)
+	}
+}

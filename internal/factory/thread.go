@@ -169,7 +169,9 @@ func (t Thread) State() (post Post, ok bool) {
 }
 
 // Stops is how many builds have stopped before making a pull request since
-// a writer last said retry (#13).
+// a writer's retry last built a stopped build again (#13). A retry of a
+// pull request that failed doesn't count them afresh, as the protocol has
+// it.
 func (t Thread) Stops() int {
 	retries := map[int64]bool{}
 	for _, c := range t.Commands {
@@ -183,7 +185,7 @@ func (t Thread) Stops() int {
 			continue
 		}
 		for _, id := range p.Marker.ReplyTo {
-			if retries[id] {
+			if retries[id] && p.Marker.Kind == KindRatified {
 				n = 0
 			}
 		}
