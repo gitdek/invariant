@@ -25,6 +25,13 @@ Decided on the issue:
 - When a producer writes a line and the buffer is already at capacity, what should happen? **A.** The producer waits until the shipper frees a slot, so no line is ever lost. (@gitdek)
 - When the shipper fails to send a line, what should happen to that line? **A.** The line stays at the front of the buffer and the shipper retries it before sending any later line. (@gitdek)
 
+## Code with no model bounds
+
+This is slice 8's worked example ([D-0068](../../decisions/D-0068-slice-8-plan.md)). The model describes the buffer and its environment together. The code holds only the buffer, so it could ship.
+
+- [`logbuffer.go`](logbuffer/logbuffer.go) is the system: a ring buffer of any capacity, that takes any number of lines. Gobra proves each operation against its contract at every capacity, with overflow checks. Nothing in it comes from the bounds.
+- [`explore.go`](logbuffer/explore.go) is the environment: the producers, the lines each has written, and what the shipper has sent. It keeps the bounds, makes the buffer at the ratified capacity, and calls it for the buffer's part of each step. Agreement explores it the way TLC explores the model, and reaches exactly the model's 87 states.
+
 Checked within `Capacity = 2`, `MaxLines = 2`, `Producers = {p1, p2}`. To run the gate yourself:
 
 ```bash

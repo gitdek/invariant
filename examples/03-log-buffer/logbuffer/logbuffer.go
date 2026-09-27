@@ -1,115 +1,87 @@
 // +gobra
 
+// A spike for slice 8: a ring buffer of any capacity, with O(1) writes and
+// ships and no model bounds. The index arithmetic is linear: code wraps with
+// an if, and the spec wraps with a ghost conditional.
 package logbuffer
 
-// This package implements the LogBuffer TLA+ model: producers write log
-// lines into a bounded buffer and a shipper sends them on, oldest first.
+// MaxCapacity keeps index arithmetic far from overflow. It's the machine's
+// limit, not the model's.
+const MaxCapacity = 1 << 30
 
-const (
-	// NP is the number of producers (p1, p2 map to 0, 1).
-	NP = 2
-	// Capacity is the buffer capacity.
-	Capacity = 2
-	// MaxLines is how many lines each producer writes.
-	MaxLines = 2
-	// MaxLog is the most lines ever written in total.
-	MaxLog = NP * MaxLines
-)
-
-// Line identifies a log line by its producer and per-producer number (from 1).
-// The zero Line marks an unused slot.
 type Line struct {
 	P int
 	N int
 }
 
-// State mirrors the spec variables. Sequences are stored as a fixed array plus
-// a length; slots past the length are always the zero Line.
-type State struct {
-	Buf      [Capacity]Line
-	BufLen   int
-	Sent     [MaxLog]Line
-	SentLen  int
-	Log      [MaxLog]Line
-	LogLen   int
-	Written  [NP]int
-	Retrying bool
+// Buffer is a ring of slots holding N lines, the oldest at Head.
+type Buffer struct {
+	Slots []Line
+	Head  int
+	N     int
 }
 
-// Init mirrors the TLA+ Init.
-// @ ensures t.BufLen == 0 && t.SentLen == 0 && t.LogLen == 0 && !t.Retrying
-// @ ensures forall i int :: 0 <= i && i < NP ==> t.Written[i] == 0
-func Init() (t State) {
-	return State{}
+// @ requires acc(&b.Slots, _) && acc(&b.Head, _) && acc(&b.N, _)
+// @ decreases
+// @ pure
+func (b *Buffer) Ok() bool {
+	return 0 < len(b.Slots) && len(b.Slots) <= MaxCapacity &&
+		0 <= b.Head && b.Head < len(b.Slots) && 0 <= b.N && b.N <= len(b.Slots)
 }
 
-// Write mirrors the TLA+ action Write(p).
-// @ requires 0 <= p && p < NP
-// @ requires 0 <= s.Written[p] && s.Written[p] < MaxLines
-// @ requires 0 <= s.BufLen && s.BufLen < Capacity
-// @ requires 0 <= s.LogLen && s.LogLen < MaxLog
-// @ ensures t.Buf[s.BufLen].P == p && t.Buf[s.BufLen].N == s.Written[p] + 1
-// @ ensures forall i int :: 0 <= i && i < Capacity && i != s.BufLen ==> t.Buf[i] == s.Buf[i]
-// @ ensures t.BufLen == s.BufLen + 1
-// @ ensures t.Log[s.LogLen].P == p && t.Log[s.LogLen].N == s.Written[p] + 1
-// @ ensures forall i int :: 0 <= i && i < MaxLog && i != s.LogLen ==> t.Log[i] == s.Log[i]
-// @ ensures t.LogLen == s.LogLen + 1
-// @ ensures t.Written[p] == s.Written[p] + 1
-// @ ensures forall q int :: 0 <= q && q < NP && q != p ==> t.Written[q] == s.Written[q]
-// @ ensures t.Sent == s.Sent && t.SentLen == s.SentLen
-// @ ensures t.Retrying == s.Retrying
-func Write(s State, p int) (t State) {
-	t = s
-	line := Line{P: p, N: s.Written[p] + 1}
-	t.Buf[s.BufLen] = line
-	t.BufLen = s.BufLen + 1
-	t.Log[s.LogLen] = line
-	t.LogLen = s.LogLen + 1
-	t.Written[p] = s.Written[p] + 1
-	return t
+// @ ghost
+// @ requires 0 <= x && x < 2*n && 0 < n
+// @ ensures 0 <= r && r < n
+// @ decreases
+// @ pure func wrap(x, n int) (r int) { return x < n ? x : x - n }
+
+// @ ghost
+// @ requires acc(&b.Slots, _) && acc(&b.Head, _) && acc(&b.N, _) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j], _)
+// @ requires 0 <= i && i < b.N
+// @ decreases
+// @ pure func (b *Buffer) At(i int) Line { return b.Slots[wrap(b.Head+i, len(b.Slots))] }
+
+// New makes an empty buffer of the given capacity.
+// @ requires 0 < capacity && capacity <= MaxCapacity
+// @ ensures acc(&b.Slots) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures len(b.Slots) == capacity && b.N == 0
+func New(capacity int) (b *Buffer) {
+	return &Buffer{Slots: make([]Line, capacity)}
 }
 
-// Ship mirrors the TLA+ action Ship.
-// @ requires 0 < s.BufLen && s.BufLen <= Capacity
-// @ requires 0 <= s.SentLen && s.SentLen < MaxLog
-// @ ensures t.Sent[s.SentLen] == s.Buf[0]
-// @ ensures forall i int :: 0 <= i && i < MaxLog && i != s.SentLen ==> t.Sent[i] == s.Sent[i]
-// @ ensures t.SentLen == s.SentLen + 1
-// @ ensures t.Buf[0] == s.Buf[1]
-// @ ensures t.Buf[1].P == 0 && t.Buf[1].N == 0
-// @ ensures t.BufLen == s.BufLen - 1
-// @ ensures !t.Retrying
-// @ ensures t.Log == s.Log && t.LogLen == s.LogLen
-// @ ensures t.Written == s.Written
-func Ship(s State) (t State) {
-	t = s
-	t.Sent[s.SentLen] = s.Buf[0]
-	t.SentLen = s.SentLen + 1
-	t.Buf[0] = s.Buf[1]
-	t.Buf[1] = Line{}
-	t.BufLen = s.BufLen - 1
-	t.Retrying = false
-	return t
+// Write adds a line, newest, when there's room.
+// @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ requires b.N < len(b.Slots)
+// @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures b.N == old(b.N) + 1 && b.At(old(b.N)) == l
+// @ ensures forall i int :: { b.At(i) } 0 <= i && i < old(b.N) ==> b.At(i) == old(b.At(i))
+func (b *Buffer) Write(l Line) {
+	i := b.Head + b.N
+	if i >= len(b.Slots) {
+		i = i - len(b.Slots)
+	}
+	b.Slots[i] = l
+	b.N = b.N + 1
 }
 
-// ShipFail mirrors the TLA+ action ShipFail.
-// @ requires 0 < s.BufLen
-// @ requires !s.Retrying
-// @ ensures t.Retrying
-// @ ensures t.Buf == s.Buf && t.BufLen == s.BufLen
-// @ ensures t.Sent == s.Sent && t.SentLen == s.SentLen
-// @ ensures t.Log == s.Log && t.LogLen == s.LogLen
-// @ ensures t.Written == s.Written
-func ShipFail(s State) (t State) {
-	t = s
-	t.Retrying = true
-	return t
-}
-
-// Done mirrors the TLA+ action Done.
-// @ requires forall p int :: 0 <= p && p < NP ==> s.Written[p] == MaxLines
-// @ requires s.BufLen == 0
-// @ ensures t == s
-func Done(s State) (t State) {
-	return s
+// Ship takes the oldest line out, when there is one.
+// @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ requires 0 < b.N
+// @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures l == old(b.At(0)) && b.N == old(b.N) - 1
+// @ ensures forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
+func (b *Buffer) Ship() (l Line) {
+	l = b.Slots[b.Head]
+	b.Head = b.Head + 1
+	if b.Head == len(b.Slots) {
+		b.Head = 0
+	}
+	b.N = b.N - 1
+	return l
 }

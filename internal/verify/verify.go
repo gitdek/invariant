@@ -47,6 +47,9 @@ type Report struct {
 	Agreement   *Agreement          `json:"agreement,omitempty"`
 	Conformance *conformance.Result `json:"conformance,omitempty"`
 	Code        *Code               `json:"code,omitempty"`
+	// Larger is agreement again, one size past the bounds, for code whose
+	// explorer names its bounds (D-0068).
+	Larger *Larger `json:"larger,omitempty"`
 	// Existing is the code an existing-code project checked, as it was
 	// (D-0054). The fingerprint covers it, so a receipt names that code.
 	Existing []ExistingCode `json:"existing,omitempty"`
@@ -355,6 +358,49 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		})
 	}
 
+	// One size past the bounds (D-0068), for Go code whose explorer names
+	// its bounds. TLC and the explorer run beside everything else.
+	var (
+		larger      map[string]string
+		largerTLC   *tlc.Result
+		largerCode  *Exploration
+		largerError string
+	)
+	if g, ok := lang.(Go); ok && !model {
+		var sizes map[string]int
+		larger, sizes = largerBounds(p.Lock.Bounds)
+		if explorer, err := os.ReadFile(filepath.Join(p.CodeDir(), explorerFile)); err == nil && declaresBounds(explorer, sizes) {
+			spawn(func() error {
+				d, err := stage(work, "larger", p, src, "")
+				if err != nil {
+					return err
+				}
+				tctx, cancel := context.WithTimeout(ctx, largerTimeout)
+				defer cancel()
+				res, err := runner.Check(tctx, d, p.ModuleName(), tlc.Config{Specification: cfg.Specification, Constants: larger, Invariants: cfg.Invariants})
+				if err == nil && tctx.Err() != nil {
+					err = tctx.Err()
+				}
+				if err != nil {
+					mu.Lock()
+					largerError = fmt.Sprintf("TLC didn't finish one size larger within %s: %v", largerTimeout, err)
+					mu.Unlock()
+					return nil
+				}
+				largerTLC = &res
+				return nil
+			})
+			spawn(func() error {
+				e, err := g.exploreLarger(ctx, p.Dir, p.CodeDir(), sizes)
+				if err != nil {
+					return err
+				}
+				largerCode = &e
+				return nil
+			})
+		}
+	}
+
 	wg.Wait()
 	if firstErr != nil {
 		return nil, firstErr
@@ -403,6 +449,9 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		r.Passed = r.Passed && r.Code.Passed
 	}
 	r.Passed = r.Passed && modelPassed(r)
+	if larger != nil && (largerTLC != nil || largerError != "") {
+		r.Larger = compareLarger(larger, largerTLC, largerCode, largerError)
+	}
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	return r, nil
