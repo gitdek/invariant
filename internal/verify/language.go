@@ -46,6 +46,9 @@ type Exploration struct {
 	States  int64
 	Depth   int
 	Message string // why exploration failed, when it did
+	// Unfinished means it ran out of time, which one size larger claims
+	// nothing and fails nothing.
+	Unfinished bool
 }
 
 func languageFor(p *project.Project, tc toolchain.Toolchain) (Language, error) {

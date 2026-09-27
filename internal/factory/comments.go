@@ -156,7 +156,12 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if len(assumed) > 0 {
 		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
 	}
-	b.WriteString("| Statement | Change | Says |\n| :-- | :-- | :-- |\n")
+	changed := len(ch.Of(formalize.Added)) + len(ch.Of(formalize.Changed)) + len(ch.Of(formalize.Removed))
+	if changed == 0 {
+		b.WriteString("No statement changes. Every ratified statement stays exactly as it is, and only the code changes.\n")
+	} else {
+		b.WriteString("| Statement | Change | Says |\n| :-- | :-- | :-- |\n")
+	}
 	for _, c := range ch.Statements {
 		switch c.How {
 		case formalize.Added:
