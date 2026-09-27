@@ -3,6 +3,9 @@
 // /api/graph/<model>.json, which the server reads from GitHub, CI's
 // receipts and TLC. Nothing is typed by hand.
 (() => {
+  // The page's own version, from its script's URL. Graph URLs carry it, so
+  // a new dashboard never draws a graph the browser kept from an old one.
+  const VERSION = new URL(document.currentScript?.src || location.href).searchParams.get("v") || "";
   const $ = (s, el = document) => el.querySelector(s);
   const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const nf = new Intl.NumberFormat("en-US");
@@ -383,7 +386,7 @@
 
   const graphs = new Map(); // model key → graph JSON (or a promise)
   function getGraph(key) {
-    if (!graphs.has(key)) graphs.set(key, fetch(`/api/graph/${key}.json`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((g) => { g.layout = layoutGraph(g); return g; }));
+    if (!graphs.has(key)) graphs.set(key, fetch(`/api/graph/${key}.json?v=${VERSION}`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((g) => { g.layout = layoutGraph(g); return g; }));
     return graphs.get(key);
   }
 

@@ -29,10 +29,16 @@ var assets = func() map[string][]byte {
 	return out
 }()
 
-// version changes whenever any asset does, so browsers and Cloudflare
-// fetch the new ones.
+// graphFormat changes whenever what the page gets for a state graph does,
+// such as how many steps a huge one sends. Graph URLs carry the version, so
+// browsers fetch graphs again.
+const graphFormat = "2: steps capped at maxEdges"
+
+// version changes whenever any asset or the graph format does, so browsers
+// and Cloudflare fetch the new ones.
 var version = func() string {
 	h := sha256.New()
+	h.Write([]byte(graphFormat))
 	for _, p := range sortedKeys(assets) {
 		h.Write([]byte(p))
 		h.Write(assets[p])
