@@ -1,16 +1,24 @@
 ---- MODULE IssueProtocol ----
-EXTENDS FiniteSets
+EXTENDS Naturals, FiniteSets
 
 CONSTANTS Actors, Writers, Bots, Questions, Proposals, Heads, NoP, NoHead, NoActor
 
 VARIABLES state, open, proposal, amends, base, ratified, ratifiedBase,
-          head, gate, prLock, scope, mergedBy, mergedHead, directedBy
+          head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+          stops, failure
 
 vars == <<state, open, proposal, amends, base, ratified, ratifiedBase,
-          head, gate, prLock, scope, mergedBy, mergedHead, directedBy>>
+          head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+          stops, failure>>
 
 Kinds == {"none", "asked", "proposed", "stuck", "unsupported",
           "ratified", "pr_open", "failed", "merged", "closed"}
+
+\* Why the issue's latest failure happened.
+Failures == {"none", "stopped", "limit", "gate", "ci", "unmergeable"}
+
+\* Builds of an issue that may stop partway before the factory refuses another.
+MaxStops == 2
 
 \* Only people with write access who are not bots direct the factory.
 Directors == Writers \ Bots
@@ -37,6 +45,8 @@ TypeOK ==
     /\ mergedBy \in {"nobody", "factory", "other"}
     /\ mergedHead \in Heads \cup {NoHead}
     /\ directedBy \in Actors \cup {NoActor}
+    /\ stops \in Nat
+    /\ failure \in Failures
 
 OnlyDirectorsDirect == directedBy \in Directors \cup {NoActor}
 
@@ -55,6 +65,10 @@ MergedOneProject == FactoryMerged => scope = "one"
 
 MergedLockRatified == FactoryMerged => prLock = ratified
 
+StopLimit == stops <= MaxStops
+
+StoppedHasNoPullRequest == failure \in {"stopped", "limit"} => head = NoHead
+
 \* Witnesses.
 QuestionsAsked == state = "asked"
 
@@ -72,6 +86,14 @@ FactoryMerges == FactoryMerged
 
 AmendmentMerges == FactoryMerged /\ ratifiedBase # NoP
 
+BuildStopped == state = "failed" /\ failure = "stopped"
+
+BuildRefusedAtLimit == state = "failed" /\ failure = "limit"
+
+OwnGateFailed == state = "failed" /\ failure = "gate" /\ head # NoHead
+
+CannotMerge == state = "failed" /\ failure = "unmergeable"
+
 \* The draft model.
 Init ==
     /\ state = "none"
@@ -88,6 +110,8 @@ Init ==
     /\ mergedBy = "nobody"
     /\ mergedHead = NoHead
     /\ directedBy = NoActor
+    /\ stops = 0
+    /\ failure = "none"
 
 ResetPR ==
     /\ head' = NoHead
@@ -97,13 +121,17 @@ ResetPR ==
     /\ mergedBy' = "nobody"
     /\ mergedHead' = NoHead
 
+\* A build stopped before it made a pull request.
+StoppedBuild == state = "failed" /\ head = NoHead
+
 \* The factory drafts: it asks questions, proposes statements against the
 \* base branch's current lock, gets stuck, or finds the issue unsupported.
 Draft ==
     /\ ResetPR
     /\ ratified' = NoP
     /\ ratifiedBase' = NoP
-    /\ UNCHANGED base
+    /\ failure' = "none"
+    /\ UNCHANGED <<base, stops>>
     /\ \/ \E Q \in (SUBSET Questions) \ {{}} :
             state' = "asked" /\ open' = Q /\ proposal' = NoP /\ amends' = NoP
        \/ \E p \in Proposals :
@@ -113,13 +141,13 @@ Draft ==
 
 Solve(a) ==
     /\ a \in Directors
-    /\ state \in {"none", "stuck", "unsupported", "closed"}
+    /\ state \in {"none", "stuck", "unsupported", "closed"} \/ StoppedBuild
     /\ directedBy' = a
     /\ Draft
 
 Revise(a) ==
     /\ a \in Directors
-    /\ state \in {"asked", "proposed", "stuck", "unsupported", "closed"}
+    /\ state \in {"asked", "proposed", "stuck", "unsupported", "closed"} \/ StoppedBuild
     /\ directedBy' = a
     /\ Draft
 
@@ -132,7 +160,8 @@ Choose(a, q) ==
           THEN Draft
           ELSE /\ open' = open \ {q}
                /\ UNCHANGED <<state, proposal, amends, base, ratified, ratifiedBase,
-                              head, gate, prLock, scope, mergedBy, mergedHead>>
+                              head, gate, prLock, scope, mergedBy, mergedHead,
+                              stops, failure>>
 
 Ratify(a, p) ==
     /\ a \in Directors
@@ -145,10 +174,12 @@ Ratify(a, p) ==
     /\ ratifiedBase' = base
     /\ directedBy' = a
     /\ UNCHANGED <<open, proposal, amends, base,
-                   head, gate, prLock, scope, mergedBy, mergedHead>>
+                   head, gate, prLock, scope, mergedBy, mergedHead,
+                   stops, failure>>
 
 Build ==
     /\ state = "ratified"
+    /\ stops < MaxStops
     /\ \E h \in Heads :
         /\ state' = "pr_open"
         /\ head' = h
@@ -156,38 +187,95 @@ Build ==
         /\ prLock' = ratified
         /\ scope' = "one"
     /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
-                   mergedBy, mergedHead, directedBy>>
+                   mergedBy, mergedHead, directedBy, stops, failure>>
+
+\* The build starts, then stops before it makes a pull request.
+StopBuild ==
+    /\ state = "ratified"
+    /\ stops < MaxStops
+    /\ state' = "failed"
+    /\ stops' = stops + 1
+    /\ failure' = "stopped"
+    /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy>>
+
+\* Two builds have already stopped partway, so the factory won't start another.
+RefuseBuild ==
+    /\ state = "ratified"
+    /\ stops = MaxStops
+    /\ state' = "failed"
+    /\ failure' = "limit"
+    /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+                   stops>>
+
+\* The code fails the gate in the factory's own run: it opens a draft pull
+\* request and posts that the build failed.
+BuildFailsGate ==
+    /\ state = "ratified"
+    /\ stops < MaxStops
+    /\ \E h \in Heads :
+        /\ state' = "failed"
+        /\ head' = h
+        /\ gate' = [gate EXCEPT ![h] = "pending"]
+        /\ prLock' = ratified
+        /\ scope' = "one"
+    /\ failure' = "gate"
+    /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
+                   mergedBy, mergedHead, directedBy, stops>>
 
 \* Someone pushes a new head commit to the pull request, with any content.
 Push(h, l, s) ==
     /\ state \in {"pr_open", "failed"}
+    /\ head # NoHead
     /\ h # head
     /\ head' = h
     /\ gate' = [gate EXCEPT ![h] = "pending"]
     /\ prLock' = l
     /\ scope' = s
     /\ UNCHANGED <<state, open, proposal, amends, base, ratified, ratifiedBase,
-                   mergedBy, mergedHead, directedBy>>
+                   mergedBy, mergedHead, directedBy, stops, failure>>
 
 CIGate ==
     /\ state \in {"pr_open", "failed"}
+    /\ head # NoHead
     /\ gate[head] = "pending"
     /\ \E r \in {"pass", "fail"} : gate' = [gate EXCEPT ![head] = r]
     /\ UNCHANGED <<state, open, proposal, amends, base, ratified, ratifiedBase,
-                   head, prLock, scope, mergedBy, mergedHead, directedBy>>
+                   head, prLock, scope, mergedBy, mergedHead, directedBy,
+                   stops, failure>>
 
 NoticeFail ==
     /\ state = "pr_open"
     /\ gate[head] = "fail"
     /\ state' = "failed"
+    /\ failure' = "ci"
     /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
-                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy>>
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+                   stops>>
 
+\* CI's gate passed, but the pull request changes more than its one project
+\* or its lock isn't the ratified proposal.
+NoticeUnmergeable ==
+    /\ state = "pr_open"
+    /\ gate[head] = "pass"
+    /\ (scope # "one" \/ prLock # ratified)
+    /\ state' = "failed"
+    /\ failure' = "unmergeable"
+    /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+                   stops>>
+
+\* Retry reopens a failed pull request, or builds a stopped build's ratified
+\* proposal again with the stop limit reset.
 Retry(a) ==
     /\ a \in Directors
     /\ state = "failed"
-    /\ state' = "pr_open"
     /\ directedBy' = a
+    /\ failure' = "none"
+    /\ IF head = NoHead
+          THEN state' = "ratified" /\ stops' = 0
+          ELSE state' = "pr_open" /\ UNCHANGED stops
     /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
                    head, gate, prLock, scope, mergedBy, mergedHead>>
 
@@ -201,29 +289,35 @@ Merge ==
     /\ mergedHead' = head
     /\ base' = prLock
     /\ UNCHANGED <<open, proposal, amends, ratified, ratifiedBase,
-                   head, gate, prLock, scope, directedBy>>
+                   head, gate, prLock, scope, directedBy, stops, failure>>
 
 OthersMerge ==
     /\ state \in {"pr_open", "failed"}
+    /\ head # NoHead
     /\ state' = "merged"
     /\ mergedBy' = "other"
     /\ mergedHead' = head
     /\ base' = prLock
+    /\ failure' = "none"
     /\ UNCHANGED <<open, proposal, amends, ratified, ratifiedBase,
-                   head, gate, prLock, scope, directedBy>>
+                   head, gate, prLock, scope, directedBy, stops>>
 
 OthersClose ==
     /\ state \in {"pr_open", "failed"}
+    /\ head # NoHead
     /\ state' = "closed"
+    /\ failure' = "none"
     /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
-                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy>>
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+                   stops>>
 
 \* The base branch's lock changes elsewhere.
 BaseMoves(l) ==
     /\ l # base
     /\ base' = l
     /\ UNCHANGED <<state, open, proposal, amends, ratified, ratifiedBase,
-                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy>>
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy,
+                   stops, failure>>
 
 Finished == state = "merged" /\ UNCHANGED vars
 
@@ -235,9 +329,13 @@ Next ==
         \/ \E q \in Questions : Choose(a, q)
         \/ \E p \in Proposals : Ratify(a, p)
     \/ Build
+    \/ StopBuild
+    \/ RefuseBuild
+    \/ BuildFailsGate
     \/ \E h \in Heads, l \in Locks, s \in {"one", "many"} : Push(h, l, s)
     \/ CIGate
     \/ NoticeFail
+    \/ NoticeUnmergeable
     \/ Merge
     \/ OthersMerge
     \/ OthersClose
@@ -253,7 +351,8 @@ ObeyAnyone ==
         /\ state' = "stuck"
         /\ directedBy' = a
         /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
-                       head, gate, prLock, scope, mergedBy, mergedHead>>
+                       head, gate, prLock, scope, mergedBy, mergedHead,
+                       stops, failure>>
 
 \* A ratify naming an earlier proposal's hash is accepted.
 RatifyEarlier ==
@@ -265,7 +364,8 @@ RatifyEarlier ==
         /\ ratifiedBase' = base
         /\ directedBy' = a
         /\ UNCHANGED <<open, proposal, amends, base,
-                       head, gate, prLock, scope, mergedBy, mergedHead>>
+                       head, gate, prLock, scope, mergedBy, mergedHead,
+                       stops, failure>>
 
 \* An amendment is ratified after the base branch's lock has moved.
 RatifyOverMovedLock ==
@@ -276,7 +376,8 @@ RatifyOverMovedLock ==
         /\ ratifiedBase' = base
         /\ directedBy' = a
         /\ UNCHANGED <<open, proposal, amends, base,
-                       head, gate, prLock, scope, mergedBy, mergedHead>>
+                       head, gate, prLock, scope, mergedBy, mergedHead,
+                       stops, failure>>
 
 \* The factory merges whichever head passed CI, not the current one.
 MergeOnAnyPass ==
@@ -290,7 +391,7 @@ MergeOnAnyPass ==
         /\ mergedHead' = h
         /\ base' = prLock
         /\ UNCHANGED <<open, proposal, amends, ratified, ratifiedBase,
-                       head, gate, prLock, scope, directedBy>>
+                       head, gate, prLock, scope, directedBy, stops, failure>>
 
 \* The factory merges without checking the project's lock.
 MergeIgnoringLock ==
@@ -302,7 +403,29 @@ MergeIgnoringLock ==
     /\ mergedHead' = head
     /\ base' = prLock
     /\ UNCHANGED <<open, proposal, amends, ratified, ratifiedBase,
-                   head, gate, prLock, scope, directedBy>>
+                   head, gate, prLock, scope, directedBy, stops, failure>>
+
+\* The factory starts a third build after two have stopped partway.
+StartPastLimit ==
+    /\ state = "ratified"
+    /\ stops = MaxStops
+    /\ state' = "failed"
+    /\ stops' = stops + 1
+    /\ failure' = "stopped"
+    /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
+                   head, gate, prLock, scope, mergedBy, mergedHead, directedBy>>
+
+\* The factory merges a draft pull request whose own gate failed, before
+\* anyone says retry.
+MergeFailedBuild ==
+    /\ state = "failed"
+    /\ head # NoHead
+    /\ state' = "merged"
+    /\ mergedBy' = "factory"
+    /\ mergedHead' = head
+    /\ base' = prLock
+    /\ UNCHANGED <<open, proposal, amends, ratified, ratifiedBase,
+                   head, gate, prLock, scope, directedBy, stops, failure>>
 
 Spec == Init /\ [][Next]_vars
 ====

@@ -1,10 +1,12 @@
 {
   "ratified": {
     "by": "gitdek",
-    "at": "2026-09-27T03:54:14Z",
-    "issue": 9,
-    "comment": "https://github.com/gitdek/invariant/issues/9#issuecomment-5852434500",
-    "proposal": "sha256:11bff3f218d7d1da4c6257c6b6c7f4ca28f0767837087176c97619e7b4445a20"
+    "at": "2026-09-27T05:00:57Z",
+    "issue": 13,
+    "comment": "https://github.com/gitdek/invariant/issues/13#issuecomment-5852806855",
+    "proposal": "sha256:e61ba88fa372b1f24f0ac7d77017a2e8a15e7e7efd4048d4ca471f4f5aa399a3",
+    "amends": "sha256:11bff3f218d7d1da4c6257c6b6c7f4ca28f0767837087176c97619e7b4445a20",
+    "previous": "#9"
   },
   "bounds": {
     "Actors": "{alice, mallory, invbot}",
@@ -22,13 +24,13 @@
       "name": "Spec",
       "kind": "spec",
       "says": "The factory starts with no post on the issue, and every step is a Next step.",
-      "sha256": "sha256:2fef4b30b56b7cb7a6b564b11088cb5d1a993edf9983e1b5a95b30604504e2b7"
+      "sha256": "sha256:ad521718dbe0c78c342f2b65d243f3ddddf65994ad0077bbda807b9765b62297"
     },
     {
       "name": "TypeOK",
       "kind": "invariant",
       "says": "The issue's state is always one of the ten kinds of post, and everything else the factory knows has its expected type.",
-      "sha256": "sha256:abaa60151e62da4eeb1aa6a1124afdd9d21338b76fe51f13e056fc1ed6c6e9d9"
+      "sha256": "sha256:bd56024cf0b74cdedebca4214d980932f8b2e7355ad9152e000d42620d14ba56"
     },
     {
       "name": "OnlyDirectorsDirect",
@@ -79,6 +81,18 @@
       "sha256": "sha256:423e4e80eb0d0c0d54d5827b051ef28b3811054b5fe580c70731fe6eeb04f8ef"
     },
     {
+      "name": "StopLimit",
+      "kind": "invariant",
+      "says": "At most two builds of an issue stop partway before a writer says retry.",
+      "sha256": "sha256:eefc48a346f94c4c71ac2ed1c1b98d6d7b6348680047b7474a46af1e7de0558e"
+    },
+    {
+      "name": "StoppedHasNoPullRequest",
+      "kind": "invariant",
+      "says": "When a build stops, or the factory refuses to start one, there is no pull request.",
+      "sha256": "sha256:7181be45875df8f30e772072af4a426e20bd3f179d3894d409864519a2dc7c46"
+    },
+    {
       "name": "QuestionsAsked",
       "kind": "witness",
       "says": "The factory can ask questions.",
@@ -127,39 +141,77 @@
       "sha256": "sha256:1636cbb592bfbe1483435fd9025d1a9bc6a32a99cf36cf14fea8a16a83bef4c8"
     },
     {
+      "name": "BuildStopped",
+      "kind": "witness",
+      "says": "A build can stop before it makes a pull request, and the factory posts that it failed.",
+      "sha256": "sha256:83e1c86d16ba971d04e2f40d29209acfb18d2e805f8206cd5ff1e84fdda7a9e3"
+    },
+    {
+      "name": "BuildRefusedAtLimit",
+      "kind": "witness",
+      "says": "After two builds of an issue stop partway, the factory can refuse to start a third and post that the build failed.",
+      "sha256": "sha256:cdaab345046482a65d3e7176a4cdb9dfdceb749f9a3f4ea637d875fd7b9a0c89"
+    },
+    {
+      "name": "OwnGateFailed",
+      "kind": "witness",
+      "says": "When the code fails the gate in the factory's own run, the factory can open a draft pull request and post that the build failed.",
+      "sha256": "sha256:92234d240b42ae4d6e64af6ba588b757303157d959731fdee72f5ea5ce5c9b8a"
+    },
+    {
+      "name": "CannotMerge",
+      "kind": "witness",
+      "says": "A pull request that passed CI's gate but changes more than its one project or has a lock other than the ratified proposal can fail.",
+      "sha256": "sha256:ebf58d856eb1bde5999e609cb62a702123d63ebad711c7ad830b0b85fd56cb11"
+    },
+    {
       "name": "ObeyAnyone",
       "kind": "bug",
       "says": "A bot or someone without write access gets the factory to take the issue.",
       "expect": "OnlyDirectorsDirect",
-      "sha256": "sha256:c0fbe091afc0deb2c2fc33468f1499c0bc54fa533387d1b6ab714a056a9bc017"
+      "sha256": "sha256:705dc1fa390658d5f82c88b32113d4bd96e04b0a4822f5738965b461999c7667"
     },
     {
       "name": "RatifyEarlier",
       "kind": "bug",
       "says": "A ratify naming an earlier proposal's hash is accepted.",
       "expect": "RatifiesCurrentProposal",
-      "sha256": "sha256:9ff58a46a9acb9361cd35b4cb89b14716e4535e80c6fb52416f7dc45281f833f"
+      "sha256": "sha256:630ac68ae465bd33f93aa390dcd26be7af390d501edce065c160c740266a791c"
     },
     {
       "name": "RatifyOverMovedLock",
       "kind": "bug",
       "says": "An amendment is ratified after the base branch's lock has moved.",
       "expect": "AmendsHeldLock",
-      "sha256": "sha256:f54de8f94f1216a8d6292dc3545be21e54fc0082df3326a7500cdcf32dda72b4"
+      "sha256": "sha256:afba7aa28960159203b79fe0e6f9e6a35771a80da66bb19b109fe960ad8f0f67"
     },
     {
       "name": "MergeOnAnyPass",
       "kind": "bug",
       "says": "The factory merges a commit that passed CI even though it is no longer the pull request's head.",
       "expect": "MergedCurrentHead",
-      "sha256": "sha256:84b79da428c0b8cc6fbfd57eb2be2ae8a02b0c2c2d662927aab1e9e34ea16294"
+      "sha256": "sha256:5aea60f28baf74ff3c8a0cd7b4209ccde6752eaca53a2697340a9aaed5b582be"
     },
     {
       "name": "MergeIgnoringLock",
       "kind": "bug",
       "says": "The factory merges without checking that the project's lock is the ratified proposal.",
       "expect": "MergedLockRatified",
-      "sha256": "sha256:f1bc8fb79f340eb013428cdb880b05c2c85d706f88832e400d6198a1c9224d28"
+      "sha256": "sha256:f6b099fb6336b2d73732d2f3d3f00f6e8a28df832a78ca97621224057a4243d2"
+    },
+    {
+      "name": "StartPastLimit",
+      "kind": "bug",
+      "says": "The factory starts a third build after two builds of the issue have stopped partway and no writer has said retry.",
+      "expect": "StopLimit",
+      "sha256": "sha256:82c7895aaf34e9efacf6b5ecaff6ac96f9c76c47d5309444ce4987e946e2dc71"
+    },
+    {
+      "name": "MergeFailedBuild",
+      "kind": "bug",
+      "says": "The factory merges a pull request whose build failed, before a writer says retry and CI's gate passes.",
+      "expect": "MergedGatePassed",
+      "sha256": "sha256:c7d13fdf3a36e54a57693ff62e869c15fab2c3c7879ce3172a3d0a4d845d942c"
     }
   ]
 }
