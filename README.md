@@ -62,6 +62,8 @@ People steer the factory with comments on the issue, and only people with write 
 | A `Project: <dir>` line in the issue | Changes that existing project. The factory proposes a diff of its statements, and calls out anything removed or loosened |
 | `/invariant retry` | Looks again at a pull request that failed, once someone has fixed the cause |
 
+Anyone can open an issue, but the factory takes one only when a writer labels it or says `/invariant solve`. That hands the issue's text to a coding agent, so read someone else's issue before you do either. The agent that drafts statements has no network and no GitHub access, and nothing it drafts is built until a person ratifies it.
+
 ## Watch it catch a bug
 
 <p align="center">
