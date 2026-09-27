@@ -296,6 +296,12 @@ func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 		w.Write(actPage(email))
 	case r.URL.Path == "/act/api/comment" && r.Method == http.MethodPost:
 		s.postAct(w, r, email)
+	case r.URL.Path == "/act/api/issue" && r.Method == http.MethodPost:
+		if !fromPage(r) {
+			http.Error(w, "only the page can post", http.StatusForbidden)
+			return
+		}
+		s.openIssue(w, r, email, "")
 	default:
 		http.NotFound(w, r)
 	}
@@ -305,13 +311,19 @@ func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 // send it: another site can't set its header, and its origin must be this
 // one.
 func (s *Server) postAct(w http.ResponseWriter, r *http.Request, email string) {
-	if r.Header.Get("X-Invariant") != "act" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") ||
-		(r.Header.Get("Origin") != "" && r.Header.Get("Origin") != "https://"+r.Host) ||
-		(r.Header.Get("Sec-Fetch-Site") != "" && r.Header.Get("Sec-Fetch-Site") != "same-origin") {
+	if !fromPage(r) {
 		http.Error(w, "only the page can post", http.StatusForbidden)
 		return
 	}
 	s.post(w, r, email, "")
+}
+
+// fromPage says whether a request came from the page itself: another site
+// can't set its header, and its origin must be this one.
+func fromPage(r *http.Request) bool {
+	return r.Header.Get("X-Invariant") == "act" && strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") &&
+		(r.Header.Get("Origin") == "" || r.Header.Get("Origin") == "https://"+r.Host) &&
+		(r.Header.Get("Sec-Fetch-Site") == "" || r.Header.Get("Sec-Fetch-Site") == "same-origin")
 }
 
 // agentNote ends every comment the agent's door posts, so the issue says
@@ -336,11 +348,14 @@ func (s *Server) AgentHandler(token string) http.Handler {
 			http.Error(w, "browsers can't use the agent's door", http.StatusForbidden)
 			return
 		}
-		if r.URL.Path != "/act/api/comment" || r.Method != http.MethodPost {
+		switch {
+		case r.URL.Path == "/act/api/comment" && r.Method == http.MethodPost:
+			s.post(w, r, "a coding agent", agentNote)
+		case r.URL.Path == "/act/api/issue" && r.Method == http.MethodPost:
+			s.openIssue(w, r, "a coding agent", agentNote)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		s.post(w, r, "a coding agent", agentNote)
 	})
 }
 
@@ -376,4 +391,94 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
+// newIssue is an issue the page asks to open, for the factory to solve.
+type newIssue struct {
+	Repo     string   `json:"repo"`
+	Title    string   `json:"title"`
+	Body     string   `json:"body"`
+	Project  string   `json:"project"`  // where the project goes, or the one it changes
+	Code     []string `json:"code"`     // existing code for the project to check as it is
+	Language string   `json:"language"` // go, typescript or python; empty for the repository's default
+}
+
+var issuePath = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
+
+// compose writes the issue the factory reads: what must be true, the
+// Project: and Code: lines, and the /invariant solve line that hands it to
+// the factory.
+func (n newIssue) compose(repos []*Repo) (github.NewIssue, error) {
+	known := false
+	for _, r := range repos {
+		known = known || r.Name == n.Repo
+	}
+	title, body := strings.TrimSpace(n.Title), strings.TrimSpace(n.Body)
+	switch {
+	case !known:
+		return github.NewIssue{}, errors.New("the dashboard doesn't show that repository")
+	case title == "" || len(title) > 200 || strings.ContainsAny(title, "\r\n"):
+		return github.NewIssue{}, errors.New("give the issue a title of one line")
+	case body == "" || len(body) > 20000:
+		return github.NewIssue{}, errors.New("say what must be true, in under 20,000 characters")
+	case len(n.Code) > 10:
+		return github.NewIssue{}, errors.New("name at most ten paths of code")
+	}
+	var b strings.Builder
+	b.WriteString(body + "\n\n")
+	for _, p := range append([]string{n.Project}, n.Code...) {
+		if p = strings.TrimSpace(p); p != "" && (len(p) > 120 || !issuePath.MatchString(p) || strings.Contains(p, "..")) {
+			return github.NewIssue{}, fmt.Errorf("%q isn't a path in the repository", p)
+		}
+	}
+	for _, c := range n.Code {
+		if c = strings.TrimSpace(c); c != "" {
+			b.WriteString("Code: " + c + "\n")
+		}
+	}
+	if p := strings.TrimSpace(n.Project); p != "" {
+		b.WriteString("Project: " + p + "\n")
+	}
+	b.WriteString("\n/invariant solve\n")
+	is := github.NewIssue{Title: title, Body: b.String()}
+	switch n.Language {
+	case "":
+	case "go", "typescript", "python":
+		is.Labels = []string{"invariant:" + n.Language}
+	default:
+		return github.NewIssue{}, errors.New("the language is go, typescript or python")
+	}
+	return is, nil
+}
+
+// openIssue opens an issue as @gitdek, with /invariant solve, so the
+// factory takes it, followed by note.
+func (s *Server) openIssue(w http.ResponseWriter, r *http.Request, who, note string) {
+	var n newIssue
+	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<10)).Decode(&n); err != nil {
+		http.Error(w, "that isn't an issue", http.StatusBadRequest)
+		return
+	}
+	is, err := n.compose(s.Repos)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	is.Body += strings.TrimPrefix(note, "\n")
+	open := s.Open
+	if open == nil {
+		open = func(ctx context.Context, repo string, is github.NewIssue) (int, string, error) {
+			out, err := github.Client{Repo: repo}.CreateIssue(ctx, is)
+			return out.Number, out.URL, err
+		}
+	}
+	number, url, err := open(r.Context(), n.Repo, is)
+	if err != nil {
+		s.logf("act: opening an issue on %s for %s: %v", n.Repo, who, err)
+		http.Error(w, "GitHub didn't take it; try again", http.StatusBadGateway)
+		return
+	}
+	s.logf("act: %s opened %s#%d, %q", who, n.Repo, number, is.Title)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"number": number, "url": url})
 }

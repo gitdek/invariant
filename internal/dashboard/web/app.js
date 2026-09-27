@@ -1151,12 +1151,80 @@
       if (state) renderInbox(state);
     });
     const lede = $("#needs-lede");
-    if (lede) lede.textContent = "What the factory is waiting for from you, in every repository. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first.";
+    if (lede) lede.textContent = "What the factory is waiting for from you, in every repository. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first. Or open a new issue for the factory to solve.";
+    composer();
     const who = document.createElement("span");
     who.className = "pill acting";
     who.title = `Signed in as ${ACT} through Cloudflare Access. Your clicks in Needs you post to GitHub as you.`;
     who.innerHTML = "<i></i>Acting as you";
     document.querySelector(".top-right")?.prepend(who);
+  }
+
+  // A new issue for the factory to solve, from /act: what must be true,
+  // where its project goes, and the code it checks, if any.
+  function composer() {
+    const box = $("#compose");
+    if (!box) return;
+    let open = false, busy = false, done = null, error = "", confirm = false;
+    const draft = { repo: "", title: "", body: "", project: "", code: "", language: "" };
+    const repos = () => (state?.repos || []).map((r) => r.name);
+    const projects = () => (state?.projects || []).filter((p) => (p.repo || state.repo) === (draft.repo || repos()[0])).map((p) => p.dir);
+    function paint() {
+      if (!open) {
+        box.innerHTML = `<button class="cmd act primary newissue" type="button" data-compose="open">＋ New issue for the factory</button>` +
+          (done ? `<p class="posted">✓ Opened <a href="${esc(done.url)}" target="_blank" rel="noopener">${esc(ref(done.repo, done.number))}</a> as you. The factory starts drafting within 30 seconds.</p>` : "");
+        return;
+      }
+      const repo = draft.repo || repos()[0] || "";
+      box.innerHTML = `<form class="composer" autocomplete="off">
+        <div class="row"><label>Repository<select name="repo">${repos().map((r) => `<option${r === repo ? " selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+          <label>Language<select name="language"><option value="">the repository's</option>${["go", "typescript", "python"].map((l) => `<option value="${l}"${draft.language === l ? " selected" : ""}>${l === "go" ? "Go" : l === "typescript" ? "TypeScript" : "Python"}</option>`).join("")}</select></label></div>
+        <label>Title<input name="title" maxlength="200" placeholder="Prove the lease protocol" value="${esc(draft.title)}"></label>
+        <label>What must be true<textarea name="body" rows="7" placeholder="In plain language: what can happen, the rules that must always hold, and what must never happen. The factory asks about anything it can't decide.">${esc(draft.body)}</textarea></label>
+        <div class="row"><label>Project <i>optional</i><input name="project" list="compose-projects" placeholder="a new directory, or a project to amend" value="${esc(draft.project)}"><datalist id="compose-projects">${projects().map((d) => `<option value="${esc(d)}">`).join("")}</datalist></label>
+          <label>Code to check as it is <i>optional</i><input name="code" placeholder="src/lib, migrations/admin" value="${esc(draft.code)}"></label></div>
+        ${confirm ? `<div class="confirm"><span>Open this as you, with <b>/invariant solve</b>? The factory starts drafting within 30 seconds.</span><button class="cmd act primary" type="button" data-compose="post"${busy ? " disabled" : ""}>Yes, open it</button><button class="cmd" type="button" data-compose="back">Not yet</button></div>`
+          : `<div class="cmds"><button class="cmd act primary" type="button" data-compose="ask">Open it for the factory</button><button class="cmd" type="button" data-compose="close">Cancel</button></div>`}
+        ${error ? `<p class="acterr">${esc(error)}</p>` : ""}
+      </form>`;
+    }
+    box.addEventListener("input", (e) => {
+      const f = e.target;
+      if (f.name in draft) draft[f.name] = f.value;
+      if (f.name === "repo") paint();
+    });
+    box.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-compose]");
+      if (!b || b.disabled) return;
+      const what = b.dataset.compose;
+      error = "";
+      if (what === "open") { open = true; done = null; }
+      if (what === "close") open = false;
+      if (what === "back") confirm = false;
+      if (what === "ask") {
+        if (!draft.title.trim() || !draft.body.trim()) error = "Give it a title, and say what must be true.";
+        else confirm = true;
+      }
+      if (what === "post") {
+        busy = true; paint();
+        const repo = draft.repo || repos()[0];
+        try {
+          const r = await fetch("/act/api/issue", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+            body: JSON.stringify({ repo, title: draft.title, body: draft.body, project: draft.project.trim(), language: draft.language,
+              code: draft.code.split(/[,\n]/).map((c) => c.trim()).filter(Boolean) }) });
+          if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
+          const j = await r.json();
+          done = { repo, number: j.number, url: j.url };
+          Object.assign(draft, { title: "", body: "", project: "", code: "", language: "" });
+          open = false; confirm = false;
+        } catch (err) {
+          error = `Not opened: ${err.message}`; confirm = false;
+        }
+        busy = false;
+      }
+      paint();
+    });
+    paint();
   }
 
   // ---------- the fleet: every repository as a star system ----------

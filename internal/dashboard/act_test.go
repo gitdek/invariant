@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gitdek/invariant/internal/github"
 )
 
 // accessTeam is a stand-in for a Cloudflare Access team: it serves its
@@ -259,5 +261,80 @@ func TestTheAgentsDoor(t *testing.T) {
 	}
 	if len(posted) != 1 || !strings.HasPrefix(posted[0], "/invariant ratify e61ba88fa372\n\n") || !strings.Contains(posted[0], "by a coding agent") {
 		t.Errorf("posted %q", posted)
+	}
+}
+
+// /act opens an issue for the factory to solve: what must be true, its
+// Project: and Code: lines, and /invariant solve, and nothing it can't read.
+func TestActOpensAnIssue(t *testing.T) {
+	team := newAccessTeam(t)
+	var opened []github.NewIssue
+	s := &Server{Repos: []*Repo{{Name: "o/r"}}, Access: team.access(), Log: t.Logf,
+		Open: func(_ context.Context, repo string, is github.NewIssue) (int, string, error) {
+			opened = append(opened, is)
+			return 16, "https://github.com/o/r/issues/16", nil
+		}}
+	h := s.Handler()
+	good := team.token(t, team.key, "RS256", team.claims(nil))
+	send := func(tok string, n newIssue, headers map[string]string) int {
+		b, _ := json.Marshal(n)
+		r := httptest.NewRequest("POST", "https://invariant.example.com/act/api/issue", strings.NewReader(string(b)))
+		r.Host = "invariant.example.com"
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Invariant", "act")
+		if tok != "" {
+			r.Header.Set("Cf-Access-Jwt-Assertion", tok)
+		}
+		for k, v := range headers {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	ok := newIssue{Repo: "o/r", Title: "Check the leases", Body: "Only one worker holds a lease.", Project: "invariant/leases", Code: []string{"src/lib"}, Language: "typescript"}
+	if code := send(good, ok, nil); code != 200 {
+		t.Fatalf("opening an issue: %d", code)
+	}
+	if len(opened) != 1 || opened[0].Body != "Only one worker holds a lease.\n\nCode: src/lib\nProject: invariant/leases\n\n/invariant solve\n" ||
+		len(opened[0].Labels) != 1 || opened[0].Labels[0] != "invariant:typescript" {
+		t.Fatalf("opened %+v", opened)
+	}
+	bad := func(change func(*newIssue)) newIssue {
+		n := ok
+		change(&n)
+		return n
+	}
+	for name, c := range map[string]struct {
+		tok     string
+		n       newIssue
+		headers map[string]string
+		want    int
+	}{
+		"not signed in":        {"", ok, nil, 403},
+		"another origin":       {good, ok, map[string]string{"Origin": "https://evil.example.com"}, 403},
+		"another repository":   {good, bad(func(n *newIssue) { n.Repo = "x/y" }), nil, 400},
+		"no title":             {good, bad(func(n *newIssue) { n.Title = " " }), nil, 400},
+		"a title on two lines": {good, bad(func(n *newIssue) { n.Title = "a\nb" }), nil, 400},
+		"nothing to say":       {good, bad(func(n *newIssue) { n.Body = "" }), nil, 400},
+		"a path outside":       {good, bad(func(n *newIssue) { n.Project = "../elsewhere" }), nil, 400},
+		"an absolute path":     {good, bad(func(n *newIssue) { n.Code = []string{"/etc"} }), nil, 400},
+		"a strange language":   {good, bad(func(n *newIssue) { n.Language = "cobol" }), nil, 400},
+	} {
+		if code := send(c.tok, c.n, c.headers); code != c.want {
+			t.Errorf("%s: %d, want %d", name, code, c.want)
+		}
+	}
+	if len(opened) != 1 {
+		t.Errorf("a refused issue was opened: %+v", opened)
+	}
+	// The agent's door opens one too, and says who wrote it.
+	b, _ := json.Marshal(ok)
+	r := httptest.NewRequest("POST", "/act/api/issue", strings.NewReader(string(b)))
+	r.Header.Set("Authorization", "Bearer door-token")
+	w := httptest.NewRecorder()
+	s.AgentHandler("door-token").ServeHTTP(w, r)
+	if w.Code != 200 || len(opened) != 2 || !strings.HasSuffix(opened[1].Body, "/invariant solve\n\n_Posted for @gitdek by a coding agent, through the dashboard._") {
+		t.Errorf("the agent's issue: %d %+v", w.Code, opened)
 	}
 }

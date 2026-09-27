@@ -46,6 +46,7 @@ type Server struct {
 	// posts through gh's login.
 	Access *Access
 	Post   func(ctx context.Context, repo string, issue int, body string) (url string, err error)
+	Open   func(ctx context.Context, repo string, is github.NewIssue) (number int, url string, err error)
 
 	mu      sync.RWMutex
 	state   []byte  // the latest snapshot, gzipped JSON

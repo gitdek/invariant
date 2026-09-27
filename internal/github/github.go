@@ -184,6 +184,19 @@ func (c Client) PostComment(ctx context.Context, issue int, body string) (Commen
 	return out, c.call(ctx, "POST", c.path(fmt.Sprintf("issues/%d/comments", issue)), map[string]string{"body": body}, &out)
 }
 
+// NewIssue is an issue to open.
+type NewIssue struct {
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Labels []string `json:"labels,omitempty"`
+}
+
+// CreateIssue opens an issue.
+func (c Client) CreateIssue(ctx context.Context, is NewIssue) (Issue, error) {
+	var out Issue
+	return out, c.call(ctx, "POST", c.path("issues"), is, &out)
+}
+
 // EnsureLabel creates a label unless the repository already has it.
 func (c Client) EnsureLabel(ctx context.Context, name, color, description string) error {
 	err := c.call(ctx, "GET", c.path("labels/"+url.PathEscape(name)), nil, nil)
