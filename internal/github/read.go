@@ -76,6 +76,38 @@ func (c Client) Runs(ctx context.Context, branch string, n int) ([]Run, error) {
 	return out.Runs, err
 }
 
+// Job is one job of a workflow run.
+type Job struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	RunnerID   int64  `json:"runner_id"`
+	Steps      []struct {
+		Name string `json:"name"`
+	} `json:"steps"`
+}
+
+// Started says whether the job ran at all. GitHub fails a job it never gives
+// a runner, such as when the account's Actions minutes have run out, and
+// that job has no runner and no steps.
+func (j Job) Started() bool { return j.RunnerID != 0 || len(j.Steps) > 0 }
+
+// Job reads one job. A check run that GitHub Actions made has its job's ID.
+func (c Client) Job(ctx context.Context, id int64) (Job, error) {
+	var out Job
+	return out, c.call(ctx, "GET", c.path(fmt.Sprintf("actions/jobs/%d", id)), nil, &out)
+}
+
+// Jobs lists a workflow run's jobs.
+func (c Client) Jobs(ctx context.Context, run int64) ([]Job, error) {
+	var out struct {
+		Jobs []Job `json:"jobs"`
+	}
+	err := c.call(ctx, "GET", c.path(fmt.Sprintf("actions/runs/%d/jobs?per_page=100", run)), nil, &out)
+	return out.Jobs, err
+}
+
 // Artifact is a file a workflow run uploaded.
 type Artifact struct {
 	ID      int64  `json:"id"`

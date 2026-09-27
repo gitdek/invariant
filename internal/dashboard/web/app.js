@@ -162,6 +162,11 @@
     }
     $("#nowmeta").innerHTML = chips.join("");
 
+    // A gate run that didn't pass: failed, or never started at all, as when
+    // the account's Actions minutes run out. Only a gate that ran can fail.
+    const gateNot = (g) => g.notStarted
+      ? `<span class="muted" title="GitHub never gave the job a runner">○ gate didn't start</span>`
+      : `<span class="bad">✕ gate ${esc(g.conclusion === "failure" ? "failed" : g.conclusion.replaceAll("_", " "))}</span>`;
     const rows = [];
     if (s.main) {
       const m = s.main;
@@ -170,7 +175,7 @@
         const g = m.gate;
         if (g.status !== "completed") gate = `<span class="run">● gate running</span> for <span data-since="${esc(g.started)}"></span>`;
         else if (g.conclusion === "success") gate = `<span class="ok">✓ gate passed</span> in ${dur((T(g.updated) - T(g.started)) / 1000)}`;
-        else gate = `<span class="bad">✕ gate ${esc(g.conclusion)}</span>`;
+        else gate = gateNot(g);
       }
       rows.push(`<div><span class="k">Main</span><span><code>${esc(m.sha.slice(0, 7))}</code> ${esc(m.title)} · @${esc(m.by)} · <span data-ago="${esc(m.at)}"></span></span></div>`);
       rows.push(`<div><span class="k">CI</span><span>${gate}</span></div>`);
@@ -189,7 +194,7 @@
         const g = r.gate;
         if (g.status !== "completed") gate = `<span class="run">● gate running</span>`;
         else if (g.conclusion === "success") gate = `<span class="ok">✓ gate passed</span> on <code>${esc(g.sha.slice(0, 7))}</code>`;
-        else gate = `<span class="bad">✕ gate ${esc(g.conclusion)}</span>`;
+        else gate = gateNot(g);
       }
       const f = r.factory?.running ? "factory on" : "factory off";
       const held = r.lease && T(r.lease.until) > Date.now() ? " · lease held" : "";
@@ -1050,7 +1055,7 @@
       case "limit": return "Two builds stopped before they made a pull request, so the factory won't start another on its own. Try again, or draft again.";
       case "gate": return `The code didn't pass the gate in the factory's own run. It's in draft ${pr}. Once the cause is fixed, have the factory try again.`;
       case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified. Once it's fixed, have the factory try again.`;
-      case "ci": return `CI's gate failed on ${pr}. Once the cause is fixed, have the factory try again.`;
+      case "ci": return `CI's gate didn't pass on ${pr}. Once the cause is fixed, have the factory try again.`;
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.`;
   }

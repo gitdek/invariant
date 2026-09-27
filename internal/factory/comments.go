@@ -320,9 +320,32 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 	return post("needs a person", b.String(), m)
 }
 
-func ciFailedComment(pr github.PullRequest, run github.CheckRun, m Marker) string {
+// ciFailedComment says why CI's gate didn't pass. A gate GitHub never
+// started didn't fail, so it says that instead, and how to go on.
+func ciFailedComment(pr github.PullRequest, run github.CheckRun, started bool, m Marker) string {
+	if !started {
+		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment `/invariant retry`.",
+			pr.Number, run.URL), m)
+	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` %s on #%d ([run](%s)), so I won't merge it. A person needs to look at this.",
-		strings.ReplaceAll(run.Conclusion, "_", " "), pr.Number, run.URL), m)
+		gateWords(run.Conclusion), pr.Number, run.URL), m)
+}
+
+// gateWords says how a check run that didn't pass ended.
+func gateWords(conclusion string) string {
+	switch conclusion {
+	case "failure":
+		return "failed"
+	case "cancelled":
+		return "was cancelled"
+	case "timed_out":
+		return "timed out"
+	case "action_required":
+		return "is waiting for someone to approve it"
+	case "skipped":
+		return "was skipped"
+	}
+	return "ended " + strings.ReplaceAll(conclusion, "_", " ")
 }
 
 func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) string {

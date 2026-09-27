@@ -429,3 +429,44 @@ func TestFailuresSayWhy(t *testing.T) {
 		t.Error("a pull request that failed CI can't be drafted again, only retried")
 	}
 }
+
+// A gate run GitHub never started, as when the account's Actions minutes
+// run out, didn't fail: the gate didn't run at all.
+func TestAGateGitHubNeverStartedDidntFail(t *testing.T) {
+	ran := github.Job{RunnerID: 5}
+	ran.Steps = append(ran.Steps, struct {
+		Name string `json:"name"`
+	}{Name: "Verify every project"})
+	for _, c := range []struct {
+		jobs []github.Job
+		want bool
+	}{
+		{nil, false},
+		{[]github.Job{{Name: "invariant/gate"}}, true},
+		{[]github.Job{{Name: "What changed"}, ran}, false},
+	} {
+		if got := refused(c.jobs); got != c.want {
+			t.Errorf("refused(%+v) = %v; want %v", c.jobs, got, c.want)
+		}
+	}
+	run := github.Run{ID: 9, Name: "gate", HeadSHA: "9121057", Status: "completed", Conclusion: "failure"}
+	r := &Repo{Name: "o/r"}
+	r.src.refused = map[int64]bool{9: true}
+	if got := runWords(run, true); got != "didn't start" {
+		t.Errorf("runWords = %q", got)
+	}
+	if ref := r.runRef(run); !ref.NotStarted {
+		t.Errorf("runRef = %+v; want NotStarted", ref)
+	}
+	r.src.refused[9] = false
+	if got := runWords(run, false); got != "failed" {
+		t.Errorf("runWords = %q", got)
+	}
+	if ref := r.runRef(run); ref.NotStarted {
+		t.Errorf("runRef = %+v; a gate that ran and failed started", ref)
+	}
+	run.Conclusion = "timed_out"
+	if got := runWords(run, false); got != "timed out" {
+		t.Errorf("runWords = %q", got)
+	}
+}

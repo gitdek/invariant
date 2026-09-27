@@ -211,12 +211,57 @@ func TestARedGateIsNeverMerged(t *testing.T) {
 	r.gh.ci(pr.Marker.PR, "failure")
 	r.poll()
 	failed := r.expect(1, KindFailed, LabelHumanReview)
-	if len(r.gh.merged) != 0 || !strings.Contains(failed.Comment.Body, "failure on #") {
+	if len(r.gh.merged) != 0 || !strings.Contains(failed.Comment.Body, "`invariant/gate` failed on #") {
 		t.Errorf("merged = %v\n%s", r.gh.merged, failed.Comment.Body)
 	}
 	r.poll()
 	if len(r.gh.merged) != 0 {
 		t.Error("a failed pull request must stay unmerged")
+	}
+}
+
+// A gate GitHub never started, as when the account's Actions minutes run
+// out, didn't fail, and the factory says so. It still doesn't merge, and a
+// re-run that passes merges once a writer says retry.
+func TestAGateThatNeverStartedIsNeverMerged(t *testing.T) {
+	r := newRig(t)
+	pr := ratified(t, r)
+	r.gh.refuse(pr.Marker.PR)
+	r.poll()
+	refused := r.expect(1, KindFailed, LabelHumanReview)
+	for _, want := range []string{"couldn't start `invariant/gate`", "didn't run", "`/invariant retry`"} {
+		if !strings.Contains(refused.Comment.Body, want) {
+			t.Errorf("the post doesn't say %q:\n%s", want, refused.Comment.Body)
+		}
+	}
+	if strings.Contains(refused.Comment.Body, "failed on") || refused.Marker.Failure != FailCI {
+		t.Errorf("failure = %q:\n%s", refused.Marker.Failure, refused.Comment.Body)
+	}
+
+	// CI can run again, and someone re-runs the job on the same head.
+	r.gh.ci(pr.Marker.PR, "success")
+	r.poll()
+	if len(r.gh.merged) != 0 {
+		t.Fatal("a pull request whose gate never started waits for a person to say retry")
+	}
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	r.expect(1, KindPR, LabelPR)
+	r.poll()
+	r.expect(1, KindMerged, LabelMerged)
+	if !reflect.DeepEqual(r.gh.merged, []int{pr.Marker.PR}) {
+		t.Errorf("merged = %v", r.gh.merged)
+	}
+}
+
+func TestGateWords(t *testing.T) {
+	for conclusion, want := range map[string]string{
+		"failure": "failed", "cancelled": "was cancelled", "timed_out": "timed out",
+		"action_required": "is waiting for someone to approve it", "stale": "ended stale",
+	} {
+		if got := gateWords(conclusion); got != want {
+			t.Errorf("gateWords(%q) = %q; want %q", conclusion, got, want)
+		}
 	}
 }
 
