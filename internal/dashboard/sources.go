@@ -114,6 +114,13 @@ func ParseSlices(readme, prd string) []Slice {
 		status := strings.ToLower(strings.Fields(plain(cells[2]) + " later")[0])
 		status = strings.Trim(status, ".,")
 		switch status {
+		case "next":
+			// The next slice on the road is the one in progress, once the
+			// README's are all done.
+			status = "planned"
+			if !now {
+				status, now = "now", true
+			}
 		case "proposed", "planned", "later", "done":
 		default:
 			status = "proposed"

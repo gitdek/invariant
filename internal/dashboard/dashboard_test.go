@@ -267,3 +267,17 @@ func TestWaitingSaysWhatAPersonMustDo(t *testing.T) {
 		t.Error("a closed issue waits on no one")
 	}
 }
+
+// Once every slice in the README is done, the PRD's next slice is the one
+// in progress.
+func TestTheNextSliceIsNow(t *testing.T) {
+	readme := "- [x] **Slice 6 · Changing existing projects.** Done.\n"
+	prd := "## Roadmap\n\n| Slice | What | Status |\n| :-- | :-- | :-- |\n| 7 | Invariant builds itself: the issue protocol (4.1) | Next `D-0058` |\n| 8 | Code you can ship (3.7) | Planned |\n"
+	var got []string
+	for _, s := range ParseSlices(readme, prd) {
+		got = append(got, s.ID+" "+s.Status)
+	}
+	if strings.Join(got, ",") != "6 done,7 now,8 planned" {
+		t.Errorf("slices %v", got)
+	}
+}

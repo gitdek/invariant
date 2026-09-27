@@ -106,7 +106,7 @@ Each requirement serves one goal.
 - **3.3 Receipts reproduce.** Every verifier is pinned and runs offline, and a commit's fingerprint matches between a local run and CI. Built. `D-0013` `D-0016` `D-0032`
 - **3.4 A checker's failure is never a pass.** When a checker runs out of memory or time, the gate fails, and the receipt doesn't blame the code. Built. `D-0047`
 - **3.5 Public copy never claims more than the receipt.** Built. `D-0015`
-- **3.6 A live view.** A dashboard shows what the factory is working on and every project's evidence, from the same sources as the receipts. It's shared through a Cloudflare tunnel for now, and moves to puglisij.com/invariant later. Next. `D-0049`
+- **3.6 A live view.** A dashboard shows what the factory is working on and every project's evidence, from the same sources as the receipts, and what's waiting on a person. It's shared through a Cloudflare tunnel for now, and moves to puglisij.com/invariant later. Built. `D-0049` `D-0050` `D-0060`
 - **3.7 Code you can ship.** The code carries no model bounds. Today it does: the rate limiter's code stops at `MAX_CALLS = 5`, and its clock at `MAX_TIME = 3`, because the model needs those limits to stay finite. The limits move into what TLC is told to explore, and sizes such as capacity become parameters. Gobra's and Nagini's proofs then hold at every size, and TLC still checks the design at the ratified bounds. Planned, slice 8. `D-0048` `D-0058`
 - **3.11 A second agent reviews every driver.** A conformance driver is evidence only if it tries every step a person or worker could. On copythis-ad#33, the factory's driver skipped the one step the ratified rule was about, and the gate passed anyway (D-0059). A second agent, with fresh context, reads each driver for steps it skips or states it never records, and the factory posts its review with the pull request. Proposed.
 - **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Today the gate checks invariants and deadlock only. Planned, slice 9, where the factory's own recovery needs it first. `D-0048` `D-0058`
@@ -127,7 +127,7 @@ Each requirement serves one goal.
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
 - **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Next. `D-0048`
 - **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Planned. `D-0028` `D-0052`
-- **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. It starts with copythis-ad. Next, slice 6. `D-0053` `D-0054`
+- **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. Built: copythis-ad's lease protocol is checked on every pull request, and the check caught a real bug. `D-0053` `D-0054` `D-0059`
 - **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
 
 ## How we'll know it works
@@ -156,8 +156,8 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | Slice | What | Status |
 | :-- | :-- | :-- |
 | 1 to 5 | The gate, synthesis, TypeScript and Python checking, GitHub, and synthesis in all three languages | Done |
-| 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Part A done, Part B next `D-0053` `D-0054` |
-| 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Planned `D-0045` `D-0053` `D-0058` |
+| 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Done `D-0053` `D-0054` |
+| 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Next `D-0045` `D-0053` `D-0058` |
 | 8 | Code you can ship (3.7) | Planned `D-0048` `D-0058` |
 | 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Planned `D-0048` `D-0058` |
 | 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Planned `D-0007` `D-0033` `D-0048` |
