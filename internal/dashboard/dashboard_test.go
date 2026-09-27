@@ -328,7 +328,7 @@ func TestTheFactorysIssues(t *testing.T) {
 		{github.Issue{Body: "Mentions `invariant` in passing.", Labels: []github.Label{{Name: "bug"}}}, false},
 		{github.Issue{Body: "> /invariant solve\nquoted, so not a command"}, false},
 	} {
-		if got := theFactorys(c.is); got != c.want {
+		if got := factory.Takes(c.is); got != c.want {
 			t.Errorf("%+v: %v, want %v", c.is, got, c.want)
 		}
 	}

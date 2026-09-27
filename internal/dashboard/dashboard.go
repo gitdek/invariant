@@ -329,7 +329,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		} else {
 			var issues []github.Issue
 			for _, is := range all {
-				if theFactorys(is) {
+				if factory.Takes(is) {
 					issues = append(issues, is)
 				}
 			}
@@ -866,23 +866,6 @@ func combined(repos []RepoState) Watcher {
 		return repos[0].Factory
 	}
 	return Watcher{}
-}
-
-// theFactorys says whether an issue is one the factory takes: it carries
-// the invariant label or one of the factory's own, or it opens with a
-// /invariant solve line.
-func theFactorys(is github.Issue) bool {
-	for _, l := range is.Labels {
-		if l.Name == factory.LabelTrigger || strings.HasPrefix(l.Name, factory.LabelTrigger+":") {
-			return true
-		}
-	}
-	for _, c := range factory.ParseCommands(is.Body) {
-		if c.Verb == factory.Solve {
-			return true
-		}
-	}
-	return false
 }
 
 // issueRef names an issue: #5 in Invariant's own repository, and
