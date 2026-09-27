@@ -240,3 +240,30 @@ func TestAnotherRepositorysIssuesAreNamed(t *testing.T) {
 		t.Errorf("the top bar should show the watcher that's working: %+v", got)
 	}
 }
+
+// An open issue says what it needs from a person: the questions still
+// open, or the proposal's short hash to ratify.
+func TestWaitingSaysWhatAPersonMustDo(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-time.Minute).Format(time.RFC3339)
+	issue := github.Issue{Number: 33, Title: "Check leases", State: "open", CreatedAt: now.Add(-time.Hour).Format(time.RFC3339),
+		Labels: []github.Label{{Name: factory.LabelTrigger}, {Name: factory.LabelAsking}}}
+	forks := factory.Marker{Kind: factory.KindForks,
+		Forks:   []formalize.Fork{{ID: "F1", Question: "Which rule?", Options: []formalize.Option{{ID: "A", Says: "a"}, {ID: "C", Says: "c"}}}, {ID: "F2", Question: "When?", Options: []formalize.Option{{ID: "A", Says: "now"}}}},
+		Answers: []formalize.Answer{{Fork: "F2", Option: "A"}}}
+	l := Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, forks)}}, "", now)
+	if w := l.Waiting; w == nil || w.Kind != factory.KindForks || len(w.Forks) != 1 || w.Forks[0].ID != "F1" || len(w.Forks[0].Options) != 2 {
+		t.Fatalf("waiting %+v", l.Waiting)
+	}
+	proposal := &formalize.Proposal{Draft: formalize.Draft{Name: "leases", Statements: []project.Statement{{Name: "OneLeaseHolder", Kind: "invariant", Says: "One holder."}}},
+		Hash: "sha256:6db634c64b0912345678"}
+	issue.Labels = []github.Label{{Name: factory.LabelTrigger}, {Name: factory.LabelProposal}}
+	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, factory.Marker{Kind: factory.KindProposal, Proposal: proposal})}}, "", now)
+	if w := l.Waiting; w == nil || w.Hash != "6db634c64b09" || len(w.Statements) != 1 || w.Statements[0].Name != "OneLeaseHolder" {
+		t.Fatalf("waiting %+v", l.Waiting)
+	}
+	issue.State = "closed"
+	if l = Lane(issue, nil, "", now); l.Waiting != nil {
+		t.Error("a closed issue waits on no one")
+	}
+}

@@ -45,6 +45,8 @@
 </header>
 
 <main>
+  <nav class="scope" id="scope" aria-label="Choose which repositories to show"></nav>
+
   <section class="hero" aria-live="polite">
     <div>
       <p class="eyebrow">Right now</p>
@@ -56,7 +58,27 @@
     <div class="orbit" id="orbit" role="img" aria-label="The factory's pipeline as an orbit: issue, ask, ratify, build, gate, merge"></div>
   </section>
 
+  <section class="block" id="inbox-block">
+    <header>
+      <div>
+        <h2>Needs you</h2>
+        <p class="lede">What the factory is waiting for from a person, in every repository: questions to answer, proposals to ratify, and pull requests that failed. Click an answer to copy its command, then comment it on the issue.</p>
+      </div>
+    </header>
+    <div class="inbox" id="inbox"></div>
+  </section>
+
   <section class="numbers" id="numbers" aria-label="The numbers"></section>
+
+  <section class="block">
+    <header>
+      <div>
+        <h2>The fleet</h2>
+        <p class="lede">Every repository Invariant works in is a star. Its projects orbit it as planets, sized by how many states TLC checked and colored by language, with a ring in the accent when every check holds. Open issues ride the outer orbit as comets, from issue to merge, and each merged issue becomes a moon of its project.</p>
+      </div>
+    </header>
+    <div class="fleet" id="fleet"></div>
+  </section>
 
   <section class="block" id="states">
     <header>
@@ -98,8 +120,9 @@
         <h2>What's proved</h2>
         <p class="lede">Every project in the repository, from the receipt CI wrote on main. The factory never writes its own receipt.</p>
       </div>
-      <p class="muted" id="receipts"></p>
+      <div class="viewtoggle" role="group" aria-label="Show projects as"><button type="button" data-view="cards">Cards</button><button type="button" data-view="table">Table</button></div>
     </header>
+    <p class="muted" id="receipts"></p>
     <div class="cards" id="projects"></div>
   </section>
 

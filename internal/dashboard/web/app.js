@@ -91,16 +91,19 @@
 
   function render(s) {
     renderTop(s);
+    if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
+    if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting])])) renderInbox(s);
+    if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
     if (changed("now", [s.now, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
     if (changed("orbit", [s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("numbers", [s.totals, s.who.ratified])) renderNumbers(s);
     if (changed("models", s.projects.map((p) => [p.model, p.graph, p.states]))) renderTabs(s);
-    if (changed("lanes", s.issues)) renderLanes(s.issues);
-    if (changed("projects", s.projects)) renderProjects(s);
+    if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
+    if (changed("projects", [scope, pview, s.projects])) renderProjects(s);
     if (changed("road", s.slices)) renderRoad(s.slices);
     if (changed("who", [s.who, s.decisions.status])) renderWho(s);
     if (changed("decisions", s.decisions)) renderDecisions(s.decisions);
-    if (changed("activity", s.activity)) renderActivity(s.activity);
+    if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
     tick();
   }
 
@@ -114,7 +117,9 @@
 
   function renderNow(s) {
     const n = s.now, h = $("#headline");
-    const html = esc(n.headline).replace(/#(\d+)/g, '<span class="n">#$1</span>');
+    // Find the issue numbers first, then escape the rest. Escaping first
+    // turns an apostrophe into &#39;, whose #39 would look like an issue.
+    const html = n.headline.split(/(#\d+)/).map((part) => (/^#\d+$/.test(part) ? `<span class="n">${part}</span>` : esc(part))).join("");
     if (h.innerHTML !== html) {
       h.innerHTML = html;
       h.classList.remove("swap");
@@ -750,9 +755,12 @@
 
   // ---------- lanes ----------
   let lanesShown = false;
-  function renderLanes(issues) {
+  function renderLanes(all) {
     const box = $("#lanes");
-    if (!issues.length) { box.innerHTML = `<p class="skeleton">No issues yet.</p>`; return; }
+    if (!all.length) { box.innerHTML = `<p class="skeleton">No issues yet.</p>`; return; }
+    const open = all.filter((i) => i.open), closed = all.filter((i) => !i.open);
+    const issues = lanesAll ? open.concat(closed) : open.concat(closed.slice(0, Math.max(0, 4 - open.length + 1)));
+    const hidden = all.length - issues.length;
     const FOLD = 11; // a wait on people takes this share of the widest lane's factory time
     const maxFactory = Math.max(...issues.map((i) => i.spans.filter((s) => s.who !== "people").reduce((a, s) => a + (T(s.to) - T(s.from)) / 1000, 0)), 60);
     const unitsOf = (sp) => (sp.who === "people" ? FOLD : Math.max(0.6, ((T(sp.to) - T(sp.from)) / 1000 / maxFactory) * 100));
@@ -793,6 +801,10 @@
         <div class="lane-foot"><span>factory <b>${dur(is.factorySeconds)}</b></span><span class="p">waiting on people <b>${dur(is.peopleSeconds)}</b></span><span><b>${is.peopleComments}</b> comment${is.peopleComments === 1 ? "" : "s"} from people</span>${is.questions ? `<span><b>${is.questions}</b> question${is.questions === 1 ? "" : "s"} asked</span>` : ""}${is.statements ? `<span><b>${is.statements}</b> statements</span>` : ""}${is.pr ? `<span>pull request <b>${esc(ref(is.repo, is.pr))}</b></span>` : ""}</div>
       </article>`;
     }).join("");
+    if (hidden > 0 || lanesAll) {
+      box.insertAdjacentHTML("beforeend", `<div class="more"><button class="btn" type="button" id="lanesmore">${lanesAll ? "Show fewer" : `Show ${hidden} more`}</button></div>`);
+      $("#lanesmore").addEventListener("click", () => { lanesAll = !lanesAll; delete seen.lanes; render(state); });
+    }
     if (lanesShown || REDUCED) box.classList.add("shown");
     else {
       const io = new IntersectionObserver((es) => {
@@ -807,7 +819,9 @@
     const r = s.receipts;
     $("#receipts").innerHTML = r ? `Receipts from CI's gate on <code>${esc(r.sha.slice(0, 7))}</code>` : "";
     const order = (p) => (p.factory ? 0 : 1);
-    const ps = s.projects.slice().sort((a, b) => order(a) - order(b) || b.states - a.states);
+    const ps = s.projects.filter((p) => inScope(p.repo)).sort((a, b) => (a.repo === s.repo ? 0 : 1) - (b.repo === s.repo ? 0 : 1) || order(a) - order(b) || b.states - a.states);
+    if (pview === "table") return renderTable(s, ps);
+    $("#projects").className = "cards";
     $("#projects").innerHTML = ps.map((p) => {
       const assure = p.assurance === "proved" ? "proved" : p.assurance === "tested in every state" ? "every" : "tested";
       const caught = p.bugs.filter((b) => b.caught).length;
@@ -947,6 +961,198 @@
       return `<li class="${esc(e.who)} ${esc(e.kind)}" ${style}>${text}<span class="when" data-ago="${esc(e.at)}" title="${esc(stamp(e.at))}"></span></li>`;
     }).join("");
   }
+
+
+  // ---------- scope: which repositories the page shows ----------
+  let scope = "all", pview = "cards", lanesAll = false;
+  try { scope = localStorage.getItem("invariant-scope") || "all"; pview = localStorage.getItem("invariant-pview") || "cards"; } catch (e) {}
+  const inScope = (repo) => scope === "all" || !repo || repo === scope;
+  function setScope(v) {
+    scope = v;
+    try { localStorage.setItem("invariant-scope", v); } catch (e) {}
+    if (state) render(state);
+  }
+  function renderScope(s) {
+    const repos = s.repos || [];
+    const nav = $("#scope");
+    if (repos.length < 2) { nav.innerHTML = ""; return; }
+    if (scope !== "all" && !repos.find((r) => r.name === scope)) scope = "all";
+    const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
+    const all = repos.reduce((a, r) => a + r.projects, 0);
+    const btn = (value, label, projects, open, live) =>
+      `<button type="button" data-scope="${esc(value)}" aria-pressed="${scope === value}"><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${projects} project${projects === 1 ? "" : "s"}${open ? ` · ${open} open` : ""}</span></button>`;
+    nav.innerHTML = `<span class="lbl">Show</span>` + btn("all", "Everything", all, openIn(""), repos.some((r) => r.factory?.running)) +
+      repos.map((r) => btn(r.name, r.short, r.projects, openIn(r.name), r.factory?.running)).join("");
+    nav.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => setScope(b.dataset.scope)));
+  }
+
+  // ---------- needs you ----------
+  const people = "var(--people)";
+  function needGlyph(kind) {
+    if (kind === "forks") return `<svg class="glyph" viewBox="0 0 64 64" aria-hidden="true" style="color:${people}">
+      <circle cx="32" cy="32" r="30" fill="none" stroke="currentColor" stroke-opacity=".22"/>
+      <path d="M10 32 H28 C34 32, 36 18, 50 18 M28 32 C34 32, 36 46, 50 46" fill="none" stroke="currentColor" stroke-opacity=".45" stroke-width="2.4" stroke-linecap="round"/>
+      <circle cx="50" cy="18" r="3" fill="currentColor" fill-opacity=".5"/><circle cx="50" cy="46" r="3" fill="currentColor" fill-opacity=".5"/>
+      ${REDUCED ? `<circle cx="28" cy="32" r="4" fill="currentColor"/>` : `<circle r="4" fill="currentColor"><animateMotion dur="3.2s" repeatCount="indefinite" keyPoints="0;0.42;0.42;1" keyTimes="0;0.35;0.65;1" calcMode="linear" path="M10 32 H28 C34 32, 36 18, 50 18"/></circle>
+      <circle r="4" fill="currentColor" opacity=".55"><animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite" keyPoints="0;0.42;0.42;1" keyTimes="0;0.35;0.65;1" calcMode="linear" path="M10 32 H28 C34 32, 36 46, 50 46"/></circle>`}
+      <text x="28" y="26" text-anchor="middle" font-size="10" font-weight="700" fill="currentColor" font-family="JetBrains Mono, monospace">?</text></svg>`;
+    if (kind === "proposal") return `<svg class="glyph" viewBox="0 0 64 64" aria-hidden="true" style="color:${people}">
+      <rect x="15" y="9" width="34" height="44" rx="4" fill="none" stroke="currentColor" stroke-opacity=".5" stroke-width="2"/>
+      <path d="M21 19 H43 M21 25 H43 M21 31 H36" stroke="currentColor" stroke-opacity=".35" stroke-width="2" stroke-linecap="round"/>
+      <path d="M20 44 c4 -6 6 4 9 -1 s4 -5 6 0 s3 3 8 -2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="40" stroke-dashoffset="${REDUCED ? 0 : 40}">
+        ${REDUCED ? "" : `<animate attributeName="stroke-dashoffset" values="40;0;0;40" keyTimes="0;.35;.85;1" dur="3.6s" repeatCount="indefinite"/>`}</path>
+      <circle cx="50" cy="50" r="8" fill="var(--bg)" stroke="currentColor" stroke-width="2"/><path d="M46.5 50 l2.5 2.5 l5 -5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    return `<svg class="glyph" viewBox="0 0 64 64" aria-hidden="true" style="color:var(--bug)">
+      <circle cx="32" cy="32" r="14" fill="currentColor" fill-opacity=".14" stroke="currentColor" stroke-width="2"/>
+      ${REDUCED ? "" : `<circle cx="32" cy="32" r="14" fill="none" stroke="currentColor" stroke-width="2"><animate attributeName="r" values="14;29" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values=".8;0" dur="1.8s" repeatCount="indefinite"/></circle>`}
+      <path d="M32 24 V34" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><circle cx="32" cy="39.5" r="2" fill="currentColor"/></svg>`;
+  }
+  function calmGlyph() {
+    return `<svg viewBox="-20 -20 40 40" aria-hidden="true"><circle r="15" fill="none" stroke="currentColor" stroke-opacity=".25" style="color:var(--ink)"/>
+      <path d="M-6 0 l4 4 l8 -9" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <g>${REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="7s" repeatCount="indefinite"/>`}<circle cx="15" cy="0" r="2.4" style="fill:var(--ink)"/></g></svg>`;
+  }
+  function renderInbox(s) {
+    const items = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
+    const box = $("#inbox");
+    if (!items.length) {
+      box.innerHTML = `<div class="calm">${calmGlyph()}<span>Nothing needs you right now. When the factory asks a question, proposes statements or needs a person, it shows up here.</span></div>`;
+      return;
+    }
+    box.innerHTML = items.map(needCard).join("");
+  }
+  function needCard(is) {
+    const w = is.waiting, repo = is.repo, n = is.number;
+    const gh = (body) => `gh issue comment ${n} -R ${repo} --body "${body}"`;
+    const url = `https://github.com/${repo}/issues/${n}`;
+    const open = `<a class="gh" href="${esc(url)}" target="_blank" rel="noopener">Open on GitHub ↗</a>`;
+    const cmd = (c, primary) => `<button class="cmd${primary ? " primary" : ""}" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy. Shift-click copies it as a gh command.">${esc(c)}<span class="cp">copy</span></button>`;
+    let body = "", cls = "";
+    if (w.kind === "forks") {
+      body = (w.forks || []).map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
+        const c = `/invariant choose ${q.id} ${o.id}`;
+        return `<button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>`;
+      }).join("")}</div>`).join("") + `<div class="cmds">${cmd("/invariant revise")}${open}</div>`;
+    } else if (w.kind === "proposal") {
+      body = `<p class="ask">${w.amends ? `An amendment to what ${esc(ref(repo, Number(String(w.amends).replace("#", ""))) || w.amends)} ratified: ` : ""}<strong>${(w.statements || []).length}</strong> statements for <strong>${esc(w.name)}</strong>, already checked by TLC, and waiting for a person to ratify them.</p>
+        <details class="stmts"><summary>Read what they say</summary><ul>${(w.statements || []).map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>
+        <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${cmd("/invariant revise")}${open}</div>`;
+    } else {
+      cls = "failed";
+      body = `<p class="ask">${w.pr ? `Pull request <strong>${esc(ref(repo, w.pr))}</strong> didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.</p>
+        <div class="cmds">${cmd("/invariant retry", true)}${open}</div>`;
+    }
+    return `<article class="need ${cls}"><div>${needGlyph(w.kind)}</div><div>
+      <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
+  }
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-cmd]");
+    if (!b) return;
+    const text = e.shiftKey && b.dataset.gh ? b.dataset.gh : b.dataset.cmd;
+    try { await navigator.clipboard.writeText(text); } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    }
+    const cp = b.querySelector(".cp");
+    b.classList.add("copied");
+    if (cp) cp.textContent = e.shiftKey ? "gh copied" : "copied";
+    setTimeout(() => { b.classList.remove("copied"); if (cp) cp.textContent = "copy"; }, 1600);
+  });
+
+  // ---------- the fleet: every repository as a star system ----------
+  const STAGE_ANGLE = { queued: -90, asking: -30, ratifying: 30, building: 90, gate: 150, review: 150, merged: 210 };
+  const langClass = (l) => (l === "typescript" ? "ts-c" : l === "python" ? "py-c" : "go-c");
+  function renderFleet(s) {
+    const box = $("#fleet");
+    const repos = s.repos || [];
+    box.innerHTML = repos.map((r, k) => systemCard(s, r, k)).join("");
+    box.querySelectorAll("[data-model]").forEach((el) => el.addEventListener("click", () => {
+      selectModel(el.dataset.model);
+      $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" });
+    }));
+  }
+  function spin(from, dur) {
+    return REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${from}" to="${from + 360}" dur="${dur}s" repeatCount="indefinite"/>`;
+  }
+  function systemCard(s, r, k) {
+    const c = 200, R = 176;
+    const projects = s.projects.filter((p) => p.repo === r.name).sort((a, b) => a.states - b.states);
+    const issues = s.issues.filter((i) => i.repo === r.name);
+    const open = issues.filter((i) => i.open), merged = issues.filter((i) => i.stage === "merged");
+    const n = projects.length, inner = 50, outer = R - 40;
+    const orbitR = (i) => (n <= 1 ? (inner + outer) / 2 : inner + ((outer - inner) * i) / (n - 1));
+    const working = r.factory?.running && r.factory?.doing;
+    const ciRunning = r.gate && r.gate.status !== "completed";
+    let g = `<defs>
+      <radialGradient id="corona${k}"><stop offset="0" style="stop-color:var(--ink);stop-opacity:.55"/><stop offset=".35" style="stop-color:var(--ink);stop-opacity:.12"/><stop offset="1" style="stop-color:var(--ink);stop-opacity:0"/></radialGradient>
+      <linearGradient id="tail${k}" x1="0" x2="1"><stop offset="0" style="stop-color:var(--hi);stop-opacity:0"/><stop offset="1" style="stop-color:var(--hi);stop-opacity:.9"/></linearGradient>
+    </defs>`;
+    g += `<circle class="outer" cx="${c}" cy="${c}" r="${R}"/>`;
+    for (const [stage, a] of Object.entries(STAGE_ANGLE)) {
+      if (stage === "review") continue;
+      const t = (a * Math.PI) / 180;
+      g += `<circle class="station2" cx="${c + R * Math.cos(t)}" cy="${c + R * Math.sin(t)}" r="3.2"><title>${stage}</title></circle>`;
+    }
+    projects.forEach((p, i) => { g += `<circle class="orbitline" cx="${c}" cy="${c}" r="${orbitR(i)}"/>`; });
+    // The star: brighter and quicker while the factory works here, with a blue ring while CI runs.
+    g += `<circle cx="${c}" cy="${c}" r="${working ? 58 : 46}" fill="url(#corona${k})">${REDUCED ? "" : `<animate attributeName="r" values="${working ? "50;64;50" : "42;50;42"}" dur="${working ? 2.2 : 5}s" repeatCount="indefinite"/>`}</circle>`;
+    if (ciRunning) g += `<circle cx="${c}" cy="${c}" r="16" fill="none" style="stroke:var(--ci)" stroke-width="2">${REDUCED ? "" : `<animate attributeName="r" values="14;34" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values=".9;0" dur="1.6s" repeatCount="indefinite"/>`}</circle>`;
+    g += `<circle class="star" cx="${c}" cy="${c}" r="9"/><circle cx="${c}" cy="${c}" r="4" style="fill:var(--accent)"/>`;
+    projects.forEach((p, i) => {
+      const orr = orbitR(i), pr = 4 + 2.4 * Math.log10(Math.max(10, p.states));
+      const start = (i * 137.5 + k * 40) % 360, period = 46 + i * 23;
+      const moons = merged.filter((m) => m.project === p.dir);
+      const moonSvg = moons.map((m, j) => `<g>${spin(j * 120, 7 + j * 3)}<circle class="moon2" cx="${pr + 7 + j * 3}" cy="0" r="2"><title>${esc(ref(m.repo, m.number))} ${esc(m.title)}</title></circle></g>`).join("");
+      const tip = `${cap(p.name)} · ${p.dir}\n${nf.format(p.states)} states · ${p.assurance}\n${p.bugs.filter((b) => b.caught).length}/${p.bugs.length} planted bugs caught`;
+      g += `<g transform="translate(${c} ${c})"><g transform="rotate(${start})">${spin(start, period)}<g class="planet" data-model="${esc(p.model)}" transform="translate(${orr} 0)"><title>${esc(tip)}</title>
+        <circle class="${p.passed ? "holds" : "fails"}" r="${pr + 4}"/><circle class="body ${langClass(p.language)}" r="${pr}"/>${moonSvg}</g></g></g>`;
+    });
+    // Comets: open issues on the outer orbit, parked at their stage.
+    open.forEach((is, j) => {
+      const a = (STAGE_ANGLE[is.stage] ?? -90) + j * 9, t = (a * Math.PI) / 180;
+      const x = c + R * Math.cos(t), y = c + R * Math.sin(t);
+      const cls = is.stage === "review" ? "bug" : is.stage === "asking" || is.stage === "ratifying" ? "people" : "";
+      const tailA = ((a - 28) * Math.PI) / 180;
+      g += `<path d="M${c + R * Math.cos(tailA)} ${c + R * Math.sin(tailA)} A${R} ${R} 0 0 1 ${x} ${y}" fill="none" stroke="url(#tail${k})" stroke-width="3" stroke-linecap="round" opacity=".75"/>
+        <circle class="comet-head ${cls}" cx="${x}" cy="${y}" r="6">${REDUCED ? "" : `<animate attributeName="r" values="5;7.5;5" dur="1.8s" repeatCount="indefinite"/>`}<title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: ${esc(is.stage)}</title></circle>
+        <text class="comet-label" x="${x + (x > c ? 10 : -10)}" y="${y - 10}" text-anchor="${x > c ? "start" : "end"}">${esc(ref(is.repo, is.number))}</text>`;
+    });
+    // A shooting star crosses the system while the factory works in it.
+    if (working && !REDUCED) g += `<line x1="40" y1="60" x2="120" y2="20" stroke="url(#tail${k})" stroke-width="2" stroke-linecap="round" opacity="0">
+        <animate attributeName="opacity" values="0;1;0" dur="2.8s" repeatCount="indefinite"/>
+        <animateTransform attributeName="transform" type="translate" values="-60 40; 280 -20" dur="2.8s" repeatCount="indefinite"/></line>`;
+    const legend = projects.length
+      ? projects.slice().reverse().map((p) => `<span data-model="${esc(p.model)}" title="${esc(p.dir)}"><i class="${langClass(p.language)}"></i>${esc(cap(p.name))}</span>`).join("")
+      : `<span>No projects yet. The first issue's project will orbit here.</span>`;
+    const state = r.factory?.running ? `<span class="chip factory pulse state"><i></i>${working ? "working" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
+    return `<article class="system${scope !== "all" && scope !== r.name ? " dim" : ""}">
+      <header><h3>${esc(r.short)}</h3><span class="meta">${n} project${n === 1 ? "" : "s"} · ${open.length} open · ${merged.length} merged</span>${state}</header>
+      <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${n} projects, ${open.length} open issues">${g}</svg>
+      <div class="legend2">${legend}</div></article>`;
+  }
+
+  // ---------- projects as a table ----------
+  function renderTable(s, ps) {
+    const box = $("#projects");
+    box.className = "tablewrap";
+    box.innerHTML = `<table class="ptable"><thead><tr><th>Project</th><th>Evidence</th><th>States</th><th>Statements</th><th>Bugs caught</th><th>Ratified</th></tr></thead><tbody>${ps.map((p) => {
+      const caught = p.bugs.filter((b) => b.caught).length;
+      const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
+      return `<tr data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
+        <td>${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}</td><td class="num">${nf.format(p.states)}</td><td class="num">${p.statements.length}</td>
+        <td class="num ${caught === p.bugs.length ? "ok" : ""}">${caught}/${p.bugs.length}</td><td>${who}</td></tr>`;
+    }).join("")}</tbody></table>`;
+    box.querySelectorAll("tr[data-model]").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
+  }
+  document.querySelectorAll(".viewtoggle button").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.view === pview));
+    b.addEventListener("click", () => {
+      pview = b.dataset.view;
+      try { localStorage.setItem("invariant-pview", pview); } catch (e) {}
+      document.querySelectorAll(".viewtoggle button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.view === pview)));
+      if (state) render(state);
+    });
+  });
 
   $("#theme").addEventListener("click", () => {
     const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";

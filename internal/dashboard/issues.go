@@ -61,6 +61,43 @@ type Issue struct {
 	Answers        int        `json:"answers,omitempty"` // forks people decided
 	Questions      int        `json:"questions,omitempty"`
 	Statements     int        `json:"statements,omitempty"`
+	// Waiting is what the factory needs from a person, when it's waiting on
+	// one: its open questions, the proposal to ratify, or a pull request
+	// that failed. It comes from the factory's own post, never from
+	// people's comments.
+	Waiting *Waiting `json:"waiting,omitempty"`
+}
+
+// Waiting is what an open issue needs from a person.
+type Waiting struct {
+	Kind       string     `json:"kind"`                 // forks, proposal or failed
+	Forks      []Question `json:"forks,omitempty"`      // the questions to answer
+	Name       string     `json:"name,omitempty"`       // the proposal's project
+	Hash       string     `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
+	Statements []Said     `json:"statements,omitempty"` // what the proposal says
+	Amends     string     `json:"amends,omitempty"`     // what an amendment replaces
+	PR         int        `json:"pr,omitempty"`         // the pull request that failed
+	Since      time.Time  `json:"since"`
+}
+
+// Question is one fork the factory asked about.
+type Question struct {
+	ID       string   `json:"id"`
+	Question string   `json:"question"`
+	Options  []Choice `json:"options"`
+}
+
+// Choice is one of a question's options.
+type Choice struct {
+	ID   string `json:"id"`
+	Says string `json:"says"`
+}
+
+// Said is one statement of a proposal, in plain language.
+type Said struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Says string `json:"says"`
 }
 
 // Event is one thing that happened: a factory post, a person's command, a
@@ -104,9 +141,15 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	}
 	l.Events = append(l.Events, Event{At: opened, Issue: issue.Number, Who: WhoPerson, By: issue.User.Login, Kind: "opened", Text: "opened the issue"})
 	last := ""
+	var latest *factory.Marker
+	var latestAt time.Time
 	for _, c := range comments {
 		at := parseTime(c.CreatedAt)
 		if m, ok := factory.DecodeMarker(c.Body); ok && (self == "" || c.User.Login == self) {
+			if m.Kind != factory.KindNote {
+				mm := m
+				latest, latestAt = &mm, at
+			}
 			e := Event{At: at, Issue: issue.Number, Who: WhoFactory, Kind: m.Kind, Text: postText(m, last)}
 			l.Events = append(l.Events, e)
 			if m.Kind != factory.KindNote {
@@ -159,6 +202,9 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	case l.Stage == "":
 		l.Stage = StageQueued
 	}
+	if l.Open && latest != nil {
+		l.Waiting = waitingFor(*latest, latestAt)
+	}
 	if !l.Open {
 		if t := parseTime(issue.ClosedAt); !t.IsZero() {
 			l.Closed = &t
@@ -209,6 +255,54 @@ func spanWho(from, to Event) string {
 		return WhoCI
 	}
 	return WhoFactory
+}
+
+// waitingFor says what the factory's latest post asks of a person, if
+// anything.
+func waitingFor(m factory.Marker, at time.Time) *Waiting {
+	w := &Waiting{Kind: m.Kind, Since: at}
+	switch m.Kind {
+	case factory.KindForks:
+		for _, f := range m.Forks {
+			q := Question{ID: f.ID, Question: f.Question}
+			for _, o := range f.Options {
+				q.Options = append(q.Options, Choice{ID: o.ID, Says: o.Says})
+			}
+			w.Forks = append(w.Forks, q)
+		}
+		// Forks already decided in this round don't need asking again.
+		decided := map[string]bool{}
+		for _, a := range m.Answers {
+			decided[a.Fork] = true
+		}
+		var open []Question
+		for _, q := range w.Forks {
+			if !decided[q.ID] {
+				open = append(open, q)
+			}
+		}
+		w.Forks = open
+	case factory.KindProposal:
+		p := m.Proposal
+		if p == nil {
+			return nil
+		}
+		w.Name, w.Hash = p.Name, strings.TrimPrefix(p.Hash, "sha256:")
+		if len(w.Hash) > 12 {
+			w.Hash = w.Hash[:12]
+		}
+		for _, s := range p.Statements {
+			w.Statements = append(w.Statements, Said{Name: s.Name, Kind: s.Kind, Says: s.Says})
+		}
+		if p.Target != nil {
+			w.Amends = p.Target.Previous
+		}
+	case factory.KindFailed, factory.KindStuck:
+		w.PR = m.PR
+	default:
+		return nil
+	}
+	return w
 }
 
 func postText(m factory.Marker, previous string) string {
