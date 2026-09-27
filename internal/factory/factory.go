@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/factory/protocol/protocol"
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/project"
@@ -276,11 +277,11 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if started && kind != KindStuck && kind != KindUnsupported && kind != KindClosed {
 			return f.note(ctx, t, c, "I'm already working on this issue.")
 		}
-		return f.formalize(ctx, t, nil, nil, []int64{c.Comment})
+		return f.formalize(ctx, t, c, nil, nil, []int64{c.Comment})
 	case Revise:
 		switch kind {
 		case KindForks, KindProposal, KindStuck, KindUnsupported, KindClosed:
-			return f.formalize(ctx, t, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
+			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
 		}
 		return f.note(ctx, t, c, "There's no draft to revise right now.")
 	case Choose:
@@ -297,6 +298,10 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		// ratified proposal.
 		m := state.Marker
 		m.Kind, m.ReplyTo = KindPR, []int64{c.Comment}
+		from, to := f.retryStep(state, c)
+		if err := f.allowed(ctx, t.Issue.Number, fmt.Sprintf("look at #%d again", m.PR), from, to); err != nil {
+			return err
+		}
 		return f.say(ctx, t.Issue.Number, post("pull request", fmt.Sprintf("Watching #%d again. I'll merge it once CI's `invariant/gate` passes on its current head.", m.PR), m), LabelPR)
 	case Ratify:
 		if kind != KindProposal {
@@ -329,10 +334,12 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 	forks := state.Marker.Forks
 	chosen := map[string]formalize.Answer{}
 	var replyTo []int64
+	var last Command
 	for _, c := range pending {
 		if c.Verb != Choose {
 			continue
 		}
+		last = c
 		fork, option, problem := findChoice(forks, c.Args)
 		if problem != "" {
 			return f.note(ctx, t, c, problem)
@@ -349,7 +356,7 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 	for _, fork := range forks {
 		answers = append(answers, chosen[strings.ToUpper(fork.ID)])
 	}
-	return f.formalize(ctx, t, answers, nil, replyTo)
+	return f.formalize(ctx, t, last, answers, nil, replyTo)
 }
 
 func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formalize.Option, string) {
@@ -368,9 +375,16 @@ func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formaliz
 }
 
 // formalize drafts statements for the issue and posts what came of it:
-// forks to decide, a proposal to ratify, or why neither.
-func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.Answer, previous *formalize.Proposal, replyTo []int64) error {
+// forks to decide, a proposal to ratify, or why neither. cause is the
+// command that asked for the draft.
+func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answers []formalize.Answer, previous *formalize.Proposal, replyTo []int64) error {
 	n := t.Issue.Number
+	// base is the project's lock on the base branch, which a draft amends.
+	var base string
+	stuck := func(problem string) error {
+		m := Marker{Kind: KindStuck, ReplyTo: replyTo}
+		return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
+	}
 	f.logf("#%d: formalizing", n)
 	f.doing(n, "formalizing")
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
@@ -380,7 +394,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 	var newDir string
 	if dir := projectLine(t.Issue.Body); dir != "" {
 		if problem := badDir(dir); problem != "" {
-			return f.say(ctx, n, stuckComment("The issue names the project `"+dir+"`, but "+problem+".", Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+			return stuck("The issue names the project `" + dir + "`, but " + problem + ".")
 		}
 		cur, err := f.current(ctx, dir)
 		if err != nil {
@@ -388,6 +402,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 		}
 		if cur != nil {
 			req.Current, req.Language = cur, cur.Manifest.Language
+			base = project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements)
 		} else {
 			newDir = dir
 		}
@@ -397,11 +412,11 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 	if paths := codeLines(t.Issue.Body); len(paths) > 0 {
 		for _, p := range paths {
 			if problem := badDir(p); problem != "" {
-				return f.say(ctx, n, stuckComment("The issue names the code `"+p+"`, but "+problem+".", Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+				return stuck("The issue names the code `" + p + "`, but " + problem + ".")
 			}
 		}
 		if req.Current != nil && len(req.Current.Manifest.Existing) == 0 {
-			return f.say(ctx, n, stuckComment("The issue names code to check, but `"+req.Current.Dir+"` is a project that holds its own code. Name a new directory with the Project: line instead.", Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+			return stuck("The issue names code to check, but `" + req.Current.Dir + "` is a project that holds its own code. Name a new directory with the Project: line instead.")
 		}
 		root, err := os.MkdirTemp("", "invariant-existing-")
 		if err != nil {
@@ -412,7 +427,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 			return err
 		}
 		if err := f.Repo.Export(ctx, "origin/"+f.Base, paths, root); err != nil {
-			return f.say(ctx, n, stuckComment(fmt.Sprintf("The issue names code to check, and I couldn't read it on `%s`: %v", f.Base, err), Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+			return stuck(fmt.Sprintf("The issue names code to check, and I couldn't read it on `%s`: %v", f.Base, err))
 		}
 		req.Existing, req.Language = &formalize.Existing{Paths: paths, Root: root}, "typescript"
 	}
@@ -430,20 +445,30 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 	switch p := res.Proposal; {
 	case res.Problem != "":
 		m.Kind, m.Proposal = KindStuck, p
-		return f.say(ctx, n, stuckComment(res.Problem, m), LabelHumanReview)
+		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
 	case p.Unsupported != "":
 		m.Kind = KindUnsupported
-		return f.say(ctx, n, unsupportedComment(p.Unsupported, m), "")
+		return f.drafted(ctx, t, cause, base, m, unsupportedComment(p.Unsupported, m), "")
 	case len(p.Forks) > 0:
 		m.Kind, m.Forks, m.Proposal = KindForks, p.Forks, p
-		return f.say(ctx, n, forksComment(p.Forks, m), LabelAsking)
+		return f.drafted(ctx, t, cause, base, m, forksComment(p.Forks, m), LabelAsking)
 	case p.Target != nil:
 		m.Kind, m.Proposal = KindProposal, p
-		return f.say(ctx, n, amendmentComment(p, res.Report, res.Changes, m), LabelProposal)
+		return f.drafted(ctx, t, cause, base, m, amendmentComment(p, res.Report, res.Changes, m), LabelProposal)
 	default:
 		m.Kind, m.Proposal = KindProposal, p
-		return f.say(ctx, n, proposalComment(p, res.Report, m), LabelProposal)
+		return f.drafted(ctx, t, cause, base, m, proposalComment(p, res.Report, m), LabelProposal)
 	}
+}
+
+// drafted posts what the formalizer made of an issue, once the protocol
+// allows it.
+func (f *Factory) drafted(ctx context.Context, t Thread, cause Command, base string, m Marker, body, label string) error {
+	from, to := f.draftStep(t, cause, base, m)
+	if err := f.allowed(ctx, t.Issue.Number, "post a draft", from, to); err != nil {
+		return err
+	}
+	return f.say(ctx, t.Issue.Number, body, label)
 }
 
 // projectLine finds the project an issue names, in a line such as
@@ -607,6 +632,18 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if err != nil {
 		return Post{}, err
 	}
+	base, err := f.lockOn(ctx, dir)
+	if err != nil {
+		return Post{}, err
+	}
+	named := p.Hash
+	if !matches(c.Args, p.Hash) {
+		named = "the proposal " + strings.Join(c.Args, " ")
+	}
+	before, after := f.ratifyStep(state, c, named, base)
+	if err := f.allowed(ctx, n, "ratify "+named, before, after); err != nil {
+		return Post{}, err
+	}
 	wt, err := f.Repo.Worktree(ctx, branch, from)
 	if err != nil {
 		return Post{}, err
@@ -753,11 +790,20 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	defer f.Repo.RemoveWorktree(ctx, wt)
 	root := filepath.Join(wt, filepath.FromSlash(m.Project))
 	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash}
+	// stopped posts that a build stopped before it made a pull request.
+	stopped := func(body string) error {
+		from, to := buildStep(ratified, pullRequest{})
+		to.kind = protocol.KindFailed
+		if err := f.allowed(ctx, n, "say the build stopped", from, to); err != nil {
+			return err
+		}
+		return f.say(ctx, n, body, LabelHumanReview)
+	}
 	// A build costs an agent run, so a build that keeps stopping partway
 	// isn't retried forever.
 	logs := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n))
 	if tries, _ := filepath.Glob(filepath.Join(logs, "build-*")); len(tries) >= maxBuilds {
-		return f.say(ctx, n, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they finished; the logs are in %s", len(tries), logs), next), LabelHumanReview)
+		return stopped(buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they finished; the logs are in %s", len(tries), logs), next))
 	}
 	out := filepath.Join(logs, "build-"+f.now().Format("20060102-150405"))
 	if err := os.MkdirAll(out, 0o755); err != nil {
@@ -766,7 +812,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := f.Builder.Build(ctx, root, out, amend)
 	if res == nil || res.Final == nil {
-		return f.say(ctx, n, buildFailedComment(nil, res, runErr, next), LabelHumanReview)
+		return stopped(buildFailedComment(nil, res, runErr, next))
 	}
 	// The agent's files replace the project's, so a file it removed is gone.
 	if err := removeOwned(root); err != nil {
@@ -789,10 +835,27 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		msg = fmt.Sprintf("Implement #%d: %s\n\nChanged by Invariant to meet the amended statements ratified in the previous commit. It %s: %s.",
 			n, t.Issue.Title, verdict, res.Final.Assurance)
 	}
-	if _, err := f.Repo.Commit(ctx, wt, m.Project, msg); err != nil {
+	sha, err := f.Repo.Commit(ctx, wt, m.Project, msg)
+	if err != nil {
 		return err
 	}
 	if err := f.Repo.Push(ctx, wt, m.Branch); err != nil {
+		return err
+	}
+	// The pull request this makes, in the protocol's terms: its head, the
+	// lock there, and whether it changes only its project.
+	at := pullRequest{head: sha, gate: protocol.GatePending}
+	at.lock = headLock(os.ReadFile(filepath.Join(root, ".invariant", "ratified.lock")))
+	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, "origin/"+m.Branch, n)
+	if err != nil {
+		return err
+	}
+	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
+	from, to := buildStep(ratified, at)
+	if !res.Final.Passed {
+		to.kind = protocol.KindFailed
+	}
+	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
 	pr, err := f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
@@ -870,9 +933,17 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	next.ReplyTo = nil
 	switch {
 	case pr.Merged:
+		from, to := prStep(state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
+		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was merged", pr.Number), from, to); err != nil {
+			return err
+		}
 		next.Kind = KindMerged
 		return f.say(ctx, n, post("merged", fmt.Sprintf("#%d was merged.", pr.Number), next), LabelMerged)
 	case pr.State == "closed":
+		from, to := prStep(state, pullRequest{head: pr.Head.SHA}, protocol.KindClosed, protocol.Nobody)
+		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was closed", pr.Number), from, to); err != nil {
+			return err
+		}
 		next.Kind = KindClosed
 		return f.say(ctx, n, closedComment(pr, next), "")
 	}
@@ -886,6 +957,10 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	next.Kind = KindFailed
 	if run.Conclusion != "success" {
+		from, to := prStep(state, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, protocol.KindFailed, protocol.Nobody)
+		if err := f.allowed(ctx, n, fmt.Sprintf("say CI's gate failed on #%d", pr.Number), from, to); err != nil {
+			return err
+		}
 		return f.say(ctx, n, ciFailedComment(pr, run, next), LabelHumanReview)
 	}
 	if err := f.Repo.Fetch(ctx); err != nil {
@@ -905,8 +980,9 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if sc.Project != m.Project {
 		problems = append(problems, fmt.Sprintf("it changes %q, not the ratified project %q", sc.Project, m.Project))
 	}
-	if b, err := f.Repo.Show(ctx, head, m.Project+"/.invariant/ratified.lock"); err != nil {
-		problems = append(problems, "its lock can't be read: "+err.Error())
+	b, lockErr := f.Repo.Show(ctx, head, m.Project+"/.invariant/ratified.lock")
+	if lockErr != nil {
+		problems = append(problems, "its lock can't be read: "+lockErr.Error())
 	} else {
 		var lock project.Lock
 		if err := json.Unmarshal(b, &lock); err != nil || lock.Ratified == nil || lock.Ratified.Proposal != m.Hash ||
@@ -914,8 +990,18 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 			problems = append(problems, "its lock isn't the proposal that was ratified")
 		}
 	}
+	at := pullRequest{head: pr.Head.SHA, gate: gateOf(run, done), lock: headLock(b, lockErr), scopeMany: len(sc.Problems) > 0 || sc.Project != m.Project}
 	if len(problems) > 0 {
+		from, to := prStep(state, at, protocol.KindFailed, protocol.Nobody)
+		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
+			return err
+		}
 		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
+	}
+	// The protocol has the last word on merging.
+	from, to := prStep(state, at, protocol.KindMerged, protocol.ByFactory)
+	if err := f.allowed(ctx, n, fmt.Sprintf("merge #%d", pr.Number), from, to); err != nil {
+		return err
 	}
 	sha, err := f.GitHub.Merge(ctx, pr.Number, pr.Head.SHA, "merge")
 	if err != nil {

@@ -2,6 +2,7 @@ package factory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -291,6 +292,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // synthesis would, and reports the gate result it's told to.
 type fakeBuilder struct {
 	pass    bool
+	stop    bool // the agent stops before it finishes
 	built   []string
 	amended []bool
 }
@@ -298,6 +300,9 @@ type fakeBuilder struct {
 func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*synth.Result, error) {
 	b.built = append(b.built, dir)
 	b.amended = append(b.amended, amend)
+	if b.stop {
+		return nil, errors.New("the agent stopped before it finished")
+	}
 	result := filepath.Join(out, "result")
 	if err := copyResult(dir, result); err != nil {
 		return nil, err

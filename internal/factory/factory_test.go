@@ -254,6 +254,19 @@ func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	}
 }
 
+// A build that stops before it makes a pull request asks a person to look.
+func TestABuildThatStopsAsksForHelp(t *testing.T) {
+	r := newRig(t)
+	r.build.stop = true
+	failed := ratified(t, r)
+	if failed.Marker.Kind != KindFailed || failed.Marker.PR != 0 || !sameSet(r.gh.labelsOf(1), []string{LabelHumanReview}) {
+		t.Fatalf("post = %+v, labels = %v", failed.Marker, r.gh.labelsOf(1))
+	}
+	if !strings.Contains(failed.Comment.Body, "the agent stopped before it finished") {
+		t.Errorf("the post doesn't say why:\n%s", failed.Comment.Body)
+	}
+}
+
 func TestTheLabelStartsTheFactory(t *testing.T) {
 	r := newRig(t)
 	r.gh.open(2, "gitdek", "Add a bounded buffer", "No command here.", LabelTrigger)
