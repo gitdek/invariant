@@ -135,6 +135,10 @@ func (m Marker) carried() Marker {
 	return m
 }
 
+// Why is why a failed post failed: one of the Fail kinds, or "" for a post
+// that didn't fail.
+func (m Marker) Why() string { return m.failure() }
+
 // failure is why a failed post failed. Posts from before failures were
 // recorded have a pull request when CI failed it, and none when the build
 // stopped.

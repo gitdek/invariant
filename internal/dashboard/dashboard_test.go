@@ -405,3 +405,27 @@ func TestCompactKeepsRingsAndBugPaths(t *testing.T) {
 		}
 	}
 }
+
+// A failure says why, and a build that stopped can be drafted again.
+func TestFailuresSayWhy(t *testing.T) {
+	now := time.Date(2026, 9, 27, 8, 0, 0, 0, time.UTC)
+	at := now.Add(-time.Minute).Format(time.RFC3339)
+	issue := github.Issue{Number: 20, Title: "A pool", State: "open", CreatedAt: now.Add(-time.Hour).Format(time.RFC3339),
+		Labels: []github.Label{{Name: factory.LabelHumanReview}}}
+	stopped := factory.Marker{Kind: factory.KindFailed, Failure: factory.FailStopped}
+	l := Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, stopped)}}, "", now)
+	if w := l.Waiting; w == nil || w.Kind != factory.KindFailed || w.Failure != factory.FailStopped {
+		t.Fatalf("waiting %+v", l.Waiting)
+	}
+	c := act{Repo: "o/r", Issue: 20, Body: "/invariant revise"}
+	l.Repo, l.Open = "o/r", true
+	if err := c.check([]Issue{l}); err != nil {
+		t.Errorf("a stopped build can be drafted again: %v", err)
+	}
+	ci := factory.Marker{Kind: factory.KindFailed, Failure: factory.FailCI, PR: 7}
+	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, ci)}}, "", now)
+	l.Repo, l.Open = "o/r", true
+	if err := c.check([]Issue{l}); err == nil {
+		t.Error("a pull request that failed CI can't be drafted again, only retried")
+	}
+}

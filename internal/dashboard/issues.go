@@ -73,6 +73,7 @@ type Issue struct {
 // Waiting is what an open issue needs from a person.
 type Waiting struct {
 	Kind       string     `json:"kind"`                 // forks, proposal or failed
+	Failure    string     `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci or unmergeable
 	Forks      []Question `json:"forks,omitempty"`      // the questions to answer
 	Name       string     `json:"name,omitempty"`       // the proposal's project
 	Hash       string     `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
@@ -288,7 +289,8 @@ func answered(w *Waiting, cmds []factory.Command) bool {
 	for _, c := range cmds {
 		switch c.Verb {
 		case factory.Revise:
-			if w.Kind != factory.KindFailed {
+			// After a failure, only a build that stopped drafts again (#13).
+			if w.Kind != factory.KindFailed || w.Failure == factory.FailStopped || w.Failure == factory.FailLimit {
 				return true
 			}
 		case factory.Solve:
@@ -364,7 +366,7 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 			w.Amends = p.Target.Previous
 		}
 	case factory.KindFailed, factory.KindStuck:
-		w.PR = m.PR
+		w.PR, w.Failure = m.PR, m.Why()
 	default:
 		return nil
 	}

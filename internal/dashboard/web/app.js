@@ -1032,6 +1032,19 @@
     }
     box.innerHTML = items.map(needCard).join("");
   }
+  // why says, in words, why a failed issue needs a person.
+  function why(w, repo) {
+    const pr = w.pr ? `<strong>${esc(ref(repo, w.pr))}</strong>` : "the pull request";
+    switch (w.failure) {
+      case "stopped": return "The build stopped before it made a pull request. Try again, or draft again from the comments.";
+      case "limit": return "Two builds stopped before they made a pull request, so the factory won't start another on its own. Try again, or draft again.";
+      case "gate": return `The code didn't pass the gate in the factory's own run. It's in draft ${pr}. Once the cause is fixed, have the factory try again.`;
+      case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified. Once it's fixed, have the factory try again.`;
+      case "ci": return `CI's gate failed on ${pr}. Once the cause is fixed, have the factory try again.`;
+    }
+    return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.`;
+  }
+  const stoppedBuild = (w) => w.failure === "stopped" || w.failure === "limit";
   function needCard(is) {
     if (ACT) return actCard(is);
     const w = is.waiting, repo = is.repo, n = is.number;
@@ -1051,8 +1064,8 @@
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${cmd("/invariant revise")}${open}</div>`;
     } else {
       cls = "failed";
-      body = `<p class="ask">${w.pr ? `Pull request <strong>${esc(ref(repo, w.pr))}</strong> didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.</p>
-        <div class="cmds">${cmd("/invariant retry", true)}${open}</div>`;
+      body = `<p class="ask">${why(w, repo)}</p>
+        <div class="cmds">${cmd("/invariant retry", true)}${stoppedBuild(w) ? cmd("/invariant revise") : ""}${open}</div>`;
     }
     return `<article class="need ${cls}"><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
@@ -1106,8 +1119,8 @@
       actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + ask("Draft again", "/invariant revise");
     } else {
       cls = "failed";
-      body = `<p class="ask">${w.pr ? `Pull request <strong>${esc(ref(repo, w.pr))}</strong> didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.</p>`;
-      actions = ask("Retry", "/invariant retry", true);
+      body = `<p class="ask">${why(w, repo)}</p>`;
+      actions = ask("Retry", "/invariant retry", true) + (stoppedBuild(w) ? ask("Draft again", "/invariant revise") : "");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
     if (a.confirm) {

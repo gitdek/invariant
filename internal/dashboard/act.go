@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gitdek/invariant/internal/factory"
 	"github.com/gitdek/invariant/internal/github"
 )
 
@@ -243,7 +244,7 @@ func (c act) check(issues []Issue) error {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		switch m := chooseLine.FindStringSubmatch(line); {
-		case line == "/invariant revise" && (w.Kind == "forks" || w.Kind == "proposal"):
+		case line == "/invariant revise" && (w.Kind == "forks" || w.Kind == "proposal" || w.Failure == factory.FailStopped || w.Failure == factory.FailLimit):
 		case line == "/invariant retry" && w.Kind == "failed":
 		case m != nil && w.Kind == "forks":
 			if !offered(w.Forks, m[1], m[2]) {
