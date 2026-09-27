@@ -25,12 +25,22 @@ func TestInvariants(t *testing.T) {
 		return k == KindRatified || k == KindPROpen || k == KindFailed || k == KindMerged
 	}
 	var sawFactoryMerge, sawAmendment bool
+	sawFailure := map[int8]bool{}
 	for s := range reachable() {
 		if len(Successors(s)) == 0 {
 			t.Fatalf("deadlock in %+v", s)
 		}
 		if s.DirectedBy != NoActor && s.DirectedBy != ByAlice {
 			t.Fatalf("directed by a non-director: %+v", s)
+		}
+		if s.Stops > MaxStops {
+			t.Fatalf("past the stop limit: %+v", s)
+		}
+		if (s.Failure == FailStopped || s.Failure == FailLimit) && s.Head != NoHead {
+			t.Fatalf("stopped build has a pull request: %+v", s)
+		}
+		if s.Kind == KindFailed {
+			sawFailure[s.Failure] = true
 		}
 		if building(s.Kind) {
 			if s.Ratified == NoP || s.Ratified != s.Proposal {
@@ -56,5 +66,10 @@ func TestInvariants(t *testing.T) {
 	}
 	if !sawFactoryMerge || !sawAmendment {
 		t.Fatalf("factory merge %v, amendment merge %v", sawFactoryMerge, sawAmendment)
+	}
+	for _, f := range []int8{FailStopped, FailLimit, FailGate, FailCI, FailUnmergeable} {
+		if !sawFailure[f] {
+			t.Fatalf("no failure of kind %d", f)
+		}
 	}
 }

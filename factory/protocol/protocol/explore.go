@@ -15,17 +15,18 @@ func headGate(s State) int8 {
 // expands Next.
 func Successors(s State) []State {
 	var out []State
-	prOrFailed := s.Kind == KindPROpen || s.Kind == KindFailed
+	prOrFailed := (s.Kind == KindPROpen || s.Kind == KindFailed) && s.Head != NoHead
+	stopped := s.Kind == KindFailed && s.Head == NoHead
 	for a := 0; a < NActors; a++ {
 		if !isDirector(a) {
 			continue
 		}
-		if s.Kind == KindNone || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed {
+		if s.Kind == KindNone || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed || stopped {
 			for d := 0; d < NDrafts; d++ {
 				out = append(out, Solve(s, a, d))
 			}
 		}
-		if s.Kind == KindAsked || s.Kind == KindProposed || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed {
+		if s.Kind == KindAsked || s.Kind == KindProposed || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed || stopped {
 			for d := 0; d < NDrafts; d++ {
 				out = append(out, Revise(s, a, d))
 			}
@@ -55,10 +56,17 @@ func Successors(s State) []State {
 			}
 		}
 	}
-	if s.Kind == KindRatified {
+	if s.Kind == KindRatified && s.Stops < MaxStops {
 		for h := 0; h < NHeads; h++ {
 			out = append(out, Build(s, h))
 		}
+		out = append(out, StopBuild(s))
+		for h := 0; h < NHeads; h++ {
+			out = append(out, BuildFailsGate(s, h))
+		}
+	}
+	if s.Kind == KindRatified && s.Stops == MaxStops {
+		out = append(out, RefuseBuild(s))
 	}
 	if prOrFailed {
 		for h := 0; h < NHeads; h++ {
@@ -81,6 +89,9 @@ func Successors(s State) []State {
 	}
 	if s.Kind == KindPROpen && headGate(s) == GateFail {
 		out = append(out, NoticeFail(s))
+	}
+	if s.Kind == KindPROpen && headGate(s) == GatePass && (s.Scope != ScopeOne || s.PrLock != s.Ratified) {
+		out = append(out, NoticeUnmergeable(s))
 	}
 	if s.Kind == KindPROpen && headGate(s) == GatePass && s.Scope == ScopeOne && s.PrLock == s.Ratified {
 		out = append(out, Merge(s))

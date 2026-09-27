@@ -80,6 +80,20 @@ const (
 	ByOther   = 2
 )
 
+// Why the issue's latest failure happened.
+const (
+	FailNone        = 0
+	FailStopped     = 1
+	FailLimit       = 2
+	FailGate        = 3
+	FailCI          = 4
+	FailUnmergeable = 5
+)
+
+// MaxStops is how many builds of an issue may stop partway before the
+// factory refuses another.
+const MaxStops = 2
+
 // State mirrors the spec's variables one to one. Open[i] is question f(i+1);
 // Gate[i] is CI's result on head h(i+1).
 type State struct {
@@ -97,6 +111,8 @@ type State struct {
 	MergedBy     int8
 	MergedHead   int8
 	DirectedBy   int8
+	Stops        int8
+	Failure      int8
 }
 
 // Init mirrors the TLA+ Init.
@@ -105,7 +121,7 @@ type State struct {
 // @ ensures t.Ratified == NoP && t.RatifiedBase == NoP
 // @ ensures t.Head == NoHead && t.Gate[0] == GateNone && t.Gate[1] == GateNone
 // @ ensures t.PrLock == NoP && t.Scope == ScopeOne && t.MergedBy == Nobody && t.MergedHead == NoHead
-// @ ensures t.DirectedBy == NoActor
+// @ ensures t.DirectedBy == NoActor && t.Stops == 0 && t.Failure == FailNone
 func Init() (t State) {
 	t = State{}
 	return t
@@ -125,9 +141,10 @@ func Init() (t State) {
 // @ ensures d == 4 ==> t.Kind == KindProposed && !t.Open[0] && !t.Open[1] && t.Proposal == P2 && t.Amends == s.Base
 // @ ensures d == 5 ==> t.Kind == KindStuck && !t.Open[0] && !t.Open[1] && t.Proposal == NoP && t.Amends == NoP
 // @ ensures d == 6 ==> t.Kind == KindUnsupported && !t.Open[0] && !t.Open[1] && t.Proposal == NoP && t.Amends == NoP
-// @ ensures t.DirectedBy == s.DirectedBy
+// @ ensures t.DirectedBy == s.DirectedBy && t.Stops == s.Stops && t.Failure == FailNone
 func draft(s State, d int) (t State) {
 	t = s
+	t.Failure = FailNone
 	t.Head = NoHead
 	t.Gate[0] = GateNone
 	t.Gate[1] = GateNone
@@ -170,8 +187,8 @@ func draft(s State, d int) (t State) {
 // Solve mirrors the TLA+ Solve(a), with d choosing Draft's outcome.
 // @ requires 0 <= a && a < NActors && a == ActorAlice
 // @ requires 0 <= d && d < NDrafts
-// @ requires s.Kind == KindNone || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed
-// @ ensures t.DirectedBy == ByAlice
+// @ requires s.Kind == KindNone || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed || (s.Kind == KindFailed && s.Head == NoHead)
+// @ ensures t.DirectedBy == ByAlice && t.Stops == s.Stops && t.Failure == FailNone
 // @ ensures t.Head == NoHead && t.Gate[0] == GateNone && t.Gate[1] == GateNone
 // @ ensures t.PrLock == NoP && t.Scope == ScopeOne && t.MergedBy == Nobody && t.MergedHead == NoHead
 // @ ensures t.Ratified == NoP && t.RatifiedBase == NoP && t.Base == s.Base
@@ -191,8 +208,8 @@ func Solve(s State, a int, d int) (t State) {
 // Revise mirrors the TLA+ Revise(a), with d choosing Draft's outcome.
 // @ requires 0 <= a && a < NActors && a == ActorAlice
 // @ requires 0 <= d && d < NDrafts
-// @ requires s.Kind == KindAsked || s.Kind == KindProposed || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed
-// @ ensures t.DirectedBy == ByAlice
+// @ requires s.Kind == KindAsked || s.Kind == KindProposed || s.Kind == KindStuck || s.Kind == KindUnsupported || s.Kind == KindClosed || (s.Kind == KindFailed && s.Head == NoHead)
+// @ ensures t.DirectedBy == ByAlice && t.Stops == s.Stops && t.Failure == FailNone
 // @ ensures t.Head == NoHead && t.Gate[0] == GateNone && t.Gate[1] == GateNone
 // @ ensures t.PrLock == NoP && t.Scope == ScopeOne && t.MergedBy == Nobody && t.MergedHead == NoHead
 // @ ensures t.Ratified == NoP && t.RatifiedBase == NoP && t.Base == s.Base
@@ -215,7 +232,9 @@ func Revise(s State, a int, d int) (t State) {
 // @ requires 0 <= q && q < NQuestions
 // @ requires 0 <= d && d < NDrafts
 // @ requires s.Kind == KindAsked && s.Open[q]
-// @ ensures t.DirectedBy == ByAlice
+// @ ensures t.DirectedBy == ByAlice && t.Stops == s.Stops
+// @ ensures s.Open[1-q] ==> t.Failure == s.Failure
+// @ ensures !s.Open[1-q] ==> t.Failure == FailNone
 // @ ensures s.Open[1-q] ==> !t.Open[q] && t.Open[1-q]
 // @ ensures s.Open[1-q] ==> t.Kind == s.Kind && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures s.Open[1-q] ==> t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
@@ -251,6 +270,7 @@ func Choose(s State, a int, q int, d int) (t State) {
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures t.Head == s.Head && t.Gate == s.Gate && t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func Ratify(s State, a int, p int) (t State) {
 	t = s
 	t.Kind = KindRatified
@@ -262,7 +282,7 @@ func Ratify(s State, a int, p int) (t State) {
 
 // Build mirrors the TLA+ Build, with h choosing the head h(h+1).
 // @ requires 0 <= h && h < NHeads
-// @ requires s.Kind == KindRatified
+// @ requires s.Kind == KindRatified && 0 <= s.Stops && s.Stops < MaxStops
 // @ ensures t.Kind == KindPROpen
 // @ ensures h == 0 ==> t.Head == H1
 // @ ensures h == 1 ==> t.Head == H2
@@ -271,6 +291,7 @@ func Ratify(s State, a int, p int) (t State) {
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func Build(s State, h int) (t State) {
 	t = s
 	t.Kind = KindPROpen
@@ -285,12 +306,73 @@ func Build(s State, h int) (t State) {
 	return t
 }
 
+// StopBuild mirrors the TLA+ StopBuild: the build starts, then stops before
+// it makes a pull request.
+// @ requires s.Kind == KindRatified && 0 <= s.Stops && s.Stops < MaxStops
+// @ ensures t.Kind == KindFailed && t.Stops == s.Stops + 1 && t.Failure == FailStopped
+// @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
+// @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
+// @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
+// @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+func StopBuild(s State) (t State) {
+	t = s
+	t.Kind = KindFailed
+	t.Stops = s.Stops + 1
+	t.Failure = FailStopped
+	return t
+}
+
+// RefuseBuild mirrors the TLA+ RefuseBuild: two builds have already stopped
+// partway, so the factory won't start another.
+// @ requires s.Kind == KindRatified && s.Stops == MaxStops
+// @ ensures t.Kind == KindFailed && t.Failure == FailLimit
+// @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
+// @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
+// @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
+// @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops
+func RefuseBuild(s State) (t State) {
+	t = s
+	t.Kind = KindFailed
+	t.Failure = FailLimit
+	return t
+}
+
+// BuildFailsGate mirrors the TLA+ BuildFailsGate, with h choosing the head
+// h(h+1) of the draft pull request.
+// @ requires 0 <= h && h < NHeads
+// @ requires s.Kind == KindRatified && 0 <= s.Stops && s.Stops < MaxStops
+// @ ensures t.Kind == KindFailed && t.Failure == FailGate
+// @ ensures h == 0 ==> t.Head == H1
+// @ ensures h == 1 ==> t.Head == H2
+// @ ensures t.Gate[h] == GatePending && t.Gate[1-h] == s.Gate[1-h]
+// @ ensures t.PrLock == s.Ratified && t.Scope == ScopeOne
+// @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
+// @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase
+// @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops
+func BuildFailsGate(s State, h int) (t State) {
+	t = s
+	t.Kind = KindFailed
+	if h == 0 {
+		t.Head = H1
+	} else {
+		t.Head = H2
+	}
+	t.Gate[h] = GatePending
+	t.PrLock = s.Ratified
+	t.Scope = ScopeOne
+	t.Failure = FailGate
+	return t
+}
+
 // Push mirrors the TLA+ Push(h, l, s): head h(h+1), lock l (NoP, P1, P2) and
 // scope sc (ScopeOne, ScopeMany).
 // @ requires 0 <= h && h < NHeads
 // @ requires 0 <= l && l < NLocks
 // @ requires 0 <= sc && sc < 2
 // @ requires s.Kind == KindPROpen || s.Kind == KindFailed
+// @ requires s.Head != NoHead
 // @ requires (h == 0 ==> s.Head != H1) && (h == 1 ==> s.Head != H2)
 // @ ensures h == 0 ==> t.Head == H1
 // @ ensures h == 1 ==> t.Head == H2
@@ -303,6 +385,7 @@ func Build(s State, h int) (t State) {
 // @ ensures t.Kind == s.Kind && t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func Push(s State, h int, l int, sc int) (t State) {
 	t = s
 	if h == 0 {
@@ -341,6 +424,7 @@ func Push(s State, h int, l int, sc int) (t State) {
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func CIGate(s State, r int) (t State) {
 	t = s
 	var v int8 = GatePass
@@ -358,28 +442,58 @@ func CIGate(s State, r int) (t State) {
 // NoticeFail mirrors the TLA+ NoticeFail.
 // @ requires s.Kind == KindPROpen
 // @ requires (s.Head == H1 && s.Gate[0] == GateFail) || (s.Head == H2 && s.Gate[1] == GateFail)
-// @ ensures t.Kind == KindFailed
+// @ ensures t.Kind == KindFailed && t.Failure == FailCI
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops
 func NoticeFail(s State) (t State) {
 	t = s
 	t.Kind = KindFailed
+	t.Failure = FailCI
 	return t
 }
 
-// Retry mirrors the TLA+ Retry(a).
+// NoticeUnmergeable mirrors the TLA+ NoticeUnmergeable: CI's gate passed, but
+// the pull request changes more than its one project or its lock isn't the
+// ratified proposal.
+// @ requires s.Kind == KindPROpen
+// @ requires (s.Head == H1 && s.Gate[0] == GatePass) || (s.Head == H2 && s.Gate[1] == GatePass)
+// @ requires s.Scope != ScopeOne || s.PrLock != s.Ratified
+// @ ensures t.Kind == KindFailed && t.Failure == FailUnmergeable
+// @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
+// @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
+// @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
+// @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops
+func NoticeUnmergeable(s State) (t State) {
+	t = s
+	t.Kind = KindFailed
+	t.Failure = FailUnmergeable
+	return t
+}
+
+// Retry mirrors the TLA+ Retry(a): it reopens a failed pull request, or
+// builds a stopped build's ratified proposal again with the stop limit reset.
 // @ requires 0 <= a && a < NActors && a == ActorAlice
 // @ requires s.Kind == KindFailed
-// @ ensures t.Kind == KindPROpen && t.DirectedBy == ByAlice
+// @ ensures t.DirectedBy == ByAlice && t.Failure == FailNone
+// @ ensures s.Head == NoHead ==> t.Kind == KindRatified && t.Stops == 0
+// @ ensures s.Head != NoHead ==> t.Kind == KindPROpen && t.Stops == s.Stops
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead
 func Retry(s State, a int) (t State) {
 	t = s
-	t.Kind = KindPROpen
+	if s.Head == NoHead {
+		t.Kind = KindRatified
+		t.Stops = 0
+	} else {
+		t.Kind = KindPROpen
+	}
+	t.Failure = FailNone
 	t.DirectedBy = ByAlice
 	return t
 }
@@ -392,6 +506,7 @@ func Retry(s State, a int) (t State) {
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func Merge(s State) (t State) {
 	t = s
 	t.Kind = KindMerged
@@ -403,12 +518,15 @@ func Merge(s State) (t State) {
 
 // OthersMerge mirrors the TLA+ OthersMerge.
 // @ requires s.Kind == KindPROpen || s.Kind == KindFailed
+// @ requires s.Head != NoHead
 // @ ensures t.Kind == KindMerged && t.MergedBy == ByOther && t.MergedHead == s.Head && t.Base == s.PrLock
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == FailNone
 func OthersMerge(s State) (t State) {
 	t = s
+	t.Failure = FailNone
 	t.Kind = KindMerged
 	t.MergedBy = ByOther
 	t.MergedHead = s.Head
@@ -418,13 +536,16 @@ func OthersMerge(s State) (t State) {
 
 // OthersClose mirrors the TLA+ OthersClose.
 // @ requires s.Kind == KindPROpen || s.Kind == KindFailed
+// @ requires s.Head != NoHead
 // @ ensures t.Kind == KindClosed
 // @ ensures t.Open == s.Open && t.Proposal == s.Proposal && t.Amends == s.Amends && t.Base == s.Base
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == FailNone
 func OthersClose(s State) (t State) {
 	t = s
+	t.Failure = FailNone
 	t.Kind = KindClosed
 	return t
 }
@@ -439,6 +560,7 @@ func OthersClose(s State) (t State) {
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func BaseMoves(s State, l int) (t State) {
 	t = s
 	if l == 0 {
@@ -457,6 +579,7 @@ func BaseMoves(s State, l int) (t State) {
 // @ ensures t.Ratified == s.Ratified && t.RatifiedBase == s.RatifiedBase && t.Head == s.Head && t.Gate == s.Gate
 // @ ensures t.PrLock == s.PrLock && t.Scope == s.Scope
 // @ ensures t.MergedBy == s.MergedBy && t.MergedHead == s.MergedHead && t.DirectedBy == s.DirectedBy
+// @ ensures t.Stops == s.Stops && t.Failure == s.Failure
 func Finished(s State) (t State) {
 	t = s
 	return t
