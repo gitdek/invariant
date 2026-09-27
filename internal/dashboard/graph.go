@@ -19,6 +19,9 @@ type Graph struct {
 	Edges   []int     `json:"edges"`            // flat triples: from, to, action
 	Labels  []string  `json:"labels,omitempty"` // each state as TLA+, when the graph is small enough to send them
 	Bugs    []BugPath `json:"bugs,omitempty"`
+	// AllEdges is how many steps TLC explored, when the page gets only some
+	// of them.
+	AllEdges int `json:"allEdges,omitempty"`
 
 	vars []map[string]string // each state's variables, for finding a trace's states
 }
@@ -123,12 +126,86 @@ func (g *Graph) Trace(t tlc.TraceFile) (path []int, action, escape string) {
 	return path, "", ""
 }
 
-// Compact drops a big graph's labels, which would make the page's download
-// too big.
+// maxEdges is the most steps the page gets. Past it, the page gets each
+// state's first step from Init, which keeps its rings exact, every step of a
+// planted bug's path, and an even sample of the rest.
+const maxEdges = 60000
+
+// Compact drops a big graph's labels, and a huge one's extra steps, which
+// would make the page's download too big to draw.
 func (g *Graph) Compact() {
 	if g.States > maxLabels {
 		g.Labels = nil
 	}
+	n := len(g.Edges) / 3
+	if n <= maxEdges {
+		return
+	}
+	out := make([][]int, g.States) // each state's outgoing steps, by index
+	for e := 0; e < n; e++ {
+		if f := g.Edges[3*e]; f >= 0 && f < g.States {
+			out[f] = append(out[f], e)
+		}
+	}
+	keep := make([]bool, n)
+	seen := make([]bool, g.States)
+	queue := []int{}
+	for _, s := range g.Init {
+		if s >= 0 && s < g.States && !seen[s] {
+			seen[s] = true
+			queue = append(queue, s)
+		}
+	}
+	for len(queue) > 0 {
+		s := queue[0]
+		queue = queue[1:]
+		for _, e := range out[s] {
+			if t := g.Edges[3*e+1]; t >= 0 && t < g.States && !seen[t] {
+				seen[t], keep[e] = true, true
+				queue = append(queue, t)
+			}
+		}
+	}
+	for _, b := range g.Bugs {
+		for i := 0; i+1 < len(b.Path); i++ {
+			if f := b.Path[i]; f >= 0 && f < g.States {
+				for _, e := range out[f] {
+					if g.Edges[3*e+1] == b.Path[i+1] {
+						keep[e] = true
+						break
+					}
+				}
+			}
+		}
+	}
+	kept := 0
+	for _, k := range keep {
+		if k {
+			kept++
+		}
+	}
+	if budget := maxEdges - kept; budget > 0 {
+		rest, taken := n-kept, 0
+		for e, i := 0, 0; e < n && taken < budget; e++ {
+			if keep[e] {
+				continue
+			}
+			// an even spread: take the i-th of the rest when it crosses the
+			// next multiple of rest/budget
+			if i*budget/rest != (i+1)*budget/rest {
+				keep[e] = true
+				taken++
+			}
+			i++
+		}
+	}
+	edges := make([]int, 0, 3*maxEdges)
+	for e := 0; e < n; e++ {
+		if keep[e] {
+			edges = append(edges, g.Edges[3*e:3*e+3]...)
+		}
+	}
+	g.AllEdges, g.Edges = n, edges
 }
 
 // stateVars splits a state as TLC prints it, "/\ x = 1" per variable, into

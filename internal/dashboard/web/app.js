@@ -422,7 +422,7 @@
       if (!m) return;
       const inv = m.statements.filter((s) => s.kind === "invariant").map((s) => s.name);
       $("#caption").innerHTML = `<div class="t">${esc(cap(m.name))}</div>
-        <div class="m">${nf.format(m.states)} states · ${m.depth} steps deep · ${esc(Object.entries(m.bounds || {}).map(([k, v]) => `${k} = ${v}`).join(", "))}</div>
+        <div class="m">${nf.format(m.states)} states · ${m.depth} steps deep${this.g?.allEdges ? ` · ${nf.format(this.g.allEdges)} steps, ${nf.format(this.g.edges.length / 3)} drawn` : ""} · ${esc(Object.entries(m.bounds || {}).map(([k, v]) => `${k} = ${v}`).join(", "))}</div>
         <div class="h">In every one of them, <b>${esc(inv.slice(0, 4).join(", "))}</b>${inv.length > 4 ? ` and ${inv.length - 4} more` : ""} hold${inv.length === 1 ? "s" : ""}.</div>`;
     },
     resize() {

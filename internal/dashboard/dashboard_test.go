@@ -370,3 +370,38 @@ func TestAnsweredIssuesNeedNoOne(t *testing.T) {
 		}
 	}
 }
+
+// A huge graph keeps every state's first step from Init, so its rings stay
+// exact, and every step of a bug's path, within the page's budget.
+func TestCompactKeepsRingsAndBugPaths(t *testing.T) {
+	// A complete graph on 400 states: 160,000 steps, over the budget.
+	const n = 400
+	g := &Graph{States: n, Init: []int{0}, Actions: []string{"Go"}}
+	for f := 0; f < n; f++ {
+		for to := 0; to < n; to++ {
+			g.Edges = append(g.Edges, f, to, 0)
+		}
+	}
+	g.Bugs = []BugPath{{Name: "Bug", Path: []int{0, 399, 7, 398}}}
+	g.Compact()
+	if g.AllEdges != n*n || len(g.Edges)/3 > maxEdges || len(g.Edges)/3 < maxEdges-n {
+		t.Fatalf("kept %d of %d steps", len(g.Edges)/3, g.AllEdges)
+	}
+	reached := map[int]bool{0: true}
+	has := map[[2]int]bool{}
+	for e := 0; e < len(g.Edges)/3; e++ {
+		f, to := g.Edges[3*e], g.Edges[3*e+1]
+		has[[2]int{f, to}] = true
+		if f == 0 {
+			reached[to] = true
+		}
+	}
+	if len(reached) != n {
+		t.Errorf("only %d states keep their first step from Init", len(reached))
+	}
+	for _, step := range [][2]int{{0, 399}, {399, 7}, {7, 398}} {
+		if !has[step] {
+			t.Errorf("the bug's step %v was dropped", step)
+		}
+	}
+}
