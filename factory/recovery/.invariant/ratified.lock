@@ -1,0 +1,156 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-27T12:53:00Z",
+    "issue": 23,
+    "comment": "https://github.com/gitdek/invariant/issues/23#issuecomment-5856010917",
+    "proposal": "sha256:85b44c9f1da81dc071bd946a6095d75267a92ef8601c5d17aff2163b0254b976"
+  },
+  "bounds": {
+    "MaxCrashes": "2",
+    "Watchers": "{w1, w2}"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "The factory starts with an issue that has no commands, posts, branch or pull request, and every step is a Next step.",
+      "sha256": "sha256:d5a4bd602a92989746b6cab842fa3dcda128da4274684a06900eff501e9f895c"
+    },
+    {
+      "name": "NoDoubleAnswer",
+      "kind": "invariant",
+      "says": "No command, build or merge is ever answered by more than one factory post.",
+      "sha256": "sha256:0e2c75197f67f88d4989e5df14f3566f3f6baa921565009ab7975f65e371d47e"
+    },
+    {
+      "name": "OnlyHolderActs",
+      "kind": "invariant",
+      "says": "No watcher ever takes an effect on GitHub while it doesn't hold the repository's lease.",
+      "sha256": "sha256:66c976be99c304a6c6ccf687a4e19295a49fd5f339478f32a7894a54e43d9372"
+    },
+    {
+      "name": "NoRunTwice",
+      "kind": "invariant",
+      "says": "No agent run is ever started twice for one command or build.",
+      "sha256": "sha256:2c9b6e21aa57239edd3f56d781e2c9379f5ebd44875927c0f5c47ebf5433c980"
+    },
+    {
+      "name": "OnePullRequest",
+      "kind": "invariant",
+      "says": "At most one pull request is ever opened for the ratification.",
+      "sha256": "sha256:e10c5d99514a29e90e1ddc27cd31e83d6d9c238ce28f7cf2832c2db44939a922"
+    },
+    {
+      "name": "OneMerge",
+      "kind": "invariant",
+      "says": "The pull request is merged at most once.",
+      "sha256": "sha256:d84a459c9afc2316a8a2239327f1aa6de17437a9f95b12b117539a5e3b882d19"
+    },
+    {
+      "name": "MergeOnlyAfterGate",
+      "kind": "invariant",
+      "says": "The factory merges only after CI's gate passes on a pull request GitHub can merge.",
+      "sha256": "sha256:74b8f1d532af9272211140de5234df2b02fa0bfc5ba9253d6b3b6cedbcc15901"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "Every part of the state always has the expected kind of value.",
+      "sha256": "sha256:0344e043d021bbce9b371d02b396dd445ca7bdc7438b69c997e9e5685331c129"
+    },
+    {
+      "name": "Merged",
+      "kind": "witness",
+      "says": "The pull request can be merged and the merge reported.",
+      "sha256": "sha256:dacfebde238711ab7c0619d305beea8b5cfac4a7dc4426c22a2d31ad98d9e11c"
+    },
+    {
+      "name": "ReportedUnmergeable",
+      "kind": "witness",
+      "says": "A pull request whose gate passed can be reported as one that can't merge.",
+      "sha256": "sha256:3203b1a333551b0d4bf0b90afd76a3918050fb7d2cdf5f5b4e375195644bdd99"
+    },
+    {
+      "name": "StoppedRunReported",
+      "kind": "witness",
+      "says": "A build whose agent run stopped partway can be reported as stopped.",
+      "sha256": "sha256:fb4b57308d124ab3fb6fec04cd8cd86a3034399686ee18be2d84251ef4f98334"
+    },
+    {
+      "name": "RetryBuilt",
+      "kind": "witness",
+      "says": "A writer's retry of a stopped build can open the pull request and be answered.",
+      "sha256": "sha256:f2d78e33fc6b9b6ee46b5d88bbc2e8fed65c9ad16012d27ec3ae8ce3f40d0ad3"
+    },
+    {
+      "name": "RecoveredAfterCrashes",
+      "kind": "witness",
+      "says": "After the most crashes allowed, the factory can still get the pull request merged and reported.",
+      "sha256": "sha256:50ddde7d38ea86d800ff0afc6da313444f006c09a6a1f070f5a03ddb13a1ee03"
+    },
+    {
+      "name": "CommandsAnswered",
+      "kind": "property",
+      "says": "Every command a writer gives is eventually answered by a factory post.",
+      "sha256": "sha256:f92d54689937eb917a68b88b440cf2a01ccd54ef042d2c37038f22b1ff494cd9"
+    },
+    {
+      "name": "GatedPullRequestsSettled",
+      "kind": "property",
+      "says": "Once CI's gate passes on the pull request, it is eventually merged or reported as one that can't merge.",
+      "sha256": "sha256:6e4c52816975934bab47659af8a4e80c30f685f654355a36c0a12ef20fbb9d9b"
+    },
+    {
+      "name": "FairAcquire",
+      "kind": "fairness",
+      "says": "A running watcher eventually takes a lease that nobody holds.",
+      "sha256": "sha256:af39b5f88f01c142ed0db2ae34db6955c177c16172e6d40dda5111c90443680d"
+    },
+    {
+      "name": "FairExpire",
+      "kind": "fairness",
+      "says": "A lease whose holder has crashed eventually runs out.",
+      "sha256": "sha256:b66a33e241a5305f2b8b2cfcfbc0a19eee0350b441146f8ea862b307d43f00d7"
+    },
+    {
+      "name": "FairAct",
+      "kind": "fairness",
+      "says": "A watcher holding the lease eventually takes the next effect that's due.",
+      "sha256": "sha256:f1124d20a1c8f5a8c41726fbbcc5c0ed53681b727e02a0dadf0222c78993cce3"
+    },
+    {
+      "name": "FairFinishRun",
+      "kind": "fairness",
+      "says": "An agent run held by the lease's holder eventually finishes and is recorded.",
+      "sha256": "sha256:9c87c08d7cc8c708dbc0dc59cf437e1ed076509677c55ac3f9f0754fce8f3f02"
+    },
+    {
+      "name": "FairDropRun",
+      "kind": "fairness",
+      "says": "A watcher that has lost the lease eventually drops the agent run it was in.",
+      "sha256": "sha256:60726c5b5533e99ea007bcacbc401f39477499933101b372a1f3a1280a1eb642"
+    },
+    {
+      "name": "PostWithoutLooking",
+      "kind": "bug",
+      "says": "A watcher posts its answer without looking for an answer already there.",
+      "expect": "NoDoubleAnswer",
+      "sha256": "sha256:7c0c0db1687591d763a913a7085fbed0e40c8acd949b574890c59c621f734a61"
+    },
+    {
+      "name": "PostWithoutLease",
+      "kind": "bug",
+      "says": "A watcher that woke after its lease ran out posts without checking the lease.",
+      "expect": "OnlyHolderActs",
+      "sha256": "sha256:277421dbd0bfb5576616eaa319c02323a0e6c5c091308fb374687381ca35d8f8"
+    },
+    {
+      "name": "RerunStoppedRun",
+      "kind": "bug",
+      "says": "A watcher that finds an agent run that stopped partway starts it again.",
+      "expect": "NoRunTwice",
+      "sha256": "sha256:dd8254895f48a55d9312f3dba49cc3a7f6c8ab6a8bb869cbaa43d875ac118112"
+    }
+  ]
+}
