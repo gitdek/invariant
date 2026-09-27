@@ -1,0 +1,6 @@
+{
+  "name": "factory issue protocol",
+  "module": ".invariant/specs/IssueProtocol.tla",
+  "code": "protocol",
+  "language": "go"
+}
