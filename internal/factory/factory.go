@@ -296,7 +296,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if state.Marker.PR == 0 {
 			// The build stopped before it made a pull request. Build the
 			// ratified proposal again, and start counting stops afresh.
-			m := state.Marker
+			m := state.Marker.carried()
 			m.Kind, m.ReplyTo, m.Failure = KindRatified, []int64{c.Comment}, ""
 			from, to := f.retryStep(t, c)
 			if err := f.allowed(ctx, t.Issue.Number, "build the ratified proposal again", from, to); err != nil {
@@ -307,7 +307,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		// Watch the pull request again. Nothing merges unless CI's gate passes
 		// on its current head, it stays in scope, and its lock is still the
 		// ratified proposal.
-		m := state.Marker
+		m := state.Marker.carried()
 		m.Kind, m.ReplyTo, m.Failure = KindPR, []int64{c.Comment}, ""
 		from, to := f.retryStep(t, c)
 		if err := f.allowed(ctx, t.Issue.Number, fmt.Sprintf("look at #%d again", m.PR), from, to); err != nil {
@@ -452,7 +452,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	case res.Proposal == nil && res.Problem == "":
 		res.Problem = "the formalizer left no draft"
 	}
-	m := Marker{ReplyTo: replyTo, Answers: answers}
+	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD}
 	switch p := res.Proposal; {
 	case res.Problem != "":
 		m.Kind, m.Proposal = KindStuck, p
@@ -834,6 +834,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	}
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := f.Builder.Build(ctx, root, out, amend)
+	if res != nil {
+		next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
+	}
 	if res == nil || res.Final == nil {
 		return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)), []string{out})
 	}
@@ -989,7 +992,7 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if err != nil {
 		return err
 	}
-	next := m
+	next := m.carried()
 	next.ReplyTo, next.Failure = nil, ""
 	switch {
 	case pr.Merged:
@@ -1076,6 +1079,8 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		f.logf("#%d: deleting %s: %v", n, m.Branch, err)
 	}
 	next.Kind = KindMerged
+	numbers := NumbersOf(t, f.now())
+	next.Numbers = &numbers
 	return f.say(ctx, n, mergedComment(pr, run, sha, &next), LabelMerged)
 }
 

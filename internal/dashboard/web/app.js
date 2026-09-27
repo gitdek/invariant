@@ -809,7 +809,7 @@
       return `<article class="lane">
         <div class="lane-head"><span class="no">${esc(ref(is.repo, is.number))}</span><span class="title">${esc(is.title)}</span><span class="chips">${chips}</span></div>
         <div class="track">${segs}${marks}</div>
-        <div class="lane-foot"><span>factory <b>${dur(is.factorySeconds)}</b></span><span class="p">waiting on people <b>${dur(is.peopleSeconds)}</b></span><span><b>${is.peopleComments}</b> comment${is.peopleComments === 1 ? "" : "s"} from people</span>${is.questions ? `<span><b>${is.questions}</b> question${is.questions === 1 ? "" : "s"} asked</span>` : ""}${is.statements ? `<span><b>${is.statements}</b> statements</span>` : ""}${is.pr ? `<span>pull request <b>${esc(ref(is.repo, is.pr))}</b></span>` : ""}</div>
+        <div class="lane-foot"><span>factory <b>${dur(is.factorySeconds)}</b></span><span class="p">waiting on people <b>${dur(is.peopleSeconds)}</b></span><span><b>${is.peopleComments}</b> comment${is.peopleComments === 1 ? "" : "s"} from people</span>${is.questions ? `<span><b>${is.questions}</b> question${is.questions === 1 ? "" : "s"} asked</span>` : ""}${is.statements ? `<span><b>${is.statements}</b> statements</span>` : ""}${is.spendUSD ? `<span>agents <b>$${is.spendUSD.toFixed(2)}</b></span>` : ""}${is.gateRuns ? `<span><b>${is.gateRuns}</b> gate run${is.gateRuns === 1 ? "" : "s"}</span>` : ""}${is.pr ? `<span>pull request <b>${esc(ref(is.repo, is.pr))}</b></span>` : ""}</div>
       </article>`;
     }).join("");
     if (hidden > 0 || lanesAll) {

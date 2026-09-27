@@ -107,6 +107,19 @@ type Marker struct {
 	Hash     string              `json:"hash,omitempty"` // the ratified proposal
 	PR       int                 `json:"pr,omitempty"`
 	Failure  string              `json:"failure,omitempty"` // why a failed post failed: Fail*
+	// Spend is the agents' estimated cost for the step this post reports,
+	// and GateRuns the gate runs its synthesis used. A post that carries an
+	// earlier marker forward clears them, so nothing counts twice (D-0048).
+	Spend    float64  `json:"spend,omitempty"`
+	GateRuns int      `json:"gate_runs,omitempty"`
+	Numbers  *Numbers `json:"numbers,omitempty"` // the issue's record, on the post that merges it
+}
+
+// carried is the marker a later post carries forward: the same issue state,
+// without the step's own numbers.
+func (m Marker) carried() Marker {
+	m.Spend, m.GateRuns, m.Numbers = 0, 0, nil
+	return m
 }
 
 // failure is why a failed post failed. Posts from before failures were

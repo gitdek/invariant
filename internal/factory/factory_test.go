@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
@@ -792,9 +794,51 @@ func TestRetryAfterAFailedGate(t *testing.T) {
 	r.poll()
 	r.expect(1, KindPR, LabelPR)
 	r.poll()
-	r.expect(1, KindMerged, LabelMerged)
+	merged := r.expect(1, KindMerged, LabelMerged)
 	if !reflect.DeepEqual(r.gh.merged, []int{pr.Marker.PR}) {
 		t.Errorf("merged = %v", r.gh.merged)
+	}
+
+	// The merge records the issue's numbers. The failed post, the retry and
+	// the merge carry the build's marker forward, and its spend and gate
+	// runs still count once (D-0048, 5.4).
+	drafts := 0
+	for _, c := range r.gh.comments[1] {
+		if m, ok := DecodeMarker(c.Body); ok && (m.Kind == KindForks || m.Kind == KindProposal) {
+			drafts++
+		}
+	}
+	n := merged.Marker.Numbers
+	if n == nil || n.GateRuns != 1 || n.PeopleComments < 2 || math.Abs(n.SpendUSD-(0.10*float64(drafts)+0.25)) > 1e-9 {
+		t.Fatalf("numbers %+v, with %d drafts", n, drafts)
+	}
+	if !strings.Contains(merged.Comment.Body, "of factory time") || !strings.Contains(merged.Comment.Body, "estimated spend was $") {
+		t.Errorf("the merge comment doesn't report the numbers:\n%s", merged.Comment.Body)
+	}
+}
+
+func TestNumbersOf(t *testing.T) {
+	at := func(min int) string {
+		return time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC).Add(time.Duration(min) * time.Minute).Format(time.RFC3339)
+	}
+	post := func(min int, m Marker) Post { return Post{Comment: github.Comment{CreatedAt: at(min)}, Marker: m} }
+	th := Thread{
+		Issue: github.Issue{CreatedAt: at(0)},
+		Posts: []Post{
+			post(2, Marker{Kind: KindProposal, Spend: 0.40}),
+			post(12, Marker{Kind: KindRatified}),
+			post(14, Marker{Kind: KindPR, Spend: 0.30, GateRuns: 2}),
+			post(20, Marker{Kind: KindFailed}), // carried forward: no spend of its own
+		},
+		Commands: []Command{{Verb: Ratify, Comment: 7, At: at(10)}, {Verb: Retry, Comment: 8, At: at(30)}},
+	}
+	n := NumbersOf(th, time.Date(2026, 9, 26, 12, 34, 0, 0, time.UTC))
+	// People: 2 to 10 and 20 to 30. The factory: 0 to 2, 10 to 20 and 30 to 34.
+	if n.PeopleSeconds != 18*60 || n.FactorySeconds != 16*60 || n.PeopleComments != 2 || n.GateRuns != 2 || math.Abs(n.SpendUSD-0.70) > 1e-9 {
+		t.Errorf("numbers %+v", n)
+	}
+	if s := n.Sentence(); !strings.Contains(s, "16 minutes of factory time") || !strings.Contains(s, "2 comments from people") || !strings.Contains(s, "$0.70") || !strings.Contains(s, "2 gate runs") {
+		t.Errorf("sentence %q", s)
 	}
 }
 

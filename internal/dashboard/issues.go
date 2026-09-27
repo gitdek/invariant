@@ -61,6 +61,8 @@ type Issue struct {
 	Answers        int        `json:"answers,omitempty"` // forks people decided
 	Questions      int        `json:"questions,omitempty"`
 	Statements     int        `json:"statements,omitempty"`
+	SpendUSD       float64    `json:"spendUSD,omitempty"` // the agents' estimated spend, where the factory recorded it
+	GateRuns       int        `json:"gateRuns,omitempty"`
 	// Waiting is what the factory needs from a person, when it's waiting on
 	// one: its open questions, the proposal to ratify, or a pull request
 	// that failed. It comes from the factory's own post, never from
@@ -151,6 +153,8 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 				mm := m
 				latest, latestAt = &mm, at
 			}
+			l.SpendUSD += m.Spend
+			l.GateRuns += m.GateRuns
 			e := Event{At: at, Issue: issue.Number, Who: WhoFactory, Kind: m.Kind, Text: postText(m, last)}
 			l.Events = append(l.Events, e)
 			if m.Kind != factory.KindNote {
