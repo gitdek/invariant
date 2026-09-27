@@ -57,25 +57,9 @@ func NewHolder() string {
 // Lease reads the repository's lease: the commit its ref points to, empty
 // when there's none, and what that commit says.
 func (c Clone) Lease(ctx context.Context) (sha string, rec LeaseRecord, err error) {
-	env, err := c.auth(ctx)
-	if err != nil {
+	sha, err = c.remoteRef(ctx, leaseRef)
+	if err != nil || sha == "" {
 		return "", rec, err
-	}
-	out, err := runEnv(ctx, c.Dir, env, "git", "ls-remote", "origin", leaseRef)
-	if err != nil {
-		return "", rec, err
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return "", rec, nil
-	}
-	sha = fields[0]
-	// A watcher already has the lease it pushed, so it fetches only
-	// another's.
-	if _, err := c.git(ctx, "cat-file", "-e", sha+"^{commit}"); err != nil {
-		if _, err := runEnv(ctx, c.Dir, env, "git", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", "+"+leaseRef+":"+leaseRef); err != nil {
-			return "", rec, err
-		}
 	}
 	msg, err := c.git(ctx, "log", "-1", "--format=%B", sha)
 	if err != nil {
@@ -95,21 +79,11 @@ func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (stri
 	if err != nil {
 		return "", err
 	}
-	tree, err := runEnv(ctx, c.Dir, nil, "git", "hash-object", "-t", "tree", "-w", "--stdin")
+	commit, err := c.emptyCommit(ctx, string(msg))
 	if err != nil {
 		return "", err
 	}
-	commit, err := run(ctx, c.Dir, "git", "-c", "user.name="+c.Name, "-c", "user.email="+c.Email,
-		"commit-tree", strings.TrimSpace(tree), "-m", string(msg))
-	if err != nil {
-		return "", err
-	}
-	commit = strings.TrimSpace(commit)
-	env, err := c.auth(ctx)
-	if err != nil {
-		return "", err
-	}
-	if _, err := runEnv(ctx, c.Dir, env, "git", "push", "--quiet", "--force-with-lease="+leaseRef+":"+old, "origin", commit+":"+leaseRef); err != nil {
+	if err := c.pushRef(ctx, leaseRef, old, commit); err != nil {
 		now, _, readErr := c.Lease(ctx)
 		if readErr == nil && now != old && now != commit {
 			return "", ErrLeaseMoved
