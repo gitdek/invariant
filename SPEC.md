@@ -139,4 +139,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Undecided: don't build against these
 
-Nothing is undecided right now.
+- Slice 10, going public: when, who merges once GitHub enforces the gate, the 13 merge commits that carry `joe@puglisij.com`, and approval for outside collaborators' workflow runs. Its plan is proposed, with recommendations. `D-0075`
