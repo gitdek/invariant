@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 )
@@ -118,6 +119,29 @@ func (c Client) Tree(ctx context.Context, ref string) ([]TreeEntry, error) {
 		return out.Tree, fmt.Errorf("the tree at %s is too big to list in one request", ref)
 	}
 	return out.Tree, nil
+}
+
+// Ref is where a ref points, such as "invariant/lease", or "" when it
+// doesn't exist.
+func (c Client) Ref(ctx context.Context, ref string) (string, error) {
+	var out struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	err := c.call(ctx, "GET", c.path("git/ref/"+ref), nil, &out)
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	return out.Object.SHA, err
+}
+
+// CommitMessage is a commit's message.
+func (c Client) CommitMessage(ctx context.Context, sha string) (string, error) {
+	var out struct {
+		Message string `json:"message"`
+	}
+	return out.Message, c.call(ctx, "GET", c.path("git/commits/"+sha), nil, &out)
 }
 
 // File reads one file as it is at ref.
