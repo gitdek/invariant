@@ -3,6 +3,8 @@ package verify
 import (
 	"fmt"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/tlc"
 )
 
 // Feedback explains a report to the factory: what failed, and enough detail
@@ -30,9 +32,9 @@ func Feedback(r *Report) string {
 	switch d.Outcome {
 	case "passed":
 	case "violated":
-		section("Design: TLC", fmt.Sprintf("Invariant %s is violated. The shortest behavior that violates it:", d.Violated), traceText(d))
+		section("Design: TLC", fmt.Sprintf("Invariant %s is violated. The shortest behavior that violates it:", d.Violated), traceText(d.Trace))
 	case "deadlock":
-		section("Design: TLC", "A reachable state has no successor, so the system can deadlock. The behavior that reaches it:", traceText(d))
+		section("Design: TLC", "A reachable state has no successor, so the system can deadlock. The behavior that reaches it:", traceText(d.Trace))
 	default:
 		section("Design: TLC", "TLC couldn't check the model:", d.Message)
 	}
@@ -41,11 +43,32 @@ func Feedback(r *Report) string {
 			section("Witness "+w.Name, fmt.Sprintf("It says: %s. %s. The model must be able to reach it.", w.Says, w.Message))
 		}
 	}
+	for _, p := range r.Properties {
+		switch {
+		case p.Holds:
+		case len(p.Behavior) == 0:
+			section("Property "+p.Name, fmt.Sprintf("It says: %s. %s.", p.Says, p.Message))
+		case p.Stutters:
+			section("Property "+p.Name, fmt.Sprintf("It says: %s. Under the fairness statements, TLC found a behavior that breaks it: it reaches the last state below and stays there forever. "+
+				"The fairness allows that only where none of its actions can happen, so the model must be able to make progress there.", p.Says), traceText(p.Behavior))
+		default:
+			section("Property "+p.Name, fmt.Sprintf("It says: %s. Under the fairness statements, TLC found a behavior that breaks it: from the last state below, it returns to state %d and repeats forever.", p.Says, p.Loop), traceText(p.Behavior))
+		}
+	}
+	for _, f := range r.Fairness {
+		if !f.InNext {
+			section("Fairness "+f.Name, fmt.Sprintf("It says: %s. %s.", f.Says, f.Message))
+		}
+	}
 	for _, bug := range r.Bugs {
 		if !bug.Caught {
 			section("Known bug "+bug.Name, fmt.Sprintf("It says: %s. With %s added to Next, TLC must find %s violated. Instead: %s.",
 				bug.Says, bug.Name, bug.Expect, bug.Message))
 		}
+	}
+	if l := r.Larger; l != nil && l.Required && !l.Passed {
+		section("One size larger", "The explorer names its bounds, so the code must hold at every size. With every bound one size larger, "+
+			l.Message+". Something in the code stops at the bounds: sizes must be parameters, and only the explorer may use the bounds.")
 	}
 	if a := r.Agreement; a != nil && !a.Passed {
 		section("Agreement", "Exploring the Go code from Init with Successors must reach exactly the states TLC reaches in the model. "+
@@ -67,14 +90,18 @@ func Feedback(r *Report) string {
 	if !r.Build.Passed && !r.ModelOnly {
 		section("Build: go vet and go test", "```", lastLines(r.Build.Output, 60), "```")
 	}
+	properties := ""
+	if len(r.Properties) > 0 {
+		properties = " every property held under the fairness,"
+	}
 	if len(failed) == 0 && r.ModelOnly {
 		return fmt.Sprintf("The model checks out. TLC explored %d states (depth %d) and found no invariant violated and no deadlock, "+
-			"every witness was reached, and every known bug was caught.", d.DistinctStates, d.Depth)
+			"every witness was reached,%s and every known bug was caught.", d.DistinctStates, d.Depth, properties)
 	}
 	if len(failed) == 0 {
-		return fmt.Sprintf("The gate passed. Every check passed: TLC explored %d states (depth %d), every witness was reached, "+
+		return fmt.Sprintf("The gate passed. Every check passed: TLC explored %d states (depth %d), every witness was reached,%s "+
 			"every known bug was caught, the code-level evidence holds (%s), and the build is green.",
-			d.DistinctStates, d.Depth, r.Assurance)
+			d.DistinctStates, d.Depth, properties, r.Assurance)
 	}
 	return fmt.Sprintf("The gate failed. What to fix: %s.\n%s", strings.Join(failed, "; "), b.String())
 }
@@ -98,10 +125,23 @@ func Failed(r *Report) []string {
 			out = append(out, "witness "+w.Name)
 		}
 	}
+	for _, p := range r.Properties {
+		if !p.Holds {
+			out = append(out, "property "+p.Name)
+		}
+	}
+	for _, f := range r.Fairness {
+		if !f.InNext {
+			out = append(out, "fairness "+f.Name)
+		}
+	}
 	for _, b := range r.Bugs {
 		if !b.Caught {
 			out = append(out, "bug "+b.Name)
 		}
+	}
+	if l := r.Larger; l != nil && l.Required && !l.Passed {
+		out = append(out, "one size larger")
 	}
 	if r.Agreement != nil && !r.Agreement.Passed {
 		out = append(out, "agreement")
@@ -118,9 +158,9 @@ func Failed(r *Report) []string {
 	return out
 }
 
-func traceText(d Design) string {
+func traceText(trace []tlc.State) string {
 	var b strings.Builder
-	for _, s := range d.Trace {
+	for _, s := range trace {
 		fmt.Fprintf(&b, "%d. %s\n", s.Index, s.Action)
 		for _, v := range s.Vars {
 			fmt.Fprintf(&b, "     %s = %s\n", v.Name, v.Value)

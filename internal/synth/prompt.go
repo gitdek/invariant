@@ -16,6 +16,10 @@ var kindMeaning = map[string]string{
 	project.Witness:   "Some reachable state must satisfy it, so the invariants can't hold just because the model does nothing.",
 	project.Bug: "A bug the invariants must catch. The gate adds this action to your Next and requires TLC to find the " +
 		"named invariant violated, so your model must be able to do the things this bug would do damage with.",
+	project.Property: "Must hold of every behavior, forever, under the fairness statements. TLC checks each one alone, " +
+		"so your model must make progress wherever the fairness says it will.",
+	project.Fairness: "An assumption the properties rest on: whenever its action can happen, it eventually does. The action is " +
+		"pinned with it. Keep it a part of your Next, because the gate checks that every step of it is a Next step.",
 }
 
 // Prompt is the synthesis task: the request, what was ratified, the rules,
@@ -40,7 +44,10 @@ func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft, a
 		fmt.Fprintf(&statements, "| `%s` | %s | %s |\n", s.Name, s.Kind, says)
 	}
 	var kinds strings.Builder
-	for _, k := range []string{project.Spec, project.Invariant, project.Witness, project.Bug} {
+	for _, k := range []string{project.Spec, project.Invariant, project.Witness, project.Bug, project.Property, project.Fairness} {
+		if (k == project.Property || k == project.Fairness) && len(p.Of(k)) == 0 {
+			continue
+		}
 		fmt.Fprintf(&kinds, "- **%s**: %s\n", k, kindMeaning[k])
 	}
 	var bounds []string

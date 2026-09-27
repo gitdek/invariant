@@ -84,7 +84,7 @@ func TestVariables(t *testing.T) {
 
 func TestSkeleton(t *testing.T) {
 	keep := map[string]bool{"vars": true, "Amounts": true, "TypeOK": true, "Solvent": true, "Overdraw": true, "Spec": true}
-	got, err := Skeleton(spec, keep, "Spec")
+	got, err := Skeleton(spec, keep, []string{"Spec"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +104,38 @@ func TestSkeleton(t *testing.T) {
 	}
 	for name := range keep {
 		a, _ := PinHash(spec, name, model)
+		b, err := PinHash(got, name, model)
+		if err != nil || a != b {
+			t.Errorf("the skeleton changed %s's pin", name)
+		}
+	}
+}
+
+// A fairness statement may refer to the model, as WF_vars(Next) does, so it
+// goes after the model's place too, after the spec.
+func TestSkeletonWithFairness(t *testing.T) {
+	src := `---- MODULE Tick ----
+VARIABLE n
+vars == <<n>>
+TypeOK == n \in 0..3
+Init == n = 0
+Next == n < 3 /\ n' = n + 1
+\* The clock, whenever it can tick, eventually does.
+Ticks == WF_vars(Next)
+Spec == Init /\ [][Next]_vars
+====
+`
+	keep := map[string]bool{"vars": true, "TypeOK": true, "Ticks": true, "Spec": true}
+	got, err := Skeleton(src, keep, []string{"Spec", "Ticks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, spec, ticks := strings.Index(got, ModelMarker), strings.Index(got, "Spec =="), strings.Index(got, "\\* The clock")
+	if marker < 0 || !(marker < spec && spec < ticks) || !strings.Contains(got, "Ticks == WF_vars(Next)") {
+		t.Fatalf("want the marker, then Spec, then Ticks with its comment:\n%s", got)
+	}
+	for name := range keep {
+		a, _ := PinHash(src, name, model)
 		b, err := PinHash(got, name, model)
 		if err != nil || a != b {
 			t.Errorf("the skeleton changed %s's pin", name)

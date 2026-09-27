@@ -213,6 +213,12 @@ func traceCmd(args []string) int {
 			fmt.Printf("%s%s = %s\n", marker, name, s.TLA[name])
 		}
 	}
+	switch {
+	case f.Loop > 0:
+		fmt.Printf("\nThen back to %d, forever.\n", f.Loop)
+	case f.Stutters:
+		fmt.Printf("\nThen nothing more happens, forever.\n")
+	}
 	return 0
 }
 

@@ -87,9 +87,59 @@ func TestParseValue(t *testing.T) {
 }
 
 func TestConfigRender(t *testing.T) {
-	cfg := Config{Specification: "Spec", Constants: map[string]string{"RM": "{r1, r2}", "N": "3"}, Invariants: []string{"TypeOK", "Safe"}}
-	want := "SPECIFICATION Spec\nCONSTANT N = 3\nCONSTANT RM = {r1, r2}\nINVARIANT TypeOK\nINVARIANT Safe\n"
+	cfg := Config{Specification: "Spec", Constants: map[string]string{"RM": "{r1, r2}", "N": "3"}, Invariants: []string{"TypeOK", "Safe"}, Properties: []string{"Answered"}}
+	want := "SPECIFICATION Spec\nCONSTANT N = 3\nCONSTANT RM = {r1, r2}\nINVARIANT TypeOK\nINVARIANT Safe\nPROPERTY Answered\n"
 	if got := cfg.render(); got != want {
 		t.Errorf("render =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// The property fixtures are real runs of the pinned TLC on testdata/Live.tla,
+// where a watcher answers the commands people ask, under weak fairness.
+
+// property-passed.txt checks EventuallyAnswered and the action property
+// NeverUnanswered under FairSpec. Both hold.
+func TestParsePropertiesPassed(t *testing.T) {
+	r := Parse(fixture(t, "property-passed.txt"), 0)
+	if r.Outcome != Passed || r.DistinctStates != 9 || r.Depth != 5 {
+		t.Fatalf("Outcome = %s (%s), %d states, depth %d; want passed, 9, 5", r.Outcome, r.Message, r.DistinctStates, r.Depth)
+	}
+}
+
+// property-loop.txt adds Forget, which drops a pending command. The
+// counterexample asks and forgets command 1 forever: from state 6 it
+// returns to state 5.
+func TestParsePropertyLoop(t *testing.T) {
+	r := Parse(fixture(t, "property-loop.txt"), 13)
+	if r.Outcome != PropertyViolated || r.Property != "" || r.Loop != 5 || r.Stutters {
+		t.Fatalf("Outcome = %s, Property = %q, Loop = %d, Stutters = %v; want property violated, unnamed, loop 5", r.Outcome, r.Property, r.Loop, r.Stutters)
+	}
+	if len(r.Trace) != 6 || r.Trace[2].Action != "Forget" {
+		t.Fatalf("trace = %+v; want 6 states, the third after Forget", r.Trace)
+	}
+	f, err := r.TraceFile("Live", "property EventuallyAnswered")
+	if err != nil || f.Loop != 5 || f.Stutters || len(f.States) != 6 {
+		t.Fatalf("TraceFile = %+v, %v", f, err)
+	}
+}
+
+// property-stutter.txt checks EventuallyAnswered with no fairness: the
+// watcher answers nothing, and the behavior stops with a command pending.
+func TestParsePropertyStutter(t *testing.T) {
+	r := Parse(fixture(t, "property-stutter.txt"), 13)
+	if r.Outcome != PropertyViolated || !r.Stutters || r.Loop != 0 {
+		t.Fatalf("Outcome = %s, Loop = %d, Stutters = %v; want property violated by stuttering", r.Outcome, r.Loop, r.Stutters)
+	}
+	if last := r.Trace[len(r.Trace)-1]; last.Action == "" {
+		t.Fatalf("last state = %+v", last)
+	}
+}
+
+// action-property.txt adds an action outside Next and checks that its every
+// step is a Next step, as the gate checks a fair action. TLC names it.
+func TestParseActionProperty(t *testing.T) {
+	r := Parse(fixture(t, "action-property.txt"), 13)
+	if r.Outcome != PropertyViolated || r.Property != "OtherIsNext" || len(r.Trace) != 2 {
+		t.Fatalf("Outcome = %s, Property = %q, trace %d states; want OtherIsNext violated in 2", r.Outcome, r.Property, len(r.Trace))
 	}
 }

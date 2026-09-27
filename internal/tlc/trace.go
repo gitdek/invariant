@@ -8,6 +8,10 @@ type TraceFile struct {
 	Violated string       `json:"violated,omitempty"`
 	TLC      string       `json:"tlc"`
 	States   []TraceState `json:"states"`
+	// A behavior that breaks a temporal property goes on forever: from the
+	// last state it returns to state Loop, or it Stutters there.
+	Loop     int  `json:"loop,omitempty"`
+	Stutters bool `json:"stutters,omitempty"`
 }
 
 // TraceState is one step of a TraceFile.
@@ -21,7 +25,10 @@ type TraceState struct {
 
 // TraceFile turns the result's counterexample into a TraceFile.
 func (r Result) TraceFile(module, check string) (TraceFile, error) {
-	f := TraceFile{Module: module, Check: check, Violated: r.Invariant, TLC: r.Version, States: []TraceState{}}
+	f := TraceFile{Module: module, Check: check, Violated: r.Invariant, TLC: r.Version, States: []TraceState{}, Loop: r.Loop, Stutters: r.Stutters}
+	if r.Property != "" {
+		f.Violated = r.Property
+	}
 	prev := map[string]string{}
 	for _, s := range r.Trace {
 		ts := TraceState{Index: s.Index, Action: s.Action, Changed: []string{}, Vars: map[string]any{}, TLA: map[string]string{}}

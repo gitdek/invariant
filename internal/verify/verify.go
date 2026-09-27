@@ -41,6 +41,11 @@ type Report struct {
 	Design    Design            `json:"design"`
 	Witnesses []Witness         `json:"witnesses"`
 	Bugs      []Bug             `json:"bugs"`
+	// Properties and Fairness are the liveness checks (D-0069): each
+	// temporal property under the ratified fairness, and each fairness
+	// statement's action as a step the model takes.
+	Properties []Property `json:"properties,omitempty"`
+	Fairness   []Fair     `json:"fairness,omitempty"`
 	// Code-level evidence: agreement for a state machine explored from its
 	// initial state, conformance for code run by a driver, and a proof when
 	// the language has a verifier for the code.
@@ -249,6 +254,24 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
 	r.Bugs = make([]Bug, len(bugs))
+	properties, fairness := p.Of(project.Property), p.Of(project.Fairness)
+	if len(properties) > 0 {
+		r.Properties = make([]Property, len(properties))
+	}
+	if len(fairness) > 0 {
+		r.Fairness = make([]Fair, len(fairness))
+	}
+	isProperty := map[string]bool{}
+	for _, s := range properties {
+		isProperty[s.Name] = true
+	}
+	// Fairness stated in the spec itself would be missing from the bug
+	// checks and unchecked, so a project with properties states it only in
+	// fairness statements.
+	unfairSpec := ""
+	if len(properties) > 0 && specFairness(src, p) {
+		unfairSpec = "the spec states fairness itself. State it in fairness statements instead, so every check uses it and the gate can check it"
+	}
 	var evidence Evidence
 
 	// Every check is independent, so they all run at once. Each goroutine
@@ -317,10 +340,62 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		})
 	}
 
+	for i, s := range properties {
+		spawn(func() error {
+			if unfairSpec != "" {
+				r.Properties[i] = Property{Name: s.Name, Label: kebab(s.Name), Says: s.Says, Message: unfairSpec}
+				return nil
+			}
+			name := "Property_" + s.Name
+			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\n%s\n====\n", name, p.ModuleName(), fairSpec("Invariant_FairSpec", cfg.Specification, p.FairnessNames()))
+			d, err := stage(work, name, p, src, wrapper)
+			if err != nil {
+				return err
+			}
+			res, err := runner.Check(ctx, d, name, tlc.Config{Specification: "Invariant_FairSpec", Constants: cfg.Constants, Properties: []string{s.Name}})
+			if err != nil {
+				return err
+			}
+			out := propertyResult(s, res)
+			defer func() { r.Properties[i] = out }()
+			if outDir != "" && len(res.Trace) > 0 {
+				out.Trace = out.Label + ".json"
+				return writeTrace(filepath.Join(outDir, "traces", out.Trace), res, p.ModuleName(), "property "+out.Label)
+			}
+			return nil
+		})
+	}
+
+	for i, f := range fairness {
+		spawn(func() error {
+			c, err := fairnessOf(src, f.Name)
+			if err != nil {
+				r.Fairness[i] = Fair{Name: f.Name, Says: f.Says, Message: err.Error()}
+				return nil
+			}
+			name := "Fairness_" + f.Name
+			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\nInvariant_WithAction == Init /\\ [][Next \\/ %s]_vars\nInvariant_InNext == %s\n====\n",
+				name, p.ModuleName(), c.steps(), c.inNext())
+			d, err := stage(work, name, p, src, wrapper)
+			if err != nil {
+				return err
+			}
+			res, err := runner.Check(ctx, d, name, tlc.Config{Specification: "Invariant_WithAction", Constants: cfg.Constants, Properties: []string{"Invariant_InNext"}})
+			if err != nil {
+				return err
+			}
+			r.Fairness[i] = fairResult(f, c, res)
+			return nil
+		})
+	}
+
 	for i, b := range bugs {
 		spawn(func() error {
 			out := Bug{Name: b.Name, Label: kebab(b.Name), Says: b.Says, Expect: b.Expect}
 			defer func() { r.Bugs[i] = out }()
+			if isProperty[b.Expect] {
+				return checkPropertyBug(ctx, &out, b, work, outDir, p, src, runner, cfg, unfairSpec)
+			}
 			// The bug runs alongside the model: every behavior the model allows,
 			// plus the bug's own steps.
 			name := "Bug_" + b.Name
@@ -475,6 +550,12 @@ func modelPassed(r *Report) bool {
 	for _, b := range r.Bugs {
 		ok = ok && b.Caught
 	}
+	for _, p := range r.Properties {
+		ok = ok && p.Holds
+	}
+	for _, f := range r.Fairness {
+		ok = ok && f.InNext
+	}
 	return ok
 }
 
@@ -510,6 +591,10 @@ func Fingerprint(r Report) string {
 	r.Bugs = append([]Bug(nil), r.Bugs...)
 	for i := range r.Bugs {
 		r.Bugs[i].Trace = ""
+	}
+	r.Properties = append([]Property(nil), r.Properties...)
+	for i := range r.Properties {
+		r.Properties[i].Trace = ""
 	}
 	b, _ := json.Marshal(r)
 	sum := sha256.Sum256(b)
@@ -586,6 +671,11 @@ func describe(res tlc.Result) string {
 		return "TLC found " + res.Invariant + " violated"
 	case tlc.Deadlock:
 		return "TLC found a deadlock"
+	case tlc.PropertyViolated:
+		if res.Property != "" {
+			return "TLC found " + res.Property + " violated"
+		}
+		return "TLC found a behavior that breaks the property"
 	case tlc.Passed:
 		return "TLC found no violation"
 	default:

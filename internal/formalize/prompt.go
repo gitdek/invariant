@@ -75,10 +75,13 @@ Each statement is a definition in the module, with a kind and `+"`says`"+`: one 
 - **invariant**: holds in every reachable state. Always include `+"`TypeOK`"+`, which gives every variable its type. Then add the safety properties the issue implies: what must never go wrong. Keep each one small and about one thing.
 - **witness**: a state predicate that some reachable state must satisfy. Add one for each outcome the system must be able to reach, so the invariants can't hold just because nothing happens.
 - **bug**: an action a plausible wrong implementation would take, with `+"`expect`"+` naming the invariant it must break. The gate adds it to `+"`Next`"+` and requires TLC to find exactly that invariant violated, which shows the invariants have teeth. Add at least one, for the invariant that matters most. Define it in the module, but leave it out of `+"`Next`"+`.
+- **property**: a temporal formula that must hold of every behavior, forever. Add one only when the issue says something must eventually happen, such as `+"`\\A c \\in Commands : c \\in pending ~> c \\in answered`"+`: every command that's asked is eventually answered. TLC checks each property alone, under the fairness statements. A bug may expect a property instead of an invariant: TLC must then find a behavior, under the same fairness, that breaks it.
+- **fairness**: what the properties assume about progress. Each is one condition: `+"`WF_vars(A)`"+`, if `+"`A`"+` stays possible it eventually happens, or `+"`SF_vars(A)`"+`, if `+"`A`"+` is possible again and again it eventually happens, optionally for each `+"`x`"+` in a set, `+"`\\A x \\in S : WF_vars(A(x))`"+`. Make it about the system's own steps, never about people or the outside world: nothing can promise that a person acts. Leave fairness out when there are no properties.
 
 The gate enforces these rules:
 
-- Statements may depend on helper definitions, which are pinned along with them. They must not depend on `+"`Init`"+`, `+"`Next`"+` or the model's actions, which can still change.
+- Statements may depend on helper definitions, which are pinned along with them. They must not depend on `+"`Init`"+`, `+"`Next`"+` or the model's actions, which can still change. A fairness statement is the exception: the action it names is pinned with it, so define that action in full and make it a part of `+"`Next`"+`. The gate checks that every step of it is a `+"`Next`"+` step.
+- Fairness goes in fairness statements, never in `+"`Spec`"+`.
 - TLC always checks for deadlock: every reachable state needs an enabled action. If the system can legitimately finish, give it an action for that, such as one that leaves a finished state unchanged.
 - TLC reports the first invariant it finds violated, in the order the statements are listed. List a bug's expected invariant before any other invariant the bug would also break.
 - Keep the bounds small enough that TLC checks every state quickly: thousands of states, not millions.
@@ -102,7 +105,7 @@ If the issue isn't something this factory can build as a new, self-contained pro
 
 # Check your draft
 
-The `+"`check`"+` tool pins your statements and runs the gate's model checks on your files. TLC must find no invariant violated and no deadlock, every witness must be reachable, and every bug must be caught. You have %d checks, so reread your files before each one. If you're proposing statements, you're done when the check passes. Then reply with a two-sentence summary.
+The `+"`check`"+` tool pins your statements and runs the gate's model checks on your files. TLC must find no invariant violated and no deadlock, every witness must be reachable, every property must hold, every fairness statement's action must be a `+"`Next`"+` step, and every bug must be caught. You have %d checks, so reread your files before each one. If you're proposing statements, you're done when the check passes. Then reply with a two-sentence summary.
 
 # An example
 
