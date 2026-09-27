@@ -41,6 +41,15 @@ func (r *Report) EverySize() bool {
 	return r.Code != nil && r.Code.Passed && r.Larger != nil && r.Larger.Passed
 }
 
+// Claim is what the report says of the code, in the receipt's words:
+// "proved", "proved at every size", or "tested against the model".
+func (r *Report) Claim() string {
+	if r.EverySize() {
+		return r.Assurance + " at every size"
+	}
+	return r.Assurance
+}
+
 var (
 	numberBound = regexp.MustCompile(`^\d+$`)
 	setBound    = regexp.MustCompile(`^\{\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*\}$`)

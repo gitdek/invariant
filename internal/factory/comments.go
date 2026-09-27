@@ -264,7 +264,7 @@ func ratifiedComment(by, dir, branch, hash string, statements int, m Marker) str
 
 func prComment(pr github.PullRequest, r *verify.Report, m Marker) string {
 	return post("pull request", fmt.Sprintf("The code is written, and it passed the gate here: it's **%s**. "+
-		"I opened #%d, and I'll merge it once CI's `invariant/gate` passes on it.", r.Assurance, pr.Number), m)
+		"I opened #%d, and I'll merge it once CI's `invariant/gate` passes on it.", r.Claim(), pr.Number), m)
 }
 
 func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error, m Marker) string {
