@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -158,7 +159,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
 	var errs []error
 	for _, issue := range issues {
-		err := f.step(ctx, issue)
+		err := f.safeStep(ctx, issue)
 		f.doing(0, "")
 		if err != nil {
 			errs = append(errs, fmt.Errorf("#%d: %w", issue.Number, err))
@@ -985,6 +986,17 @@ func (f *Factory) now() time.Time {
 		return f.Now()
 	}
 	return time.Now()
+}
+
+// safeStep takes one step on an issue, and turns a panic into an error,
+// so that one issue's bug can't stop the factory's work on the others.
+func (f *Factory) safeStep(ctx context.Context, issue github.Issue) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("the factory's step panicked: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return f.step(ctx, issue)
 }
 
 func (f *Factory) doing(issue int, what string) {

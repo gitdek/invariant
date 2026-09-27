@@ -1,10 +1,13 @@
 package formalize
 
 import (
+	"context"
+	"github.com/gitdek/invariant/internal/synth"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // workspace copies testdata/buffer into a temporary workspace, applying
@@ -144,5 +147,37 @@ func TestExistingManifest(t *testing.T) {
 	}
 	if pr := Prompt(req, 3); !strings.Contains(pr, "writes a driver that runs existing code") || !strings.Contains(pr, "Don't read intent into the code") {
 		t.Error("the prompt doesn't explain checking existing code")
+	}
+}
+
+// scripted is an agent that writes a fixed draft.
+type scripted struct{ proposal string }
+
+func (scripted) Name() string { return "scripted" }
+
+func (s scripted) Run(_ context.Context, job synth.Job) (synth.Usage, error) {
+	return synth.Usage{}, os.WriteFile(filepath.Join(job.Workspace, "proposal.json"), []byte(s.proposal), 0o644)
+}
+
+// A new project's draft isn't an amendment. The formalizer once treated
+// every draft that checked out as one, and panicked on copythis-ad#33, the
+// first new project after amendments were built.
+func TestANewProjectsDraftIsNoAmendment(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "src"), 0o755)
+	os.WriteFile(filepath.Join(root, "src", "store.ts"), []byte("export class Store {}"), 0o644)
+	f := Formalizer{Backend: scripted{`{"name": "leases", "slug": "leases", "module": "Leases", "package": "leases",
+		"forks": [{"id": "F1", "question": "When a lease expires, what happens?", "options": [{"id": "A", "says": "Review."}, {"id": "B", "says": "Retry."}]}]}`},
+		CheckRuns: 1, Timeout: time.Minute}
+	req := Request{Repo: "gitdek/copythis-ad", Issue: 33, Title: "Check leases", Existing: &Existing{Paths: []string{"src"}, Root: root}}
+	r, err := f.Formalize(context.Background(), req, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Problem != "" || r.Proposal == nil || len(r.Proposal.Forks) != 1 || r.Proposal.Target != nil {
+		t.Fatalf("result %+v", r)
+	}
+	if got := strings.Join(r.Proposal.Existing, ","); got != "src" || r.Proposal.Language != "typescript" {
+		t.Errorf("existing %s, language %s", got, r.Proposal.Language)
 	}
 }

@@ -193,7 +193,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			p.Existing, p.Language = e.Paths, "typescript"
 		}
 	}
-	if c := req.Current; p != nil && err == nil {
+	if c := req.Current; c != nil && p != nil && err == nil {
 		if err = p.Amend(c); err == nil && p.Ratifiable() {
 			r.Changes = Diff(c, p)
 		}
