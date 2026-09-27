@@ -92,7 +92,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Merging
 
-- Factory pull requests merge on green, starting with the first. `invariant/gate` is the check. GitHub Free can't require a check or auto-merge on a private repository, so for now the factory merges its own pull request, pinned to the head commit that passed. When the repository goes public, `invariant/gate` becomes a required check and GitHub's native auto-merge takes over. `D-0004` `D-0021` `D-0033`
+- Factory pull requests merge on green, starting with the first. `invariant/gate` is the check. GitHub Free can't require a check or auto-merge on a private repository, so for now the factory merges its own pull request, pinned to the head commit that passed. When the repository goes public, `invariant/gate` becomes a required check, so GitHub refuses any merge the gate didn't pass, and the factory keeps merging its own proved way. `D-0004` `D-0021` `D-0033` `D-0075`
 - The gate passes only when all of these hold. `D-0004` `D-0013` `D-0014`
   - The pinned statements match.
   - TLC reports no invariant violation and no deadlock.
@@ -108,6 +108,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - CI is green.
   - The diff stays in scope. It changes one project and nothing else. It adds no dependencies: no Go modules, npm packages or Python requirements. It uses no cgo and doesn't edit `.github/`. It changes a ratified lock only by adding a new, ratified project, or as an amendment. An amendment's lock carries this pull request's issue's ratification, and amends exactly the lock on the base branch. `D-0014` `D-0036` `D-0043` `D-0045`
   - Every factory project's ratification checks out on GitHub: a writer's comment ratified exactly the proposal its lock holds. `D-0034` `D-0036`
+- CI runs on pull requests and on main, except when a change touches only docs and decisions. A newer push to the same branch cancels a run that's still going. A factory pull request's gate verifies the one project it changes, since scope already confines it to that project. The gate's own tests run on pull requests that can change the gate. `D-0079`
 - The pinned-statement checks and the scope rules must exist before the factory opens its first PR. `D-0004` `D-0014`
 - After a merge, the branch is deleted and the originating issue is notified with the proof artifacts. `D-0000`
 
@@ -123,7 +124,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   7. Invariant builds itself. Done: #9 ratified the factory's issue protocol, and the bot merged it as `factory/protocol` in #11, proved with Gobra. #13 amended it through the factory, and the bot merged #15 once CI proved it again. Since #12, the watcher checks every step it takes against it. `D-0045` `D-0053` `D-0058`
   8. Code you can ship. Done: code is the system alone, with sizes as parameters, and the explorer or driver is the environment. The gate proves Go code at every size and checks agreement one size past the bounds, and fails code that hardcodes a size. #18 became #20, a connection pool proved at every size, which the bot merged. The check one size larger covers TypeScript and Python drivers too (D-0076). #28 took the rate limiter's bounds out of its code, through the factory, and the bot merged #30. Other existing projects keep theirs until an issue asks. `D-0048` `D-0058` `D-0068`
   9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Under way, by its ratified plan. The gate checks properties under fairness. #23 ratified the recovery model, and the bot merged `factory/recovery` as #25, proved at every size. The watcher holds a lease, records its runs and merges, and takes every effect only as the core allows. A test stops it before each of its effects, and the issue still merges with every effect done once. Left: two watchers running on one repository for a day, the second never acting. `D-0048` `D-0058` `D-0069` `D-0071` `D-0072` `D-0073` `D-0074`
-  10. Ready to go public: GitHub enforces the gate. @gitdek chooses when. `D-0007` `D-0033` `D-0048`
+  10. Ready to go public, once slice 9's live check has run its day. The factory keeps merging, with GitHub requiring the gate. Every run from an outside collaborator needs approval. Until then, the account's Actions minutes are spent, so CI is off and nothing merges. Before GitHub requires the gate, the skip for docs moves inside the gate job. Its plan is ratified. `D-0007` `D-0033` `D-0048` `D-0075` `D-0079` `D-0080`
 - The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. `invariant ledger` lists them for every issue it took. `D-0048` `D-0062`
 - The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
 
@@ -139,4 +140,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Undecided: don't build against these
 
-- Slice 10, going public: when, who merges once GitHub enforces the gate, the 13 merge commits that carry `joe@puglisij.com`, and approval for outside collaborators' workflow runs. Its plan is proposed, with recommendations. `D-0075`
+Nothing is undecided right now.

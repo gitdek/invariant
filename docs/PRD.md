@@ -132,10 +132,12 @@ Each requirement serves one goal.
 
 ## How we'll know it works
 
-Two measures must stay at zero, always. Both are zero so far.
+Two measures must stay at zero, always. The dashboard counts both for the factory's merges, and both are zero so far.
 
 - Pull requests merged without a green gate on their exact head.
 - Locks merged that aren't exactly what a writer ratified.
+
+One pull request that changed CI itself, #34, merged without the gate. The account's Actions minutes had run out, and @gitdek chose to merge it once the whole suite passed locally (D-0079).
 
 The rest have targets. Here are the first three live issues:
 
@@ -160,7 +162,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Done `D-0045` `D-0053` `D-0058` |
 | 8 | Code you can ship (3.7) | Done `D-0048` `D-0058` `D-0068` |
 | 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Under way `D-0048` `D-0058` `D-0069` |
-| 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Planned `D-0007` `D-0033` `D-0048` |
+| 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Next, after slice 9 `D-0007` `D-0033` `D-0048` `D-0075` |
 | Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
