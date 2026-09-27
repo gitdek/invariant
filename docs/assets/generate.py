@@ -676,6 +676,76 @@ def factory_card(run):
     return svg_doc(W, H, "\n".join(out), label)
 
 
+
+# ---------------------------------------------------------------- 7. the crash test
+
+def crash_card(run):
+    """The crash test: the watcher stopped just before each of its effects,
+    and a fresh one finishing the issue every time."""
+    c, W = DARK, 860
+    effects = run["effects"]
+    steps_seen = []
+    for e in effects:
+        if e["step"] not in steps_seen:
+            steps_seen.append(e["step"])
+    RH, GH, TOP = 22, 28, 96
+    H = TOP + len(steps_seen) * GH + len(effects) * RH + 104
+    T = 13.0
+    xs, xo = W - 214, W - 84
+    stops = sum(1 for e in effects for k in ("same_machine", "another_machine") if e[k])
+    recovered = sum(1 for e in effects for k in ("same_machine", "another_machine") if e[k] == "pass")
+    out = [card(W, H, c, "Stop the watcher anywhere", f"go test -run {run['test']}"), f'<g font-family="{SANS}">']
+    out.append(f'<text x="44" y="74" font-size="12" fill="{c["muted"]}" letter-spacing="0.6">STOPPED JUST BEFORE</text>')
+    for x, label in ((xs, "SAME MACHINE"), (xo, "ANOTHER MACHINE")):
+        out.append(f'<text x="{x}" y="74" text-anchor="middle" font-size="12" fill="{c["muted"]}" letter-spacing="0.6">{label}</text>')
+    y, i, step = TOP - 10, 0, None
+    last = 0.0
+    for e in effects:
+        if e["step"] != step:
+            step = e["step"]
+            y += GH
+            out.append(f'<text x="30" y="{y}" font-size="13" font-weight="700" fill="{c["blue"]}">{esc(step)}</text>')
+            out.append(f'<path d="M30 {y + 7}H{W - 30}" stroke="{c["line"]}"/>')
+        y += RH
+        s = 0.7 + i * (T - 4.2) / len(effects)
+        last = s
+        out.append(f'<text x="30" y="{y}" font-family="{MONO}" font-size="12" fill="{c["arrow"]}">{e["n"]}</text>'
+                   f'<text x="56" y="{y}" font-family="{MONO}" font-size="12.5" fill="{c["text"]}">{esc(clip(e["stopped_before"], 58))}</text>')
+        for x, key in ((xs, "same_machine"), (xo, "another_machine")):
+            ok = e[key] == "pass"
+            cy = y - 4
+            # Stopped: a red mark, while the watcher is down.
+            out.append(f'<g opacity="0">{shown(s, s + 0.55, T)}'
+                       f'<circle cx="{x}" cy="{cy}" r="8" fill="{c["red"]}" fill-opacity="0.2" stroke="{c["red"]}"/>'
+                       f'<path d="M{x - 3.5},{cy - 3.5}l7,7M{x + 3.5},{cy - 3.5}l-7,7" stroke="{c["red"]}" stroke-width="1.8" stroke-linecap="round"/></g>')
+            # Recovered: a fresh watcher finished the issue, every effect once.
+            color = c["green"] if ok else c["red"]
+            mark = (f'<path d="M{x - 4},{cy}l3,3l5.5-6" fill="none" stroke="{color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+                    if ok else f'<path d="M{x - 3.5},{cy - 3.5}l7,7M{x + 3.5},{cy - 3.5}l-7,7" stroke="{color}" stroke-width="1.8" stroke-linecap="round"/>')
+            out.append(f'<g opacity="0">{shown(s + 0.55, T - 0.4, T)}'
+                       f'<circle cx="{x}" cy="{cy}" r="8" fill="{color}" fill-opacity="0.16" stroke="{color}"/>{mark}</g>')
+        i += 1
+    done = last + 0.9
+    fy = y + 26
+    out.append(f'<path d="M20 {fy}H{W - 20}" stroke="{c["line"]}"/>')
+    before = run.get("before")
+    out.append(f'<g opacity="0">{shown(done, T - 0.4, T)}'
+               f'<rect x="30" y="{fy + 20}" width="238" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
+               f'<text x="149" y="{fy + 40}" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
+               f'{stops} stops · {recovered} recoveries</text>'
+               f'<text x="{W - 30}" y="{fy + 32}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'every effect once, and the issue merges</text>'
+               + (f'<text x="{W - 30}" y="{fy + 50}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+                  f'before #26: {before["broke"]} of {before["stops"]} stops broke the flow</text>' if before else "")
+               + '</g>')
+    out.append('</g>')
+    return svg_doc(W, H, "\n".join(out),
+                   f"The crash test: the watcher is stopped just before each of its {len(effects)} effects on one issue, "
+                   f"and a fresh watcher, on the same machine or another, finishes it. {recovered} of {stops} stops recover, "
+                   "with one post per command, one agent run per command or build, one pull request and one merge."
+                   + (f" Before #26, {before['broke']} of {before['stops']} stops broke the flow." if before else ""))
+
+
 def main():
     receipt = json.load(open(sys.argv[1] if len(sys.argv) > 1 else os.path.join(RUN, "receipt.json")))
     trace = json.load(open(sys.argv[2] if len(sys.argv) > 2 else os.path.join(RUN, "traces", "early-commit.json")))
@@ -693,6 +763,8 @@ def main():
     write(os.path.join(HERE, "receipt.svg"), poster(receipt_card(receipt), 8.0))
     run = json.load(open(os.path.join(HERE, "factory-run.json")))
     write(os.path.join(HERE, "factory-run.svg"), poster(factory_card(run), 12.0))
+    crashes = json.load(open(os.path.join(HERE, "crash-run.json")))
+    write(os.path.join(HERE, "crash-anywhere.svg"), poster(crash_card(crashes), 12.5))
 
 
 if __name__ == "__main__":

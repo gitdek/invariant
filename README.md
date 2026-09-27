@@ -139,6 +139,20 @@ Then Invariant turned on itself. The rules that decide what the factory does on 
 - **The proof caught its own author.** Wiring the watcher to the proved core, [#12](https://github.com/gitdek/invariant/pull/12), means the watcher takes a step only if the model has it. Its own tests then showed three steps it had always taken that the ratified rules didn't have: a build that stops before it opens a pull request, a build that fails its own gate, and a pull request that passes CI but can't merge.
 - **It changed its rules through itself.** [#13](https://github.com/gitdek/invariant/issues/13) asked the factory to add those steps. It asked two questions, including what a writer can do after a build stops, and @gitdek answered them. Then it proposed the amendment, checked by TLC in 24,762 states. @gitdek ratified it from the dashboard's new `/act` page, the first ratification made there. The factory changed its own proved core, and CI proved it again before the bot merged [#15](https://github.com/gitdek/invariant/pull/15).
 
+## Stop it anywhere
+
+<p align="center">
+  <img src="docs/assets/crash-anywhere.svg" alt="The crash test: the watcher is stopped just before each of its 20 effects on one issue, from recording the first agent run to the last label, and a fresh watcher on the same machine or another finishes the issue. 40 of 40 stops recover, with one post per command, one agent run per command or build, one pull request and one merge. Before #26, 14 of 30 stops broke the flow." width="100%">
+</p>
+
+The watcher takes each step as a few effects on GitHub, and it can stop between any two: a crash, a restart, a laptop going to sleep. Two watchers can also run on one repository at once.
+
+- **It modeled its own recovery.** [#23](https://github.com/gitdek/invariant/issues/23) asked the factory to prove that every effect happens exactly once, whatever stops it, and that every command is still answered. It drafted 23 statements, among them two "eventually" properties under ratified fairness, which the gate now checks.
+- **It proved the core.** The factory wrote [`factory/recovery`](factory/recovery), Gobra proved it at every size, and the bot merged [#25](https://github.com/gitdek/invariant/pull/25). It took 31 minutes and $1.74 of agent spend.
+- **The watcher runs on it.** It records each agent run and merge where every watcher can see them, and one watcher at a time holds a lease in a Git ref. It takes every effect only as the proved core allows ([#24](https://github.com/gitdek/invariant/pull/24), [#26](https://github.com/gitdek/invariant/pull/26)).
+
+The test above stops the watcher before each of its effects and starts a fresh one. Every time, the issue still merges with every effect done once.
+
 ## Try it
 
 With Go and Docker installed, run:
@@ -206,5 +220,5 @@ This repository runs on its own rule: **a decision that isn't written down didn'
 
 <p align="center">
   <sub>Built by <a href="https://github.com/gitdek">@gitdek</a> · <a href="https://puglisij.com">puglisij.com</a><br>
-  Every graphic above is generated from real <code>invariant verify</code> output by <a href="docs/assets/generate.py"><code>docs/assets/generate.py</code></a>.</sub>
+  Every graphic above is generated from real <code>invariant verify</code> and test output by <a href="docs/assets/generate.py"><code>docs/assets/generate.py</code></a>.</sub>
 </p>
