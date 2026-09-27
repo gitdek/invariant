@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/scope"
+	"github.com/gitdek/invariant/internal/setup"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/tlc"
 	"github.com/gitdek/invariant/internal/toolchain"
@@ -53,10 +55,11 @@ Usage:
                                                check factory projects' ratifications on GitHub
   invariant pin PROJECT                        record the statements' current text as ratified
   invariant trace FILE                         replay a counterexample trace
-  invariant dashboard -repo OWNER/NAME [-addr HOST:PORT]
+  invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-addr HOST:PORT]
                                                serve a live view of the factory and its evidence
 
-Not built yet: init (see decisions/D-0013-slice-plan.md).
+  invariant init [-repo OWNER/NAME] [-invariant COMMIT] [DIR]
+                                               set up another repository's gate
 `
 
 func main() {
@@ -89,8 +92,7 @@ func main() {
 	case "dashboard":
 		code = dashboardCmd(ctx, args)
 	case "init":
-		fmt.Fprintf(os.Stderr, "invariant %s isn't built yet (see decisions/D-0013-slice-plan.md)\n", cmd)
-		code = 2
+		code = initCmd(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -310,10 +312,11 @@ func mcpCmd(ctx context.Context, args []string) int {
 				return "The gate couldn't start: " + err.Error(), true
 			}
 			defer os.RemoveAll(dir)
-			if err := synth.Assemble(p, ws, dir); err != nil {
+			proj, err := synth.Stage(p, ws, dir)
+			if err != nil {
 				return "The gate couldn't assemble your project: " + err.Error(), true
 			}
-			r, err := verify.Run(ctx, dir, "", tc)
+			r, err := verify.Run(ctx, proj, "", tc)
 			if err != nil {
 				if *logPath != "" {
 					synth.LogGateRun(*logPath, synth.GateRun{Run: runs, Failed: []string{"couldn't run: " + err.Error()}, At: time.Now().UTC().Format(time.RFC3339)})
@@ -600,22 +603,25 @@ func ratificationCmd(ctx context.Context, args []string) int {
 
 func dashboardCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
-	repo := fs.String("repo", "", "the repository to show, as owner/name")
+	var repos []string
+	fs.Func("repo", "a repository to show, as owner/name; repeat it to show more. The first is Invariant's own", func(v string) error {
+		repos = append(repos, v)
+		return nil
+	})
 	addr := fs.String("addr", "127.0.0.1:8484", "where to serve the page. Keep it on localhost, and share it through a tunnel")
 	every := fs.Duration("every", 30*time.Second, "how often to read GitHub")
 	base := fs.String("base", "main", "the branch the factory merges into")
 	cache, _ := os.UserCacheDir()
-	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "the watcher's work directory, where it writes what it's doing")
+	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "the watchers' work directory, where they write what they're doing")
 	fs.Parse(args)
-	if *repo == "" || fs.NArg() != 0 {
+	if len(repos) == 0 || fs.NArg() != 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
 	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
-	s := &dashboard.Server{
-		Repo: *repo, Branch: *base, GitHub: github.Client{Repo: *repo},
-		Cache: filepath.Join(cache, "invariant", "dashboard"), Status: dashboard.StatusPath(*work, *repo),
-		Every: *every, Log: logger.Printf,
+	s := &dashboard.Server{Branch: *base, Cache: filepath.Join(cache, "invariant", "dashboard"), Every: *every, Log: logger.Printf}
+	for _, r := range repos {
+		s.Repos = append(s.Repos, &dashboard.Repo{Name: r, GitHub: github.Client{Repo: r}, Status: dashboard.StatusPath(*work, r)})
 	}
 	// State graphs come from TLC, so they need Docker. Without it, the page
 	// still shows everything else.
@@ -633,10 +639,72 @@ func dashboardCmd(ctx context.Context, args []string) int {
 		defer cancel()
 		srv.Shutdown(shut)
 	}()
-	logger.Printf("serving the dashboard for %s at http://%s", *repo, *addr)
+	logger.Printf("serving the dashboard for %s at http://%s", strings.Join(repos, " and "), *addr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Print(err)
 		return 2
 	}
 	return 0
+}
+
+// initCmd sets up another repository for the factory (D-0054): it writes the
+// gate workflow, pinned to one commit of Invariant, and prints the steps only
+// a person can take.
+func initCmd(args []string) int {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	repo := fs.String("repo", "OWNER/NAME", "the repository, for the steps this prints")
+	ref := fs.String("invariant", buildCommit(), "the full commit of Invariant the repository's gate builds")
+	force := fs.Bool("force", false, "replace a different gate workflow")
+	fs.Parse(args)
+	dir := "."
+	switch fs.NArg() {
+	case 0:
+	case 1:
+		dir = fs.Arg(0)
+	default:
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	path, err := setup.Write(dir, *ref, *force)
+	if err != nil {
+		if path != "" {
+			err = fmt.Errorf("%s: %w", path, err)
+		}
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	key := filepath.Join("~/.config/invariant", strings.ReplaceAll(*repo, "/", "-")+"-deploy")
+	fmt.Printf(`Wrote %s. CI will build Invariant at %s and run its gate on every pull request.
+
+Next:
+1. Commit the workflow. The factory's App can't change CI, so a person does.
+2. Let CI read Invariant with a read-only deploy key:
+     ssh-keygen -t ed25519 -N "" -C "%s CI reads invariant" -f %s
+     gh repo deploy-key add %s.pub -R gitdek/invariant -t "%s CI (read-only)"
+     gh secret set INVARIANT_DEPLOY_KEY -R %s < %s
+     rm %s
+3. Add %s to the factory's App installation, under Repository access.
+4. Run the factory there:
+     invariant watch -repo %s -app-id APP_ID -projects invariant -language typescript
+`, setup.WorkflowPath, (*ref)[:12], *repo, key, key, *repo, *repo, key, key, *repo, *repo)
+	return 0
+}
+
+// buildCommit is the commit this binary was built from, when go build
+// recorded one from a clean checkout.
+func buildCommit() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	var rev string
+	for _, s := range info.Settings {
+		switch {
+		case s.Key == "vcs.revision":
+			rev = s.Value
+		case s.Key == "vcs.modified" && s.Value == "true":
+			return ""
+		}
+	}
+	return rev
 }

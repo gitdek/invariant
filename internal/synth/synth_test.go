@@ -226,3 +226,93 @@ func TestPromptByLanguage(t *testing.T) {
 		}
 	}
 }
+
+// A project that checks existing code owns its model, its driver and the
+// driver's helpers. The copies of the code it reads, and dependencies, never
+// come back from the agent (D-0054).
+func TestOwnedExisting(t *testing.T) {
+	m := project.Manifest{Module: ".invariant/specs/Leases.tla", Code: ".", Language: "typescript", Conformance: "conformance.ts", Existing: []string{"src/lib"}}
+	for rel, want := range map[string]bool{
+		".invariant/specs/Leases.tla": true,
+		"conformance.ts":              true,
+		"harness.ts":                  true,
+		"lib/steps.ts":                true,
+		".invariant/ratified.lock":    false,
+		".invariant/invariant.json":   false,
+		"existing/src/lib/store.ts":   false,
+		"package.json":                false,
+		"node_modules/zod/index.js":   false,
+		"lib/node_modules/x/index.js": false,
+	} {
+		if got := Owned(m, rel); got != want {
+			t.Errorf("Owned(%s) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
+// Every gate run stages the package around a project that checks existing
+// code: the package's files and the named code come from the package, the
+// project sits at its place in it, and the agent's copy of the code is
+// ignored.
+func TestStageExisting(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"package.json":      `{"name": "app"}`,
+		"package-lock.json": `{"lockfileVersion": 3}`,
+		"src/lib/store.ts":  "export class Store {}",
+		"src/app/page.tsx":  "not named, not staged",
+		"invariant/leases/.invariant/invariant.json":   `{"name": "leases", "module": ".invariant/specs/Leases.tla", "code": ".", "language": "typescript", "conformance": "conformance.ts", "existing": ["src/lib"]}`,
+		"invariant/leases/.invariant/ratified.lock":    `{"decision": "test", "bounds": {"N": "1"}, "statements": [{"name": "Spec", "kind": "spec", "says": "s", "sha256": ""}, {"name": "TypeOK", "kind": "invariant", "says": "t", "sha256": ""}]}`,
+		"invariant/leases/.invariant/specs/Leases.tla": "---- MODULE Leases ----\n====\n",
+	}
+	for name, text := range files {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(text), 0o644)
+	}
+	p, err := project.Load(filepath.Join(root, "invariant", "leases"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	for name, text := range map[string]string{
+		".invariant/specs/Leases.tla": "---- MODULE Leases ----\n\\* the agent's model\n====\n",
+		"conformance.ts":              "import { Store } from \"../../src/lib/store\";\n",
+		"existing/src/lib/store.ts":   "export class Store { hacked = true }",
+		"package.json":                `{"dependencies": {"left-pad": "1"}}`,
+	} {
+		p := filepath.Join(ws, filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(text), 0o644)
+	}
+	dir := t.TempDir()
+	proj, err := Stage(p, ws, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "invariant", "leases"); proj != want {
+		t.Fatalf("staged at %s, want %s", proj, want)
+	}
+	read := func(rel string) string {
+		b, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		return string(b)
+	}
+	if got := read("src/lib/store.ts"); got != "export class Store {}" {
+		t.Errorf("the staged code is %q; it must come from the package", got)
+	}
+	if read("src/app/page.tsx") != "" {
+		t.Error("staged code the project doesn't name")
+	}
+	if got := read("invariant/leases/conformance.ts"); !strings.Contains(got, "src/lib/store") {
+		t.Errorf("the driver is %q", got)
+	}
+	if !strings.Contains(read("invariant/leases/.invariant/specs/Leases.tla"), "the agent's model") {
+		t.Error("the agent's model didn't reach the staged project")
+	}
+	if read("invariant/leases/existing/src/lib/store.ts") != "" || read("invariant/leases/package.json") != "" {
+		t.Error("the agent's copy of the code, or its package.json, reached the gate")
+	}
+	if got := read("package.json"); got != `{"name": "app"}` {
+		t.Errorf("the package's manifest is %q", got)
+	}
+}

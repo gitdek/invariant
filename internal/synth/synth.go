@@ -85,6 +85,7 @@ type Result struct {
 	GateRuns []GateRun      `json:"gate_runs"`
 	Final    *verify.Report `json:"final"`
 	Tampered []string       `json:"tampered,omitempty"` // protected files the agent changed; the changes were discarded
+	Dir      string         `json:"dir"`                // the finished project, under Out/result
 	Seconds  float64        `json:"seconds"`
 }
 
@@ -140,6 +141,11 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	if len(p.Manifest.Existing) > 0 {
+		if err := seedExisting(p, ws); err != nil {
+			return nil, err
+		}
+	}
 	transcript, err := os.Create(filepath.Join(out, "transcript.jsonl"))
 	if err != nil {
 		return nil, err
@@ -161,10 +167,11 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	if r.Tampered, err = Tampered(p, ws); err != nil {
 		return nil, err
 	}
-	final := filepath.Join(out, "result")
-	if err := Assemble(p, ws, final); err != nil {
+	final, err := Stage(p, ws, filepath.Join(out, "result"))
+	if err != nil {
 		return nil, err
 	}
+	r.Dir = final
 	if r.Final, err = verify.Run(ctx, final, filepath.Join(out, "gate"), o.Toolchain); err != nil {
 		return nil, fmt.Errorf("the final gate couldn't run: %w", err)
 	}
@@ -231,6 +238,22 @@ func copyOwned(p *project.Project, ws string) error {
 }
 
 func owned(m project.Manifest, rel string) bool {
+	if len(m.Existing) > 0 {
+		// A project that checks existing code holds only the model, the
+		// driver and its helpers (D-0054). The copies of the code in
+		// existing/ are there to read, and never come back.
+		switch {
+		case rel == m.Module:
+			return true
+		case strings.HasPrefix(rel, ".invariant/"), strings.HasPrefix(rel, "existing/"):
+			return false
+		}
+		switch path.Base(rel) {
+		case "package.json", "package-lock.json", "node_modules":
+			return false
+		}
+		return !strings.Contains(rel, "node_modules/")
+	}
 	switch {
 	case rel == m.Module, m.Conformance != "" && rel == m.Conformance:
 		return true
@@ -289,6 +312,40 @@ func Assemble(p *project.Project, ws, dst string) error {
 		}
 		return copyFile(file, filepath.Join(dst, filepath.FromSlash(rel)))
 	})
+}
+
+// Stage assembles a project for the gate, as Assemble does, and returns its
+// directory. A project that checks existing code needs its package around
+// it (D-0054). So Stage lays the package's manifest, lockfile, tsconfig and
+// named code into dir from the ratified project's package, and the project
+// at its place in the package. The code always comes from the package,
+// never from the agent's workspace.
+func Stage(p *project.Project, ws, dir string) (string, error) {
+	if len(p.Manifest.Existing) == 0 {
+		return dir, Assemble(p, ws, dir)
+	}
+	root, rel, err := verify.PackageRoot(p.Dir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return "", err
+	}
+	if err := verify.StagePackage(root, p.Manifest.Existing, dir); err != nil {
+		return "", err
+	}
+	proj := filepath.Join(dir, filepath.FromSlash(rel))
+	return proj, Assemble(p, ws, proj)
+}
+
+// seedExisting copies the code a project checks into the agent's workspace,
+// under existing/, for it to read.
+func seedExisting(p *project.Project, ws string) error {
+	root, _, err := verify.PackageRoot(p.Dir)
+	if err != nil {
+		return err
+	}
+	return verify.StagePackage(root, p.Manifest.Existing, filepath.Join(ws, "existing"))
 }
 
 // Tampered lists the protected files the agent changed in its workspace.

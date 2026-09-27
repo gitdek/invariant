@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0054 · 2026-09-26 (every ratified or decided entry. D-0048 is proposed, so it isn't here yet)
+**Rolled up through** D-0055 · 2026-09-26 (every ratified or decided entry. D-0048 is proposed, so it isn't here yet)
 
 ## What Invariant is
 
@@ -35,6 +35,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Python: new cores are proved with Nagini, in files marked `# +nagini`, and still tested against the model by conformance. Existing code is tested by conformance alone. `D-0024` `D-0029` `D-0031`
   - TypeScript: tested against the model by conformance. No proof path yet. `D-0024` `D-0029`
 - The factory writes all three languages. Go is proved with Gobra, and Python is a core proved with Nagini. TypeScript is a state machine tested against the model in every state it can reach. An issue picks its language with an `invariant:typescript`, `invariant:python` or `invariant:go` label, and without one, the repository's default applies. `D-0038` `D-0039` `D-0040` `D-0043`
+- An existing-code project checks code that was already in its repository, without holding it or changing it. An issue names the code with `Code:` lines, and the project holds only the model and a conformance driver the factory writes. The gate runs the driver on the real code, in a throwaway copy of its package, and requires it to import every piece of code it checks. The receipt hashes that code. It's TypeScript only, for now. `D-0054` `D-0055`
 - When a project's conformance driver explores every state the code can reach, its manifest says so. The gate then requires the driver to visit every state the model reaches, so the code and the model reach exactly the same states. `D-0043`
 - Conformance: a project's driver calls the code's operations at random and records each state in the spec's vocabulary. TLC checks that every run starts in a state `Init` allows and that every step that changes the state is a `Next` step. Runs use a fixed seed, so receipts reproduce. TLC checks the steps in batches, so memory stays flat as models grow. `D-0029` `D-0047`
 - Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra, and Python cores with Nagini. Lean 4 has no role in v1. `D-0003` `D-0010` `D-0031`
@@ -44,6 +45,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Builds, tests and exploration run in `golang:1.27-alpine`, pinned by digest, on a throwaway copy.
   - TypeScript runs in `node:24-alpine` and Python in `python:3.13-alpine`, both pinned by digest and limited to the standard library. Type checking isn't run yet. `D-0030`
   - Nagini 1.3.1 runs in an image built from a recipe inside Invariant, for linux/amd64 only. Every input is pinned: the base by digest, the Java runtime by copying it from TLC's Temurin image, and every Python package by wheel hash. Receipts name the recipe by its hash. `D-0031` `D-0032`
+  - Existing TypeScript code runs in an image built from its package's own lockfile, starting from `node:24-bookworm-slim`, pinned by digest. Only that build has network. Receipts name its recipe. `D-0054` `D-0055`
   - Nothing runs with network access or with the host's environment.
 - Invariant converts TLC counterexamples into JSON traces. `D-0016`
 - Each project is its own Go module. `D-0020`
@@ -75,7 +77,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - A live dashboard shows what the factory is working on, each project's evidence, the roadmap and the decisions. `invariant dashboard` serves it from @gitdek's machine, and a Cloudflare tunnel publishes it at `invariant.puglisij.com`, open to anyone with the link. It moves to puglisij.com/invariant later. It has a light and a dark theme. `D-0049` `D-0050`
   - It only reads: GitHub through `gh`, CI's receipts from main, and TLC's own state graphs. It shows no code, comment bodies, emails or keys. `D-0051`
   - The watcher writes what it's doing to a status file for it. `D-0051`
-- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin`, `trace` and `dashboard` commands are built. `init` is specified but not yet built. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036` `D-0051`
+- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin`, `trace`, `dashboard` and `init` commands are built. `init` sets up another repository: it writes the gate workflow, pinned to a full commit of Invariant that CI reads through a read-only deploy key, and prints the steps only a person can take. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036` `D-0051` `D-0054` `D-0055`
 
 ## Merging
 
@@ -87,6 +89,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Every known bug is caught.
   - Go: the code, explored from `Init()` through `Successors()`, reaches exactly the states TLC found, at the same depth.
   - TypeScript and Python: every step the code took is a step the model allows.
+  - Existing code: the driver imports every piece of code the project checks. `D-0054`
   - Gobra verifies Go files marked `// +gobra`, Nagini verifies Python files marked `# +nagini`, and the receipt names any function neither saw. `D-0031`
   - CI is green.
   - The diff stays in scope. It changes one project and nothing else. It adds no dependencies: no Go modules, npm packages or Python requirements. It uses no cgo and doesn't edit `.github/`. It changes a ratified lock only by adding a new, ratified project, or as an amendment. An amendment's lock carries this pull request's issue's ratification, and amends exactly the lock on the base branch. `D-0014` `D-0036` `D-0043` `D-0045`

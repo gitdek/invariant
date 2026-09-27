@@ -39,10 +39,20 @@ func forksComment(forks []formalize.Fork, m Marker) string {
 	return post("a decision for you", b.String(), m)
 }
 
+// thenWhat says what the factory does once people ratify: write or change
+// code in the project's language, or, for existing code, run it as it is
+// against the model (D-0054).
+func thenWhat(p *formalize.Proposal, verb string) string {
+	if e := p.Manifest().Existing; len(e) > 0 {
+		return "I'll write a driver that runs " + list(e) + " as it is, and CI will check every step the code takes against the model. I never change that code"
+	}
+	return "I'll " + verb + " " + formalize.Languages[p.Manifest().Language]
+}
+
 func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's what I propose must always be true for **%s**. Once you ratify it, these statements are pinned by hash, and I can't change them. "+
-		"Then I'll write the code %s.\n\n", p.Name, formalize.Languages[p.Manifest().Language])
+		"Then %s.\n\n", p.Name, thenWhat(p, "write the code"))
 	b.WriteString("| Statement | Kind | Says |\n| :-- | :-- | :-- |\n")
 	for _, s := range p.Statements {
 		says := s.Says
@@ -75,8 +85,8 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	var b strings.Builder
 	t := p.Target
 	fmt.Fprintf(&b, "Here's how I propose to change **%s**, in `%s`. It amends the statements ratified in %s (proposal `%s`). "+
-		"Once you ratify it, the whole new set is pinned by hash. Then I'll change the code %s.\n\n",
-		p.Name, t.Dir, t.Previous, short(t.Amends), formalize.Languages[p.Manifest().Language])
+		"Once you ratify it, the whole new set is pinned by hash. Then %s.\n\n",
+		p.Name, t.Dir, t.Previous, short(t.Amends), thenWhat(p, "change the code"))
 	if ch == nil {
 		ch = &formalize.Changes{}
 	}

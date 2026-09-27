@@ -1,0 +1,81 @@
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  gate:
+    # The check the factory merges its pull requests on. invariant init
+    # wrote this workflow, and it runs Invariant's gate, pinned to one commit.
+    name: invariant/gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      # Invariant is private, so a read-only deploy key checks it out.
+      - uses: actions/checkout@v7
+        with:
+          repository: gitdek/invariant
+          ref: {{REF}}
+          path: .invariant-gate
+          ssh-key: ${{ secrets.INVARIANT_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: .invariant-gate/go.mod
+          cache: false
+
+      - name: Build the gate
+        run: |
+          go build -C .invariant-gate -o "$RUNNER_TEMP/invariant" ./cmd/invariant
+          rm -rf .invariant-gate
+
+      # The branch names the issue: invariant/issue-<n>-<slug>.
+      - name: Keep a factory pull request in scope
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          issue=$(printf '%s' "$HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
+          "$RUNNER_TEMP/invariant" scope -base "origin/$BASE" -issue "${issue:-0}" HEAD
+
+      # Every project in the repository, found rather than listed.
+      - name: Verify every project
+        run: |
+          status=0
+          for manifest in $(git ls-files '*/.invariant/invariant.json'); do
+            project="${manifest%/.invariant/invariant.json}"
+            echo "::group::$project"
+            "$RUNNER_TEMP/invariant" verify -out "out/$(basename "$project")" "$project" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Check who ratified each project
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          projects=$(git ls-files '*/.invariant/invariant.json' | sed 's#/.invariant/invariant.json$##')
+          if [ -n "$projects" ]; then
+            "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects
+          fi
+
+      - name: Upload the receipts and traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: receipts
+          path: out
+          if-no-files-found: ignore

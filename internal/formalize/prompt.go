@@ -1,6 +1,9 @@
 package formalize
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Prompt is the formalization task: the request, what to write, the rules
 // the gate enforces, and a worked example.
@@ -30,7 +33,22 @@ This issue changes an existing project, `+"`%s`"+`. What's ratified today is alr
 - If the issue isn't a change this project can take, set `+"`unsupported`"+` to one sentence saying why.
 `, c.Dir, c.ModuleName(), c.Previous())
 	}
-	return fmt.Sprintf(`You're the formalization step of Invariant, a code factory. Someone with write access to %s asked the factory to take on issue #%d. Nothing gets built until a person ratifies formal statements that say what must be true. Then the factory writes the code, %s, and checks it against exactly those statements. Your job is to draft the statements in TLA+, with a draft model that shows they hang together. When the issue leaves a real decision open, your job is to ask instead of guessing.
+	writes := "writes the code, " + Languages[language] + ","
+	if e := req.Existing; e != nil {
+		writes = "writes a driver that runs existing code, as it is,"
+		previous += `
+# The code this checks
+
+This issue asks the factory to check code that already exists, without changing it. Copies are in ` + "`existing/`" + `, for you to read: ` + backticked(e.Paths) + `. Read the code, and its tests beside it. The factory never changes this code. A conformance driver will run it instead, and TLC will check every step it takes against your model. So:
+
+- Draft the rules this code is meant to keep, as invariants: the ones its behavior, its tests and the issue show. Add known bugs for the mistakes that matter most, the kind the code's own tests guard against.
+- Make the model a small, faithful picture of what the code does in the part the issue names: its states, and every step it can take. The code is checked against the model step by step. A model that allows less than the code does will fail, and one that allows more will let bugs through. Model only the state the rules need, in words a driver can read back from the code, such as each job's status.
+- Keep the bounds small, such as one or two jobs, two workers and two attempts. A driver will run the real code within them.
+- Don't read intent into the code. Where the code, its tests and the issue disagree, or where it's unclear what the code should do, ask a fork. Checking what the code does against rules nobody chose would prove nothing.
+- ` + "`package`" + ` isn't used for existing code. Set it to the slug without dashes.
+`
+	}
+	return fmt.Sprintf(`You're the formalization step of Invariant, a code factory. Someone with write access to %s asked the factory to take on issue #%d. Nothing gets built until a person ratifies formal statements that say what must be true. Then the factory %s and checks it against exactly those statements. Your job is to draft the statements in TLA+, with a draft model that shows they hang together. When the issue leaves a real decision open, your job is to ask instead of guessing.
 
 # The request
 
@@ -144,5 +162,20 @@ Spec == Init /\ [][Next]_vars
   "forks": []
 }
 `+"```"+`
-`, req.Repo, req.Issue, Languages[language], req.Markdown(), previous, checks)
+`, req.Repo, req.Issue, writes, req.Markdown(), previous, checks)
+}
+
+// backticked lists paths in code spans: `a`, `b` and `c`.
+func backticked(paths []string) string {
+	quoted := make([]string, len(paths))
+	for i, p := range paths {
+		quoted[i] = "`" + p + "`"
+	}
+	switch len(quoted) {
+	case 0:
+		return ""
+	case 1:
+		return quoted[0]
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " and " + quoted[len(quoted)-1]
 }

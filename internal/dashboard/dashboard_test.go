@@ -142,15 +142,15 @@ func TestAnOpenIssueIsWaitingOnSomeone(t *testing.T) {
 	if l.Stage != StageRatifying || !last.Open || last.Who != WhoPeople || l.PeopleSeconds != 50*60 {
 		t.Fatalf("stage %s, last span %+v, people %ds", l.Stage, last, l.PeopleSeconds)
 	}
-	n := nowLine(Watcher{}, []Issue{l})
+	n := nowLine([]namedWatcher{{repo: "gitdek/invariant"}}, []Issue{l}, "gitdek/invariant")
 	if n.Headline != "Waiting for a person to ratify #7" || n.WaitingOn != WhoPeople || n.Since == nil {
 		t.Errorf("now %+v", n)
 	}
-	n = nowLine(Watcher{Running: true, Issue: 7, Doing: "building"}, []Issue{l})
+	n = nowLine([]namedWatcher{{repo: "gitdek/invariant", w: Watcher{Running: true, Issue: 7, Doing: "building"}}}, []Issue{l}, "gitdek/invariant")
 	if n.Headline != "Writing the code for #7" || n.Detail != "Refuse duplicates" {
 		t.Errorf("now %+v", n)
 	}
-	if n := nowLine(Watcher{}, nil); n.Stage != "idle" || !strings.Contains(n.Headline, "switched off") {
+	if n := nowLine(nil, nil, "gitdek/invariant"); n.Stage != "idle" || !strings.Contains(n.Headline, "switched off") {
 		t.Errorf("now %+v", n)
 	}
 }
@@ -222,5 +222,21 @@ func TestHandlerServesOnlyThePage(t *testing.T) {
 	}
 	if w := get("GET", "/app.js?v="+version); w.Code != 200 || !strings.Contains(w.Header().Get("Cache-Control"), "immutable") {
 		t.Errorf("app.js: %d %q", w.Code, w.Header().Get("Cache-Control"))
+	}
+}
+
+func TestAnotherRepositorysIssuesAreNamed(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	l := Issue{Repo: "gitdek/copythis-ad", Number: 1, Title: "Check leases", Open: true, Stage: StageAsking,
+		Spans: []Span{{From: now.Add(-time.Minute), To: now, Who: WhoPeople, Open: true}}}
+	if n := nowLine(nil, []Issue{l}, "gitdek/invariant"); n.Headline != "Waiting for answers on copythis-ad#1" || n.Repo != "gitdek/copythis-ad" {
+		t.Errorf("now %+v", n)
+	}
+	w := []namedWatcher{{repo: "gitdek/invariant", w: Watcher{Running: true}}, {repo: "gitdek/copythis-ad", w: Watcher{Running: true, Issue: 1, Doing: "formalizing"}}}
+	if n := nowLine(w, []Issue{l}, "gitdek/invariant"); n.Headline != "Drafting what must be true for copythis-ad#1" {
+		t.Errorf("now %+v", n)
+	}
+	if got := combined([]RepoState{{Factory: Watcher{Running: true}}, {Factory: Watcher{Running: true, Issue: 1, Doing: "building"}}}); got.Doing != "building" {
+		t.Errorf("the top bar should show the watcher that's working: %+v", got)
 	}
 }

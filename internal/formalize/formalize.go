@@ -59,6 +59,10 @@ type Draft struct {
 	// Language is the code's language: go, typescript or python. The factory
 	// sets it from the issue's labels (D-0040); the agent doesn't choose it.
 	Language string `json:"language,omitempty"`
+	// Existing is the code the project checks without holding it, for an
+	// issue that names code with Code: lines (D-0054). The factory sets it,
+	// like the language.
+	Existing []string `json:"existing,omitempty"`
 }
 
 // Proposal is a draft the factory has pinned: its statements carry the hash
@@ -187,6 +191,12 @@ func (p *Proposal) Manifest() project.Manifest {
 		return p.Target.Manifest
 	}
 	m := project.Manifest{Name: p.Name, Module: ".invariant/specs/" + p.Module + ".tla", Code: p.Package, Language: "go"}
+	if len(p.Existing) > 0 {
+		// The project holds a model and a driver, and checks the named code
+		// where it is (D-0054).
+		m.Language, m.Code, m.Conformance, m.Existing = "typescript", ".", "conformance.ts", p.Existing
+		return m
+	}
 	switch p.Language {
 	case "typescript":
 		m.Language, m.Code, m.Conformance, m.Exhaustive = "typescript", "src", "conformance.ts", true

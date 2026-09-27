@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -29,6 +30,11 @@ type Manifest struct {
 	// state the model reaches. The factory's TypeScript and Python are
 	// written this way (D-0038, D-0039).
 	Exhaustive bool `json:"exhaustive,omitempty"`
+	// Existing names code the project checks without holding it (D-0054):
+	// files and directories outside the project, relative to the root of
+	// the package they belong to, such as src/lib. The conformance driver
+	// runs that code where it is, and the factory never changes it.
+	Existing []string `json:"existing,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,
@@ -127,6 +133,16 @@ func (p *Project) validate() error {
 	m, l := p.Manifest, p.Lock
 	if m.Module == "" || m.Code == "" {
 		return fmt.Errorf("%s: module and code are required", manifestFile)
+	}
+	if len(m.Existing) > 0 {
+		if m.Language != "typescript" || m.Conformance == "" {
+			return fmt.Errorf("%s: a project that checks existing code needs a TypeScript conformance driver", manifestFile)
+		}
+		for _, e := range m.Existing {
+			if clean := path.Clean(e); e == "" || clean != e || path.IsAbs(e) || e == "." || strings.HasPrefix(e, "../") || e == ".." || strings.Contains(e, `\`) {
+				return fmt.Errorf("%s: existing code %q must be a clean path inside its package", manifestFile, e)
+			}
+		}
 	}
 	if len(l.Bounds) == 0 {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)
