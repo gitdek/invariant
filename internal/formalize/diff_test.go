@@ -63,7 +63,7 @@ func TestDiff(t *testing.T) {
 	if p.Target == nil || p.Target.Dir != c.Dir || p.Target.Previous != "#1" || p.Target.Amends != project.ProposalHash(c.Lock.Bounds, c.Lock.Statements) {
 		t.Errorf("target = %+v", p.Target)
 	}
-	if m := p.Manifest(); m != c.Manifest {
+	if m := p.Manifest(); !reflect.DeepEqual(m, c.Manifest) {
 		t.Errorf("an amendment keeps the project's manifest: %+v", m)
 	}
 }

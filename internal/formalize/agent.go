@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,15 @@ type Request struct {
 	Answers  []Answer  // the forks people decided
 	Previous *Proposal // the draft people asked to revise, if any
 	Current  *Current  // the project an amendment changes, if any (D-0045)
+	Existing *Existing // the existing code the issue asks the factory to check, if any (D-0054)
+}
+
+// Existing is code an issue names for the factory to check as it is: its
+// paths in the package, and a directory holding them as they are on the
+// base branch.
+type Existing struct {
+	Paths []string
+	Root  string
 }
 
 // Current is an existing project as it stands: what an amendment starts
@@ -80,6 +90,12 @@ func (r Request) Markdown() string {
 			fmt.Fprintf(&b, "- **%s. %s** %s. %s (decided by @%s: %s)\n", a.Fork, a.Question, a.Option, a.Says, a.By, a.Comment)
 		}
 	}
+	if e := r.Existing; e != nil {
+		b.WriteString("\n## The code to check\n\nThe factory checks this code as it is, and never changes it:\n\n")
+		for _, p := range e.Paths {
+			fmt.Fprintf(&b, "- `%s`\n", p)
+		}
+	}
 	if len(r.Thread) > 0 {
 		b.WriteString("\n## Discussion\n")
 		for _, m := range r.Thread {
@@ -127,6 +143,15 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			return nil, err
 		}
 	}
+	// The existing code is there to read. The factory never takes anything
+	// back from existing/.
+	if e := req.Existing; e != nil {
+		for _, p := range e.Paths {
+			if err := copyPath(filepath.Join(e.Root, filepath.FromSlash(p)), filepath.Join(ws, "existing", filepath.FromSlash(p))); err != nil {
+				return nil, fmt.Errorf("the existing code %s: %w", p, err)
+			}
+		}
+	}
 	if p := req.Previous; p != nil {
 		b, err := json.MarshalIndent(p.Draft, "", "  ")
 		if err != nil {
@@ -164,6 +189,9 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	p, report, err := Check(ctx, ws, f.Toolchain)
 	if p != nil {
 		p.Language = req.Language
+		if e := req.Existing; e != nil {
+			p.Existing, p.Language = e.Paths, "typescript"
+		}
 	}
 	if c := req.Current; p != nil && err == nil {
 		if err = p.Amend(c); err == nil && p.Ratifiable() {
@@ -192,6 +220,31 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	b, _ := json.MarshalIndent(r, "", "  ")
 	os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
 	return r, nil
+}
+
+// copyPath copies a file, or a directory and everything in it.
+func copyPath(from, to string) error {
+	return filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(from, p)
+		target := filepath.Join(to, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o644)
+	})
 }
 
 func readRuns(path string) ([]synth.GateRun, error) {

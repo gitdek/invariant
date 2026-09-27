@@ -42,6 +42,7 @@ const (
 // Issue is one issue the factory took, as a lane on the page: what happened
 // when, who it was waiting on in between, and the measures D-0048 tracks.
 type Issue struct {
+	Repo           string     `json:"repo"`
 	Number         int        `json:"number"`
 	Title          string     `json:"title"`
 	Open           bool       `json:"open"`
@@ -66,6 +67,7 @@ type Issue struct {
 // commit or a CI run.
 type Event struct {
 	At    time.Time `json:"at"`
+	Repo  string    `json:"repo,omitempty"`
 	Issue int       `json:"issue,omitempty"`
 	Who   string    `json:"who"`          // factory, person or ci
 	By    string    `json:"by,omitempty"` // the person's login

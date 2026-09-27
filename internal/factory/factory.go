@@ -61,6 +61,7 @@ type Repo interface {
 	Push(ctx context.Context, worktree, branch string) error
 	RevParse(ctx context.Context, ref string) (string, error)
 	Show(ctx context.Context, ref, file string) ([]byte, error)
+	Export(ctx context.Context, ref string, paths []string, dst string) error
 	Scope(ctx context.Context, base, head string, issue int) (scope.Result, error)
 }
 
@@ -390,6 +391,30 @@ func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.A
 			newDir = dir
 		}
 	}
+	// Code: lines name existing code for the factory to check as it is
+	// (D-0054). The formalizer reads it as it is on the base branch.
+	if paths := codeLines(t.Issue.Body); len(paths) > 0 {
+		for _, p := range paths {
+			if problem := badDir(p); problem != "" {
+				return f.say(ctx, n, stuckComment("The issue names the code `"+p+"`, but "+problem+".", Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+			}
+		}
+		if req.Current != nil && len(req.Current.Manifest.Existing) == 0 {
+			return f.say(ctx, n, stuckComment("The issue names code to check, but `"+req.Current.Dir+"` is a project that holds its own code. Name a new directory with the Project: line instead.", Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+		}
+		root, err := os.MkdirTemp("", "invariant-existing-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(root)
+		if err := f.Repo.Fetch(ctx); err != nil {
+			return err
+		}
+		if err := f.Repo.Export(ctx, "origin/"+f.Base, paths, root); err != nil {
+			return f.say(ctx, n, stuckComment(fmt.Sprintf("The issue names code to check, and I couldn't read it on `%s`: %v", f.Base, err), Marker{Kind: KindStuck, ReplyTo: replyTo}), LabelHumanReview)
+		}
+		req.Existing, req.Language = &formalize.Existing{Paths: paths, Root: root}, "typescript"
+	}
 	res, err := f.Formalizer.Formalize(ctx, req, out)
 	if err == nil && res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
@@ -438,6 +463,29 @@ func projectLine(body string) string {
 		}
 	}
 	return ""
+}
+
+// codeLines reads the existing code an issue names for the factory to
+// check, one `Code: <path>` line each (D-0054).
+func codeLines(body string) []string {
+	var paths []string
+	fenced := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") {
+			fenced = !fenced
+			continue
+		}
+		if fenced {
+			continue
+		}
+		if name, p, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "code") {
+			if p = strings.Trim(strings.TrimSpace(p), "`/"); p != "" {
+				paths = append(paths, p)
+			}
+		}
+	}
+	return paths
 }
 
 // badDir says what's wrong with a project directory an issue names.
@@ -723,7 +771,11 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	if err := removeOwned(root); err != nil {
 		return err
 	}
-	if err := copyResult(filepath.Join(out, "result"), root); err != nil {
+	result := res.Dir
+	if result == "" {
+		result = filepath.Join(out, "result")
+	}
+	if err := copyResult(result, root); err != nil {
 		return err
 	}
 	verdict := "passed the gate"

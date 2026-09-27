@@ -26,6 +26,11 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
   const langName = { go: "Go", typescript: "TypeScript", python: "Python" };
+  // An issue in Invariant's own repository is #5; one elsewhere is
+  // copythis-ad#1.
+  const short = (repo) => (repo || "").split("/").pop();
+  const ref = (repo, n) => (repo && state && repo !== state.repo ? short(repo) : "") + "#" + n;
+  const issueKey = (is) => `${is.repo || ""}#${is.number}`;
 
   // ---------- time ----------
   const T = (ts) => (ts ? new Date(ts).getTime() : 0);
@@ -86,8 +91,8 @@
 
   function render(s) {
     renderTop(s);
-    if (changed("now", [s.now, s.factory, s.main, s.receipts?.id])) renderNow(s);
-    if (changed("orbit", [s.issues.map((i) => [i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
+    if (changed("now", [s.now, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
+    if (changed("orbit", [s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("numbers", [s.totals, s.who.ratified])) renderNumbers(s);
     if (changed("models", s.projects.map((p) => [p.model, p.graph, p.states]))) renderTabs(s);
     if (changed("lanes", s.issues)) renderLanes(s.issues);
@@ -124,7 +129,7 @@
     const lastMerged = s.issues.find((i) => i.stage === "merged");
     if (n.stage === "idle" && lastMerged) {
       const when = lastMerged.closed ? `, <span data-ago="${esc(lastMerged.closed)}"></span>` : "";
-      d.innerHTML = `Last merged <b>#${lastMerged.pr}</b> for #${lastMerged.number}, <q>${esc(lastMerged.title)}</q>${when}.`;
+      d.innerHTML = `Last merged <b>${esc(ref(lastMerged.repo, lastMerged.pr))}</b> for ${esc(ref(lastMerged.repo, lastMerged.number))}, <q>${esc(lastMerged.title)}</q>${when}.`;
     } else {
       d.innerHTML = n.detail ? `<q>${esc(n.detail)}</q>` : "";
     }
@@ -154,6 +159,18 @@
       rows.push(`<div><span class="k">CI</span><span>${gate}</span></div>`);
     }
     if (s.receipts) rows.push(`<div><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>, <span data-ago="${esc(s.receipts.updated)}"></span></span></div>`);
+    for (const r of s.repos || []) {
+      if (r.primary) continue;
+      let gate = `<span class="muted">no gate run yet</span>`;
+      if (r.gate) {
+        const g = r.gate;
+        if (g.status !== "completed") gate = `<span class="run">● gate running</span>`;
+        else if (g.conclusion === "success") gate = `<span class="ok">✓ gate passed</span> on <code>${esc(g.sha.slice(0, 7))}</code>`;
+        else gate = `<span class="bad">✕ gate ${esc(g.conclusion)}</span>`;
+      }
+      const f = r.factory?.running ? "factory on" : "factory off";
+      rows.push(`<div><span class="k">${esc(r.short)}</span><span>${gate} · ${f} · ${r.projects} project${r.projects === 1 ? "" : "s"}</span></div>`);
+    }
     $("#mainline").innerHTML = rows.join("");
   }
 
@@ -221,7 +238,7 @@
       $("#moons").innerHTML = merged.map((is, i) => {
         const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137) % 360;
         const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start}" to="${start + 360}" dur="${per}s" repeatCount="indefinite"/>`;
-        return `<g transform="rotate(${start})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>#${is.number} ${esc(is.title)}: merged #${is.pr}</title></circle></g>`;
+        return `<g transform="rotate(${start})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
       }).join("");
       // Open issues sit at their stage.
       const open = s.issues.filter((i) => i.open);
@@ -240,12 +257,13 @@
       });
       dots.innerHTML = want.map(({ is }) => {
         const bug = is.stage === "review";
-        return `<g data-n="${is.number}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" x="12" y="4">#${is.number}</text><title>#${is.number} ${esc(is.title)}</title></g>`;
+        return `<g data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" x="12" y="4">${esc(ref(is.repo, is.number))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
       }).join("");
       want.forEach(({ is, angle }) => {
-        const from = this.angles.has(is.number) ? this.angles.get(is.number) : stationAngle(0);
-        this.angles.set(is.number, angle);
-        const g = dots.querySelector(`[data-n="${is.number}"]`);
+        const k = issueKey(is);
+        const from = this.angles.has(k) ? this.angles.get(k) : stationAngle(0);
+        this.angles.set(k, angle);
+        const g = [...dots.children].find((el) => el.dataset.n === k);
         const place = (a) => g.setAttribute("transform", `translate(${ORBIT_R * Math.cos(a)},${ORBIT_R * Math.sin(a)})`);
         if (REDUCED || from === angle) return place(angle);
         let to = angle;
@@ -770,9 +788,9 @@
         stageChip[is.stage] || "",
       ].join("");
       return `<article class="lane">
-        <div class="lane-head"><span class="no">#${is.number}</span><span class="title">${esc(is.title)}</span><span class="chips">${chips}</span></div>
+        <div class="lane-head"><span class="no">${esc(ref(is.repo, is.number))}</span><span class="title">${esc(is.title)}</span><span class="chips">${chips}</span></div>
         <div class="track">${segs}${marks}</div>
-        <div class="lane-foot"><span>factory <b>${dur(is.factorySeconds)}</b></span><span class="p">waiting on people <b>${dur(is.peopleSeconds)}</b></span><span><b>${is.peopleComments}</b> comment${is.peopleComments === 1 ? "" : "s"} from people</span>${is.questions ? `<span><b>${is.questions}</b> question${is.questions === 1 ? "" : "s"} asked</span>` : ""}${is.statements ? `<span><b>${is.statements}</b> statements</span>` : ""}${is.pr ? `<span>pull request <b>#${is.pr}</b></span>` : ""}</div>
+        <div class="lane-foot"><span>factory <b>${dur(is.factorySeconds)}</b></span><span class="p">waiting on people <b>${dur(is.peopleSeconds)}</b></span><span><b>${is.peopleComments}</b> comment${is.peopleComments === 1 ? "" : "s"} from people</span>${is.questions ? `<span><b>${is.questions}</b> question${is.questions === 1 ? "" : "s"} asked</span>` : ""}${is.statements ? `<span><b>${is.statements}</b> statements</span>` : ""}${is.pr ? `<span>pull request <b>${esc(ref(is.repo, is.pr))}</b></span>` : ""}</div>
       </article>`;
     }).join("");
     if (lanesShown || REDUCED) box.classList.add("shown");
@@ -798,13 +816,13 @@
       else if ((p.visited || 0) >= p.states) evidence = ["every state", "Code reached"];
       else evidence = [`${nf.format(p.visited || 0)}/${nf.format(p.states)}`, "States the code ran"];
       let prov = "Hand-built, before the factory";
-      if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on #${p.ratified.issue}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
+      if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
       else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
       return `<article class="card" data-model="${p.model}" tabindex="0">
         <canvas class="thumb" data-model="${p.model}" width="150" height="150"></canvas>
         <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${esc(p.assurance)}</span></div>
         <h3>${esc(cap(p.name))}</h3>
-        <p class="dir">${esc(p.dir)}</p>
+        <p class="dir">${p.repo && p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</p>
         <dl class="metrics">
           <div><dt>States</dt><dd>${nf.format(p.states)}</dd></div>
           <div><dt>Statements</dt><dd>${p.statements.length}</dd></div>
@@ -916,14 +934,15 @@
   function renderActivity(items) {
     const first = known.size === 0;
     $("#activity").innerHTML = items.slice(0, 16).map((e, k) => {
-      const key = `${e.at}|${e.who}|${e.kind}|${e.text}`;
+      const key = `${e.repo}|${e.at}|${e.who}|${e.kind}|${e.text}`;
       const fresh = !known.has(key);
       known.add(key);
       let text;
-      if (e.who === "factory") text = `<span class="who">Invariant</span> ${esc(e.text)} on #${e.issue}`;
-      else if (e.who === "person") text = e.kind === "opened" ? `<span class="who">@${esc(e.by)}</span> opened #${e.issue}` : `<span class="who">@${esc(e.by)}</span> ${esc(e.text)} on #${e.issue}`;
+      const on = esc(ref(e.repo, e.issue));
+      if (e.who === "factory") text = `<span class="who">Invariant</span> ${esc(e.text)} on ${on}`;
+      else if (e.who === "person") text = e.kind === "opened" ? `<span class="who">@${esc(e.by)}</span> opened ${on}` : `<span class="who">@${esc(e.by)}</span> ${esc(e.text)} on ${on}`;
       else if (e.who === "commit") text = `<span class="who">@${esc(e.by)}</span> committed <code>${esc(e.kind)}</code> ${esc(e.text)}`;
-      else text = `<span class="who">CI</span> ${esc(e.text)}`;
+      else text = `<span class="who">CI</span> ${e.repo && e.repo !== state.repo ? esc(short(e.repo)) + "'s " : ""}${esc(e.text)}`;
       const style = fresh ? `style="animation-delay:${first ? k * 45 : 0}ms"` : `style="animation:none"`;
       return `<li class="${esc(e.who)} ${esc(e.kind)}" ${style}>${text}<span class="when" data-ago="${esc(e.at)}" title="${esc(stamp(e.at))}"></span></li>`;
     }).join("");

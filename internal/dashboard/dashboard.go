@@ -31,13 +31,13 @@ import (
 
 // Server keeps the dashboard's data fresh and serves it with the page.
 type Server struct {
-	Repo   string // owner/name
-	Branch string // the branch the factory merges into
-	GitHub github.Client
-	Self   string      // the factory's bot login; empty tells its posts apart by marker alone
+	// Repos are the repositories the page shows. The first is Invariant's
+	// own: the decisions, the roadmap and the commits come from it. The
+	// others show their factory work only (D-0054).
+	Repos  []*Repo
+	Branch string      // the branch the factory merges into
 	Runner *tlc.Runner // draws state graphs; nil leaves them out
 	Cache  string      // where drawn graphs are kept between runs
-	Status string      // the watcher's status file
 	Every  time.Duration
 	Log    func(format string, args ...any)
 
@@ -46,9 +46,19 @@ type Server struct {
 	graphs  map[string][]byte
 	drawing map[string]bool
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
-	src     sources
 	pending chan graphJob
 }
+
+// Repo is one repository the page shows.
+type Repo struct {
+	Name   string // owner/name
+	GitHub github.Client
+	Status string // its watcher's status file
+	src    sources
+}
+
+// Short is the repository's name without its owner.
+func (r *Repo) Short() string { return path.Base(r.Name) }
 
 // sources is the last good read of everything the snapshot is built from,
 // so one source failing leaves the rest fresh.
@@ -101,20 +111,32 @@ type graphJob struct {
 
 // Snapshot is everything the page draws, as of GeneratedAt.
 type Snapshot struct {
-	Repo        string     `json:"repo"`
-	GeneratedAt time.Time  `json:"generatedAt"`
-	Factory     Watcher    `json:"factory"`
-	Now         Now        `json:"now"`
-	Issues      []Issue    `json:"issues"`
-	Main        *MainState `json:"main,omitempty"`
-	Projects    []Project  `json:"projects"`
-	Receipts    *RunRef    `json:"receipts,omitempty"` // the CI run the receipts come from
-	Decisions   Decisions  `json:"decisions"`
-	Slices      []Slice    `json:"slices"`
-	Totals      Totals     `json:"totals"`
-	Who         Who        `json:"who"`
-	Activity    []Event    `json:"activity"`
-	Stale       []string   `json:"stale,omitempty"` // sources that couldn't be read this time
+	Repo        string      `json:"repo"`
+	GeneratedAt time.Time   `json:"generatedAt"`
+	Factory     Watcher     `json:"factory"`
+	Now         Now         `json:"now"`
+	Issues      []Issue     `json:"issues"`
+	Repos       []RepoState `json:"repos"`
+	Main        *MainState  `json:"main,omitempty"`
+	Projects    []Project   `json:"projects"`
+	Receipts    *RunRef     `json:"receipts,omitempty"` // the CI run the receipts come from
+	Decisions   Decisions   `json:"decisions"`
+	Slices      []Slice     `json:"slices"`
+	Totals      Totals      `json:"totals"`
+	Who         Who         `json:"who"`
+	Activity    []Event     `json:"activity"`
+	Stale       []string    `json:"stale,omitempty"` // sources that couldn't be read this time
+}
+
+// RepoState is one repository's line on the page.
+type RepoState struct {
+	Name     string  `json:"name"`
+	Short    string  `json:"short"`
+	Primary  bool    `json:"primary"`
+	Factory  Watcher `json:"factory"`
+	Gate     *RunRef `json:"gate,omitempty"`     // the newest gate run on the branch
+	Receipts *RunRef `json:"receipts,omitempty"` // the run its receipts come from
+	Projects int     `json:"projects"`
 }
 
 // Watcher is the factory's watcher, as its status file tells it.
@@ -133,6 +155,7 @@ type Now struct {
 	Headline  string     `json:"headline"`
 	Detail    string     `json:"detail,omitempty"`
 	Issue     int        `json:"issue,omitempty"`
+	Repo      string     `json:"repo,omitempty"`
 	Stage     string     `json:"stage"`               // idle, or the issue's stage
 	WaitingOn string     `json:"waitingOn,omitempty"` // factory, people or ci
 	Since     *time.Time `json:"since,omitempty"`
@@ -158,6 +181,7 @@ type RunRef struct {
 
 // Project is one project's evidence, from CI's receipt for it.
 type Project struct {
+	Repo        string            `json:"repo"`
 	Dir         string            `json:"dir"`
 	Name        string            `json:"name"`
 	Language    string            `json:"language"`
@@ -253,7 +277,9 @@ type Who struct {
 // Start reads everything once, then keeps it fresh until ctx ends.
 func (s *Server) Start(ctx context.Context) {
 	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
-	s.src.comments, s.src.files, s.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
+	for _, r := range s.Repos {
+		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
+	}
 	s.pending = make(chan graphJob, 64)
 	go s.drawGraphs(ctx)
 	go func() {
@@ -274,49 +300,57 @@ func (s *Server) Start(ctx context.Context) {
 
 func (s *Server) refresh(ctx context.Context) error {
 	var stale []string
-	fail := func(what string, err error) {
-		s.logf("%s: %v", what, err)
-		stale = append(stale, what)
-	}
-	if issues, err := s.GitHub.Issues(ctx, factory.LabelTrigger); err != nil {
-		fail("issues", err)
-	} else {
-		s.src.issues = issues
-		for _, is := range issues {
-			if c, ok := s.src.comments[is.Number]; ok && c.updated == is.UpdatedAt {
-				continue
-			}
-			comments, err := s.GitHub.Comments(ctx, is.Number)
-			if err != nil {
-				fail(fmt.Sprintf("comments on #%d", is.Number), err)
-				continue
-			}
-			s.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
+	for i, r := range s.Repos {
+		fail := func(what string, err error) {
+			s.logf("%s: %s: %v", r.Name, what, err)
+			stale = append(stale, r.Short()+" "+what)
 		}
-	}
-	if commits, err := s.GitHub.Commits(ctx, s.Branch, 100); err != nil {
-		fail("commits", err)
-	} else {
-		s.src.commits = commits
-	}
-	if runs, err := s.GitHub.Runs(ctx, s.Branch, 30); err != nil {
-		fail("CI runs", err)
-	} else {
-		s.src.runs = runs
-	}
-	if err := s.readReceipts(ctx); err != nil {
-		fail("receipts", err)
-	}
-	if set := s.src.receipts; set != nil {
-		for _, p := range s.src.projects {
-			name := path.Base(p.dir)
-			s.queueGraph(graphJob{key: p.key, source: p, report: set.reports[name], traces: set.traces[name]})
+		if issues, err := r.GitHub.Issues(ctx, factory.LabelTrigger); err != nil {
+			fail("issues", err)
+		} else {
+			r.src.issues = issues
+			for _, is := range issues {
+				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt {
+					continue
+				}
+				comments, err := r.GitHub.Comments(ctx, is.Number)
+				if err != nil {
+					fail(fmt.Sprintf("comments on #%d", is.Number), err)
+					continue
+				}
+				r.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
+			}
 		}
+		// Only Invariant's own commits are shown. Another repository's
+		// commits are its own business.
+		if i == 0 {
+			if commits, err := r.GitHub.Commits(ctx, s.Branch, 100); err != nil {
+				fail("commits", err)
+			} else {
+				r.src.commits = commits
+			}
+		}
+		if runs, err := r.GitHub.Runs(ctx, s.Branch, 30); err != nil {
+			fail("CI runs", err)
+		} else {
+			r.src.runs = runs
+		}
+		if err := s.readReceipts(ctx, r); err != nil {
+			fail("receipts", err)
+		}
+		if set := r.src.receipts; set != nil {
+			for _, p := range r.src.projects {
+				name := path.Base(p.dir)
+				s.queueGraph(graphJob{key: p.key, source: p, report: set.reports[name], traces: set.traces[name]})
+			}
+		}
+		if i == 0 {
+			if err := s.readDocs(ctx, r); err != nil {
+				fail("docs", err)
+			}
+		}
+		s.checkMerges(ctx, r)
 	}
-	if err := s.readDocs(ctx); err != nil {
-		fail("docs", err)
-	}
-	s.checkMerges(ctx)
 
 	snap := s.assemble(time.Now().UTC())
 	snap.Stale = stale
@@ -336,21 +370,21 @@ func (s *Server) refresh(ctx context.Context) error {
 
 // readReceipts takes the receipts from the newest gate run on the branch
 // that passed, and the projects as they were at that commit.
-func (s *Server) readReceipts(ctx context.Context) error {
+func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 	var run *github.Run
-	for i, r := range s.src.runs {
-		if r.Name == "gate" && r.Status == "completed" && r.Conclusion == "success" {
-			run = &s.src.runs[i]
+	for i, run2 := range r.src.runs {
+		if run2.Name == "gate" && run2.Status == "completed" && run2.Conclusion == "success" {
+			run = &r.src.runs[i]
 			break
 		}
 	}
 	if run == nil {
-		return errors.New("no gate run on the branch has passed yet")
+		return nil // no gate run on the branch has passed yet, so there are no receipts
 	}
-	if s.src.receipts != nil && s.src.receipts.run.ID == run.ID {
+	if r.src.receipts != nil && r.src.receipts.run.ID == run.ID {
 		return nil
 	}
-	arts, err := s.GitHub.Artifacts(ctx, run.ID)
+	arts, err := r.GitHub.Artifacts(ctx, run.ID)
 	if err != nil {
 		return err
 	}
@@ -363,7 +397,7 @@ func (s *Server) readReceipts(ctx context.Context) error {
 	if id == 0 {
 		return fmt.Errorf("gate run %d has no receipts", run.ID)
 	}
-	raw, err := s.GitHub.Download(ctx, id)
+	raw, err := r.GitHub.Download(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -372,11 +406,11 @@ func (s *Server) readReceipts(ctx context.Context) error {
 		return err
 	}
 	set.run = *run
-	projects, err := s.readProjects(ctx, run.HeadSHA)
+	projects, err := s.readProjects(ctx, r, run.HeadSHA)
 	if err != nil {
 		return err
 	}
-	s.src.receipts, s.src.projects = set, projects
+	r.src.receipts, r.src.projects = set, projects
 	return nil
 }
 
@@ -428,8 +462,8 @@ func readReceiptZip(raw []byte) (*receiptSet, error) {
 
 // readProjects finds every project at a commit, the way CI does, and reads
 // what's needed to draw its model.
-func (s *Server) readProjects(ctx context.Context, sha string) ([]projectSource, error) {
-	tree, err := s.GitHub.Tree(ctx, sha)
+func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]projectSource, error) {
+	tree, err := r.GitHub.Tree(ctx, sha)
 	if err != nil {
 		return nil, err
 	}
@@ -440,14 +474,14 @@ func (s *Server) readProjects(ctx context.Context, sha string) ([]projectSource,
 		}
 		dir := strings.TrimSuffix(e.Path, "/.invariant/invariant.json")
 		p := projectSource{dir: dir, files: map[string][]byte{}}
-		raw, err := s.file(ctx, sha, e.Path)
+		raw, err := s.file(ctx, r, sha, e.Path)
 		if err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &p.manifest); err != nil {
 			return nil, fmt.Errorf("%s: %w", e.Path, err)
 		}
-		if raw, err = s.file(ctx, sha, dir+"/.invariant/ratified.lock"); err != nil {
+		if raw, err = s.file(ctx, r, sha, dir+"/.invariant/ratified.lock"); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &p.lock); err != nil {
@@ -459,7 +493,7 @@ func (s *Server) readProjects(ctx context.Context, sha string) ([]projectSource,
 		h := sha256.New()
 		for _, f := range tree {
 			if f.Type == "blob" && strings.HasPrefix(f.Path, specs) && !strings.Contains(strings.TrimPrefix(f.Path, specs), "/") && strings.HasSuffix(f.Path, ".tla") {
-				text, err := s.file(ctx, sha, f.Path)
+				text, err := s.file(ctx, r, sha, f.Path)
 				if err != nil {
 					return nil, err
 				}
@@ -484,59 +518,59 @@ func (s *Server) readProjects(ctx context.Context, sha string) ([]projectSource,
 
 // readDocs reads the decision log, the README and the PRD at the branch's
 // newest commit.
-func (s *Server) readDocs(ctx context.Context) error {
-	if len(s.src.commits) == 0 {
+func (s *Server) readDocs(ctx context.Context, r *Repo) error {
+	if len(r.src.commits) == 0 {
 		return errors.New("no commits read")
 	}
-	sha := s.src.commits[0].SHA
-	if sha == s.src.docsAt {
+	sha := r.src.commits[0].SHA
+	if sha == r.src.docsAt {
 		return nil
 	}
 	var err error
 	var log, readme, prd []byte
-	if log, err = s.file(ctx, sha, "decisions/log.md"); err != nil {
+	if log, err = s.file(ctx, r, sha, "decisions/log.md"); err != nil {
 		return err
 	}
-	if readme, err = s.file(ctx, sha, "README.md"); err != nil {
+	if readme, err = s.file(ctx, r, sha, "README.md"); err != nil {
 		return err
 	}
-	if prd, err = s.file(ctx, sha, "docs/PRD.md"); err != nil && !errors.Is(err, github.ErrNotFound) {
+	if prd, err = s.file(ctx, r, sha, "docs/PRD.md"); err != nil && !errors.Is(err, github.ErrNotFound) {
 		return err
 	}
-	s.src.log, s.src.readme, s.src.prd, s.src.docsAt = string(log), string(readme), string(prd), sha
+	r.src.log, r.src.readme, r.src.prd, r.src.docsAt = string(log), string(readme), string(prd), sha
 	return nil
 }
 
-func (s *Server) file(ctx context.Context, sha, p string) ([]byte, error) {
-	key := sha + ":" + p
-	if b, ok := s.src.files[key]; ok {
+func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, error) {
+	key := r.Name + "@" + sha + ":" + p
+	if b, ok := r.src.files[key]; ok {
 		return b, nil
 	}
-	b, err := s.GitHub.File(ctx, p, sha)
+	b, err := r.GitHub.File(ctx, p, sha)
 	if err != nil {
 		return nil, fmt.Errorf("%s at %s: %w", p, sha[:7], err)
 	}
-	s.src.files[key] = b
+	r.src.files[key] = b
 	return b, nil
 }
 
 // checkMerges confirms, for each pull request the factory merged, that
 // CI's gate passed on the head it merged. A merged pull request never
 // changes, so each is checked once.
-func (s *Server) checkMerges(ctx context.Context) {
-	for _, is := range s.src.issues {
-		l := Lane(is, s.src.comments[is.Number].comments, s.Self, time.Now())
+func (s *Server) checkMerges(ctx context.Context, r *Repo) {
+	for _, is := range r.src.issues {
+		l := Lane(is, r.src.comments[is.Number].comments, "", time.Now())
 		if l.Stage != StageMerged || l.PR == 0 {
 			continue
 		}
-		if _, ok := s.src.merges[l.PR]; ok {
+		if _, ok := r.src.merges[l.PR]; ok {
 			continue
 		}
-		pr, err := s.GitHub.PullRequest(ctx, l.PR)
+		pr, err := r.GitHub.PullRequest(ctx, l.PR)
 		if err != nil || !pr.Merged {
 			continue
 		}
-		runs, err := s.GitHub.CheckRuns(ctx, pr.Head.SHA, "invariant/gate")
+		runs, err := r.GitHub.CheckRuns(ctx, pr.Head.SHA, "invariant/gate")
 		if err != nil {
 			continue
 		}
@@ -546,42 +580,13 @@ func (s *Server) checkMerges(ctx context.Context) {
 				green = true
 			}
 		}
-		s.src.merges[l.PR] = mergeCheck{sha: pr.Head.SHA, green: green}
+		r.src.merges[l.PR] = mergeCheck{sha: pr.Head.SHA, green: green}
 	}
 }
 
 func (s *Server) assemble(now time.Time) Snapshot {
-	snap := Snapshot{Repo: s.Repo, GeneratedAt: now, Issues: []Issue{}, Projects: []Project{}, Activity: []Event{}}
-
-	st, err := ReadStatus(s.Status)
-	if err == nil && st.PID != 0 {
-		w := Watcher{Running: st.Running(), Issue: st.Issue, Doing: st.Doing, Since: st.Since}
-		started, beat := st.Started, st.Heartbeat
-		w.Started, w.Heartbeat = &started, &beat
-		if !w.Running {
-			w.Issue, w.Doing, w.Since = 0, "", nil
-		}
-		snap.Factory = w
-	}
-
-	for _, is := range s.src.issues {
-		snap.Issues = append(snap.Issues, Lane(is, s.src.comments[is.Number].comments, s.Self, now))
-	}
-	sort.Slice(snap.Issues, func(i, j int) bool { return snap.Issues[i].Number > snap.Issues[j].Number })
-	snap.Now = nowLine(snap.Factory, snap.Issues)
-
-	if len(s.src.commits) > 0 {
-		c := s.src.commits[0]
-		m := &MainState{SHA: c.SHA, Title: firstLine(c.Commit.Message), By: author(c), At: parseTime(c.Commit.Committer.Date)}
-		for _, r := range s.src.runs {
-			if r.Name == "gate" && r.HeadSHA == c.SHA {
-				m.Gate = runRef(r)
-				break
-			}
-		}
-		snap.Main = m
-	}
-
+	primary := s.Repos[0]
+	snap := Snapshot{Repo: primary.Name, GeneratedAt: now, Issues: []Issue{}, Repos: []RepoState{}, Projects: []Project{}, Activity: []Event{}}
 	s.mu.RLock()
 	ready := map[string]bool{}
 	for k := range s.graphs {
@@ -590,73 +595,130 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	s.mu.RUnlock()
 	models := map[string]bool{}
 	pins, built := map[string]bool{}, map[string]bool{}
-	if set := s.src.receipts; set != nil {
-		snap.Receipts = runRef(set.run)
-		for _, ps := range s.src.projects {
-			r := set.reports[path.Base(ps.dir)]
-			if r == nil {
-				continue
+	var watchers []namedWatcher
+	for i, r := range s.Repos {
+		rs := RepoState{Name: r.Name, Short: r.Short(), Primary: i == 0}
+		if st, err := ReadStatus(r.Status); err == nil && st.PID != 0 {
+			w := Watcher{Running: st.Running(), Issue: st.Issue, Doing: st.Doing, Since: st.Since}
+			started, beat := st.Started, st.Heartbeat
+			w.Started, w.Heartbeat = &started, &beat
+			if !w.Running {
+				w.Issue, w.Doing, w.Since = 0, "", nil
 			}
-			p := projectOf(ps, r)
-			p.Graph = ready[ps.key] || s.cached(ps.key)
-			snap.Projects = append(snap.Projects, p)
-			t := &snap.Totals
-			t.Projects++
-			t.Proved += p.Verified
-			if r.Ratified != nil {
-				t.LocksChecked++
-				if r.Proposal != r.Ratified.Proposal {
-					t.BadLocks++
+			rs.Factory = w
+		}
+		watchers = append(watchers, namedWatcher{repo: r.Name, w: rs.Factory})
+
+		for _, is := range r.src.issues {
+			l := Lane(is, r.src.comments[is.Number].comments, "", now)
+			l.Repo = r.Name
+			for k := range l.Events {
+				l.Events[k].Repo = r.Name
+			}
+			if l.Stage == StageMerged && l.PR != 0 {
+				snap.Totals.Merged++
+				if m, ok := r.src.merges[l.PR]; ok {
+					snap.Totals.MergesChecked++
+					if !m.green {
+						snap.Totals.BadMerges++
+					}
 				}
 			}
-			for _, pin := range r.Pins {
-				pins[pin.Want] = true
-				if p.Factory {
-					built[pin.Want] = true
+			snap.Issues = append(snap.Issues, l)
+		}
+		for _, run := range r.src.runs {
+			if run.Name == "gate" {
+				rs.Gate = runRef(run)
+				break
+			}
+		}
+		if set := r.src.receipts; set != nil {
+			rs.Receipts = runRef(set.run)
+			if i == 0 {
+				snap.Receipts = rs.Receipts
+			}
+			for _, ps := range r.src.projects {
+				rep := set.reports[path.Base(ps.dir)]
+				if rep == nil {
+					continue
 				}
-			}
-			if models[ps.key] {
-				continue
-			}
-			models[ps.key] = true
-			t.Models++
-			t.States += p.States
-			t.Witnesses += len(p.Witnesses)
-			for _, b := range p.Bugs {
-				t.Bugs++
-				if b.Caught {
-					t.BugsCaught++
+				p := projectOf(ps, rep)
+				p.Repo = r.Name
+				p.Graph = ready[ps.key] || s.cached(ps.key)
+				snap.Projects = append(snap.Projects, p)
+				rs.Projects++
+				t := &snap.Totals
+				t.Projects++
+				t.Proved += p.Verified
+				if rep.Ratified != nil {
+					t.LocksChecked++
+					if rep.Proposal != rep.Ratified.Proposal {
+						t.BadLocks++
+					}
+				}
+				for _, pin := range rep.Pins {
+					pins[pin.Want] = true
+					if p.Factory {
+						built[pin.Want] = true
+					}
+				}
+				if models[ps.key] {
+					continue
+				}
+				models[ps.key] = true
+				t.Models++
+				t.States += p.States
+				t.Witnesses += len(p.Witnesses)
+				for _, b := range p.Bugs {
+					t.Bugs++
+					if b.Caught {
+						t.BugsCaught++
+					}
 				}
 			}
 		}
-		snap.Totals.Statements, snap.Who.Built = len(pins), len(built)
+		for k, run := range r.src.runs {
+			if k >= 12 || run.Name != "gate" {
+				continue
+			}
+			e := Event{At: parseTime(run.UpdatedAt), Repo: r.Name, Who: WhoCI, Kind: run.Status, Text: "gate " + runWords(run) + " on " + run.HeadSHA[:7]}
+			if run.Conclusion != "" {
+				e.Kind = run.Conclusion
+			}
+			snap.Activity = append(snap.Activity, e)
+		}
+		snap.Repos = append(snap.Repos, rs)
 	}
+	snap.Totals.Statements, snap.Who.Built = len(pins), len(built)
+	sort.SliceStable(snap.Issues, func(i, j int) bool { return snap.Issues[i].Opened.After(snap.Issues[j].Opened) })
+	snap.Factory = combined(snap.Repos)
+	snap.Now = nowLine(watchers, snap.Issues, primary.Name)
 
 	// An issue without a language label was written in the project's
 	// language: the repository's default when it was made.
 	langs := map[string]string{}
 	for _, p := range snap.Projects {
-		langs[p.Dir] = p.Language
+		langs[p.Repo+"/"+p.Dir] = p.Language
 	}
 	for i := range snap.Issues {
 		if l := &snap.Issues[i]; l.Language == "" {
-			l.Language = langs[l.Project]
-		}
-	}
-	for _, l := range snap.Issues {
-		if l.Stage != StageMerged || l.PR == 0 {
-			continue
-		}
-		snap.Totals.Merged++
-		if m, ok := s.src.merges[l.PR]; ok {
-			snap.Totals.MergesChecked++
-			if !m.green {
-				snap.Totals.BadMerges++
-			}
+			l.Language = langs[l.Repo+"/"+l.Project]
 		}
 	}
 
-	decisions := ParseLog(s.src.log)
+	if len(primary.src.commits) > 0 {
+		c := primary.src.commits[0]
+		m := &MainState{SHA: c.SHA, Title: firstLine(c.Commit.Message), By: author(c), At: parseTime(c.Commit.Committer.Date)}
+		for _, r := range primary.src.runs {
+			if r.Name == "gate" && r.HeadSHA == c.SHA {
+				m.Gate = runRef(r)
+				break
+			}
+		}
+		snap.Main = m
+	}
+
+	decisions := ParseLog(primary.src.log)
 	snap.Decisions = Decisions{Total: len(decisions), Status: map[string]int{}, Who: map[string]int{}, Latest: []Decision{}}
 	for i := len(decisions) - 1; i >= 0; i-- {
 		d := decisions[i]
@@ -673,7 +735,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		}
 	}
 	snap.Totals.Decisions = len(decisions)
-	snap.Slices = ParseSlices(s.src.readme, s.src.prd)
+	snap.Slices = ParseSlices(primary.src.readme, primary.src.prd)
 	for _, sl := range snap.Slices {
 		if sl.Status == "done" {
 			snap.Who.Slices++
@@ -682,10 +744,8 @@ func (s *Server) assemble(now time.Time) Snapshot {
 
 	for _, l := range snap.Issues {
 		for _, e := range l.Events {
-			if e.Who == WhoPerson {
-				if e.Kind == factory.Ratify {
-					snap.Who.Ratifications++
-				}
+			if e.Who == WhoPerson && e.Kind == factory.Ratify {
+				snap.Who.Ratifications++
 			}
 			snap.Activity = append(snap.Activity, e)
 		}
@@ -694,35 +754,59 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			snap.Who.Merged++
 		}
 	}
-	for _, c := range s.src.commits {
+	for i, c := range primary.src.commits {
 		by := author(c)
-		if by == s.Self || strings.HasSuffix(by, "[bot]") {
+		if strings.HasSuffix(by, "[bot]") {
 			snap.Who.BotCommits++
 		} else {
 			snap.Who.Commits++
 		}
-	}
-	for i, c := range s.src.commits {
-		if i >= 12 {
-			break
+		if i < 12 {
+			snap.Activity = append(snap.Activity, Event{At: parseTime(c.Commit.Committer.Date), Repo: primary.Name, Who: "commit", By: by, Kind: c.SHA[:7], Text: firstLine(c.Commit.Message)})
 		}
-		snap.Activity = append(snap.Activity, Event{At: parseTime(c.Commit.Committer.Date), Who: "commit", By: author(c), Kind: c.SHA[:7], Text: firstLine(c.Commit.Message)})
-	}
-	for i, r := range s.src.runs {
-		if i >= 12 || r.Name != "gate" {
-			continue
-		}
-		e := Event{At: parseTime(r.UpdatedAt), Who: WhoCI, Kind: r.Status, Text: "gate " + runWords(r) + " on " + r.HeadSHA[:7]}
-		if r.Conclusion != "" {
-			e.Kind = r.Conclusion
-		}
-		snap.Activity = append(snap.Activity, e)
 	}
 	sort.SliceStable(snap.Activity, func(i, j int) bool { return snap.Activity[i].At.After(snap.Activity[j].At) })
 	if len(snap.Activity) > 40 {
 		snap.Activity = snap.Activity[:40]
 	}
 	return snap
+}
+
+// namedWatcher is a repository's watcher.
+type namedWatcher struct {
+	repo string
+	w    Watcher
+}
+
+// combined is the factory as the page's top bar shows it: on when any
+// watcher runs, and working on whatever one of them is working on.
+func combined(repos []RepoState) Watcher {
+	var on *Watcher
+	for i := range repos {
+		w := repos[i].Factory
+		switch {
+		case w.Running && w.Doing != "":
+			return w
+		case w.Running && on == nil:
+			on = &repos[i].Factory
+		}
+	}
+	if on != nil {
+		return *on
+	}
+	if len(repos) > 0 {
+		return repos[0].Factory
+	}
+	return Watcher{}
+}
+
+// issueRef names an issue: #5 in Invariant's own repository, and
+// copythis-ad#1 in another.
+func issueRef(repo, primary string, n int) string {
+	if repo == "" || repo == primary {
+		return fmt.Sprintf("#%d", n)
+	}
+	return fmt.Sprintf("%s#%d", path.Base(repo), n)
 }
 
 func projectOf(ps projectSource, r *verify.Report) Project {
@@ -771,28 +855,35 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 }
 
 // nowLine says what the factory is doing, or what it's waiting for.
-func nowLine(w Watcher, issues []Issue) Now {
-	find := func(n int) *Issue {
+func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
+	find := func(repo string, n int) *Issue {
 		for i := range issues {
-			if issues[i].Number == n {
+			if issues[i].Number == n && (issues[i].Repo == repo || issues[i].Repo == "") {
 				return &issues[i]
 			}
 		}
 		return nil
 	}
-	if w.Running && w.Issue != 0 && w.Doing != "" {
-		n := Now{Issue: w.Issue, Since: w.Since, WaitingOn: WhoFactory, Stage: StageBuilding}
+	running := false
+	for _, nw := range ws {
+		w := nw.w
+		running = running || w.Running
+		if !w.Running || w.Issue == 0 || w.Doing == "" {
+			continue
+		}
+		ref := issueRef(nw.repo, primary, w.Issue)
+		n := Now{Issue: w.Issue, Repo: nw.repo, Since: w.Since, WaitingOn: WhoFactory, Stage: StageBuilding}
 		switch w.Doing {
 		case "formalizing":
-			n.Headline, n.Stage = fmt.Sprintf("Drafting what must be true for #%d", w.Issue), StageQueued
+			n.Headline, n.Stage = "Drafting what must be true for "+ref, StageQueued
 		case "answering":
-			n.Headline, n.Stage = fmt.Sprintf("Drafting again with the answers on #%d", w.Issue), StageAsking
+			n.Headline, n.Stage = "Drafting again with the answers on "+ref, StageAsking
 		case "ratifying":
-			n.Headline, n.Stage = fmt.Sprintf("Committing the ratification on #%d", w.Issue), StageRatifying
+			n.Headline, n.Stage = "Committing the ratification on "+ref, StageRatifying
 		default:
-			n.Headline = fmt.Sprintf("Writing the code for #%d", w.Issue)
+			n.Headline = "Writing the code for " + ref
 		}
-		if is := find(w.Issue); is != nil {
+		if is := find(nw.repo, w.Issue); is != nil {
 			n.Detail = is.Title
 		}
 		return n
@@ -803,37 +894,41 @@ func nowLine(w Watcher, issues []Issue) Now {
 			if !is.Open || is.Stage != stage {
 				continue
 			}
-			n := Now{Issue: is.Number, Detail: is.Title, Stage: stage}
+			ref := issueRef(is.Repo, primary, is.Number)
+			n := Now{Issue: is.Number, Repo: is.Repo, Detail: is.Title, Stage: stage}
 			if k := len(is.Spans); k > 0 && is.Spans[k-1].Open {
 				from := is.Spans[k-1].From
 				n.Since, n.WaitingOn = &from, is.Spans[k-1].Who
 			}
 			switch stage {
 			case StageBuilding:
-				n.Headline = fmt.Sprintf("Writing the code for #%d", is.Number)
+				n.Headline = "Writing the code for " + ref
 			case StageGate:
-				n.Headline = fmt.Sprintf("Waiting for CI's gate on #%d", is.PR)
+				n.Headline = "Waiting for CI's gate on " + issueRef(is.Repo, primary, is.PR)
 			case StageQueued:
-				n.Headline = fmt.Sprintf("Picking up #%d", is.Number)
+				n.Headline = "Picking up " + ref
 			case StageRatifying:
-				n.Headline = fmt.Sprintf("Waiting for a person to ratify #%d", is.Number)
+				n.Headline = "Waiting for a person to ratify " + ref
 			case StageAsking:
-				n.Headline = fmt.Sprintf("Waiting for answers on #%d", is.Number)
+				n.Headline = "Waiting for answers on " + ref
 			case StageReview:
-				n.Headline = fmt.Sprintf("#%d needs a person", is.Number)
+				n.Headline = ref + " needs a person"
 			}
 			return n
 		}
 	}
 	n := Now{Stage: "idle", Headline: "Idle, and watching for issues"}
-	if !w.Running {
+	if !running {
 		n.Headline = "Idle. The factory is switched off"
 	}
-	for _, is := range issues {
-		if is.Stage == StageMerged && is.Closed != nil {
-			n.Issue, n.Detail, n.Since = is.Number, is.Title, is.Closed
-			break
+	var last *Issue
+	for i := range issues {
+		if is := &issues[i]; is.Stage == StageMerged && is.Closed != nil && (last == nil || is.Closed.After(*last.Closed)) {
+			last = is
 		}
+	}
+	if last != nil {
+		n.Issue, n.Repo, n.Detail, n.Since = last.Number, last.Repo, last.Title, last.Closed
 	}
 	return n
 }

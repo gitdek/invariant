@@ -36,6 +36,9 @@ func Markdown(r *verify.Report) string {
 	if c := r.Conformance; c != nil {
 		row(&b, "Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
 	}
+	if len(r.Existing) > 0 {
+		row(&b, "Existing code", r.Build.Passed, "run as it is, by the factory's driver", existingEvidence(r.Existing))
+	}
 	if !r.ModelOnly {
 		row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
 	}
@@ -67,11 +70,27 @@ func Markdown(r *verify.Report) string {
 	if t.NaginiRecipe != "" {
 		fmt.Fprintf(&b, "| Nagini sandbox | recipe `%s` |\n", short(t.NaginiRecipe))
 	}
+	if t.DepsRecipe != "" {
+		fmt.Fprintf(&b, "| Dependencies sandbox | `%s`, with the package's locked dependencies: recipe `%s` |\n", shortImage(t.DepsBase), short(t.DepsRecipe))
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
 	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()
+}
+
+// existingEvidence names the existing code a project ran, and its hashes.
+func existingEvidence(code []verify.ExistingCode) string {
+	var parts []string
+	for _, c := range code {
+		files := "1 file"
+		if c.Files != 1 {
+			files = fmt.Sprintf("%d files", c.Files)
+		}
+		parts = append(parts, fmt.Sprintf("`%s`, %s, `%s`", c.Path, files, short(c.SHA256)))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func row(b *strings.Builder, check string, ok bool, result, evidence string) {

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,6 +47,9 @@ type Report struct {
 	Agreement   *Agreement          `json:"agreement,omitempty"`
 	Conformance *conformance.Result `json:"conformance,omitempty"`
 	Code        *Code               `json:"code,omitempty"`
+	// Existing is the code an existing-code project checked, as it was
+	// (D-0054). The fingerprint covers it, so a receipt names that code.
+	Existing []ExistingCode `json:"existing,omitempty"`
 	// Assurance says how the code was checked: "proved", or "tested against
 	// the model". A receipt never blurs the two (D-0024).
 	Assurance   string    `json:"assurance"`
@@ -154,6 +158,8 @@ type Toolchain struct {
 	NodeImage    string `json:"node_image,omitempty"`
 	PythonImage  string `json:"python_image,omitempty"`
 	NaginiRecipe string `json:"nagini_recipe,omitempty"`
+	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
+	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
 	Go           string `json:"go,omitempty"`
 }
 
@@ -215,6 +221,20 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
 	case TypeScript:
 		r.Toolchain.NodeImage = tc.NodeImage
+	case ExistingTypeScript:
+		root, _, err := PackageRoot(dir)
+		if err != nil {
+			return nil, err
+		}
+		if r.Existing, err = HashExisting(root, p.Manifest.Existing); err != nil {
+			return nil, err
+		}
+		pkg, errP := os.ReadFile(filepath.Join(root, "package.json"))
+		lock, errL := os.ReadFile(filepath.Join(root, "package-lock.json"))
+		if err := errors.Join(errP, errL); err != nil {
+			return nil, err
+		}
+		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
 		r.Toolchain.PythonImage = tc.PythonImage
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {

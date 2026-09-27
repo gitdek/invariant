@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/verify"
 )
 
 var kindMeaning = map[string]string{
@@ -52,6 +53,11 @@ func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft, a
 	if lang.name == "" {
 		lang = languages["go"]
 	}
+	intro := fmt.Sprintf("Your job is to write the TLA+ model and the %s code that satisfy them, and to show they do by passing the gate.", lang.name)
+	if len(p.Manifest.Existing) > 0 {
+		lang = existingLanguage
+		intro = "The code they're about already exists, and nobody changes it. Your job is to keep the TLA+ model faithful to that code, to write a conformance driver that runs it as it is, and to show the code keeps the statements by passing the gate."
+	}
 	amendment := ""
 	if amend {
 		amendment = `
@@ -60,7 +66,7 @@ func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft, a
 This is an amendment. The project's code is already in your workspace, and it implements the statements people ratified before this request. They've now ratified the amended statements above. Change the code, and the model if it needs it, to satisfy the amended statements. Keep what doesn't need to change: its structure, its names and its tests. The gate checks every statement in the lock, old and new, so a change that breaks an unchanged statement fails.
 `
 	}
-	return fmt.Sprintf(`You're the synthesis step of Invariant, a code factory. People have ratified formal statements about a system. Your job is to write the TLA+ model and the %s code that satisfy them, and to show they do by passing the gate.
+	return fmt.Sprintf(`You're the synthesis step of Invariant, a code factory. People have ratified formal statements about a system. %s
 
 # The request
 
@@ -90,7 +96,7 @@ TLC checks everything with these constants: %s.
 
 `+"```tla"+`
 %s`+"```"+`
-`, lang.name, strings.TrimSpace(request), amendment, p.Manifest.Module, lang.protected, statements.String(), kinds.String(), strings.Join(bounds, ", "),
+`, intro, strings.TrimSpace(request), amendment, p.Manifest.Module, lang.protected, statements.String(), kinds.String(), strings.Join(bounds, ", "),
 		p.Manifest.Module, modelTask, lang.task(p, gateRuns), lang.checks, lang.primer, moduleHeading, p.Manifest.Module, skeleton)
 }
 
@@ -240,6 +246,37 @@ def inc(s: State, i: int) -> None:
 - The code also runs as ordinary Python: the gate supplies a stand-in for ` + "`nagini_contracts`" + ` whose calls do nothing.
 `,
 	},
+}
+
+// existingLanguage is what the prompt says for a project that checks
+// existing TypeScript code as it is (D-0054).
+var existingLanguage = language{
+	name:      "TypeScript",
+	protected: " and package.json",
+	task: func(p *project.Project, gateRuns int) string {
+		rel := "the project's directory"
+		up := "../../"
+		if _, r, err := verify.PackageRoot(p.Dir); err == nil {
+			rel, up = "`"+r+"`", strings.Repeat("../", strings.Count(r, "/")+1)
+		}
+		quoted := make([]string, len(p.Manifest.Existing))
+		for i, e := range p.Manifest.Existing {
+			quoted[i] = "`" + e + "`"
+		}
+		return fmt.Sprintf(`2. **The driver**, `+"`%s`"+`. The code it checks already exists: %s. Copies are in `+"`existing/`"+`, for you to read. The project sits at %s in its package, so import the code by its path from there, such as `+"`%s%s/...`"+`. The gate requires the driver to import every piece of code the project checks, and runs it with the package's own locked dependencies, in a sandbox with no network.
+   - Run the real code. Create what it needs in memory, and give it its own injected clock where it takes one, so that time only moves when the driver moves it. Never use real time, the network, or files outside a temporary directory.
+   - Make `+"`INVARIANT_RUNS`"+` runs of `+"`INVARIANT_STEPS`"+` steps each, from the environment. Choose each step at random, from a small generator seeded with `+"`INVARIANT_SEED`"+`, so every run is reproducible. Each step calls one of the code's operations, the ones the model's actions stand for, with arguments inside the bounds. When the code refuses an operation, nothing changes, and the driver carries on.
+   - Record the state before the first step and after every step, in the spec's vocabulary: an object with one field per variable. Read every value back from the code, through its own methods or its storage, and never from what the driver expected to happen.
+   - Stay within the bounds. Never take an operation the bounds rule out, such as a third attempt when two is the bound.
+   - Write the runs to the file `+"`process.env.INVARIANT_TRACES`"+` names, as `+"`{\"traces\": [[state, ...], ...]}`"+`.
+   - Helper files beside the driver are fine. Add no dependencies: use what the package already depends on, and Node's standard library.
+3. **Keep the model faithful to the code.** The code is fixed, and the model isn't. If the gate shows the code taking a step the model doesn't allow, and allowing it keeps every ratified statement true, change the model's actions to allow it. If allowing it would break a ratified statement, stop changing things: the code has a bug, or a statement is wrong, and people decide which. Say so in your final message, with the step.
+4. **Check your work with the `+"`gate`"+` tool.** It runs every check and says exactly what failed. You have %d gate runs in total, so reread your files carefully before each run. You're done when the gate passes. Then reply with a short summary.
+`, p.Manifest.Conformance, strings.Join(quoted, ", "), rel, up, p.Manifest.Existing[0], gateRuns)
+	},
+	checks: `- **Conformance:** TLC checks every run your driver recorded. Its first state must satisfy Init, and every step that changes the state must be a Next step.
+- **Existing code:** the driver imports every piece of code the project checks, and it runs in a sandbox with the package's locked dependencies and no network.`,
+	primer: encodingPrimer,
 }
 
 // encodingPrimer explains how a conformance driver writes a state.

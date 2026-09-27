@@ -129,3 +129,20 @@ func TestRequestMarkdown(t *testing.T) {
 		}
 	}
 }
+
+// A proposal for existing code becomes a project that holds a model and a
+// driver, and checks the named code where it is (D-0054).
+func TestExistingManifest(t *testing.T) {
+	p := &Proposal{Draft: Draft{Name: "analysis leases", Module: "Leases", Package: "leases", Language: "typescript", Existing: []string{"src/lib", "migrations/admin"}}}
+	m := p.Manifest()
+	if m.Code != "." || m.Conformance != "conformance.ts" || m.Language != "typescript" || m.Exhaustive || strings.Join(m.Existing, ",") != "src/lib,migrations/admin" {
+		t.Errorf("manifest %+v", m)
+	}
+	req := Request{Repo: "gitdek/copythis-ad", Issue: 1, Title: "Check leases", Existing: &Existing{Paths: []string{"src/lib"}}}
+	if md := req.Markdown(); !strings.Contains(md, "## The code to check") || !strings.Contains(md, "`src/lib`") {
+		t.Errorf("request %s", md)
+	}
+	if pr := Prompt(req, 3); !strings.Contains(pr, "writes a driver that runs existing code") || !strings.Contains(pr, "Don't read intent into the code") {
+		t.Error("the prompt doesn't explain checking existing code")
+	}
+}

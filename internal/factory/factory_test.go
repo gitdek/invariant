@@ -698,3 +698,13 @@ func TestRetryWithNothingToRetry(t *testing.T) {
 		t.Errorf("note = %s", note.Comment.Body)
 	}
 }
+
+func TestCodeLines(t *testing.T) {
+	body := "Check the lease protocol.\n\nCode: src/lib\ncode: `migrations/admin/`\n\n```\nCode: not/this\n```\nProject: invariant/analysis-leases\n"
+	if got := strings.Join(codeLines(body), ","); got != "src/lib,migrations/admin" {
+		t.Errorf("codeLines = %s", got)
+	}
+	if len(codeLines("Nothing named here.")) != 0 {
+		t.Error("an issue without Code: lines names no code")
+	}
+}

@@ -57,6 +57,9 @@ func languageFor(p *project.Project, tc toolchain.Toolchain) (Language, error) {
 			return nil, fmt.Errorf("a %s project needs a conformance driver in its manifest", p.Manifest.Language)
 		}
 		if p.Manifest.Language == "typescript" {
+			if len(p.Manifest.Existing) > 0 {
+				return ExistingTypeScript{}, nil
+			}
 			return TypeScript{Image: tc.NodeImage}, nil
 		}
 		return Python{Image: tc.PythonImage}, nil

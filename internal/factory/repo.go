@@ -1,13 +1,17 @@
 package factory
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/scope"
@@ -114,6 +118,44 @@ func (c Clone) RevParse(ctx context.Context, ref string) (string, error) {
 func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
 	out, err := c.git(ctx, "show", ref+":"+file)
 	return []byte(out), err
+}
+
+// Export writes the files under paths, as they are at ref, into dst: the
+// existing code an issue names, for the formalizer to read (D-0054). It
+// never reads the working tree, and it keeps every file inside dst.
+func (c Clone) Export(ctx context.Context, ref string, paths []string, dst string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"archive", "--format=tar", ref, "--"}, paths...)...)
+	cmd.Dir = c.Dir
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git archive %s %s: %w: %s", ref, strings.Join(paths, " "), err, strings.TrimSpace(errOut.String()))
+	}
+	tr := tar.NewReader(&out)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		name := path.Clean(h.Name)
+		if h.Typeflag != tar.TypeReg || path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
+			continue
+		}
+		target := filepath.Join(dst, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, b, 0o644); err != nil {
+			return err
+		}
+	}
 }
 
 func (c Clone) Scope(ctx context.Context, base, head string, issue int) (scope.Result, error) {
