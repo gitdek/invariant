@@ -2,6 +2,7 @@ package factory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,6 +34,7 @@ type fakeGitHub struct {
 	bodies   map[int]string
 	nextID   int64
 	nextPR   int
+	failPRs  int // pull requests to refuse, as GitHub can
 }
 
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
@@ -148,6 +150,10 @@ func (g *fakeGitHub) RemoveLabel(_ context.Context, n int, label string) error {
 }
 
 func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullRequest) (github.PullRequest, error) {
+	if g.failPRs > 0 {
+		g.failPRs--
+		return github.PullRequest{}, errors.New("GitHub is having a bad day")
+	}
 	g.nextPR++
 	out := &github.PullRequest{Number: g.nextPR, State: "open", Draft: pr.Draft, URL: fmt.Sprintf("https://github.com/o/r/pull/%d", g.nextPR),
 		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}}
@@ -291,6 +297,8 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // synthesis would, and reports the gate result it's told to.
 type fakeBuilder struct {
 	pass    bool
+	stop    bool // the agent stops before it finishes
+	crash   bool // the factory itself stops partway through the build
 	built   []string
 	amended []bool
 }
@@ -298,6 +306,12 @@ type fakeBuilder struct {
 func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*synth.Result, error) {
 	b.built = append(b.built, dir)
 	b.amended = append(b.amended, amend)
+	if b.stop {
+		return nil, errors.New("the agent stopped before it finished")
+	}
+	if b.crash {
+		panic("the factory stopped partway through the build")
+	}
 	result := filepath.Join(out, "result")
 	if err := copyResult(dir, result); err != nil {
 		return nil, err
