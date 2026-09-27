@@ -125,6 +125,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   8. Code you can ship. Done: code is the system alone, with sizes as parameters, and the explorer or driver is the environment. The gate proves Go code at every size and checks agreement one size past the bounds, and fails code that hardcodes a size. #18 became #20, a connection pool proved at every size, which the bot merged. The check one size larger covers TypeScript and Python drivers too (D-0076). #28 took the rate limiter's bounds out of its code, through the factory, and the bot merged #30. Other existing projects keep theirs until an issue asks. `D-0048` `D-0058` `D-0068`
   9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Done: the gate checks properties under fairness. #23 ratified the recovery model, and the bot merged `factory/recovery` as #25, proved at every size. The watcher holds a lease, records its runs and merges, and takes every effect only as the core allows. A test stops it before each of its effects, and the issue still merges with every effect done once. Two watchers ran on this repository for a day, and the second never acted. GitHub refused its one push for the lease, when both reached for it in the same second. `D-0048` `D-0058` `D-0069` `D-0071` `D-0072` `D-0073` `D-0074`
   10. Public. Done: the repository is public since 2026-09-28, which brought CI back on GitHub's free runners. `main` requires the gate and a pull request for every change, and every run from an outside collaborator needs approval. The factory keeps merging. `D-0007` `D-0033` `D-0048` `D-0075` `D-0079` `D-0080`
+  11. A driver can't skip a step: the gate checks that a driver tried every step in every state it reached, except where only a bound rules the step out. Proposed. `D-0059` `D-0082`
 - The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. `invariant ledger` lists them for every issue it took. `D-0048` `D-0062`
 - The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
 
@@ -140,4 +141,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Undecided: don't build against these
 
-Nothing is undecided right now.
+- Slice 11, a driver can't skip a step: whether it comes before the Codex backend, whether the gate checks drivers' attempts or a second agent reviews them or both, when existing drivers are rebuilt, Go's explorers, and who names the code's parameters. Its plan is proposed, with recommendations. `D-0082`
