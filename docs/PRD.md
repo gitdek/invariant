@@ -2,7 +2,7 @@
 
 This document says what Invariant is for, who it serves, what it has to do, and how we'll know it works. It isn't the spec. [`SPEC.md`](../SPEC.md) is the only document to build against, and it holds only what's ratified or decided. Every requirement here cites its decisions in [`decisions/log.md`](../decisions/log.md). A requirement marked **proposed** becomes buildable only once @gitdek ratifies it and it's rolled up into the spec.
 
-**Status.** Proposed as D-0048 on 2026-09-26. A coding agent drafted it from the kickoff brief, the decision log and the first three live issues. @gitdek ratifies it by answering the [questions](#questions-for-gitdek) at the end.
+**Status.** Ratified as D-0048 by @gitdek on 2026-09-26, with the four recommendations in [Decided by @gitdek](#decided-by-gitdek). A coding agent drafted it from the kickoff brief, the decision log and the first three live issues.
 
 ## The problem
 
@@ -66,7 +66,7 @@ A receipt is only as good as the code that produced it. That code is the trusted
 - **The watcher's merge decision, while the repository is private**, and the GitHub calls behind it, because the watcher merges instead of GitHub. `D-0033`
 - **Outside Invariant:** TLC, Gobra, Nagini and Z3, the Go toolchain, Docker and GitHub.
 
-Everything else can fail to produce a merge, but it can't produce a bad one, because the gate checks everything it makes. That covers formalizing, synthesis, the prompts and the rest of the watcher. So the trusted base stays small, and the parts of it that are state machines get proved. The merge decision is first: in slice 6 it moves into `factory/protocol`. From then on the factory can change it, but only through an amendment @gitdek ratifies, proved against statements such as `NoMergeWithoutGreenGate`. Changes to the rest of the trusted base get more scrutiny than other changes (question 2).
+Everything else can fail to produce a merge, but it can't produce a bad one, because the gate checks everything it makes. That covers formalizing, synthesis, the prompts and the rest of the watcher. So the trusted base stays small, and the parts of it that are state machines get proved. The merge decision is first: in slice 7 it moves into `factory/protocol`. From then on the factory can change it, but only through an amendment @gitdek ratifies, proved against statements such as `NoMergeWithoutGreenGate`. Changes to the rest of the trusted base land by pull request, and @gitdek merges them (D-0048).
 
 ## Requirements
 
@@ -75,7 +75,6 @@ Each requirement serves one goal.
 - **Built:** it works today, and it's tested.
 - **Next:** it's ratified, and being built.
 - **Planned:** it's ratified, for later.
-- **Proposed:** this document asks for it.
 - **Later:** it's wanted, but not scheduled.
 
 ### 1 · Nothing merges that people didn't agree to
@@ -87,7 +86,7 @@ Each requirement serves one goal.
 - **1.5 The factory merges only when three things hold:** the gate passed on the exact head, the pull request is in scope, and its lock is the ratified proposal. Built. `D-0033` `D-0047`
 - **1.6 An amendment lands only on the lock it amends.** If the base branch has moved on, the factory ratifies nothing and asks for a revision. Built. `D-0045` `D-0046`
 - **1.7 The factory can't change its own gate.** A factory pull request changes one project and nothing else, and the App can't edit CI. Built. `D-0014` `D-0041`
-- **1.8 Changes to the trusted base land by pull request,** and @gitdek merges them once CI passes. Proposed, question 2.
+- **1.8 Changes to the trusted base land by pull request,** and @gitdek merges them once CI passes. In force. `D-0048`
 - **1.9 GitHub enforces the gate once the repository is public.** `invariant/gate` becomes a required check, and GitHub's native auto-merge replaces the watcher's merge. Planned. `D-0033`
 
 ### 2 · People decide; they don't review code
@@ -108,24 +107,24 @@ Each requirement serves one goal.
 - **3.4 A checker's failure is never a pass.** When a checker runs out of memory or time, the gate fails, and the receipt doesn't blame the code. Built. `D-0047`
 - **3.5 Public copy never claims more than the receipt.** Built. `D-0015`
 - **3.6 A live view.** A dashboard shows what the factory is working on and every project's evidence, from the same sources as the receipts. It's shared through a Cloudflare tunnel for now, and moves to puglisij.com/invariant later. Next. `D-0049`
-- **3.7 Code you can ship.** The code carries no model bounds. Today it does: the rate limiter's code stops at `MAX_CALLS = 5`, and its clock at `MAX_TIME = 3`, because the model needs those limits to stay finite. The limits move into what TLC is told to explore, and sizes such as capacity become parameters. Gobra's and Nagini's proofs then hold at every size, and TLC still checks the design at the ratified bounds. Proposed, slice 7.
-- **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Today the gate checks invariants and deadlock only. Proposed, slice 8, where the factory's own recovery needs it first.
+- **3.7 Code you can ship.** The code carries no model bounds. Today it does: the rate limiter's code stops at `MAX_CALLS = 5`, and its clock at `MAX_TIME = 3`, because the model needs those limits to stay finite. The limits move into what TLC is told to explore, and sizes such as capacity become parameters. Gobra's and Nagini's proofs then hold at every size, and TLC still checks the design at the ratified bounds. Planned, slice 8. `D-0048` `D-0058`
+- **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Today the gate checks invariants and deadlock only. Planned, slice 9, where the factory's own recovery needs it first. `D-0048` `D-0058`
 - **3.9 Type checking** for TypeScript and Python, inside the sandbox. Later. `D-0030`
 - **3.10 A proof path for TypeScript.** Later. `D-0024` `D-0038`
 
 ### 4 · Invariant maintains its own rules
 
-- **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Planned, after this PRD. `D-0045` `D-0053`
-- **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Planned, after this PRD. `D-0045` `D-0053`
-- **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Proposed, slice 8.
-- **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. Today the first holds because of a check, and nothing handles the second. Proposed, slice 8.
+- **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Next, slice 7. `D-0045` `D-0053` `D-0058`
+- **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Next, slice 7. `D-0045` `D-0053` `D-0058`
+- **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Planned, slice 9. `D-0048` `D-0058`
+- **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. Today the first holds because of a check, and nothing handles the second. Planned, slice 9. `D-0048` `D-0058`
 
 ### 5 · Fast and cheap enough to use every day
 
 - **5.1 It runs on the owner's machine,** through the official coding-agent CLIs in their documented headless modes, on the owner's accounts. Built. `D-0028` `D-0036`
 - **5.2 Effort is bounded.** Each agent run has a cost budget, a turn limit and a timeout, and synthesis gets at most four gate runs. Built. `D-0000` `D-0026`
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
-- **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs. Proposed, question 3.
+- **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Next. `D-0048`
 - **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Planned. `D-0028` `D-0052`
 - **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. It starts with copythis-ad. Next, slice 6. `D-0053` `D-0054`
 - **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
@@ -157,32 +156,33 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | :-- | :-- | :-- |
 | 1 to 5 | The gate, synthesis, TypeScript and Python checking, GitHub, and synthesis in all three languages | Done |
 | 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Part A done, Part B next `D-0053` `D-0054` |
-| 7 | Code you can ship (3.7) | Proposed |
-| 8 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Proposed |
-| 9 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Proposed. The switch itself is ratified. `D-0007` `D-0033` |
+| 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Planned `D-0045` `D-0053` `D-0058` |
+| 8 | Code you can ship (3.7) | Planned `D-0048` `D-0058` |
+| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Planned `D-0048` `D-0058` |
+| 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Planned `D-0007` `D-0033` `D-0048` |
 | Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
-- **Then this PRD,** and after it, Invariant builds itself: the issue protocol is ratified on an issue, built by the factory and proved with Gobra, the watcher runs on it, and one issue changes it through the factory. `D-0045` `D-0053` The protocol core runs inside the real watcher, so its model has to be finite without counters that cap its behavior. Otherwise the cap would end up in the code the watcher runs. Slice 7 makes that true for every project.
-- **Slice 7 is done when** a factory project's code has no model bounds in it, its proofs don't depend on the bounds, and TLC checks it at the ratified bounds, on a live issue.
-- **Slice 8 is done when** a model of the watcher shows that no step is lost or doubled, including a crash at any point and a second watcher. The factory proves the core that decides what to do after a restart, the watcher runs on it, and a test kills the watcher after each kind of step and shows the issue still merges.
-- **Slice 9 is done when** `invariant/gate` is a required check, GitHub's auto-merge does the merging, and a review of the issue surface, seen as someone without write access, is written up with its findings fixed.
+- **Slice 7 is done when** the issue protocol is ratified on an issue, built by the factory and proved with Gobra, the watcher runs on it, and one issue changes it through the factory. `D-0045` `D-0053` The protocol core runs inside the real watcher, so its model has to be finite without counters that cap its behavior. Otherwise the cap would end up in the code the watcher runs. Slice 8 makes that true for every project.
+- **Slice 8 is done when** a factory project's code has no model bounds in it, its proofs don't depend on the bounds, and TLC checks it at the ratified bounds, on a live issue.
+- **Slice 9 is done when** a model of the watcher shows that no step is lost or doubled, including a crash at any point and a second watcher. The factory proves the core that decides what to do after a restart, the watcher runs on it, and a test kills the watcher after each kind of step and shows the issue still merges.
+- **Slice 10 is done when** `invariant/gate` is a required check, GitHub's auto-merge does the merging, and a review of the issue surface, seen as someone without write access, is written up with its findings fixed.
 
 ## Risks
 
 - **The model is wrong.** The factory writes both the model and the code, so a proof shows only that they agree. People ratify the statements, not the model. Witnesses show the model does something, known bugs show the statements can catch mistakes, and agreement or conformance ties the code to the model's states.
 - **Rubber-stamp ratification.** A proposal nobody reads is a guess with extra steps. Proposals lead with plain language, amendments are diffs with any loosening called out in bold, and nothing is shown until TLC has checked it.
-- **Small bounds.** TLC is exhaustive only within the bounds, and a bug can hide at larger sizes. Receipts always state the bounds, and slice 7 makes the proofs hold at every size.
+- **Small bounds.** TLC is exhaustive only within the bounds, and a bug can hide at larger sizes. Receipts always state the bounds, and slice 8 makes the proofs hold at every size.
 - **Checker limits.** Big models can run out of memory or CI time, as #6 did. That fails the gate, never passes it, and the checker's memory now stays flat.
-- **Issue text as an attack.** An issue's text goes into an agent's prompt. Only writers can start the factory. Agents have no network, no secrets and no GitHub access. What they write is checked by TLC and shown to people before it counts, and then it's gated. Going public widens who can write issues, so slice 9 reviews it.
+- **Issue text as an attack.** An issue's text goes into an agent's prompt. Only writers can start the factory. Agents have no network, no secrets and no GitHub access. What they write is checked by TLC and shown to people before it counts, and then it's gated. Going public widens who can write issues, so slice 10 reviews it.
 - **Agent terms and cost.** The agents run on the owner's accounts, only through official CLIs in their documented headless modes, with a budget on every run. `D-0028`
 - **A drifting trusted base.** Changes to the gate land as fast as any other change. Question 2 adds review.
 
-## Questions for @gitdek
+## Decided by @gitdek
 
-Answering these ratifies this document as D-0048.
+@gitdek ratified this document with the four recommendations it asked about.
 
-1. **In what order should slices 7 to 9 come?** Recommended: code you can ship, then crash and concurrency safety, then going public. The factory's code today stops after five calls, which nobody would ship, and it's the first thing a skeptical engineer will spot. Crash safety matters most once people rely on the factory. The alternatives are crash safety first, or going public first.
-2. **How should changes to the trusted base land?** Recommended: by pull request, and @gitdek merges once CI passes. Everything else still goes straight to main. The alternative is straight to main for everything, as now.
-3. **Should the factory record its numbers?** Recommended: yes. Its merge comment reports the issue's factory time, the comments people made, agent spend and gate runs, and keeps them in its hidden marker. The measures above and the portfolio's graphics then come from real runs. The alternative is working them out from logs by hand.
-4. **Are the goals, the non-goals and the split of who builds what right, as written?**
+1. **The order after self-hosting:** code you can ship, then crash and concurrency safety, then going public. D-0053 had already put self-hosting first, right after this PRD, so the slices are 7 to 10 (D-0058). The alternatives were crash safety first, or going public first.
+2. **Changes to the trusted base** land by pull request, and @gitdek merges them once CI passes. Everything else can go straight to main. The alternative was straight to main for everything.
+3. **The factory records its numbers.** Its merge comment reports the issue's factory time, the comments people made, agent spend and gate runs, and its hidden marker keeps them. The alternative was working them out from logs by hand.
+4. **The goals, the non-goals and the split of who builds what** stand as written.

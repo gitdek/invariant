@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0055 · 2026-09-26 (every ratified or decided entry. D-0048 is proposed, so it isn't here yet)
+**Rolled up through** D-0058 · 2026-09-26 (every entry is ratified or decided)
 
 ## What Invariant is
 
@@ -12,6 +12,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 - **People decide what must be true, and the factory proves that it is.** The factory drafts formal statements, and a person ratifies them before the factory builds against them. Ratified statements are pinned by hash, and the factory cannot change them. Changing one takes a new decision. `D-0002`
 - **The factory doesn't guess.** When it can't formalize an issue without choosing between interpretations, it posts the fork on the issue as a decision request and does not proceed on that fork. `D-0002`
+- **Proofs where the rules are, tests where the plumbing is, and a person makes every decision.** People decide every requirement, fork and statement. Invariant proves the rules that make it trustworthy, as projects under `factory/`. Coding agents build everything else, tested by CI. `D-0048`
+- **A small trusted base.** A bug outside the gate, CI and the merge decision can stop a merge, but it can't produce a bad one, because the gate checks everything the factory makes. Changes to the trusted base land by pull request, and @gitdek merges them once CI passes. `D-0048`
 - **Checks can't be quietly weakened.** The gate writes TLC's config itself from what was ratified. Reachability witnesses show the invariants don't hold only because the model does nothing. Known bugs show the invariants are strong enough to catch real mistakes. `D-0011` `D-0013` `D-0017`
 
 ## What gets ratified
@@ -106,7 +108,12 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
   5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
   6. Part A, amendments: done. Issue #5 amended the rate limiter to refuse calls once two are waiting: the proposal showed the diff, its lock amends #3's, and the bot merged it once CI's gate passed. Part B, next: existing projects in @gitdek's other repositories, starting with a check of gitdek/copythis-ad's analysis lease protocol, as it is. `D-0042` `D-0045` `D-0046` `D-0047` `D-0053` `D-0054`
-  7. Then the PRD, D-0048. After it, Invariant builds itself: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0045` `D-0053`
+  7. Invariant builds itself: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0045` `D-0053` `D-0058`
+  8. Code you can ship: no model bounds in a project's code, so its proofs hold at every size. `D-0048` `D-0058`
+  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. `D-0048` `D-0058`
+  10. Ready to go public: GitHub enforces the gate. @gitdek chooses when. `D-0007` `D-0033` `D-0048`
+- The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. Next. `D-0048`
+- The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
 
 ## Project
 
