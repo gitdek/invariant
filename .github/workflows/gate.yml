@@ -3,10 +3,7 @@ name: gate
 on:
   push:
     branches: [main]
-    # Docs and decisions don't change what the gate checks (D-0079).
-    paths-ignore: ['**.md', 'docs/**', 'decisions/**']
   pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'decisions/**']
 
 # A newer push to the same branch replaces a run that's still going.
 concurrency:
@@ -18,9 +15,51 @@ permissions:
   issues: read
 
 jobs:
+  # Whether the change touches anything the gate checks. Docs and decisions
+  # don't, so the gate is skipped for them (D-0079). GitHub counts a job its
+  # condition skips as passing, and waits forever for a required check whose
+  # workflow a path filter skipped, so the skip lives here (D-0080).
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      gated: ${{ steps.diff.outputs.gated }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # A factory pull request always runs the gate, since the factory merges
+      # only on a gate that passed, and so does a push this can't compare.
+      # Without renames, moving code into docs/ lists the code it removes.
+      - id: diff
+        env:
+          FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') }}
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          gated=true
+          if [ "$FACTORY" != "true" ] && git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then
+            # A failed diff fails this job, and then the gate runs.
+            files=$(git diff --no-renames --name-only "$BASE...HEAD")
+            gated=false
+            while IFS= read -r f; do
+              case "$f" in
+                *.md|docs/*|decisions/*) ;;
+                *) gated=true ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "gated=$gated" >> "$GITHUB_OUTPUT"
+          echo "The gate runs: $gated"
+
   gate:
     # The check the factory merges its pull requests on (D-0004, D-0033).
     name: invariant/gate
+    needs: changes
+    # Skipped only when the step above says the change is docs alone. If that
+    # step fails, the gate runs.
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
