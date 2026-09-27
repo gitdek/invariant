@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -60,6 +61,24 @@ func (c Clone) Run(ctx context.Context, issue int, step string) (RunState, strin
 	return RunDone, sha, nil
 }
 
+// Recorded is what a step's record says it's for, while it's recorded with
+// no result, or "" otherwise.
+func (c Clone) Recorded(ctx context.Context, issue int, step string) (string, error) {
+	state, sha, err := c.Run(ctx, issue, step)
+	if err != nil || state != RunRecorded {
+		return "", err
+	}
+	msg, err := c.git(ctx, "log", "-1", "--format=%B", sha)
+	if err != nil {
+		return "", err
+	}
+	what := strings.TrimSpace(strings.TrimPrefix(msg, recordedMark))
+	if i := strings.LastIndex(what, "\n\n"); i >= 0 {
+		what = what[:i] // the nonce
+	}
+	return strings.TrimSpace(what), nil
+}
+
 // Record records a step before it happens. It fails with ErrRecorded if the
 // step already has a record.
 func (c Clone) Record(ctx context.Context, issue int, step, what string) error {
@@ -91,9 +110,10 @@ func (c Clone) Finish(ctx context.Context, issue int, step, result string) error
 	return c.pushRef(ctx, runRef(issue, step), recorded, result)
 }
 
-// Save commits the files in dir, on their own, and returns the commit: a
-// draft's result, for Finish.
-func (c Clone) Save(ctx context.Context, dir, message string) (string, error) {
+// Save commits the files in dir, on top of parent when it isn't empty, and
+// returns the commit: a run's result, for Finish. A build's result sits on
+// top of the code it pushes.
+func (c Clone) Save(ctx context.Context, dir, message, parent string) (string, error) {
 	index := filepath.Join(c.Dir, ".git", "invariant-save-index")
 	defer os.Remove(index)
 	env := []string{"GIT_INDEX_FILE=" + index, "GIT_WORK_TREE=" + dir}
@@ -104,13 +124,41 @@ func (c Clone) Save(ctx context.Context, dir, message string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := run(ctx, c.Dir, "git", "-c", "user.name="+c.Name, "-c", "user.email="+c.Email, "commit-tree", strings.TrimSpace(tree), "-m", message)
+	args := []string{"-c", "user.name=" + c.Name, "-c", "user.email=" + c.Email, "commit-tree", strings.TrimSpace(tree), "-m", message}
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	out, err := run(ctx, c.Dir, "git", args...)
 	return strings.TrimSpace(out), err
 }
 
 // Load writes the files of commit, such as a draft's result, into dir.
 func (c Clone) Load(ctx context.Context, commit, dir string) error {
 	return c.Export(ctx, commit, []string{"."}, dir)
+}
+
+// Holds says whether ref already holds commit.
+func (c Clone) Holds(ctx context.Context, ref, commit string) (bool, error) {
+	_, err := c.git(ctx, "merge-base", "--is-ancestor", commit, ref)
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return false, nil
+	}
+	return false, err
+}
+
+// PushCommit pushes commit to branch. It never forces, so the branch must
+// be behind it.
+func (c Clone) PushCommit(ctx context.Context, commit, branch string) error {
+	env, err := c.auth(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = runEnv(ctx, c.Dir, env, "git", "push", "--quiet", "origin", commit+":refs/heads/"+branch)
+	return err
 }
 
 // emptyCommit makes a commit with no files and no parent.

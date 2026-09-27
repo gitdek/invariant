@@ -318,8 +318,9 @@ func TestAnUnfinishedBuildIsAStop(t *testing.T) {
 }
 
 // A build whose pull request GitHub refused never becomes another agent
-// run: the next poll says the build stopped (#13).
-func TestARefusedPullRequestIsAStop(t *testing.T) {
+// run (#13). Its result is recorded, so the next poll opens the pull request
+// from it (D-0069).
+func TestARefusedPullRequestIsOpenedAgain(t *testing.T) {
 	r := newRig(t)
 	r.gh.failPRs = 1
 	r.form.forks = nil
@@ -331,9 +332,9 @@ func TestARefusedPullRequestIsAStop(t *testing.T) {
 		t.Fatal("the refused pull request should be an error")
 	}
 	r.poll()
-	stopped := r.expect(1, KindFailed, LabelHumanReview)
-	if stopped.Marker.Failure != FailStopped || len(r.build.built) != 1 {
-		t.Errorf("post = %+v, builds = %d", stopped.Marker, len(r.build.built))
+	opened := r.expect(1, KindPR, LabelPR)
+	if opened.Marker.PR == 0 || len(r.gh.prs) != 1 || len(r.build.built) != 1 {
+		t.Errorf("post = %+v, pull requests = %d, builds = %d", opened.Marker, len(r.gh.prs), len(r.build.built))
 	}
 }
 

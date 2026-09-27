@@ -240,3 +240,24 @@ func (r leasedRepo) Push(ctx context.Context, worktree, branch string) error {
 	}
 	return r.Repo.Push(ctx, worktree, branch)
 }
+
+func (r leasedRepo) PushCommit(ctx context.Context, commit, branch string) error {
+	if !r.f.holds() {
+		return errLeaseLost
+	}
+	return r.Repo.PushCommit(ctx, commit, branch)
+}
+
+func (r leasedRepo) Record(ctx context.Context, issue int, step, what string) error {
+	if !r.f.holds() {
+		return errLeaseLost
+	}
+	return r.Repo.Record(ctx, issue, step, what)
+}
+
+func (r leasedRepo) Finish(ctx context.Context, issue int, step, result string) error {
+	if !r.f.holds() {
+		return errLeaseLost
+	}
+	return r.Repo.Finish(ctx, issue, step, result)
+}

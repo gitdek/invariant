@@ -36,7 +36,7 @@ func TestRunsAreRecordedOnceAndSeenEverywhere(t *testing.T) {
 	os.WriteFile(filepath.Join(result, "result.json"), []byte(`{"proposal": "p"}`), 0o644)
 	os.MkdirAll(filepath.Join(result, "draft"), 0o755)
 	os.WriteFile(filepath.Join(result, "draft", "Mutex.tla"), []byte("---- MODULE Mutex ----\n===="), 0o644)
-	commit, err := a.Save(ctx, result, "the draft for comment 1001")
+	commit, err := a.Save(ctx, result, "the draft for comment 1001", "")
 	if err != nil {
 		t.Fatal(err)
 	}

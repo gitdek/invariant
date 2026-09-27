@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -78,6 +77,21 @@ func (r crashRepo) Push(ctx context.Context, worktree, branch string) error {
 	return r.Repo.Push(ctx, worktree, branch)
 }
 
+func (r crashRepo) PushCommit(ctx context.Context, commit, branch string) error {
+	r.c.effect("push the code to " + branch)
+	return r.Repo.PushCommit(ctx, commit, branch)
+}
+
+func (r crashRepo) Record(ctx context.Context, issue int, step, what string) error {
+	r.c.effect("record " + step)
+	return r.Repo.Record(ctx, issue, step, what)
+}
+
+func (r crashRepo) Finish(ctx context.Context, issue int, step, result string) error {
+	r.c.effect("record the result of " + step)
+	return r.Repo.Finish(ctx, issue, step, result)
+}
+
 // runs counts the agent runs started, by what started them. A crash during
 // a run stops the watcher after the run started and before it finished.
 type runs struct {
@@ -122,9 +136,9 @@ func firstLine(s string) string {
 // crashRun takes an issue to a merge, stopping the watcher at effect at,
 // and starting a fresh one in its place. With elsewhere, the new watcher
 // runs on another machine, with its own clone and logs. It returns what the
-// watcher stopped at, "" if the flow finished before effect at, and the
-// rig and runs to check.
-func crashRun(t *testing.T, at int, elsewhere bool) (string, *rig, *runs) {
+// watcher stopped at, the rig and runs to check, and how many effects it
+// counted. With at 0, it never stops.
+func crashRun(t *testing.T, at int, elsewhere bool) (string, *rig, *runs, int) {
 	t.Helper()
 	ctx := context.Background()
 	r := newRig(t)
@@ -164,7 +178,7 @@ func crashRun(t *testing.T, at int, elsewhere bool) (string, *rig, *runs) {
 		last := r.gh.last(1)
 		switch {
 		case last.Marker.Kind == KindMerged:
-			return c.what, r, started
+			return c.what, r, started, c.n
 		case last.Marker.Kind == KindProposal && !said["ratify"]:
 			said["ratify"] = true
 			r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(last.Marker.Proposal.Hash, "sha256:")[:hashChars])
@@ -174,10 +188,13 @@ func crashRun(t *testing.T, at int, elsewhere bool) (string, *rig, *runs) {
 		case last.Marker.Kind == KindFailed && stoppedBuild(last) && !said["retry"]:
 			said["retry"] = true
 			r.gh.say(1, "gitdek", "/invariant retry")
+		case last.Marker.Kind == KindStuck && !said["revise"]:
+			said["revise"] = true
+			r.gh.say(1, "gitdek", "/invariant revise")
 		}
 	}
 	t.Fatalf("after stopping at %q, the issue never merged: its last post is %q", c.what, r.gh.last(1).Marker.Kind)
-	return "", nil, nil
+	return "", nil, nil, 0
 }
 
 // everyEffectOnce checks what a crash must not do: answer a command twice,
@@ -201,7 +218,7 @@ func everyEffectOnce(t *testing.T, r *rig, started *runs) {
 			t.Errorf("%q was answered %d times", firstLine(c.Body), answers[c.ID])
 		}
 	}
-	drafts, builds, retries := 0, 0, 0
+	drafts, builds, retries, revises := 0, 0, 0, 0
 	for _, s := range started.started {
 		switch s {
 		case "draft":
@@ -211,12 +228,16 @@ func everyEffectOnce(t *testing.T, r *rig, started *runs) {
 		}
 	}
 	for _, c := range r.gh.comments[1] {
-		if strings.Contains(c.Body, "/invariant retry") && c.User.Login == "gitdek" {
+		switch {
+		case c.User.Login != "gitdek":
+		case strings.Contains(c.Body, "/invariant retry"):
 			retries++
+		case strings.Contains(c.Body, "/invariant revise"):
+			revises++
 		}
 	}
-	if drafts > 1 {
-		t.Errorf("%d agent runs drafted the one solve", drafts)
+	if drafts > 1+revises {
+		t.Errorf("%d agent runs drafted, for one solve and %d revises", drafts, revises)
 	}
 	if builds > 1+retries {
 		t.Errorf("%d agent runs built the one ratification, with %d retries", builds, retries)
@@ -233,28 +254,20 @@ func everyEffectOnce(t *testing.T, r *rig, started *runs) {
 }
 
 func TestCrashAnywhere(t *testing.T) {
-	if os.Getenv("INVARIANT_CRASH") == "" {
-		t.Skip("slice 9: the watcher doesn't recover from every crash yet; set INVARIANT_CRASH=1 to run it")
-	}
+	// A flow with no crash counts the effects there are to stop before.
+	_, _, _, effects := crashRun(t, 0, false)
 	for _, elsewhere := range []bool{false, true} {
 		where := "the same machine"
 		if elsewhere {
 			where = "another machine"
 		}
-		for at := 1; at < 60; at++ {
-			finished := false
+		for at := 1; at <= effects; at++ {
 			t.Run(fmt.Sprintf("%s/effect %d", where, at), func(t *testing.T) {
-				what, r, started := crashRun(t, at, elsewhere)
-				if what == "" {
-					finished = true
-					t.Skip("the flow finished before this effect")
-				}
+				t.Parallel()
+				what, r, started, _ := crashRun(t, at, elsewhere)
 				t.Logf("stopped %s", what)
 				everyEffectOnce(t, r, started)
 			})
-			if finished {
-				break
-			}
 		}
 	}
 }

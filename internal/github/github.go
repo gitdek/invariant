@@ -230,6 +230,20 @@ func (c Client) PullRequest(ctx context.Context, n int) (PullRequest, error) {
 	return out, c.call(ctx, "GET", c.path(fmt.Sprintf("pulls/%d", n)), nil, &out)
 }
 
+// OpenPullRequest finds the open pull request from branch, in this
+// repository, if there is one.
+func (c Client) OpenPullRequest(ctx context.Context, branch string) (PullRequest, bool, error) {
+	owner, _, _ := strings.Cut(c.Repo, "/")
+	var out []PullRequest
+	if err := c.call(ctx, "GET", c.path("pulls?state=open&head="+url.QueryEscape(owner+":"+branch)), nil, &out); err != nil {
+		return PullRequest{}, false, err
+	}
+	if len(out) == 0 {
+		return PullRequest{}, false, nil
+	}
+	return out[0], true, nil
+}
+
 // CheckRuns lists the check runs with the given name on a commit.
 func (c Client) CheckRuns(ctx context.Context, sha, name string) ([]CheckRun, error) {
 	var out struct {

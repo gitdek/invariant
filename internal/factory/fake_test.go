@@ -162,6 +162,16 @@ func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullReque
 	return *out, nil
 }
 
+func (g *fakeGitHub) OpenPullRequest(_ context.Context, branch string) (github.PullRequest, bool, error) {
+	for _, pr := range g.prs {
+		if pr.State == "open" && pr.Head.Ref == branch {
+			pr.Head.SHA = g.head(branch)
+			return *pr, true, nil
+		}
+	}
+	return github.PullRequest{}, false, nil
+}
+
 func (g *fakeGitHub) head(branch string) string {
 	out, err := exec.Command("git", "-C", g.origin, "rev-parse", "refs/heads/"+branch).Output()
 	if err != nil {
@@ -204,7 +214,7 @@ func (g *fakeGitHub) Merge(_ context.Context, n int, sha, method string) (string
 	if pr.Head.SHA != sha {
 		return "", fmt.Errorf("head moved")
 	}
-	pr.Merged, pr.State = true, "closed"
+	pr.Merged, pr.State, pr.MergeCommitSHA = true, "closed", "abc123merge"
 	g.merged = append(g.merged, n)
 	return "abc123merge", nil
 }
