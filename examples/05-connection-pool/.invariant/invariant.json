@@ -1,0 +1,6 @@
+{
+  "name": "bounded connection pool",
+  "module": ".invariant/specs/ConnectionPool.tla",
+  "code": "pool",
+  "language": "go"
+}
