@@ -38,7 +38,6 @@ Invariant is a code factory that turns GitHub issues into merged pull requests. 
 ## Non-goals, for now
 
 - **Whole applications.** The factory builds small cores that are state machines, and the rest of an application calls them. It doesn't prove arbitrary existing code.
-- **Other repositories.** Invariant works on itself first. `invariant init` and a factory for other repositories come later.
 - **A hosted service.** The factory runs on the owner's machine, with the owner's accounts. A hosted factory would use an API key. `D-0028`
 - **Claims beyond the checked bounds.** No "100%", and no "bug-free". `D-0015`
 - **Deciding what to build.** The factory never makes a call a person should make. `D-0002`
@@ -116,8 +115,8 @@ Each requirement serves one goal.
 
 ### 4 · Invariant maintains its own rules
 
-- **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Next, slice 6. `D-0045`
-- **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Next, slice 6. `D-0045`
+- **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Planned, after this PRD. `D-0045` `D-0053`
+- **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Planned, after this PRD. `D-0045` `D-0053`
 - **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Proposed, slice 8.
 - **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. Today the first holds because of a check, and nothing handles the second. Proposed, slice 8.
 
@@ -128,7 +127,8 @@ Each requirement serves one goal.
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
 - **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs. Proposed, question 3.
 - **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Planned. `D-0028` `D-0052`
-- **5.6 Other repositories,** through `invariant init`, and a hosted factory that runs on an API key. Later. `D-0000` `D-0028`
+- **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. It starts with copythis-ad. Next, slice 6. `D-0053` `D-0054`
+- **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
 
 ## How we'll know it works
 
@@ -156,13 +156,14 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | Slice | What | Status |
 | :-- | :-- | :-- |
 | 1 to 5 | The gate, synthesis, TypeScript and Python checking, GitHub, and synthesis in all three languages | Done |
-| 6 | Amendments, then Invariant building itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Part A done, Part B next |
+| 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Part A done, Part B next `D-0053` `D-0054` |
 | 7 | Code you can ship (3.7) | Proposed |
 | 8 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Proposed |
 | 9 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Proposed. The switch itself is ratified. `D-0007` `D-0033` |
-| Later | Codex, type checking, a TypeScript proof path, other repositories, a hosted factory | Later |
+| Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 
-- **Slice 6 is done when** the protocol is ratified on an issue, built by the factory and proved with Gobra, the watcher runs on it, and one issue changes it through the factory. `D-0045` The protocol core runs inside the real watcher, so its model has to be finite without counters that cap its behavior. Otherwise the cap would end up in the code the watcher runs. Slice 7 makes that true for every project.
+- **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
+- **Then this PRD,** and after it, Invariant builds itself: the issue protocol is ratified on an issue, built by the factory and proved with Gobra, the watcher runs on it, and one issue changes it through the factory. `D-0045` `D-0053` The protocol core runs inside the real watcher, so its model has to be finite without counters that cap its behavior. Otherwise the cap would end up in the code the watcher runs. Slice 7 makes that true for every project.
 - **Slice 7 is done when** a factory project's code has no model bounds in it, its proofs don't depend on the bounds, and TLC checks it at the ratified bounds, on a live issue.
 - **Slice 8 is done when** a model of the watcher shows that no step is lost or doubled, including a crash at any point and a second watcher. The factory proves the core that decides what to do after a restart, the watcher runs on it, and a test kills the watcher after each kind of step and shows the issue still merges.
 - **Slice 9 is done when** `invariant/gate` is a required check, GitHub's auto-merge does the merging, and a review of the issue surface, seen as someone without write access, is written up with its findings fixed.

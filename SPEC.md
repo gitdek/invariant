@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided entries in [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided entry supports is a bug in this file. History and reasoning live in the log.
 
-**Rolled up through** D-0052 · 2026-09-26 (every ratified or decided entry. D-0048 is proposed, so it isn't here yet)
+**Rolled up through** D-0054 · 2026-09-26 (every ratified or decided entry. D-0048 is proposed, so it isn't here yet)
 
 ## What Invariant is
 
@@ -102,7 +102,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   3. TypeScript and Python: conformance for existing code, then a Nagini spike. Done.
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
   5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
-  6. Part A, amendments: done. Issue #5 amended the rate limiter to refuse calls once two are waiting: the proposal showed the diff, its lock amends #3's, and the bot merged it once CI's gate passed. Part B, next: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0042` `D-0045` `D-0046` `D-0047`
+  6. Part A, amendments: done. Issue #5 amended the rate limiter to refuse calls once two are waiting: the proposal showed the diff, its lock amends #3's, and the bot merged it once CI's gate passed. Part B, next: existing projects in @gitdek's other repositories, starting with a check of gitdek/copythis-ad's analysis lease protocol, as it is. `D-0042` `D-0045` `D-0046` `D-0047` `D-0053` `D-0054`
+  7. Then the PRD, D-0048. After it, Invariant builds itself: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. `D-0045` `D-0053`
 
 ## Project
 
