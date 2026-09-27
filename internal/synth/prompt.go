@@ -114,67 +114,108 @@ var languages = map[string]language{
 		name:      "Go",
 		protected: " and go.mod",
 		task: func(p *project.Project, gateRuns int) string {
-			return fmt.Sprintf(`2. **The code**, in `+"`%s/`"+` as Go package `+"`%s`"+`. It must implement your model exactly.
-   - A comparable `+"`State`"+` struct that represents the spec's variables for the bounds above, one to one. Use fixed-size arrays, booleans and small integer types; no slices, maps or pointers.
-   - `+"`func Init() State`"+`: the initial state.
-   - One exported step function per TLA+ action. It takes the current state (and the action's parameters as ints, if any) and returns the next state. Directly above each one, a Gobra contract: `+"`// @ requires`"+` lines for the action's enabling condition and parameter bounds, and `+"`// @ ensures`"+` lines for its effect and for everything it leaves unchanged.
-   - `+"`func Successors(s State) []State`"+`: the state after every action enabled in s, the way TLC expands Next. Put it alone in `+"`explore.go`"+`, without the Gobra header. Gobra can't verify Go's append.
-   - Every other Go file starts with the line `+"`// +gobra`"+`, then a blank line, then the package clause, so that Gobra verifies it.
-   - Standard library only. No cgo, goroutines, network or file access.
-   - Tests in `+"`_test.go`"+` files are welcome. They run in a sandbox with no network.
-3. **Check your work with the `+"`gate`"+` tool.** It runs every check and says exactly what failed. You have %d gate runs in total, so reread your files carefully before each run. You're done when the gate passes. Then reply with a short summary.
+			return fmt.Sprintf(`2. **The code**, in `+"`%s/`"+` as Go package `+"`%s`"+`. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068).
+   - **No bound is in it.** Sizes are parameters: a capacity passed to a constructor, a slice made at that size, an operation that refuses when there's no room. No constant, array length or loop limit in it comes from the bounds above. The one exception is a machine limit that keeps arithmetic from overflowing, far above any bound.
+   - **Only the system's own state is in it.** The model's environment and history stay out of the code: who acts, how many times, and what was sent, received or written. Those belong to the explorer.
+   - **Each operation has a Gobra contract that holds at every size,** directly above it. It has `+"`// @ requires`"+` lines for when it may run, and `+"`// @ ensures`"+` lines for its effect and for everything it leaves unchanged. No contract mentions a bound.
+   - Every Go file except `+"`explore.go`"+` starts with the line `+"`// +gobra`"+`, then a blank line, then the package clause, so that Gobra verifies it.
+3. **The explorer,** alone in `+"`explore.go`"+`, without the Gobra header. It's the environment, and the only place the bounds live.
+   - **The bounds are constants in their own `+"`const`"+` block.** Each one is named exactly after its TLA+ constant. A number is its value. A set of model values is its size, such as `+"`Producers = 2`"+` for `+"`{p1, p2}`"+`.
+   - **A comparable `+"`State`"+`** holds the spec's variables at those bounds, one to one, in fixed-size arrays, booleans and small ints. The system's part is copied out of the code. The environment's and history's parts are the explorer's own.
+   - **`+"`func Init() State`"+` and `+"`func Successors(s State) []State`"+`,** which follow the way TLC expands Next. For each action enabled in s, make the code's value from s at the bounds, call its operation, and read its state back. Then update the environment's part. The environment's own steps, such as a failed send, need no call into the code.
+   - **The code's refusals are the code's to make.** Call an operation wherever the model's action could run, and let the code refuse it. Only the environment's bounds stop the explorer.
+4. **Standard library only.** No cgo, goroutines, network or file access. Tests in `+"`_test.go`"+` files are welcome. They run in a sandbox with no network.
+5. **Check your work with the `+"`gate`"+` tool.** It runs every check and says exactly what failed. You have %d gate runs in total, so reread your files carefully before each run. You're done when the gate passes. Then reply with a short summary.
 `, p.Manifest.Code, filepath.Base(p.Manifest.Code), gateRuns)
 		},
-		checks: `- **Agreement:** exploring your Go code from ` + "`Init()`" + ` through ` + "`Successors()`" + ` reaches exactly as many distinct states as TLC finds in your model, at the same depth. The Go state space must match the model's one to one.
-- **Code:** Gobra verifies every function in files marked ` + "`// +gobra`" + `, including array bounds and integer overflow.
+		checks: `- **Agreement:** exploring your explorer from ` + "`Init()`" + ` through ` + "`Successors()`" + `, with the code doing the system's part of each step, reaches exactly as many distinct states as TLC finds in your model, at the same depth. The state space must match the model's one to one.
+- **Code:** Gobra verifies every function in files marked ` + "`// +gobra`" + `, including slice bounds and integer overflow, at every size.
 - **Build:** go vet and go test pass.`,
 		primer: `# Gobra, briefly
 
-A contract is a block of comment lines directly above a function. A generic example, not from this project:
+A contract is a block of comment lines directly above a function. Here's code with no model bounds in it, which Gobra proves at every capacity. It's a log buffer's core, a ring of any capacity:
 
 ` + "```go" + `
 // +gobra
 
-package counter
+package logbuffer
 
-const N = 3
+// MaxCapacity keeps index arithmetic far from overflow. It's the machine's
+// limit, not the model's.
+const MaxCapacity = 1 << 30
 
-type State struct {
-	Count [N]int
-	Done  bool
+type Line struct{ P, N int }
+
+// Buffer is a ring of slots holding N lines, the oldest at Head.
+type Buffer struct {
+	Slots []Line
+	Head  int
+	N     int
 }
 
-// Inc mirrors the TLA+ action Inc(i).
-// @ requires 0 <= i && i < N
-// @ requires !s.Done && s.Count[i] < 10
-// @ ensures t.Count[i] == s.Count[i] + 1
-// @ ensures forall j int :: 0 <= j && j < N && j != i ==> t.Count[j] == s.Count[j]
-// @ ensures t.Done == s.Done
-func Inc(s State, i int) (t State) {
-	t = s
-	t.Count[i] = s.Count[i] + 1
-	return t
+// @ requires acc(&b.Slots, _) && acc(&b.Head, _) && acc(&b.N, _)
+// @ decreases
+// @ pure
+func (b *Buffer) Ok() bool {
+	return 0 < len(b.Slots) && len(b.Slots) <= MaxCapacity &&
+		0 <= b.Head && b.Head < len(b.Slots) && 0 <= b.N && b.N <= len(b.Slots)
+}
+
+// @ ghost
+// @ requires 0 <= x && x < 2*n && 0 < n
+// @ ensures 0 <= r && r < n
+// @ decreases
+// @ pure func wrap(x, n int) (r int) { return x < n ? x : x - n }
+
+// At is the i-th oldest line, which the contracts speak of.
+// @ ghost
+// @ requires acc(&b.Slots, _) && acc(&b.Head, _) && acc(&b.N, _) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j], _)
+// @ requires 0 <= i && i < b.N
+// @ decreases
+// @ pure func (b *Buffer) At(i int) Line { return b.Slots[wrap(b.Head+i, len(b.Slots))] }
+
+// Ship takes the oldest line out, when there is one.
+// @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ requires 0 < b.N
+// @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
+// @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
+// @ ensures l == old(b.At(0)) && b.N == old(b.N) - 1
+// @ ensures forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
+func (b *Buffer) Ship() (l Line) {
+	l = b.Slots[b.Head]
+	b.Head = b.Head + 1
+	if b.Head == len(b.Slots) {
+		b.Head = 0
+	}
+	b.N = b.N - 1
+	return l
 }
 ` + "```" + `
 
-- A loop needs its invariants on the lines directly above the ` + "`for`" + `, such as ` + "`// @ invariant 0 <= i && i <= N`" + `.
-- Contracts can use ` + "`forall`" + `, ` + "`exists`" + `, ` + "`==>`" + ` and ` + "`==`" + ` on whole arrays (` + "`t.Count == s.Count`" + `).
-- Calls to a function with a contract must satisfy its ` + "`requires`" + `, so guard them.
+Its ` + "`New(capacity)`" + ` and ` + "`Write(l)`" + ` follow the same pattern. What makes contracts like these verify:
+
+- **Spell out permissions field by field,** as above. With overflow checks on, a pure function can't read an int field through a predicate's unfolding.
+- **Keep index arithmetic linear.** A remainder by a length, ` + "`(head+i) % len(slots)`" + `, can keep the solver busy for many minutes. Wrap an index with an ` + "`if`" + ` in code, and with a ghost conditional, ` + "`c ? a : b`" + `, in specs. Go itself has no such expression.
+- **Say what a value holds through a ghost view,** such as ` + "`At(i)`" + ` above, and write each contract in its terms.
+- **Avoid loops over slices where a ring or a direct index will do.** A loop needs invariants on the lines directly above the ` + "`for`" + `, such as ` + "`// @ invariant 0 <= i && i <= b.N`" + `, and the solver must be able to use them. Go's ` + "`copy`" + ` is specified only for slices that don't overlap.
+- Calls to a function with a contract must satisfy its ` + "`requires`" + `, so guard them in the explorer.
 `,
 	},
 	"typescript": {
 		name:      "TypeScript",
 		protected: " and package.json",
 		task: func(p *project.Project, gateRuns int) string {
-			return fmt.Sprintf(`2. **The code**, in TypeScript in `+"`%s/`"+`, as a state machine that implements your model exactly. Node 24 runs `+"`.ts`"+` files directly by stripping their types, so use only erasable syntax: types, interfaces and `+"`as`"+` are fine, but not `+"`enum`"+`, `+"`namespace`"+` or constructor parameter properties. Import local files with their `+"`.ts`"+` extension. No dependencies: Node's standard library only, and no network.
-   - A module, such as `+"`%s/machine.ts`"+`, that exports:
-     - `+"`type State`"+`: plain data (numbers, booleans, strings, arrays and plain objects) that represents the spec's variables for the bounds above, one to one.
-     - `+"`init(): State`"+`: the initial state.
-     - One function per TLA+ action. It takes the state, and the action's parameters if any, and returns the next state, or `+"`null`"+` when the action isn't enabled. It never changes its argument.
-     - `+"`successors(s: State): State[]`"+`: the state after every enabled action, the way TLC expands Next.
-     - `+"`key(s: State): string`"+`: a canonical string for a state, so that equal states have equal keys.
+			return fmt.Sprintf(`2. **The code**, in TypeScript in `+"`%s/`"+`. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068). Node 24 runs `+"`.ts`"+` files directly by stripping their types, so use only erasable syntax: types, interfaces and `+"`as`"+` are fine, but not `+"`enum`"+`, `+"`namespace`"+` or constructor parameter properties. Import local files with their `+"`.ts`"+` extension. No dependencies: Node's standard library only, and no network.
+   - **No bound is in it.** Sizes, limits and clocks are parameters or inputs: a capacity or a limit passed in when it's made, the time passed to each call, and an operation that refuses when the model wouldn't take its action. No constant in it comes from the bounds above.
+   - **Only the system's own state is in it.** The model's environment and history stay out of the code: who acts, how many times, how far the clock runs, and what was sent, received or written. Those belong to the driver.
+   - A module, such as `+"`%s/machine.ts`"+`, that exports the system, as a class or as functions over its state. Its operations are what the model's actions stand for. It offers a way to read its state, and to make it again from that state.
    - Tests beside it, such as `+"`%s/machine.test.ts`"+`, with `+"`node:test`"+` and `+"`node:assert`"+`. They run with `+"`node --test`"+`.
-3. **The conformance driver**, `+"`%s`"+`. It explores your state machine completely, breadth first from `+"`init()`"+` through `+"`successors()`"+`. For every step the code can take, it records one run: the path from the initial state to the step's start, then the state the step reaches. It writes the runs, each state in the spec's vocabulary (see below), to the file named by `+"`process.env.INVARIANT_TRACES`"+`, as `+"`{\"traces\": [[state, ...], ...]}`"+`.
+3. **The conformance driver**, `+"`%s`"+`. It's the environment, and the only place the bounds live.
+   - **The bounds are constants at its top,** each named exactly after its TLA+ constant. A number is its value, and a set of model values is its size.
+   - **It explores completely,** breadth first from the initial state. Each state it keeps holds the system's part, read out of the code, and the environment's own. For each action that could run, it makes the code from the state, calls the operation, and reads the state back. Then it updates the environment's part. The code's refusals are the code's to make: call an operation wherever the model's action could run, and let the code refuse it. Only the bounds stop the driver.
+   - **It records each step.** For every step, it records one run: the path from the initial state to the step's start, then the state the step reaches. It writes the runs, each state in the spec's vocabulary (see below), to the file named by `+"`process.env.INVARIANT_TRACES`"+`, as `+"`{\"traces\": [[state, ...], ...]}`"+`.
 4. **Check your work with the `+"`gate`"+` tool.** It runs every check and says exactly what failed. You have %d gate runs in total, so reread your files carefully before each run. You're done when the gate passes. Then reply with a short summary.
 `, p.Manifest.Code, p.Manifest.Code, p.Manifest.Code, p.Manifest.Conformance, gateRuns)
 		},
