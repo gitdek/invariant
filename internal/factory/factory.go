@@ -84,6 +84,11 @@ type Factory struct {
 	Self string
 	Log  func(format string, args ...any)
 	Now  func() time.Time
+	// Activity, when set, hears what the factory starts on an issue:
+	// formalizing, answering, ratifying or building. It hears 0 and "" when
+	// the factory is between steps. The watcher writes it down for the
+	// dashboard (D-0049).
+	Activity func(issue int, doing string)
 
 	writers map[string]bool
 }
@@ -152,10 +157,13 @@ func (f *Factory) Poll(ctx context.Context) error {
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
 	var errs []error
 	for _, issue := range issues {
-		if err := f.step(ctx, issue); err != nil {
+		err := f.step(ctx, issue)
+		f.doing(0, "")
+		if err != nil {
 			errs = append(errs, fmt.Errorf("#%d: %w", issue.Number, err))
 		}
 	}
+	f.doing(0, "")
 	return errors.Join(errs...)
 }
 
@@ -315,6 +323,7 @@ func matches(args []string, hash string) bool {
 // choose records people's answers to the open forks. Once every fork is
 // answered, it drafts again with the answers.
 func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Command) error {
+	f.doing(t.Issue.Number, "answering")
 	forks := state.Marker.Forks
 	chosen := map[string]formalize.Answer{}
 	var replyTo []int64
@@ -361,6 +370,7 @@ func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formaliz
 func (f *Factory) formalize(ctx context.Context, t Thread, answers []formalize.Answer, previous *formalize.Proposal, replyTo []int64) error {
 	n := t.Issue.Number
 	f.logf("#%d: formalizing", n)
+	f.doing(n, "formalizing")
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
 	req := f.request(t, answers, previous)
 	// A Project: line names the project the issue changes, or where a new
@@ -513,6 +523,7 @@ func withoutCommands(body string) string {
 // ratify commits the ratified proposal as a new project on the issue's
 // branch, then builds it.
 func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) error {
+	f.doing(t.Issue.Number, "ratifying")
 	posted, err := f.commitRatification(ctx, t, state, c)
 	if errors.Is(err, errStale) {
 		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything. Comment `/invariant revise` and I'll draft it again from the project as it is now.")
@@ -682,6 +693,7 @@ var numbered = regexp.MustCompile(`^(\d+)-`)
 func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
 	f.logf("#%d: building %s", n, m.Project)
+	f.doing(n, "building")
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err
 	}
@@ -921,6 +933,12 @@ func (f *Factory) now() time.Time {
 		return f.Now()
 	}
 	return time.Now()
+}
+
+func (f *Factory) doing(issue int, what string) {
+	if f.Activity != nil {
+		f.Activity(issue, what)
+	}
 }
 
 func (f *Factory) logf(format string, args ...any) {

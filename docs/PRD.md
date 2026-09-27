@@ -2,7 +2,7 @@
 
 This document says what Invariant is for, who it serves, what it has to do, and how we'll know it works. It isn't the spec. [`SPEC.md`](../SPEC.md) is the only document to build against, and it holds only what's ratified or decided. Every requirement here cites its decisions in [`decisions/log.md`](../decisions/log.md). A requirement marked **proposed** becomes buildable only once @gitdek ratifies it and it's rolled up into the spec.
 
-**Status.** Proposed as D-0048 on 2026-09-26. Claude wrote it from the kickoff brief, the decision log and the first three live issues. @gitdek ratifies it by answering the [questions](#questions-for-gitdek) at the end.
+**Status.** Proposed as D-0048 on 2026-09-26. A coding agent drafted it from the kickoff brief, the decision log and the first three live issues. @gitdek ratifies it by answering the [questions](#questions-for-gitdek) at the end.
 
 ## The problem
 
@@ -52,9 +52,9 @@ Invariant can't build all of itself, and it shouldn't. The factory builds only w
 | :-- | :-- | :-- |
 | **@gitdek** | Decides. Ratifies every requirement, answers every fork, and ratifies every statement. | |
 | **Invariant** | The rules that make it trustworthy, as proved projects under `factory/`. Its issue protocol comes first, then how it survives crashes and concurrent work. It changes them only through amendments @gitdek ratifies. | Its own gate: TLC, Gobra and agreement, again in CI |
-| **Claude** | Everything else: the gate's machinery, the verifier integrations, the GitHub and git plumbing, the prompts, the CLI, the docs and the graphics. It's built in sessions with @gitdek, and each decision is logged as it's made. | CI: vet, unit and integration tests, and the gate on every project |
+| **Coding agents** | Everything else: the gate's machinery, the verifier integrations, the GitHub and git plumbing, the prompts, the CLI, the docs and the graphics. Any coding agent builds it, in sessions with @gitdek, and each decision is logged as it's made. | CI: vet, unit and integration tests, and the gate on every project |
 
-Once a requirement is ratified, it becomes code in one of two ways. If it's a rule with a model, Claude writes an issue that describes it completely, @gitdek answers the forks and ratifies, and the factory builds and proves it. Anything else, Claude builds in a session with @gitdek.
+Once a requirement is ratified, it becomes code in one of two ways. If it's a rule with a model, an agent writes an issue that describes it completely, @gitdek answers the forks and ratifies, and the factory builds and proves it. Anything else, an agent builds in a session with @gitdek.
 
 That split is the ideal, not a compromise. Proofs go where the rules are, tests go where the plumbing is, and a person makes every decision.
 
@@ -127,7 +127,7 @@ Each requirement serves one goal.
 - **5.2 Effort is bounded.** Each agent run has a cost budget, a turn limit and a timeout, and synthesis gets at most four gate runs. Built. `D-0000` `D-0026`
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
 - **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs. Proposed, question 3.
-- **5.5 A second synthesis backend,** Codex. Later. `D-0028`
+- **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Planned. `D-0028` `D-0052`
 - **5.6 Other repositories,** through `invariant init`, and a hosted factory that runs on an API key. Later. `D-0000` `D-0028`
 
 ## How we'll know it works
@@ -142,7 +142,7 @@ The rest have targets. Here are the first three live issues:
 | Measure | Target | #1, Go | #3, TypeScript | #5, an amendment |
 | :-- | :-- | :-- | :-- | :-- |
 | Comments from people | 3 or fewer | 2 | 2 | 2 |
-| People only decided | 9 issues in 10 | yes | yes | no: CI's checker ran out of memory, and Claude fixed it |
+| People only decided | 9 issues in 10 | yes | yes | no: CI's checker ran out of memory, and it had to be fixed |
 | Factory time, not counting time waiting on people | under 20 minutes | 16 minutes | 13 minutes | 11 minutes |
 | Synthesis passed its first gate run | 8 issues in 10 | yes | yes | yes |
 | Estimated agent spend | under $2 | synthesis $0.26, the rest not recorded | synthesis $0.23, the rest not recorded | $0.64 |
