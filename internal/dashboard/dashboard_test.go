@@ -315,3 +315,21 @@ func TestRunsOfTheCurrentStep(t *testing.T) {
 		}
 	}
 }
+
+// The dashboard shows every issue the factory takes, however it was asked.
+func TestTheFactorysIssues(t *testing.T) {
+	for _, c := range []struct {
+		is   github.Issue
+		want bool
+	}{
+		{github.Issue{Labels: []github.Label{{Name: "invariant"}}}, true},
+		{github.Issue{Labels: []github.Label{{Name: "invariant:asking"}}}, true},
+		{github.Issue{Body: "Check the leases.\n\n/invariant solve\n"}, true},
+		{github.Issue{Body: "Mentions `invariant` in passing.", Labels: []github.Label{{Name: "bug"}}}, false},
+		{github.Issue{Body: "> /invariant solve\nquoted, so not a command"}, false},
+	} {
+		if got := theFactorys(c.is); got != c.want {
+			t.Errorf("%+v: %v, want %v", c.is, got, c.want)
+		}
+	}
+}

@@ -10,10 +10,14 @@ import (
 // on GitHub.
 
 // Issues lists the issues that carry a label, open and closed, leaving out
-// pull requests.
+// pull requests. An empty label lists them all.
 func (c Client) Issues(ctx context.Context, label string) ([]Issue, error) {
+	query := "issues?state=all&per_page=100"
+	if label != "" {
+		query += "&labels=" + url.QueryEscape(label)
+	}
 	var all []Issue
-	if err := c.pages(ctx, c.path("issues?state=all&per_page=100&labels="+url.QueryEscape(label)), &all); err != nil {
+	if err := c.pages(ctx, c.path(query), &all); err != nil {
 		return nil, err
 	}
 	var issues []Issue
