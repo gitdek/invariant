@@ -126,6 +126,16 @@ def main():
         + "\n    </g>"
     )
     write("mark-tile.svg", svg("-28 -28 56 56", 512, 512, tile))
+
+    # The factory's GitHub App logo, which is also its bot's avatar: the tile,
+    # full-bleed, because GitHub rounds an avatar's corners itself.
+    app = (
+        '<rect x="-28" y="-28" width="56" height="56" fill="#0E1116" stroke="none"/>\n'
+        '    <g transform="scale(0.64)">\n      '
+        + mark(0, 0, DARK, "      ", ICON)
+        + "\n    </g>"
+    )
+    write("app-logo.svg", svg("-28 -28 56 56", 1024, 1024, app, "Invariant Code Factory"))
     print("wrote", sorted(os.listdir(OUT)))
 
 

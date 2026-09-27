@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-28 -28 56 56" width="1024" height="1024" role="img" aria-label="Invariant Code Factory">
+  <title>Invariant Code Factory</title>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="-28" y="-28" width="56" height="56" fill="#0E1116" stroke="none"/>
+    <g transform="scale(0.64)">
+      <path d="M20.18,-5.82A21,21 0 1 1 5.82,-20.18" stroke="#E6EDF3" stroke-width="6"/>
+      <circle cx="14.85" cy="-14.85" r="5.6" fill="#E6EDF3"/>
+      <circle cx="0" cy="0" r="9.6" fill="#38D9A9"/>
+    </g>
+  </g>
+</svg>
