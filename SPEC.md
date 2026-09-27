@@ -88,7 +88,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - The public page only reads: GitHub through `gh`, CI's receipts from main, TLC's own state graphs, and each repository's lease, which names the one watcher that may act. `D-0077` It shows no code, comment bodies, emails or keys. `D-0051`
   - At `/act`, behind Cloudflare Access, @gitdek can post what an issue is waiting for: answers, ratify, retry and revise. He can also open a new issue for the factory to solve. The server checks Access's signed token on every request, and each command posts as his own comment. `D-0065` `D-0067`
   - The watcher writes what it's doing to a status file for it. `D-0051`
-- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin`, `trace`, `dashboard` and `init` commands are built. `init` sets up another repository: it writes the gate workflow, pinned to a full commit of Invariant that CI reads through a read-only deploy key, and prints the steps only a person can take. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036` `D-0051` `D-0054` `D-0055`
+- The CLI's `verify`, `synthesize`, `formalize`, `watch`, `scope`, `ratification`, `pin`, `trace`, `dashboard` and `init` commands are built. `init` sets up another repository: it writes the gate workflow, pinned to a full commit of Invariant, which CI reads without a key now that Invariant is public, and prints the steps only a person can take. `D-0000` `D-0013` `D-0017` `D-0026` `D-0036` `D-0051` `D-0054` `D-0055` `D-0075`
 
 ## Merging
 

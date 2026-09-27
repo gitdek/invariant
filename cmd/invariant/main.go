@@ -733,20 +733,14 @@ func initCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	key := filepath.Join("~/.config/invariant", strings.ReplaceAll(*repo, "/", "-")+"-deploy")
 	fmt.Printf(`Wrote %s. CI will build Invariant at %s and run its gate on every pull request.
 
 Next:
 1. Commit the workflow. The factory's App can't change CI, so a person does.
-2. Let CI read Invariant with a read-only deploy key:
-     ssh-keygen -t ed25519 -N "" -C "%s CI reads invariant" -f %s
-     gh repo deploy-key add %s.pub -R gitdek/invariant -t "%s CI (read-only)"
-     gh secret set INVARIANT_DEPLOY_KEY -R %s < %s
-     rm %s
-3. Add %s to the factory's App installation, under Repository access.
-4. Run the factory there:
+2. Add %s to the factory's App installation, under Repository access.
+3. Run the factory there:
      invariant watch -repo %s -app-id APP_ID -projects invariant -language typescript
-`, setup.WorkflowPath, (*ref)[:12], *repo, key, key, *repo, *repo, key, key, *repo, *repo)
+`, setup.WorkflowPath, (*ref)[:12], *repo, *repo)
 	return 0
 }
 
