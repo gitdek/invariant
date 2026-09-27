@@ -40,6 +40,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - An existing-code project checks code that was already in its repository, without holding it or changing it. An issue names the code with `Code:` lines, and the project holds only the model and a conformance driver the factory writes. The gate runs the driver on the real code, in a throwaway copy of its package, and requires it to import every piece of code it checks. The receipt hashes that code. It's TypeScript only, for now. `D-0054` `D-0055`
 - When a project's conformance driver explores every state the code can reach, its manifest says so. The gate then requires the driver to visit every state the model reaches, so the code and the model reach exactly the same states. `D-0043`
 - Conformance: a project's driver calls the code's operations at random and records each state in the spec's vocabulary. TLC checks that every run starts in a state `Init` allows and that every step that changes the state is a `Next` step. Runs use a fixed seed, so receipts reproduce. TLC checks the steps in batches, so memory stays flat as models grow. `D-0029` `D-0047`
+- Code is the system alone, with sizes as parameters and no constant from the bounds. The explorer (Go) or driver (TypeScript and Python) is the environment: it makes the code at the ratified bounds, and keeps the model's environment and history. Gobra and Nagini prove each operation at every size. `D-0068`
 - Designs are model-checked with TLA+ and TLC. Go code is verified with Gobra, and Python cores with Nagini. Lean 4 has no role in v1. `D-0003` `D-0010` `D-0031`
 - Verifiers run in Docker and are pinned. `D-0000` `D-0013` `D-0016` `D-0020`
   - TLC is v1.7.4, pinned by SHA-256, running in `eclipse-temurin` pinned by digest.
@@ -76,6 +77,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 - When a check fails, the counterexamples and verifier errors feed back into synthesis for up to three repair attempts. If it still fails, the PR is labeled `invariant:human-review-needed` and the counterexample is posted on the issue. `D-0000`
 - Every pull request carries a receipt that CI generates from tool output only. `D-0000` `D-0013`
   - It lists the states explored, the bounds, the functions verified, the statement hashes and the tool versions.
+  - It says Go code is proved at every size only when Gobra proved it and it agrees with TLC one size past the bounds. Otherwise it says what was checked, and at which bounds. `D-0015` `D-0068` `D-0070`
   - Its fingerprint matches between a local run and a CI run of the same commit.
 - A live dashboard shows what the factory is working on, each project's evidence, the roadmap and the decisions. `invariant dashboard` serves it from @gitdek's machine, and a Cloudflare tunnel publishes it at `invariant.puglisij.com`, open to anyone with the link. It moves to puglisij.com/invariant later. It has a light and a dark theme. `D-0049` `D-0050`
   - The public page only reads: GitHub through `gh`, CI's receipts from main, and TLC's own state graphs. It shows no code, comment bodies, emails or keys. `D-0051`
@@ -92,6 +94,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Every witness is reachable.
   - Every known bug is caught.
   - Go: the code, explored from `Init()` through `Successors()`, reaches exactly the states TLC found, at the same depth.
+  - Go, when the explorer names its bounds as constants named after the model's: one size past the bounds, the code reaches exactly the states TLC found there too. One size larger means each number plus one, and a set of numbered model values, such as `{p1, p2}`, with the next one added. If TLC can't finish there within three minutes, or finds a problem in the model there, nothing is claimed or failed. `D-0068` `D-0070`
   - TypeScript and Python: every step the code took is a step the model allows.
   - Existing code: the driver imports every piece of code the project checks. `D-0054`
   - Gobra verifies Go files marked `// +gobra`, Nagini verifies Python files marked `# +nagini`, and the receipt names any function neither saw. `D-0031`
@@ -111,8 +114,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
   6. Done, in two parts. Part A, amendments: issue #5 amended the rate limiter, its proposal showed the diff and its lock amends #3's, and the bot merged it once CI's gate passed. Part B, existing projects: copythis-ad#33 checked the app's analysis lease protocol as it is. The gate found a real bug: a stalled retry canceled an attempt whose lease had run out, which erased the record that the attempt may have been charged. copythis-ad#35 fixed it, and the bot merged the check as copythis-ad#34. `D-0042` `D-0045` `D-0046` `D-0047` `D-0053` `D-0054` `D-0059`
   7. Invariant builds itself. Done: #9 ratified the factory's issue protocol, and the bot merged it as `factory/protocol` in #11, proved with Gobra. #13 amended it through the factory, and the bot merged #15 once CI proved it again. Since #12, the watcher checks every step it takes against it. `D-0045` `D-0053` `D-0058`
-  8. Code you can ship: no model bounds in a project's code, so its proofs hold at every size. Under way, by its ratified plan. `D-0048` `D-0058` `D-0068`
-  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Its plan is ratified. `D-0048` `D-0058` `D-0069`
+  8. Code you can ship. Done: code is the system alone, with sizes as parameters, and the explorer or driver is the environment. The gate proves Go code at every size and checks agreement one size past the bounds, and fails code that hardcodes a size. #18 became #20, a connection pool proved at every size, which the bot merged. The check one size larger doesn't cover TypeScript and Python drivers yet, and existing projects, such as the rate limiter, keep their bounds until an issue asks. `D-0048` `D-0058` `D-0068`
+  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Next, by its ratified plan. `D-0048` `D-0058` `D-0069`
   10. Ready to go public: GitHub enforces the gate. @gitdek chooses when. `D-0007` `D-0033` `D-0048`
 - The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. `invariant ledger` lists them for every issue it took. `D-0048` `D-0062`
 - The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
