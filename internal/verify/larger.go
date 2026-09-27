@@ -212,8 +212,13 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 // it explores as always, and writes only how many states it reached, and
 // how deep its search went, to $INVARIANT_COUNT.
 const countScript = `cd /src
-%s "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
+timeout %d %s "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
 `
+
+// countTimeout caps a driver's count one size larger. A driver explores
+// more slowly than TLC, so it gets twice TLC's time. One that runs out
+// claims nothing and fails nothing, as TLC doesn't when it runs out.
+const countTimeout = 2 * largerTimeout
 
 // boundsFile is where a TypeScript or Python project's bounds live: at the
 // top of its conformance driver, or of its explorer for a Python core.
@@ -257,7 +262,7 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance), "-e", "INVARIANT_COUNT=/out/count.json",
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", fmt.Sprintf(countScript, runner))
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", fmt.Sprintf(countScript, int(countTimeout.Seconds()), runner))
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
@@ -276,6 +281,8 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 		Depth  int   `json:"depth"`
 	}
 	switch {
+	case s[0].code == 124 || s[0].code == 143:
+		return Exploration{Unfinished: true, Message: fmt.Sprintf("the driver didn't finish counting one size larger within %s", countTimeout)}, nil
 	case s[0].code != 0:
 		return Exploration{Message: "the driver failed one size larger:\n" + lastLines(string(log), 20)}, nil
 	case readErr != nil || json.Unmarshal(raw, &count) != nil || count.States <= 0:
@@ -296,6 +303,8 @@ func compareLarger(bounds map[string]string, model *tlc.Result, code *Exploratio
 	case model == nil:
 	case model.Outcome != tlc.Passed:
 		l.Message = "TLC found a problem one size larger: " + describe(*model)
+	case code != nil && code.Unfinished:
+		l.Message = code.Message
 	case code == nil || !code.OK:
 		l.Required = true
 		l.Message = "couldn't explore the code one size larger"
