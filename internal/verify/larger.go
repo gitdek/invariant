@@ -183,6 +183,9 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 	if err := os.WriteFile(filepath.Join(agreeDir, "zz_invariant_agreement_test.go"), []byte(fmt.Sprintf(agreementTest, name)), 0o644); err != nil {
 		return Exploration{}, err
 	}
+	if err := pulled(ctx, g.GoImage); err != nil {
+		return Exploration{}, err
+	}
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOCACHE=/tmp/gocache", "-e", "HOME=/tmp",
@@ -256,6 +259,9 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 		return Exploration{}, err
 	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
+		return Exploration{}, err
+	}
+	if err := pulled(ctx, image); err != nil {
 		return Exploration{}, err
 	}
 	var buf bytes.Buffer

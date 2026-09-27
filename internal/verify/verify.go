@@ -460,6 +460,11 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 				exploreLarger = func() (Exploration, error) { return countLarger(ctx, l.Image, "python", p, sizes) }
 			}
 		}
+		// A driver counts only once TLC has finished one size larger: its
+		// count costs more than Go's exploration, and it says nothing
+		// without TLC's.
+		_, isGo := lang.(Go)
+		after := !isGo
 		if exploreLarger != nil {
 			spawn(func() error {
 				d, err := stage(work, "larger", p, src, "")
@@ -479,16 +484,25 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 					return nil
 				}
 				largerTLC = &res
-				return nil
-			})
-			spawn(func() error {
-				e, err := exploreLarger()
-				if err != nil {
-					return err
+				if after && res.Outcome == tlc.Passed {
+					e, err := exploreLarger()
+					if err != nil {
+						return err
+					}
+					largerCode = &e
 				}
-				largerCode = &e
 				return nil
 			})
+			if !after {
+				spawn(func() error {
+					e, err := exploreLarger()
+					if err != nil {
+						return err
+					}
+					largerCode = &e
+					return nil
+				})
+			}
 		}
 	}
 

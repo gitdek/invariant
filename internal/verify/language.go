@@ -170,6 +170,9 @@ func (g Go) check(ctx context.Context, projectDir, pkg string) (Build, Explorati
 	if err := os.WriteFile(filepath.Join(agreeDir, "zz_invariant_agreement_test.go"), []byte(test), 0o644); err != nil {
 		return Build{}, Exploration{}, err
 	}
+	if err := pulled(ctx, g.GoImage); err != nil {
+		return Build{}, Exploration{}, err
+	}
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOCACHE=/tmp/gocache", "-e", "HOME=/tmp",
@@ -208,6 +211,20 @@ func splitMarkers(out string, want int) ([]section, error) {
 		sections[i] = section{strings.TrimSpace(out[start:m[0]]), code}
 	}
 	return sections, nil
+}
+
+// pulled makes sure an image is on this machine before a sandbox runs in it.
+// docker run would pull it itself, but it writes the pull's progress into the
+// sandbox's own output, and a marker that lands mid-line isn't found.
+func pulled(ctx context.Context, image string) error {
+	if exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, "docker", "pull", "--quiet", image).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("pulling %s: %w: %s", image, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // parseSandbox reads the Go sandbox's output.
@@ -370,6 +387,9 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
+		return Build{}, Evidence{}, err
+	}
+	if err := pulled(ctx, image); err != nil {
 		return Build{}, Evidence{}, err
 	}
 	var buf bytes.Buffer
