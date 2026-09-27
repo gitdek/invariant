@@ -7,8 +7,12 @@
 package factory
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"regexp"
 	"strings"
 
@@ -91,11 +95,21 @@ type Marker struct {
 
 // The marker is base64 inside an HTML comment, so nothing in it, such as
 // TLA+ text, can end the comment early, and GitHub doesn't render it.
-var markerRE = regexp.MustCompile(`<!-- invariant:([A-Za-z0-9+/=]+) -->`)
+// It's gzipped first, marked z:, so a proposal's model still fits in a
+// comment. Markers from before that are read as they are.
+var markerRE = regexp.MustCompile(`<!-- invariant:(z:)?([A-Za-z0-9+/=]+) -->`)
+
+// maxMarker is the most a marker may unzip to. Anyone can post one, so a
+// small one can't make the factory unzip a huge one.
+const maxMarker = 4 << 20
 
 func (m Marker) encode() string {
 	b, _ := json.Marshal(m)
-	return "<!-- invariant:" + base64.StdEncoding.EncodeToString(b) + " -->"
+	var z bytes.Buffer
+	w := gzip.NewWriter(&z)
+	w.Write(b)
+	w.Close()
+	return "<!-- invariant:z:" + base64.StdEncoding.EncodeToString(z.Bytes()) + " -->"
 }
 
 // DecodeMarker reads the marker in a comment, if it has one.
@@ -104,12 +118,27 @@ func DecodeMarker(body string) (Marker, bool) {
 	if match == nil {
 		return Marker{}, false
 	}
-	b, err := base64.StdEncoding.DecodeString(match[1])
+	b, err := base64.StdEncoding.DecodeString(match[2])
+	if err == nil && match[1] == "z:" {
+		b, err = unzip(b)
+	}
 	var m Marker
 	if err != nil || json.Unmarshal(b, &m) != nil || m.Kind == "" {
 		return Marker{}, false
 	}
 	return m, true
+}
+
+func unzip(b []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	out, err := io.ReadAll(io.LimitReader(r, maxMarker+1))
+	if err == nil && len(out) > maxMarker {
+		err = errors.New("the marker is too big")
+	}
+	return out, err
 }
 
 // Post is one of the factory's comments.

@@ -2,6 +2,7 @@ package factory
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -20,8 +21,30 @@ const header = "◉ **Invariant** · "
 // hashChars is how much of a proposal's hash a ratifying comment must quote.
 const hashChars = 12
 
+// maxComment keeps a post under GitHub's limit of 65,536 characters, with
+// room to spare. A post GitHub refuses would be drafted again, by an agent,
+// on every poll.
+const maxComment = 60000
+
+// details are a post's collapsed sections, such as the TLA+ a proposal
+// changes. The marker and the proposal's hash already pin what they show.
+var details = regexp.MustCompile(`(?s)\n*<details>.*?</details>\n*`)
+
 func post(title, body string, m Marker) string {
-	return header + title + "\n\n" + strings.TrimSpace(body) + "\n\n" + m.encode() + "\n"
+	marker := m.encode()
+	compose := func(body string) string {
+		return header + title + "\n\n" + strings.TrimSpace(body) + "\n\n" + marker + "\n"
+	}
+	out := compose(body)
+	if len(out) <= maxComment {
+		return out
+	}
+	const short = "\n\n_Some detail is left out, because GitHub limits how long a comment can be._"
+	body = details.ReplaceAllString(body, "\n\n")
+	if room := maxComment - len(compose("")) - len(short); len(body) > room {
+		body = strings.ToValidUTF8(body[:max(room, 0)], "")
+	}
+	return compose(strings.TrimSpace(body) + short)
 }
 
 func forksComment(forks []formalize.Fork, m Marker) string {
