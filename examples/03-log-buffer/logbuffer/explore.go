@@ -4,14 +4,16 @@ package logbuffer
 // what the shipper has sent. It keeps the model's bounds, so the code
 // doesn't have to. Agreement explores it the way TLC explores the model.
 
-// The bounds TLC checks within: Producers = {p1, p2}, Capacity = 2,
-// MaxLines = 2.
+// The bounds TLC checks within, named after the TLA+ constants: a set of
+// model values, such as Producers = {p1, p2}, by its size.
 const (
-	NP       = 2
-	Capacity = 2
-	MaxLines = 2
-	MaxLog   = NP * MaxLines
+	Producers = 2
+	Capacity  = 2
+	MaxLines  = 2
 )
+
+// MaxLog is the most lines ever written in all.
+const MaxLog = Producers * MaxLines
 
 // State is the model's state: the buffer's lines, oldest first, and the
 // environment's history.
@@ -22,7 +24,7 @@ type State struct {
 	SentLen  int
 	Log      [MaxLog]Line
 	LogLen   int
-	Written  [NP]int
+	Written  [Producers]int
 	Retrying bool
 }
 
@@ -50,7 +52,7 @@ func read(b *Buffer, s *State) {
 // expands Next. The code does the buffer's part of each step.
 func Successors(s State) []State {
 	var out []State
-	for p := 0; p < NP; p++ {
+	for p := 0; p < Producers; p++ {
 		// Write(p): the producer has lines left, and the code has room.
 		if s.Written[p] < MaxLines && s.BufLen < Capacity {
 			b := buffer(s)
@@ -80,7 +82,7 @@ func Successors(s State) []State {
 		}
 	}
 	done := s.BufLen == 0
-	for p := 0; p < NP; p++ {
+	for p := 0; p < Producers; p++ {
 		done = done && s.Written[p] == MaxLines
 	}
 	if done {
