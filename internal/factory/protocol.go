@@ -43,7 +43,9 @@ type view struct {
 	scopeMany    bool   // the pull request changes more than its one project
 	mergedBy     int8   // protocol.Nobody, ByFactory or ByOther
 	mergedHead   string
-	directedBy   int8 // who directed the latest step: protocol.NoActor or By*
+	directedBy   int8   // who directed the latest step: protocol.NoActor or By*
+	stops        int    // builds that stopped since a writer last said retry
+	failure      string // why the latest failure happened: Fail*, or "" for none
 }
 
 // allows says whether the protocol has a step from one view of an issue to
@@ -130,17 +132,37 @@ func (r renaming) state(v view) protocol.State {
 	if v.scopeMany {
 		s.Scope = protocol.ScopeMany
 	}
+	s.Stops = int8(min(v.stops, 127))
+	s.Failure = failureValue(v.failure)
 	return s
 }
 
-// viewOf is an issue as its latest post left it. A thread the factory hasn't
-// posted on has no post yet.
-func viewOf(state Post, started bool) view {
+// failureValue is why a failure happened, as the model says it.
+func failureValue(why string) int8 {
+	switch why {
+	case FailStopped:
+		return protocol.FailStopped
+	case FailLimit:
+		return protocol.FailLimit
+	case FailGate:
+		return protocol.FailGate
+	case FailCI:
+		return protocol.FailCI
+	case FailUnmergeable:
+		return protocol.FailUnmergeable
+	}
+	return protocol.FailNone
+}
+
+// viewOf is an issue as its latest post left it, with the builds that have
+// stopped since a writer last said retry. A thread the factory hasn't posted
+// on has no post yet.
+func viewOf(state Post, started bool, stops int) view {
 	if !started {
-		return view{kind: protocol.KindNone}
+		return view{kind: protocol.KindNone, stops: stops}
 	}
 	m := state.Marker
-	v := view{}
+	v := view{stops: stops, failure: m.failure()}
 	switch m.Kind {
 	case KindForks:
 		v.kind, v.open = protocol.KindAsked, len(m.Forks)
@@ -206,14 +228,14 @@ func (f *Factory) allowed(ctx context.Context, issue int, what string, from, to 
 // base is the project's lock on the base branch, which the draft amends.
 func (f *Factory) draftStep(t Thread, c Command, base string, m Marker) (from, to view) {
 	state, started := t.State()
-	from = viewOf(state, started)
+	from = viewOf(state, started, t.Stops())
 	from.base, from.directedBy = base, protocol.NoActor
 	if c.Verb == Choose {
 		// People answer questions one at a time, and the factory drafts
 		// with the answer to the last one.
 		from.open = 1
 	}
-	to = view{base: base, directedBy: f.director(c.By)}
+	to = view{base: base, directedBy: f.director(c.By), stops: from.stops}
 	switch m.Kind {
 	case KindForks:
 		to.kind, to.open = protocol.KindAsked, len(m.Forks)
@@ -232,8 +254,8 @@ func (f *Factory) draftStep(t Thread, c Command, base string, m Marker) (from, t
 
 // ratifyStep is ratifying the proposal a command names, while the base
 // branch holds the lock base.
-func (f *Factory) ratifyStep(state Post, c Command, named, base string) (from, to view) {
-	from = viewOf(state, true)
+func (f *Factory) ratifyStep(t Thread, state Post, c Command, named, base string) (from, to view) {
+	from = viewOf(state, true, t.Stops())
 	from.base = base
 	to = from
 	to.kind, to.ratified, to.ratifiedBase, to.directedBy = protocol.KindRatified, named, from.amends, f.director(c.By)
@@ -251,26 +273,27 @@ type pullRequest struct {
 }
 
 // prView is an issue as its latest post left it, with its pull request.
-func prView(state Post, pr pullRequest) view {
-	v := viewOf(state, true)
+func prView(state Post, stops int, pr pullRequest) view {
+	v := viewOf(state, true, stops)
 	v.head, v.gate, v.prLock, v.scopeMany = pr.head, pr.gate, pr.lock, pr.scopeMany
 	return v
 }
 
-// buildStep is opening the pull request that a build made.
-func buildStep(ratified Post, pr pullRequest) (from, to view) {
-	from = viewOf(ratified, true)
-	to = prView(ratified, pr)
+// buildStep is opening the pull request that a build made, with stops the
+// builds that stopped before it.
+func buildStep(ratified Post, stops int, pr pullRequest) (from, to view) {
+	from = viewOf(ratified, true, stops)
+	to = prView(ratified, stops, pr)
 	to.kind = protocol.KindPROpen
 	return from, to
 }
 
 // prStep is the factory merging its pull request, or recording what became
 // of it: to is the kind of post it would make, and by who merged it.
-func prStep(state Post, pr pullRequest, to, by int8) (view, view) {
-	from := prView(state, pr)
+func prStep(t Thread, state Post, pr pullRequest, to, by int8) (view, view) {
+	from := prView(state, t.Stops(), pr)
 	next := from
-	next.kind = to
+	next.kind, next.failure = to, ""
 	if to == protocol.KindMerged {
 		next.mergedBy, next.mergedHead, next.base = by, pr.head, pr.lock
 	}
@@ -301,14 +324,20 @@ func (f *Factory) lockOn(ctx context.Context, dir string) (string, error) {
 	return project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements), nil
 }
 
-// retryStep is looking again at a pull request that failed.
-func (f *Factory) retryStep(state Post, c Command) (from, to view) {
-	from = viewOf(state, true)
+// retryStep is trying again after a failure: looking again at a pull
+// request that failed, or building a stopped build's proposal again, with
+// its stops counted afresh.
+func (f *Factory) retryStep(t Thread, c Command) (from, to view) {
+	state, _ := t.State()
+	from = viewOf(state, true, t.Stops())
 	if state.Marker.PR != 0 {
 		from.head = fmt.Sprintf("#%d", state.Marker.PR)
 	}
 	to = from
-	to.kind, to.directedBy = protocol.KindPROpen, f.director(c.By)
+	to.kind, to.directedBy, to.failure = protocol.KindPROpen, f.director(c.By), ""
+	if from.head == "" {
+		to.kind, to.stops = protocol.KindRatified, 0
+	}
 	return from, to
 }
 

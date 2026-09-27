@@ -293,6 +293,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 type fakeBuilder struct {
 	pass    bool
 	stop    bool // the agent stops before it finishes
+	crash   bool // the factory itself stops partway through the build
 	built   []string
 	amended []bool
 }
@@ -302,6 +303,9 @@ func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*sy
 	b.amended = append(b.amended, amend)
 	if b.stop {
 		return nil, errors.New("the agent stopped before it finished")
+	}
+	if b.crash {
+		panic("the factory stopped partway through the build")
 	}
 	result := filepath.Join(out, "result")
 	if err := copyResult(dir, result); err != nil {

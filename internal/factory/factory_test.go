@@ -267,6 +267,83 @@ func TestABuildThatStopsAsksForHelp(t *testing.T) {
 	}
 }
 
+// A writer's retry builds a stopped build's proposal again (#13).
+func TestRetryRebuildsAStoppedBuild(t *testing.T) {
+	r := newRig(t)
+	r.build.stop = true
+	stopped := ratified(t, r)
+	if stopped.Marker.Failure != FailStopped {
+		t.Fatalf("post = %+v", stopped.Marker)
+	}
+	r.build.stop = false
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	again := r.expect(1, KindRatified, LabelBuilding)
+	if !strings.Contains(again.Comment.Body, "again") {
+		t.Errorf("the retry's post doesn't say it builds again:\n%s", again.Comment.Body)
+	}
+	r.poll()
+	pr := r.expect(1, KindPR, LabelPR)
+	if pr.Marker.PR == 0 || len(r.build.built) != 2 {
+		t.Errorf("pr = %+v, builds = %d", pr.Marker, len(r.build.built))
+	}
+}
+
+// A build the factory itself stopped partway through is a stop the factory
+// says out loud, without another agent run (#13).
+func TestAnUnfinishedBuildIsAStop(t *testing.T) {
+	r := newRig(t)
+	r.build.crash = true
+	r.form.forks = nil
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
+	r.poll()
+	p := r.expect(1, KindProposal, LabelProposal)
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Marker.Proposal.Hash, "sha256:"))
+	if err := r.f.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "partway") {
+		t.Fatalf("the crash: %v", err)
+	}
+	r.expect(1, KindRatified, LabelBuilding)
+	r.build.crash = false
+	r.poll()
+	stopped := r.expect(1, KindFailed, LabelHumanReview)
+	if stopped.Marker.Failure != FailStopped || len(r.build.built) != 1 {
+		t.Errorf("post = %+v, builds = %d", stopped.Marker, len(r.build.built))
+	}
+	r.poll()
+	if len(r.build.built) != 1 {
+		t.Error("the factory built again without a retry")
+	}
+}
+
+// Two stops, and the factory waits for a writer's retry before it starts
+// another build; the retry counts stops afresh (#13).
+func TestTwoStopsWaitForARetry(t *testing.T) {
+	r := newRig(t)
+	r.build.stop = true
+	ratified(t, r)
+	for i := 0; i < 2; i++ {
+		// A revise drafts again, and the stops still count.
+		r.gh.say(1, "gitdek", "/invariant revise")
+		r.poll()
+		p := r.expect(1, KindProposal, LabelProposal)
+		r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Marker.Proposal.Hash, "sha256:"))
+		r.poll()
+	}
+	limit := r.expect(1, KindFailed, LabelHumanReview)
+	if limit.Marker.Failure != FailLimit || len(r.build.built) != 2 {
+		t.Fatalf("post = %+v, builds = %d", limit.Marker, len(r.build.built))
+	}
+	r.build.stop = false
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	r.expect(1, KindRatified, LabelBuilding)
+	r.poll()
+	r.expect(1, KindPR, LabelPR)
+	if len(r.build.built) != 3 {
+		t.Errorf("builds = %d", len(r.build.built))
+	}
+}
+
 func TestTheLabelStartsTheFactory(t *testing.T) {
 	r := newRig(t)
 	r.gh.open(2, "gitdek", "Add a bounded buffer", "No command here.", LabelTrigger)
@@ -707,7 +784,7 @@ func TestRetryWithNothingToRetry(t *testing.T) {
 	r.poll()
 	r.gh.say(1, "gitdek", "/invariant retry")
 	r.poll()
-	if note := r.expect(1, KindNote, LabelAsking); !strings.Contains(note.Comment.Body, "no failed pull request") {
+	if note := r.expect(1, KindNote, LabelAsking); !strings.Contains(note.Comment.Body, "nothing that failed") {
 		t.Errorf("note = %s", note.Comment.Body)
 	}
 }

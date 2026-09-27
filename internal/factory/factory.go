@@ -274,13 +274,13 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	kind := state.Marker.Kind
 	switch c.Verb {
 	case Solve:
-		if started && kind != KindStuck && kind != KindUnsupported && kind != KindClosed {
+		if started && kind != KindStuck && kind != KindUnsupported && kind != KindClosed && !stoppedBuild(state) {
 			return f.note(ctx, t, c, "I'm already working on this issue.")
 		}
 		return f.formalize(ctx, t, c, nil, nil, []int64{c.Comment})
 	case Revise:
-		switch kind {
-		case KindForks, KindProposal, KindStuck, KindUnsupported, KindClosed:
+		switch {
+		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
 		}
 		return f.note(ctx, t, c, "There's no draft to revise right now.")
@@ -290,15 +290,26 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		}
 		return f.choose(ctx, t, state, pending)
 	case Retry:
-		if kind != KindFailed || state.Marker.PR == 0 {
-			return f.note(ctx, t, c, "There's no failed pull request to look at again right now.")
+		if kind != KindFailed {
+			return f.note(ctx, t, c, "There's nothing that failed to try again right now.")
+		}
+		if state.Marker.PR == 0 {
+			// The build stopped before it made a pull request. Build the
+			// ratified proposal again, and start counting stops afresh.
+			m := state.Marker
+			m.Kind, m.ReplyTo, m.Failure = KindRatified, []int64{c.Comment}, ""
+			from, to := f.retryStep(t, c)
+			if err := f.allowed(ctx, t.Issue.Number, "build the ratified proposal again", from, to); err != nil {
+				return err
+			}
+			return f.say(ctx, t.Issue.Number, post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m), LabelBuilding)
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
 		// on its current head, it stays in scope, and its lock is still the
 		// ratified proposal.
 		m := state.Marker
-		m.Kind, m.ReplyTo = KindPR, []int64{c.Comment}
-		from, to := f.retryStep(state, c)
+		m.Kind, m.ReplyTo, m.Failure = KindPR, []int64{c.Comment}, ""
+		from, to := f.retryStep(t, c)
 		if err := f.allowed(ctx, t.Issue.Number, fmt.Sprintf("look at #%d again", m.PR), from, to); err != nil {
 			return err
 		}
@@ -640,7 +651,7 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if !matches(c.Args, p.Hash) {
 		named = "the proposal " + strings.Join(c.Args, " ")
 	}
-	before, after := f.ratifyStep(state, c, named, base)
+	before, after := f.ratifyStep(t, state, c, named, base)
 	if err := f.allowed(ctx, n, "ratify "+named, before, after); err != nil {
 		return Post{}, err
 	}
@@ -790,20 +801,36 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	defer f.Repo.RemoveWorktree(ctx, wt)
 	root := filepath.Join(wt, filepath.FromSlash(m.Project))
 	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash}
-	// stopped posts that a build stopped before it made a pull request.
-	stopped := func(body string) error {
-		from, to := buildStep(ratified, pullRequest{})
-		to.kind = protocol.KindFailed
-		if err := f.allowed(ctx, n, "say the build stopped", from, to); err != nil {
+	stops := t.Stops()
+	// failed posts that the build failed before it made a pull request:
+	// it stopped, or the factory wouldn't start it (#13).
+	failed := func(why, body string) error {
+		from, to := buildStep(ratified, stops, pullRequest{})
+		to.kind, to.failure = protocol.KindFailed, why
+		if why == FailStopped {
+			to.stops++
+		}
+		if err := f.allowed(ctx, n, "say the build failed: "+why, from, to); err != nil {
 			return err
 		}
+		next.Failure = why
 		return f.say(ctx, n, body, LabelHumanReview)
 	}
-	// A build costs an agent run, so a build that keeps stopping partway
-	// isn't retried forever.
 	logs := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n))
-	if tries, _ := filepath.Glob(filepath.Join(logs, "build-*")); len(tries) >= maxBuilds {
-		return stopped(buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they finished; the logs are in %s", len(tries), logs), next))
+	// A build that stopped partway, when the factory itself stopped, never
+	// said so. Say it now, instead of starting another agent run.
+	if unfinished := unfinishedBuilds(logs); len(unfinished) > 0 {
+		body := buildFailedComment(nil, nil, fmt.Errorf("the build stopped partway; its log is in %s", unfinished[len(unfinished)-1]), withFailure(next, FailStopped))
+		if err := failed(FailStopped, body); err != nil {
+			return err
+		}
+		finishBuilds(unfinished)
+		return nil
+	}
+	// Each build costs an agent run, so after two stop, a writer decides
+	// whether to try again.
+	if stops >= maxStops {
+		return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)))
 	}
 	out := filepath.Join(logs, "build-"+f.now().Format("20060102-150405"))
 	if err := os.MkdirAll(out, 0o755); err != nil {
@@ -812,7 +839,11 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := f.Builder.Build(ctx, root, out, amend)
 	if res == nil || res.Final == nil {
-		return stopped(buildFailedComment(nil, res, runErr, next))
+		if err := failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped))); err != nil {
+			return err
+		}
+		finishBuilds([]string{out})
+		return nil
 	}
 	// The agent's files replace the project's, so a file it removed is gone.
 	if err := removeOwned(root); err != nil {
@@ -851,13 +882,14 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		return err
 	}
 	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
-	from, to := buildStep(ratified, at)
+	from, to := buildStep(ratified, stops, at)
 	if !res.Final.Passed {
-		to.kind = protocol.KindFailed
+		to.kind, to.failure = protocol.KindFailed, FailGate
 	}
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
+	defer finishBuilds([]string{out})
 	pr, err := f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
 		Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
 		Body: pullRequestBody(t, m, res, m.Proposal),
@@ -870,6 +902,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
 			return err
 		}
+		next.Failure = FailGate
 		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
@@ -895,9 +928,34 @@ func removeOwned(root string) error {
 	})
 }
 
-// maxBuilds is how many builds of one issue the factory starts before it
-// asks a person to look.
-const maxBuilds = 2
+// A build's directory holds a done file once the factory has said how the
+// build ended. One without it stopped partway, when the factory stopped.
+const doneFile = "done"
+
+// unfinishedBuilds are an issue's builds that never said how they ended.
+func unfinishedBuilds(logs string) []string {
+	dirs, _ := filepath.Glob(filepath.Join(logs, "build-*"))
+	sort.Strings(dirs)
+	var out []string
+	for _, d := range dirs {
+		if _, err := os.Stat(filepath.Join(d, doneFile)); err != nil {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// finishBuilds marks builds as having said how they ended.
+func finishBuilds(dirs []string) {
+	for _, d := range dirs {
+		os.WriteFile(filepath.Join(d, doneFile), nil, 0o644)
+	}
+}
+
+func withFailure(m Marker, why string) Marker {
+	m.Failure = why
+	return m
+}
 
 // copyResult copies the finished project over the ratified one. The model,
 // the code and anything else the agent wrote come across; the people's files
@@ -930,17 +988,17 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		return err
 	}
 	next := m
-	next.ReplyTo = nil
+	next.ReplyTo, next.Failure = nil, ""
 	switch {
 	case pr.Merged:
-		from, to := prStep(state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
+		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
 		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was merged", pr.Number), from, to); err != nil {
 			return err
 		}
 		next.Kind = KindMerged
 		return f.say(ctx, n, post("merged", fmt.Sprintf("#%d was merged.", pr.Number), next), LabelMerged)
 	case pr.State == "closed":
-		from, to := prStep(state, pullRequest{head: pr.Head.SHA}, protocol.KindClosed, protocol.Nobody)
+		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindClosed, protocol.Nobody)
 		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was closed", pr.Number), from, to); err != nil {
 			return err
 		}
@@ -957,10 +1015,12 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	next.Kind = KindFailed
 	if run.Conclusion != "success" {
-		from, to := prStep(state, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, protocol.KindFailed, protocol.Nobody)
+		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, protocol.KindFailed, protocol.Nobody)
+		to.failure = FailCI
 		if err := f.allowed(ctx, n, fmt.Sprintf("say CI's gate failed on #%d", pr.Number), from, to); err != nil {
 			return err
 		}
+		next.Failure = FailCI
 		return f.say(ctx, n, ciFailedComment(pr, run, next), LabelHumanReview)
 	}
 	if err := f.Repo.Fetch(ctx); err != nil {
@@ -992,14 +1052,16 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	at := pullRequest{head: pr.Head.SHA, gate: gateOf(run, done), lock: headLock(b, lockErr), scopeMany: len(sc.Problems) > 0 || sc.Project != m.Project}
 	if len(problems) > 0 {
-		from, to := prStep(state, at, protocol.KindFailed, protocol.Nobody)
+		from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
+		to.failure = FailUnmergeable
 		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
 			return err
 		}
+		next.Failure = FailUnmergeable
 		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
 	}
 	// The protocol has the last word on merging.
-	from, to := prStep(state, at, protocol.KindMerged, protocol.ByFactory)
+	from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
 	if err := f.allowed(ctx, n, fmt.Sprintf("merge #%d", pr.Number), from, to); err != nil {
 		return err
 	}

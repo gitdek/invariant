@@ -76,6 +76,21 @@ const (
 	KindNote        = "note"        // answered a command without changing anything
 )
 
+// Why the issue's latest failure happened, as a failed post records it
+// (#13).
+const (
+	FailStopped     = "stopped"     // the build stopped before it made a pull request
+	FailLimit       = "limit"       // two builds had stopped, so the factory didn't start another
+	FailGate        = "gate"        // the code failed the gate in the factory's own run
+	FailCI          = "ci"          // CI's gate failed on the pull request
+	FailUnmergeable = "unmergeable" // CI's gate passed, but the pull request can't merge
+)
+
+// maxStops is how many builds of an issue can stop before it makes a pull
+// request, until a writer says retry. After that many, the factory doesn't
+// start another.
+const maxStops = 2
+
 // Marker is the state a factory post records, hidden at its end.
 type Marker struct {
 	Kind     string              `json:"kind"`
@@ -87,6 +102,22 @@ type Marker struct {
 	Branch   string              `json:"branch,omitempty"`
 	Hash     string              `json:"hash,omitempty"` // the ratified proposal
 	PR       int                 `json:"pr,omitempty"`
+	Failure  string              `json:"failure,omitempty"` // why a failed post failed: Fail*
+}
+
+// failure is why a failed post failed. Posts from before failures were
+// recorded have a pull request when CI failed it, and none when the build
+// stopped.
+func (m Marker) failure() string {
+	switch {
+	case m.Kind != KindFailed:
+		return ""
+	case m.Failure != "":
+		return m.Failure
+	case m.PR == 0:
+		return FailStopped
+	}
+	return FailCI
 }
 
 // The marker is base64 inside an HTML comment, so nothing in it, such as
@@ -135,6 +166,39 @@ func (t Thread) State() (post Post, ok bool) {
 		}
 	}
 	return Post{}, false
+}
+
+// Stops is how many builds have stopped before making a pull request since
+// a writer last said retry (#13).
+func (t Thread) Stops() int {
+	retries := map[int64]bool{}
+	for _, c := range t.Commands {
+		if c.Verb == Retry {
+			retries[c.Comment] = true
+		}
+	}
+	n := 0
+	for _, p := range t.Posts {
+		if p.Marker.Kind == KindNote {
+			continue
+		}
+		for _, id := range p.Marker.ReplyTo {
+			if retries[id] {
+				n = 0
+			}
+		}
+		if p.Marker.failure() == FailStopped {
+			n++
+		}
+	}
+	return n
+}
+
+// stoppedBuild says whether an issue's latest post says its build stopped
+// before it made a pull request.
+func stoppedBuild(p Post) bool {
+	f := p.Marker.failure()
+	return f == FailStopped || f == FailLimit
 }
 
 // Pending lists the commands no post has answered yet, oldest first.
