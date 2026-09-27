@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gitdek/invariant/internal/formalize"
+	"github.com/gitdek/invariant/internal/verify"
 )
 
 // A post stays under GitHub's limit, however big the proposal: the marker
@@ -44,5 +45,18 @@ func TestMarkersOldAndHostile(t *testing.T) {
 	w.Close()
 	if _, ok := DecodeMarker("<!-- invariant:z:" + base64.StdEncoding.EncodeToString(z.Bytes()) + " -->"); ok {
 		t.Error("a marker that unzips past the limit was read")
+	}
+}
+
+// A proposal with properties says they held, and under what.
+func TestCheckedSaysPropertiesHeld(t *testing.T) {
+	r := &verify.Report{Design: verify.Design{DistinctStates: 5188},
+		Witnesses:  []verify.Witness{{Name: "Merged", Reached: true}},
+		Properties: []verify.Property{{Name: "CommandsAnswered", Holds: true}, {Name: "Settled", Holds: true}},
+		Fairness:   []verify.Fair{{Name: "FairAct", InNext: true}},
+		Bugs:       []verify.Bug{{Name: "PostWithoutLooking", Caught: true}}}
+	want := "TLC explored 5,188 states and found no violation and no deadlock, the witness was reached, all 2 properties held under the fairness, and the known bug `PostWithoutLooking` was caught."
+	if got := checked(r); got != want {
+		t.Errorf("checked =\n%s\nwant\n%s", got, want)
 	}
 }

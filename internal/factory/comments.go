@@ -249,6 +249,18 @@ func checked(r *verify.Report) string {
 	default:
 		parts = append(parts, fmt.Sprintf("all %d witnesses were reached", n))
 	}
+	// Properties hold under the fairness, and each fair action is a step the
+	// model takes (D-0071).
+	switch n, fair := len(r.Properties), len(r.Fairness); {
+	case n == 1 && fair > 0:
+		parts = append(parts, "the property held under the fairness")
+	case n > 1 && fair > 0:
+		parts = append(parts, fmt.Sprintf("all %d properties held under the fairness", n))
+	case n == 1:
+		parts = append(parts, "the property held")
+	case n > 1:
+		parts = append(parts, fmt.Sprintf("all %d properties held", n))
+	}
 	var bugs []string
 	for _, g := range r.Bugs {
 		bugs = append(bugs, "`"+g.Name+"`")

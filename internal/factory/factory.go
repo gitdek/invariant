@@ -65,6 +65,8 @@ type Repo interface {
 	Show(ctx context.Context, ref, file string) ([]byte, error)
 	Export(ctx context.Context, ref string, paths []string, dst string) error
 	Scope(ctx context.Context, base, head string, issue int) (scope.Result, error)
+	Lease(ctx context.Context) (sha string, rec LeaseRecord, err error)
+	PushLease(ctx context.Context, old string, rec LeaseRecord) (string, error)
 }
 
 // Factory turns issues into merged pull requests.
@@ -92,8 +94,14 @@ type Factory struct {
 	// the factory is between steps. The watcher writes it down for the
 	// dashboard (D-0049).
 	Activity func(issue int, doing string)
+	// Holder names this watcher, and LeaseFor is how long its lease on the
+	// repository lasts (D-0069). A watcher acts only while it holds the
+	// lease. Zero means no lease, as in a one-off run.
+	Holder   string
+	LeaseFor time.Duration
 
 	writers map[string]bool
+	lease   lease
 }
 
 // Labels show where each issue is. The factory keeps exactly one status
@@ -136,10 +144,26 @@ func (f *Factory) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// Watch polls until ctx ends.
+// Watch polls until ctx ends. With a lease, it polls only while it holds
+// the lease, and checks it before each effect.
 func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
+	if f.LeaseFor > 0 {
+		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
+		if _, err := f.hold(ctx); err != nil {
+			f.logf("lease: %v", err)
+		}
+		go func() {
+			select {
+			case <-ctx.Done():
+			case <-time.After(every):
+				f.keepLease(ctx, every)
+			}
+		}()
+	}
 	for {
-		if err := f.Poll(ctx); err != nil {
+		if !f.holds() {
+			// Another watcher holds the lease. Wait for it to run out.
+		} else if err := f.Poll(ctx); err != nil {
 			f.logf("poll: %v", err)
 		}
 		select {
@@ -441,6 +465,10 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 			return stuck(fmt.Sprintf("The issue names code to check, and I couldn't read it on `%s`: %v", f.Base, err))
 		}
 		req.Existing, req.Language = &formalize.Existing{Paths: paths, Root: root}, "typescript"
+	}
+	// An agent run is an effect: only the lease's holder starts one.
+	if !f.holds() {
+		return errLeaseLost
 	}
 	res, err := f.Formalizer.Formalize(ctx, req, out)
 	if err == nil && res.Proposal != nil && newDir != "" {
@@ -827,6 +855,11 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	// whether to try again.
 	if stops >= maxStops {
 		return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)), nil)
+	}
+	// An agent run is an effect: only the lease's holder starts one, before
+	// it records the run.
+	if !f.holds() {
+		return errLeaseLost
 	}
 	out := filepath.Join(logs, "build-"+f.now().Format("20060102-150405"))
 	if err := os.MkdirAll(out, 0o755); err != nil {
