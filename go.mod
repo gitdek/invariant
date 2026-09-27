@@ -8,3 +8,9 @@ go 1.27.1
 require github.com/gitdek/invariant/factory/protocol v0.0.0
 
 replace github.com/gitdek/invariant/factory/protocol => ./factory/protocol
+
+// It takes each effect only as its recovery core allows, which the factory
+// also wrote and Gobra proves (D-0069).
+require github.com/gitdek/invariant/factory/recovery v0.0.0
+
+replace github.com/gitdek/invariant/factory/recovery => ./factory/recovery

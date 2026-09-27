@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/factory/protocol/protocol"
+	"github.com/gitdek/invariant/factory/recovery/recovery"
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/project"
@@ -337,6 +338,12 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			if err := f.allowed(ctx, t.Issue.Number, "build the ratified proposal again", from, to); err != nil {
 				return err
 			}
+			// The branch still holds the ratification, so the retry is
+			// answered as a ratification is, and the build it starts has its
+			// own run.
+			if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
+				return err
+			}
 			return f.say(ctx, t.Issue.Number, post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m), LabelBuilding)
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
@@ -346,6 +353,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		m.Kind, m.ReplyTo, m.Failure = KindPR, []int64{c.Comment}, ""
 		from, to := f.retryStep(t, c)
 		if err := f.allowed(ctx, t.Issue.Number, fmt.Sprintf("look at #%d again", m.PR), from, to); err != nil {
+			return err
+		}
+		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(noting(), recovery.Note)); err != nil {
 			return err
 		}
 		return f.say(ctx, t.Issue.Number, post("pull request", fmt.Sprintf("Watching #%d again. I'll merge it once CI's `invariant/gate` passes on its current head.", m.PR), m), LabelPR)
@@ -485,7 +495,13 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		return err
 	}
 	if res == nil {
+		if err := f.recovers(ctx, n, "say the draft stopped", f.canReportStopped(drafting(RunRecorded), recovery.Solve)); err != nil {
+			return err
+		}
 		return stuck("The draft's agent run stopped partway, when the factory stopped. Comment `/invariant revise` to draft again.")
+	}
+	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
+		return err
 	}
 	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
@@ -532,6 +548,9 @@ func (f *Factory) draft(ctx context.Context, n int, step string, req formalize.R
 		var res formalize.Result
 		return &res, f.loadResult(ctx, result, &res)
 	}
+	if err := f.recovers(ctx, n, "start a draft's agent run", f.canStartRun(drafting(RunNone), recovery.Solve)); err != nil {
+		return nil, err
+	}
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("a draft for #%d", n)); err != nil {
 		return nil, err
 	}
@@ -553,6 +572,9 @@ func (f *Factory) draft(ctx context.Context, n int, step string, req formalize.R
 	}
 	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d", n), "")
 	if err != nil {
+		return nil, err
+	}
+	if err := f.recovers(ctx, n, "record the draft's result", f.canFinishRun(drafting(RunRecorded), recovery.Solve)); err != nil {
 		return nil, err
 	}
 	return res, f.Repo.Finish(ctx, n, step, saved)
@@ -777,10 +799,22 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 		msg = fmt.Sprintf("Ratify the amendment for #%d\n\nRatified by @%s in %s.\nProposal %s, amending %s (ratified in %s).",
 			n, c.By, c.URL, p.Hash, p.Target.Amends, p.Target.Previous)
 	}
-	if _, err := f.Repo.Commit(ctx, wt, dir, msg); err != nil && !errors.Is(err, ErrNothingToCommit) {
+	// Push the ratification, unless the branch already holds it: then
+	// there's nothing to commit on top of it.
+	_, err = f.Repo.Commit(ctx, wt, dir, msg)
+	switch {
+	case errors.Is(err, ErrNothingToCommit) && from == "origin/"+branch:
+	case err != nil && !errors.Is(err, ErrNothingToCommit):
 		return Post{}, err
+	default:
+		if err := f.recovers(ctx, n, "push the ratification", f.canPushRatification(ratifying(false))); err != nil {
+			return Post{}, err
+		}
+		if err := f.Repo.Push(ctx, wt, branch); err != nil {
+			return Post{}, err
+		}
 	}
-	if err := f.Repo.Push(ctx, wt, branch); err != nil {
+	if err := f.recovers(ctx, n, "say it's ratified", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
 		return Post{}, err
 	}
 	m := Marker{Kind: KindRatified, ReplyTo: []int64{c.Comment}, Answers: state.Marker.Answers, Proposal: p, Project: dir, Branch: branch, Hash: p.Hash}
@@ -902,6 +936,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	}
 	switch state {
 	case RunRecorded:
+		if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
+			return err
+		}
 		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the factory stopped"), withFailure(next, FailStopped)))
 	case RunNone:
 		// Each build costs an agent run, so after two stop, a writer decides
@@ -916,6 +953,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if built == "" {
 			// The run gave no result, so its record stays as a run that
 			// stopped.
+			if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
+				return err
+			}
 			if res != nil {
 				next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
 			}
@@ -960,6 +1000,9 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	}
 	// An agent run is an effect: only the lease's holder records and starts
 	// one, and it's recorded before it starts.
+	if err := f.recovers(ctx, n, "start the build's agent run", f.canStartRun(building(RunNone, false, false), recovery.Build)); err != nil {
+		return "", nil, nil, err
+	}
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of %s for #%d", m.Project, n)); err != nil {
 		return "", nil, nil, err
 	}
@@ -1008,6 +1051,9 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	}
 	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d", n), code)
 	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
 		return "", nil, nil, err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
@@ -1080,6 +1126,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if has, err := f.Repo.Holds(ctx, head, code); err != nil {
 		return err
 	} else if !has {
+		if err := f.recovers(ctx, n, "push the code", f.canPushCode(building(RunDone, false, false))); err != nil {
+			return err
+		}
 		if err := f.Repo.PushCommit(ctx, code, m.Branch); err != nil {
 			return err
 		}
@@ -1108,6 +1157,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return err
 	}
 	if !open {
+		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
+			return err
+		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
 			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
 			Body: pullRequestBody(t, m, res, m.Proposal),
@@ -1116,6 +1168,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}
 	}
 	next.PR = pr.Number
+	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
+		return err
+	}
 	if !res.Final.Passed {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
 			return err
@@ -1199,6 +1254,9 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 			if err := f.allowed(ctx, n, fmt.Sprintf("record that the factory merged #%d", pr.Number), from, to); err != nil {
 				return err
 			}
+			if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
+				return err
+			}
 			return f.saidMerged(ctx, t, pr, run, pr.MergeCommitSHA, next)
 		}
 		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
@@ -1267,12 +1325,18 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
 			return err
 		}
+		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(merging(false, false), recovery.Merge)); err != nil {
+			return err
+		}
 		next.Failure = FailUnmergeable
 		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
 	}
 	// The protocol has the last word on merging.
 	from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
 	if err := f.allowed(ctx, n, fmt.Sprintf("merge #%d", pr.Number), from, to); err != nil {
+		return err
+	}
+	if err := f.recovers(ctx, n, fmt.Sprintf("merge #%d", pr.Number), f.canMerge(merging(true, false))); err != nil {
 		return err
 	}
 	// The merge is recorded before it happens, with what the protocol
@@ -1286,6 +1350,9 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		return err
 	}
 	f.logf("#%d: merged #%d as %s", n, pr.Number, sha)
+	if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
+		return err
+	}
 	return f.saidMerged(ctx, t, pr, run, sha, next)
 }
 
@@ -1351,6 +1418,9 @@ func latest(runs []github.CheckRun) (github.CheckRun, bool) {
 
 // note answers a command without changing anything.
 func (f *Factory) note(ctx context.Context, t Thread, c Command, text string) error {
+	if err := f.recovers(ctx, t.Issue.Number, "answer a command with a note", f.canPost(noting(), recovery.Note)); err != nil {
+		return err
+	}
 	_, err := f.GitHub.PostComment(ctx, t.Issue.Number, noteComment(text, Marker{Kind: KindNote, ReplyTo: []int64{c.Comment}}))
 	return err
 }
