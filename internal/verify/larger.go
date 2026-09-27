@@ -18,11 +18,15 @@ import (
 )
 
 // Larger is the check one size past the bounds (D-0068): TLC and agreement
-// again, with every bound that has a next size one bigger. Code that carries
-// a bound can't pass it. It only adds to what a receipt claims: a project
-// that doesn't pass it keeps the claim it had, within the bounds.
+// again, with every bound that has a next size one bigger. A project whose
+// explorer names its bounds has its code split from its environment, so its
+// code must agree there too: when TLC finishes one size larger, a code that
+// disagrees fails the gate, because it carries a bound. When TLC can't
+// finish, or finds a problem in the model there, nothing is claimed or
+// failed.
 type Larger struct {
 	Passed     bool              `json:"passed"`
+	Required   bool              `json:"required,omitempty"` // TLC finished one size larger, so the code must agree
 	Bounds     map[string]string `json:"bounds"`
 	States     int64             `json:"states,omitempty"`
 	Depth      int               `json:"depth,omitempty"`
@@ -204,11 +208,13 @@ func compareLarger(bounds map[string]string, model *tlc.Result, code *Exploratio
 	case model.Outcome != tlc.Passed:
 		l.Message = "TLC found a problem one size larger: " + describe(*model)
 	case code == nil || !code.OK:
+		l.Required = true
 		l.Message = "couldn't explore the code one size larger"
 		if code != nil && code.Message != "" {
 			l.Message += ":\n" + code.Message
 		}
 	default:
+		l.Required = true
 		l.States, l.Depth, l.WantStates, l.WantDepth = code.States, code.Depth, model.DistinctStates, model.Depth
 		l.Passed = code.States == model.DistinctStates && code.Depth == model.Depth
 		if !l.Passed {

@@ -451,6 +451,11 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	r.Passed = r.Passed && modelPassed(r)
 	if larger != nil && (largerTLC != nil || largerError != "") {
 		r.Larger = compareLarger(larger, largerTLC, largerCode, largerError)
+		// Code split from its environment must agree one size larger too,
+		// once TLC can say what that is.
+		if r.Larger.Required && !r.Larger.Passed {
+			r.Passed = false
+		}
 	}
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
