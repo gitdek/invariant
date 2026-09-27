@@ -205,7 +205,7 @@
     { key: "ratifying", name: "Ratify", sub: "people sign", color: "people" },
     { key: "building", name: "Build", sub: "factory", color: "ink" },
     { key: "gate", name: "Gate", sub: "CI checks", color: "ci" },
-    { key: "merged", name: "Merge", sub: "proved", color: "accent" },
+    { key: "merged", name: "Merge", sub: "gate passed", color: "accent" },
   ];
   const ORBIT_R = 160;
   const stationAngle = (i) => -Math.PI / 2 + (i * Math.PI) / 3;
@@ -246,7 +246,9 @@
     update(s) {
       if (!this.built) this.build();
       $("#coreNum").textContent = s.totals.merged;
-      $("#coreLabel").textContent = s.totals.merged === 1 ? "merged, proved" : "merged, proved";
+      // Some merges are proved and some are tested against the model, and the
+      // count claims only what every one of them has: the gate passed (D-0015).
+      $("#coreLabel").textContent = "merged through the gate";
       // The ghost: the factory's attention, circling. Slow and dim when it's off.
       const period = s.factory.running ? 14 : 36, op = s.factory.running ? 0.95 : 0.35;
       const path = `M0,${-ORBIT_R} A${ORBIT_R},${ORBIT_R} 0 1 1 -0.01,${-ORBIT_R}`;
