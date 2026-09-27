@@ -17,7 +17,11 @@ func Markdown(r *verify.Report) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", r.Project)
 	if r.Passed {
-		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", r.Assurance, short(r.Fingerprint))
+		assurance := r.Assurance
+		if r.EverySize() {
+			assurance += " at every size"
+		}
+		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", assurance, short(r.Fingerprint))
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", short(r.Fingerprint))
 	}
@@ -29,6 +33,15 @@ func Markdown(r *verify.Report) string {
 	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
 	if a := r.Agreement; a != nil {
 		row(&b, "Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
+	}
+	if l := r.Larger; l != nil {
+		// It adds to a claim and never fails a pass, so it isn't marked as a
+		// failure when it doesn't hold.
+		if l.Passed {
+			row(&b, "One size larger", true, "code reaches the model's states", fmt.Sprintf("%s states, depth %d, within %s", thousands(l.States), l.Depth, bounds(l.Bounds)))
+		} else {
+			fmt.Fprintf(&b, "| One size larger | ➖ not claimed | %s |\n", strings.ReplaceAll(firstLine(l.Message), "|", "\\|"))
+		}
 	}
 	if c := r.Code; c != nil {
 		row(&b, "Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
@@ -43,7 +56,11 @@ func Markdown(r *verify.Report) string {
 		row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
 	}
 
-	fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
+	if r.EverySize() {
+		fmt.Fprintf(&b, "\nChecked within %s, and again one size larger, within %s. Within each, TLC's search is exhaustive. %s proves the code against its contracts at every size, and the design's rules are claimed only within the sizes checked.\n", bounds(r.Bounds), bounds(r.Larger.Bounds), r.Code.Verifier)
+	} else {
+		fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
+	}
 
 	if problems := failures(r); len(problems) > 0 {
 		b.WriteString("\n**What failed**\n\n")
@@ -347,4 +364,12 @@ func shortImage(ref string) string {
 		return name + "@" + short(digest)
 	}
 	return ref
+}
+
+// firstLine is a message's first line, for a table cell.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
