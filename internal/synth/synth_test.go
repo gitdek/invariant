@@ -316,3 +316,30 @@ func TestStageExisting(t *testing.T) {
 		t.Errorf("the package's manifest is %q", got)
 	}
 }
+
+// A driver that skips a step the model rules out hides the bug the check
+// exists to find, as a driver did on copythis-ad#33 (D-0059). The prompt
+// says so.
+func TestExistingPromptForbidsSkippingSteps(t *testing.T) {
+	root := t.TempDir()
+	for name, text := range map[string]string{
+		"package.json":      `{"name": "app"}`,
+		"package-lock.json": `{"lockfileVersion": 3}`,
+		"invariant/leases/.invariant/invariant.json": `{"name": "leases", "module": ".invariant/specs/Leases.tla", "code": ".", "language": "typescript", "conformance": "conformance.ts", "existing": ["src/lib"]}`,
+		"invariant/leases/.invariant/ratified.lock":  `{"decision": "test", "bounds": {"N": "1"}, "statements": [{"name": "Spec", "kind": "spec", "says": "s", "sha256": ""}, {"name": "TypeOK", "kind": "invariant", "says": "t", "sha256": ""}]}`,
+	} {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(text), 0o644)
+	}
+	p, err := project.Load(filepath.Join(root, "invariant", "leases"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := Prompt(p, "", "request", 4, true, false)
+	for _, want := range []string{"Never skip an operation because of the state the code is in", "`../../src/lib/...`", "The bounds are the only reason to skip"} {
+		if !strings.Contains(pr, want) {
+			t.Errorf("the existing-code prompt lacks %q", want)
+		}
+	}
+}
