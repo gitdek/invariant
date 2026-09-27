@@ -619,7 +619,7 @@ func dashboardCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
-	s := &dashboard.Server{Branch: *base, Cache: filepath.Join(cache, "invariant", "dashboard"), Every: *every, Log: logger.Printf}
+	s := &dashboard.Server{Branch: *base, Cache: filepath.Join(cache, "invariant", "dashboard"), Work: *work, Every: *every, Log: logger.Printf}
 	for _, r := range repos {
 		s.Repos = append(s.Repos, &dashboard.Repo{Name: r, GitHub: github.Client{Repo: r}, Status: dashboard.StatusPath(*work, r)})
 	}

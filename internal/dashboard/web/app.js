@@ -147,6 +147,14 @@
       const w = { people: ["people", "Waiting on a person"], ci: ["ci pulse", "CI's gate is running"], factory: ["factory pulse", "The factory is working"] }[n.waitingOn] || ["", n.stage];
       chips.push(`<span class="chip ${w[0]}"><i></i>${w[1]}</span>`);
       if (n.since) chips.push(`<span class="chip">for&nbsp;<span data-since="${esc(n.since)}"></span></span>`);
+      // The step's checks as they run: TLC checking a draft, or the gate
+      // checking the code.
+      const owner = (s.repos || []).find((r) => r.name === (n.repo || s.repo))?.factory;
+      const fw = owner && owner.issue === n.issue ? owner : {};
+      for (const r of fw.runs || []) {
+        const what = fw.runsKind === "check" ? "TLC check" : "gate run";
+        chips.push(`<span class="chip ${r.passed ? "holds" : "bug"} runchip"><i></i>${what} ${r.run} ${r.passed ? "passed" : "failed"}</span>`);
+      }
     }
     $("#nowmeta").innerHTML = chips.join("");
 

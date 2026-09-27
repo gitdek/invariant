@@ -38,6 +38,7 @@ type Server struct {
 	Branch string      // the branch the factory merges into
 	Runner *tlc.Runner // draws state graphs; nil leaves them out
 	Cache  string      // where drawn graphs are kept between runs
+	Work   string      // the watchers' work directory, whose logs show a step's checks as they run
 	Every  time.Duration
 	Log    func(format string, args ...any)
 
@@ -147,6 +148,16 @@ type Watcher struct {
 	Issue     int        `json:"issue,omitempty"`
 	Doing     string     `json:"doing,omitempty"`
 	Since     *time.Time `json:"since,omitempty"`
+	// Runs are the checks the current step has run so far: TLC checks of a
+	// draft while formalizing, or gate runs while building.
+	Runs     []RunMark `json:"runs,omitempty"`
+	RunsKind string    `json:"runsKind,omitempty"` // check or gate
+}
+
+// RunMark is one check the factory ran during its current step.
+type RunMark struct {
+	Run    int  `json:"run"`
+	Passed bool `json:"passed"`
 }
 
 // Now is the one line at the top of the page: what the factory is doing,
@@ -607,6 +618,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			if !w.Running {
 				w.Issue, w.Doing, w.Since = 0, "", nil
 			}
+			w.Runs, w.RunsKind = s.runsOf(r.Name, w)
 			rs.Factory = w
 		}
 		watchers = append(watchers, namedWatcher{repo: r.Name, w: rs.Factory})
@@ -772,6 +784,41 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		snap.Activity = snap.Activity[:40]
 	}
 	return snap
+}
+
+// runsOf reads the checks a watcher's current step has run, from its own
+// log in the work directory: the newest formalize or build directory for
+// the issue it's on.
+func (s *Server) runsOf(repo string, w Watcher) ([]RunMark, string) {
+	if s.Work == "" || !w.Running || w.Issue == 0 {
+		return nil, ""
+	}
+	var kind, prefix, file string
+	switch w.Doing {
+	case "building":
+		kind, prefix, file = "gate", "build-", "gate-runs.jsonl"
+	case "formalizing", "answering":
+		kind, prefix, file = "check", "formalize-", "check-runs.jsonl"
+	default:
+		return nil, ""
+	}
+	dirs, _ := filepath.Glob(filepath.Join(s.Work, filepath.FromSlash(repo), "issues", fmt.Sprintf("issue-%d", w.Issue), prefix+"*"))
+	if len(dirs) == 0 {
+		return nil, kind
+	}
+	sort.Strings(dirs)
+	b, err := os.ReadFile(filepath.Join(dirs[len(dirs)-1], file))
+	if err != nil {
+		return nil, kind
+	}
+	var runs []RunMark
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var r RunMark
+		if json.Unmarshal([]byte(line), &r) == nil && r.Run > 0 {
+			runs = append(runs, r)
+		}
+	}
+	return runs, kind
 }
 
 // namedWatcher is a repository's watcher.
