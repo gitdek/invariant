@@ -1,130 +1,116 @@
-// Token-bucket rate limiter as a state machine mirroring .invariant/specs/RateLimiter.tla.
-
-export const APIS = ["a1", "a2"] as const;
-export type Api = (typeof APIS)[number];
-
-export const CAPACITY = 2;
-export const MAX_CALLS = 5;
-export const MAX_TIME = 3;
-export const MAX_WAITING = 2;
+// Token-bucket rate limiter, one bucket and one queue of waiting calls per API.
+// Its capacity and how many calls may wait are chosen when it's made; the time
+// is passed in with each operation. See .invariant/specs/RateLimiter.tla.
 
 export interface Waiter {
   id: number;
   madeAt: number;
 }
 
-export interface SentCall {
+// A waiting call that a refilled token sent out.
+export interface Released {
+  api: string;
   id: number;
   madeAt: number;
   at: number;
 }
 
-// A refused call, with the bucket and queue it met when it was made.
-export interface RefusedCall {
-  madeAt: number;
+// What happened to a call: it went out now, it waits, or it was refused
+// with the bucket and queue it met.
+export type Outcome =
+  | { kind: "sent" }
+  | { kind: "queued" }
+  | { kind: "refused"; tokens: number; queued: number };
+
+export interface BucketState {
   tokens: number;
-  queued: number;
+  waiting: Waiter[];
 }
 
-export interface State {
-  tokens: Record<Api, number>;
-  waiting: Record<Api, Waiter[]>;
-  sent: Record<Api, SentCall[]>;
-  refused: Record<Api, RefusedCall[]>;
-  made: Record<Api, number>;
-  clock: number;
+// An API missing from buckets has a full bucket and nobody waiting.
+export interface Snapshot {
+  capacity: number;
+  maxWaiting: number;
+  buckets: Record<string, BucketState>;
 }
 
-function perApi<T>(f: (a: Api) => T): Record<Api, T> {
-  const r = {} as Record<Api, T>;
-  for (const a of APIS) r[a] = f(a);
-  return r;
+function checkCount(name: string, n: number): void {
+  if (!Number.isInteger(n) || n < 0) throw new RangeError(`${name} must be a non-negative integer`);
 }
 
-function clone(s: State): State {
-  return {
-    tokens: { ...s.tokens },
-    waiting: perApi((a) => s.waiting[a].map((w) => ({ ...w }))),
-    sent: perApi((a) => s.sent[a].map((c) => ({ ...c }))),
-    refused: perApi((a) => s.refused[a].map((r) => ({ ...r }))),
-    made: { ...s.made },
-    clock: s.clock,
-  };
-}
+export class RateLimiter {
+  readonly capacity: number;
+  readonly maxWaiting: number;
+  private buckets = new Map<string, BucketState>();
 
-export function init(): State {
-  return {
-    tokens: perApi(() => CAPACITY),
-    waiting: perApi(() => []),
-    sent: perApi(() => []),
-    refused: perApi(() => []),
-    made: perApi(() => 0),
-    clock: 0,
-  };
-}
-
-// A call is made: it goes out now if a token is free and nobody waits,
-// else it queues if fewer than MAX_WAITING wait, else it is refused.
-export function makeCall(s: State, a: Api): State | null {
-  if (s.made[a] >= MAX_CALLS) return null;
-  const n = clone(s);
-  n.made[a] = s.made[a] + 1;
-  const id = s.sent[a].length + s.waiting[a].length + 1;
-  if (s.tokens[a] > 0 && s.waiting[a].length === 0) {
-    n.tokens[a] = s.tokens[a] - 1;
-    n.sent[a].push({ id, madeAt: s.clock, at: s.clock });
-  } else if (s.waiting[a].length < MAX_WAITING) {
-    n.waiting[a].push({ id, madeAt: s.clock });
-  } else {
-    n.refused[a].push({ madeAt: s.clock, tokens: s.tokens[a], queued: s.waiting[a].length });
+  constructor(capacity: number, maxWaiting: number) {
+    checkCount("capacity", capacity);
+    checkCount("maxWaiting", maxWaiting);
+    this.capacity = capacity;
+    this.maxWaiting = maxWaiting;
   }
-  return n;
-}
 
-// One tick: every bucket refills one token, spent at once on the oldest waiting call.
-export function tick(s: State): State | null {
-  if (s.clock >= MAX_TIME) return null;
-  const n = clone(s);
-  n.clock = s.clock + 1;
-  for (const a of APIS) {
-    if (s.waiting[a].length === 0) {
-      if (s.tokens[a] < CAPACITY) n.tokens[a] = s.tokens[a] + 1;
-    } else {
-      const head = s.waiting[a][0];
-      n.sent[a].push({ id: head.id, madeAt: head.madeAt, at: s.clock + 1 });
-      n.waiting[a] = n.waiting[a].slice(1);
+  static from(s: Snapshot): RateLimiter {
+    const r = new RateLimiter(s.capacity, s.maxWaiting);
+    for (const [api, b] of Object.entries(s.buckets)) {
+      r.buckets.set(api, { tokens: b.tokens, waiting: b.waiting.map((w) => ({ ...w })) });
     }
+    return r;
   }
-  return n;
-}
 
-// The checked run is over: time and calls are used up.
-export function done(s: State): State | null {
-  if (s.clock !== MAX_TIME) return null;
-  for (const a of APIS) if (s.made[a] !== MAX_CALLS) return null;
-  return clone(s);
-}
-
-export function successors(s: State): State[] {
-  const out: State[] = [];
-  for (const a of APIS) {
-    const t = makeCall(s, a);
-    if (t) out.push(t);
+  snapshot(): Snapshot {
+    const buckets: Record<string, BucketState> = {};
+    for (const [api, b] of this.buckets) {
+      buckets[api] = { tokens: b.tokens, waiting: b.waiting.map((w) => ({ ...w })) };
+    }
+    return { capacity: this.capacity, maxWaiting: this.maxWaiting, buckets };
   }
-  const t = tick(s);
-  if (t) out.push(t);
-  const d = done(s);
-  if (d) out.push(d);
-  return out;
-}
 
-export function key(s: State): string {
-  return JSON.stringify([
-    APIS.map((a) => s.tokens[a]),
-    APIS.map((a) => s.waiting[a].map((w) => [w.id, w.madeAt])),
-    APIS.map((a) => s.sent[a].map((c) => [c.id, c.madeAt, c.at])),
-    APIS.map((a) => s.refused[a].map((r) => [r.madeAt, r.tokens, r.queued])),
-    APIS.map((a) => s.made[a]),
-    s.clock,
-  ]);
+  tokens(api: string): number {
+    return this.buckets.get(api)?.tokens ?? this.capacity;
+  }
+
+  waiting(api: string): Waiter[] {
+    return (this.buckets.get(api)?.waiting ?? []).map((w) => ({ ...w }));
+  }
+
+  private bucket(api: string): BucketState {
+    let b = this.buckets.get(api);
+    if (!b) {
+      b = { tokens: this.capacity, waiting: [] };
+      this.buckets.set(api, b);
+    }
+    return b;
+  }
+
+  // A call is made: it goes out now if a token is free and nobody waits,
+  // else it queues if fewer than maxWaiting wait, else it is refused.
+  request(api: string, id: number, now: number): Outcome {
+    const b = this.bucket(api);
+    if (b.tokens > 0 && b.waiting.length === 0) {
+      b.tokens -= 1;
+      return { kind: "sent" };
+    }
+    if (b.waiting.length < this.maxWaiting) {
+      b.waiting.push({ id, madeAt: now });
+      return { kind: "queued" };
+    }
+    return { kind: "refused", tokens: b.tokens, queued: b.waiting.length };
+  }
+
+  // One refill period: every bucket refills one token, spent at once on its
+  // oldest waiting call. Returns the calls that went out.
+  refill(now: number): Released[] {
+    const out: Released[] = [];
+    for (const [api, b] of this.buckets) {
+      const head = b.waiting.shift();
+      if (head) {
+        out.push({ api, id: head.id, madeAt: head.madeAt, at: now });
+      } else if (b.tokens < this.capacity) {
+        b.tokens += 1;
+      }
+      if (b.tokens === this.capacity && b.waiting.length === 0) this.buckets.delete(api);
+    }
+    return out;
+  }
 }
