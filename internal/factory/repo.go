@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -97,16 +96,11 @@ func (c Clone) Commit(ctx context.Context, worktree, dir, message string) (strin
 
 // Push pushes a worktree's branch. It never forces.
 func (c Clone) Push(ctx context.Context, worktree, branch string) error {
-	var env []string
-	if c.Token != nil {
-		token, err := c.Token(ctx)
-		if err != nil {
-			return err
-		}
-		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
-		env = []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + basic}
+	env, err := c.auth(ctx)
+	if err != nil {
+		return err
 	}
-	_, err := runEnv(ctx, worktree, env, "git", "push", "--quiet", "origin", "HEAD:refs/heads/"+branch)
+	_, err = runEnv(ctx, worktree, env, "git", "push", "--quiet", "origin", "HEAD:refs/heads/"+branch)
 	return err
 }
 

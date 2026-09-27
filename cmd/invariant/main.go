@@ -51,7 +51,7 @@ Usage:
   invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
   invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
   invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
-  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L]
+  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L] [-lease D]
                                                turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
   invariant ratification -repo OWNER/NAME PROJECT...
@@ -465,8 +465,9 @@ func watchCmd(ctx context.Context, args []string) int {
 	appID := fs.Int64("app-id", 0, "the factory's GitHub App; without one, the factory acts as whoever gh is logged in as")
 	home, _ := os.UserHomeDir()
 	appKey := fs.String("app-key", filepath.Join(home, ".config", "invariant", "factory.pem"), "the App's private key")
+	leaseFor := fs.Duration("lease", 5*time.Minute, "how long the watcher's lease on the repository lasts, renewed every poll: over 2m and at least three polls; 0 watches without one")
 	fs.Parse(args)
-	if *repo == "" || fs.NArg() != 0 || formalize.Languages[*language] == "" {
+	if *repo == "" || fs.NArg() != 0 || formalize.Languages[*language] == "" || (*leaseFor > 0 && (*leaseFor < 3*(*every) || *leaseFor <= 2*time.Minute)) {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
@@ -521,6 +522,7 @@ func watchCmd(ctx context.Context, args []string) int {
 			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc},
 		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
 			Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc}},
+		Holder: factory.NewHolder(), LeaseFor: *leaseFor,
 	}
 	if err := f.Prepare(ctx); err != nil {
 		return fail(err)
