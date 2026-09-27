@@ -931,7 +931,7 @@
       <div class="col people">${people}<h3>@gitdek decides</h3><p>What must be true, every fork the factory can't settle, and every requirement.</p>
         <ul><li><b>${w.ratified}</b>decisions ratified</li><li><b>${w.answered}</b>questions answered on issues</li><li><b>${w.ratifications}</b>proposals ratified on issues</li></ul></div>
       <div class="col proves">${proves}<h3>Invariant proves</h3><p>Code proved or tested against what was ratified, merged only when CI's gate passes on the exact commit.</p>
-        <ul><li><b>${w.merged}</b>pull requests merged</li><li><b>${w.built}</b>ratified statements it built against</li><li><b>${w.botCommits}</b>commits by its own bot</li></ul></div>
+        <ul><li><b>${w.merged}</b>pull requests merged</li><li><b>${w.built}</b>ratified statements it built against</li><li><b>${w.botCommits}</b>commits by its own bot</li>${w.itself ? `<li class="itself"><b>${w.itself}</b>part${w.itself === 1 ? "" : "s"} of itself it proves: the rules its factory runs on</li>` : ""}</ul></div>
       <div class="col agent">${agent}<h3>Agents build</h3><p>The machinery: the gate, the verifiers, the GitHub plumbing, the prompts, the docs, and this page. Any coding agent, working with @gitdek.</p>
         <ul><li><b>${w.logged}</b>calls made and logged as they built</li><li><b>${w.slices}</b>slices built</li><li><b>${proposed}</b>proposal${proposed === 1 ? "" : "s"} waiting on @gitdek</li></ul></div>`;
   }

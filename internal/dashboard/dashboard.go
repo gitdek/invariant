@@ -283,6 +283,7 @@ type Who struct {
 	Logged        int `json:"logged"`        // decisions agents made while building: the decided ones
 	Slices        int `json:"slices"`        // slices done
 	Commits       int `json:"commits"`       // commits on the branch by people's sessions
+	Itself        int `json:"itself"`        // Invariant's own parts it proves, the projects under factory/
 }
 
 // Start reads everything once, then keeps it fresh until ctx ends.
@@ -710,6 +711,11 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		snap.Repos = append(snap.Repos, rs)
 	}
 	snap.Totals.Statements, snap.Who.Built = len(pins), len(built)
+	for _, p := range snap.Projects {
+		if (p.Repo == "" || p.Repo == primary.Name) && strings.HasPrefix(p.Dir, "factory/") {
+			snap.Who.Itself++
+		}
+	}
 	sort.SliceStable(snap.Issues, func(i, j int) bool { return snap.Issues[i].Opened.After(snap.Issues[j].Opened) })
 	snap.Factory = combined(snap.Repos)
 	snap.Now = nowLine(watchers, snap.Issues, primary.Name)
