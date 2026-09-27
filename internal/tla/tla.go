@@ -174,13 +174,17 @@ const ModelMarker = `\* --------------------------------------------------------
 
 // Skeleton reduces a module to what's pinned: its header, its CONSTANT and
 // VARIABLE declarations, and the definitions in keep, in source order, each
-// with the comment lines directly above it. The definition named last (the
-// spec, which refers to the model) goes after ModelMarker, where the factory
-// adds the model.
-func Skeleton(src string, keep map[string]bool, last string) (string, error) {
+// with the comment lines directly above it. The definitions named in last,
+// the spec first, which refer to the model, go after ModelMarker, where the
+// factory adds the model, in that order.
+func Skeleton(src string, keep map[string]bool, last []string) (string, error) {
+	isLast := map[string]bool{}
+	for _, n := range last {
+		isLast[n] = true
+	}
 	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
 	var header, decls, defs []string
-	var lastDef string
+	lastDefs := map[string][2]string{} // each definition, alone and with its comment
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 		switch {
@@ -206,8 +210,8 @@ func Skeleton(src string, keep map[string]bool, last string) (string, error) {
 				start--
 			}
 			text := strings.Join(append(append([]string{}, lines[start:i]...), def), "\n")
-			if m[1] == last {
-				lastDef = def
+			if isLast[m[1]] {
+				lastDefs[m[1]] = [2]string{def, text}
 			} else {
 				defs = append(defs, text)
 			}
@@ -216,15 +220,25 @@ func Skeleton(src string, keep map[string]bool, last string) (string, error) {
 	if header == nil {
 		return "", fmt.Errorf("no MODULE header")
 	}
-	if lastDef == "" {
-		return "", fmt.Errorf("no definition of %s", last)
+	var after []string
+	for i, n := range last {
+		def, ok := lastDefs[n]
+		if !ok {
+			return "", fmt.Errorf("no definition of %s", n)
+		}
+		// The spec follows the marker directly, as the prompt describes.
+		if i == 0 {
+			after = append(after, def[0])
+		} else {
+			after = append(after, def[1])
+		}
 	}
 	var b strings.Builder
 	b.WriteString(header[0] + "\n")
 	b.WriteString(strings.Join(decls, "\n") + "\n\n")
 	b.WriteString(strings.Join(defs, "\n\n") + "\n\n")
 	b.WriteString(ModelMarker + "\n\n")
-	b.WriteString(lastDef + "\n")
+	b.WriteString(strings.Join(after, "\n\n") + "\n")
 	b.WriteString(strings.Repeat("=", 77) + "\n")
 	return b.String(), nil
 }

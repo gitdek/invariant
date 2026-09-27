@@ -26,6 +26,12 @@ func Markdown(r *verify.Report) string {
 	row(&b, "Pinned statements", pinsOK(r) && r.RatificationMatches(), pinsResult(r), provenance(r))
 	row(&b, "Design · TLC", r.Design.Passed, designResult(r.Design), designEvidence(r.Design))
 	row(&b, "Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), witnessEvidence(r))
+	if len(r.Properties) > 0 {
+		row(&b, "Liveness · TLC", propertiesOK(r), fmt.Sprintf("%d of %d properties hold", count(r.Properties, func(p verify.Property) bool { return p.Holds }), len(r.Properties)), propertyEvidence(r))
+	}
+	if len(r.Fairness) > 0 {
+		row(&b, "Fairness", fairnessOK(r), fmt.Sprintf("%d of %d on steps the model takes", count(r.Fairness, func(f verify.Fair) bool { return f.InNext }), len(r.Fairness)), fairnessEvidence(r))
+	}
 	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
 	if a := r.Agreement; a != nil {
 		row(&b, "Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
@@ -171,6 +177,60 @@ func witnessEvidence(r *verify.Report) string {
 	return strings.Join(parts, ", ")
 }
 
+func propertiesOK(r *verify.Report) bool {
+	return count(r.Properties, func(p verify.Property) bool { return p.Holds }) == len(r.Properties)
+}
+
+// propertyEvidence names each property and, for a broken one, how the
+// behavior that breaks it goes on forever.
+func propertyEvidence(r *verify.Report) string {
+	fair := "with no fairness"
+	if len(r.Fairness) > 0 {
+		names := make([]string, len(r.Fairness))
+		for i, f := range r.Fairness {
+			names[i] = "`" + f.Name + "`"
+		}
+		fair = "under " + strings.Join(names, ", ")
+	}
+	var parts []string
+	for _, p := range r.Properties {
+		switch {
+		case p.Holds:
+			parts = append(parts, fmt.Sprintf("`%s` holds", p.Name))
+		case p.Stutters:
+			parts = append(parts, fmt.Sprintf("`%s` broken: stops after %s", p.Name, steps(p.Steps)))
+		case p.Loop > 0:
+			parts = append(parts, fmt.Sprintf("`%s` broken: loops back to state %d after %s", p.Name, p.Loop, steps(p.Steps)))
+		default:
+			parts = append(parts, fmt.Sprintf("`%s` not checked", p.Name))
+		}
+	}
+	return strings.Join(parts, ", ") + ", " + fair
+}
+
+func fairnessOK(r *verify.Report) bool {
+	return count(r.Fairness, func(f verify.Fair) bool { return f.InNext }) == len(r.Fairness)
+}
+
+func fairnessEvidence(r *verify.Report) string {
+	var parts []string
+	for _, f := range r.Fairness {
+		kind := "weak"
+		if f.Strong {
+			kind = "strong"
+		}
+		switch {
+		case f.InNext:
+			parts = append(parts, fmt.Sprintf("`%s`: %s, on `%s`", f.Name, kind, f.Action))
+		case f.Action != "":
+			parts = append(parts, fmt.Sprintf("`%s`: `%s` isn't a Next step", f.Name, f.Action))
+		default:
+			parts = append(parts, fmt.Sprintf("`%s`: not a fairness condition", f.Name))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 func bugsOK(r *verify.Report) bool {
 	return count(r.Bugs, func(g verify.Bug) bool { return g.Caught }) == len(r.Bugs)
 }
@@ -273,6 +333,16 @@ func failures(r *verify.Report) []string {
 	for _, w := range r.Witnesses {
 		if !w.Reached {
 			out = append(out, fmt.Sprintf("Witness `%s`: %s", w.Name, w.Message))
+		}
+	}
+	for _, p := range r.Properties {
+		if !p.Holds {
+			out = append(out, fmt.Sprintf("Property `%s`: %s", p.Name, p.Message))
+		}
+	}
+	for _, f := range r.Fairness {
+		if !f.InNext {
+			out = append(out, fmt.Sprintf("Fairness `%s`: %s", f.Name, f.Message))
 		}
 	}
 	for _, g := range r.Bugs {

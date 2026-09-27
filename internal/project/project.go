@@ -88,7 +88,14 @@ const (
 	Spec      = "spec"      // the behaviors TLC explores: Init /\ [][Next]_vars
 	Invariant = "invariant" // must hold in every reachable state
 	Witness   = "witness"   // must hold in at least one reachable state
-	Bug       = "bug"       // an action the invariants must catch when added to Next
+	Bug       = "bug"       // an action the invariants, or a property, must catch when added to Next
+	// Property must hold of every behavior the spec allows under the
+	// fairness statements: a temporal formula, such as P ~> Q (D-0069).
+	Property = "property"
+	// Fairness is an assumption the properties rest on: WF_vars(A) or
+	// SF_vars(A), optionally for each x in a set. It pins the action A, and
+	// the gate checks that every A step is a Next step.
+	Fairness = "fairness"
 )
 
 // Model names the definitions that belong to the factory. Pins stop at
@@ -100,7 +107,7 @@ type Statement struct {
 	Name   string `json:"name"`
 	Kind   string `json:"kind"`
 	Says   string `json:"says"`             // the plain-language meaning a person ratified
-	Expect string `json:"expect,omitempty"` // for a bug: the invariant it must violate
+	Expect string `json:"expect,omitempty"` // for a bug: the invariant or property it must violate
 	SHA256 string `json:"sha256"`           // the pin: tla.PinHash of the statement
 }
 
@@ -148,12 +155,14 @@ func (p *Project) validate() error {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)
 	}
 	kinds := map[string]int{}
-	invariants := map[string]bool{}
+	invariants, properties := map[string]bool{}, map[string]bool{}
 	for _, s := range l.Statements {
 		switch s.Kind {
-		case Spec, Witness, Bug:
+		case Spec, Witness, Bug, Fairness:
 		case Invariant:
 			invariants[s.Name] = true
+		case Property:
+			properties[s.Name] = true
 		default:
 			return fmt.Errorf("%s: statement %s has kind %q", lockFile, s.Name, s.Kind)
 		}
@@ -176,8 +185,8 @@ func (p *Project) validate() error {
 		names[s.Name] = true
 	}
 	for _, s := range l.Statements {
-		if s.Kind == Bug && !invariants[s.Expect] {
-			return fmt.Errorf("%s: bug %s expects %q, which isn't a ratified invariant", lockFile, s.Name, s.Expect)
+		if s.Kind == Bug && !invariants[s.Expect] && !properties[s.Expect] {
+			return fmt.Errorf("%s: bug %s expects %q, which isn't a ratified invariant or property", lockFile, s.Name, s.Expect)
 		}
 	}
 	return nil
@@ -216,9 +225,17 @@ func (p *Project) Of(kind string) []Statement {
 func (p *Project) SpecName() string { return p.Of(Spec)[0].Name }
 
 // Invariants names the ratified invariants.
-func (p *Project) Invariants() []string {
+func (p *Project) Invariants() []string { return p.names(Invariant) }
+
+// Properties names the ratified temporal properties.
+func (p *Project) Properties() []string { return p.names(Property) }
+
+// FairnessNames names the ratified fairness statements.
+func (p *Project) FairnessNames() []string { return p.names(Fairness) }
+
+func (p *Project) names(kind string) []string {
 	var names []string
-	for _, s := range p.Of(Invariant) {
+	for _, s := range p.Of(kind) {
 		names = append(names, s.Name)
 	}
 	return names

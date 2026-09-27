@@ -123,10 +123,20 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if removed := ch.Of(formalize.Removed); len(removed) > 0 {
 		fmt.Fprintf(&b, "**This removes %s.** Nothing will hold the code to it any more.\n\n", names(removed))
 	}
-	var loosened []formalize.Change
+	var loosened, properties, assumed []formalize.Change
 	for _, c := range ch.Of(formalize.Changed) {
-		if c.Old.Kind == project.Invariant {
+		switch c.Old.Kind {
+		case project.Invariant:
 			loosened = append(loosened, c)
+		case project.Property:
+			properties = append(properties, c)
+		case project.Fairness:
+			assumed = append(assumed, c)
+		}
+	}
+	for _, c := range ch.Of(formalize.Added) {
+		if c.New.Kind == project.Fairness {
+			assumed = append(assumed, c)
 		}
 	}
 	switch len(loosened) {
@@ -135,6 +145,16 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text below.\n\n", names(loosened))
 	default:
 		fmt.Fprintf(&b, "**This changes the invariants %s.** A changed invariant can promise less than before, so compare their old and new text below.\n\n", names(loosened))
+	}
+	switch len(properties) {
+	case 0:
+	case 1:
+		fmt.Fprintf(&b, "**This changes the property %s.** A changed property can promise less than before, so compare its old and new text below.\n\n", names(properties))
+	default:
+		fmt.Fprintf(&b, "**This changes the properties %s.** A changed property can promise less than before, so compare their old and new text below.\n\n", names(properties))
+	}
+	if len(assumed) > 0 {
+		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
 	}
 	b.WriteString("| Statement | Change | Says |\n| :-- | :-- | :-- |\n")
 	for _, c := range ch.Statements {

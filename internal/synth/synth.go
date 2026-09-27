@@ -198,7 +198,9 @@ func Skeleton(p *project.Project) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return tla.Skeleton(string(raw), keep, p.SpecName())
+	// The spec refers to the model, and a fairness statement may too, as in
+	// WF_vars(Next), so they go after it.
+	return tla.Skeleton(string(raw), keep, append([]string{p.SpecName()}, p.FairnessNames()...))
 }
 
 // protected lists the files that belong to the people, not the factory: the

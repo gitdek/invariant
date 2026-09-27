@@ -26,6 +26,7 @@ type Config struct {
 	Specification string
 	Constants     map[string]string
 	Invariants    []string
+	Properties    []string // temporal properties, checked under the specification's fairness
 }
 
 func (c Config) render() string {
@@ -41,6 +42,9 @@ func (c Config) render() string {
 	}
 	for _, inv := range c.Invariants {
 		fmt.Fprintf(&b, "INVARIANT %s\n", inv)
+	}
+	for _, p := range c.Properties {
+		fmt.Fprintf(&b, "PROPERTY %s\n", p)
 	}
 	return b.String()
 }

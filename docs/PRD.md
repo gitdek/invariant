@@ -109,7 +109,7 @@ Each requirement serves one goal.
 - **3.6 A live view.** A dashboard shows what the factory is working on and every project's evidence, from the same sources as the receipts, and what's waiting on a person. It's shared through a Cloudflare tunnel for now, and moves to puglisij.com/invariant later. Built. `D-0049` `D-0050` `D-0060`
 - **3.7 Code you can ship.** The code carries no model bounds: it's the system alone, with sizes as parameters, and the explorer or driver keeps the environment at the bounds. Gobra and Nagini prove it at every size, and TLC checks the design at the ratified bounds. For Go, the gate also checks agreement one size past the bounds, and fails code that hardcodes a size. Built, slice 8: the factory asks for code this way in all three languages, and #18 did it live in Go. Not built yet: the check one size larger for TypeScript and Python drivers. Existing projects, such as the rate limiter, keep their bounds until an issue asks. `D-0048` `D-0058` `D-0068`
 - **3.11 A second agent reviews every driver.** A conformance driver is evidence only if it tries every step a person or worker could. On copythis-ad#33, the factory's driver skipped the one step the ratified rule was about, and the gate passed anyway (D-0059). A second agent, with fresh context, reads each driver for steps it skips or states it never records, and the factory posts its review with the pull request. Proposed.
-- **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Today the gate checks invariants and deadlock only. Next, slice 9, where the factory's own recovery needs it first. `D-0048` `D-0058` `D-0069`
+- **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Each property is checked alone, under the ratified fairness, and each fairness statement must be about a step the model takes, so no property holds vacuously. A known bug can expect a property. Built in the gate in slice 9, for the factory's recovery model, which is next. `D-0048` `D-0058` `D-0069` `D-0071`
 - **3.9 Type checking** for TypeScript and Python, inside the sandbox. Later. `D-0030`
 - **3.10 A proof path for TypeScript.** Later. `D-0024` `D-0038`
 
@@ -159,7 +159,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Done `D-0053` `D-0054` |
 | 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Done `D-0045` `D-0053` `D-0058` |
 | 8 | Code you can ship (3.7) | Done `D-0048` `D-0058` `D-0068` |
-| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Next `D-0048` `D-0058` `D-0069` |
+| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Under way `D-0048` `D-0058` `D-0069` |
 | 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Planned `D-0007` `D-0033` `D-0048` |
 | Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 

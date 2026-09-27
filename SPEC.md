@@ -18,13 +18,15 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## What gets ratified
 
-- Each project's `.invariant/ratified.lock` records five things. `D-0011` `D-0013` `D-0026`
+- Each project's `.invariant/ratified.lock` records five things, and two more when something must eventually happen. `D-0011` `D-0013` `D-0026` `D-0071`
   - The spec, `Init /\ [][Next]_vars`.
   - The invariants.
   - The bounds TLC checks them within.
   - The reachability witnesses.
-  - The known bugs, as TLA+ actions the invariants must catch.
-- Each pin covers a statement and every definition it depends on, stopping at the factory's `Init` and `Next`. `D-0026`
+  - The known bugs, as TLA+ actions the invariants, or a property, must catch.
+  - The properties: temporal formulas every behavior must satisfy, such as every command eventually being answered.
+  - The fairness they assume: `WF_vars(A)` or `SF_vars(A)`, one condition each, about the system's own steps. The spec never states fairness itself.
+- Each pin covers a statement and every definition it depends on, stopping at the factory's `Init` and `Next`. So a fairness statement pins the action it names, and the model must keep that action a part of `Next`. `D-0026` `D-0071`
 - The factory owns the model (`Init`, the actions and `Next`), the implementation and its contracts. Each contract restates one TLA+ action. `D-0011` `D-0026` `D-0031`
 - A person records a ratification with `invariant pin`. `D-0017`
 
@@ -92,7 +94,9 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - The pinned statements match.
   - TLC reports no invariant violation and no deadlock.
   - Every witness is reachable.
-  - Every known bug is caught.
+  - Every property holds of every behavior the spec allows under the fairness statements. TLC checks each property alone, so a broken one is named, with the behavior that breaks it. `D-0069` `D-0071`
+  - Every fairness statement is about a step the model takes: with its action added to `Next`, every step of it is already a `Next` step. Fairness on a step the model can't take would leave no behavior to check, and properties would hold vacuously. `D-0071`
+  - Every known bug is caught: with its action added to `Next`, TLC finds its expected invariant violated, or, for a property, a behavior under the same fairness that breaks it.
   - Go: the code, explored from `Init()` through `Successors()`, reaches exactly the states TLC found, at the same depth.
   - Go, when the explorer names its bounds as constants named after the model's: one size past the bounds, the code reaches exactly the states TLC found there too. One size larger means each number plus one, and a set of numbered model values, such as `{p1, p2}`, with the next one added. If TLC can't finish there within three minutes, or finds a problem in the model there, nothing is claimed or failed. `D-0068` `D-0070`
   - TypeScript and Python: every step the code took is a step the model allows.
@@ -115,7 +119,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   6. Done, in two parts. Part A, amendments: issue #5 amended the rate limiter, its proposal showed the diff and its lock amends #3's, and the bot merged it once CI's gate passed. Part B, existing projects: copythis-ad#33 checked the app's analysis lease protocol as it is. The gate found a real bug: a stalled retry canceled an attempt whose lease had run out, which erased the record that the attempt may have been charged. copythis-ad#35 fixed it, and the bot merged the check as copythis-ad#34. `D-0042` `D-0045` `D-0046` `D-0047` `D-0053` `D-0054` `D-0059`
   7. Invariant builds itself. Done: #9 ratified the factory's issue protocol, and the bot merged it as `factory/protocol` in #11, proved with Gobra. #13 amended it through the factory, and the bot merged #15 once CI proved it again. Since #12, the watcher checks every step it takes against it. `D-0045` `D-0053` `D-0058`
   8. Code you can ship. Done: code is the system alone, with sizes as parameters, and the explorer or driver is the environment. The gate proves Go code at every size and checks agreement one size past the bounds, and fails code that hardcodes a size. #18 became #20, a connection pool proved at every size, which the bot merged. The check one size larger doesn't cover TypeScript and Python drivers yet, and existing projects, such as the rate limiter, keep their bounds until an issue asks. `D-0048` `D-0058` `D-0068`
-  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Next, by its ratified plan. `D-0048` `D-0058` `D-0069`
+  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Under way, by its ratified plan: the gate checks properties under fairness. Next, an issue models the watcher's effects, with a crash at any point and a second watcher. `D-0048` `D-0058` `D-0069` `D-0071`
   10. Ready to go public: GitHub enforces the gate. @gitdek chooses when. `D-0007` `D-0033` `D-0048`
 - The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. `invariant ledger` lists them for every issue it took. `D-0048` `D-0062`
 - The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
