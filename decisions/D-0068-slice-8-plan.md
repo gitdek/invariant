@@ -39,7 +39,10 @@ A spike, not committed, wrote the log buffer's core this way: a buffer of any ca
 - **Two Gobra pitfalls,** which the prompt will warn about:
   - With `--overflow`, a pure function can't read an int field through a predicate's unfolding, so permissions are spelled out field by field.
   - A remainder by a symbolic length, `(head+i) % len(slots)`, kept the solver busy for over ten minutes, so index arithmetic stays linear.
-- **`Ship` didn't verify yet.** It shifts the lines down in a loop, and its loop invariants need to be ones the solver can instantiate. This is the slice's main risk: parametric proofs take more engineering than fixed-size ones. The agent will need a worked example and its four gate runs.
+- **`Ship` didn't verify yet.** It shifts the lines down, which is the slice's main risk: parametric proofs take more engineering than fixed-size ones. The agent will need a worked example and its four gate runs. Three attempts didn't verify:
+  - A loop that shifts in place: its loop invariants need triggers the solver will instantiate.
+  - Go's `copy`, in place: Gobra specifies `copy` only for slices that don't overlap.
+  - `copy` into a fresh slice: its permission precondition wasn't met yet.
 
 ## Options considered
 
