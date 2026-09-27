@@ -54,13 +54,16 @@ func TestLargerExplorer(t *testing.T) {
 func TestCompareLarger(t *testing.T) {
 	b := map[string]string{"Capacity": "3"}
 	model := &tlc.Result{Outcome: tlc.Passed, DistinctStates: 111, Depth: 9}
-	if l := compareLarger(b, model, &Exploration{OK: true, States: 111, Depth: 9}, ""); !l.Passed {
+	if l := compareLarger(b, model, &Exploration{OK: true, States: 111, Depth: 9}, ""); !l.Passed || !l.Required {
 		t.Errorf("same states: %+v", l)
 	}
-	if l := compareLarger(b, model, &Exploration{OK: true, States: 87, Depth: 9}, ""); l.Passed || !strings.Contains(l.Message, "87 states") {
-		t.Errorf("bounded code: %+v", l)
+	if l := compareLarger(b, model, &Exploration{OK: true, States: 87, Depth: 9}, ""); l.Passed || !l.Required || !strings.Contains(l.Message, "87 states") {
+		t.Errorf("bounded code fails: %+v", l)
 	}
-	if l := compareLarger(b, nil, nil, "TLC didn't finish"); l.Passed || l.Message != "TLC didn't finish" {
-		t.Errorf("no model: %+v", l)
+	if l := compareLarger(b, nil, nil, "TLC didn't finish"); l.Passed || l.Required || l.Message != "TLC didn't finish" {
+		t.Errorf("no model is neither claimed nor failed: %+v", l)
+	}
+	if l := compareLarger(b, &tlc.Result{Outcome: tlc.Violated}, &Exploration{OK: true}, ""); l.Passed || l.Required {
+		t.Errorf("a problem in the model one size larger isn't the code's to fail: %+v", l)
 	}
 }

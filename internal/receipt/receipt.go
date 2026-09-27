@@ -39,6 +39,8 @@ func Markdown(r *verify.Report) string {
 		// failure when it doesn't hold.
 		if l.Passed {
 			row(&b, "One size larger", true, "code reaches the model's states", fmt.Sprintf("%s states, depth %d, within %s", thousands(l.States), l.Depth, bounds(l.Bounds)))
+		} else if l.Required {
+			row(&b, "One size larger", false, "code and model differ, so the code carries a bound", fmt.Sprintf("%s states, depth %d, where the model has %s, depth %d, within %s", thousands(l.States), l.Depth, thousands(l.WantStates), l.WantDepth, bounds(l.Bounds)))
 		} else {
 			fmt.Fprintf(&b, "| One size larger | ➖ not claimed | %s |\n", strings.ReplaceAll(firstLine(l.Message), "|", "\\|"))
 		}
@@ -281,6 +283,9 @@ func failures(r *verify.Report) []string {
 		if !g.Caught {
 			out = append(out, fmt.Sprintf("Known bug `%s`: %s", g.Name, g.Message))
 		}
+	}
+	if l := r.Larger; l != nil && l.Required && !l.Passed {
+		out = append(out, "One size larger: "+l.Message+". The explorer names its bounds, so the code must hold at every size, and something in it stops at the bounds.")
 	}
 	if a := r.Agreement; a != nil && !a.Passed {
 		out = append(out, "Agreement: "+a.Message)
