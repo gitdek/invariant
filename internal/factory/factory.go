@@ -856,10 +856,10 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		verdict = "didn't pass the gate"
 	}
 	msg := fmt.Sprintf("Implement #%d: %s\n\nWritten by Invariant against the statements ratified in the previous commit. It %s: %s.",
-		n, t.Issue.Title, verdict, res.Final.Assurance)
+		n, t.Issue.Title, verdict, res.Final.Claim())
 	if amend {
 		msg = fmt.Sprintf("Implement #%d: %s\n\nChanged by Invariant to meet the amended statements ratified in the previous commit. It %s: %s.",
-			n, t.Issue.Title, verdict, res.Final.Assurance)
+			n, t.Issue.Title, verdict, res.Final.Claim())
 	}
 	sha, err := f.Repo.Commit(ctx, wt, m.Project, msg)
 	if err != nil {

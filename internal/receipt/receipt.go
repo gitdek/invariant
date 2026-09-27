@@ -17,11 +17,7 @@ func Markdown(r *verify.Report) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", r.Project)
 	if r.Passed {
-		assurance := r.Assurance
-		if r.EverySize() {
-			assurance += " at every size"
-		}
-		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", assurance, short(r.Fingerprint))
+		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", r.Claim(), short(r.Fingerprint))
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", short(r.Fingerprint))
 	}
