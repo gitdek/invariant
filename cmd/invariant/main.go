@@ -13,11 +13,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -604,6 +607,31 @@ func ratificationCmd(ctx context.Context, args []string) int {
 	return code
 }
 
+// agentDoor serves the agent's door on a loopback address (D-0066), with a
+// new token written where only this account can read it.
+func agentDoor(addr, dir string, s *dashboard.Server) (*http.Server, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if ip := net.ParseIP(host); err != nil || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+		return nil, fmt.Errorf("the agent's door must be on a loopback address, not %q", addr)
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	token := hex.EncodeToString(b)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "agent.token")
+	os.Remove(path)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		return nil, err
+	}
+	log.Printf("invariant: the agent's door is on %s, and its token is in %s", addr, path)
+	return &http.Server{Addr: addr, Handler: s.AgentHandler(token), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: time.Minute, MaxHeaderBytes: 16 << 10}, nil
+}
+
 func dashboardCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
 	var repos []string
@@ -616,13 +644,34 @@ func dashboardCmd(ctx context.Context, args []string) int {
 	base := fs.String("base", "main", "the branch the factory merges into")
 	cache, _ := os.UserCacheDir()
 	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "the watchers' work directory, where they write what they're doing")
+	team := fs.String("access-team", "", "the Cloudflare Access team domain in front of /act, such as puglisij.cloudflareaccess.com. Without it, there's no /act")
+	aud := fs.String("access-aud", "", "the AUD tag of the Access application that protects /act")
+	agentAddr := fs.String("agent-addr", "", "serve the agent's door on this loopback address, such as 127.0.0.1:8485: a coding agent acting for @gitdek posts through the same narrow check as /act. The tunnel never publishes it. Empty turns it off")
+	var emails []string
+	fs.Func("access-email", "an email that may post commands from /act; repeat it for more", func(v string) error {
+		emails = append(emails, v)
+		return nil
+	})
 	fs.Parse(args)
-	if len(repos) == 0 || fs.NArg() != 0 {
+	if len(repos) == 0 || fs.NArg() != 0 || (*team != "") != (*aud != "") || (*team != "" && len(emails) == 0) {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
 	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
 	s := &dashboard.Server{Branch: *base, Cache: filepath.Join(cache, "invariant", "dashboard"), Work: *work, Every: *every, Log: logger.Printf}
+	if *team != "" {
+		s.Access = &dashboard.Access{Team: *team, Audience: *aud, Emails: emails}
+		logger.Printf("/act lets %s post commands, behind Cloudflare Access", strings.Join(emails, ", "))
+	}
+	if *agentAddr != "" {
+		door, err := agentDoor(*agentAddr, filepath.Join(cache, "invariant", "dashboard"), s)
+		if err != nil {
+			logger.Print(err)
+			return 1
+		}
+		go door.ListenAndServe()
+		defer door.Close()
+	}
 	for _, r := range repos {
 		s.Repos = append(s.Repos, &dashboard.Repo{Name: r, GitHub: github.Client{Repo: r}, Status: dashboard.StatusPath(*work, r)})
 	}
