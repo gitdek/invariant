@@ -1242,7 +1242,7 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	case pr.Merged:
 		// A merge the factory recorded, at this head, is the factory's: it
 		// stopped after merging and before it said so (D-0069).
-		if at, ok, err := f.mergeRecord(ctx, n, pr.Number); err != nil {
+		if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
 			return err
 		} else if ok && at.head == pr.Head.SHA {
 			runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
@@ -1378,7 +1378,14 @@ type mergeRecordJSON struct {
 	ScopeMany bool   `json:"scope_many,omitempty"`
 }
 
-func mergeStepName(pr int) string { return fmt.Sprintf("merge-%d", pr) }
+// mergeStepName names a merge's record after the pull request and the head
+// it merges, so a merge at a head that moved has a record of its own.
+func mergeStepName(pr int, head string) string {
+	if len(head) > 12 {
+		head = head[:12]
+	}
+	return fmt.Sprintf("merge-%d-%s", pr, head)
+}
 
 // recordMerge records a merge before it happens.
 func (f *Factory) recordMerge(ctx context.Context, n, pr int, at pullRequest) error {
@@ -1386,12 +1393,12 @@ func (f *Factory) recordMerge(ctx context.Context, n, pr int, at pullRequest) er
 	if err != nil {
 		return err
 	}
-	return f.Repo.Record(ctx, n, mergeStepName(pr), string(b))
+	return f.Repo.Record(ctx, n, mergeStepName(pr, at.head), string(b))
 }
 
-// mergeRecord reads a merge the factory recorded, if it did.
-func (f *Factory) mergeRecord(ctx context.Context, n, pr int) (pullRequest, bool, error) {
-	what, err := f.Repo.Recorded(ctx, n, mergeStepName(pr))
+// mergeRecord reads the merge the factory recorded at a head, if it did.
+func (f *Factory) mergeRecord(ctx context.Context, n, pr int, head string) (pullRequest, bool, error) {
+	what, err := f.Repo.Recorded(ctx, n, mergeStepName(pr, head))
 	if err != nil || what == "" {
 		return pullRequest{}, false, err
 	}
