@@ -11,7 +11,7 @@ source: slice 6 planning, after D-0053 moved Part B to @gitdek's existing projec
 
 # D-0054 · Slice 6 Part B · existing projects, starting with copythis-ad
 
-**Goal** ([D-0053](log.md)). The factory works in @gitdek's other repositories, on code that already exists. It starts with [gitdek/copythis-ad](https://github.com/gitdek/copythis-ad), @gitdek's least important project. There, the video-analysis jobs run on a lease protocol in `src/lib/admin-control-store.ts`: claim, renew, complete, expire, stall, cancel and retry. Its tests already state rules, for example:
+**Goal** ([D-0053](log.md)). The factory works in @gitdek's other repositories, on code that already exists. It starts with [gitdek/copythis-ad](https://github.com/gitdek/copythis-ad), his least important project. There, the video-analysis jobs run on a lease protocol in `src/lib/admin-control-store.ts`: claim, renew, complete, expire, stall, cancel and retry. Its tests already state rules, for example:
 
 - only one lease per job
 - a stale lease token changes nothing
