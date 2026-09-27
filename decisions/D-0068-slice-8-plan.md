@@ -40,7 +40,17 @@ A spike, not committed, wrote the log buffer's core this way: a ring buffer of a
 - **Say what the buffer holds through a ghost view,** `At(i)`, the i-th oldest line. Each operation's contract is then short and exact: `Ship` returns the old `At(0)`, and every `At(i)` becomes the old `At(i+1)`.
 - **Avoid loops over slices where a ring will do.** Two earlier tries shifted the lines down on each ship, and neither verified. A loop that shifts in place needs loop invariants the solver can instantiate. Go's `copy` is specified only for slices that don't overlap.
 
-So the main risk moves. Parametric proofs are feasible and fast. The work is teaching the agent these patterns, with the log buffer as the worked example, within its four gate runs.
+**Then the whole design went through today's gate, unchanged.** A copy of `examples/03-log-buffer` kept its 13 ratified statements and its bounds, and swapped in two files: the proved ring buffer as its code, and an explorer that is the environment. The explorer keeps the bounds, the producers' writes and what was sent, and it calls the ring buffer for the buffer's part of each step.
+
+- **At the ratified bounds** (`Capacity = 2`), `invariant verify` passed in about 25 seconds:
+  - agreement: 87 states, depth 9, exactly TLC's
+  - Gobra: 4 of 4 functions proved, with overflow checks, and the explorer's functions listed as unverified
+- **At one size larger** (`Capacity = 3`, with the lock edited only for the experiment), the same core, byte for byte, agreed with TLC again: 111 states, depth 9.
+- **The original bounded code at capacity 3 fails agreement:** it reaches 87 states where the model reaches 111. That's the check that catches a hardcoded size.
+
+So for Go, agreement needs no change: the explorer can already carry the environment.
+
+The main risk moves. Parametric proofs are feasible and fast, and the gate already checks the split. The work is teaching the agent these patterns, with the log buffer as the worked example, within its four gate runs.
 
 ## Options considered
 
@@ -54,8 +64,8 @@ So the main risk moves. Parametric proofs are feasible and fast. The work is tea
 
 1. **Build the worked example by hand first.** Rebuild `examples/03-log-buffer` this way, until Gobra proves all of it and agreement passes. It becomes the prompt's worked example.
 2. **Rewrite the synthesis prompts** for Go, TypeScript and Python around the split: code that is the system, with sizes as parameters, and an explorer or driver that is the environment. Include the Gobra pitfalls.
-3. **Agreement and conformance** accept an explorer or driver that keeps environment and history variables, mapped onto the spec's.
-4. **The gate** runs agreement at the bounds and at one size larger, and a receipt says "every size" only when that passes and the verifier proved the code.
+3. **Agreement and conformance.** For Go, nothing changes: the demo above passed today's gate. TypeScript and Python drivers already keep the environment, so the slice checks they need nothing more.
+4. **The gate** runs TLC and agreement at the ratified bounds and again at one size larger, without touching the lock. A receipt says "every size" only when both pass and the verifier proved the code.
 5. **Live:** an issue amends a factory project so its code has no bounds, through the factory.
 
 Existing projects keep their receipts, and nobody rewrites them unless an issue asks.
