@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/factory/protocol/protocol"
+	"github.com/gitdek/invariant/factory/recovery/recovery"
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/project"
@@ -35,6 +36,8 @@ type GitHub interface {
 	RemoveLabel(ctx context.Context, issue int, label string) error
 	CreatePullRequest(ctx context.Context, pr github.NewPullRequest) (github.PullRequest, error)
 	PullRequest(ctx context.Context, n int) (github.PullRequest, error)
+	// OpenPullRequest finds the open pull request from a branch, if there is one.
+	OpenPullRequest(ctx context.Context, branch string) (github.PullRequest, bool, error)
 	CheckRuns(ctx context.Context, sha, name string) ([]github.CheckRun, error)
 	Merge(ctx context.Context, n int, sha, method string) (string, error)
 	DeleteBranch(ctx context.Context, branch string) error
@@ -67,6 +70,15 @@ type Repo interface {
 	Scope(ctx context.Context, base, head string, issue int) (scope.Result, error)
 	Lease(ctx context.Context) (sha string, rec LeaseRecord, err error)
 	PushLease(ctx context.Context, old string, rec LeaseRecord) (string, error)
+	// Runs and merges are recorded before they happen (D-0069).
+	Run(ctx context.Context, issue int, step string) (RunState, string, error)
+	Record(ctx context.Context, issue int, step, what string) error
+	Recorded(ctx context.Context, issue int, step string) (string, error)
+	Finish(ctx context.Context, issue int, step, result string) error
+	Save(ctx context.Context, dir, message, parent string) (string, error)
+	Load(ctx context.Context, commit, dir string) error
+	Holds(ctx context.Context, ref, commit string) (bool, error)
+	PushCommit(ctx context.Context, commit, branch string) error
 }
 
 // Factory turns issues into merged pull requests.
@@ -326,6 +338,12 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			if err := f.allowed(ctx, t.Issue.Number, "build the ratified proposal again", from, to); err != nil {
 				return err
 			}
+			// The branch still holds the ratification, so the retry is
+			// answered as a ratification is, and the build it starts has its
+			// own run.
+			if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
+				return err
+			}
 			return f.say(ctx, t.Issue.Number, post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m), LabelBuilding)
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
@@ -335,6 +353,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		m.Kind, m.ReplyTo, m.Failure = KindPR, []int64{c.Comment}, ""
 		from, to := f.retryStep(t, c)
 		if err := f.allowed(ctx, t.Issue.Number, fmt.Sprintf("look at #%d again", m.PR), from, to); err != nil {
+			return err
+		}
+		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(noting(), recovery.Note)); err != nil {
 			return err
 		}
 		return f.say(ctx, t.Issue.Number, post("pull request", fmt.Sprintf("Watching #%d again. I'll merge it once CI's `invariant/gate` passes on its current head.", m.PR), m), LabelPR)
@@ -466,19 +487,24 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		req.Existing, req.Language = &formalize.Existing{Paths: paths, Root: root}, "typescript"
 	}
-	// An agent run is an effect: only the lease's holder starts one.
-	if !f.holds() {
-		return errLeaseLost
+	// The draft's agent run is recorded before it starts, where every
+	// watcher sees it (D-0069). One recorded and never finished stopped
+	// partway, and only a writer's command starts another.
+	res, err := f.draft(ctx, n, draftStepName(cause), req, out)
+	if err != nil {
+		return err
 	}
-	res, err := f.Formalizer.Formalize(ctx, req, out)
-	if err == nil && res.Proposal != nil && newDir != "" {
+	if res == nil {
+		if err := f.recovers(ctx, n, "say the draft stopped", f.canReportStopped(drafting(RunRecorded), recovery.Solve)); err != nil {
+			return err
+		}
+		return stuck("The draft's agent run stopped partway, when the factory stopped. Comment `/invariant revise` to draft again.")
+	}
+	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
+		return err
+	}
+	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
-	}
-	switch {
-	case err != nil:
-		res = &formalize.Result{Problem: "the formalizer couldn't run: " + err.Error()}
-	case res.Proposal == nil && res.Problem == "":
-		res.Problem = "the formalizer left no draft"
 	}
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD}
 	switch p := res.Proposal; {
@@ -498,6 +524,60 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, proposalComment(p, res.Report, m), LabelProposal)
 	}
+}
+
+// draftStepName names a draft's record after the command that asked for it.
+func draftStepName(cause Command) string {
+	if cause.Comment == 0 {
+		return "draft-issue" // the /invariant solve that opened the issue
+	}
+	return fmt.Sprintf("draft-%d", cause.Comment)
+}
+
+// draft returns what the draft's agent run made of the request: running it,
+// when nothing was recorded, or reading what a finished run left, whichever
+// watcher ran it. It returns nil for a run recorded and never finished.
+func (f *Factory) draft(ctx context.Context, n int, step string, req formalize.Request, out string) (*formalize.Result, error) {
+	state, result, err := f.Repo.Run(ctx, n, step)
+	switch {
+	case err != nil:
+		return nil, err
+	case state == RunRecorded:
+		return nil, nil
+	case state == RunDone:
+		var res formalize.Result
+		return &res, f.loadResult(ctx, result, &res)
+	}
+	if err := f.recovers(ctx, n, "start a draft's agent run", f.canStartRun(drafting(RunNone), recovery.Solve)); err != nil {
+		return nil, err
+	}
+	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("a draft for #%d", n)); err != nil {
+		return nil, err
+	}
+	res, runErr := f.Formalizer.Formalize(ctx, req, out)
+	// A watcher that lost the lease during the run drops it. The holder will
+	// find it recorded, and say it stopped.
+	if !f.holds() {
+		return nil, errLeaseLost
+	}
+	switch {
+	case runErr != nil:
+		spent := synth.Usage{}
+		if res != nil {
+			spent = res.Usage
+		}
+		res = &formalize.Result{Problem: "the formalizer couldn't run: " + runErr.Error(), Usage: spent}
+	case res.Proposal == nil && res.Problem == "":
+		res.Problem = "the formalizer left no draft"
+	}
+	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d", n), "")
+	if err != nil {
+		return nil, err
+	}
+	if err := f.recovers(ctx, n, "record the draft's result", f.canFinishRun(drafting(RunRecorded), recovery.Solve)); err != nil {
+		return nil, err
+	}
+	return res, f.Repo.Finish(ctx, n, step, saved)
 }
 
 // drafted posts what the formalizer made of an issue, once the protocol
@@ -719,10 +799,22 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 		msg = fmt.Sprintf("Ratify the amendment for #%d\n\nRatified by @%s in %s.\nProposal %s, amending %s (ratified in %s).",
 			n, c.By, c.URL, p.Hash, p.Target.Amends, p.Target.Previous)
 	}
-	if _, err := f.Repo.Commit(ctx, wt, dir, msg); err != nil && !errors.Is(err, ErrNothingToCommit) {
+	// Push the ratification, unless the branch already holds it: then
+	// there's nothing to commit on top of it.
+	_, err = f.Repo.Commit(ctx, wt, dir, msg)
+	switch {
+	case errors.Is(err, ErrNothingToCommit) && from == "origin/"+branch:
+	case err != nil && !errors.Is(err, ErrNothingToCommit):
 		return Post{}, err
+	default:
+		if err := f.recovers(ctx, n, "push the ratification", f.canPushRatification(ratifying(false))); err != nil {
+			return Post{}, err
+		}
+		if err := f.Repo.Push(ctx, wt, branch); err != nil {
+			return Post{}, err
+		}
 	}
-	if err := f.Repo.Push(ctx, wt, branch); err != nil {
+	if err := f.recovers(ctx, n, "say it's ratified", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
 		return Post{}, err
 	}
 	m := Marker{Kind: KindRatified, ReplyTo: []int64{c.Comment}, Answers: state.Marker.Answers, Proposal: p, Project: dir, Branch: branch, Hash: p.Hash}
@@ -813,27 +905,20 @@ func (f *Factory) projectDir(ctx context.Context, slug string) (string, error) {
 
 var numbered = regexp.MustCompile(`^(\d+)-`)
 
-// build writes and gates the code for a ratified project, then opens a pull
-// request: ready to merge if the gate passed, a draft for people if not.
+// build takes the next step of a build: the one a ratification started, or
+// a writer's retry. Each effect is looked for before it's taken (D-0069):
+// the agent run's record, its code on the branch, and the pull request from
+// the branch. A run recorded with no result stopped partway, and the factory
+// says so instead of paying for another.
 func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
 	f.logf("#%d: building %s", n, m.Project)
 	f.doing(n, "building")
-	if err := f.Repo.Fetch(ctx); err != nil {
-		return err
-	}
-	wt, err := f.Repo.Worktree(ctx, m.Branch, "origin/"+m.Branch)
-	if err != nil {
-		return err
-	}
-	defer f.Repo.RemoveWorktree(ctx, wt)
-	root := filepath.Join(wt, filepath.FromSlash(m.Project))
 	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash}
 	stops := t.Stops()
-	// failed posts that the build failed before it made a pull request:
-	// it stopped, or the factory wouldn't start it (#13). builds are the
-	// builds the post accounts for.
-	failed := func(why, body string, builds []string) error {
+	// failed posts that the build failed before it made a pull request: it
+	// stopped, or the factory wouldn't start it (#13).
+	failed := func(why, body string) error {
 		from, to := buildStep(ratified, stops, pullRequest{})
 		to.kind, to.failure = protocol.KindFailed, why
 		if why == FailStopped {
@@ -842,47 +927,105 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if err := f.allowed(ctx, n, "say the build failed: "+why, from, to); err != nil {
 			return err
 		}
-		return f.ended(ctx, n, builds, body, LabelHumanReview)
+		return f.say(ctx, n, body, LabelHumanReview)
 	}
-	logs := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n))
-	// A build that stopped partway, when the factory itself stopped, never
-	// said so. Say it now, instead of starting another agent run.
-	if unfinished := unfinishedBuilds(logs); len(unfinished) > 0 {
-		body := buildFailedComment(nil, nil, fmt.Errorf("the build stopped partway; its log is in %s", unfinished[len(unfinished)-1]), withFailure(next, FailStopped))
-		return failed(FailStopped, body, unfinished)
-	}
-	// Each build costs an agent run, so after two stop, a writer decides
-	// whether to try again.
-	if stops >= maxStops {
-		return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)), nil)
-	}
-	// An agent run is an effect: only the lease's holder starts one, before
-	// it records the run.
-	if !f.holds() {
-		return errLeaseLost
-	}
-	out := filepath.Join(logs, "build-"+f.now().Format("20060102-150405"))
-	if err := os.MkdirAll(out, 0o755); err != nil {
+	step := buildStepName(ratified)
+	state, result, err := f.Repo.Run(ctx, n, step)
+	if err != nil {
 		return err
+	}
+	switch state {
+	case RunRecorded:
+		if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
+			return err
+		}
+		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the factory stopped"), withFailure(next, FailStopped)))
+	case RunNone:
+		// Each build costs an agent run, so after two stop, a writer decides
+		// whether to try again.
+		if stops >= maxStops {
+			return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)))
+		}
+		built, res, runErr, err := f.runBuild(ctx, t, ratified, step)
+		if err != nil {
+			return err
+		}
+		if built == "" {
+			// The run gave no result, so its record stays as a run that
+			// stopped.
+			if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
+				return err
+			}
+			if res != nil {
+				next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
+			}
+			return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
+		}
+		result = built
+	}
+	return f.publish(ctx, t, ratified, result, next, stops)
+}
+
+// buildStepName names a build's record after the post that started it: a
+// ratification, or the answer to a writer's retry.
+func buildStepName(ratified Post) string {
+	return fmt.Sprintf("build-%d", ratified.Comment.ID)
+}
+
+// builtResult is what a build's run leaves in its record, on top of the
+// code it wrote: what synthesis reported, and what went wrong, if anything.
+type builtResult struct {
+	Result *synth.Result `json:"result"`
+	Error  string        `json:"error,omitempty"`
+}
+
+// runBuild records the build's agent run, runs it, and commits the code it
+// wrote on top of the branch, without pushing it. Then the run's record
+// moves to its result: a commit on top of that code, holding what the run
+// reported. runBuild returns that commit, or "" when the run gave no result.
+func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step string) (string, *synth.Result, error, error) {
+	n, m := t.Issue.Number, ratified.Marker
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return "", nil, nil, err
+	}
+	wt, err := f.Repo.Worktree(ctx, m.Branch, "origin/"+m.Branch)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	defer f.Repo.RemoveWorktree(ctx, wt)
+	root := filepath.Join(wt, filepath.FromSlash(m.Project))
+	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "build-"+f.now().Format("20060102-150405"))
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		return "", nil, nil, err
+	}
+	// An agent run is an effect: only the lease's holder records and starts
+	// one, and it's recorded before it starts.
+	if err := f.recovers(ctx, n, "start the build's agent run", f.canStartRun(building(RunNone, false, false), recovery.Build)); err != nil {
+		return "", nil, nil, err
+	}
+	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of %s for #%d", m.Project, n)); err != nil {
+		return "", nil, nil, err
 	}
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := f.Builder.Build(ctx, root, out, amend)
-	if res != nil {
-		next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
+	// A watcher that lost the lease during the run drops it. The holder will
+	// find it recorded, and say it stopped.
+	if !f.holds() {
+		return "", nil, nil, errLeaseLost
 	}
 	if res == nil || res.Final == nil {
-		return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)), []string{out})
+		return "", res, runErr, nil
 	}
 	// The agent's files replace the project's, so a file it removed is gone.
 	if err := removeOwned(root); err != nil {
-		return err
+		return "", nil, nil, err
 	}
-	result := res.Dir
-	if result == "" {
-		result = filepath.Join(out, "result")
+	dir := res.Dir
+	if dir == "" {
+		dir = filepath.Join(out, "result")
 	}
-	if err := copyResult(result, root); err != nil {
-		return err
+	if err := copyResult(dir, root); err != nil {
+		return "", nil, nil, err
 	}
 	verdict := "passed the gate"
 	if !res.Final.Passed {
@@ -894,18 +1037,110 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		msg = fmt.Sprintf("Implement #%d: %s\n\nChanged by Invariant to meet the amended statements ratified in the previous commit. It %s: %s.",
 			n, t.Issue.Title, verdict, res.Final.Claim())
 	}
-	sha, err := f.Repo.Commit(ctx, wt, m.Project, msg)
+	code, err := f.Repo.Commit(ctx, wt, m.Project, msg)
+	if errors.Is(err, ErrNothingToCommit) {
+		// The branch already holds exactly this code.
+		code, err = f.Repo.RevParse(ctx, m.Branch)
+	}
+	if err != nil {
+		return "", nil, nil, err
+	}
+	saved := builtResult{Result: res}
+	if runErr != nil {
+		saved.Error = runErr.Error()
+	}
+	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d", n), code)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
+		return "", nil, nil, err
+	}
+	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
+		return "", nil, nil, err
+	}
+	return result, res, runErr, nil
+}
+
+// saveResult commits a run's result as result.json, on top of parent.
+func (f *Factory) saveResult(ctx context.Context, v any, message, parent string) (string, error) {
+	dir, err := os.MkdirTemp("", "invariant-result-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644); err != nil {
+		return "", err
+	}
+	return f.Repo.Save(ctx, dir, message, parent)
+}
+
+// loadResult reads a run's result.json from its result commit.
+func (f *Factory) loadResult(ctx context.Context, commit string, v any) error {
+	dir, err := os.MkdirTemp("", "invariant-result-")
 	if err != nil {
 		return err
 	}
-	if err := f.Repo.Push(ctx, wt, m.Branch); err != nil {
+	defer os.RemoveAll(dir)
+	if err := f.Repo.Load(ctx, commit, dir); err != nil {
 		return err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "result.json"))
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+// publish takes a finished build to its post: it pushes the build's code,
+// unless the branch has it, opens the pull request, unless one is open from
+// the branch, and says how the build went. Whichever watcher ran the build,
+// its record holds everything this needs.
+func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result string, next Marker, stops int) error {
+	n, m := t.Issue.Number, ratified.Marker
+	var built builtResult
+	if err := f.loadResult(ctx, result, &built); err != nil {
+		return err
+	}
+	res := built.Result
+	if res == nil || res.Final == nil {
+		return fmt.Errorf("the build's record at %s holds no result", result)
+	}
+	var runErr error
+	if built.Error != "" {
+		runErr = errors.New(built.Error)
+	}
+	next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return err
+	}
+	code, err := f.Repo.RevParse(ctx, result+"^")
+	if err != nil {
+		return err
+	}
+	head := "origin/" + m.Branch
+	if has, err := f.Repo.Holds(ctx, head, code); err != nil {
+		return err
+	} else if !has {
+		if err := f.recovers(ctx, n, "push the code", f.canPushCode(building(RunDone, false, false))); err != nil {
+			return err
+		}
+		if err := f.Repo.PushCommit(ctx, code, m.Branch); err != nil {
+			return err
+		}
+		if err := f.Repo.Fetch(ctx); err != nil {
+			return err
+		}
 	}
 	// The pull request this makes, in the protocol's terms: its head, the
 	// lock there, and whether it changes only its project.
-	at := pullRequest{head: sha, gate: protocol.GatePending}
-	at.lock = headLock(os.ReadFile(filepath.Join(root, ".invariant", "ratified.lock")))
-	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, "origin/"+m.Branch, n)
+	at := pullRequest{head: code, gate: protocol.GatePending}
+	at.lock = headLock(f.Repo.Show(ctx, code, m.Project+"/.invariant/ratified.lock"))
+	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
 	if err != nil {
 		return err
 	}
@@ -917,34 +1152,34 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	pr, err := f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
-		Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
-		Body: pullRequestBody(t, m, res, m.Proposal),
-	})
+	pr, open, err := f.GitHub.OpenPullRequest(ctx, m.Branch)
 	if err != nil {
 		return err
 	}
+	if !open {
+		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
+			return err
+		}
+		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
+			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
+			Body: pullRequestBody(t, m, res, m.Proposal),
+		}); err != nil {
+			return err
+		}
+	}
 	next.PR = pr.Number
+	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
+		return err
+	}
 	if !res.Final.Passed {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
 			return err
 		}
 		next.Failure = FailGate
-		return f.ended(ctx, n, []string{out}, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
+		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
-	return f.ended(ctx, n, []string{out}, prComment(pr, res.Final, next), LabelPR)
-}
-
-// ended posts how builds ended, and only once it's posted marks them done.
-// A factory that stops before then finds them unfinished, and posts a stop
-// instead of starting another agent run.
-func (f *Factory) ended(ctx context.Context, n int, builds []string, body, label string) error {
-	if _, err := f.GitHub.PostComment(ctx, n, body); err != nil {
-		return err
-	}
-	finishBuilds(builds)
-	return f.status(ctx, n, label)
+	return f.say(ctx, n, prComment(pr, res.Final, next), LabelPR)
 }
 
 // removeOwned deletes the files in a project that the agent owns, before
@@ -964,30 +1199,6 @@ func removeOwned(root string) error {
 		}
 		return nil
 	})
-}
-
-// A build's directory holds a done file once the factory has said how the
-// build ended. One without it stopped partway, when the factory stopped.
-const doneFile = "done"
-
-// unfinishedBuilds are an issue's builds that never said how they ended.
-func unfinishedBuilds(logs string) []string {
-	dirs, _ := filepath.Glob(filepath.Join(logs, "build-*"))
-	sort.Strings(dirs)
-	var out []string
-	for _, d := range dirs {
-		if _, err := os.Stat(filepath.Join(d, doneFile)); err != nil {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// finishBuilds marks builds as having said how they ended.
-func finishBuilds(dirs []string) {
-	for _, d := range dirs {
-		os.WriteFile(filepath.Join(d, doneFile), nil, 0o644)
-	}
 }
 
 func withFailure(m Marker, why string) Marker {
@@ -1029,6 +1240,25 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	next.ReplyTo, next.Failure = nil, ""
 	switch {
 	case pr.Merged:
+		// A merge the factory recorded, at this head, is the factory's: it
+		// stopped after merging and before it said so (D-0069).
+		if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
+			return err
+		} else if ok && at.head == pr.Head.SHA {
+			runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
+			if err != nil {
+				return err
+			}
+			run, _ := latest(runs)
+			from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
+			if err := f.allowed(ctx, n, fmt.Sprintf("record that the factory merged #%d", pr.Number), from, to); err != nil {
+				return err
+			}
+			if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
+				return err
+			}
+			return f.saidMerged(ctx, t, pr, run, pr.MergeCommitSHA, next)
+		}
 		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
 		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was merged", pr.Number), from, to); err != nil {
 			return err
@@ -1095,6 +1325,9 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
 			return err
 		}
+		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(merging(false, false), recovery.Merge)); err != nil {
+			return err
+		}
 		next.Failure = FailUnmergeable
 		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
 	}
@@ -1103,18 +1336,77 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if err := f.allowed(ctx, n, fmt.Sprintf("merge #%d", pr.Number), from, to); err != nil {
 		return err
 	}
+	if err := f.recovers(ctx, n, fmt.Sprintf("merge #%d", pr.Number), f.canMerge(merging(true, false))); err != nil {
+		return err
+	}
+	// The merge is recorded before it happens, with what the protocol
+	// checked, so a watcher that finds the pull request merged knows the
+	// factory merged it. A record left by an attempt that stopped stands.
+	if err := f.recordMerge(ctx, n, pr.Number, at); err != nil && !errors.Is(err, ErrRecorded) {
+		return err
+	}
 	sha, err := f.GitHub.Merge(ctx, pr.Number, pr.Head.SHA, "merge")
 	if err != nil {
 		return err
 	}
 	f.logf("#%d: merged #%d as %s", n, pr.Number, sha)
-	if err := f.GitHub.DeleteBranch(ctx, m.Branch); err != nil {
-		f.logf("#%d: deleting %s: %v", n, m.Branch, err)
+	if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
+		return err
+	}
+	return f.saidMerged(ctx, t, pr, run, sha, next)
+}
+
+// saidMerged deletes a merged pull request's branch and says the factory
+// merged it, with the issue's numbers.
+func (f *Factory) saidMerged(ctx context.Context, t Thread, pr github.PullRequest, run github.CheckRun, sha string, next Marker) error {
+	n := t.Issue.Number
+	if err := f.GitHub.DeleteBranch(ctx, next.Branch); err != nil {
+		f.logf("#%d: deleting %s: %v", n, next.Branch, err)
 	}
 	next.Kind = KindMerged
 	numbers := NumbersOf(t, f.now())
 	next.Numbers = &numbers
 	return f.say(ctx, n, mergedComment(pr, run, sha, &next), LabelMerged)
+}
+
+// mergeRecordJSON is a pull request as the protocol saw it just before the
+// factory merged it.
+type mergeRecordJSON struct {
+	Head      string `json:"head"`
+	Gate      int8   `json:"gate"`
+	Lock      string `json:"lock"`
+	ScopeMany bool   `json:"scope_many,omitempty"`
+}
+
+// mergeStepName names a merge's record after the pull request and the head
+// it merges, so a merge at a head that moved has a record of its own.
+func mergeStepName(pr int, head string) string {
+	if len(head) > 12 {
+		head = head[:12]
+	}
+	return fmt.Sprintf("merge-%d-%s", pr, head)
+}
+
+// recordMerge records a merge before it happens.
+func (f *Factory) recordMerge(ctx context.Context, n, pr int, at pullRequest) error {
+	b, err := json.Marshal(mergeRecordJSON{Head: at.head, Gate: at.gate, Lock: at.lock, ScopeMany: at.scopeMany})
+	if err != nil {
+		return err
+	}
+	return f.Repo.Record(ctx, n, mergeStepName(pr, at.head), string(b))
+}
+
+// mergeRecord reads the merge the factory recorded at a head, if it did.
+func (f *Factory) mergeRecord(ctx context.Context, n, pr int, head string) (pullRequest, bool, error) {
+	what, err := f.Repo.Recorded(ctx, n, mergeStepName(pr, head))
+	if err != nil || what == "" {
+		return pullRequest{}, false, err
+	}
+	var r mergeRecordJSON
+	if err := json.Unmarshal([]byte(what), &r); err != nil {
+		return pullRequest{}, false, fmt.Errorf("the record of merging #%d can't be read: %w", pr, err)
+	}
+	return pullRequest{head: r.Head, gate: r.Gate, lock: r.Lock, scopeMany: r.ScopeMany}, true, nil
 }
 
 // latest is the newest check run, and whether it has completed.
@@ -1133,6 +1425,9 @@ func latest(runs []github.CheckRun) (github.CheckRun, bool) {
 
 // note answers a command without changing anything.
 func (f *Factory) note(ctx context.Context, t Thread, c Command, text string) error {
+	if err := f.recovers(ctx, t.Issue.Number, "answer a command with a note", f.canPost(noting(), recovery.Note)); err != nil {
+		return err
+	}
 	_, err := f.GitHub.PostComment(ctx, t.Issue.Number, noteComment(text, Marker{Kind: KindNote, ReplyTo: []int64{c.Comment}}))
 	return err
 }

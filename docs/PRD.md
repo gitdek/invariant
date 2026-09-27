@@ -117,8 +117,8 @@ Each requirement serves one goal.
 
 - **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Built, slice 7. `D-0045` `D-0053` `D-0058`
 - **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Built, slice 7. `D-0045` `D-0053` `D-0058`
-- **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Next, slice 9. `D-0048` `D-0058` `D-0069`
-- **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. Today the first holds because of a check, and nothing handles the second. Next, slice 9. `D-0048` `D-0058` `D-0069`
+- **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Built, slice 9: runs and merges are recorded before they happen, every effect is looked for before it's taken, and the proved recovery core, `factory/recovery`, allows each one. A test stops the watcher before each of its effects, on the same machine or another. `D-0048` `D-0058` `D-0069` `D-0073` `D-0074`
+- **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. The first holds because of a check. For the second, one watcher at a time holds a lease in a Git ref, and checks it before every effect. Built, slice 9, with two watchers live for a day still to come. `D-0048` `D-0058` `D-0069` `D-0072`
 
 ### 5 · Fast and cheap enough to use every day
 
