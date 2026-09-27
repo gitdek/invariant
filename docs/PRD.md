@@ -115,8 +115,8 @@ Each requirement serves one goal.
 
 ### 4 · Invariant maintains its own rules
 
-- **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Next, slice 7. `D-0045` `D-0053` `D-0058`
-- **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Next, slice 7. `D-0045` `D-0053` `D-0058`
+- **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Built, slice 7. `D-0045` `D-0053` `D-0058`
+- **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Built, slice 7. `D-0045` `D-0053` `D-0058`
 - **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Planned, slice 9. `D-0048` `D-0058`
 - **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. Today the first holds because of a check, and nothing handles the second. Planned, slice 9. `D-0048` `D-0058`
 
@@ -125,7 +125,7 @@ Each requirement serves one goal.
 - **5.1 It runs on the owner's machine,** through the official coding-agent CLIs in their documented headless modes, on the owner's accounts. Built. `D-0028` `D-0036`
 - **5.2 Effort is bounded.** Each agent run has a cost budget, a turn limit and a timeout, and synthesis gets at most four gate runs. Built. `D-0000` `D-0026`
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
-- **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Next. `D-0048`
+- **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Built. `D-0048`
 - **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Planned. `D-0028` `D-0052`
 - **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. Built: copythis-ad's lease protocol is checked on every pull request, and the check caught a real bug. `D-0053` `D-0054` `D-0059`
 - **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
@@ -157,9 +157,9 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | :-- | :-- | :-- |
 | 1 to 5 | The gate, synthesis, TypeScript and Python checking, GitHub, and synthesis in all three languages | Done |
 | 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Done `D-0053` `D-0054` |
-| 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Next `D-0045` `D-0053` `D-0058` |
-| 8 | Code you can ship (3.7) | Planned `D-0048` `D-0058` |
-| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Planned `D-0048` `D-0058` |
+| 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Done `D-0045` `D-0053` `D-0058` |
+| 8 | Code you can ship (3.7) | Next `D-0048` `D-0058` `D-0068` |
+| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Planned `D-0048` `D-0058` `D-0069` |
 | 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Planned `D-0007` `D-0033` `D-0048` |
 | Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 

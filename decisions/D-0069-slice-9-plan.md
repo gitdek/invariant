@@ -3,7 +3,8 @@ id: D-0069
 title: Slice 9 · the factory survives crashes and concurrent work
 date: 2026-09-27
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: slice 9 planning, overnight after slice 7, from a trace of the watcher's side effects
 ---
@@ -80,6 +81,14 @@ Tonight found two more of the same kind. A deferred mark made a refused pull req
 1. **The shape: A, B or C?** Recommend A.
 2. **What does a lease live in?** Recommend a Git ref, because creating one is atomic on GitHub. The alternatives are a label or a comment, which two watchers can both add.
 3. **Is slice 9 still after slice 8?** Recommend yes, as ratified. The orphaned pull request and the second agent run on a crashed draft are rare and cost money, not correctness. Handle them one issue at a time as they come up.
+
+## Ratified
+
+@gitdek had the agent ratify this plan on the morning of 2026-09-27, with its recommendations:
+
+1. **Shape A:** idempotent effects plus a lease.
+2. **The lease lives in a Git ref,** because creating one is atomic on GitHub.
+3. **Slice 9 comes after slice 8,** as ratified before.
 
 ## What would reopen this
 

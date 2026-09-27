@@ -110,11 +110,11 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   4. GitHub. Done: issue #1, a bounded buffer, became pull request #2, which the factory merged once CI's gate passed. `D-0035` `D-0036`
   5. TypeScript and Python synthesis. Done: issue #3, a rate limiter in TypeScript, went from opened to merged as the factory's own bot. `D-0042` `D-0043` `D-0044`
   6. Done, in two parts. Part A, amendments: issue #5 amended the rate limiter, its proposal showed the diff and its lock amends #3's, and the bot merged it once CI's gate passed. Part B, existing projects: copythis-ad#33 checked the app's analysis lease protocol as it is. The gate found a real bug: a stalled retry canceled an attempt whose lease had run out, which erased the record that the attempt may have been charged. copythis-ad#35 fixed it, and the bot merged the check as copythis-ad#34. `D-0042` `D-0045` `D-0046` `D-0047` `D-0053` `D-0054` `D-0059`
-  7. Invariant builds itself: the factory's own issue protocol becomes `factory/protocol`, its first self-hosted project. Under way: #9 ratified the protocol, and the bot merged it as #11, proved with Gobra. #13 amended it through the factory, with the watcher's three failure steps, and the bot merged #15 once CI proved it again. #12 runs the watcher on it. `D-0045` `D-0053` `D-0058`
-  8. Code you can ship: no model bounds in a project's code, so its proofs hold at every size. Its plan is proposed, with a spike that passed today's gate. `D-0048` `D-0058` `D-0068`
-  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Its plan is proposed. `D-0048` `D-0058` `D-0069`
+  7. Invariant builds itself. Done: #9 ratified the factory's issue protocol, and the bot merged it as `factory/protocol` in #11, proved with Gobra. #13 amended it through the factory, and the bot merged #15 once CI proved it again. Since #12, the watcher checks every step it takes against it. `D-0045` `D-0053` `D-0058`
+  8. Code you can ship: no model bounds in a project's code, so its proofs hold at every size. Under way, by its ratified plan. `D-0048` `D-0058` `D-0068`
+  9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Its plan is ratified. `D-0048` `D-0058` `D-0069`
   10. Ready to go public: GitHub enforces the gate. @gitdek chooses when. `D-0007` `D-0033` `D-0048`
-- The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. Next. `D-0048`
+- The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. `invariant ledger` lists them for every issue it took. `D-0048` `D-0062`
 - The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
 
 ## Project

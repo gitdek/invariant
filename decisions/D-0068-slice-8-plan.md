@@ -3,7 +3,8 @@ id: D-0068
 title: Slice 8 · code you can ship
 date: 2026-09-27
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: slice 8 planning, overnight after slice 7, with a Gobra spike
 ---
@@ -81,6 +82,14 @@ Existing projects keep their receipts, and nobody rewrites them unless an issue 
 1. **The shape: A, B or C?** Recommend A.
 2. **One size larger, or two?** Recommend one. It catches a hardcoded size and keeps TLC fast.
 3. **Which project goes live first?** Recommend the rate limiter, [#3](https://github.com/gitdek/invariant/issues/3) and [#5](https://github.com/gitdek/invariant/issues/5). Its bounds are the most visible, `MAX_CALLS = 5` and a clock that stops at 3, and it's TypeScript, so the live run also tests the driver side. The log buffer stays the Go worked example.
+
+## Ratified
+
+@gitdek had the agent ratify this plan on the morning of 2026-09-27, with its recommendations:
+
+1. **Shape A:** the system in the code, the environment in the explorer.
+2. **One size larger,** not two.
+3. **The first live issue is a new Go project, not the rate limiter.** This departs from the recommendation above. Acceptance 3 needs proofs at every size, and TypeScript has conformance but no proofs, so the rate limiter can't meet it. The rate limiter follows, for the TypeScript driver side.
 
 ## What would reopen this
 
