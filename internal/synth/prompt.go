@@ -228,14 +228,15 @@ Its ` + "`New(capacity)`" + ` and ` + "`Write(l)`" + ` follow the same pattern. 
 		protected: "",
 		task: func(p *project.Project, gateRuns int) string {
 			pkg := p.Manifest.Code
-			return fmt.Sprintf(`2. **The code**, in Python, as package `+"`%s/`"+`, with the standard library only and no network. Nagini proves the core.
+			return fmt.Sprintf(`2. **The code**, in Python, as package `+"`%s/`"+`, with the standard library only and no network. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068). Nagini proves the core.
    - `+"`%s/__init__.py`"+`.
-   - `+"`%s/core.py`"+`, whose first line is `+"`# +nagini`"+`, so that Nagini verifies it. It holds:
-     - the state as a class whose fields represent the spec's variables for the bounds above, one to one, as ints, bools and fixed-length lists. Its `+"`__init__`"+` mirrors Init.
-     - one function per TLA+ action, which changes the state in place. Its contract restates the action: `+"`Requires`"+` for the permissions it needs, the parameters' bounds and the enabling condition, and `+"`Ensures`"+` for the permissions it returns, the effect, and everything it leaves unchanged.
-   - `+"`%s/explore.py`"+`, plain Python that Nagini doesn't check: `+"`key(s)`"+` for a canonical tuple, `+"`copy(s)`"+`, and `+"`successors(s)`"+` for the state after every enabled action, the way TLC expands Next.
+   - `+"`%s/core.py`"+`, whose first line is `+"`# +nagini`"+`, so that Nagini verifies it. It holds the system:
+     - **no bound is in it.** Sizes and limits are parameters: a capacity passed to `+"`__init__`"+`, a list that grows to it, and an operation that refuses when there's no room. No constant in it comes from the bounds above.
+     - **only the system's own state is in it.** The model's environment and history stay out of the code: who acts, how many times, and what was sent, received or written. Those belong to the explorer.
+     - **each operation has a contract that holds at every size.** `+"`Requires`"+` states the permissions it needs and when it may run. `+"`Ensures`"+` states the permissions it returns, its effect, and everything it leaves unchanged. No contract mentions a bound.
+   - `+"`%s/explore.py`"+`, plain Python that Nagini doesn't check. It's the environment, and the only place the bounds live. The bounds are constants at its top, each named exactly after its TLA+ constant. A number is its value, and a set of model values is its size. It gives `+"`key(s)`"+` for a canonical tuple, `+"`copy(s)`"+`, and `+"`successors(s)`"+` for the state after every enabled action, the way TLC expands Next. Each state holds the system's part, read out of the core, and the environment's own. For each action, it makes the core from the state, calls its operation, and reads the state back, and the core's refusals are the core's to make.
    - Tests in `+"`test_%s.py`"+` at the project's root, with `+"`unittest`"+`.
-3. **The conformance driver**, `+"`%s`"+`. It explores the core completely, breadth first from a new state through `+"`successors()`"+`. For every step the code can take, it records one run: the path from the initial state to the step's start, then the state the step reaches. It writes the runs, each state in the spec's vocabulary (see below), to the file named by the environment variable `+"`INVARIANT_TRACES`"+`, as `+"`{\"traces\": [[state, ...], ...]}`"+`.
+3. **The conformance driver**, `+"`%s`"+`. It explores completely, breadth first from the initial state through `+"`successors()`"+`. For every step the code can take, it records one run: the path from the initial state to the step's start, then the state the step reaches. It writes the runs, each state in the spec's vocabulary (see below), to the file named by the environment variable `+"`INVARIANT_TRACES`"+`, as `+"`{\"traces\": [[state, ...], ...]}`"+`.
 4. **Check your work with the `+"`gate`"+` tool.** It runs every check and says exactly what failed. You have %d gate runs in total, so reread your files carefully before each run. You're done when the gate passes. Then reply with a short summary.
 `, pkg, pkg, pkg, pkg, filepath.Base(pkg), p.Manifest.Conformance, gateRuns)
 		},
@@ -245,7 +246,7 @@ Its ` + "`New(capacity)`" + ` and ` + "`Write(l)`" + ` follow the same pattern. 
 		primer: encodingPrimer + `
 # Nagini, briefly
 
-Nagini verifies a typed subset of Python. Contracts are calls at the top of a function's body. A generic example, not from this project:
+Nagini verifies a typed subset of Python. Contracts are calls at the top of a function's body. Here's code with no model bounds in it, which Nagini proves at every capacity. It's a queue, not from this project:
 
 ` + "```python" + `
 # +nagini
@@ -253,33 +254,43 @@ from typing import List
 
 from nagini_contracts.contracts import *
 
-N = 2
 
+class Queue:
+    """A queue whose capacity is chosen when it's made."""
 
-class State:
-    def __init__(self) -> None:
-        self.count = [0, 0]  # type: List[int]
-        self.done = False
-        Ensures(Acc(self.count) and Acc(list_pred(self.count)) and len(self.count) == N)
-        Ensures(Acc(self.done))
-        Ensures(Forall(int, lambda i: Implies(0 <= i and i < N, self.count[i] == 0)))
-        Ensures(not self.done)
+    def __init__(self, capacity: int) -> None:
+        Requires(capacity > 0)
+        self.capacity = capacity
+        self.items = []  # type: List[int]
+        Ensures(Acc(self.capacity) and Acc(self.items) and Acc(list_pred(self.items)))
+        Ensures(self.capacity == capacity and len(self.items) == 0)
 
+    def put(self, x: int) -> bool:
+        Requires(Acc(self.capacity, 1/2) and Acc(self.items, 1/2) and Acc(list_pred(self.items)))
+        Requires(len(self.items) <= self.capacity)
+        Ensures(Acc(self.capacity, 1/2) and Acc(self.items, 1/2) and Acc(list_pred(self.items)))
+        Ensures(len(self.items) <= self.capacity)
+        Ensures(Implies(Old(len(self.items)) < self.capacity, Result() and ToSeq(self.items) == Old(ToSeq(self.items)) + PSeq(x)))
+        Ensures(Implies(Old(len(self.items)) >= self.capacity, not Result() and ToSeq(self.items) == Old(ToSeq(self.items))))
+        if len(self.items) < self.capacity:
+            self.items.append(x)
+            return True
+        return False
 
-def inc(s: State, i: int) -> None:
-    """Mirrors the TLA+ action Inc(i)."""
-    Requires(Acc(s.count) and Acc(list_pred(s.count)) and len(s.count) == N)
-    Requires(Acc(s.done))
-    Requires(0 <= i and i < N)
-    Requires(not s.done and s.count[i] < 3)
-    Ensures(Acc(s.count) and Acc(list_pred(s.count)) and len(s.count) == N)
-    Ensures(Acc(s.done))
-    Ensures(s.count[i] == Old(s.count[i]) + 1)
-    Ensures(Forall(int, lambda j: Implies(0 <= j and j < N and j != i, s.count[j] == Old(s.count[j]))))
-    Ensures(s.done == Old(s.done))
-    s.count[i] = s.count[i] + 1
+    def get(self) -> int:
+        Requires(Acc(self.capacity, 1/2) and Acc(self.items) and Acc(list_pred(self.items)))
+        Requires(0 < len(self.items) and len(self.items) <= self.capacity)
+        Ensures(Acc(self.capacity, 1/2) and Acc(self.items) and Acc(list_pred(self.items)))
+        Ensures(len(self.items) == Old(len(self.items)) - 1)
+        Ensures(Result() == Old(ToSeq(self.items))[0])
+        Ensures(ToSeq(self.items) == Old(ToSeq(self.items)).drop(1))
+        x = self.items[0]
+        self.items = self.items[1:]
+        return x
 ` + "```" + `
 
+- **Say what a list holds through its sequence,** ` + "`ToSeq(items)`" + `, and write each contract in its terms. ` + "`PSeq(x)`" + ` is a one-element sequence, ` + "`+`" + ` joins sequences, and ` + "`.drop(n)`" + ` and ` + "`.take(n)`" + ` cut them.
+- **An operation that may be refused** returns whether it ran, and its contract says both outcomes. The model's action is the one that ran.
 - Every function states the permissions it needs in ` + "`Requires`" + ` and gives them back in ` + "`Ensures`" + `: ` + "`Acc(s.field)`" + ` for a field, and ` + "`Acc(list_pred(s.items))`" + ` for a list's contents.
 - ` + "`Old(e)`" + ` is e's value on entry. ` + "`Forall(int, lambda i: ...)`" + ` and ` + "`Implies(a, b)`" + ` write quantified conditions.
 - Nagini checks every list index, so bound each one in ` + "`Requires`" + `.
