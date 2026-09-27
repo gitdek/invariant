@@ -49,7 +49,8 @@ var version = func() string {
 var graphPath = regexp.MustCompile(`^/api/graph/([0-9a-f]{16})\.json$`)
 
 // Handler serves the page, its assets, the snapshot and the state graphs.
-// It answers only GET and HEAD.
+// It answers only GET and HEAD, except at /act, where @gitdek can post
+// commands once Cloudflare Access has signed him in.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -58,6 +59,10 @@ func (s *Server) Handler() http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if r.URL.Path == "/act" || strings.HasPrefix(r.URL.Path, "/act/") {
+			s.serveAct(w, r)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			h.Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

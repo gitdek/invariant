@@ -95,7 +95,7 @@
   function render(s) {
     renderTop(s);
     if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
-    if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting])])) renderInbox(s);
+    if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting]), [...acts]])) renderInbox(s);
     if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
     if (changed("now", [s.now, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
     if (changed("orbit", [s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
@@ -1033,6 +1033,7 @@
     box.innerHTML = items.map(needCard).join("");
   }
   function needCard(is) {
+    if (ACT) return actCard(is);
     const w = is.waiting, repo = is.repo, n = is.number;
     const gh = (body) => `gh issue comment ${n} -R ${repo} --body "${body}"`;
     const url = `https://github.com/${repo}/issues/${n}`;
@@ -1069,6 +1070,162 @@
     if (cp) cp.textContent = e.shiftKey ? "gh copied" : "copied";
     setTimeout(() => { b.classList.remove("copied"); if (cp) cp.textContent = "copy"; }, 1600);
   });
+
+  // ---------- acting: at /act, the owner's clicks post to GitHub (D-0065) ----------
+  // Cloudflare Access signs the owner in, and the server checks it again on
+  // every post. Each card offers only what its issue is waiting for, and a
+  // ratify or a retry asks first.
+  const ACT = document.body.dataset.act || "";
+  const acts = new Map(); // "repo#n" → { chosen: {F1: "C"}, confirm, busy, posted, error }
+  function actOf(key) {
+    if (!acts.has(key)) acts.set(key, { chosen: {} });
+    return acts.get(key);
+  }
+  function actCard(is) {
+    const w = is.waiting, repo = is.repo, n = is.number, key = `${repo}#${n}`, a = actOf(key);
+    const url = `https://github.com/${repo}/issues/${n}`;
+    const open = `<a class="gh" href="${esc(url)}" target="_blank" rel="noopener">Open on GitHub ↗</a>`;
+    const post = (label, body, primary) => `<button class="cmd act${primary ? " primary" : ""}" type="button" data-act-key="${esc(key)}" data-act-body="${esc(body)}"${a.busy ? " disabled" : ""}>${esc(label)}</button>`;
+    const ask = (label, body, primary) => `<button class="cmd act${primary ? " primary" : ""}" type="button" data-act-key="${esc(key)}" data-act-confirm="${esc(body)}"${a.busy ? " disabled" : ""}>${esc(label)}</button>`;
+    let body = "", cls = "", actions = "";
+    if (w.kind === "forks") {
+      const forks = w.forks || [];
+      body = forks.map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
+        const on = a.chosen[q.id] === o.id;
+        return `<button class="opt pick${on ? " chosen" : ""}" type="button" aria-pressed="${on}" data-act-key="${esc(key)}" data-act-pick="${esc(q.id)} ${esc(o.id)}"><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">${on ? "chosen" : "choose"}</span></button>`;
+      }).join("")}</div>`).join("");
+      const picked = forks.filter((q) => a.chosen[q.id]);
+      const lines = picked.map((q) => `/invariant choose ${q.id} ${a.chosen[q.id]}`).join("\n");
+      actions = picked.length === forks.length && forks.length
+        ? post(forks.length === 1 ? "Post my answer" : `Post my ${forks.length} answers`, lines, true)
+        : `<button class="cmd act primary" type="button" disabled>Choose ${forks.length === 1 ? "an answer" : `all ${forks.length}`} to post</button>`;
+      actions += ask("Draft again instead", "/invariant revise");
+    } else if (w.kind === "proposal") {
+      body = `<p class="ask">${w.amends ? `An amendment to what ${esc(ref(repo, Number(String(w.amends).replace("#", ""))) || w.amends)} ratified: ` : ""}<strong>${(w.statements || []).length}</strong> statements for <strong>${esc(w.name)}</strong>, already checked by TLC, and waiting for you to ratify them.</p>
+        <details class="stmts"><summary>Read what they say</summary><ul>${(w.statements || []).map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>`;
+      actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + ask("Draft again", "/invariant revise");
+    } else {
+      cls = "failed";
+      body = `<p class="ask">${w.pr ? `Pull request <strong>${esc(ref(repo, w.pr))}</strong> didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.</p>`;
+      actions = ask("Retry", "/invariant retry", true);
+    }
+    let row = `<div class="cmds">${actions}${open}</div>`;
+    if (a.confirm) {
+      const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins these statements, and the factory starts building.`
+        : a.confirm === "/invariant retry" ? "Have the factory try again, as you?" : "Have the factory draft again from the comments, as you?";
+      row = `<div class="confirm"><span>${what}</span>${post("Yes, post it", a.confirm, true)}<button class="cmd" type="button" data-act-key="${esc(key)}" data-act-cancel>Cancel</button></div>`;
+    }
+    if (a.posted) row = `<p class="posted">✓ Posted <a href="${esc(a.posted)}" target="_blank" rel="noopener">on GitHub</a> as you. The factory picks it up within 30 seconds.</p>`;
+    if (a.error) row += `<p class="acterr">${esc(a.error)}</p>`;
+    return `<article class="need ${cls}"><div>${needGlyph(w.kind)}</div><div>
+      <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}${row}</div></article>`;
+  }
+  if (ACT) {
+    document.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-act-key]");
+      if (!b || b.disabled) return;
+      const key = b.dataset.actKey, a = actOf(key);
+      a.error = "";
+      if (b.dataset.actPick) {
+        const [q, o] = b.dataset.actPick.split(" ");
+        a.chosen[q] = a.chosen[q] === o ? undefined : o;
+      } else if (b.dataset.actConfirm) {
+        a.confirm = b.dataset.actConfirm;
+      } else if ("actCancel" in b.dataset) {
+        a.confirm = "";
+      } else if (b.dataset.actBody) {
+        const [repo, n] = key.split("#");
+        a.busy = true;
+        if (state) renderInbox(state);
+        try {
+          const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+            body: JSON.stringify({ repo, issue: Number(n), body: b.dataset.actBody }) });
+          if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
+          a.posted = (await r.json()).url || `https://github.com/${repo}/issues/${n}`;
+          a.confirm = "";
+        } catch (err) {
+          a.error = `Not posted: ${err.message}`;
+        }
+        a.busy = false;
+      }
+      if (state) renderInbox(state);
+    });
+    const lede = $("#needs-lede");
+    if (lede) lede.textContent = "What the factory is waiting for from you, in every repository. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first. Or open a new issue for the factory to solve.";
+    composer();
+    const who = document.createElement("span");
+    who.className = "pill acting";
+    who.title = `Signed in as ${ACT} through Cloudflare Access. Your clicks in Needs you post to GitHub as you.`;
+    who.innerHTML = "<i></i>Acting as you";
+    document.querySelector(".top-right")?.prepend(who);
+  }
+
+  // A new issue for the factory to solve, from /act: what must be true,
+  // where its project goes, and the code it checks, if any.
+  function composer() {
+    const box = $("#compose");
+    if (!box) return;
+    let open = false, busy = false, done = null, error = "", confirm = false;
+    const draft = { repo: "", title: "", body: "", project: "", code: "", language: "" };
+    const repos = () => (state?.repos || []).map((r) => r.name);
+    const projects = () => (state?.projects || []).filter((p) => (p.repo || state.repo) === (draft.repo || repos()[0])).map((p) => p.dir);
+    function paint() {
+      if (!open) {
+        box.innerHTML = `<button class="cmd act primary newissue" type="button" data-compose="open">＋ New issue for the factory</button>` +
+          (done ? `<p class="posted">✓ Opened <a href="${esc(done.url)}" target="_blank" rel="noopener">${esc(ref(done.repo, done.number))}</a> as you. The factory starts drafting within 30 seconds.</p>` : "");
+        return;
+      }
+      const repo = draft.repo || repos()[0] || "";
+      box.innerHTML = `<form class="composer" autocomplete="off">
+        <div class="row"><label>Repository<select name="repo">${repos().map((r) => `<option${r === repo ? " selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+          <label>Language<select name="language"><option value="">the repository's</option>${["go", "typescript", "python"].map((l) => `<option value="${l}"${draft.language === l ? " selected" : ""}>${l === "go" ? "Go" : l === "typescript" ? "TypeScript" : "Python"}</option>`).join("")}</select></label></div>
+        <label>Title<input name="title" maxlength="200" placeholder="Prove the lease protocol" value="${esc(draft.title)}"></label>
+        <label>What must be true<textarea name="body" rows="7" placeholder="In plain language: what can happen, the rules that must always hold, and what must never happen. The factory asks about anything it can't decide.">${esc(draft.body)}</textarea></label>
+        <div class="row"><label>Project <i>optional</i><input name="project" list="compose-projects" placeholder="a new directory, or a project to amend" value="${esc(draft.project)}"><datalist id="compose-projects">${projects().map((d) => `<option value="${esc(d)}">`).join("")}</datalist></label>
+          <label>Code to check as it is <i>optional</i><input name="code" placeholder="src/lib, migrations/admin" value="${esc(draft.code)}"></label></div>
+        ${confirm ? `<div class="confirm"><span>Open this as you, with <b>/invariant solve</b>? The factory starts drafting within 30 seconds.</span><button class="cmd act primary" type="button" data-compose="post"${busy ? " disabled" : ""}>Yes, open it</button><button class="cmd" type="button" data-compose="back">Not yet</button></div>`
+          : `<div class="cmds"><button class="cmd act primary" type="button" data-compose="ask">Open it for the factory</button><button class="cmd" type="button" data-compose="close">Cancel</button></div>`}
+        ${error ? `<p class="acterr">${esc(error)}</p>` : ""}
+      </form>`;
+    }
+    box.addEventListener("input", (e) => {
+      const f = e.target;
+      if (f.name in draft) draft[f.name] = f.value;
+      if (f.name === "repo") paint();
+    });
+    box.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-compose]");
+      if (!b || b.disabled) return;
+      const what = b.dataset.compose;
+      error = "";
+      if (what === "open") { open = true; done = null; }
+      if (what === "close") open = false;
+      if (what === "back") confirm = false;
+      if (what === "ask") {
+        if (!draft.title.trim() || !draft.body.trim()) error = "Give it a title, and say what must be true.";
+        else confirm = true;
+      }
+      if (what === "post") {
+        busy = true; paint();
+        const repo = draft.repo || repos()[0];
+        try {
+          const r = await fetch("/act/api/issue", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+            body: JSON.stringify({ repo, title: draft.title, body: draft.body, project: draft.project.trim(), language: draft.language,
+              code: draft.code.split(/[,\n]/).map((c) => c.trim()).filter(Boolean) }) });
+          if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
+          const j = await r.json();
+          done = { repo, number: j.number, url: j.url };
+          Object.assign(draft, { title: "", body: "", project: "", code: "", language: "" });
+          open = false; confirm = false;
+        } catch (err) {
+          error = `Not opened: ${err.message}`; confirm = false;
+        }
+        busy = false;
+      }
+      paint();
+    });
+    paint();
+  }
 
   // ---------- the fleet: every repository as a star system ----------
   const STAGE_ANGLE = { queued: -90, asking: -30, ratifying: 30, building: 90, gate: 150, review: 150, merged: 210 };

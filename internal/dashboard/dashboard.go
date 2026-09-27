@@ -41,9 +41,16 @@ type Server struct {
 	Work   string      // the watchers' work directory, whose logs show a step's checks as they run
 	Every  time.Duration
 	Log    func(format string, args ...any)
+	// Access, when set, lets @gitdek post commands from /act, behind
+	// Cloudflare Access (D-0065). Post is how a command reaches GitHub; nil
+	// posts through gh's login.
+	Access *Access
+	Post   func(ctx context.Context, repo string, issue int, body string) (url string, err error)
+	Open   func(ctx context.Context, repo string, is github.NewIssue) (number int, url string, err error)
 
 	mu      sync.RWMutex
-	state   []byte // the latest snapshot, gzipped JSON
+	state   []byte  // the latest snapshot, gzipped JSON
+	issues  []Issue // the latest snapshot's issues, which say what each is waiting for
 	graphs  map[string][]byte
 	drawing map[string]bool
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
@@ -381,7 +388,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
-	s.state = gz
+	s.state, s.issues = gz, snap.Issues
 	s.mu.Unlock()
 	return nil
 }

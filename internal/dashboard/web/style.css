@@ -649,3 +649,27 @@ footer p { margin: 0; max-width: 60em; }
   .stmts li { grid-template-columns: 1fr; }
 }
 .runchip { animation: needin 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+/* acting at /act (D-0065) */
+.opt.pick.chosen { border-color: var(--people); background: rgba(var(--people-rgb), 0.12); color: var(--ink); }
+.opt.pick.chosen .cp { color: var(--people); }
+.cmd.act { cursor: pointer; }
+.cmd.act[disabled] { opacity: 0.45; cursor: not-allowed; }
+.confirm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(var(--people-rgb), 0.5); background: rgba(var(--people-rgb), 0.08); }
+.confirm span { flex: 1 1 240px; font-size: 14px; }
+.posted { margin: 12px 0 0; font: 500 13px var(--mono); color: var(--accent); animation: needin 0.5s ease both; }
+.acterr { margin: 8px 0 0; font: 500 13px var(--mono); color: var(--bug); }
+.pill.acting { border-color: rgba(var(--people-rgb), 0.55); color: var(--people); }
+.pill.acting i { background: var(--people); }
+@media (max-width: 560px) { .pill.acting { display: none; } }
+
+/* a new issue, from /act */
+#compose { margin: 0 0 16px; }
+.newissue { font-size: 14px; }
+.composer { display: grid; gap: 12px; padding: 18px; border-radius: 16px; border: 1px solid rgba(var(--people-rgb), 0.45); background: var(--card); animation: needin 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.composer .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.composer label { display: grid; gap: 6px; font: 600 11.5px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); }
+.composer label i { font-style: normal; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink3); opacity: 0.8; }
+.composer input, .composer select, .composer textarea { font: 400 15px/1.5 var(--sans, inherit); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; text-transform: none; letter-spacing: 0; min-width: 0; }
+.composer textarea { resize: vertical; min-height: 120px; }
+.composer input:focus, .composer select:focus, .composer textarea:focus { outline: none; border-color: var(--people); box-shadow: 0 0 0 3px rgba(var(--people-rgb), 0.18); }
