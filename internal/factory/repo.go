@@ -125,7 +125,7 @@ func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
 // never reads the working tree, and it keeps every file inside dst.
 func (c Clone) Export(ctx context.Context, ref string, paths []string, dst string) error {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"archive", "--format=tar", ref, "--"}, paths...)...)
-	cmd.Dir = c.Dir
+	cmd.Dir, cmd.Env = c.Dir, append(os.Environ(), noLFS)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {
@@ -170,9 +170,17 @@ func run(ctx context.Context, dir, name string, args ...string) (string, error) 
 	return runEnv(ctx, dir, nil, name, args...)
 }
 
+// noLFS keeps git from fetching the large files a repository keeps in Git
+// LFS, such as media: the factory's checkouts hold LFS pointers only, and
+// the factory never needs more (D-0055).
+const noLFS = "GIT_LFS_SKIP_SMUDGE=1"
+
 func runEnv(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if name == "git" {
+		env = append(env, noLFS)
+	}
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
