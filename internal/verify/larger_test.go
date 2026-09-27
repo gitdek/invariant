@@ -67,3 +67,26 @@ func TestCompareLarger(t *testing.T) {
 		t.Errorf("a problem in the model one size larger isn't the code's to fail: %+v", l)
 	}
 }
+
+// Bounds are found, and made one size larger, in Go, TypeScript and Python.
+func TestBoundsInEveryLanguage(t *testing.T) {
+	sizes := map[string]int{"Capacity": 3, "Clients": 4}
+	for lang, src := range map[string]string{
+		"go":         "const (\n\tCapacity = 2\n\tClients  = 3 // c1, c2, c3\n)\n",
+		"typescript": "const Capacity = 2;\nexport const Clients: number = 3; // c1, c2, c3\n",
+		"python":     "Capacity = 2\nClients = 3  # c1, c2, c3\n",
+	} {
+		if !declaresBounds([]byte(src), sizes) {
+			t.Errorf("%s: the bounds weren't found in\n%s", lang, src)
+			continue
+		}
+		got := string(largerExplorer([]byte(src), sizes))
+		if !strings.Contains(got, "Capacity = 3") || !strings.Contains(got, "Clients = 4") && !strings.Contains(got, "Clients: number = 4") && !strings.Contains(got, "Clients  = 4") {
+			t.Errorf("%s: one size larger is\n%s", lang, got)
+		}
+	}
+	// A name that only starts like a bound isn't one.
+	if declaresBounds([]byte("const CapacityMax = 2;\nconst Clients = 3;\n"), sizes) {
+		t.Error("CapacityMax was taken for Capacity")
+	}
+}

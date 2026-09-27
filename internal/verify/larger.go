@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tlc"
 )
 
@@ -103,10 +105,12 @@ func largerBounds(bounds map[string]string) (larger map[string]string, sizes map
 // explorerFile is where a Go project's explorer lives.
 const explorerFile = "explore.go"
 
-// boundConst finds a bound's constant in an explorer, such as
-// "\tCapacity = 2", to change its value.
+// boundConst finds a bound's constant in an explorer or a driver, to change
+// its value: "\tCapacity = 2" in Go, "const Capacity = 2;" in TypeScript,
+// and "Capacity = 2" in Python.
 func boundConst(name string) *regexp.Regexp {
-	return regexp.MustCompile(`(?m)^(\s*` + regexp.QuoteMeta(name) + `\s*=\s*)(\d+)(\s*(?://.*)?)$`)
+	return regexp.MustCompile(`(?m)^(\s*(?:export\s+)?(?:const\s+|let\s+)?` + regexp.QuoteMeta(name) +
+		`\s*(?::\s*number\s*)?=\s*)(\d+)(\s*;?\s*(?://.*|#.*)?)$`)
 }
 
 // declaresBounds says whether an explorer declares a constant for each of
@@ -202,6 +206,82 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 		return e, nil
 	}
 	return Exploration{Message: lastLines(s[0].out, 20)}, nil
+}
+
+// countScript runs a TypeScript or Python conformance driver in count mode:
+// it explores as always, and writes only how many states it reached, and
+// how deep its search went, to $INVARIANT_COUNT.
+const countScript = `cd /src
+%s "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
+`
+
+// boundsFile is where a TypeScript or Python project's bounds live: at the
+// top of its conformance driver, or of its explorer for a Python core.
+func boundsFile(p *project.Project) string {
+	if p.Manifest.Language == "python" {
+		if _, err := os.Stat(filepath.Join(p.CodeDir(), "explore.py")); err == nil {
+			return filepath.Join(p.Manifest.Code, "explore.py")
+		}
+	}
+	return p.Manifest.Conformance
+}
+
+// countLarger runs an exhaustive driver again with its bounds one size
+// larger, in count mode, and returns what it reached (D-0068, D-0076).
+func countLarger(ctx context.Context, image, runner string, p *project.Project, sizes map[string]int) (Exploration, error) {
+	work, err := os.MkdirTemp("", "invariant-larger-")
+	if err != nil {
+		return Exploration{}, err
+	}
+	defer os.RemoveAll(work)
+	src, out := filepath.Join(work, "src"), filepath.Join(work, "out")
+	runtime := filepath.Join(work, "runtime")
+	if err := copyTree(p.Dir, src); err != nil {
+		return Exploration{}, err
+	}
+	bounds := filepath.Join(src, boundsFile(p))
+	b, err := os.ReadFile(bounds)
+	if err != nil {
+		return Exploration{}, err
+	}
+	if err := os.WriteFile(bounds, largerExplorer(b, sizes), 0o644); err != nil {
+		return Exploration{}, err
+	}
+	if err := writeNaginiRuntime(runtime); err != nil {
+		return Exploration{}, err
+	}
+	if err := os.MkdirAll(out, 0o777); err != nil {
+		return Exploration{}, err
+	}
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
+		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance), "-e", "INVARIANT_COUNT=/out/count.json",
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", fmt.Sprintf(countScript, runner))
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			return Exploration{}, fmt.Errorf("running the sandbox: %w", err)
+		}
+	}
+	s, err := splitMarkers(buf.String(), 1)
+	if err != nil {
+		return Exploration{}, err
+	}
+	log, _ := os.ReadFile(filepath.Join(out, "driver.log"))
+	raw, readErr := os.ReadFile(filepath.Join(out, "count.json"))
+	var count struct {
+		States int64 `json:"states"`
+		Depth  int   `json:"depth"`
+	}
+	switch {
+	case s[0].code != 0:
+		return Exploration{Message: "the driver failed one size larger:\n" + lastLines(string(log), 20)}, nil
+	case readErr != nil || json.Unmarshal(raw, &count) != nil || count.States <= 0:
+		return Exploration{Message: "the driver wrote no count to $INVARIANT_COUNT, as {\"states\": N, \"depth\": D}"}, nil
+	}
+	return Exploration{OK: true, States: count.States, Depth: count.Depth}, nil
 }
 
 // largerTimeout caps TLC's run one size larger. A model that grows past it

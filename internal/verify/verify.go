@@ -434,17 +434,33 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	}
 
 	// One size past the bounds (D-0068), for Go code whose explorer names
-	// its bounds. TLC and the explorer run beside everything else.
+	// its bounds, and for code whose exhaustive TypeScript or Python driver
+	// does (D-0076). TLC and the exploration run beside everything else.
 	var (
 		larger      map[string]string
 		largerTLC   *tlc.Result
 		largerCode  *Exploration
 		largerError string
 	)
-	if g, ok := lang.(Go); ok && !model {
+	var exploreLarger func() (Exploration, error)
+	if !model {
 		var sizes map[string]int
 		larger, sizes = largerBounds(p.Lock.Bounds)
-		if explorer, err := os.ReadFile(filepath.Join(p.CodeDir(), explorerFile)); err == nil && declaresBounds(explorer, sizes) {
+		switch l := lang.(type) {
+		case Go:
+			if explorer, err := os.ReadFile(filepath.Join(p.CodeDir(), explorerFile)); err == nil && declaresBounds(explorer, sizes) {
+				exploreLarger = func() (Exploration, error) { return l.exploreLarger(ctx, p.Dir, p.CodeDir(), sizes) }
+			}
+		case TypeScript:
+			if bounds, err := os.ReadFile(filepath.Join(p.Dir, boundsFile(p))); err == nil && p.Manifest.Exhaustive && declaresBounds(bounds, sizes) {
+				exploreLarger = func() (Exploration, error) { return countLarger(ctx, l.Image, "node", p, sizes) }
+			}
+		case Python:
+			if bounds, err := os.ReadFile(filepath.Join(p.Dir, boundsFile(p))); err == nil && p.Manifest.Exhaustive && declaresBounds(bounds, sizes) {
+				exploreLarger = func() (Exploration, error) { return countLarger(ctx, l.Image, "python", p, sizes) }
+			}
+		}
+		if exploreLarger != nil {
 			spawn(func() error {
 				d, err := stage(work, "larger", p, src, "")
 				if err != nil {
@@ -466,7 +482,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 				return nil
 			})
 			spawn(func() error {
-				e, err := g.exploreLarger(ctx, p.Dir, p.CodeDir(), sizes)
+				e, err := exploreLarger()
 				if err != nil {
 					return err
 				}
