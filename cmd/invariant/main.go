@@ -58,6 +58,7 @@ Usage:
   invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-addr HOST:PORT]
                                                serve a live view of the factory and its evidence
 
+  invariant ledger -repo OWNER/NAME [-json]      what each of the factory's issues took: time, comments, spend
   invariant init [-repo OWNER/NAME] [-invariant COMMIT] [DIR]
                                                set up another repository's gate
 `
@@ -93,6 +94,8 @@ func main() {
 		code = dashboardCmd(ctx, args)
 	case "init":
 		code = initCmd(args)
+	case "ledger":
+		code = ledgerCmd(ctx, args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -707,4 +710,77 @@ func buildCommit() string {
 		}
 	}
 	return rev
+}
+
+// ledgerCmd prints what each of the factory's issues took (D-0048, 5.4):
+// its factory time, the time it waited on people, their comments, the
+// agents' estimated spend and the gate runs synthesis used. It reads them
+// from the factory's own posts, so older issues show what was recorded.
+func ledgerCmd(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("ledger", flag.ExitOnError)
+	repo := fs.String("repo", "", "the repository, as owner/name")
+	asJSON := fs.Bool("json", false, "print JSON instead of a table")
+	fs.Parse(args)
+	if *repo == "" || fs.NArg() != 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	gh := github.Client{Repo: *repo}
+	issues, err := gh.Issues(ctx, factory.LabelTrigger)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+	type row struct {
+		Issue  int             `json:"issue"`
+		Title  string          `json:"title"`
+		State  string          `json:"state"`
+		Merged bool            `json:"merged"`
+		Took   factory.Numbers `json:"numbers"`
+	}
+	var rows []row
+	for _, is := range issues {
+		comments, err := gh.Comments(ctx, is.Number)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 2
+		}
+		t := factory.ThreadFrom(is, comments, "")
+		post, ok := t.State()
+		if !ok {
+			continue
+		}
+		end := time.Now()
+		if is.State == "closed" {
+			end, _ = time.Parse(time.RFC3339, post.Comment.CreatedAt)
+		}
+		n := factory.NumbersOf(t, end)
+		if post.Marker.Numbers != nil {
+			n = *post.Marker.Numbers
+		}
+		rows = append(rows, row{Issue: is.Number, Title: is.Title, State: post.Marker.Kind, Merged: post.Marker.Kind == factory.KindMerged, Took: n})
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(rows, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	fmt.Printf("%-6s %-10s %9s %9s %8s %8s %6s  %s\n", "ISSUE", "STATE", "FACTORY", "PEOPLE", "COMMENTS", "SPEND", "GATE", "TITLE")
+	for _, r := range rows {
+		spend := "-"
+		if r.Took.SpendUSD > 0 {
+			spend = fmt.Sprintf("$%.2f", r.Took.SpendUSD)
+		}
+		fmt.Printf("#%-5d %-10s %9s %9s %8d %8s %6d  %s\n", r.Issue, r.State, clock(r.Took.FactorySeconds), clock(r.Took.PeopleSeconds), r.Took.PeopleComments, spend, r.Took.GateRuns, r.Title)
+	}
+	return 0
+}
+
+// clock is a duration as hours and minutes, or minutes and seconds.
+func clock(secs int) string {
+	if secs >= 3600 {
+		return fmt.Sprintf("%dh%02dm", secs/3600, secs%3600/60)
+	}
+	return fmt.Sprintf("%dm%02ds", secs/60, secs%60)
 }

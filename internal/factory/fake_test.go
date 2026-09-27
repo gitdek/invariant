@@ -277,7 +277,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 		return &formalize.Result{Problem: s.fail}, nil
 	}
 	if len(req.Answers) < len(s.forks) {
-		return &formalize.Result{Proposal: &formalize.Proposal{Draft: formalize.Draft{Forks: s.forks}}}, nil
+		return &formalize.Result{Proposal: &formalize.Proposal{Draft: formalize.Draft{Forks: s.forks}}, Usage: synth.Usage{CostUSD: 0.10}}, nil
 	}
 	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
 		Witnesses: []verify.Witness{{Name: "CanFill", Reached: true, Steps: 2}}, Bugs: []verify.Bug{{Name: "PutWhenFull", Caught: true}}}
@@ -290,7 +290,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 	}
 	p := bufferProposal(s.t)
 	p.Language = req.Language
-	return &formalize.Result{Proposal: p, Report: report}, nil
+	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
 }
 
 // fakeBuilder writes a Go package into the ratified project, the way
@@ -333,7 +333,7 @@ func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*sy
 	}
 	final := &verify.Report{Project: "bounded buffer", Passed: b.pass, Assurance: "proved",
 		Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3}, Build: verify.Build{Passed: b.pass}}
-	return &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3},
+	return &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25},
 		GateRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}, nil
 }
 

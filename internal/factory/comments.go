@@ -294,7 +294,11 @@ func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) stri
 }
 
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
-	return post("merged", fmt.Sprintf("CI's `invariant/gate` passed on #%d ([run](%s)), and I merged it as %s.", pr.Number, run.URL, sha), *r)
+	body := fmt.Sprintf("CI's `invariant/gate` passed on #%d ([run](%s)), and I merged it as %s.", pr.Number, run.URL, sha)
+	if r.Numbers != nil {
+		body += "\n\n" + r.Numbers.Sentence()
+	}
+	return post("merged", body, *r)
 }
 
 func closedComment(pr github.PullRequest, m Marker) string {
