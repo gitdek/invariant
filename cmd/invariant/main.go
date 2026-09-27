@@ -775,10 +775,16 @@ func ledgerCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	gh := github.Client{Repo: *repo}
-	issues, err := gh.Issues(ctx, factory.LabelTrigger)
+	all, err := gh.Issues(ctx, "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
+	}
+	var issues []github.Issue
+	for _, is := range all {
+		if factory.Takes(is) {
+			issues = append(issues, is)
+		}
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
 	type row struct {

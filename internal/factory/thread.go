@@ -40,6 +40,19 @@ type Command struct {
 	At      string
 }
 
+// Takes says whether an issue is one the factory takes on: it carries the
+// invariant label or one of the factory's own, or it opens with a
+// /invariant solve line. A report that lists the factory's issues uses it;
+// the factory itself checks who asked before it acts.
+func Takes(is github.Issue) bool {
+	for _, l := range is.Labels {
+		if l.Name == LabelTrigger || strings.HasPrefix(l.Name, LabelTrigger+":") {
+			return true
+		}
+	}
+	return hasVerb(ParseCommands(is.Body), Solve)
+}
+
 // ParseCommands finds the commands in a comment's text. A command is a line
 // of its own, possibly in backticks, outside code blocks and quotes.
 func ParseCommands(body string) []Command {
