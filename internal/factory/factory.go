@@ -803,8 +803,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash}
 	stops := t.Stops()
 	// failed posts that the build failed before it made a pull request:
-	// it stopped, or the factory wouldn't start it (#13).
-	failed := func(why, body string) error {
+	// it stopped, or the factory wouldn't start it (#13). builds are the
+	// builds the post accounts for.
+	failed := func(why, body string, builds []string) error {
 		from, to := buildStep(ratified, stops, pullRequest{})
 		to.kind, to.failure = protocol.KindFailed, why
 		if why == FailStopped {
@@ -813,24 +814,19 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if err := f.allowed(ctx, n, "say the build failed: "+why, from, to); err != nil {
 			return err
 		}
-		next.Failure = why
-		return f.say(ctx, n, body, LabelHumanReview)
+		return f.ended(ctx, n, builds, body, LabelHumanReview)
 	}
 	logs := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n))
 	// A build that stopped partway, when the factory itself stopped, never
 	// said so. Say it now, instead of starting another agent run.
 	if unfinished := unfinishedBuilds(logs); len(unfinished) > 0 {
 		body := buildFailedComment(nil, nil, fmt.Errorf("the build stopped partway; its log is in %s", unfinished[len(unfinished)-1]), withFailure(next, FailStopped))
-		if err := failed(FailStopped, body); err != nil {
-			return err
-		}
-		finishBuilds(unfinished)
-		return nil
+		return failed(FailStopped, body, unfinished)
 	}
 	// Each build costs an agent run, so after two stop, a writer decides
 	// whether to try again.
 	if stops >= maxStops {
-		return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)))
+		return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)), nil)
 	}
 	out := filepath.Join(logs, "build-"+f.now().Format("20060102-150405"))
 	if err := os.MkdirAll(out, 0o755); err != nil {
@@ -839,11 +835,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := f.Builder.Build(ctx, root, out, amend)
 	if res == nil || res.Final == nil {
-		if err := failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped))); err != nil {
-			return err
-		}
-		finishBuilds([]string{out})
-		return nil
+		return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)), []string{out})
 	}
 	// The agent's files replace the project's, so a file it removed is gone.
 	if err := removeOwned(root); err != nil {
@@ -889,7 +881,6 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	defer finishBuilds([]string{out})
 	pr, err := f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
 		Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
 		Body: pullRequestBody(t, m, res, m.Proposal),
@@ -903,10 +894,21 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 			return err
 		}
 		next.Failure = FailGate
-		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
+		return f.ended(ctx, n, []string{out}, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
-	return f.say(ctx, n, prComment(pr, res.Final, next), LabelPR)
+	return f.ended(ctx, n, []string{out}, prComment(pr, res.Final, next), LabelPR)
+}
+
+// ended posts how builds ended, and only once it's posted marks them done.
+// A factory that stops before then finds them unfinished, and posts a stop
+// instead of starting another agent run.
+func (f *Factory) ended(ctx context.Context, n int, builds []string, body, label string) error {
+	if _, err := f.GitHub.PostComment(ctx, n, body); err != nil {
+		return err
+	}
+	finishBuilds(builds)
+	return f.status(ctx, n, label)
 }
 
 // removeOwned deletes the files in a project that the agent owns, before

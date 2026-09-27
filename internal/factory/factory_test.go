@@ -315,6 +315,26 @@ func TestAnUnfinishedBuildIsAStop(t *testing.T) {
 	}
 }
 
+// A build whose pull request GitHub refused never becomes another agent
+// run: the next poll says the build stopped (#13).
+func TestARefusedPullRequestIsAStop(t *testing.T) {
+	r := newRig(t)
+	r.gh.failPRs = 1
+	r.form.forks = nil
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
+	r.poll()
+	p := r.expect(1, KindProposal, LabelProposal)
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(p.Marker.Proposal.Hash, "sha256:"))
+	if err := r.f.Poll(context.Background()); err == nil {
+		t.Fatal("the refused pull request should be an error")
+	}
+	r.poll()
+	stopped := r.expect(1, KindFailed, LabelHumanReview)
+	if stopped.Marker.Failure != FailStopped || len(r.build.built) != 1 {
+		t.Errorf("post = %+v, builds = %d", stopped.Marker, len(r.build.built))
+	}
+}
+
 // Two stops, and the factory waits for a writer's retry before it starts
 // another build; the retry counts stops afresh (#13).
 func TestTwoStopsWaitForARetry(t *testing.T) {

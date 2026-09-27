@@ -34,6 +34,7 @@ type fakeGitHub struct {
 	bodies   map[int]string
 	nextID   int64
 	nextPR   int
+	failPRs  int // pull requests to refuse, as GitHub can
 }
 
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
@@ -149,6 +150,10 @@ func (g *fakeGitHub) RemoveLabel(_ context.Context, n int, label string) error {
 }
 
 func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullRequest) (github.PullRequest, error) {
+	if g.failPRs > 0 {
+		g.failPRs--
+		return github.PullRequest{}, errors.New("GitHub is having a bad day")
+	}
 	g.nextPR++
 	out := &github.PullRequest{Number: g.nextPR, State: "open", Draft: pr.Draft, URL: fmt.Sprintf("https://github.com/o/r/pull/%d", g.nextPR),
 		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}}
