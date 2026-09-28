@@ -4,5 +4,8 @@
   "code": "logbuffer",
   "language": "python",
   "conformance": "conformance.py",
-  "exhaustive": true
+  "exhaustive": true,
+  "parameters": [
+    "Capacity"
+  ]
 }
