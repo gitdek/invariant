@@ -1,59 +1,75 @@
 import unittest
 
-from conformance import explore
-from logbuffer.core import CAP, State, ship, ship_fail, write
-from logbuffer.explore import key, successors
+from logbuffer.core import LogBuffer
+from logbuffer.explore import Capacity, INITIAL, STEPS, abstract
+
+
+def reachable():
+    seen = {}
+    stack = list(INITIAL)
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        succ = []
+        for step in STEPS:
+            for args in step.args:
+                nxt = step.take(node, *args)
+                if nxt is not None:
+                    succ.append(nxt)
+        seen[node] = succ
+        stack.extend(succ)
+    return seen
 
 
 class LogBufferTest(unittest.TestCase):
     def test_init(self):
-        s = State()
-        self.assertEqual(key(s), ((), (), (), (0, 0), False))
+        b = LogBuffer(Capacity)
+        self.assertEqual(b.lines, [])
+        self.assertFalse(b.retrying)
+        state = abstract(INITIAL[0])
+        self.assertEqual(state["buf"], {"$seq": []})
+        self.assertFalse(state["retrying"])
 
     def test_ships_in_order_once(self):
-        s = State()
-        write(s, 0)
-        write(s, 1)
-        ship(s)
-        ship(s)
-        self.assertEqual(s.sent[: s.sent_len], s.log[: s.log_len])
-        self.assertEqual(s.buf_len, 0)
+        b = LogBuffer(2)
+        self.assertTrue(b.write(1))
+        self.assertTrue(b.write(3))
+        self.assertTrue(b.ship())
+        self.assertEqual(b.lines, [3])
+        self.assertTrue(b.ship())
+        self.assertEqual(b.lines, [])
+        self.assertFalse(b.ship())
 
     def test_failed_send_is_retried(self):
-        s = State()
-        write(s, 0)
-        ship_fail(s)
-        self.assertTrue(s.retrying)
-        self.assertEqual(s.buf[: s.buf_len], [1])
-        ship(s)
-        self.assertEqual(s.sent[: s.sent_len], [1])
-        self.assertFalse(s.retrying)
+        b = LogBuffer(2)
+        b.write(1)
+        self.assertTrue(b.ship_fail())
+        self.assertTrue(b.retrying)
+        self.assertEqual(b.lines, [1])
+        self.assertFalse(b.ship_fail())
+        self.assertTrue(b.ship())
+        self.assertEqual(b.lines, [])
+        self.assertFalse(b.retrying)
 
     def test_full_buffer_blocks_writers(self):
-        s = State()
-        write(s, 0)
-        write(s, 1)
-        self.assertEqual(s.buf_len, CAP)
-        self.assertFalse(any(t.log_len > s.log_len for t in successors(s)))
+        b = LogBuffer(2)
+        b.write(1)
+        b.write(3)
+        self.assertFalse(b.write(2))
+        self.assertEqual(b.lines, [1, 3])
 
     def test_invariants_hold_everywhere(self):
-        traces, _ = explore()
-        self.assertTrue(traces)
-        seen = set()
-        stack = [State()]
-        while stack:
-            s = stack.pop()
-            if key(s) in seen:
-                continue
-            seen.add(key(s))
-            log = s.log[: s.log_len]
-            self.assertLessEqual(s.buf_len, CAP)
-            self.assertEqual(s.sent[: s.sent_len], log[: s.sent_len])
-            self.assertEqual(s.buf[: s.buf_len], log[s.sent_len:])
-            self.assertEqual(len(set(s.sent[: s.sent_len])), s.sent_len)
-            succ = successors(s)
+        graph = reachable()
+        self.assertTrue(graph)
+        for node, succ in graph.items():
+            log = list(node.log)
+            sent = list(node.sent)
+            self.assertLessEqual(len(node.buf), Capacity)
+            self.assertEqual(sent, log[: len(sent)])
+            self.assertEqual(list(node.buf), log[len(sent):])
+            self.assertEqual(len(set(sent)), len(sent))
             self.assertTrue(succ)
-            stack.extend(succ)
 
 
 if __name__ == "__main__":
