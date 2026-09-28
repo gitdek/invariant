@@ -23,8 +23,8 @@ func citeFrom(tx *sql.Tx, src, project, text string) error {
 		if dst == src {
 			continue
 		}
-		if _, err := tx.Exec(`INSERT INTO edge (src, type, dst, derived)
-			SELECT ?1, 'cites', ?2, 1 WHERE NOT EXISTS (SELECT 1 FROM edge WHERE src = ?1 AND dst = ?2)`, src, dst); err != nil {
+		if _, err := tx.Exec(`INSERT INTO edge (src, type, dst, project, derived)
+			SELECT ?1, 'cites', ?2, ?3, 1 WHERE NOT EXISTS (SELECT 1 FROM edge WHERE src = ?1 AND dst = ?2)`, src, dst, project); err != nil {
 			return err
 		}
 	}
@@ -129,7 +129,7 @@ func scanFile(tx *sql.Tx, repo Repo, path, rel, ext string) error {
 			return err
 		}
 		for _, m := range ids {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO edge (src, type, dst, derived) VALUES (?, ?, ?, 1)`, src, edge, repo.Name+"/"+m); err != nil {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO edge (src, type, dst, project, derived) VALUES (?, ?, ?, ?, 1)`, src, edge, repo.Name+"/"+m, repo.Name); err != nil {
 				return err
 			}
 		}

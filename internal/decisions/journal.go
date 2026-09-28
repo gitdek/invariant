@@ -176,6 +176,111 @@ func ReadJournal(path string) ([]Event, error) {
 	return events, nil
 }
 
+// A Decision is one decision as its journal leaves it: its node, the edges
+// its lines record, and the decision that supersedes it, if one does. IDs
+// here are qualified by their project.
+type Decision struct {
+	Node
+	Edges        []Edge
+	SupersededBy string
+}
+
+// fold reads one decision's journal lines into the decision, and refuses a
+// journal that breaks the rules: it starts by recording the decision and
+// never records it again, an agent never decides a one-way door, and only a
+// person ratifies.
+func fold(project string, events []Event) (Decision, error) {
+	var d Decision
+	for n, e := range events {
+		where := fmt.Sprintf("%s/%s, line %d", project, e.ID, n+1)
+		if (e.Op == OpImport || e.Op == OpDecide) != (n == 0) {
+			return d, fmt.Errorf("%s: a journal's first line, and only its first, records the decision", where)
+		}
+		for _, edge := range e.Edges {
+			if !edgeTypes[edge.Type] || edge.Type == Implements {
+				return d, fmt.Errorf("%s: a decision refines, supersedes, reopens or cites another, not %q", where, edge.Type)
+			}
+			to, err := Qualify(project, edge.To)
+			if err != nil {
+				return d, fmt.Errorf("%s: %v", where, err)
+			}
+			d.Edges = append(d.Edges, Edge{Type: edge.Type, To: to})
+		}
+		switch e.Op {
+		case OpImport, OpDecide:
+			if !statuses[e.Status] {
+				return d, fmt.Errorf("%s: %q isn't a status", where, e.Status)
+			}
+			if e.Op == OpDecide && ((e.Door != "one-way" && e.Door != "two-way") || (e.Door == "one-way" && e.Status == "decided")) {
+				return d, fmt.Errorf("%s: a decision's door is one-way or two-way, and a one-way door is proposed until it's ratified", where)
+			}
+			d.Node = Node{ID: project + "/" + e.ID, Kind: "decision", Project: project, Date: e.Date, Door: e.Door,
+				Status: e.Status, Who: e.Who, Text: e.Text, Record: e.Record}
+		case OpRatify:
+			if !strings.HasPrefix(e.By, "@") {
+				return d, fmt.Errorf("%s: only a person ratifies, not %q", where, e.By)
+			}
+			if d.Status == "ratified" || d.Status == "superseded" {
+				return d, fmt.Errorf("%s: it's %s already", where, d.Status)
+			}
+			d.Status, d.Who = "ratified", e.By
+		case OpSupersede:
+			with, err := Qualify(project, e.With)
+			if err != nil {
+				return d, fmt.Errorf("%s: %v", where, err)
+			}
+			if d.Status == "superseded" {
+				return d, fmt.Errorf("%s: it's superseded already", where)
+			}
+			d.Status, d.SupersededBy = "superseded", with
+		case OpLink:
+			if len(e.Edges) != 1 {
+				return d, fmt.Errorf("%s: a link records one edge", where)
+			}
+		default:
+			return d, fmt.Errorf("%s: unknown op %q", where, e.Op)
+		}
+	}
+	return d, nil
+}
+
+// Load reads every decision in a repository's journal, in the order of
+// their IDs.
+func Load(repo Repo) ([]Decision, error) {
+	journals, ids, err := Journals(repo)
+	if err != nil {
+		return nil, err
+	}
+	var out []Decision
+	for _, id := range ids {
+		d, err := fold(repo.Name, journals[id])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// highest is the number of the highest decision in a repository's journal.
+func highest(repo Repo) (int, error) {
+	entries, err := os.ReadDir(repo.JournalDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return -1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	top := -1
+	for _, e := range entries {
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		if m := idPattern.FindStringSubmatch(id); m != nil && m[1] == "" && number(id) > top {
+			top = number(id)
+		}
+	}
+	return top, nil
+}
+
 // Journals reads every decision's journal in a repository, in the order of
 // their IDs.
 func Journals(repo Repo) (map[string][]Event, []string, error) {

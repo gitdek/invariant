@@ -20,7 +20,8 @@ jobs:
   # Whether the change touches anything the gate checks. Docs and decisions
   # don't, so the gate is skipped for them (D-0079). GitHub counts a job its
   # condition skips as passing, and waits forever for a required check whose
-  # workflow a path filter skipped, so the skip lives here (D-0080).
+  # workflow a path filter skipped, so the skip lives here (D-0080). Docs cite
+  # decisions, though, so this job checks the decision graph on every change.
   changes:
     name: What changed
     runs-on: ubuntu-latest
@@ -55,6 +56,22 @@ jobs:
           echo "gated=$gated" >> "$GITHUB_OUTPUT"
           echo "The gate runs: $gated"
 
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Every decision the docs, the SPEC and the code cite exists, the SPEC
+      # rests on none that's superseded, decisions/log.md is the journal's
+      # view, and the journal only grew. If this fails, the job fails, so the
+      # gate runs and fails on the same check (D-0096).
+      - name: Check the decision graph
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          base=""
+          if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
+          go run ./cmd/invariant decisions check $base
+
   gate:
     # The check the factory merges its pull requests on (D-0004, D-0033).
     name: invariant/gate
@@ -80,6 +97,14 @@ jobs:
 
       - name: Build the gate
         run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
+
+      - name: Check the decision graph
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          base=""
+          if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
+          "$RUNNER_TEMP/invariant" decisions check $base
 
       # The branch names the issue: invariant/issue-<n>-<slug>. Only that
       # issue's ratification may amend an existing project (D-0045).
