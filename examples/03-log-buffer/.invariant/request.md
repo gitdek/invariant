@@ -1,14 +1,22 @@
-# Add a bounded buffer for log shipping
+# Rebuild the Go log buffer's explorer to try every step
 
-Issue #1 in gitdek/invariant, opened by @gitdek.
+Issue #67 in gitdek/invariant, opened by @gitdek.
 
-Producers write log lines into a buffer with a fixed capacity. A shipper takes lines out, oldest first, and sends them on.
+The Go log buffer's explorer returns only the states it reaches, through `Successors`, and calls each operation only where it has already checked that the model allows it. So no check can say the code refuses what the model rules out (D-0082). Rebuild it with `Try` and `Abstract` (D-0090), so the gate explores the code itself and checks every attempt:
 
-- Several producers can write to the buffer.
-- The shipper sends lines in the order they went in, and sends each line once.
-- The buffer never holds more lines than its capacity.
+- Every operation decides for itself whether it runs. Where the model's action can't run, it refuses and changes nothing, and its Gobra contract says both outcomes.
+- `Try` tries every step the model's Next names, for every producer, in every state, and lets the code refuse. Only `MaxLines`, the environment's bound, may leave a producer's write untried.
+- `Capacity` is the buffer's own limit, so `Try` still tries a write into a full buffer and sees the code refuse it. Name `Capacity` as a parameter in the manifest.
 
-## Decided
+What must be true doesn't change. Keep every ratified statement exactly as it is.
 
-- **F1. When a producer writes a line and the buffer is already at capacity, what should happen?** A. The producer waits until the shipper frees a slot, so no line is ever lost. (decided by @gitdek: https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263)
-- **F2. When the shipper fails to send a line, what should happen to that line?** A. The line stays at the front of the buffer and the shipper retries it before sending any later line. (decided by @gitdek: https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263)
+Project: examples/03-log-buffer
+
+
+_Posted for @gitdek by a coding agent, through the dashboard._
+
+## Discussion
+
+**@gitdek:**
+
+_Posted for @gitdek by a coding agent, through the dashboard._
