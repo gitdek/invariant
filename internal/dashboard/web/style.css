@@ -541,6 +541,20 @@ footer p { margin: 0; max-width: 60em; }
 .scope button .ct { font: 600 11px var(--mono); opacity: 0.7; }
 .scope button i.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
 .scope button i.live.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.6); animation: livepulse 1.8s infinite; }
+
+/* ---------- Focus: one repository at a time ---------- */
+/* With everything shown, another repository's items are quieter than
+   Invariant's own, and come up when pointed at. Choosing one repository fades
+   the others out, and showing everything again fades them back in. */
+.aside { opacity: 0.5; }
+.aside:hover, .aside:focus-within { opacity: 1; }
+.orbit .aside .issue-dot { filter: none; }
+.orbit .aside .issue-label { font-size: 10px; fill: var(--ink3); }
+.leaving { animation: leave 0.36s ease forwards !important; pointer-events: none; }
+@keyframes leave { to { opacity: 0; filter: blur(3px); } }
+.arriving { animation: arrive 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both !important; }
+@keyframes arrive { from { opacity: 0; filter: blur(3px); } }
+@media (prefers-reduced-motion: reduce) { .leaving, .arriving { animation: none !important; } }
 @keyframes livepulse { 70% { box-shadow: 0 0 0 8px rgba(var(--accent-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); } }
 
 /* ---------- Needs you ---------- */
@@ -607,7 +621,6 @@ footer p { margin: 0; max-width: 60em; }
   position: relative; background: radial-gradient(120% 90% at 50% 40%, rgba(var(--ink-rgb), 0.04), transparent 60%), var(--card);
   border: 1px solid var(--line); border-radius: 22px; padding: 16px 16px 14px; overflow: hidden; transition: opacity 0.4s, filter 0.4s, border-color 0.3s;
 }
-.system.dim { opacity: 0.35; filter: saturate(0.4); }
 .system:hover { border-color: rgba(var(--ink-rgb), 0.25); }
 .system header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .system h3 { margin: 0; font-size: 18px; }

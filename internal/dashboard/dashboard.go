@@ -131,21 +131,22 @@ type graphJob struct {
 
 // Snapshot is everything the page draws, as of GeneratedAt.
 type Snapshot struct {
-	Repo        string      `json:"repo"`
-	GeneratedAt time.Time   `json:"generatedAt"`
-	Factory     Watcher     `json:"factory"`
-	Now         Now         `json:"now"`
-	Issues      []Issue     `json:"issues"`
-	Repos       []RepoState `json:"repos"`
-	Main        *MainState  `json:"main,omitempty"`
-	Projects    []Project   `json:"projects"`
-	Receipts    *RunRef     `json:"receipts,omitempty"` // the CI run the receipts come from
-	Decisions   Decisions   `json:"decisions"`
-	Slices      []Slice     `json:"slices"`
-	Totals      Totals      `json:"totals"`
-	Who         Who         `json:"who"`
-	Activity    []Event     `json:"activity"`
-	Stale       []string    `json:"stale,omitempty"` // sources that couldn't be read this time
+	Repo        string         `json:"repo"`
+	GeneratedAt time.Time      `json:"generatedAt"`
+	Factory     Watcher        `json:"factory"`
+	Now         Now            `json:"now"`
+	NowBy       map[string]Now `json:"nowBy,omitempty"` // each repository's own headline, for a page that shows one
+	Issues      []Issue        `json:"issues"`
+	Repos       []RepoState    `json:"repos"`
+	Main        *MainState     `json:"main,omitempty"`
+	Projects    []Project      `json:"projects"`
+	Receipts    *RunRef        `json:"receipts,omitempty"` // the CI run the receipts come from
+	Decisions   Decisions      `json:"decisions"`
+	Slices      []Slice        `json:"slices"`
+	Totals      Totals         `json:"totals"`
+	Who         Who            `json:"who"`
+	Activity    []Event        `json:"activity"`
+	Stale       []string       `json:"stale,omitempty"` // sources that couldn't be read this time
 }
 
 // RepoState is one repository's line on the page.
@@ -158,6 +159,7 @@ type RepoState struct {
 	Receipts *RunRef `json:"receipts,omitempty"` // the run its receipts come from
 	Projects int     `json:"projects"`
 	Lease    *Lease  `json:"lease,omitempty"` // which watcher may act (D-0069)
+	Totals   Totals  `json:"totals"`          // the big numbers for this repository alone
 }
 
 // Lease is a repository's lease as its ref says: the one watcher that may
@@ -688,6 +690,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	var watchers []namedWatcher
 	for i, r := range s.Repos {
 		rs := RepoState{Name: r.Name, Short: r.Short(), Primary: i == 0, Lease: r.src.lease}
+		repoPins, repoModels := map[string]bool{}, map[string]bool{}
 		if st, err := ReadStatus(r.Status); err == nil && st.PID != 0 {
 			w := Watcher{Running: st.Running(), Issue: st.Issue, Doing: st.Doing, Since: st.Since}
 			started, beat := st.Started, st.Heartbeat
@@ -707,11 +710,14 @@ func (s *Server) assemble(now time.Time) Snapshot {
 				l.Events[k].Repo = r.Name
 			}
 			if l.Stage == StageMerged && l.PR != 0 {
-				snap.Totals.Merged++
-				if m, ok := r.src.merges[l.PR]; ok {
-					snap.Totals.MergesChecked++
-					if !m.green {
-						snap.Totals.BadMerges++
+				m, checked := r.src.merges[l.PR]
+				for _, t := range []*Totals{&snap.Totals, &rs.Totals} {
+					t.Merged++
+					if checked {
+						t.MergesChecked++
+						if !m.green {
+							t.BadMerges++
+						}
 					}
 				}
 			}
@@ -738,36 +744,45 @@ func (s *Server) assemble(now time.Time) Snapshot {
 				p.Graph = ready[ps.key] || s.cached(ps.key)
 				snap.Projects = append(snap.Projects, p)
 				rs.Projects++
-				t := &snap.Totals
-				t.Projects++
-				t.Proved += p.Verified
-				if rep.Ratified != nil {
-					t.LocksChecked++
-					if rep.Proposal != rep.Ratified.Proposal {
-						t.BadLocks++
-					}
-				}
 				for _, pin := range rep.Pins {
 					pins[pin.Want] = true
+					repoPins[pin.Want] = true
 					if p.Factory {
 						built[pin.Want] = true
 					}
 				}
-				if models[ps.key] {
-					continue
-				}
-				models[ps.key] = true
-				t.Models++
-				t.States += p.States
-				t.Witnesses += len(p.Witnesses)
-				for _, b := range p.Bugs {
-					t.Bugs++
-					if b.Caught {
-						t.BugsCaught++
+				// The fleet counts a model its repositories share once, and
+				// each repository counts it once too.
+				for _, c := range []struct {
+					t    *Totals
+					seen map[string]bool
+				}{{&snap.Totals, models}, {&rs.Totals, repoModels}} {
+					t := c.t
+					t.Projects++
+					t.Proved += p.Verified
+					if rep.Ratified != nil {
+						t.LocksChecked++
+						if rep.Proposal != rep.Ratified.Proposal {
+							t.BadLocks++
+						}
+					}
+					if c.seen[ps.key] {
+						continue
+					}
+					c.seen[ps.key] = true
+					t.Models++
+					t.States += p.States
+					t.Witnesses += len(p.Witnesses)
+					for _, b := range p.Bugs {
+						t.Bugs++
+						if b.Caught {
+							t.BugsCaught++
+						}
 					}
 				}
 			}
 		}
+		rs.Totals.Statements = len(repoPins)
 		for k, run := range r.src.runs {
 			if k >= 12 || run.Name != "gate" {
 				continue
@@ -796,6 +811,9 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	sort.SliceStable(snap.Issues, func(i, j int) bool { return snap.Issues[i].Opened.After(snap.Issues[j].Opened) })
 	snap.Factory = combined(snap.Repos)
 	snap.Now = nowLine(watchers, snap.Issues, primary.Name)
+	if len(snap.Repos) > 1 {
+		snap.NowBy = nowBy(watchers, snap.Issues, snap.Repos, primary.Name)
+	}
 
 	// An issue without a language label was written in the project's
 	// language: the repository's default when it was made.
@@ -838,6 +856,9 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		}
 	}
 	snap.Totals.Decisions = len(decisions)
+	if len(snap.Repos) > 0 {
+		snap.Repos[0].Totals.Decisions = len(decisions) // the log is the primary repository's
+	}
 	snap.Slices = ParseSlices(primary.src.readme, primary.src.prd)
 	for _, sl := range snap.Slices {
 		if sl.Status == "done" {
@@ -993,6 +1014,28 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 }
 
 // nowLine says what the factory is doing, or what it's waiting for.
+// nowBy is each repository's own headline: what its watcher and its issues
+// alone would put there. A page that shows one repository shows its line.
+func nowBy(ws []namedWatcher, issues []Issue, repos []RepoState, primary string) map[string]Now {
+	out := map[string]Now{}
+	for _, rs := range repos {
+		var its []namedWatcher
+		for _, nw := range ws {
+			if nw.repo == rs.Name {
+				its = append(its, nw)
+			}
+		}
+		var theirs []Issue
+		for _, is := range issues {
+			if is.Repo == rs.Name {
+				theirs = append(theirs, is)
+			}
+		}
+		out[rs.Name] = nowLine(its, theirs, primary)
+	}
+	return out
+}
+
 func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 	find := func(repo string, n int) *Issue {
 		for i := range issues {

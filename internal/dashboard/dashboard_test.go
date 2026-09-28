@@ -248,6 +248,11 @@ func TestAnotherRepositorysIssuesAreNamed(t *testing.T) {
 	if got := combined([]RepoState{{Factory: Watcher{Running: true}}, {Factory: Watcher{Running: true, Issue: 1, Doing: "building"}}}); got.Doing != "building" {
 		t.Errorf("the top bar should show the watcher that's working: %+v", got)
 	}
+	// A page showing one repository has that repository's headline alone.
+	by := nowBy(w, []Issue{l}, []RepoState{{Name: "gitdek/invariant"}, {Name: "gitdek/copythis-ad"}}, "gitdek/invariant")
+	if by["gitdek/invariant"].Stage != "idle" || by["gitdek/copythis-ad"].Headline != "Drafting what must be true for copythis-ad#1" {
+		t.Errorf("nowBy %+v", by)
+	}
 }
 
 // An open issue says what it needs from a person: the questions still
