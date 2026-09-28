@@ -280,6 +280,9 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 	if err := writeNaginiRuntime(runtime); err != nil {
 		return Exploration{}, err
 	}
+	if err := writeHarness(src, runtime, p); err != nil {
+		return Exploration{}, err
+	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
 		return Exploration{}, err
 	}

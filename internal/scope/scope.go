@@ -14,6 +14,7 @@ import (
 	"go/token"
 	"os/exec"
 	"path"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,6 +89,11 @@ func Check(ctx context.Context, dir, base, head string, issue int) (Result, erro
 		// An amendment (D-0045): the new lock must carry this issue's
 		// ratification, amending exactly the lock on the base branch.
 		r.Problems = append(r.Problems, amendment(g, base, head, join(r.Project, lockFile), issue)...)
+	}
+	// The manifest decides what the gate checks, so the factory may change
+	// only the sizes its code takes as parameters (D-0085).
+	if !r.New && changed(r.Files, join(r.Project, manifestFile)) && !onlyParameters(g, base, head, join(r.Project, manifestFile)) {
+		r.Problems = append(r.Problems, "it changes the project's manifest beyond its code's parameters")
 	}
 
 	before, _ := g.show(base, join(r.Project, "go.mod"))
@@ -245,6 +251,19 @@ func (g git) show(ref, file string) (string, error) { return g.run("show", ref+"
 func (g git) exists(ref, file string) bool {
 	_, err := g.run("cat-file", "-e", ref+":"+file)
 	return err == nil
+}
+
+// onlyParameters says whether a manifest changed, from base to head, in
+// nothing but the code's parameters.
+func onlyParameters(g git, base, head, file string) bool {
+	var before, after project.Manifest
+	b, errB := g.show(base, file)
+	a, errA := g.show(head, file)
+	if errB != nil || errA != nil || json.Unmarshal([]byte(b), &before) != nil || json.Unmarshal([]byte(a), &after) != nil {
+		return false
+	}
+	after.Parameters = before.Parameters
+	return reflect.DeepEqual(before, after)
 }
 
 // projectOf finds the project a file belongs to at ref: the nearest
