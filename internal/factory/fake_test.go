@@ -30,12 +30,14 @@ type fakeGitHub struct {
 	prs      map[int]*github.PullRequest
 	checks   map[string][]github.CheckRun
 	refused  map[int64]bool // check runs whose jobs GitHub never started
-	merged   []int
-	deleted  []string
-	bodies   map[int]string
-	nextID   int64
-	nextPR   int
-	failPRs  int // pull requests to refuse, as GitHub can
+	// noActions is an App without the Actions permission: it can't read jobs.
+	noActions bool
+	merged    []int
+	deleted   []string
+	bodies    map[int]string
+	nextID    int64
+	nextPR    int
+	failPRs   int // pull requests to refuse, as GitHub can
 }
 
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
@@ -218,6 +220,9 @@ func (g *fakeGitHub) refuse(pr int) {
 }
 
 func (g *fakeGitHub) Job(_ context.Context, id int64) (github.Job, error) {
+	if g.noActions {
+		return github.Job{}, fmt.Errorf("GET actions/jobs/%d: %w", id, github.ErrNoPermission)
+	}
 	job := github.Job{ID: id, Name: "invariant/gate", Status: "completed"}
 	if !g.refused[id] {
 		job.RunnerID = 7
@@ -253,6 +258,8 @@ type scriptedFormalizer struct {
 	// amend drafts an amendment of the current project, when the issue
 	// names one.
 	amend func(c *formalize.Current) *formalize.Proposal
+	// revised is what a draft says people's later comments changed.
+	revised []formalize.Revision
 }
 
 const bufferModule = `---- MODULE BoundedBuffer ----
@@ -318,7 +325,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
 	}
 	p := bufferProposal(s.t)
-	p.Language = req.Language
+	p.Language, p.Revised = req.Language, s.revised
 	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
 }
 

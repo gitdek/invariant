@@ -3,10 +3,13 @@
 package twophase
 
 // This package implements two-phase commit as modeled in
-// .invariant/specs/TwoPhase.tla.
+// .invariant/specs/TwoPhase.tla. The coordinator and the resource managers
+// hold their own state; the messages between them are the network's, which
+// the explorer models.
 
-// N is the number of resource managers, RM = {r1, r2, r3}.
-const N = 3
+// MaxRMs keeps index arithmetic far from overflow. It's the machine's limit,
+// not the model's.
+const MaxRMs = 1 << 30
 
 // Resource manager states, the values of rmState[r].
 const (
@@ -16,120 +19,141 @@ const (
 	Aborted   = 3
 )
 
-// State mirrors the spec's variables one to one.
-type State struct {
-	// RM[r] is rmState[r].
-	RM [N]uint8
-	// TMDone is tmState = "done"; false means "init".
-	TMDone bool
-	// TMPrepared[r] is r \in tmPrepared.
-	TMPrepared [N]bool
-	// MsgPrepared[r] is [type |-> "Prepared", rm |-> r] \in msgs.
-	MsgPrepared [N]bool
-	// MsgCommit is [type |-> "Commit"] \in msgs.
-	MsgCommit bool
-	// MsgAbort is [type |-> "Abort"] \in msgs.
-	MsgAbort bool
+// Coordinator is the transaction manager.
+type Coordinator struct {
+	// Done is tmState = "done"; false means "init".
+	Done bool
+	// Prepared[r] is r \in tmPrepared, one entry per resource manager.
+	Prepared []bool
 }
 
-// Init mirrors the TLA+ Init.
-// @ ensures forall j int :: 0 <= j && j < N ==> s.RM[j] == Working
-// @ ensures !s.TMDone
-// @ ensures forall j int :: 0 <= j && j < N ==> !s.TMPrepared[j]
-// @ ensures forall j int :: 0 <= j && j < N ==> !s.MsgPrepared[j]
-// @ ensures !s.MsgCommit && !s.MsgAbort
-func Init() (s State) {
-	return State{}
+// Participants are the resource managers.
+type Participants struct {
+	// States[r] is rmState[r].
+	States []int
 }
 
-// TMRcvPrepared mirrors the TLA+ action TMRcvPrepared(r).
-// @ requires 0 <= r && r < N
-// @ requires !s.TMDone && s.MsgPrepared[r]
-// @ ensures t.TMPrepared[r]
-// @ ensures forall j int :: 0 <= j && j < N && j != r ==> t.TMPrepared[j] == s.TMPrepared[j]
-// @ ensures t.RM == s.RM && t.TMDone == s.TMDone
-// @ ensures t.MsgPrepared == s.MsgPrepared && t.MsgCommit == s.MsgCommit && t.MsgAbort == s.MsgAbort
-func TMRcvPrepared(s State, r int) (t State) {
-	t = s
-	t.TMPrepared[r] = true
-	return t
+// RcvPrepared records resource manager r's Prepared message, and refuses once
+// the coordinator has decided.
+// @ requires acc(&c.Done) && acc(&c.Prepared, 1/2)
+// @ requires forall j int :: { &c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> acc(&c.Prepared[j])
+// @ requires 0 <= r && r < len(c.Prepared)
+// @ ensures acc(&c.Done) && acc(&c.Prepared, 1/2) && len(c.Prepared) == old(len(c.Prepared))
+// @ ensures forall j int :: { &c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> acc(&c.Prepared[j])
+// @ ensures ok == !old(c.Done)
+// @ ensures c.Done == old(c.Done)
+// @ ensures ok ==> c.Prepared[r]
+// @ ensures !ok ==> c.Prepared[r] == old(c.Prepared[r])
+// @ ensures forall j int :: { c.Prepared[j] } 0 <= j && j < len(c.Prepared) && j != r ==> c.Prepared[j] == old(c.Prepared[j])
+func (c *Coordinator) RcvPrepared(r int) (ok bool) {
+	if c.Done {
+		return false
+	}
+	c.Prepared[r] = true
+	return true
 }
 
-// TMCommit mirrors the TLA+ action TMCommit.
-// @ requires !s.TMDone
-// @ requires forall j int :: 0 <= j && j < N ==> s.TMPrepared[j]
-// @ ensures t.TMDone && t.MsgCommit
-// @ ensures t.RM == s.RM && t.TMPrepared == s.TMPrepared
-// @ ensures t.MsgPrepared == s.MsgPrepared && t.MsgAbort == s.MsgAbort
-func TMCommit(s State) (t State) {
-	t = s
-	t.TMDone = true
-	t.MsgCommit = true
-	return t
+// Commit decides to commit once every resource manager has prepared, and
+// refuses otherwise or once the coordinator has decided.
+// @ requires acc(&c.Done) && acc(&c.Prepared, 1/2)
+// @ requires forall j int :: { &c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> acc(&c.Prepared[j], 1/2)
+// @ requires len(c.Prepared) <= MaxRMs
+// @ ensures acc(&c.Done) && acc(&c.Prepared, 1/2) && len(c.Prepared) == old(len(c.Prepared))
+// @ ensures forall j int :: { &c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> acc(&c.Prepared[j], 1/2)
+// @ ensures forall j int :: { c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> c.Prepared[j] == old(c.Prepared[j])
+// @ ensures ok == (!old(c.Done) && forall j int :: { c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> c.Prepared[j])
+// @ ensures ok ==> c.Done
+// @ ensures !ok ==> c.Done == old(c.Done)
+func (c *Coordinator) Commit() (ok bool) {
+	if c.Done {
+		return false
+	}
+	// @ invariant acc(&c.Done) && !c.Done && c.Done == old(c.Done)
+	// @ invariant acc(&c.Prepared, 1/2) && len(c.Prepared) == old(len(c.Prepared))
+	// @ invariant forall j int :: { &c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> acc(&c.Prepared[j], 1/2)
+	// @ invariant forall j int :: { c.Prepared[j] } 0 <= j && j < len(c.Prepared) ==> c.Prepared[j] == old(c.Prepared[j])
+	// @ invariant 0 <= i && i <= len(c.Prepared) && len(c.Prepared) <= MaxRMs
+	// @ invariant forall j int :: { c.Prepared[j] } 0 <= j && j < i ==> c.Prepared[j]
+	for i := 0; i < len(c.Prepared); i++ {
+		if !c.Prepared[i] {
+			return false
+		}
+	}
+	c.Done = true
+	return true
 }
 
-// TMAbort mirrors the TLA+ action TMAbort.
-// @ requires !s.TMDone
-// @ ensures t.TMDone && t.MsgAbort
-// @ ensures t.RM == s.RM && t.TMPrepared == s.TMPrepared
-// @ ensures t.MsgPrepared == s.MsgPrepared && t.MsgCommit == s.MsgCommit
-func TMAbort(s State) (t State) {
-	t = s
-	t.TMDone = true
-	t.MsgAbort = true
-	return t
+// Abort decides to abort, and refuses once the coordinator has decided.
+// @ requires acc(&c.Done)
+// @ ensures acc(&c.Done)
+// @ ensures ok == !old(c.Done)
+// @ ensures c.Done
+func (c *Coordinator) Abort() (ok bool) {
+	if c.Done {
+		return false
+	}
+	c.Done = true
+	return true
 }
 
-// RMPrepare mirrors the TLA+ action RMPrepare(r).
-// @ requires 0 <= r && r < N
-// @ requires s.RM[r] == Working
-// @ ensures t.RM[r] == Prepared && t.MsgPrepared[r]
-// @ ensures forall j int :: 0 <= j && j < N && j != r ==> t.RM[j] == s.RM[j]
-// @ ensures forall j int :: 0 <= j && j < N && j != r ==> t.MsgPrepared[j] == s.MsgPrepared[j]
-// @ ensures t.TMDone == s.TMDone && t.TMPrepared == s.TMPrepared
-// @ ensures t.MsgCommit == s.MsgCommit && t.MsgAbort == s.MsgAbort
-func RMPrepare(s State, r int) (t State) {
-	t = s
-	t.RM[r] = Prepared
-	t.MsgPrepared[r] = true
-	return t
+// Prepare moves resource manager r from working to prepared, and refuses
+// once r has left working.
+// @ requires acc(&p.States, 1/2)
+// @ requires forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ requires 0 <= r && r < len(p.States)
+// @ ensures acc(&p.States, 1/2) && len(p.States) == old(len(p.States))
+// @ ensures forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ ensures ok == (old(p.States[r]) == Working)
+// @ ensures ok ==> p.States[r] == Prepared
+// @ ensures !ok ==> p.States[r] == old(p.States[r])
+// @ ensures forall j int :: { p.States[j] } 0 <= j && j < len(p.States) && j != r ==> p.States[j] == old(p.States[j])
+func (p *Participants) Prepare(r int) (ok bool) {
+	if p.States[r] != Working {
+		return false
+	}
+	p.States[r] = Prepared
+	return true
 }
 
-// RMChooseToAbort mirrors the TLA+ action RMChooseToAbort(r).
-// @ requires 0 <= r && r < N
-// @ requires s.RM[r] == Working
-// @ ensures t.RM[r] == Aborted
-// @ ensures forall j int :: 0 <= j && j < N && j != r ==> t.RM[j] == s.RM[j]
-// @ ensures t.TMDone == s.TMDone && t.TMPrepared == s.TMPrepared
-// @ ensures t.MsgPrepared == s.MsgPrepared && t.MsgCommit == s.MsgCommit && t.MsgAbort == s.MsgAbort
-func RMChooseToAbort(s State, r int) (t State) {
-	t = s
-	t.RM[r] = Aborted
-	return t
+// ChooseToAbort moves resource manager r from working to aborted, and refuses
+// once r has left working.
+// @ requires acc(&p.States, 1/2)
+// @ requires forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ requires 0 <= r && r < len(p.States)
+// @ ensures acc(&p.States, 1/2) && len(p.States) == old(len(p.States))
+// @ ensures forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ ensures ok == (old(p.States[r]) == Working)
+// @ ensures ok ==> p.States[r] == Aborted
+// @ ensures !ok ==> p.States[r] == old(p.States[r])
+// @ ensures forall j int :: { p.States[j] } 0 <= j && j < len(p.States) && j != r ==> p.States[j] == old(p.States[j])
+func (p *Participants) ChooseToAbort(r int) (ok bool) {
+	if p.States[r] != Working {
+		return false
+	}
+	p.States[r] = Aborted
+	return true
 }
 
-// RMRcvCommitMsg mirrors the TLA+ action RMRcvCommitMsg(r).
-// @ requires 0 <= r && r < N
-// @ requires s.MsgCommit
-// @ ensures t.RM[r] == Committed
-// @ ensures forall j int :: 0 <= j && j < N && j != r ==> t.RM[j] == s.RM[j]
-// @ ensures t.TMDone == s.TMDone && t.TMPrepared == s.TMPrepared
-// @ ensures t.MsgPrepared == s.MsgPrepared && t.MsgCommit == s.MsgCommit && t.MsgAbort == s.MsgAbort
-func RMRcvCommitMsg(s State, r int) (t State) {
-	t = s
-	t.RM[r] = Committed
-	return t
+// RcvCommit makes resource manager r follow the coordinator's Commit decision.
+// @ requires acc(&p.States, 1/2)
+// @ requires forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ requires 0 <= r && r < len(p.States)
+// @ ensures acc(&p.States, 1/2) && len(p.States) == old(len(p.States))
+// @ ensures forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ ensures p.States[r] == Committed
+// @ ensures forall j int :: { p.States[j] } 0 <= j && j < len(p.States) && j != r ==> p.States[j] == old(p.States[j])
+func (p *Participants) RcvCommit(r int) {
+	p.States[r] = Committed
 }
 
-// RMRcvAbortMsg mirrors the TLA+ action RMRcvAbortMsg(r).
-// @ requires 0 <= r && r < N
-// @ requires s.MsgAbort
-// @ ensures t.RM[r] == Aborted
-// @ ensures forall j int :: 0 <= j && j < N && j != r ==> t.RM[j] == s.RM[j]
-// @ ensures t.TMDone == s.TMDone && t.TMPrepared == s.TMPrepared
-// @ ensures t.MsgPrepared == s.MsgPrepared && t.MsgCommit == s.MsgCommit && t.MsgAbort == s.MsgAbort
-func RMRcvAbortMsg(s State, r int) (t State) {
-	t = s
-	t.RM[r] = Aborted
-	return t
+// RcvAbort makes resource manager r follow the coordinator's Abort decision.
+// @ requires acc(&p.States, 1/2)
+// @ requires forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ requires 0 <= r && r < len(p.States)
+// @ ensures acc(&p.States, 1/2) && len(p.States) == old(len(p.States))
+// @ ensures forall j int :: { &p.States[j] } 0 <= j && j < len(p.States) ==> acc(&p.States[j])
+// @ ensures p.States[r] == Aborted
+// @ ensures forall j int :: { p.States[j] } 0 <= j && j < len(p.States) && j != r ==> p.States[j] == old(p.States[j])
+func (p *Participants) RcvAbort(r int) {
+	p.States[r] = Aborted
 }

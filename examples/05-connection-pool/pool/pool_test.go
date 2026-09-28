@@ -8,12 +8,12 @@ func TestExploreReachesModelStates(t *testing.T) {
 	for len(frontier) > 0 {
 		var next []State
 		for _, s := range frontier {
-			for _, t2 := range Successors(s) {
+			Try(s, func(step string, args []any, t2 State) {
 				if !seen[t2] {
 					seen[t2] = true
 					next = append(next, t2)
 				}
-			}
+			})
 		}
 		frontier = next
 	}
@@ -47,8 +47,14 @@ func TestFullPoolRefuses(t *testing.T) {
 	if p.Acquire(1, 0) {
 		t.Fatal("acquire from full pool succeeded")
 	}
+	if !p.Refuse(1) {
+		t.Fatal("full pool did not refuse")
+	}
 	if !p.Release(0) || p.Release(0) {
 		t.Fatal("release should free exactly once")
+	}
+	if p.Refuse(1) {
+		t.Fatal("refused with a free connection")
 	}
 	if !p.Acquire(1, 0) {
 		t.Fatal("acquire after release refused")

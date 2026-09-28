@@ -2,6 +2,13 @@ package twophase
 
 import "testing"
 
+// successors is every state Try reaches from s, refusals included.
+func successors(s State) []State {
+	var next []State
+	Try(s, func(_ string, _ []any, u State) { next = append(next, u) })
+	return next
+}
+
 // explore visits every state reachable from Init, breadth first, and
 // returns them with the number of levels searched.
 func explore(step func(State) []State) (seen map[State]bool, depth int) {
@@ -21,28 +28,66 @@ func explore(step func(State) []State) (seen map[State]bool, depth int) {
 	return seen, depth
 }
 
-// The Go state machine must reach exactly the states TLC reports for the
-// spec with RM = {r1, r2, r3}. Matching counts are strong evidence the step
-// functions implement the model's actions, no more and no fewer.
+// consistent mirrors TCConsistent.
+func consistent(s State) bool {
+	sawAbort, sawCommit := false, false
+	for r := 0; r < RM; r++ {
+		sawAbort = sawAbort || s.RMs[r] == Aborted
+		sawCommit = sawCommit || s.RMs[r] == Committed
+	}
+	return !(sawAbort && sawCommit)
+}
+
+// The code must reach exactly the states TLC reports for the spec with
+// RM = {r1, r2, r3}.
 func TestStateSpaceMatchesModel(t *testing.T) {
-	seen, depth := explore(Successors)
+	if RM != 3 {
+		t.Skip("TLC's counts are for RM = {r1, r2, r3}")
+	}
+	seen, depth := explore(successors)
 	if len(seen) != 288 || depth != 11 {
 		t.Fatalf("reached %d states in %d levels; TLC reports 288 states, depth 11", len(seen), depth)
 	}
 }
 
 func TestEveryReachableStateIsConsistent(t *testing.T) {
-	seen, _ := explore(Successors)
+	seen, _ := explore(successors)
 	var allCommitted, allAborted bool
 	for s := range seen {
-		if !Consistent(s) {
+		if !consistent(s) {
 			t.Fatalf("reached an inconsistent state: %+v", s)
 		}
-		allCommitted = allCommitted || s.RM == [N]RMState{Committed, Committed, Committed}
-		allAborted = allAborted || s.RM == [N]RMState{Aborted, Aborted, Aborted}
+		all := func(want RMState) bool {
+			for r := 0; r < RM; r++ {
+				if s.RMs[r] != want {
+					return false
+				}
+			}
+			return true
+		}
+		allCommitted = allCommitted || all(Committed)
+		allAborted = allAborted || all(Aborted)
 	}
 	if !allCommitted || !allAborted {
 		t.Errorf("all committed reachable: %v, all aborted reachable: %v; want both", allCommitted, allAborted)
+	}
+}
+
+// Every step is tried for every resource manager in every state, and a
+// decided transaction manager refuses to decide again.
+func TestTryTriesEveryStepAndRefuses(t *testing.T) {
+	seen, _ := explore(successors)
+	for s := range seen {
+		n := 0
+		Try(s, func(step string, _ []any, u State) {
+			n++
+			if s.TM == TMDone && (step == "TMCommit" || step == "TMAbort") && u != s {
+				t.Fatalf("%s ran after the decision in %+v", step, s)
+			}
+		})
+		if n != 2+5*RM {
+			t.Fatalf("tried %d steps in %+v; want %d", n, s, 2+5*RM)
+		}
 	}
 }
 
@@ -51,9 +96,9 @@ func TestEveryReachableStateIsConsistent(t *testing.T) {
 // inconsistent state, just as TLC does with the mutated spec.
 func TestEarlyCommitIsCaught(t *testing.T) {
 	early := func(s State) []State {
-		next := Successors(s)
-		if s.TM == TMInit && !CanTMCommit(s) {
-			for r := 0; r < N; r++ {
+		next := successors(s)
+		if s.TM == TMInit {
+			for r := 0; r < RM; r++ {
 				if s.TMPrepared[r] {
 					u := s
 					u.TM, u.CommitMsg = TMDone, true
@@ -65,7 +110,7 @@ func TestEarlyCommitIsCaught(t *testing.T) {
 	}
 	seen, _ := explore(early)
 	for s := range seen {
-		if !Consistent(s) {
+		if !consistent(s) {
 			return
 		}
 	}

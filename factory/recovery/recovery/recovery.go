@@ -269,6 +269,36 @@ func (r Repo) Lapse(w Watcher) (s Repo, ok bool) {
 	return s, true
 }
 
+// Expire lets the lease run out, because its holder stopped renewing it. It
+// refuses when nobody holds the lease.
+// @ ensures ok == (r.Lease != NoOne)
+// @ ensures !ok ==> s == r
+// @ ensures ok ==> s.Lease == NoOne
+// @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs
+// @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.PROpen == r.PROpen
+// @ ensures ok ==> s.Merged == r.Merged && s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable
+func (r Repo) Expire() (s Repo, ok bool) {
+	if r.Lease == NoOne {
+		return r, false
+	}
+	s = r
+	s.Lease = NoOne
+	return s, true
+}
+
+// Restart starts w afresh, remembering nothing, once the lease it may have
+// held before it went down has run out.
+// @ requires w.Ok()
+// @ ensures ok == (r.Lease != w.ID)
+// @ ensures !ok ==> v == w
+// @ ensures ok ==> v.ID == w.ID && v.InRun == NoRun && v.Ok()
+func (r Repo) Restart(w Watcher) (v Watcher, ok bool) {
+	if r.Lease == w.ID {
+		return w, false
+	}
+	return NewWatcher(w.ID), true
+}
+
 // StartRun records step k's agent run, then starts it, when none was recorded.
 // @ requires w.Ok() && 0 <= k && k < NumKeys
 // @ ensures ok == r.CanStartRun(w, k)

@@ -1,16 +1,19 @@
-# A connection pool that never hands out more than it has
+# Rebuild the connection pool's explorer to try every step
 
-Issue #18 in gitdek/invariant, opened by @gitdek.
+Issue #64 in gitdek/invariant, opened by @gitdek.
 
-Services share a pool of connections, such as to a database. A client asks the pool for a connection, uses it, and gives it back. The pool's size is chosen when it's made.
+The connection pool's explorer returns only the states it reaches, through `Successors`. It drops the steps the code refuses, and some steps it only tries where it has already checked that the model allows them. So no check can say it tried every step (D-0082). Rebuild it with `Try` and `Abstract` (D-0090), so the gate explores the code itself and checks every attempt:
 
-- The pool never has more connections out than its size.
-- A client holds at most one connection at a time.
-- Only a client that holds a connection can give one back, and giving it back frees exactly that one.
-- When every connection is out, a client that asks is refused, and nothing changes.
-- The pool can fill up, and every connection that's out can come back, until none is.
+- Every operation decides for itself whether it runs, as `Acquire` and `Release` already do. Where the model's action can't run, it refuses and changes nothing, and its Gobra contract says both outcomes.
+- `Try` tries every step the model's Next names, for every client, in every state, and lets the code refuse.
+- `Size` is the pool's own limit, so `Try` still tries an `Acquire` when every connection is out and sees the code refuse it. Name `Size` as a parameter in the manifest.
 
-Check it with a pool of two and three clients. The code is the pool alone, and it must work at any size and with any number of clients. Nothing in it may depend on those bounds (D-0068).
+What must be true doesn't change. Keep every ratified statement exactly as it is.
+
+Project: examples/05-connection-pool
+
+
+_Posted for @gitdek by a coding agent, through the dashboard._
 
 ## Discussion
 
