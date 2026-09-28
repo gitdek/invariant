@@ -124,6 +124,120 @@ func TestInvariantAgreement(t *testing.T) {
 }
 `
 
+// triedTest is Invariant's harness for a Go explorer that reports every
+// step it tries (D-0082, D-0090). It explores breadth first from Init, calls
+// Try in every state it reaches, and follows each step Try reports,
+// refusals included. With $INVARIANT_TRACES set, it writes what it found
+// there, as a driver on the harness does, for the gate to check every
+// attempt. It always prints how many states it reached, and how deep.
+const triedTest = `package %s
+
+// Written by Invariant's gate, which explores the code through Try. Not part
+// of the project.
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestInvariantAgreement(t *testing.T) {
+	// Attempts go to the file as they're made, so memory holds only the
+	// states, however many steps the code has.
+	var w *bufio.Writer
+	if out := os.Getenv("INVARIANT_TRACES"); out != "" {
+		f, err := os.Create(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		w = bufio.NewWriterSize(f, 1<<20)
+		w.WriteString(` + "`" + `{"attempts":[` + "`" + `)
+	}
+	write := func(v any, first bool) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !first {
+			w.WriteByte(',')
+		}
+		w.Write(b)
+	}
+	nodes := []State{Init()}
+	index := map[State]int{nodes[0]: 0}
+	levels := []int{1}
+	attempts := 0
+	for i := 0; i < len(nodes); i++ {
+		Try(nodes[i], func(step string, args []any, next State) {
+			j, seen := index[next]
+			if !seen {
+				j = len(nodes)
+				index[next] = j
+				nodes = append(nodes, next)
+				levels = append(levels, levels[i]+1)
+			}
+			if w != nil {
+				if args == nil {
+					args = []any{}
+				}
+				write([]any{i, step, args, j}, attempts == 0)
+			}
+			attempts++
+		})
+		if len(nodes) > 10000000 {
+			t.Fatal("more than ten million states")
+		}
+	}
+	if w != nil {
+		w.WriteString(` + "`" + `],"init":[0],"states":[` + "`" + `)
+		for i, s := range nodes {
+			write(Abstract(s), i == 0)
+		}
+		w.WriteString("]}")
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fmt.Printf("invariant-agreement states=%%d depth=%%d\n", len(nodes), levels[len(levels)-1])
+}
+`
+
+// declaresTry finds an explorer's Try, which reports every step it tries.
+var declaresTry = regexp.MustCompile(`(?m)^func Try\(`)
+
+// triesSteps says whether a Go package's explorer reports every step it
+// tries, through Try, rather than only the states it reaches, through
+// Successors (D-0090).
+func triesSteps(pkg string) bool {
+	entries, err := os.ReadDir(pkg)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(pkg, n)); err == nil && declaresTry.Match(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// explorerTest is the test the gate writes into a Go package to explore it:
+// the harness for an explorer with Try, and the agreement check for one with
+// Successors.
+func explorerTest(pkg, name string) string {
+	if triesSteps(pkg) {
+		return fmt.Sprintf(triedTest, name)
+	}
+	return fmt.Sprintf(agreementTest, name)
+}
+
 // sandboxScript runs inside the container. Markers separate the steps.
 const sandboxScript = `cd /src
 go vet ./... ; echo "@@invariant vet=$?"
@@ -137,55 +251,73 @@ var (
 )
 
 func (g Go) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	b, e, err := g.check(ctx, p.Dir, p.CodeDir())
-	return b, Evidence{Exploration: &e}, err
+	b, e, traces, err := g.check(ctx, p.Dir, p.CodeDir())
+	return b, Evidence{Exploration: &e, Traces: traces}, err
 }
 
-func (g Go) check(ctx context.Context, projectDir, pkg string) (Build, Exploration, error) {
+// check builds, tests and explores a Go package. An explorer with Try also
+// records every step it tried, which the gate checks against the model.
+func (g Go) check(ctx context.Context, projectDir, pkg string) (Build, Exploration, []byte, error) {
 	root, err := moduleRoot(projectDir, pkg)
 	if err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
 	rel, err := filepath.Rel(root, pkg)
 	if err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
 	name, err := packageName(pkg)
 	if err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
 	work, err := os.MkdirTemp("", "invariant-go-")
 	if err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
 	defer os.RemoveAll(work)
-	src, agreeDir := filepath.Join(work, "src"), filepath.Join(work, "agree")
+	src, agreeDir, out := filepath.Join(work, "src"), filepath.Join(work, "agree"), filepath.Join(work, "out")
 	if err := copyTree(root, src); err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
 	if err := os.MkdirAll(agreeDir, 0o755); err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
-	test := fmt.Sprintf(agreementTest, name)
-	if err := os.WriteFile(filepath.Join(agreeDir, "zz_invariant_agreement_test.go"), []byte(test), 0o644); err != nil {
-		return Build{}, Exploration{}, err
+	if err := os.MkdirAll(out, 0o777); err != nil {
+		return Build{}, Exploration{}, nil, err
+	}
+	tries := triesSteps(pkg)
+	if err := os.WriteFile(filepath.Join(agreeDir, "zz_invariant_agreement_test.go"), []byte(explorerTest(pkg, name)), 0o644); err != nil {
+		return Build{}, Exploration{}, nil, err
 	}
 	if err := pulled(ctx, g.GoImage); err != nil {
-		return Build{}, Exploration{}, err
+		return Build{}, Exploration{}, nil, err
 	}
-	var out bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+	var buf bytes.Buffer
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOCACHE=/tmp/gocache", "-e", "HOME=/tmp",
-		"-e", "CGO_ENABLED=0", "-e", "PKG="+filepath.ToSlash(rel),
-		"-v", src+":/src", "-v", agreeDir+":/agree:ro", "-w", "/src", g.GoImage, "sh", "-c", sandboxScript)
-	cmd.Stdout, cmd.Stderr = &out, &out
+		"-e", "CGO_ENABLED=0", "-e", "PKG=" + filepath.ToSlash(rel)}
+	if tries {
+		args = append(args, "-e", "INVARIANT_TRACES=/out/traces.json")
+	}
+	args = append(args, "-v", src+":/src", "-v", agreeDir+":/agree:ro", "-v", out+":/out", "-w", "/src", g.GoImage, "sh", "-c", sandboxScript)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			return Build{}, Exploration{}, fmt.Errorf("running the Go sandbox: %w", err)
+			return Build{}, Exploration{}, nil, fmt.Errorf("running the Go sandbox: %w", err)
 		}
 	}
-	return parseSandbox(out.String())
+	b, e, err := parseSandbox(buf.String(), tries)
+	if err != nil || !tries || !e.OK {
+		return b, e, nil, err
+	}
+	traces, err := os.ReadFile(filepath.Join(out, "traces.json"))
+	if err != nil {
+		e = Exploration{Message: "the explorer's attempts weren't written: " + err.Error()}
+		return b, e, nil, nil
+	}
+	return b, e, traces, nil
 }
 
 // section is one step of a sandbox run: its output and exit code.
@@ -227,8 +359,9 @@ func pulled(ctx context.Context, image string) error {
 	return nil
 }
 
-// parseSandbox reads the Go sandbox's output.
-func parseSandbox(out string) (Build, Exploration, error) {
+// parseSandbox reads the Go sandbox's output. tries says whether the
+// explorer reports its attempts through Try.
+func parseSandbox(out string, tries bool) (Build, Exploration, error) {
 	s, err := splitMarkers(out, 3)
 	if err != nil {
 		return Build{}, Exploration{}, err
@@ -245,10 +378,19 @@ func parseSandbox(out string) (Build, Exploration, error) {
 		e.States, _ = strconv.ParseInt(m[1], 10, 64)
 		e.Depth, _ = strconv.Atoi(m[2])
 	} else {
-		e.Message = "couldn't explore the implementation. The package must export Init() State and " +
-			"Successors(State) []State, with State comparable:\n" + lastLines(agreeOut, 20)
+		e.Message = exploreProblem(tries) + ":\n" + lastLines(agreeOut, 20)
 	}
 	return b, e, nil
+}
+
+// exploreProblem says what a package must export for the gate to explore it.
+func exploreProblem(tries bool) string {
+	if tries {
+		return "couldn't explore the implementation. The package must export Init() State, " +
+			"Try(State, func(step string, args []any, next State)) and Abstract(State) map[string]any, with State comparable"
+	}
+	return "couldn't explore the implementation. The package must export Init() State and " +
+		"Successors(State) []State, with State comparable"
 }
 
 // moduleRoot finds the directory holding pkg's go.mod, within the project.

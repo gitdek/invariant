@@ -202,7 +202,8 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 	if err := os.MkdirAll(agreeDir, 0o755); err != nil {
 		return Exploration{}, err
 	}
-	if err := os.WriteFile(filepath.Join(agreeDir, "zz_invariant_agreement_test.go"), []byte(fmt.Sprintf(agreementTest, name)), 0o644); err != nil {
+	// Without $INVARIANT_TRACES, an explorer with Try is only counted.
+	if err := os.WriteFile(filepath.Join(agreeDir, "zz_invariant_agreement_test.go"), []byte(explorerTest(pkg, name)), 0o644); err != nil {
 		return Exploration{}, err
 	}
 	if err := pulled(ctx, g.GoImage); err != nil {

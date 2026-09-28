@@ -309,11 +309,13 @@ func untriedText(steps []tla.Step) string {
 	return "LET invariant_t == Invariant_Tried[invariant_i] IN\n    " + strings.Join(parts, "\n    \\cup ")
 }
 
-// printedUntried finds the untried steps TLC printed, as TLA+.
+// printedUntried finds the untried steps TLC printed, as TLA+. TLC prints a
+// tuple that fits on a line as <<a, b>>, and one it wraps as << a, b >>.
 func printedUntried(printed []string) string {
 	const head = `<<"invariant-untried",`
+	tight := strings.NewReplacer("<< ", "<<", " >>", ">>")
 	for _, p := range printed {
-		p = strings.Join(strings.Fields(p), " ")
+		p = tight.Replace(strings.Join(strings.Fields(p), " "))
 		if strings.HasPrefix(p, head) && strings.HasSuffix(p, ">>") {
 			return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(p, head), ">>"))
 		}

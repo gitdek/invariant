@@ -74,4 +74,17 @@ func TestEveryStepTriedRow(t *testing.T) {
 	if md := Markdown(r); !strings.Contains(md, "| Every step tried | ➖ not checked | the driver records its runs, not its attempts (D-0082) |") {
 		t.Errorf("a driver that records runs doesn't say its steps weren't checked:\n%s", md)
 	}
+
+	// A Go explorer with only Successors says its steps weren't checked. One
+	// with Try has its attempts checked, beside its agreement (D-0090).
+	r.Conformance, r.Agreement = nil, &verify.Agreement{Passed: true, States: 5, Depth: 3, WantStates: 5, WantDepth: 3}
+	if md := Markdown(r); !strings.Contains(md, "| Every step tried | ➖ not checked | the explorer reports the states it reaches, not its attempts (D-0082) |") {
+		t.Errorf("a Go explorer without Try doesn't say its steps weren't checked:\n%s", md)
+	}
+	r.Conformance = &conformance.Result{Passed: true, Exhaustive: true, Steps: 12, States: 5, ModelStates: 5,
+		Tried: &conformance.Tried{Passed: true, Attempts: 12, States: 5}}
+	md = Markdown(r)
+	if strings.Contains(md, "not checked") || !strings.Contains(md, "| Every step tried | ✅") || !strings.Contains(md, "| Agreement | ✅") {
+		t.Errorf("a Go explorer with Try:\n%s", md)
+	}
 }

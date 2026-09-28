@@ -35,6 +35,11 @@ func Markdown(r *verify.Report) string {
 	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
 	if a := r.Agreement; a != nil {
 		row(&b, "Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
+		// A Go explorer with Successors and no Try says where it went, not
+		// what it tried (D-0090).
+		if r.Conformance == nil {
+			b.WriteString("| Every step tried | ➖ not checked | the explorer reports the states it reaches, not its attempts (D-0082) |\n")
+		}
 	}
 	if l := r.Larger; l != nil {
 		// It adds to a claim and never fails a pass, so it isn't marked as a

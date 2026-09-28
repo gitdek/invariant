@@ -452,11 +452,11 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 				exploreLarger = func() (Exploration, error) { return l.exploreLarger(ctx, p.Dir, p.CodeDir(), sizes) }
 			}
 		case TypeScript:
-			if bounds, err := os.ReadFile(filepath.Join(p.Dir, boundsFile(p))); err == nil && explores(p) && declaresBounds(bounds, sizes) {
+			if bounds, err := os.ReadFile(filepath.Join(p.Dir, boundsFile(p))); err == nil && Explores(p) && declaresBounds(bounds, sizes) {
 				exploreLarger = func() (Exploration, error) { return countLarger(ctx, l.Image, "node", p, sizes) }
 			}
 		case Python:
-			if bounds, err := os.ReadFile(filepath.Join(p.Dir, boundsFile(p))); err == nil && explores(p) && declaresBounds(bounds, sizes) {
+			if bounds, err := os.ReadFile(filepath.Join(p.Dir, boundsFile(p))); err == nil && Explores(p) && declaresBounds(bounds, sizes) {
 				exploreLarger = func() (Exploration, error) { return countLarger(ctx, l.Image, "python", p, sizes) }
 			}
 		}
@@ -519,7 +519,10 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	if evidence.Exploration != nil {
 		a := agree(r.Design, *evidence.Exploration)
 		r.Agreement = &a
-	} else {
+	}
+	// A Go explorer with Try records its attempts as it explores, and they're
+	// checked as a driver's are (D-0090).
+	if evidence.Exploration == nil || evidence.Traces != nil {
 		c := conformance.Result{ModelStates: r.Design.DistinctStates, Message: evidence.Message}
 		if evidence.Traces != nil {
 			d, err := stage(work, "conformance", p, src, "")
@@ -529,7 +532,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 			// A driver that explores completely, and records its attempts,
 			// is checked for trying every step (D-0082, D-0085).
 			var model *conformance.Model
-			if explores(p) {
+			if Explores(p) {
 				model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
 				if model.Steps, err = tla.Steps(src); err != nil {
 					model.Problem = err.Error()
@@ -542,7 +545,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		// An exhaustive driver has seen every state the code can reach. With
 		// every step a Next step, visiting every state the model reaches means
 		// the code and the model reach exactly the same states.
-		if c.Exhaustive = explores(p); c.Exhaustive && c.Passed && int64(c.States) < c.ModelStates {
+		if c.Exhaustive = Explores(p); c.Exhaustive && c.Passed && int64(c.States) < c.ModelStates {
 			c.Passed = false
 			c.Message = fmt.Sprintf("the driver explores every state the code can reach, and it reached %d of the model's %d", c.States, c.ModelStates)
 		}

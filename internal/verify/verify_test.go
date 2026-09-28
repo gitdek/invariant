@@ -16,7 +16,7 @@ func TestParseSandbox(t *testing.T) {
 		"--- PASS: TestInvariantAgreement (0.01s)",
 		"@@invariant agree=0",
 	}, "\n")
-	b, e, err := parseSandbox(out)
+	b, e, err := parseSandbox(out, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,15 +25,19 @@ func TestParseSandbox(t *testing.T) {
 	}
 
 	failing := "twophase.go:3: undefined: Successors\n@@invariant vet=1\nFAIL\n@@invariant test=1\nundefined: Successors\n@@invariant agree=1\n"
-	b, e, err = parseSandbox(failing)
+	b, e, err = parseSandbox(failing, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if b.Passed || b.Steps[0].Passed || e.OK || !strings.Contains(e.Message, "Successors(State) []State") {
 		t.Errorf("build = %+v, exploration = %+v", b, e)
 	}
+	// An explorer with Try is told what the harness needs instead.
+	if _, e, _ = parseSandbox(strings.ReplaceAll(failing, "Successors", "Abstract"), true); e.OK || !strings.Contains(e.Message, "Abstract(State) map[string]any") {
+		t.Errorf("exploration = %+v", e)
+	}
 
-	if _, _, err := parseSandbox("docker: no space left on device"); err == nil {
+	if _, _, err := parseSandbox("docker: no space left on device", false); err == nil {
 		t.Error("a sandbox that never reached its markers should be an error")
 	}
 }

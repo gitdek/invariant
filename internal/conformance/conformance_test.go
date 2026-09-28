@@ -136,4 +136,10 @@ func TestUntriedText(t *testing.T) {
 	if got := printedUntried(printed); got != `{<<"Push", h1, l2>>}` {
 		t.Errorf("printedUntried = %q", got)
 	}
+	// A tuple too long for a line comes back wrapped, with spaces inside its
+	// brackets.
+	wrapped := []string{"<< \"invariant-untried\",\n   {<<\"Release\", c1>>, <<\"Release\", c2>>, <<\"Release\", c3>>} >>"}
+	if got := printedUntried(wrapped); got != `{<<"Release", c1>>, <<"Release", c2>>, <<"Release", c3>>}` {
+		t.Errorf("printedUntried = %q", got)
+	}
 }

@@ -124,21 +124,29 @@ var languages = map[string]language{
 			return fmt.Sprintf(`2. **The code**, in `+"`%s/`"+` as Go package `+"`%s`"+`. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068).
    - **No bound is in it.** Sizes are parameters: a capacity passed to a constructor, a slice made at that size, an operation that refuses when there's no room. No constant, array length or loop limit in it comes from the bounds above. The one exception is a machine limit that keeps arithmetic from overflowing, far above any bound.
    - **Only the system's own state is in it.** The model's environment and history stay out of the code: who acts, how many times, and what was sent, received or written. Those belong to the explorer.
-   - **Each operation has a Gobra contract that holds at every size,** directly above it. It has `+"`// @ requires`"+` lines for when it may run, and `+"`// @ ensures`"+` lines for its effect and for everything it leaves unchanged. No contract mentions a bound.
+   - **Each operation decides for itself whether it runs.** Where the model's action can't run, it refuses: it returns false and changes nothing. Where the action can run, it takes it.
+   - **Each operation has a Gobra contract that holds at every size,** directly above it. It has `+"`// @ requires`"+` lines for the permissions and arguments it needs, and `+"`// @ ensures`"+` lines for whether it ran, its effect, and everything it leaves unchanged. No contract mentions a bound.
    - Every Go file except `+"`explore.go`"+` starts with the line `+"`// +gobra`"+`, then a blank line, then the package clause, so that Gobra verifies it.
 3. **The explorer,** alone in `+"`explore.go`"+`, without the Gobra header. It's the environment, and the only place the bounds live.
    - **The bounds are constants in their own `+"`const`"+` block.** Each one is named exactly after its TLA+ constant. A number is its value. A set of model values is its size, such as `+"`Producers = 2`"+` for `+"`{p1, p2}`"+`.
    - **A comparable `+"`State`"+`** holds the spec's variables at those bounds, one to one, in fixed-size arrays, booleans and small ints. The system's part is copied out of the code. The environment's and history's parts are the explorer's own.
-   - **`+"`func Init() State`"+` and `+"`func Successors(s State) []State`"+`,** which follow the way TLC expands Next. For each action enabled in s, make the code's value from s at the bounds, call its operation, and read its state back. Then update the environment's part. The environment's own steps, such as a failed send, need no call into the code.
-   - **The code's refusals are the code's to make.** Call an operation wherever the model's action could run, and let the code refuse it. Only the environment's bounds stop the explorer.
+   - **`+"`func Init() State`"+`**, the model's initial state.
+   - **`+"`func Try(s State, tried func(step string, args []any, next State))`"+` tries every step your model's Next names, with every argument Next passes it.** For each, make the code's value from s at the bounds, call its operation, read its state back, and update the environment's part. Then call `+"`tried`"+` with the step's name exactly as Next names it, its arguments in the spec's encoding (see below), and the state it reached, which is s itself when the code refuses. `+"`\\E r \\in RM : RMPrepare(r)`"+` is `+"`tried(\"RMPrepare\", []any{map[string]any{\"$mv\": \"r1\"}}, next)`"+`, and the same for each participant. Steps of the environment alone, such as a failed send or a Done, are steps too, with no call into the code. Invariant's gate explores your code from `+"`Init()`"+` through `+"`Try`"+`, breadth first, and records every attempt.
+   - **Only the environment's bounds let `+"`Try`"+` leave a step out,** such as a producer's third line when two is the bound. Never leave one out because of the state the code is in: a step the model rules out is one the code must refuse, and the gate checks that you tried it. A step of the environment that can't happen yet, such as a Done before the end, reports s.
+   - **`+"`func Abstract(s State) map[string]any`"+`** is s in the spec's vocabulary: one entry per variable of the spec, in the encoding below.
+   - **Sizes the code takes are its parameters.** A capacity the code is made with isn't the environment's bound, so `+"`Try`"+` still tries the step past it and sees the code refuse. Name those sizes, as the TLA+ constants they are, in `+"`\"parameters\"`"+` in `+"`.invariant/invariant.json`"+`: it's the one field of the manifest that's yours to write. Only numbers belong there, such as a capacity: a set of participants the code is made with needs no entry, because the gate never grows a set when it checks your steps.
 4. **Standard library only.** No cgo, goroutines, network or file access. Tests in `+"`_test.go`"+` files are welcome. They run in a sandbox with no network.
 5. **Check your work with the `+"`gate`"+` tool.** It runs every check and says exactly what failed. You have %d gate runs in total, so reread your files carefully before each run. You're done when the gate passes. Then reply with a short summary.
 `, p.Manifest.Code, filepath.Base(p.Manifest.Code), gateRuns)
 		},
-		checks: `- **Agreement:** exploring your explorer from ` + "`Init()`" + ` through ` + "`Successors()`" + `, with the code doing the system's part of each step, reaches exactly as many distinct states as TLC finds in your model, at the same depth. The state space must match the model's one to one.
+		checks: `- **Every step tried:** in every state the gate reaches through ` + "`Try`" + `, you tried every step Next names, with every argument. A step may go untried only where the environment's bounds alone rule it out.
+- **Conformance:** TLC checks every attempt that changed the state: it must be a Next step. The gate explores every state the code can reach, so it must also visit every state TLC finds in your model: the code and the model reach exactly the same states.
+- **Agreement:** the exploration reaches exactly as many distinct ` + "`State`" + ` values as TLC finds states in your model, at the same depth.
+- **One size larger:** the gate makes every bound one size larger in ` + "`explore.go`" + ` and explores again, counting. It must reach exactly as many states as TLC's model does there, as deep.
 - **Code:** Gobra verifies every function in files marked ` + "`// +gobra`" + `, including slice bounds and integer overflow, at every size.
 - **Build:** go vet and go test pass.`,
-		primer: `# Gobra, briefly
+		primer: encodingPrimer + goEncoding + `
+# Gobra, briefly
 
 A contract is a block of comment lines directly above a function. Here's code with no model bounds in it, which Gobra proves at every capacity. It's a log buffer's core, a ring of any capacity:
 
@@ -182,32 +190,37 @@ func (b *Buffer) Ok() bool {
 // @ decreases
 // @ pure func (b *Buffer) At(i int) Line { return b.Slots[wrap(b.Head+i, len(b.Slots))] }
 
-// Ship takes the oldest line out, when there is one.
+// Ship takes the oldest line out, and refuses when there's none.
 // @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
 // @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
-// @ requires 0 < b.N
 // @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
 // @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
-// @ ensures l == old(b.At(0)) && b.N == old(b.N) - 1
-// @ ensures forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
-func (b *Buffer) Ship() (l Line) {
+// @ ensures ok == (old(b.N) > 0)
+// @ ensures ok ==> l == old(b.At(0)) && b.N == old(b.N) - 1
+// @ ensures ok ==> forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
+// @ ensures !ok ==> b.N == old(b.N) && b.Head == old(b.Head)
+func (b *Buffer) Ship() (l Line, ok bool) {
+	if b.N == 0 {
+		return l, false
+	}
 	l = b.Slots[b.Head]
 	b.Head = b.Head + 1
 	if b.Head == len(b.Slots) {
 		b.Head = 0
 	}
 	b.N = b.N - 1
-	return l
+	return l, true
 }
 ` + "```" + `
 
-Its ` + "`New(capacity)`" + ` and ` + "`Write(l)`" + ` follow the same pattern. What makes contracts like these verify:
+Its ` + "`New(capacity)`" + ` follows the same pattern, and ` + "`Write(l)`" + ` refuses when the buffer is full, the same way. What makes contracts like these verify:
 
 - **Spell out permissions field by field,** as above. With overflow checks on, a pure function can't read an int field through a predicate's unfolding.
 - **Keep index arithmetic linear.** A remainder by a length, ` + "`(head+i) % len(slots)`" + `, can keep the solver busy for many minutes. Wrap an index with an ` + "`if`" + ` in code, and with a ghost conditional, ` + "`c ? a : b`" + `, in specs. Go itself has no such expression.
 - **Say what a value holds through a ghost view,** such as ` + "`At(i)`" + ` above, and write each contract in its terms.
 - **Avoid loops over slices where a ring or a direct index will do.** A loop needs invariants on the lines directly above the ` + "`for`" + `, such as ` + "`// @ invariant 0 <= i && i <= b.N`" + `, and the solver must be able to use them. Go's ` + "`copy`" + ` is specified only for slices that don't overlap.
-- Calls to a function with a contract must satisfy its ` + "`requires`" + `, so guard them in the explorer.
+- **An operation that may be refused** returns whether it ran, and its contract says both outcomes, as ` + "`Ship`" + ` does. Keep ` + "`requires`" + ` to what every call from the explorer meets, such as permissions and arguments inside the bounds. When the model's action can't run is the operation's to check, not its caller's.
+- Calls to a function with a contract must satisfy its ` + "`requires`" + `, so the explorer passes only arguments the model's Next can pass.
 `,
 	},
 	"typescript": {
@@ -347,6 +360,11 @@ var existingLanguage = language{
 - **Existing code:** the driver imports every piece of code the project checks, and it runs in a sandbox with the package's locked dependencies and no network.`,
 	primer: encodingPrimer,
 }
+
+// goEncoding says how a Go explorer writes the spec's vocabulary.
+const goEncoding = `
+In Go, ` + "`Abstract`" + ` builds these values from ` + "`map[string]any`" + ` and ` + "`[]any`" + `: a set is ` + "`map[string]any{\"$set\": []any{...}}`" + `, a function is ` + "`map[string]any{\"$fn\": []any{[]any{key, value}, ...}}`" + `, and a model value is ` + "`map[string]any{\"$mv\": \"p1\"}`" + `. ` + "`Try`" + ` passes each step's arguments the same way.
+`
 
 // encodingPrimer explains how a conformance driver writes a state.
 const encodingPrimer = `
