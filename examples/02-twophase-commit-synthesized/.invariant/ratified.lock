@@ -1,5 +1,13 @@
 {
-  "decision": "D-0027",
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-28T17:54:55Z",
+    "issue": 66,
+    "comment": "https://github.com/gitdek/invariant/issues/66#issuecomment-5875564045",
+    "proposal": "sha256:b85a34d4852774148bf2e438dd38228c6736b48cee0013efc37ac6b0797a3ad9",
+    "amends": "sha256:b85a34d4852774148bf2e438dd38228c6736b48cee0013efc37ac6b0797a3ad9",
+    "previous": "D-0027"
+  },
   "bounds": {
     "RM": "{r1, r2, r3}"
   },
