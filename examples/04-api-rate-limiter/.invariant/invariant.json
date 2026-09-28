@@ -4,5 +4,9 @@
   "code": "src",
   "language": "typescript",
   "conformance": "conformance.ts",
-  "exhaustive": true
+  "exhaustive": true,
+  "parameters": [
+    "Capacity",
+    "MaxWaiting"
+  ]
 }
