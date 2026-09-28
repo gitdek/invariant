@@ -1,5 +1,7 @@
 package pool
 
+import "fmt"
+
 // The model's bounds: Size = 2, Clients = {c1, c2, c3}.
 const (
 	Size    = 2
@@ -38,41 +40,39 @@ func store(p *Pool) State {
 	return s
 }
 
-// Successors expands Next in s: for each client, Acquire of each connection,
-// Refuse, and Release.
-func Successors(s State) []State {
-	var out []State
+// client is client c as the spec's model value.
+func client(c int) any {
+	return map[string]any{"$mv": fmt.Sprintf("c%d", c+1)}
+}
+
+// Try tries every step of Next in s, for every client: Acquire of each
+// connection, Refuse and Release. The code decides whether each runs.
+func Try(s State, tried func(step string, args []any, next State)) {
 	for c := 0; c < Clients; c++ {
 		for k := 0; k < Size; k++ {
 			p := load(s)
-			if p.Acquire(c, k) {
-				out = append(out, store(p))
-			}
+			p.Acquire(c, k)
+			tried("Acquire", []any{client(c)}, store(p))
 		}
-		// Refuse: the code refuses every request when all are out, and
-		// nothing changes.
 		p := load(s)
-		full := true
-		for k := 0; k < Size; k++ {
-			if p.Owner[k] == 0 {
-				full = false
-			}
-		}
-		if full {
-			refused := true
-			for k := 0; k < Size; k++ {
-				if p.Acquire(c, k) {
-					refused = false
-				}
-			}
-			if refused {
-				out = append(out, store(p))
-			}
-		}
+		p.Refuse(c)
+		tried("Refuse", []any{client(c)}, store(p))
 		p = load(s)
-		if p.Release(c) {
-			out = append(out, store(p))
-		}
+		p.Release(c)
+		tried("Release", []any{client(c)}, store(p))
 	}
-	return out
+}
+
+// Abstract is s as the spec's held: each client to the set of connections
+// it holds, numbered 1..Size.
+func Abstract(s State) map[string]any {
+	held := []any{}
+	for c := 0; c < Clients; c++ {
+		conns := []any{}
+		if h := s.Held[c]; h != 0 {
+			conns = append(conns, h)
+		}
+		held = append(held, []any{client(c), map[string]any{"$set": conns}})
+	}
+	return map[string]any{"held": map[string]any{"$fn": held}}
 }
