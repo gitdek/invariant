@@ -57,6 +57,43 @@ func (p *Pool) Acquire(client, conn int) (ok bool) {
 	return true
 }
 
+// Refuse turns client away when every connection is out, and changes
+// nothing. While some connection is free, it is refused itself.
+// @ requires acc(&p.Owner, 1/2) && acc(&p.Held, 1/2)
+// @ requires len(p.Owner) <= MaxSize && len(p.Held) <= MaxSize
+// @ requires forall k int :: { &p.Owner[k] } 0 <= k && k < len(p.Owner) ==> acc(&p.Owner[k])
+// @ requires forall c int :: { &p.Held[c] } 0 <= c && c < len(p.Held) ==> acc(&p.Held[c])
+// @ requires forall k int :: { p.Owner[k] } 0 <= k && k < len(p.Owner) ==> 0 <= p.Owner[k] && p.Owner[k] <= len(p.Held)
+// @ requires forall c int :: { p.Held[c] } 0 <= c && c < len(p.Held) ==> 0 <= p.Held[c] && p.Held[c] <= len(p.Owner)
+// @ requires 0 <= client && client < len(p.Held)
+// @ ensures acc(&p.Owner, 1/2) && acc(&p.Held, 1/2)
+// @ ensures len(p.Owner) == old(len(p.Owner)) && len(p.Held) == old(len(p.Held))
+// @ ensures forall k int :: { &p.Owner[k] } 0 <= k && k < len(p.Owner) ==> acc(&p.Owner[k])
+// @ ensures forall c int :: { &p.Held[c] } 0 <= c && c < len(p.Held) ==> acc(&p.Held[c])
+// @ ensures forall k int :: { p.Owner[k] } 0 <= k && k < len(p.Owner) ==> 0 <= p.Owner[k] && p.Owner[k] <= len(p.Held)
+// @ ensures forall c int :: { p.Held[c] } 0 <= c && c < len(p.Held) ==> 0 <= p.Held[c] && p.Held[c] <= len(p.Owner)
+// @ ensures ok == (forall k int :: { p.Owner[k] } 0 <= k && k < len(p.Owner) ==> p.Owner[k] != 0)
+// @ ensures forall k int :: { p.Owner[k] } 0 <= k && k < len(p.Owner) ==> p.Owner[k] == old(p.Owner[k])
+// @ ensures forall c int :: { p.Held[c] } 0 <= c && c < len(p.Held) ==> p.Held[c] == old(p.Held[c])
+// @ decreases
+func (p *Pool) Refuse(client int) (ok bool) {
+	// @ invariant acc(&p.Owner, 1/2) && acc(&p.Held, 1/2)
+	// @ invariant forall j int :: { &p.Owner[j] } 0 <= j && j < len(p.Owner) ==> acc(&p.Owner[j])
+	// @ invariant forall c int :: { &p.Held[c] } 0 <= c && c < len(p.Held) ==> acc(&p.Held[c])
+	// @ invariant len(p.Owner) == old(len(p.Owner)) && len(p.Held) == old(len(p.Held))
+	// @ invariant forall j int :: { p.Owner[j] } 0 <= j && j < len(p.Owner) ==> p.Owner[j] == old(p.Owner[j])
+	// @ invariant forall c int :: { p.Held[c] } 0 <= c && c < len(p.Held) ==> p.Held[c] == old(p.Held[c])
+	// @ invariant 0 <= k && k <= len(p.Owner)
+	// @ invariant forall j int :: { p.Owner[j] } 0 <= j && j < k ==> p.Owner[j] != 0
+	// @ decreases len(p.Owner) - k
+	for k := 0; k < len(p.Owner); k++ {
+		if p.Owner[k] == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Release gives back the connection client holds, freeing exactly that one.
 // A client that holds none is refused.
 // @ requires acc(&p.Owner, 1/2) && acc(&p.Held, 1/2)
