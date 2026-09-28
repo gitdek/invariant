@@ -101,10 +101,10 @@
     if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting]), [...acts]])) renderInbox(s);
     if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
-    if (changed("now", [s.now, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
-    if (changed("orbit", [s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
-    if (changed("numbers", [s.totals, s.who.ratified])) renderNumbers(s);
-    if (changed("models", s.projects.map((p) => [p.model, p.graph, p.states]))) renderTabs(s);
+    if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
+    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
+    if (changed("numbers", [scope, s.totals, (s.repos || []).map((r) => r.totals), s.who.ratified])) renderNumbers(s);
+    if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states])])) renderTabs(s);
     if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
     if (changed("projects", [scope, pview, s.projects])) renderProjects(s);
     if (changed("road", s.slices)) renderRoad(s.slices);
@@ -123,7 +123,7 @@
   }
 
   function renderNow(s) {
-    const n = s.now, h = $("#headline");
+    const n = (scope !== "all" && s.nowBy?.[scope]) || s.now, h = $("#headline");
     // Find the issue numbers first, then escape the rest. Escaping first
     // turns an apostrophe into &#39;, whose #39 would look like an issue.
     const html = n.headline.split(/(#\d+)/).map((part) => (/^#\d+$/.test(part) ? `<span class="n">${part}</span>` : esc(part))).join("");
@@ -138,7 +138,7 @@
     document.title = `${n.headline} · Invariant`;
 
     const d = $("#detail");
-    const lastMerged = s.issues.find((i) => i.stage === "merged");
+    const lastMerged = s.issues.find((i) => i.stage === "merged" && inScope(i.repo));
     if (n.stage === "idle" && lastMerged) {
       const when = lastMerged.closed ? `, <span data-ago="${esc(lastMerged.closed)}"></span>` : "";
       d.innerHTML = `Last merged <b>${esc(ref(lastMerged.repo, lastMerged.pr))}</b> for ${esc(ref(lastMerged.repo, lastMerged.number))}, <q>${esc(lastMerged.title)}</q>${when}.`;
@@ -147,9 +147,14 @@
     }
 
     const chips = [];
+    // What waits on a person is counted here and shown in Needs you (D-0098).
+    const needs = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo)).length;
+    const needsChip = needs ? `<a class="chip people" href="#inbox"><i></i>${needs === 1 ? "1 issue needs you" : `${needs} issues need you`}</a>` : "";
     if (n.stage === "idle") {
       chips.push(s.factory.running ? `<span class="chip factory pulse"><i></i>Watching for issues</span>` : `<span class="chip"><i></i>The watcher is off</span>`);
-      chips.push(`<span class="chip holds"><i></i>${s.totals.badMerges} bad merges in ${s.totals.merged}</span>`);
+      if (needsChip) chips.push(needsChip);
+      const t = totalsOf(s);
+      chips.push(`<span class="chip holds"><i></i>${t.badMerges} bad merges in ${t.merged}</span>`);
     } else {
       const w = { people: ["people", "Waiting on a person"], ci: ["ci pulse", "CI's gate is running"], factory: ["factory pulse", "The factory is working"] }[n.waitingOn] || ["", n.stage];
       chips.push(`<span class="chip ${w[0]}"><i></i>${w[1]}</span>`);
@@ -163,6 +168,7 @@
         chips.push(`<span class="chip ${r.passed ? "holds" : "bug"} runchip"><i></i>${what} ${r.run} ${r.passed ? "passed" : "failed"}</span>`);
       }
     }
+    if (n.stage !== "idle" && needsChip) chips.push(needsChip);
     $("#nowmeta").innerHTML = chips.join("");
 
     // A gate run that didn't pass: failed, or never started at all, as when
@@ -172,8 +178,8 @@
       : `<span class="bad">✕ gate ${esc(g.conclusion === "failure" ? "failed" : g.conclusion.replaceAll("_", " "))}</span>`;
     // A run that changed only docs skips the gate, so it passed nothing.
     const gateSkipped = `<span class="muted" title="Only docs changed, so the gate had nothing to check">○ gate skipped: only docs changed</span>`;
-    const rows = [];
-    if (s.main) {
+    const rows = [], mine = inScope(s.repo);
+    if (s.main && mine) {
       const m = s.main;
       let gate = `<span class="muted">no gate run yet</span>`;
       if (m.gate) {
@@ -183,18 +189,18 @@
         else if (g.conclusion === "success") gate = `<span class="ok">✓ gate passed</span> in ${dur((T(g.updated) - T(g.started)) / 1000)}`;
         else gate = gateNot(g);
       }
-      rows.push(`<div><span class="k">Main</span><span><code>${esc(m.sha.slice(0, 7))}</code> ${esc(m.title)} · @${esc(m.by)} · <span data-ago="${esc(m.at)}"></span></span></div>`);
-      rows.push(`<div><span class="k">CI</span><span>${gate}</span></div>`);
+      rows.push(`<div ${tag(s.repo)}><span class="k">Main</span><span><code>${esc(m.sha.slice(0, 7))}</code> ${esc(m.title)} · @${esc(m.by)} · <span data-ago="${esc(m.at)}"></span></span></div>`);
+      rows.push(`<div ${tag(s.repo)}><span class="k">CI</span><span>${gate}</span></div>`);
     }
-    if (s.receipts) rows.push(`<div><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>, <span data-ago="${esc(s.receipts.updated)}"></span></span></div>`);
+    if (s.receipts && mine) rows.push(`<div ${tag(s.repo)}><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>, <span data-ago="${esc(s.receipts.updated)}"></span></span></div>`);
     // The lease: which one watcher may act, and until when it must renew.
     const lease = (l) => T(l.until) > Date.now()
       ? `<code>${esc(l.holder)}</code> holds it until ${esc(clockOf(l.until))}`
       : `<span class="muted">ran out at ${esc(clockOf(l.until))}, free for the next watcher</span>`;
     const primary = (s.repos || []).find((r) => r.primary);
-    if (primary?.lease) rows.push(`<div><span class="k">Lease</span><span>${lease(primary.lease)}</span></div>`);
+    if (primary?.lease && mine) rows.push(`<div ${tag(s.repo)}><span class="k">Lease</span><span>${lease(primary.lease)}</span></div>`);
     for (const r of s.repos || []) {
-      if (r.primary) continue;
+      if (r.primary || !inScope(r.name)) continue;
       let gate = `<span class="muted">no gate run yet</span>`;
       if (r.gate) {
         const g = r.gate;
@@ -205,7 +211,7 @@
       }
       const f = r.factory?.running ? "factory on" : "factory off";
       const held = r.lease && T(r.lease.until) > Date.now() ? " · lease held" : "";
-      rows.push(`<div><span class="k">${esc(r.short)}</span><span>${gate} · ${f}${held} · ${r.projects} project${r.projects === 1 ? "" : "s"}</span></div>`);
+      rows.push(`<div class="${quiet(r.name)}" ${tag(r.name)}><span class="k">${esc(r.short)}</span><span>${gate} · ${f}${held} · ${r.projects} project${r.projects === 1 ? "" : "s"}</span></div>`);
     }
     $("#mainline").innerHTML = rows.join("");
   }
@@ -257,7 +263,8 @@
     },
     update(s) {
       if (!this.built) this.build();
-      $("#coreNum").textContent = s.totals.merged;
+      const mine = s.issues.filter((i) => inScope(i.repo));
+      $("#coreNum").textContent = totalsOf(s).merged;
       // Some merges are proved and some are tested against the model, and the
       // count claims only what every one of them has: the gate passed (D-0015).
       $("#coreLabel").textContent = "merged through the gate";
@@ -272,14 +279,14 @@
       }
       $("#ghost").innerHTML = g;
       // Merged issues orbit the invariant like moons.
-      const merged = s.issues.filter((i) => i.stage === "merged").slice().reverse();
+      const merged = mine.filter((i) => i.stage === "merged").slice().reverse();
       $("#moons").innerHTML = merged.map((is, i) => {
         const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137) % 360;
         const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start}" to="${start + 360}" dur="${per}s" repeatCount="indefinite"/>`;
-        return `<g transform="rotate(${start})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
       }).join("");
       // Open issues sit at their stage.
-      const open = s.issues.filter((i) => i.open);
+      const open = mine.filter((i) => i.open);
       const active = new Set(open.map((i) => (i.stage === "review" ? "gate" : i.stage)));
       document.querySelectorAll("#orbit .station").forEach((el) => {
         el.classList.toggle("active", active.has(el.dataset.key));
@@ -295,7 +302,7 @@
       });
       dots.innerHTML = want.map(({ is }) => {
         const bug = is.stage === "review";
-        return `<g data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" x="12" y="4">${esc(ref(is.repo, is.number))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" x="12" y="4">${esc(ref(is.repo, is.number))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
       }).join("");
       want.forEach(({ is, angle }) => {
         const k = issueKey(is);
@@ -331,14 +338,15 @@
     requestAnimationFrame(step);
   }
   function renderNumbers(s) {
-    const t = s.totals;
+    const t = totalsOf(s);
+    const logged = t.decisions ? `${s.who.ratified} ratified by @gitdek, ${s.who.logged} decided by agents as they built` : "none logged in this repository yet";
     const tiles = [
       { k: "bad", cls: "holds", v: t.badMerges, l: "merges without a green gate", d: `CI's gate passed on the exact head of all ${t.mergesChecked} pull requests the factory merged. ${t.badLocks === 0 ? `All ${t.locksChecked} factory locks are exactly what a person ratified.` : `${t.badLocks} locks differ from what was ratified.`}` },
       { k: "states", v: t.states, l: "states TLC explored", d: `across ${t.models} models, exhaustively, within the ratified bounds` },
       { k: "stmts", v: t.statements, l: "statements people ratified", d: "each pinned by hash, so the factory can't change them" },
       { k: "bugs", v: t.bugsCaught, of: t.bugs, l: "planted bugs caught", d: "each one breaks an invariant, and TLC finds the step" },
       { k: "proved", v: t.proved, l: "functions proved", d: "by Gobra and Nagini, against contracts that restate the model" },
-      { k: "dec", v: t.decisions, l: "decisions logged", d: `${s.who.ratified} ratified by @gitdek, ${s.who.logged} decided by agents as they built` },
+      { k: "dec", v: t.decisions, l: "decisions logged", d: logged },
     ];
     const box = $("#numbers");
     if (!box.children.length) {
@@ -749,6 +757,7 @@
   function models(s) {
     const byKey = new Map();
     for (const p of s.projects) {
+      if (!inScope(p.repo)) continue;
       if (!byKey.has(p.model)) byKey.set(p.model, { key: p.model, projects: [], meta: p });
       const m = byKey.get(p.model);
       m.projects.push(p);
@@ -768,12 +777,12 @@
   }
   function renderTabs(s) {
     const ms = models(s);
-    if (!ms.length) return;
+    if (!ms.length) { $("#tabs").innerHTML = ""; return; }
     if (!currentModel || !ms.find((m) => m.key === currentModel)) {
       const pick = ms.find((m) => m.meta.factory && m.meta.graph) || ms.find((m) => m.meta.graph) || ms[0];
       currentModel = pick.key;
     }
-    $("#tabs").innerHTML = ms.map((m) => `<button class="tab" type="button" data-key="${m.key}" aria-pressed="${m.key === currentModel}">${esc(m.label)}<span>${nf.format(m.meta.states)}</span></button>`).join("");
+    $("#tabs").innerHTML = ms.map((m) => `<button class="tab${quiet(m.meta.repo)}" type="button" ${tag(m.meta.repo)} data-key="${m.key}" aria-pressed="${m.key === currentModel}">${esc(m.label)}<span>${nf.format(m.meta.states)}</span></button>`).join("");
     $("#tabs").querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => selectModel(b.dataset.key)));
     const cur = ms.find((m) => m.key === currentModel);
     if (cur.meta.graph && cosmos.key !== currentModel) cosmos.show(currentModel, cur.meta);
@@ -791,7 +800,8 @@
   function renderLanes(all) {
     const box = $("#lanes");
     if (!all.length) { box.innerHTML = `<p class="skeleton">No issues yet.</p>`; return; }
-    const open = all.filter((i) => i.open), closed = all.filter((i) => !i.open);
+    const first = (i) => (i.repo === state.repo ? 0 : 1);
+    const open = all.filter((i) => i.open).sort((a, b) => first(a) - first(b)), closed = all.filter((i) => !i.open);
     const issues = lanesAll ? open.concat(closed) : open.concat(closed.slice(0, Math.max(0, 4 - open.length + 1)));
     const hidden = all.length - issues.length;
     const FOLD = 11; // a wait on people takes this share of the widest lane's factory time
@@ -828,7 +838,7 @@
         is.amends ? `<span class="chip">amends ${esc(is.amends)}</span>` : "",
         stageChip[is.stage] || "",
       ].join("");
-      return `<article class="lane">
+      return `<article class="lane${quiet(is.repo)}" ${tag(is.repo)}>
         <div class="lane-head"><span class="no">${esc(ref(is.repo, is.number))}</span><span class="title">${esc(is.title)}</span><span class="chips">${chips}</span></div>
         <div class="track">${segs}${marks}</div>
         <div class="lane-foot"><span>factory <b>${dur(is.factorySeconds)}</b></span><span class="p">waiting on people <b>${dur(is.peopleSeconds)}</b></span><span><b>${is.peopleComments}</b> comment${is.peopleComments === 1 ? "" : "s"} from people</span>${is.questions ? `<span><b>${is.questions}</b> question${is.questions === 1 ? "" : "s"} asked</span>` : ""}${is.statements ? `<span><b>${is.statements}</b> statements</span>` : ""}${is.spendUSD ? `<span>agents <b>$${is.spendUSD.toFixed(2)}</b></span>` : ""}${is.gateRuns ? `<span><b>${is.gateRuns}</b> gate run${is.gateRuns === 1 ? "" : "s"}</span>` : ""}${is.pr ? `<span>pull request <b>${esc(ref(is.repo, is.pr))}</b></span>` : ""}</div>
@@ -865,7 +875,7 @@
       let prov = "Hand-built, before the factory";
       if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
       else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
-      return `<article class="card" data-model="${p.model}" tabindex="0">
+      return `<article class="card${quiet(p.repo)}" ${tag(p.repo)} data-model="${p.model}" tabindex="0">
         <canvas class="thumb" data-model="${p.model}" width="150" height="150"></canvas>
         <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${esc(p.assurance)}</span></div>
         <h3>${esc(cap(p.name))}</h3>
@@ -991,7 +1001,7 @@
       else if (e.who === "commit") text = `<span class="who">@${esc(e.by)}</span> committed <code>${esc(e.kind)}</code> ${esc(e.text)}`;
       else text = `<span class="who">CI</span> ${e.repo && e.repo !== state.repo ? esc(short(e.repo)) + "'s " : ""}${esc(e.text)}`;
       const style = fresh ? `style="animation-delay:${first ? k * 45 : 0}ms"` : `style="animation:none"`;
-      return `<li class="${esc(e.who)} ${esc(e.kind)}" ${style}>${text}<span class="when" data-ago="${esc(e.at)}" title="${esc(stamp(e.at))}"></span></li>`;
+      return `<li class="${esc(e.who)} ${esc(e.kind)}${quiet(e.repo)}" ${tag(e.repo)} ${style}>${text}<span class="when" data-ago="${esc(e.at)}" title="${esc(stamp(e.at))}"></span></li>`;
     }).join("");
   }
 
@@ -1000,10 +1010,34 @@
   let scope = "all", pview = "cards", lanesAll = false;
   try { scope = localStorage.getItem("invariant-scope") || "all"; pview = localStorage.getItem("invariant-pview") || "cards"; } catch (e) {}
   const inScope = (repo) => scope === "all" || !repo || repo === scope;
+  // Every item from a repository says which, so choosing one repository can
+  // fade the others out. With everything shown, another repository's items
+  // stay quieter than Invariant's own.
+  const tag = (repo) => `data-repo="${esc(repo || "")}"`;
+  const quiet = (repo) => (scope === "all" && repo && state && repo !== state.repo ? " aside" : "");
+  // The big numbers, for the chosen repository alone.
+  const totalsOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.totals) || s.totals;
+  let fading = 0;
   function setScope(v) {
+    if (v === scope) return;
+    const was = scope;
     scope = v;
     try { localStorage.setItem("invariant-scope", v); } catch (e) {}
-    if (state) render(state);
+    if (!state) return;
+    // What the choice leaves out fades first. Then the page is drawn for it,
+    // and what comes back fades in.
+    const draw = () => {
+      render(state);
+      if (REDUCED || was === "all") return;
+      document.querySelectorAll("[data-repo]").forEach((el) => {
+        if (el.dataset.repo && el.dataset.repo !== was) el.classList.add("arriving");
+      });
+    };
+    const leaving = [...document.querySelectorAll("[data-repo]")].filter((el) => el.dataset.repo && !inScope(el.dataset.repo));
+    clearTimeout(fading);
+    if (REDUCED || !leaving.length) return draw();
+    leaving.forEach((el) => el.classList.add("leaving"));
+    fading = setTimeout(draw, 380);
   }
   function renderScope(s) {
     const repos = s.repos || [];
@@ -1052,8 +1086,10 @@
       box.innerHTML = `<div class="calm">${calmGlyph()}<span>Nothing needs you right now. When the factory asks a question, proposes statements or needs a person, it shows up here.</span></div>`;
       return;
     }
-    // The longest wait first: the order the factory took them in.
-    items.sort((a, b) => new Date(a.waiting.since) - new Date(b.waiting.since));
+    // Invariant's own first, then the longest wait first: the order the
+    // factory took them in.
+    const first = (i) => (i.repo === s.repo ? 0 : 1);
+    items.sort((a, b) => first(a) - first(b) || new Date(a.waiting.since) - new Date(b.waiting.since));
     box.innerHTML = batchBanner(items) + items.map(needCard).join("");
   }
   // proposalText says what a proposal asks a person to ratify. A rebuild
@@ -1106,7 +1142,7 @@
       body = `<p class="ask">${why(w, repo)}</p>
         <div class="cmds">${cmd("/invariant retry", true)}${redraftable(w) ? cmd("/invariant revise") : ""}${open}</div>`;
     }
-    return `<article class="need ${cls}"><div>${needGlyph(w.kind)}</div><div>
+    return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)}><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
   }
   document.addEventListener("click", async (e) => {
@@ -1188,7 +1224,7 @@
     }
     if (a.posted) row = `<p class="posted">✓ Posted <a href="${esc(a.posted)}" target="_blank" rel="noopener">on GitHub</a> as you. The factory picks it up within 30 seconds.</p>`;
     if (a.error) row += `<p class="acterr">${esc(a.error)}</p>`;
-    return `<article class="need ${cls}"><div>${needGlyph(w.kind)}</div><div>
+    return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)}><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}${row}</div></article>`;
   }
   if (ACT) {
@@ -1331,7 +1367,7 @@
   const langClass = (l) => (l === "typescript" ? "ts-c" : l === "python" ? "py-c" : "go-c");
   function renderFleet(s) {
     const box = $("#fleet");
-    const repos = s.repos || [];
+    const repos = (s.repos || []).filter((r) => inScope(r.name));
     box.innerHTML = repos.map((r, k) => systemCard(s, r, k)).join("");
     box.querySelectorAll("[data-model]").forEach((el) => el.addEventListener("click", () => {
       selectModel(el.dataset.model);
@@ -1392,7 +1428,7 @@
       ? projects.slice().reverse().map((p) => `<span data-model="${esc(p.model)}" title="${esc(p.dir)}"><i class="${langClass(p.language)}"></i>${esc(cap(p.name))}</span>`).join("")
       : `<span>No projects yet. The first issue's project will orbit here.</span>`;
     const state = r.factory?.running ? `<span class="chip factory pulse state"><i></i>${working ? "working" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
-    return `<article class="system${scope !== "all" && scope !== r.name ? " dim" : ""}">
+    return `<article class="system${quiet(r.name)}" ${tag(r.name)}>
       <header><h3>${esc(r.short)}</h3><span class="meta">${n} project${n === 1 ? "" : "s"} · ${open.length} open · ${merged.length} merged</span>${state}</header>
       <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${n} projects, ${open.length} open issues">${g}</svg>
       <div class="legend2">${legend}</div></article>`;
@@ -1405,7 +1441,7 @@
     box.innerHTML = `<table class="ptable"><thead><tr><th>Project</th><th>Evidence</th><th>States</th><th>Statements</th><th>Bugs caught</th><th>Ratified</th></tr></thead><tbody>${ps.map((p) => {
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
-      return `<tr data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
+      return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
         <td>${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}</td><td class="num">${nf.format(p.states)}</td><td class="num">${p.statements.length}</td>
         <td class="num ${caught === p.bugs.length ? "ok" : ""}">${caught}/${p.bugs.length}</td><td>${who}</td></tr>`;
     }).join("")}</tbody></table>`;
