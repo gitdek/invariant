@@ -30,5 +30,18 @@ class TransactionTest(unittest.TestCase):
         self.assertEqual(t.state_of("b"), "aborted")
 
 
+    def test_restore_makes_the_same_transaction(self) -> None:
+        t = Transaction(["a", "b"])
+        t.prepare("a")
+        t.record_vote("a")
+        t.give_up("b")
+        again = Transaction.restore(["a", "b"], t.snapshot())
+        self.assertEqual(again.snapshot(), t.snapshot())
+        self.assertEqual(again.messages, t.messages)
+        self.assertEqual(again.votes, frozenset({"a"}))
+        self.assertTrue(again.abort())
+        self.assertFalse(t.decided)
+
+
 if __name__ == "__main__":
     unittest.main()

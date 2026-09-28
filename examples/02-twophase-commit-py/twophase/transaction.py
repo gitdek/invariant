@@ -37,6 +37,10 @@ class Abort:
 
 Message = Union[Prepared, Commit, Abort]
 
+# A transaction's whole state: each participant's state number, the votes the
+# coordinator has recorded, whether it has decided, and the messages sent.
+Snapshot = tuple[tuple[int, ...], tuple[bool, ...], bool, tuple[Message, ...]]
+
 
 class Transaction:
     """A two-phase commit. Messages are never lost."""
@@ -114,6 +118,22 @@ class Transaction:
             self._core.learn_abort(r)
             return True
         return False
+
+    def snapshot(self) -> Snapshot:
+        """Everything the transaction holds, to make it again with restore."""
+        core = self._core
+        return (tuple(core.states), tuple(core.votes), core.decided, tuple(self._messages))
+
+    @classmethod
+    def restore(cls, participants: list[str], snapshot: Snapshot) -> "Transaction":
+        """The transaction a snapshot was taken of."""
+        t = cls(participants)
+        states, votes, decided, messages = snapshot
+        t._core.states = list(states)
+        t._core.votes = list(votes)
+        t._core.decided = decided
+        t._messages = list(messages)
+        return t
 
     def _send(self, message: Message) -> None:
         if message not in self._messages:
