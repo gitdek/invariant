@@ -15,7 +15,36 @@ import (
 	"github.com/gitdek/invariant/internal/tla"
 )
 
-const example = "../../examples/02-twophase-commit"
+// example is a copy of the Go two-phase commit as it was when these tests
+// were written, from the gate's own copies (D-0091), so the factory's
+// rebuilds of the example can't change what they check. #72's rebuild
+// replaced its request, which TestPrompt reads.
+var example string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "invariant-synth-")
+	if err != nil {
+		panic(err)
+	}
+	example = filepath.Join(dir, "02-twophase-commit")
+	from := filepath.Join("..", "verify", "testdata", "examples", "02-twophase-commit")
+	err = filepath.WalkDir(from, func(file string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return err
+		}
+		rel, _ := filepath.Rel(from, file)
+		if strings.HasPrefix(rel, "_invariant"+string(filepath.Separator)) {
+			rel = "." + rel[1:]
+		}
+		return copyFile(file, filepath.Join(example, rel))
+	})
+	if err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestReadStream(t *testing.T) {
 	stream := strings.Join([]string{
@@ -113,10 +142,12 @@ func TestPrompt(t *testing.T) {
 		t.Error("the prompt must not contain the hand-built answer")
 	}
 	// Go's explorer tries every step, and the code refuses: nothing asks for
-	// only the enabled steps, the skip copythis-ad#33 made (D-0090).
+	// only the enabled steps, the skip copythis-ad#33 made (D-0090). The
+	// request is people's words, so only the instructions are checked.
+	goText := languages["go"].task(p, 4) + languages["go"].checks + languages["go"].primer
 	for _, stale := range []string{"Successors", "For each action enabled", "guard them in the explorer", "requires 0 < b.N"} {
-		if strings.Contains(got, stale) {
-			t.Errorf("the prompt still says %q", stale)
+		if strings.Contains(goText, stale) {
+			t.Errorf("the Go instructions still say %q", stale)
 		}
 	}
 	if draft := Prompt(p, skeleton, request, 4, true, false); !strings.Contains(draft, "It's already drafted") || strings.Contains(draft, "The skeleton of") {
