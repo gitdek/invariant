@@ -166,6 +166,9 @@ func (a *App) do(ctx context.Context, method, path, auth string, out any) error 
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("%s %s: %w", method, path, ErrNotFound)
 	}
+	if resp.StatusCode == http.StatusForbidden && bytes.Contains(body, []byte("Resource not accessible by integration")) {
+		return fmt.Errorf("%s %s: %w", method, path, ErrNoPermission)
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(body))
 	}

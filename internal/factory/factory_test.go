@@ -222,6 +222,28 @@ func TestARedGateIsNeverMerged(t *testing.T) {
 	}
 }
 
+// An App without the Actions permission can't read the gate's job, so it
+// can't tell a gate that ran from one GitHub never started. It says so once,
+// and doesn't merge, instead of asking again every poll (copythis-ad#38).
+func TestAGateJobTheAppCantReadIsSaidOnce(t *testing.T) {
+	r := newRig(t)
+	pr := ratified(t, r)
+	r.gh.noActions = true
+	r.gh.refuse(pr.Marker.PR)
+	r.poll()
+	failed := r.expect(1, KindFailed, LabelHumanReview)
+	for _, want := range []string{"failed on #", "can't tell whether the job ran", "Actions read-only permission", "`/invariant retry`"} {
+		if !strings.Contains(failed.Comment.Body, want) {
+			t.Errorf("the post doesn't say %q:\n%s", want, failed.Comment.Body)
+		}
+	}
+	n := len(r.gh.posts(1))
+	r.poll()
+	if len(r.gh.posts(1)) != n || len(r.gh.merged) != 0 {
+		t.Error("it says so once, and never merges")
+	}
+}
+
 // A gate GitHub never started, as when the account's Actions minutes run
 // out, didn't fail, and the factory says so. It still doesn't merge, and a
 // re-run that passes merges once a writer says retry.

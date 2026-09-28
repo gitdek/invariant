@@ -15,6 +15,7 @@ For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, b
 
    | Permission | Access | Why |
    | :-- | :-- | :-- |
+   | Actions | Read-only | Tell a gate job that ran from one GitHub never started, as when the account's Actions minutes run out (D-0081). Without it, the factory says it can't tell (D-0095) |
    | Checks | Read-only | Read `invariant/gate`'s result before merging |
    | Contents | Read and write | Push the issue's branch, merge, delete the branch |
    | Issues | Read and write | Post on issues, set labels |

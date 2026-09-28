@@ -123,6 +123,11 @@ type CheckRun struct {
 // ErrNotFound is what a request for something that doesn't exist returns.
 var ErrNotFound = errors.New("not found")
 
+// ErrNoPermission is what a request returns when the App isn't allowed to
+// make it, such as reading GitHub Actions without that permission. Waiting
+// won't change that, unlike a rate limit.
+var ErrNoPermission = errors.New("the App isn't allowed to do this")
+
 // Viewer is the user gh is logged in as.
 func (c Client) Viewer(ctx context.Context) (User, error) {
 	var u User
@@ -344,6 +349,9 @@ func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byt
 		msg := strings.TrimSpace(stderr.String())
 		if strings.Contains(msg, "(HTTP 404)") {
 			return nil, ErrNotFound
+		}
+		if strings.Contains(msg, "Resource not accessible by integration") {
+			return nil, fmt.Errorf("%w: %s", ErrNoPermission, msg)
 		}
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())

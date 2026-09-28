@@ -1358,13 +1358,21 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	next.Kind = KindFailed
 	if run.Conclusion != "success" {
-		started := true
+		started := gateRan
 		if run.Conclusion == "failure" {
 			job, err := f.GitHub.Job(ctx, run.ID)
-			if err != nil {
+			switch {
+			case errors.Is(err, github.ErrNoPermission):
+				// Without the Actions permission, the App can't read the job,
+				// so it can't tell a job that ran from one GitHub never
+				// started. It says so, rather than asking again every poll
+				// (copythis-ad#38).
+				started = gateUnknown
+			case err != nil:
 				return err
+			case !job.Started():
+				started = gateNeverStarted
 			}
-			started = job.Started()
 		}
 		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, protocol.KindFailed, protocol.Nobody)
 		to.failure = FailCI

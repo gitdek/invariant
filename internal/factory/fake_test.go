@@ -30,12 +30,14 @@ type fakeGitHub struct {
 	prs      map[int]*github.PullRequest
 	checks   map[string][]github.CheckRun
 	refused  map[int64]bool // check runs whose jobs GitHub never started
-	merged   []int
-	deleted  []string
-	bodies   map[int]string
-	nextID   int64
-	nextPR   int
-	failPRs  int // pull requests to refuse, as GitHub can
+	// noActions is an App without the Actions permission: it can't read jobs.
+	noActions bool
+	merged    []int
+	deleted   []string
+	bodies    map[int]string
+	nextID    int64
+	nextPR    int
+	failPRs   int // pull requests to refuse, as GitHub can
 }
 
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
@@ -218,6 +220,9 @@ func (g *fakeGitHub) refuse(pr int) {
 }
 
 func (g *fakeGitHub) Job(_ context.Context, id int64) (github.Job, error) {
+	if g.noActions {
+		return github.Job{}, fmt.Errorf("GET actions/jobs/%d: %w", id, github.ErrNoPermission)
+	}
 	job := github.Job{ID: id, Name: "invariant/gate", Status: "completed"}
 	if !g.refused[id] {
 		job.RunnerID = 7
