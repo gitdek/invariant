@@ -326,9 +326,11 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // synthesis would, and reports the gate result it's told to.
 type fakeBuilder struct {
 	pass    bool
-	stop    bool // the agent stops before it finishes
-	crash   bool // the factory itself stops partway through the build
+	stop    bool   // the agent stops before it finishes
+	crash   bool   // the factory itself stops partway through the build
 	review  string // what a second agent says of the driver, if it read one
+	account string // what the building agent says when it's done
+	runs    []bool // the agent's gate runs, when not just the final one
 	built   []string
 	amended []bool
 }
@@ -363,8 +365,14 @@ func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*sy
 	}
 	final := &verify.Report{Project: "bounded buffer", Passed: b.pass, Assurance: "proved",
 		Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3}, Build: verify.Build{Passed: b.pass}}
-	res := &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25},
+	res := &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25, Summary: b.account},
 		GateRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}
+	if b.runs != nil {
+		res.GateRuns = nil
+		for i, passed := range b.runs {
+			res.GateRuns = append(res.GateRuns, synth.GateRun{Run: i + 1, Passed: passed})
+		}
+	}
 	if b.review != "" && b.pass {
 		res.Review = &synth.Review{Usage: synth.Usage{CostUSD: 0.05}, Text: b.review}
 	}
