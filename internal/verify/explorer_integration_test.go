@@ -12,7 +12,7 @@ import (
 	"github.com/gitdek/invariant/internal/project"
 )
 
-// poolExplorer is an explorer for examples/05-connection-pool that reports
+// poolExplorer is an explorer for the connection pool that reports
 // every step it tries, through Try (D-0090). skip, when set, is a condition
 // on step, c and s under which Try leaves a step unreported.
 func poolExplorer(skip string) string {
@@ -115,10 +115,7 @@ func Abstract(s State) map[string]any {
 // Size named as the size the code takes.
 func poolWithTry(t *testing.T, explorer string) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "pool")
-	if err := copyTree(filepath.Join("..", "..", "examples", "05-connection-pool"), dir); err != nil {
-		t.Fatal(err)
-	}
+	dir := copyProject(t, "testdata/examples/05-connection-pool", nil)
 	if err := os.WriteFile(filepath.Join(dir, "pool", "explore.go"), []byte(explorer), 0o644); err != nil {
 		t.Fatal(err)
 	}

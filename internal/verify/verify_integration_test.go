@@ -17,10 +17,10 @@ import (
 )
 
 const (
-	example           = "../../examples/02-twophase-commit"
-	typescriptExample = "../../examples/02-twophase-commit-ts"
-	pythonExample     = "../../examples/02-twophase-commit-py"
-	provedPython      = "../../examples/02-twophase-commit-py-proved"
+	example           = "testdata/examples/02-twophase-commit"
+	typescriptExample = "testdata/examples/02-twophase-commit-ts"
+	pythonExample     = "testdata/examples/02-twophase-commit-py"
+	provedPython      = "testdata/examples/02-twophase-commit-py-proved"
 )
 
 // copyExample copies the Go example to a temporary directory, applying each
@@ -30,6 +30,11 @@ func copyExample(t *testing.T, edits map[string]func(string) string) string {
 	return copyProject(t, example, edits)
 }
 
+// The gate's tests run on copies of the example projects in
+// testdata/examples, taken when they were written, so the factory's rebuilds
+// of the examples can't change what a test checks. A copy keeps its
+// .invariant folder as _invariant, so nothing that finds projects in the
+// repository takes it for one, and copyProject names it back.
 func copyProject(t *testing.T, example string, edits map[string]func(string) string) string {
 	t.Helper()
 	dst := t.TempDir()
@@ -38,6 +43,9 @@ func copyProject(t *testing.T, example string, edits map[string]func(string) str
 			return err
 		}
 		rel, _ := filepath.Rel(example, path)
+		if rel == "_invariant" || strings.HasPrefix(rel, "_invariant"+string(filepath.Separator)) {
+			rel = "." + rel[1:]
+		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
@@ -216,16 +224,17 @@ func TestProvedPythonPasses(t *testing.T) {
 }
 
 // A proof covers every state a contract allows, not only the states a run
-// reaches. This tm_commit is right in every reachable state, where the
-// coordinator can't have aborted yet, so the tests and conformance pass. Its
-// precondition doesn't rule an abort out, and Nagini rejects it.
+// reaches. This rm_rcv_commit_msg leaves an aborted resource manager alone.
+// That's right in every reachable state, since a Commit is only ever sent
+// once every resource manager has prepared, so the tests and conformance
+// pass. Its precondition doesn't rule an abort out, and Nagini rejects it.
 func TestNaginiSeesPastTheReachableStates(t *testing.T) {
 	t.Parallel()
 	r := run(t, copyProject(t, provedPython, map[string]func(string) string{
-		"twophase/core.py": replace(t, "    s.commit_msg = True\n", "    s.commit_msg = not s.abort_msg\n"),
+		"twophase/core.py": replace(t, "    s.rm[r] = COMMITTED\n", "    if s.rm[r] != ABORTED:\n        s.rm[r] = COMMITTED\n"),
 	}))
-	if r.Passed || !contains(Failed(r), "code") || !strings.Contains(strings.Join(r.Code.Errors, "\n"), "tm_commit") {
-		t.Fatalf("failed = %v, errors = %v; want Nagini to reject tm_commit", Failed(r), r.Code.Errors)
+	if r.Passed || !contains(Failed(r), "code") || !strings.Contains(strings.Join(r.Code.Errors, "\n"), "rm_rcv_commit_msg") {
+		t.Fatalf("failed = %v, errors = %v; want Nagini to reject rm_rcv_commit_msg", Failed(r), r.Code.Errors)
 	}
 	if !r.Build.Passed || !r.Conformance.Passed {
 		t.Error("the tests and conformance should pass; only the proof can see this")

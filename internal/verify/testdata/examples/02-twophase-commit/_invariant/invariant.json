@@ -1,0 +1,6 @@
+{
+  "name": "two-phase commit",
+  "module": ".invariant/specs/TwoPhase.tla",
+  "code": "twophase",
+  "language": "go"
+}

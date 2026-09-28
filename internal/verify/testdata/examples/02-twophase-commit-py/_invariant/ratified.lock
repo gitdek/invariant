@@ -1,0 +1,53 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-28T15:22:55Z",
+    "issue": 51,
+    "comment": "https://github.com/gitdek/invariant/issues/51#issuecomment-5873085326",
+    "proposal": "sha256:b85a34d4852774148bf2e438dd38228c6736b48cee0013efc37ac6b0797a3ad9",
+    "amends": "sha256:b85a34d4852774148bf2e438dd38228c6736b48cee0013efc37ac6b0797a3ad9",
+    "previous": "D-0027"
+  },
+  "bounds": {
+    "RM": "{r1, r2, r3}"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "The system starts in Init, and every step is a Next step.",
+      "sha256": "sha256:0d1aeead3996e6a7cd4099bdd33c5b0afa4a6d9860ab132fcc9ce149a4777072"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "Every variable always holds a value of the expected type.",
+      "sha256": "sha256:ec91f02b2ebaf89174625d1cee877f3c6bade08b6c95c9601658be21b01bf7c8"
+    },
+    {
+      "name": "TCConsistent",
+      "kind": "invariant",
+      "says": "No resource manager commits while another aborts.",
+      "sha256": "sha256:e3999c24b8daff4f1245c856cd4f4af8700d8e871c73ad85e0cb213231dfeaa0"
+    },
+    {
+      "name": "AllCommitted",
+      "kind": "witness",
+      "says": "Every resource manager can end up committed.",
+      "sha256": "sha256:aa3963a9e306be0ae6e70acd741b1df6062268af143d14bd5ac27d098b20dec5"
+    },
+    {
+      "name": "AllAborted",
+      "kind": "witness",
+      "says": "Every resource manager can end up aborted.",
+      "sha256": "sha256:dc2a1880f366a36797805255f9fa6631f641e9f2884eccca40f53b84ebd9260e"
+    },
+    {
+      "name": "EarlyCommit",
+      "kind": "bug",
+      "says": "The coordinator commits once any resource manager has prepared, instead of waiting for all of them.",
+      "expect": "TCConsistent",
+      "sha256": "sha256:6cdecc4cd6837de98cc21bcbfc6e86398863647fde73bee89a9001914d41c726"
+    }
+  ]
+}

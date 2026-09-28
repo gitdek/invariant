@@ -1,0 +1,6 @@
+{
+  "name": "twophase-commit",
+  "private": true,
+  "type": "module",
+  "description": "Two-phase commit, checked against its ratified TLA+ model by Invariant's conformance testing."
+}
