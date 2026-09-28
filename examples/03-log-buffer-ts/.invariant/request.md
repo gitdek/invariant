@@ -1,14 +1,22 @@
-# Add a bounded buffer for log shipping
+# Rebuild the TypeScript log buffer's driver on the harness
 
-Issue #1 in gitdek/invariant, opened by @gitdek.
+Issue #48 in gitdek/invariant, opened by @gitdek.
 
-Producers write log lines into a buffer with a fixed capacity. A shipper takes lines out, oldest first, and sends them on.
+The TypeScript log buffer's conformance driver records only its runs, so its receipt says its steps weren't checked (D-0082). Rebuild the driver on Invariant's harness (D-0086), so the gate can check that it tried every step:
 
-- Several producers can write to the buffer.
-- The shipper sends lines in the order they went in, and sends each line once.
-- The buffer never holds more lines than its capacity.
+- It tries every step the model's Next names, with every argument, in every state it reaches, and lets the code refuse what the model rules out. Only the environment's bound stops a step: how many lines each producer writes.
+- The buffer's capacity is a size the code takes, so name it as a parameter in the manifest. The driver tries a write into a full buffer, and sees the code do what the model says.
+- It keeps the bounds as constants named after the model's, so the gate counts one size larger too.
 
-## Decided
+What must be true doesn't change. Keep every ratified statement exactly as it is, and change the code only where the new driver finds it doesn't do what the model says.
 
-- **F1. When a producer writes a line and the buffer is already at capacity, what should happen?** A. The producer waits until the shipper frees a slot, so no line is ever lost. (decided by @gitdek: https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263)
-- **F2. When the shipper fails to send a line, what should happen to that line?** A. The line stays at the front of the buffer and the shipper retries it before sending any later line. (decided by @gitdek: https://github.com/gitdek/invariant/issues/1#issuecomment-5837111263)
+Project: examples/03-log-buffer-ts
+
+
+_Posted for @gitdek by a coding agent, through the dashboard._
+
+## Discussion
+
+**@gitdek:**
+
+_Posted for @gitdek by a coding agent, through the dashboard._

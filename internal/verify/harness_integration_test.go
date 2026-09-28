@@ -258,3 +258,31 @@ func TestAPythonHarnessDriverThatSkipsARuleFails(t *testing.T) {
 		t.Fatalf("passed %v, tried %+v", r.Passed, tr)
 	}
 }
+
+// A driver on the harness is checked as one that explores every state even
+// when its manifest doesn't say so, as the hand-built two-phase commits'
+// don't (D-0088).
+func TestAHarnessDriverExploresWhateverItsManifestSays(t *testing.T) {
+	dir := ticketsWithHarness(t, ticketsDriver(""))
+	path := filepath.Join(dir, ".invariant", "invariant.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m project.Manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.Exhaustive = false
+	if b, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, dir)
+	c := r.Conformance
+	if !r.Passed || c == nil || !c.Exhaustive || c.Tried == nil || !c.Tried.Passed || r.Larger == nil || r.Larger.States != 15 {
+		t.Fatalf("passed %v, conformance %+v, larger %+v", r.Passed, c, r.Larger)
+	}
+}

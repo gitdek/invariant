@@ -8,6 +8,15 @@ export type ParticipantState = "working" | "prepared" | "committed" | "aborted";
 
 export type Message = { kind: "prepared"; from: string } | { kind: "commit" } | { kind: "abort" };
 
+/** A transaction's whole state, as plain data it can be made again from. */
+export interface Snapshot {
+  participants: string[];
+  states: [string, ParticipantState][];
+  votes: string[];
+  messages: Message[];
+  decided: boolean;
+}
+
 export class Transaction {
   readonly participants: readonly string[];
   #states = new Map<string, ParticipantState>();
@@ -23,6 +32,30 @@ export class Transaction {
     for (const p of participants) {
       this.#states.set(p, "working");
     }
+  }
+
+  /** Makes a transaction again from a snapshot of one. */
+  static restore(s: Snapshot): Transaction {
+    const t = new Transaction(s.participants);
+    for (const [p, state] of s.states) {
+      t.stateOf(p);
+      t.#states.set(p, state);
+    }
+    t.#votes = new Set(s.votes);
+    t.#messages = s.messages.map((m) => ({ ...m }));
+    t.#decided = s.decided;
+    return t;
+  }
+
+  /** The transaction's whole state, as plain data. */
+  snapshot(): Snapshot {
+    return {
+      participants: [...this.participants],
+      states: [...this.#states.entries()],
+      votes: [...this.#votes],
+      messages: this.#messages.map((m) => ({ ...m })),
+      decided: this.#decided,
+    };
   }
 
   stateOf(p: string): ParticipantState {
@@ -98,16 +131,27 @@ export class Transaction {
 
   /** A participant learns the coordinator's decision and follows it. */
   learn(p: string): boolean {
+    return this.learnCommit(p) || this.learnAbort(p);
+  }
+
+  /** A participant receives the coordinator's commit, if it was sent. */
+  learnCommit(p: string): boolean {
     this.stateOf(p);
-    if (this.#messages.some((m) => m.kind === "commit")) {
-      this.#states.set(p, "committed");
-      return true;
+    if (!this.#messages.some((m) => m.kind === "commit")) {
+      return false;
     }
-    if (this.#messages.some((m) => m.kind === "abort")) {
-      this.#states.set(p, "aborted");
-      return true;
+    this.#states.set(p, "committed");
+    return true;
+  }
+
+  /** A participant receives the coordinator's abort, if it was sent. */
+  learnAbort(p: string): boolean {
+    this.stateOf(p);
+    if (!this.#messages.some((m) => m.kind === "abort")) {
+      return false;
     }
-    return false;
+    this.#states.set(p, "aborted");
+    return true;
   }
 
   #send(m: Message): void {

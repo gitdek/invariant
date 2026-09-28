@@ -1,22 +1,34 @@
 /**
- * Invariant's conformance driver for this project. It calls the library's
- * operations at random and records every state it passes through, in the
- * vocabulary of the ratified spec. Invariant hands the runs to TLC, which
- * checks that each one starts where Init allows and moves only by Next
- * steps. Refused operations are fine: a step that changes nothing is always
- * allowed.
+ * Invariant's conformance driver for this project. It explores, with
+ * Invariant's harness, every state the library can reach: in each one it
+ * tries every step the model's Next names, for every resource manager, and
+ * lets the library refuse what the model rules out. It records every state in
+ * the vocabulary of the ratified spec, and Invariant hands the runs to TLC.
  */
-import { writeFileSync } from "node:fs";
-import { Transaction } from "./src/transaction.ts";
+import { explore } from "./invariant-explore.ts";
+import { Transaction, type Snapshot } from "./src/transaction.ts";
+
+// The bounds: RM is a set of model values, so its size.
+const RM = 3;
+
+const participants = Array.from({ length: RM }, (_, i) => `r${i + 1}`);
 
 // Values in the encoding Invariant reads: model values, sets and functions
-// say what they are; plain objects are records.
+// say what they are; plain objects are records. Sets are sorted so that equal
+// states read the same.
 const mv = (name: string) => ({ $mv: name });
-const set = (items: unknown[]) => ({ $set: items });
+const set = (items: unknown[]) => ({
+  $set: [...items].sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : JSON.stringify(a) > JSON.stringify(b) ? 1 : 0)),
+});
 const fn = (pairs: [unknown, unknown][]) => ({ $fn: pairs });
 
+// A node is the library's state, read out of it. The environment keeps
+// nothing of its own: the model has no bound on how many steps are taken.
+type Node = Snapshot;
+
 /** The abstraction: the transaction's state as the spec's variables. */
-function abstract(t: Transaction) {
+function abstract(node: Node) {
+  const t = Transaction.restore(node);
   return {
     rmState: fn(t.participants.map((p) => [mv(p), t.stateOf(p)])),
     tmState: t.decided ? "done" : "init",
@@ -29,45 +41,28 @@ function abstract(t: Transaction) {
   };
 }
 
-// mulberry32: a small seeded generator, so a run can be reproduced.
-function generator(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), a | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+// Makes the library from the node, calls the operation, and reads it back.
+// A refusal leaves the library, and so the node, as it was.
+const run =
+  (op: (t: Transaction, p: string) => unknown) =>
+  (node: Node, r?: { $mv: string }): Node => {
+    const t = Transaction.restore(node);
+    op(t, r?.$mv ?? "");
+    return t.snapshot();
   };
-}
 
-const runs = Number(process.env.INVARIANT_RUNS ?? 300);
-const steps = Number(process.env.INVARIANT_STEPS ?? 40);
-const random = generator(Number(process.env.INVARIANT_SEED ?? 1));
-const participants = ["r1", "r2", "r3"];
-const pick = <T>(xs: readonly T[]): T => xs[Math.floor(random() * xs.length)];
+const perRM = participants.map((p) => [mv(p)]);
 
-// The coordinator's abort ends a run's interesting life, so it's picked less
-// often than the rest.
-const operations: ((t: Transaction) => unknown)[] = [
-  (t) => t.prepare(pick(participants)),
-  (t) => t.prepare(pick(participants)),
-  (t) => t.giveUp(pick(participants)),
-  (t) => t.recordVote(pick(participants)),
-  (t) => t.recordVote(pick(participants)),
-  (t) => t.commit(),
-  (t) => t.learn(pick(participants)),
-  (t) => t.learn(pick(participants)),
-  (t) => (random() < 0.6 ? t.abort() : false),
-];
-
-const traces = [];
-for (let run = 0; run < runs; run++) {
-  const t = new Transaction(participants);
-  const trace = [abstract(t)];
-  for (let step = 0; step < steps; step++) {
-    pick(operations)(t);
-    trace.push(abstract(t));
-  }
-  traces.push(trace);
-}
-writeFileSync(process.env.INVARIANT_TRACES ?? "traces.json", JSON.stringify({ traces }));
+explore<Node>({
+  initial: [new Transaction(participants).snapshot()],
+  abstract,
+  steps: [
+    { name: "TMCommit", take: run((t) => t.commit()) },
+    { name: "TMAbort", take: run((t) => t.abort()) },
+    { name: "TMRcvPrepared", args: perRM, take: run((t, p) => t.recordVote(p)) },
+    { name: "RMPrepare", args: perRM, take: run((t, p) => t.prepare(p)) },
+    { name: "RMChooseToAbort", args: perRM, take: run((t, p) => t.giveUp(p)) },
+    { name: "RMRcvCommitMsg", args: perRM, take: run((t, p) => t.learnCommit(p)) },
+    { name: "RMRcvAbortMsg", args: perRM, take: run((t, p) => t.learnAbort(p)) },
+  ],
+});

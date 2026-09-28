@@ -1,53 +1,55 @@
 import unittest
-from typing import Callable, List, Set, Tuple
 
-from twophase.core import ABORTED, COMMITTED, State
-from twophase.explore import Key, copy, key, successors
-
-
-def explore(step: Callable[[State], List[State]]) -> Tuple[Set[Key], int]:
-    """Every state reachable from State(), breadth first, and the levels searched."""
-    start = State()
-    seen = {key(start)}
-    frontier = [start]
-    depth = 0
-    while frontier:
-        depth += 1
-        nxt = []
-        for s in frontier:
-            for t in step(s):
-                if key(t) not in seen:
-                    seen.add(key(t))
-                    nxt.append(t)
-        frontier = nxt
-    return seen, depth
-
-
-def consistent(k: Key) -> bool:
-    rm = k[0]
-    return not (ABORTED in rm and COMMITTED in rm)
+from twophase.core import (
+    ABORTED,
+    COMMITTED,
+    PREPARED,
+    WORKING,
+    State,
+    rm_choose_to_abort,
+    rm_prepare,
+    rm_rcv_commit_msg,
+    tm_abort,
+    tm_commit,
+    tm_rcv_prepared,
+)
 
 
 class CoreTest(unittest.TestCase):
-    def test_state_space_matches_the_model(self) -> None:
-        seen, depth = explore(successors)
-        self.assertEqual((len(seen), depth), (288, 11), "TLC reports 288 states, depth 11")
+    def test_init_sizes_to_its_parameter(self) -> None:
+        s = State(5)
+        self.assertEqual(s.rm, [WORKING] * 5)
+        self.assertEqual(s.tm_prepared, [False] * 5)
+        self.assertFalse(s.tm_done)
 
-    def test_every_reachable_state_is_consistent(self) -> None:
-        seen, _ = explore(successors)
-        self.assertTrue(all(consistent(k) for k in seen))
+    def test_prepare_runs_once(self) -> None:
+        s = State(2)
+        self.assertTrue(rm_prepare(s, 0))
+        self.assertEqual(s.rm, [PREPARED, WORKING])
+        self.assertFalse(rm_prepare(s, 0))
+        self.assertFalse(rm_choose_to_abort(s, 0))
+        self.assertEqual(s.rm, [PREPARED, WORKING])
 
-    def test_early_commit_is_caught(self) -> None:
-        def early(s: State) -> List[State]:
-            out = successors(s)
-            if not s.tm_done and any(s.tm_prepared) and not all(s.tm_prepared):
-                t = copy(s)
-                t.tm_done, t.commit_msg = True, True
-                out.append(t)
-            return out
+    def test_commit_waits_for_every_prepared(self) -> None:
+        s = State(3)
+        self.assertTrue(tm_rcv_prepared(s, 0))
+        self.assertTrue(tm_rcv_prepared(s, 1))
+        self.assertFalse(tm_commit(s))
+        self.assertFalse(s.tm_done)
+        self.assertTrue(tm_rcv_prepared(s, 2))
+        self.assertTrue(tm_commit(s))
+        self.assertTrue(s.tm_done)
+        self.assertFalse(tm_abort(s))
+        self.assertFalse(tm_rcv_prepared(s, 0))
+        rm_rcv_commit_msg(s, 1)
+        self.assertEqual(s.rm, [WORKING, COMMITTED, WORKING])
 
-        seen, _ = explore(early)
-        self.assertFalse(all(consistent(k) for k in seen))
+    def test_abort_before_deciding(self) -> None:
+        s = State(1)
+        self.assertTrue(tm_abort(s))
+        self.assertFalse(tm_commit(s))
+        self.assertTrue(rm_choose_to_abort(s, 0))
+        self.assertEqual(s.rm, [ABORTED])
 
 
 if __name__ == "__main__":

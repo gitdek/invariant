@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -350,8 +351,28 @@ func TestExistingPromptForbidsSkippingSteps(t *testing.T) {
 // the project. Any other change to the manifest is tampering, and discarded
 // whole (D-0085).
 func TestTheAgentNamesItsParameters(t *testing.T) {
-	p, err := project.Load("../../examples/04-api-rate-limiter")
+	// A copy of the rate limiter whose manifest names no parameters, so the
+	// test holds whatever the example's own manifest says.
+	dir := filepath.Join(t.TempDir(), "limiter")
+	if err := filepath.WalkDir("../../examples/04-api-rate-limiter", func(file string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel("../../examples/04-api-rate-limiter", file)
+		return copyFile(file, filepath.Join(dir, rel))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.Load(dir)
 	if err != nil {
+		t.Fatal(err)
+	}
+	p.Manifest.Parameters = nil
+	b, err := json.Marshal(p.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".invariant", "invariant.json"), b, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {

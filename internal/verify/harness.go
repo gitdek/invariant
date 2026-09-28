@@ -4,6 +4,7 @@ import (
 	"embed"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/gitdek/invariant/internal/project"
 )
@@ -55,4 +56,23 @@ func writeHarness(src, runtime string, p *project.Project) error {
 		}
 	}
 	return nil
+}
+
+// harnessImport is how a driver built on the harness imports it.
+var harnessImport = regexp.MustCompile(`(?m)^\s*(import\s[^\n]*["']\./invariant-explore\.ts["']|from\s+invariant_explore\s+import\s)`)
+
+// explores says whether a project's driver explores every state the code
+// can reach: its manifest says so, or the driver is built on the harness,
+// which always does (D-0088). Either way the gate holds it to that: the code
+// must reach every state the model does, and the driver must have tried
+// every step.
+func explores(p *project.Project) bool {
+	if p.Manifest.Exhaustive {
+		return true
+	}
+	if p.Manifest.Conformance == "" || len(p.Manifest.Existing) > 0 {
+		return false
+	}
+	src, err := os.ReadFile(filepath.Join(p.Dir, p.Manifest.Conformance))
+	return err == nil && harnessImport.Match(src)
 }
