@@ -102,6 +102,28 @@ func largerBounds(bounds map[string]string) (larger map[string]string, sizes map
 	return larger, sizes
 }
 
+// environmentLarger is the environment's numeric bounds, each one larger:
+// every number the lock bounds except the sizes the code takes as
+// parameters. Sets of model values stay as they are, since the states a
+// driver reached belong to them (D-0085).
+func environmentLarger(bounds map[string]string, parameters []string) map[string]string {
+	skip := map[string]bool{}
+	for _, name := range parameters {
+		skip[name] = true
+	}
+	out := map[string]string{}
+	for name, v := range bounds {
+		v = strings.TrimSpace(v)
+		if skip[name] || !numberBound.MatchString(v) {
+			continue
+		}
+		if n, err := strconv.Atoi(v); err == nil {
+			out[name] = strconv.Itoa(n + 1)
+		}
+	}
+	return out
+}
+
 // explorerFile is where a Go project's explorer lives.
 const explorerFile = "explore.go"
 

@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"encoding/json"
+	"github.com/gitdek/invariant/internal/tla"
 	"reflect"
 	"strings"
 	"testing"
@@ -76,5 +77,63 @@ func TestBatches(t *testing.T) {
 	}
 	if len(batches(nil, 2)) != 0 {
 		t.Error("no steps, no batches")
+	}
+}
+
+func TestDecodeReadsAttempts(t *testing.T) {
+	raw := `{"states": [{"n": 0}, {"n": 1}, {"n": 0}], "init": [0],
+		"attempts": [[0, "Up", [], 1], [1, "Up", [], 1], [1, "Down", [{"$mv": "a1"}], 2]]}`
+	rec, problem := decode([]byte(raw), []string{"n"})
+	if problem != "" {
+		t.Fatal(problem)
+	}
+	// States 0 and 2 are the same state, so the step back lands on 0.
+	if len(rec.states) != 2 || !rec.starts[0] || rec.recorded != 3 || len(rec.attempts) != 3 {
+		t.Fatalf("recorded %+v", rec)
+	}
+	if !rec.steps[[2]int{0, 1}] || !rec.steps[[2]int{1, 0}] || len(rec.steps) != 2 {
+		t.Errorf("steps %v; a refusal isn't a step", rec.steps)
+	}
+	if a := rec.attempts[2]; a.step != "Down" || len(a.args) != 1 || a.args[0] != "a1" || a.from != 1 || a.to != 0 {
+		t.Errorf("attempt %+v", a)
+	}
+	for _, bad := range []string{
+		`{"states": [{"n": 0}], "init": [1], "attempts": []}`,
+		`{"states": [{"n": 0}], "init": [0], "attempts": [[0, "Up", [], 3]]}`,
+		`{"states": [{"n": 0}], "init": [0], "attempts": [[0, "Up", 1]]}`,
+		`{"states": [{"n": 0}], "init": [], "attempts": []}`,
+	} {
+		if _, problem := decode([]byte(bad), []string{"n"}); problem == "" {
+			t.Errorf("decode(%s) found no problem", bad)
+		}
+	}
+	// Runs, as drivers wrote them before attempts.
+	rec, problem = decode([]byte(`{"traces": [[{"n": 0}, {"n": 1}, {"n": 1}]]}`), []string{"n"})
+	if problem != "" || rec.attempts != nil || rec.runs != 1 || rec.recorded != 2 || len(rec.steps) != 1 {
+		t.Errorf("runs: %+v, %s", rec, problem)
+	}
+}
+
+func TestUntriedText(t *testing.T) {
+	steps := []tla.Step{
+		{Name: "Tick"},
+		{Name: "Push", Args: []string{"h", "l"}, Binders: []tla.Binder{{Var: "h", Domain: "Heads"}, {Var: "l", Domain: "Locks"}}},
+	}
+	text := untriedText(steps)
+	for _, want := range []string{
+		`{invariant_x \in {<<"Tick">>} : invariant_x \notin invariant_t /\ ~(~ENABLED (Tick /\ UNCHANGED invariant_i) /\ ENABLED (Invariant_Larger!Tick /\ UNCHANGED invariant_i))}`,
+		`UNION {{<<"Push", h, l>> : l \in Locks} : h \in Heads}`,
+		`ENABLED (Invariant_Larger!Push(invariant_x[2], invariant_x[3]) /\ UNCHANGED invariant_i)`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("untried text lacks %q:\n%s", want, text)
+		}
+	}
+	if got := instance("Push", []string{"h1", "l2"}); got != `<<"Push", h1, l2>>` {
+		t.Errorf("instance = %s", got)
+	}
+	printed := []string{"something else", "<<\"invariant-untried\",\n  {<<\"Push\", h1, l2>>}>>"}
+	if got := printedUntried(printed); got != `{<<"Push", h1, l2>>}` {
+		t.Errorf("printedUntried = %q", got)
 	}
 }

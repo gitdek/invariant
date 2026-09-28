@@ -34,6 +34,9 @@ type Result struct {
 	BadStart    string `json:"bad_start,omitempty"`
 	BadStep     *Step  `json:"bad_step,omitempty"`
 	Message     string `json:"message,omitempty"`
+	// Tried is whether the driver tried every step (D-0082, D-0085). It's
+	// nil for a driver that records only its runs, whose steps aren't checked.
+	Tried *Tried `json:"tried,omitempty"`
 }
 
 // Step is one step the code took that the model doesn't allow.
@@ -49,49 +52,18 @@ type Traces struct {
 	Traces [][]map[string]any `json:"traces"`
 }
 
-// Check tests the traces against module, staged in dir, with TLC.
-func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, raw []byte) (Result, error) {
+// Check tests what a driver recorded against module, staged in dir, with
+// TLC. A driver that records its attempts (D-0085) is also checked for
+// trying every step: model says what that needs, and nil skips it.
+func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, raw []byte, model *Model) (Result, error) {
 	r := Result{ModelStates: modelStates}
-	var t Traces
-	if err := json.Unmarshal(raw, &t); err != nil {
-		r.Message = "the driver's traces aren't valid JSON: " + err.Error()
+	rec, problem := decode(raw, vars)
+	if problem != "" {
+		r.Message = problem
 		return r, nil
 	}
-	r.Runs = len(t.Traces)
-	if r.Runs == 0 {
-		r.Message = "the driver recorded no runs"
-		return r, nil
-	}
-	index := map[string]int{}
-	var states, pretty []string
-	starts := map[int]bool{}
-	steps := map[[2]int]bool{}
-	for _, run := range t.Traces {
-		prev := -1
-		for n, s := range run {
-			text, readable, err := encodeState(s, vars)
-			if err != nil {
-				r.Message = fmt.Sprintf("a recorded state can't be read: %v", err)
-				return r, nil
-			}
-			i, seen := index[text]
-			if !seen {
-				i = len(states)
-				index[text] = i
-				states = append(states, text)
-				pretty = append(pretty, readable)
-			}
-			if n == 0 {
-				starts[i] = true
-			} else {
-				r.Steps++
-				if i != prev {
-					steps[[2]int{prev, i}] = true
-				}
-			}
-			prev = i
-		}
-	}
+	states, pretty, starts, steps := rec.states, rec.pretty, rec.starts, rec.steps
+	r.Runs, r.Steps = rec.runs, rec.recorded
 	r.States, r.Transitions = len(states), len(steps)
 
 	values := modelValues(bounds)
@@ -196,6 +168,13 @@ func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds ma
 		}
 	}
 	r.Passed = true
+	if rec.attempts != nil && model != nil {
+		tried, err := checkTried(ctx, runner, dir, module, header, cfgConstants, vars, *model, rec)
+		if err != nil {
+			return r, err
+		}
+		r.Tried = &tried
+	}
 	return r, nil
 }
 

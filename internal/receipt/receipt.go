@@ -52,6 +52,15 @@ func Markdown(r *verify.Report) string {
 	}
 	if c := r.Conformance; c != nil {
 		row(&b, "Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
+		switch t := c.Tried; {
+		case t != nil && t.Passed:
+			row(&b, "Every step tried", true, "in every state reached, but where only the environment's bounds rule a step out",
+				fmt.Sprintf("%s attempts in %s states, refusals included", thousands(int64(t.Attempts)), thousands(int64(t.States))))
+		case t != nil:
+			row(&b, "Every step tried", false, "a step never tried", triedEvidence(*t))
+		case c.Exhaustive:
+			b.WriteString("| Every step tried | ➖ not checked | the driver records its runs, not its attempts (D-0082) |\n")
+		}
 	}
 	if len(r.Existing) > 0 {
 		row(&b, "Existing code", r.Build.Passed, "run as it is, by the factory's driver", existingEvidence(r.Existing))
@@ -286,10 +295,24 @@ func conformanceResult(c conformance.Result) string {
 }
 
 func conformanceEvidence(c conformance.Result) string {
+	if c.Tried != nil {
+		return fmt.Sprintf("%s steps recorded, %s of %s model states visited", thousands(int64(c.Steps)), thousands(int64(c.States)), thousands(c.ModelStates))
+	}
 	if int64(c.States) > c.ModelStates {
 		return fmt.Sprintf("%d runs, %s steps, %d states visited, more than the model's %s", c.Runs, thousands(int64(c.Steps)), c.States, thousands(c.ModelStates))
 	}
 	return fmt.Sprintf("%d runs, %s steps, %d of %s model states visited", c.Runs, thousands(int64(c.Steps)), c.States, thousands(c.ModelStates))
+}
+
+// triedEvidence names what a driver never tried, and where.
+func triedEvidence(t conformance.Tried) string {
+	switch {
+	case t.Untried != "" && t.In != "":
+		return strings.ReplaceAll(fmt.Sprintf("`%s` in `%s`", t.Untried, t.In), "|", "\\|")
+	case t.Untried != "":
+		return strings.ReplaceAll("`"+t.Untried+"`", "|", "\\|")
+	}
+	return strings.ReplaceAll(firstLine(t.Message), "|", "\\|")
 }
 
 func codeEvidence(c verify.Code) string {
@@ -365,6 +388,9 @@ func failures(r *verify.Report) []string {
 			msg += fmt.Sprintf(". The run started in `%s`", c.BadStart)
 		}
 		out = append(out, msg)
+	}
+	if c := r.Conformance; c != nil && c.Tried != nil && !c.Tried.Passed {
+		out = append(out, "Every step tried: "+c.Tried.Message+". "+triedEvidence(*c.Tried))
 	}
 	if c := r.Code; c != nil {
 		for _, e := range c.Errors {

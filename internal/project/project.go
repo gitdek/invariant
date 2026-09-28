@@ -35,6 +35,12 @@ type Manifest struct {
 	// the package they belong to, such as src/lib. The conformance driver
 	// runs that code where it is, and the factory never changes it.
 	Existing []string `json:"existing,omitempty"`
+	// Parameters names the bounds that are sizes the code takes, such as a
+	// capacity. Refusing work past one is a rule the code keeps, so a driver
+	// must try it there. Every other numeric bound is the environment's, and
+	// a step only one of those rules out is one a driver may leave untried
+	// (D-0082, D-0085).
+	Parameters []string `json:"parameters,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,
@@ -153,6 +159,11 @@ func (p *Project) validate() error {
 	}
 	if len(l.Bounds) == 0 {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)
+	}
+	for _, name := range m.Parameters {
+		if _, ok := l.Bounds[name]; !ok {
+			return fmt.Errorf("%s: parameter %s isn't one of the ratified bounds", manifestFile, name)
+		}
 	}
 	kinds := map[string]int{}
 	invariants, properties := map[string]bool{}, map[string]bool{}

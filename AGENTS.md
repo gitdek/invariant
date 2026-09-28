@@ -13,7 +13,7 @@ These are the rules for any coding agent working here, whatever the agent. `CLAU
 ## Commands
 
 - `go test ./...`: unit tests. Each example is its own Go module, so the root module doesn't include it.
-- `go test -tags integration ./internal/verify/`: the gate against the real verifiers, including the ways it must fail. Needs Docker.
+- `go test -tags integration ./internal/verify/ ./internal/conformance/`: the gate against the real verifiers, including the ways it must fail. Needs Docker.
 - `go run ./cmd/invariant verify examples/02-twophase-commit`: run the gate and print the receipt.
 - `go run ./cmd/invariant verify examples/02-twophase-commit-py-proved`: the same, with Nagini proving the Python core. The first run builds the Nagini image for linux/amd64, which downloads about 260 MB.
 - `go run ./cmd/invariant synthesize examples/02-twophase-commit`: have a headless coding agent rebuild the model and code from the ratified statements, then gate the result. It runs on the owner's agent account, so only run it when asked.

@@ -84,6 +84,16 @@ func Feedback(r *Report) string {
 		}
 		section("Conformance", lines...)
 	}
+	if c := r.Conformance; c != nil && c.Tried != nil && !c.Tried.Passed {
+		lines := []string{"The driver must try every step the model's Next names, with every argument, in every state it reaches, and record each attempt, refusals included. It may leave a step untried only where the environment's bounds alone rule it out: a size the code takes, such as a capacity, doesn't count, so try the step there and let the code refuse it.", c.Tried.Message + "."}
+		if c.Tried.Untried != "" {
+			lines = append(lines, "Never tried: "+c.Tried.Untried)
+		}
+		if c.Tried.In != "" {
+			lines = append(lines, "In: "+c.Tried.In)
+		}
+		section("Every step tried", lines...)
+	}
 	if c := r.Code; c != nil && !c.Passed {
 		section("Code: "+c.Verifier, c.Errors...)
 	}
@@ -148,6 +158,9 @@ func Failed(r *Report) []string {
 	}
 	if r.Conformance != nil && !r.Conformance.Passed {
 		out = append(out, "conformance")
+	}
+	if r.Conformance != nil && r.Conformance.Tried != nil && !r.Conformance.Tried.Passed {
+		out = append(out, "every step tried")
 	}
 	if r.Code != nil && !r.Code.Passed {
 		out = append(out, "code")

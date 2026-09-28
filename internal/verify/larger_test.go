@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -88,5 +89,18 @@ func TestBoundsInEveryLanguage(t *testing.T) {
 	// A name that only starts like a bound isn't one.
 	if declaresBounds([]byte("const CapacityMax = 2;\nconst Clients = 3;\n"), sizes) {
 		t.Error("CapacityMax was taken for Capacity")
+	}
+}
+
+// The environment's bounds are the numbers the code doesn't take as
+// parameters; sets of model values stay as they are (D-0085).
+func TestEnvironmentLarger(t *testing.T) {
+	got := environmentLarger(map[string]string{"Apis": "{a1, a2}", "Capacity": "2", "MaxCalls": "5", "MaxTime": " 3 ", "MaxWaiting": "2"}, []string{"Capacity", "MaxWaiting"})
+	want := map[string]string{"MaxCalls": "6", "MaxTime": "4"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("environmentLarger = %v; want %v", got, want)
+	}
+	if got := environmentLarger(map[string]string{"RM": "{r1, r2, r3}"}, nil); len(got) != 0 {
+		t.Errorf("two-phase commit has no numeric bounds, got %v", got)
 	}
 }
