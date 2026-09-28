@@ -51,37 +51,47 @@ func New(capacity int) (b *Buffer) {
 	return &Buffer{Slots: make([]Line, capacity)}
 }
 
-// Write adds a line, newest, when there's room.
+// Write adds a line, newest, and refuses when the buffer is full.
 // @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
 // @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
-// @ requires b.N < len(b.Slots)
 // @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
 // @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
-// @ ensures b.N == old(b.N) + 1 && b.At(old(b.N)) == l
-// @ ensures forall i int :: { b.At(i) } 0 <= i && i < old(b.N) ==> b.At(i) == old(b.At(i))
-func (b *Buffer) Write(l Line) {
+// @ ensures ok == (old(b.N) < len(b.Slots))
+// @ ensures ok ==> b.N == old(b.N) + 1 && b.At(old(b.N)) == l
+// @ ensures ok ==> forall i int :: { b.At(i) } 0 <= i && i < old(b.N) ==> b.At(i) == old(b.At(i))
+// @ ensures !ok ==> b.N == old(b.N) && b.Head == old(b.Head)
+// @ ensures !ok ==> forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i))
+func (b *Buffer) Write(l Line) (ok bool) {
+	if b.N == len(b.Slots) {
+		return false
+	}
 	i := b.Head + b.N
 	if i >= len(b.Slots) {
 		i = i - len(b.Slots)
 	}
 	b.Slots[i] = l
 	b.N = b.N + 1
+	return true
 }
 
-// Ship takes the oldest line out, when there is one.
+// Ship takes the oldest line out, and refuses when there's none.
 // @ requires acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
 // @ requires forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
-// @ requires 0 < b.N
 // @ ensures acc(&b.Slots, 1/2) && acc(&b.Head) && acc(&b.N) && b.Ok()
 // @ ensures forall j int :: { &b.Slots[j] } 0 <= j && j < len(b.Slots) ==> acc(&b.Slots[j])
-// @ ensures l == old(b.At(0)) && b.N == old(b.N) - 1
-// @ ensures forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
-func (b *Buffer) Ship() (l Line) {
+// @ ensures ok == (old(b.N) > 0)
+// @ ensures ok ==> l == old(b.At(0)) && b.N == old(b.N) - 1
+// @ ensures ok ==> forall i int :: { b.At(i) } 0 <= i && i < b.N ==> b.At(i) == old(b.At(i + 1))
+// @ ensures !ok ==> b.N == old(b.N) && b.Head == old(b.Head)
+func (b *Buffer) Ship() (l Line, ok bool) {
+	if b.N == 0 {
+		return l, false
+	}
 	l = b.Slots[b.Head]
 	b.Head = b.Head + 1
 	if b.Head == len(b.Slots) {
 		b.Head = 0
 	}
 	b.N = b.N - 1
-	return l
+	return l, true
 }
