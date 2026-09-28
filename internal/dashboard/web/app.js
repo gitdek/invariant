@@ -147,8 +147,12 @@
     }
 
     const chips = [];
+    // What waits on a person is counted here and shown in Needs you (D-0098).
+    const needs = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo)).length;
+    const needsChip = needs ? `<a class="chip people" href="#inbox"><i></i>${needs === 1 ? "1 issue needs you" : `${needs} issues need you`}</a>` : "";
     if (n.stage === "idle") {
       chips.push(s.factory.running ? `<span class="chip factory pulse"><i></i>Watching for issues</span>` : `<span class="chip"><i></i>The watcher is off</span>`);
+      if (needsChip) chips.push(needsChip);
       chips.push(`<span class="chip holds"><i></i>${s.totals.badMerges} bad merges in ${s.totals.merged}</span>`);
     } else {
       const w = { people: ["people", "Waiting on a person"], ci: ["ci pulse", "CI's gate is running"], factory: ["factory pulse", "The factory is working"] }[n.waitingOn] || ["", n.stage];
@@ -163,6 +167,7 @@
         chips.push(`<span class="chip ${r.passed ? "holds" : "bug"} runchip"><i></i>${what} ${r.run} ${r.passed ? "passed" : "failed"}</span>`);
       }
     }
+    if (n.stage !== "idle" && needsChip) chips.push(needsChip);
     $("#nowmeta").innerHTML = chips.join("");
 
     // A gate run that didn't pass: failed, or never started at all, as when

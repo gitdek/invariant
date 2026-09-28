@@ -183,6 +183,8 @@ h1.working {
   font: 500 12.5px/1 var(--sans); border: 1px solid var(--line2); color: var(--ink2); background: rgba(var(--glass-rgb), 0.55);
   white-space: nowrap;
 }
+a.chip { text-decoration: none; cursor: pointer; }
+a.chip:hover { border-color: currentColor; }
 .chip i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .chip.people { color: var(--people); border-color: rgba(var(--people-rgb), 0.35); background: var(--people-soft); }
 .chip.ci { color: var(--ci); border-color: rgba(var(--ci-rgb), 0.35); background: var(--ci-soft); }

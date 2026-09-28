@@ -1026,7 +1026,10 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 		}
 		return n
 	}
-	order := []string{StageBuilding, StageGate, StageQueued, StageRatifying, StageAsking, StageReview}
+	// Only the factory's own work takes the headline. What waits on a person
+	// is in Needs you, which the headline counts, so a held issue doesn't
+	// take the page's biggest words (D-0098).
+	order := []string{StageBuilding, StageGate, StageQueued}
 	for _, stage := range order {
 		for _, is := range issues {
 			if !is.Open || is.Stage != stage {
@@ -1045,12 +1048,6 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 				n.Headline = "Waiting for CI's gate on " + issueRef(is.Repo, primary, is.PR)
 			case StageQueued:
 				n.Headline = "Picking up " + ref
-			case StageRatifying:
-				n.Headline = "Waiting for a person to ratify " + ref
-			case StageAsking:
-				n.Headline = "Waiting for answers on " + ref
-			case StageReview:
-				n.Headline = ref + " needs a person"
 			}
 			return n
 		}
