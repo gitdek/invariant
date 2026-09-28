@@ -188,3 +188,31 @@ func TestAmendments(t *testing.T) {
 		})
 	}
 }
+
+// The factory may name its code's parameters in an existing project's
+// manifest, and change nothing else there, since the manifest decides what
+// the gate checks (D-0085).
+func TestAManifestChangesOnlyInItsParameters(t *testing.T) {
+	for _, c := range []struct {
+		manifest string
+		ok       bool
+	}{
+		{`{"name": "old", "parameters": ["Capacity"]}`, true},
+		{`{"name": "old", "exhaustive": true}`, false},
+		{`{"name": "renamed", "parameters": ["Capacity"]}`, false},
+	} {
+		dir := repo(t)
+		write(t, dir, map[string]string{
+			"examples/01-old/.invariant/invariant.json": c.manifest,
+			"examples/01-old/old/old.go":                "package old\n\n// Changed.\n",
+		})
+		commit(t, dir, "amend")
+		r, err := Check(context.Background(), dir, "main", "HEAD", 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.OK() != c.ok {
+			t.Errorf("manifest %s: ok %v, problems %q", c.manifest, r.OK(), r.Problems)
+		}
+	}
+}

@@ -15,6 +15,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -218,6 +220,30 @@ func protected(language string) []string {
 	}
 }
 
+// manifestFile is the project's manifest, which the people own, except for
+// the one field the agent writes: the sizes its code takes as parameters.
+const manifestFile = ".invariant/invariant.json"
+
+// agentParameters is what the agent named as its code's parameters in its
+// copy of the manifest (D-0082, D-0085). It counts only when the rest of
+// that copy is the people's manifest exactly.
+func agentParameters(p *project.Project, ws string) ([]string, bool) {
+	b, err := os.ReadFile(filepath.Join(ws, manifestFile))
+	if err != nil {
+		return nil, false
+	}
+	var m project.Manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, false
+	}
+	params := m.Parameters
+	m.Parameters = p.Manifest.Parameters
+	if !reflect.DeepEqual(m, p.Manifest) {
+		return nil, false
+	}
+	return params, true
+}
+
 // Owned says whether a project file is the agent's to write: the module,
 // anything in the code's directory, the conformance driver, and for Python,
 // the tests beside the driver. Nothing else the agent writes reaches the
@@ -282,6 +308,18 @@ func Prepare(p *project.Project, skeleton, ws string) error {
 	if err := writeFile(filepath.Join(ws, p.Manifest.Module), skeleton); err != nil {
 		return err
 	}
+	// Invariant's harness, for the driver to import (D-0085). It's not the
+	// agent's, so it never reaches the project: the gate writes its own in
+	// when the driver runs.
+	if name, source := verify.Harness(p.Manifest.Language); name != "" && len(p.Manifest.Existing) == 0 {
+		dir := ws
+		if p.Manifest.Language == "typescript" {
+			dir = filepath.Join(ws, filepath.Dir(p.Manifest.Conformance))
+		}
+		if err := writeFile(filepath.Join(dir, name), string(source)); err != nil {
+			return err
+		}
+	}
 	return os.MkdirAll(filepath.Join(ws, p.Manifest.Code), 0o755)
 }
 
@@ -295,6 +333,19 @@ func Assemble(p *project.Project, ws, dst string) error {
 	}
 	for _, rel := range protected(p.Manifest.Language) {
 		if err := copyFile(filepath.Join(p.Dir, rel), filepath.Join(dst, rel)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	// The agent may name its code's parameters, and nothing else, in the
+	// manifest.
+	if params, ok := agentParameters(p, ws); ok && !slices.Equal(params, p.Manifest.Parameters) {
+		m := p.Manifest
+		m.Parameters = params
+		b, err := json.MarshalIndent(m, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dst, manifestFile), append(b, '\n'), 0o644); err != nil {
 			return err
 		}
 	}
@@ -360,6 +411,9 @@ func Tampered(p *project.Project, ws string) ([]string, error) {
 			continue
 		}
 		if errWant != nil || errGot != nil || !bytes.Equal(want, got) {
+			if _, ok := agentParameters(p, ws); rel == manifestFile && ok {
+				continue // only the code's parameters changed, which are the agent's
+			}
 			changed = append(changed, rel)
 		}
 	}

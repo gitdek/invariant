@@ -2,6 +2,7 @@ package synth
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -340,6 +341,92 @@ func TestExistingPromptForbidsSkippingSteps(t *testing.T) {
 	for _, want := range []string{"Never skip an operation because of the state the code is in", "`../../src/lib/...`", "The bounds are the only reason to skip"} {
 		if !strings.Contains(pr, want) {
 			t.Errorf("the existing-code prompt lacks %q", want)
+		}
+	}
+}
+
+// The agent may name its code's parameters in the manifest, and they reach
+// the project. Any other change to the manifest is tampering, and discarded
+// whole (D-0085).
+func TestTheAgentNamesItsParameters(t *testing.T) {
+	p, err := project.Load("../../examples/04-api-rate-limiter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		edit     func(*project.Manifest)
+		tampered bool
+		want     []string
+	}{
+		{func(m *project.Manifest) { m.Parameters = []string{"Capacity", "MaxWaiting"} }, false, []string{"Capacity", "MaxWaiting"}},
+		{func(m *project.Manifest) { m.Parameters = []string{"Capacity"}; m.Exhaustive = false }, true, nil},
+	} {
+		ws := t.TempDir()
+		if err := Prepare(p, "---- MODULE RateLimiter ----\n====\n", ws); err != nil {
+			t.Fatal(err)
+		}
+		m := p.Manifest
+		c.edit(&m)
+		b, _ := json.Marshal(m)
+		if err := os.WriteFile(filepath.Join(ws, ".invariant", "invariant.json"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tampered, err := Tampered(p, ws)
+		if err != nil || (len(tampered) > 0) != c.tampered {
+			t.Errorf("tampered = %v, %v; want %v", tampered, err, c.tampered)
+		}
+		dst := filepath.Join(t.TempDir(), "result")
+		if err := Assemble(p, ws, dst); err != nil {
+			t.Fatal(err)
+		}
+		var got project.Manifest
+		b, _ = os.ReadFile(filepath.Join(dst, ".invariant", "invariant.json"))
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got.Parameters, c.want) || !got.Exhaustive {
+			t.Errorf("assembled manifest %+v; want parameters %v and the rest as the people wrote it", got, c.want)
+		}
+	}
+}
+
+// Drivers are built on Invariant's harness, which the agent finds in its
+// workspace and never ships: the gate writes its own in (D-0085).
+func TestDriversUseTheHarness(t *testing.T) {
+	for dir, wants := range map[string][]string{
+		"../../examples/04-api-rate-limiter": {"`invariant-explore.ts`", "Never return `null` because of the state the code is in", "`\"parameters\"`", "**Every step tried:**"},
+		"../../examples/03-log-buffer-py":    {"`from invariant_explore import Step, explore`", "Never return `None` because of the state the core is in", "`\"parameters\"`", "**Every step tried:**"},
+	} {
+		p, err := project.Load(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompt := Prompt(p, "", "", 4, false, false)
+		for _, want := range wants {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s: the prompt lacks %q", dir, want)
+			}
+		}
+		if strings.Contains(prompt, "successors(s)") || strings.Contains(prompt, `\"traces\"`) {
+			t.Errorf("%s: the prompt still asks for runs, or for only the enabled steps", dir)
+		}
+		ws := t.TempDir()
+		if err := Prepare(p, "---- MODULE M ----\n====\n", ws); err != nil {
+			t.Fatal(err)
+		}
+		name := "invariant-explore.ts"
+		if p.Manifest.Language == "python" {
+			name = "invariant_explore.py"
+		}
+		if _, err := os.Stat(filepath.Join(ws, name)); err != nil {
+			t.Errorf("%s: the workspace lacks the harness: %v", dir, err)
+		}
+		dst := filepath.Join(t.TempDir(), "result")
+		if err := Assemble(p, ws, dst); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dst, name)); !os.IsNotExist(err) {
+			t.Errorf("%s: the harness reached the project", dir)
 		}
 	}
 }

@@ -382,8 +382,12 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	if err := copyTree(p.Dir, src); err != nil {
 		return Build{}, Evidence{}, err
 	}
-	// Python finds the nagini_contracts stand-in first, so proved cores run.
+	// Python finds the nagini_contracts stand-in first, so proved cores run,
+	// and both languages find Invariant's own harness (D-0085).
 	if err := writeNaginiRuntime(runtime); err != nil {
+		return Build{}, Evidence{}, err
+	}
+	if err := writeHarness(src, runtime, p); err != nil {
 		return Build{}, Evidence{}, err
 	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
