@@ -315,6 +315,61 @@ func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	}
 }
 
+// A writer's later comment can change a fork they decided. The draft
+// follows it and says so, and the proposal records what was decided, citing
+// the comment, instead of the old answer (D-0094, copythis-ad#36). A change
+// the draft claims that doesn't check out is ignored.
+func TestALaterCommentChangesADecision(t *testing.T) {
+	r := newRig(t)
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
+	r.poll()
+	r.expect(1, KindForks, LabelAsking)
+	r.gh.say(1, "gitdek", "/invariant choose F1 B")
+	r.poll()
+	if p := r.expect(1, KindProposal, LabelProposal); !strings.Contains(p.Comment.Body, "Get an error right away.") {
+		t.Fatalf("the first proposal records B:\n%s", p.Comment.Body)
+	}
+	later := r.gh.say(1, "gitdek", "Actually, producers should wait: F1 A instead.")
+	r.gh.say(1, "mallory", "Make it B again.")
+	r.form.revised = []formalize.Revision{{Fork: "F1", Option: "A", By: "gitdek"}, {Fork: "F2", Option: "A", By: "gitdek"}, {Fork: "F1", Option: "B", By: "mallory"}}
+	r.gh.say(1, "gitdek", "/invariant revise")
+	r.poll()
+	p := r.expect(1, KindProposal, LabelProposal)
+	if a := p.Marker.Answers; len(a) != 1 || a[0].Option != "A" || a[0].By != "gitdek" || a[0].Comment != later.URL || a[0].Says != "Wait until there's room." {
+		t.Fatalf("answers %+v; want F1 A, citing %s", a, later.URL)
+	}
+	if !strings.Contains(p.Comment.Body, "Wait until there's room.") || strings.Contains(p.Comment.Body, "Get an error right away.") {
+		t.Errorf("the proposal should record A:\n%s", p.Comment.Body)
+	}
+}
+
+// revise ignores changes that don't check out: a fork nobody decided, an
+// option the fork doesn't have, and a person who didn't say anything. A
+// change that does cites the person's latest comment beyond commands.
+func TestReviseKeepsAnswersThatDontCheckOut(t *testing.T) {
+	fork := formalize.Fork{ID: "F1", Options: []formalize.Option{{ID: "A", Says: "a"}, {ID: "B", Says: "b"}}}
+	th := Thread{Posts: []Post{{Marker: Marker{Kind: KindForks, Forks: []formalize.Fork{fork}}}},
+		People: []github.Comment{{User: github.User{Login: "gitdek"}, Body: "Use A.", URL: "u1"}, {User: github.User{Login: "gitdek"}, Body: "/invariant revise", URL: "u2"}}}
+	answers := []formalize.Answer{{Fork: "F1", Option: "B", Says: "b", By: "gitdek", Comment: "u0"}}
+	for _, c := range []struct {
+		change          formalize.Revision
+		option, comment string
+	}{
+		{formalize.Revision{Fork: "f1", Option: "a", By: "GitDek"}, "A", "u1"},
+		{formalize.Revision{Fork: "F2", Option: "A", By: "gitdek"}, "B", "u0"},
+		{formalize.Revision{Fork: "F1", Option: "Z", By: "gitdek"}, "B", "u0"},
+		{formalize.Revision{Fork: "F1", Option: "A", By: "mallory"}, "B", "u0"},
+	} {
+		got := revise(th, answers, []formalize.Revision{c.change})[0]
+		if got.Option != c.option || got.Comment != c.comment || (got.Option == "A") != (got.Says == "a") {
+			t.Errorf("%+v: got %+v; want option %s citing %s", c.change, got, c.option, c.comment)
+		}
+	}
+	if answers[0].Option != "B" {
+		t.Error("revise must not change the answers it was given")
+	}
+}
+
 // To change what must be true after a failed build, a person closes its
 // draft and drafts again. The protocol has the step (OthersClose from a
 // failed build), and the factory takes it (copythis-ad#36).

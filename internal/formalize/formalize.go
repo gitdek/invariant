@@ -44,18 +44,29 @@ func (f Fork) Option(id string) (Option, bool) {
 	return Option{}, false
 }
 
+// Revision is a decided fork that a person's later comment changed.
+type Revision struct {
+	Fork   string `json:"fork"`
+	Option string `json:"option"`
+	By     string `json:"by"` // the login of the person whose comment asked for it
+}
+
 // Draft is what the formalizing agent writes to proposal.json: forks to ask,
 // or a project to ratify. Its statements carry no pins; the factory pins
 // them.
 type Draft struct {
-	Name        string              `json:"name"`    // the project, in a few plain words
-	Slug        string              `json:"slug"`    // its directory name, in kebab case
-	Module      string              `json:"module"`  // the TLA+ module's name
-	Package     string              `json:"package"` // the code's package name
-	Bounds      map[string]string   `json:"bounds"`
-	Statements  []project.Statement `json:"statements"`
-	Forks       []Fork              `json:"forks,omitempty"`
-	Unsupported string              `json:"unsupported,omitempty"` // why the factory can't take the issue
+	Name       string              `json:"name"`    // the project, in a few plain words
+	Slug       string              `json:"slug"`    // its directory name, in kebab case
+	Module     string              `json:"module"`  // the TLA+ module's name
+	Package    string              `json:"package"` // the code's package name
+	Bounds     map[string]string   `json:"bounds"`
+	Statements []project.Statement `json:"statements"`
+	Forks      []Fork              `json:"forks,omitempty"`
+	// Revised is each decided fork that a person's later comment changed,
+	// with the option the draft follows instead. The factory records it as
+	// decided only if it checks out (D-0094).
+	Revised     []Revision `json:"revised,omitempty"`
+	Unsupported string     `json:"unsupported,omitempty"` // why the factory can't take the issue
 	// Language is the code's language: go, typescript or python. The factory
 	// sets it from the issue's labels (D-0040); the agent doesn't choose it.
 	Language string `json:"language,omitempty"`
