@@ -131,6 +131,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   9. The factory survives crashes and concurrent work, proved, which brings liveness to the gate. Done: the gate checks properties under fairness. #23 ratified the recovery model, and the bot merged `factory/recovery` as #25, proved at every size. The watcher holds a lease, records its runs and merges, and takes every effect only as the core allows. A test stops it before each of its effects, and the issue still merges with every effect done once. Two watchers ran on this repository for a day, and the second never acted. GitHub refused its one push for the lease, when both reached for it in the same second. `D-0048` `D-0058` `D-0069` `D-0071` `D-0072` `D-0073` `D-0074`
   10. Public. Done: the repository is public since 2026-09-28, which brought CI back on GitHub's free runners. `main` requires the gate and a pull request for every change, and every run from an outside collaborator needs approval. The factory keeps merging. `D-0007` `D-0033` `D-0048` `D-0075` `D-0079` `D-0080`
   11. A driver can't skip a step. Done: the gate checks that a driver or a Go explorer tried every step in every state it reached, except where only a bound rules the step out, and a second agent reviews each one. The factory rebuilt all twelve projects here through #47 to #52 and #64 to #69, and every receipt shows every step tried. The review on copythis-ad's next pull request found three problems in its driver. `D-0059` `D-0082` `D-0085` `D-0086` `D-0087` `D-0088` `D-0089` `D-0090`
+  12. One decision graph for every project. Next: every project's decisions live in one embedded store, SQLite used as a graph through a pure-Go driver. Invariant makes every write, each with a line in `decisions/journal.jsonl` in the project's repository, and agents query it through traversal tools over MCP. CI rebuilds it from the journal and checks the graph, and LadybugDB is the planned upgrade. `D-0096`
 - The factory records its numbers: each issue's factory time, people's comments, agent spend and gate runs, in its merge comment and its hidden marker. `invariant ledger` lists them for every issue it took. `D-0048` `D-0062`
 - The product's requirements, goals and measures are in [`docs/PRD.md`](docs/PRD.md). `D-0048`
 
@@ -146,4 +147,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Undecided: don't build against these
 
-- One decision graph for every project, in an embedded store: SQLite used as a graph, with a journal in each repository and traversal tools over MCP, recommended over LadybugDB for now. Proposed, waiting for @gitdek. `D-0096`
+Nothing is undecided right now.
