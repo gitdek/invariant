@@ -253,6 +253,8 @@ type scriptedFormalizer struct {
 	// amend drafts an amendment of the current project, when the issue
 	// names one.
 	amend func(c *formalize.Current) *formalize.Proposal
+	// revised is what a draft says people's later comments changed.
+	revised []formalize.Revision
 }
 
 const bufferModule = `---- MODULE BoundedBuffer ----
@@ -318,7 +320,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
 	}
 	p := bufferProposal(s.t)
-	p.Language = req.Language
+	p.Language, p.Revised = req.Language, s.revised
 	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
 }
 

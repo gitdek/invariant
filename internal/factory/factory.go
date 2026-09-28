@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -529,6 +530,9 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
 	}
+	if res.Proposal != nil {
+		answers = revise(t, answers, res.Proposal.Revised)
+	}
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD}
 	switch p := res.Proposal; {
 	case res.Problem != "":
@@ -722,6 +726,54 @@ func (f *Factory) request(t Thread, answers []formalize.Answer, previous *formal
 		}
 	}
 	return req
+}
+
+// revise records the decided forks a draft says a person's later comment
+// changed (D-0094). On copythis-ad#36, a writer's comment moved F1 and F2
+// from C and B to A and A, the draft followed it, and the proposal still
+// listed C and B as decided. A change counts only if its fork was decided,
+// its option is one of that fork's, and its person is a writer who
+// commented; it then cites that person's latest comment that says more
+// than commands, as the draft read it. Otherwise the answer stands.
+func revise(t Thread, answers []formalize.Answer, changes []formalize.Revision) []formalize.Answer {
+	if len(changes) == 0 {
+		return answers
+	}
+	out := append([]formalize.Answer(nil), answers...)
+	for _, ch := range changes {
+		i := slices.IndexFunc(out, func(a formalize.Answer) bool { return strings.EqualFold(a.Fork, ch.Fork) })
+		fork, asked := askedFork(t, ch.Fork)
+		if i < 0 || !asked {
+			continue
+		}
+		opt, ok := fork.Option(ch.Option)
+		if !ok {
+			continue
+		}
+		var said *github.Comment
+		for j := len(t.People) - 1; j >= 0 && said == nil; j-- {
+			if c := &t.People[j]; strings.EqualFold(c.User.Login, ch.By) && withoutCommands(c.Body) != "" {
+				said = c
+			}
+		}
+		if said == nil {
+			continue
+		}
+		out[i].Option, out[i].Says, out[i].By, out[i].Comment = opt.ID, opt.Says, said.User.Login, said.URL
+	}
+	return out
+}
+
+// askedFork finds the fork the factory last asked with this id.
+func askedFork(t Thread, id string) (formalize.Fork, bool) {
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		for _, f := range t.Posts[i].Marker.Forks {
+			if strings.EqualFold(f.ID, id) {
+				return f, true
+			}
+		}
+	}
+	return formalize.Fork{}, false
 }
 
 // withoutCommands drops command lines, which are for the factory, not about
