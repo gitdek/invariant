@@ -5,10 +5,12 @@ on:
     branches: [main]
   pull_request:
 
-# A newer push to the same branch replaces a run that's still going.
+# A newer push to a pull request replaces its run that's still going. Every
+# push to main has a group of its own, so it runs to the end, and each
+# commit on main gets its gate and its receipts (D-0083).
 concurrency:
-  group: gate-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  group: gate-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

@@ -457,7 +457,7 @@ h2 { margin: 0; font-size: clamp(24px, 3vw, 34px); font-weight: 600; letter-spac
 .activity li.ci::before { border-color: var(--ci); }
 .activity li.ci.success::before { border-color: var(--accent); }
 .activity li.ci.failure::before { border-color: var(--bug); background: var(--bug); }
-.activity li.ci.unstarted::before { border-color: var(--ink3); border-style: dashed; }
+.activity li.ci.unstarted::before, .activity li.ci.skipped::before { border-color: var(--ink3); border-style: dashed; }
 .activity li.commit::before { border-color: var(--ink3); border-radius: 3px; }
 .activity .who { color: var(--ink); font-weight: 500; }
 .activity .when { display: block; font: 500 11.5px var(--mono); color: var(--ink3); margin-top: 2px; }

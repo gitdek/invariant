@@ -167,6 +167,8 @@
     const gateNot = (g) => g.notStarted
       ? `<span class="muted" title="GitHub never gave the job a runner">○ gate didn't start</span>`
       : `<span class="bad">✕ gate ${esc(g.conclusion === "failure" ? "failed" : g.conclusion.replaceAll("_", " "))}</span>`;
+    // A run that changed only docs skips the gate, so it passed nothing.
+    const gateSkipped = `<span class="muted" title="Only docs changed, so the gate had nothing to check">○ gate skipped: only docs changed</span>`;
     const rows = [];
     if (s.main) {
       const m = s.main;
@@ -174,6 +176,7 @@
       if (m.gate) {
         const g = m.gate;
         if (g.status !== "completed") gate = `<span class="run">● gate running</span> for <span data-since="${esc(g.started)}"></span>`;
+        else if (g.skipped) gate = gateSkipped;
         else if (g.conclusion === "success") gate = `<span class="ok">✓ gate passed</span> in ${dur((T(g.updated) - T(g.started)) / 1000)}`;
         else gate = gateNot(g);
       }
@@ -193,6 +196,7 @@
       if (r.gate) {
         const g = r.gate;
         if (g.status !== "completed") gate = `<span class="run">● gate running</span>`;
+        else if (g.skipped) gate = gateSkipped;
         else if (g.conclusion === "success") gate = `<span class="ok">✓ gate passed</span> on <code>${esc(g.sha.slice(0, 7))}</code>`;
         else gate = gateNot(g);
       }
