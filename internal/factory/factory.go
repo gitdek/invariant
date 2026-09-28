@@ -960,7 +960,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 				return err
 			}
 			if res != nil {
-				next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
+				next.Spend, next.GateRuns = res.Spend(), len(res.GateRuns)
 			}
 			return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 		}
@@ -1117,7 +1117,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if built.Error != "" {
 		runErr = errors.New(built.Error)
 	}
-	next.Spend, next.GateRuns = res.Usage.CostUSD, len(res.GateRuns)
+	next.Spend, next.GateRuns = res.Spend(), len(res.GateRuns)
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err
 	}

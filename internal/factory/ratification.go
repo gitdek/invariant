@@ -79,5 +79,17 @@ type Synthesis struct {
 func (s Synthesis) Build(ctx context.Context, dir, out string, amend bool) (*synth.Result, error) {
 	o := s.Options
 	o.Project, o.Out, o.KeepModel, o.KeepCode = dir, out, true, amend
-	return synth.Synthesize(ctx, o)
+	res, err := synth.Synthesize(ctx, o)
+	if err != nil || res.Final == nil || !res.Final.Passed {
+		return res, err
+	}
+	// A second agent reads the driver, with fresh context, and the factory
+	// posts what it says with the pull request (D-0082, D-0086). A review
+	// that fails to run takes nothing away from the build.
+	if review, err := synth.ReviewDriver(ctx, o.Backend, res.Dir, synth.ReviewTranscript(out)); err == nil {
+		res.Review = review
+	} else {
+		res.Review = &synth.Review{Text: "The review didn't run: " + err.Error()}
+	}
+	return res, nil
 }

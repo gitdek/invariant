@@ -328,6 +328,7 @@ type fakeBuilder struct {
 	pass    bool
 	stop    bool // the agent stops before it finishes
 	crash   bool // the factory itself stops partway through the build
+	review  string // what a second agent says of the driver, if it read one
 	built   []string
 	amended []bool
 }
@@ -362,8 +363,12 @@ func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*sy
 	}
 	final := &verify.Report{Project: "bounded buffer", Passed: b.pass, Assurance: "proved",
 		Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3}, Build: verify.Build{Passed: b.pass}}
-	return &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25},
-		GateRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}, nil
+	res := &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25},
+		GateRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}
+	if b.review != "" && b.pass {
+		res.Review = &synth.Review{Usage: synth.Usage{CostUSD: 0.05}, Text: b.review}
+	}
+	return res, nil
 }
 
 // gitRepos makes an origin with one project already under examples, and the

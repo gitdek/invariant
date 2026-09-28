@@ -2,6 +2,7 @@ package synth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -428,5 +429,71 @@ func TestDriversUseTheHarness(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dst, name)); !os.IsNotExist(err) {
 			t.Errorf("%s: the harness reached the project", dir)
 		}
+	}
+}
+
+// A reviewer reads, and has nothing else: no writing, no gate, no shell.
+func TestAReviewerOnlyReads(t *testing.T) {
+	args, err := ClaudeCode{Model: "opus", BudgetUSD: 1, MaxTurns: 30}.args(Job{Prompt: "p", ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		if strings.HasPrefix(args[i], "--") {
+			flags[args[i]] = args[i+1]
+		}
+	}
+	if flags["--tools"] != "Read,Glob,Grep" || flags["--allowedTools"] != "Read,Glob,Grep" {
+		t.Errorf("tools %q, allowed %q; a reviewer only reads", flags["--tools"], flags["--allowedTools"])
+	}
+	if _, ok := flags["--mcp-config"]; ok || !contains(args, "--strict-mcp-config") {
+		t.Error("a reviewer gets no MCP server at all")
+	}
+	for _, deny := range []string{"Bash", "Write", "Edit", "Read(~/**)"} {
+		if !strings.Contains(","+flags["--disallowedTools"]+",", ","+deny+",") {
+			t.Errorf("--disallowedTools lacks %s", deny)
+		}
+	}
+}
+
+// reviewer is a backend that records the job it was given and answers.
+type reviewer struct {
+	job    *Job
+	answer string
+}
+
+func (r reviewer) Name() string { return "reviewer" }
+
+func (r reviewer) Run(_ context.Context, job Job) (Usage, error) {
+	*r.job = job
+	return Usage{Backend: "reviewer", CostUSD: 0.12, Outcome: "success", Summary: r.answer}, nil
+}
+
+func TestReviewDriver(t *testing.T) {
+	var job Job
+	dir := "../../examples/04-api-rate-limiter"
+	r, err := ReviewDriver(context.Background(), reviewer{job: &job, answer: "  I found no problem. I checked every step.  "}, dir, filepath.Join(t.TempDir(), "review.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Text != "I found no problem. I checked every step." || r.Usage.CostUSD != 0.12 {
+		t.Errorf("review %+v", r)
+	}
+	if !job.ReadOnly || job.Workspace == dir || !strings.Contains(job.Workspace, "invariant-review-") {
+		t.Errorf("job %+v; the reviewer reads a copy, read only", job)
+	}
+	for _, want := range []string{"`conformance.ts`", "explores every state", "Claim nothing you didn't read"} {
+		if !strings.Contains(job.Prompt, want) {
+			t.Errorf("the review prompt lacks %q", want)
+		}
+	}
+	res := &Result{Usage: Usage{CostUSD: 1}, Review: r}
+	if res.Spend() != 1.12 {
+		t.Errorf("spend %v; the review counts", res.Spend())
+	}
+	// A project with no driver gets no review.
+	if r, err := ReviewDriver(context.Background(), reviewer{job: &job}, "../../examples/02-twophase-commit", filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r != nil {
+		t.Errorf("review %+v, %v; a Go project has no driver to review", r, err)
 	}
 }
