@@ -87,7 +87,7 @@ Each requirement serves one goal.
 - **1.6 An amendment lands only on the lock it amends.** If the base branch has moved on, the factory ratifies nothing and asks for a revision. Built. `D-0045` `D-0046`
 - **1.7 The factory can't change its own gate.** A factory pull request changes one project and nothing else, and the App can't edit CI. Built. `D-0014` `D-0041`
 - **1.8 Changes to the trusted base land by pull request,** and @gitdek merges them once CI passes. In force. `D-0048`
-- **1.9 GitHub enforces the gate once the repository is public.** `invariant/gate` becomes a required check, and GitHub's native auto-merge replaces the watcher's merge. Planned. `D-0033`
+- **1.9 GitHub enforces the gate.** `main` requires `invariant/gate` and a pull request for every change, so GitHub refuses any merge the gate didn't pass, the owner's included. The factory keeps merging its own proved way, instead of handing merges to GitHub's auto-merge. Built, slice 10. `D-0033` `D-0075`
 
 ### 2 · People decide; they don't review code
 
@@ -109,7 +109,7 @@ Each requirement serves one goal.
 - **3.6 A live view.** A dashboard shows what the factory is working on and every project's evidence, from the same sources as the receipts, and what's waiting on a person. It's shared through a Cloudflare tunnel for now, and moves to puglisij.com/invariant later. Built. `D-0049` `D-0050` `D-0060`
 - **3.7 Code you can ship.** The code carries no model bounds: it's the system alone, with sizes as parameters, and the explorer or driver keeps the environment at the bounds. Gobra and Nagini prove it at every size, and TLC checks the design at the ratified bounds. The gate also checks the code one size past the bounds, and fails code that hardcodes a size: a Go explorer runs again, and a TypeScript or Python driver counts. Built, slice 8: the factory asks for code this way in all three languages, and #18 did it live in Go. #28 took the rate limiter's bounds out of its code through the factory (#30). Other existing projects keep theirs until an issue asks. `D-0048` `D-0058` `D-0068`
 - **3.11 A second agent reviews every driver.** A conformance driver is evidence only if it tries every step a person or worker could. On copythis-ad#33, the factory's driver skipped the one step the ratified rule was about, and the gate passed anyway (D-0059). A second agent, with fresh context, reads each driver for steps it skips or states it never records, and the factory posts its review with the pull request. Proposed.
-- **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Each property is checked alone, under the ratified fairness, and each fairness statement must be about a step the model takes, so no property holds vacuously. A known bug can expect a property. Built in the gate in slice 9, for the factory's recovery model, which is next. `D-0048` `D-0058` `D-0069` `D-0071`
+- **3.8 Liveness.** People can ratify "eventually" properties under stated fairness, such as every waiting call eventually going out, and TLC checks them. Each property is checked alone, under the ratified fairness, and each fairness statement must be about a step the model takes, so no property holds vacuously. A known bug can expect a property. Built in slice 9, where the factory's recovery model is the first to use it: both its properties hold under its five fairness statements. `D-0048` `D-0058` `D-0069` `D-0071`
 - **3.9 Type checking** for TypeScript and Python, inside the sandbox. Later. `D-0030`
 - **3.10 A proof path for TypeScript.** Later. `D-0024` `D-0038`
 
@@ -118,7 +118,7 @@ Each requirement serves one goal.
 - **4.1 The issue protocol is a proved project.** It becomes `factory/protocol`, proved with Gobra and tied to its TLA+ model state for state, and the watcher runs on it. Built, slice 7. `D-0045` `D-0053` `D-0058`
 - **4.2 The factory's rules change through the factory.** A change to the protocol is an amendment that @gitdek ratifies. Built, slice 7. `D-0045` `D-0053` `D-0058`
 - **4.3 The factory survives a crash at any point.** Stop the watcher anywhere and restart it, and no step is lost or done twice, whether it's a post, a push, a pull request or a merge. Built, slice 9: runs and merges are recorded before they happen, every effect is looked for before it's taken, and the proved recovery core, `factory/recovery`, allows each one. A test stops the watcher before each of its effects, on the same machine or another. `D-0048` `D-0058` `D-0069` `D-0073` `D-0074`
-- **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. The first holds because of a check. For the second, one watcher at a time holds a lease in a Git ref, and checks it before every effect. Built, slice 9, with two watchers live for a day still to come. `D-0048` `D-0058` `D-0069` `D-0072`
+- **4.4 Concurrent work can't lose or double a step.** Two issues changing the same project can't both land, and two watchers running at once can't both act. The first holds because of a check. For the second, one watcher at a time holds a lease in a Git ref, and checks it before every effect. Built, slice 9. Two watchers ran on this repository for a day: GitHub refused the second one's only push for the lease, and it read the first's next 563 renewals without acting. `D-0048` `D-0058` `D-0069` `D-0072`
 
 ### 5 · Fast and cheap enough to use every day
 
@@ -161,8 +161,8 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 6 | Amendments, then existing projects in other repositories, starting with copythis-ad (5.6) | Done `D-0053` `D-0054` |
 | 7 | Invariant builds itself: the issue protocol as `factory/protocol` (4.1, 4.2) | Done `D-0045` `D-0053` `D-0058` |
 | 8 | Code you can ship (3.7) | Done `D-0048` `D-0058` `D-0068` |
-| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Under way `D-0048` `D-0058` `D-0069` |
-| 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Next, after slice 9 `D-0007` `D-0033` `D-0048` `D-0075` |
+| 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Done `D-0048` `D-0058` `D-0069` |
+| 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Done `D-0007` `D-0033` `D-0048` `D-0075` |
 | Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
