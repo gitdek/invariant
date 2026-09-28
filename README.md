@@ -42,6 +42,8 @@ Invariant splits the work where it belongs:
 4. **Synthesize.** Invariant writes the Go implementation and the TLA+ model. It keeps repairing them against counterexamples until the gate passes.
 5. **Gate and merge.** CI re-runs every check on the committed artifacts. The pull request merges only if every check passes.
 
+What an issue builds or changes is a **project**: one component, such as a rate limiter, with its ratified statements, its TLA+ model and its code, in a directory with an `.invariant/` folder. The gate checks each project on its own and writes a receipt for each.
+
 ## Watch it take an issue
 
 <p align="center">
