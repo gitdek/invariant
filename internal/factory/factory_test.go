@@ -908,3 +908,24 @@ func TestCodeLines(t *testing.T) {
 		t.Error("an issue without Code: lines names no code")
 	}
 }
+
+// A second agent's review of the driver goes out with the pull request, marked
+// as an opinion, and its cost counts in the build's spend (D-0082, D-0086).
+func TestThePullRequestCarriesTheReview(t *testing.T) {
+	r := newRig(t)
+	r.build.review = "I found one problem. conformance.ts:12 skips Give when the client holds nothing."
+	pr := ratified(t, r)
+	body := r.gh.prBody(pr.Marker.PR)
+	for _, want := range []string{
+		"### A second agent's review of the driver",
+		"This is its opinion, not evidence, and the receipt above doesn't count it",
+		"> I found one problem. conformance.ts:12 skips Give when the client holds nothing.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the pull request's body lacks %q:\n%s", want, body)
+		}
+	}
+	if pr.Marker.Spend != 0.30 {
+		t.Errorf("spend %v; synthesis's 0.25 and the review's 0.05", pr.Marker.Spend)
+	}
+}

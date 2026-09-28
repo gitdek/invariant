@@ -386,7 +386,29 @@ func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.
 	if res != nil && res.Final != nil {
 		b.WriteString("\n" + receipt.Markdown(res.Final))
 	}
+	if res != nil && res.Review != nil && res.Review.Text != "" {
+		b.WriteString("\n### A second agent's review of the driver\n\n")
+		b.WriteString("An agent with fresh context read the driver, and changed nothing. This is its opinion, not evidence, and the receipt above doesn't count it (D-0082).\n\n")
+		b.WriteString(quote(clip(res.Review.Text, reviewLimit), 400))
+		b.WriteString("\n")
+	}
 	return b.String()
+}
+
+// reviewLimit keeps a review from crowding the pull request's body, which
+// GitHub caps.
+const reviewLimit = 6000
+
+// clip cuts text to at most n bytes, at a line, and says so.
+func clip(text string, n int) string {
+	if len(text) <= n {
+		return text
+	}
+	cut := strings.LastIndex(text[:n], "\n")
+	if cut < 0 {
+		cut = n
+	}
+	return text[:cut] + "\n\n(The review goes on; the rest is in the build's log.)"
 }
 
 // projectReadme introduces a project the factory built.

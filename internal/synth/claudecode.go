@@ -33,7 +33,25 @@ func (c ClaudeCode) Name() string { return "claude-code" }
 // fileTools are the only built-in tools an agent gets.
 const fileTools = "Read,Write,Edit,Glob,Grep"
 
+// readTools are a reviewer's tools: it reads, and changes nothing.
+const readTools = "Read,Glob,Grep"
+
 func (c ClaudeCode) args(job Job) ([]string, error) {
+	if job.ReadOnly {
+		return []string{
+			"-p", job.Prompt,
+			"--output-format", "stream-json", "--verbose",
+			"--model", c.Model,
+			"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
+			"--max-turns", strconv.Itoa(c.MaxTurns),
+			"--strict-mcp-config",
+			"--tools", readTools,
+			"--allowedTools", readTools,
+			"--disallowedTools", "Bash,Write,Edit,WebFetch,WebSearch,Task,NotebookEdit,Read(~/**),Glob(~/**),Grep(~/**)",
+			"--setting-sources", "project",
+			"--no-session-persistence",
+		}, nil
+	}
 	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
 		"invariant": map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]},
 	}})

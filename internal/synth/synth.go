@@ -39,6 +39,9 @@ type Job struct {
 	GateServer []string  // the command that starts Invariant's MCP server
 	Tools      []string  // the server's tools the agent may call; just the gate when empty
 	Transcript io.Writer // where the backend records the agent's events
+	// ReadOnly gives the agent only the tools that read files, and no gate:
+	// a reviewer's job (D-0086).
+	ReadOnly bool
 }
 
 // Usage is how the agent's run went, by the agent's own account.
@@ -89,6 +92,19 @@ type Result struct {
 	Tampered []string       `json:"tampered,omitempty"` // protected files the agent changed; the changes were discarded
 	Dir      string         `json:"dir"`                // the finished project, under Out/result
 	Seconds  float64        `json:"seconds"`
+	// Review is a second agent's reading of the driver, when synthesis
+	// passed and the project has one (D-0082, D-0086).
+	Review *Review `json:"review,omitempty"`
+}
+
+// Spend is the agents' estimated cost for the build: synthesis, and the
+// review if there was one.
+func (r *Result) Spend() float64 {
+	spend := r.Usage.CostUSD
+	if r.Review != nil {
+		spend += r.Review.Usage.CostUSD
+	}
+	return spend
 }
 
 // Synthesize runs one synthesis. The result lands in Out/result as a
