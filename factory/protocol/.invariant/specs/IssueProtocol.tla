@@ -124,40 +124,45 @@ ResetPR ==
 \* A build stopped before it made a pull request.
 StoppedBuild == state = "failed" /\ head = NoHead
 
-\* The factory drafts: it asks questions, proposes statements against the
-\* base branch's current lock, gets stuck, or finds the issue unsupported.
-Draft ==
+\* Every draft the factory can post: questions, statements, stuck or unsupported.
+Drafts ==
+    {[kind |-> "asked", open |-> Q, p |-> NoP] : Q \in (SUBSET Questions) \ {{}}}
+    \cup {[kind |-> "proposed", open |-> {}, p |-> p] : p \in Proposals}
+    \cup {[kind |-> k, open |-> {}, p |-> NoP] : k \in {"stuck", "unsupported"}}
+
+\* The factory posts draft d: it asks questions, proposes statements against
+\* the base branch's current lock, gets stuck, or finds the issue unsupported.
+Draft(d) ==
     /\ ResetPR
     /\ ratified' = NoP
     /\ ratifiedBase' = NoP
     /\ failure' = "none"
     /\ UNCHANGED <<base, stops>>
-    /\ \/ \E Q \in (SUBSET Questions) \ {{}} :
-            state' = "asked" /\ open' = Q /\ proposal' = NoP /\ amends' = NoP
-       \/ \E p \in Proposals :
-            state' = "proposed" /\ open' = {} /\ proposal' = p /\ amends' = base
-       \/ \E k \in {"stuck", "unsupported"} :
-            state' = k /\ open' = {} /\ proposal' = NoP /\ amends' = NoP
+    /\ state' = d.kind
+    /\ open' = d.open
+    /\ proposal' = d.p
+    /\ amends' = IF d.kind = "proposed" THEN base ELSE NoP
 
-Solve(a) ==
+Solve(a, d) ==
     /\ a \in Directors
     /\ state \in {"none", "stuck", "unsupported", "closed"} \/ StoppedBuild
     /\ directedBy' = a
-    /\ Draft
+    /\ Draft(d)
 
-Revise(a) ==
+Revise(a, d) ==
     /\ a \in Directors
     /\ state \in {"asked", "proposed", "stuck", "unsupported", "closed"} \/ StoppedBuild
     /\ directedBy' = a
-    /\ Draft
+    /\ Draft(d)
 
-Choose(a, q) ==
+\* Answering the last open question drafts again, as d.
+Choose(a, q, d) ==
     /\ a \in Directors
     /\ state = "asked"
     /\ q \in open
     /\ directedBy' = a
     /\ IF open = {q}
-          THEN Draft
+          THEN Draft(d)
           ELSE /\ open' = open \ {q}
                /\ UNCHANGED <<state, proposal, amends, base, ratified, ratifiedBase,
                               head, gate, prLock, scope, mergedBy, mergedHead,
@@ -177,15 +182,15 @@ Ratify(a, p) ==
                    head, gate, prLock, scope, mergedBy, mergedHead,
                    stops, failure>>
 
-Build ==
+Build(h) ==
     /\ state = "ratified"
     /\ stops < MaxStops
-    /\ \E h \in Heads :
-        /\ state' = "pr_open"
-        /\ head' = h
-        /\ gate' = [gate EXCEPT ![h] = "pending"]
-        /\ prLock' = ratified
-        /\ scope' = "one"
+    /\ h \in Heads
+    /\ state' = "pr_open"
+    /\ head' = h
+    /\ gate' = [gate EXCEPT ![h] = "pending"]
+    /\ prLock' = ratified
+    /\ scope' = "one"
     /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
                    mergedBy, mergedHead, directedBy, stops, failure>>
 
@@ -211,15 +216,15 @@ RefuseBuild ==
 
 \* The code fails the gate in the factory's own run: it opens a draft pull
 \* request and posts that the build failed.
-BuildFailsGate ==
+BuildFailsGate(h) ==
     /\ state = "ratified"
     /\ stops < MaxStops
-    /\ \E h \in Heads :
-        /\ state' = "failed"
-        /\ head' = h
-        /\ gate' = [gate EXCEPT ![h] = "pending"]
-        /\ prLock' = ratified
-        /\ scope' = "one"
+    /\ h \in Heads
+    /\ state' = "failed"
+    /\ head' = h
+    /\ gate' = [gate EXCEPT ![h] = "pending"]
+    /\ prLock' = ratified
+    /\ scope' = "one"
     /\ failure' = "gate"
     /\ UNCHANGED <<open, proposal, amends, base, ratified, ratifiedBase,
                    mergedBy, mergedHead, directedBy, stops>>
@@ -236,11 +241,13 @@ Push(h, l, s) ==
     /\ UNCHANGED <<state, open, proposal, amends, base, ratified, ratifiedBase,
                    mergedBy, mergedHead, directedBy, stops, failure>>
 
-CIGate ==
+\* CI's gate reports result r on the pull request's current head.
+CIGate(r) ==
     /\ state \in {"pr_open", "failed"}
     /\ head # NoHead
     /\ gate[head] = "pending"
-    /\ \E r \in {"pass", "fail"} : gate' = [gate EXCEPT ![head] = r]
+    /\ r \in {"pass", "fail"}
+    /\ gate' = [gate EXCEPT ![head] = r]
     /\ UNCHANGED <<state, open, proposal, amends, base, ratified, ratifiedBase,
                    head, prLock, scope, mergedBy, mergedHead, directedBy,
                    stops, failure>>
@@ -323,17 +330,15 @@ Finished == state = "merged" /\ UNCHANGED vars
 
 Next ==
     \/ \E a \in Actors :
-        \/ Solve(a)
-        \/ Revise(a)
+        \/ \E d \in Drafts : Solve(a, d) \/ Revise(a, d)
         \/ Retry(a)
-        \/ \E q \in Questions : Choose(a, q)
+        \/ \E q \in Questions, d \in Drafts : Choose(a, q, d)
         \/ \E p \in Proposals : Ratify(a, p)
-    \/ Build
+    \/ \E h \in Heads : Build(h) \/ BuildFailsGate(h)
     \/ StopBuild
     \/ RefuseBuild
-    \/ BuildFailsGate
     \/ \E h \in Heads, l \in Locks, s \in {"one", "many"} : Push(h, l, s)
-    \/ CIGate
+    \/ \E r \in {"pass", "fail"} : CIGate(r)
     \/ NoticeFail
     \/ NoticeUnmergeable
     \/ Merge
