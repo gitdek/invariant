@@ -8,6 +8,7 @@
 //	invariant ratification -repo R DIR   check a factory project's ratification on GitHub
 //	invariant pin DIR                    record the current statement text as ratified
 //	invariant trace FILE                 replay a counterexample trace
+//	invariant decisions ...              record decisions and ask what rests on them
 //	invariant mcp ...                    serve the gate or the check to an agent (synthesize and formalize start it)
 package main
 
@@ -56,6 +57,7 @@ Usage:
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
   invariant ratification -repo OWNER/NAME PROJECT...
                                                check factory projects' ratifications on GitHub
+  invariant decisions COMMAND ...              record decisions and ask what rests on them
   invariant pin PROJECT                        record the statements' current text as ratified
   invariant trace FILE                         replay a counterexample trace
   invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-addr HOST:PORT]
@@ -99,6 +101,8 @@ func main() {
 		code = initCmd(args)
 	case "ledger":
 		code = ledgerCmd(ctx, args)
+	case "decisions":
+		code = decisionsCmd(ctx, args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:

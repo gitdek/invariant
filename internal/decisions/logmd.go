@@ -2,6 +2,8 @@ package decisions
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -122,4 +124,40 @@ func WithTable(log, table string) (string, error) {
 		end += next + 1
 	}
 	return log[:start] + TableStart + "\n\n" + table + "\n" + TableEnd + "\n" + log[end:], nil
+}
+
+// RenderLog is a repository's decisions/log.md with its table as the
+// checkout's journal has the decisions.
+func RenderLog(repo Repo) (string, error) {
+	log, err := os.ReadFile(filepath.Join(repo.Dir, "decisions", "log.md"))
+	if err != nil {
+		return "", err
+	}
+	decisions, err := Load(repo)
+	if err != nil {
+		return "", err
+	}
+	nodes := make([]Node, len(decisions))
+	for i, d := range decisions {
+		nodes[i] = d.Node
+	}
+	return WithTable(string(log), Table(nodes, repo.Name))
+}
+
+// WriteLog brings decisions/log.md's table up to date with the checkout's
+// journal, and says whether it changed.
+func WriteLog(repo Repo) (bool, error) {
+	want, err := RenderLog(repo)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(repo.Dir, "decisions", "log.md")
+	have, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	if string(have) == want {
+		return false, nil
+	}
+	return true, os.WriteFile(path, []byte(want), 0o644)
 }

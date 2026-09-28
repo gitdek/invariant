@@ -7,14 +7,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // a pure-Go SQLite, so Invariant needs no cgo (D-0096)
 )
 
-// schema is the graph: nodes, typed edges between them, and a journal that
-// mirrors every repository's journal lines and refuses edits.
+// schema is the graph: nodes, typed edges between them, a journal that
+// mirrors every repository's journal lines and refuses edits, and the
+// checkout each project was last rebuilt from. An edge's project is the one
+// whose journal or text records it, so rebuilding a project replaces its
+// nodes and edges and leaves every other project's alone.
 const schema = `
 CREATE TABLE IF NOT EXISTS node (
 	id      TEXT PRIMARY KEY,       -- invariant/D-0096, or invariant/SPEC.md:92 for a line that cites one
@@ -27,14 +31,17 @@ CREATE TABLE IF NOT EXISTS node (
 	text    TEXT NOT NULL DEFAULT '',
 	record  TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS node_project ON node (project, kind);
 CREATE TABLE IF NOT EXISTS edge (
 	src     TEXT NOT NULL,
 	type    TEXT NOT NULL,
 	dst     TEXT NOT NULL,
+	project TEXT NOT NULL,
 	derived INTEGER NOT NULL DEFAULT 0, -- read from text on a rebuild, rather than written to a journal
 	PRIMARY KEY (src, type, dst)
 );
 CREATE INDEX IF NOT EXISTS edge_to ON edge (dst, type);
+CREATE INDEX IF NOT EXISTS edge_project ON edge (project);
 CREATE TABLE IF NOT EXISTS journal (
 	seq     INTEGER PRIMARY KEY AUTOINCREMENT,
 	project TEXT NOT NULL,
@@ -42,11 +49,22 @@ CREATE TABLE IF NOT EXISTS journal (
 	hash    TEXT NOT NULL UNIQUE,
 	line    TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS journal_id ON journal (project, id);
 CREATE TRIGGER IF NOT EXISTS journal_no_update BEFORE UPDATE ON journal
 BEGIN SELECT RAISE(ABORT, 'the journal only grows'); END;
 CREATE TRIGGER IF NOT EXISTS journal_no_delete BEFORE DELETE ON journal
 BEGIN SELECT RAISE(ABORT, 'the journal only grows'); END;
+CREATE TABLE IF NOT EXISTS repo (
+	project TEXT PRIMARY KEY,
+	dir     TEXT NOT NULL, -- the checkout it was last rebuilt from
+	rebuilt TEXT NOT NULL  -- when, in RFC 3339
+);
 `
+
+// schemaVersion is the schema's version. A store with another has its
+// nodes, edges and checkouts dropped, since a rebuild brings them back, and
+// keeps its journal, which only grows.
+const schemaVersion = 1
 
 // Store is the decision graph in one SQLite file. Every process that needs
 // it opens it directly: SQLite in WAL mode lets many read while one writes,
@@ -76,11 +94,38 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("the decision store at %s: %w", path, err)
 	}
 	return &Store{db: db, Path: path}, nil
+}
+
+// migrate brings the store to this schema, in one transaction, so two
+// processes opening it at once don't both change it.
+func migrate(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	if _, err := tx.Exec(`DROP TABLE IF EXISTS edge; DROP TABLE IF EXISTS node; DROP TABLE IF EXISTS repo`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // OpenReadOnly opens the store for queries only: nothing written through it
@@ -98,118 +143,185 @@ func OpenReadOnly(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// apply puts one journal line into the graph, within tx.
-func apply(tx *sql.Tx, project string, e Event, line []byte) error {
-	id := project + "/" + e.ID
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO journal (project, id, hash, line) VALUES (?, ?, ?, ?)`, project, id, e.Hash, string(line)); err != nil {
+// put writes a decision into the graph within tx: its journal lines, its
+// node, the edges its journal records, and the citations its words make. It
+// replaces what the graph had for the decision, so putting it again after a
+// new line is the same as rebuilding.
+func put(tx *sql.Tx, project string, events []Event, d Decision) error {
+	for _, e := range events {
+		line, err := jsonLine(e)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO journal (project, id, hash, line) VALUES (?, ?, ?, ?)`, project, d.ID, e.Hash, string(line)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record`,
+		d.ID, project, d.Date, d.Door, d.Status, d.Who, d.Text, d.Record); err != nil {
 		return err
 	}
-	switch e.Op {
-	case OpImport, OpDecide:
-		if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record`,
-			id, project, e.Date, e.Door, e.Status, e.Who, e.Text, e.Record); err != nil {
-			return err
-		}
-	case OpRatify:
-		if _, err := tx.Exec(`UPDATE node SET status = 'ratified', who = ? WHERE id = ?`, e.By, id); err != nil {
-			return err
-		}
-	case OpSupersede:
-		with, err := Qualify(project, e.With)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`UPDATE node SET status = 'superseded' WHERE id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO edge (src, type, dst) VALUES (?, ?, ?)`, with, Supersedes, id); err != nil {
-			return err
-		}
-	case OpLink:
-	default:
-		return fmt.Errorf("%s: unknown op %q", id, e.Op)
+	if _, err := tx.Exec(`DELETE FROM edge WHERE src = ? AND project = ? AND derived = 0`, d.ID, project); err != nil {
+		return err
 	}
-	for _, edge := range e.Edges {
-		to, err := Qualify(project, edge.To)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO edge (src, type, dst) VALUES (?, ?, ?)`, id, edge.Type, to); err != nil {
+	for _, edge := range d.Edges {
+		if err := addEdge(tx, d.ID, edge.Type, edge.To, project); err != nil {
 			return err
 		}
 	}
-	return nil
+	if d.SupersededBy != "" {
+		if err := addEdge(tx, d.SupersededBy, Supersedes, d.ID, project); err != nil {
+			return err
+		}
+	}
+	// A citation read from words gives way to an edge the journal records.
+	if _, err := tx.Exec(`DELETE FROM edge WHERE src = ?1 AND derived = 1 AND dst IN (SELECT dst FROM edge WHERE src = ?1 AND derived = 0)`, d.ID); err != nil {
+		return err
+	}
+	return citeFrom(tx, d.ID, project, d.Text)
 }
 
-// Rebuild replays every repository's journal into the store, from nothing,
-// then reads what cites each decision in each repository's text: the
-// decisions' own words, the docs and the code. The journal table keeps what
-// it already had, since it only grows.
+// addEdge records an edge a journal holds, in place of a citation that was
+// only read from words.
+func addEdge(tx *sql.Tx, src, typ, dst, project string) error {
+	_, err := tx.Exec(`INSERT INTO edge (src, type, dst, project) VALUES (?, ?, ?, ?)
+		ON CONFLICT (src, type, dst) DO UPDATE SET derived = 0`, src, typ, dst, project)
+	return err
+}
+
+// Rebuild replaces each repository's project in the store with what its
+// checkout holds: every decision in its journal, then what cites each one in
+// its text, which is the decisions' own words, the docs and the code. Every
+// other project stays as it was, and the journal table keeps every line it
+// ever had, since it only grows.
 func (s *Store) Rebuild(repos []Repo) error {
+	type loaded struct {
+		repo      Repo
+		journals  map[string][]Event
+		ids       []string
+		decisions map[string]Decision
+	}
+	var all []loaded
+	seen := map[string]bool{}
+	for _, repo := range repos {
+		if seen[repo.Name] {
+			return fmt.Errorf("two checkouts of %s", repo.Name)
+		}
+		seen[repo.Name] = true
+		journals, ids, err := Journals(repo)
+		if err != nil {
+			return err
+		}
+		l := loaded{repo, journals, ids, map[string]Decision{}}
+		for _, id := range ids {
+			if l.decisions[id], err = fold(repo.Name, journals[id]); err != nil {
+				return err
+			}
+		}
+		all = append(all, l)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM edge; DELETE FROM node`); err != nil {
-		return err
-	}
-	for _, repo := range repos {
-		journals, ids, err := Journals(repo)
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, l := range all {
+		name := l.repo.Name
+		if _, err := tx.Exec(`DELETE FROM edge WHERE project = ?1; DELETE FROM node WHERE project = ?1`, name); err != nil {
+			return err
+		}
+		for _, id := range l.ids {
+			if err := put(tx, name, l.journals[id], l.decisions[id]); err != nil {
+				return err
+			}
+		}
+		if err := deriveCitations(tx, l.repo); err != nil {
+			return err
+		}
+		dir, err := filepath.Abs(l.repo.Dir)
 		if err != nil {
 			return err
 		}
-		for _, id := range ids {
-			for _, e := range journals[id] {
-				line, err := jsonLine(e)
-				if err != nil {
-					return err
-				}
-				if err := apply(tx, repo.Name, e, line); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	for _, repo := range repos {
-		if err := deriveCitations(tx, repo); err != nil {
+		if _, err := tx.Exec(`INSERT INTO repo (project, dir, rebuilt) VALUES (?, ?, ?)
+			ON CONFLICT (project) DO UPDATE SET dir = excluded.dir, rebuilt = excluded.rebuilt`, name, dir, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
+// Count is how many decisions a project has in the store, and how many
+// edges its journal and its text record.
+func (s *Store) Count(project string) (decisions, edges int, err error) {
+	if err = s.db.QueryRow(`SELECT count(*) FROM node WHERE project = ? AND kind = 'decision'`, project).Scan(&decisions); err != nil {
+		return 0, 0, err
+	}
+	err = s.db.QueryRow(`SELECT count(*) FROM edge WHERE project = ?`, project).Scan(&edges)
+	return decisions, edges, err
+}
+
+// Checkouts is every project the store holds, and the checkout each was
+// last rebuilt from.
+func (s *Store) Checkouts() ([]Repo, error) {
+	rows, err := s.db.Query(`SELECT project, dir FROM repo ORDER BY project`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Repo
+	for rows.Next() {
+		var r Repo
+		if err := rows.Scan(&r.Name, &r.Dir); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // NewDecision is a decision to write.
 type NewDecision struct {
 	Door   string // one-way or two-way
 	Status string // decided, proposed or ratified
-	Who    string // @gitdek, or agent
+	Who    string // who made it: a person, such as @gitdek, or agent
 	Text   string
-	Record string
+	Record string // a one-way door's record, by its slug: decisions/D-NNNN-slug.md
 	Edges  []Edge
 }
 
-// Decide writes a new decision: it takes the next ID in the repository's
-// project, writes the decision's journal, then puts it in the graph. The ID
-// is taken under the store's write lock, so two processes never take the
-// same one.
+var slug = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// Decide writes a new decision: it takes the project's next ID, writes the
+// decision's journal in the checkout, then puts it in the graph. The ID is
+// taken under the store's write lock, past every ID the store has ever
+// journaled for the project and every one in the checkout, so processes and
+// checkouts on one machine never take the same one. A branch that's
+// abandoned leaves a gap in the numbers.
 func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
-	if d.Door != "one-way" && d.Door != "two-way" {
+	text := strings.Join(strings.Fields(d.Text), " ")
+	switch {
+	case d.Door != "one-way" && d.Door != "two-way":
 		return "", fmt.Errorf("a decision's door is one-way or two-way, not %q", d.Door)
-	}
-	if d.Status != "decided" && d.Status != "proposed" && d.Status != "ratified" {
+	case d.Status != "decided" && d.Status != "proposed" && d.Status != "ratified":
 		return "", fmt.Errorf("a new decision is decided, proposed or ratified, not %q", d.Status)
-	}
-	if d.Door == "one-way" && d.Status == "decided" {
+	case d.Door == "one-way" && d.Status == "decided":
 		return "", errors.New("a one-way door is proposed until @gitdek ratifies it, never decided by an agent (AGENTS.md)")
-	}
-	if strings.TrimSpace(d.Text) == "" {
+	case d.Door == "one-way" && d.Record == "":
+		return "", errors.New("a one-way door has a full record: name it with its slug, for decisions/D-NNNN-slug.md")
+	case d.Record != "" && !slug.MatchString(d.Record):
+		return "", fmt.Errorf("a record's slug is lowercase words joined by hyphens, not %q", d.Record)
+	case d.Status == "ratified" && !strings.HasPrefix(d.Who, "@"):
+		return "", errors.New("only a person ratifies, so a ratified decision's who is a person, such as @gitdek")
+	case text == "":
 		return "", errors.New("a decision says what was decided")
+	case strings.Contains(text, "|"):
+		return "", errors.New("a decision's words can't hold |, which would split its row in decisions/log.md")
 	}
 	for _, e := range d.Edges {
-		if !edgeTypes[e.Type] || e.Type == Implements {
-			return "", fmt.Errorf("a decision refines, supersedes, reopens or cites another, not %q", e.Type)
+		if err := s.checkEdge(repo, e); err != nil {
+			return "", err
 		}
 	}
 	tx, err := s.db.Begin()
@@ -217,31 +329,68 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 		return "", err
 	}
 	defer tx.Rollback()
-	var last sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(CAST(substr(id, length(?) + 4) AS INTEGER)) FROM node WHERE kind = 'decision' AND project = ?`, repo.Name, repo.Name).Scan(&last); err != nil {
+	var journaled sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(CAST(substr(id, length(?1) + 4) AS INTEGER)) FROM journal WHERE project = ?1`, repo.Name).Scan(&journaled); err != nil {
 		return "", err
 	}
-	id := fmt.Sprintf("D-%04d", last.Int64+1)
-	if !last.Valid {
-		id = "D-0001"
+	next, err := highest(repo)
+	if err != nil {
+		return "", err
 	}
+	if journaled.Valid && int(journaled.Int64) > next {
+		next = int(journaled.Int64)
+	}
+	id := fmt.Sprintf("D-%04d", max(next+1, 1))
 	now := time.Now().UTC()
 	e := Event{At: now.Format(time.RFC3339), By: by, Op: OpDecide, ID: id, Date: now.Format("2006-01-02"),
-		Door: d.Door, Status: d.Status, Who: d.Who, Text: strings.TrimSpace(d.Text), Record: d.Record, Edges: d.Edges}
+		Door: d.Door, Status: d.Status, Who: d.Who, Text: text, Edges: d.Edges}
+	if d.Record != "" {
+		e.Record = id + "-" + d.Record + ".md"
+	}
+	if _, err := fold(repo.Name, []Event{e}); err != nil {
+		return "", err
+	}
 	if err := appendLine(repo, &e, true); err != nil {
 		return "", err
 	}
-	if err := s.applyNew(tx, repo, e); err != nil {
+	if err := putFile(tx, repo, id); err != nil {
 		return "", err
 	}
 	return id, tx.Commit()
 }
 
-// Ratify records @gitdek's ratification of a proposed or decided decision.
+// checkEdge refuses an edge a decision can't have: an unknown type, code's
+// implements, or a decision in the same project that doesn't exist.
+func (s *Store) checkEdge(repo Repo, e Edge) error {
+	if !edgeTypes[e.Type] || e.Type == Implements {
+		return fmt.Errorf("a decision refines, supersedes, reopens or cites another, not %q", e.Type)
+	}
+	return exists(repo, e.To)
+}
+
+// exists refuses an ID in the repository's own project that its checkout
+// has no journal for. Another project's decisions are checked against its
+// own journal, where both are loaded.
+func exists(repo Repo, id string) error {
+	full, err := Qualify(repo.Name, id)
+	if err != nil {
+		return err
+	}
+	short := full[strings.LastIndex(full, "/")+1:]
+	if full != repo.Name+"/"+short {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(repo.JournalDir(), short+".jsonl")); err != nil {
+		return fmt.Errorf("there's no decision %s in %s", short, repo.Dir)
+	}
+	return nil
+}
+
+// Ratify records a person's ratification of a proposed or decided decision.
 func (s *Store) Ratify(repo Repo, id, by string) error {
-	return s.update(repo, id, by, func(status string) (Event, error) {
-		if status == "ratified" || status == "superseded" {
-			return Event{}, fmt.Errorf("%s is %s already", id, status)
+	return s.update(repo, id, by, func(d Decision) (Event, error) {
+		if d.Status == "ratified" || d.Status == "superseded" {
+			return Event{}, fmt.Errorf("%s is %s already", id, d.Status)
 		}
 		return Event{Op: OpRatify}, nil
 	})
@@ -249,11 +398,11 @@ func (s *Store) Ratify(repo Repo, id, by string) error {
 
 // Supersede records that a later decision replaces id.
 func (s *Store) Supersede(repo Repo, id, with, by string) error {
-	if _, err := Qualify(repo.Name, with); err != nil {
+	if err := exists(repo, with); err != nil {
 		return err
 	}
-	return s.update(repo, id, by, func(status string) (Event, error) {
-		if status == "superseded" {
+	return s.update(repo, id, by, func(d Decision) (Event, error) {
+		if d.Status == "superseded" {
 			return Event{}, fmt.Errorf("%s is superseded already", id)
 		}
 		return Event{Op: OpSupersede, With: with}, nil
@@ -262,20 +411,18 @@ func (s *Store) Supersede(repo Repo, id, with, by string) error {
 
 // Link records a typed edge from id to another decision.
 func (s *Store) Link(repo Repo, id string, edge Edge, by string) error {
-	if !edgeTypes[edge.Type] || edge.Type == Implements {
-		return fmt.Errorf("a decision refines, supersedes, reopens or cites another, not %q", edge.Type)
-	}
-	if _, err := Qualify(repo.Name, edge.To); err != nil {
+	if err := s.checkEdge(repo, edge); err != nil {
 		return err
 	}
-	return s.update(repo, id, by, func(string) (Event, error) {
+	return s.update(repo, id, by, func(Decision) (Event, error) {
 		return Event{Op: OpLink, Edges: []Edge{edge}}, nil
 	})
 }
 
-// update appends one line to an existing decision's journal, and applies it,
-// under the store's write lock.
-func (s *Store) update(repo Repo, id, by string, next func(status string) (Event, error)) error {
+// update appends one line to a decision's journal in the checkout, and puts
+// the decision in the graph again, under the store's write lock. What the
+// line may say depends on the decision as the checkout's journal has it.
+func (s *Store) update(repo Repo, id, by string, next func(Decision) (Event, error)) error {
 	full, err := Qualify(repo.Name, id)
 	if err != nil {
 		return err
@@ -289,40 +436,46 @@ func (s *Store) update(repo Repo, id, by string, next func(status string) (Event
 		return err
 	}
 	defer tx.Rollback()
-	var status string
-	if err := tx.QueryRow(`SELECT status FROM node WHERE id = ? AND kind = 'decision'`, full).Scan(&status); errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("there's no decision %s", full)
-	} else if err != nil {
+	events, err := ReadJournal(filepath.Join(repo.JournalDir(), short+".jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("there's no decision %s in %s", short, repo.Dir)
+	}
+	if err != nil {
 		return err
 	}
-	e, err := next(status)
+	d, err := fold(repo.Name, events)
+	if err != nil {
+		return err
+	}
+	e, err := next(d)
 	if err != nil {
 		return err
 	}
 	e.At, e.By, e.ID = time.Now().UTC().Format(time.RFC3339), by, short
+	if _, err := fold(repo.Name, append(events, e)); err != nil {
+		return err
+	}
 	if err := appendLine(repo, &e, false); err != nil {
 		return err
 	}
-	if err := s.applyNew(tx, repo, e); err != nil {
+	if err := putFile(tx, repo, short); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// applyNew puts a line that was just written into the graph, with the
-// citations its words make.
-func (s *Store) applyNew(tx *sql.Tx, repo Repo, e Event) error {
-	line, err := jsonLine(e)
+// putFile puts one decision into the graph, as its journal file in the
+// checkout has it.
+func putFile(tx *sql.Tx, repo Repo, short string) error {
+	events, err := ReadJournal(filepath.Join(repo.JournalDir(), short+".jsonl"))
 	if err != nil {
 		return err
 	}
-	if err := apply(tx, repo.Name, e, line); err != nil {
+	d, err := fold(repo.Name, events)
+	if err != nil {
 		return err
 	}
-	if e.Text != "" {
-		return citeFrom(tx, repo.Name+"/"+e.ID, repo.Name, e.Text)
-	}
-	return nil
+	return put(tx, repo.Name, events, d)
 }
 
 // Node is one node of the graph.
@@ -365,6 +518,38 @@ func (s *Store) Get(id string) (Node, error) {
 	return nodes[0], nil
 }
 
+// A Neighbor is a node at the other end of an edge: the edge's type, and
+// whether it points out from the node asked about or in to it. A node whose
+// project isn't loaded has only its ID.
+type Neighbor struct {
+	Type string `json:"type"`
+	Out  bool   `json:"out"`
+	Node Node   `json:"node"`
+}
+
+// Neighbors is every edge at a node, out from it first.
+func (s *Store) Neighbors(id string) ([]Neighbor, error) {
+	cols := `COALESCE(n.kind, ''), COALESCE(n.project, ''), COALESCE(n.date, ''), COALESCE(n.door, ''), COALESCE(n.status, ''), COALESCE(n.who, ''), COALESCE(n.text, ''), COALESCE(n.record, '')`
+	rows, err := s.db.Query(`SELECT e.type, 1, e.dst, `+cols+` FROM edge e LEFT JOIN node n ON n.id = e.dst WHERE e.src = ?1
+		UNION ALL
+		SELECT e.type, 0, e.src, `+cols+` FROM edge e LEFT JOIN node n ON n.id = e.src WHERE e.dst = ?1
+		ORDER BY 2 DESC, 1, 3`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Neighbor
+	for rows.Next() {
+		var nb Neighbor
+		n := &nb.Node
+		if err := rows.Scan(&nb.Type, &nb.Out, &n.ID, &n.Kind, &n.Project, &n.Date, &n.Door, &n.Status, &n.Who, &n.Text, &n.Record); err != nil {
+			return nil, err
+		}
+		out = append(out, nb)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) nodes(query string, args ...any) ([]Node, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -373,23 +558,29 @@ func (s *Store) nodes(query string, args ...any) ([]Node, error) {
 	return scanNodes(rows)
 }
 
-// Dependents is everything that rests on a decision, transitively: the
-// decisions that refine or cite it, and the SPEC lines, docs and code that
-// cite or implement any of them. It's what reopening the decision touches.
-// UNION keeps each node once, so the walk always ends, however the graph
-// loops.
+// Dependents is everything that rests on a decision: every decision that
+// refines it, directly or through others, and every decision, SPEC line,
+// doc or piece of code that mentions or implements any of them. It's what
+// reopening the decision touches. A mention counts one step and no further,
+// since a citation is often only an example, and following citations on
+// would make every decision rest on nearly every other one. UNION keeps
+// each node once, so the walk ends however the graph loops.
 func (s *Store) Dependents(id string) ([]Node, error) {
-	return s.nodes(`WITH RECURSIVE dep(id) AS (
+	return s.nodes(`WITH RECURSIVE chain(id) AS (
 			SELECT ?1
 			UNION
-			SELECT e.src FROM edge e JOIN dep d ON e.dst = d.id WHERE e.type IN ('refines', 'cites', 'implements')
+			SELECT e.src FROM edge e JOIN chain c ON e.dst = c.id WHERE e.type = 'refines'
 		)
-		SELECT `+nodeColumns+` FROM dep JOIN node n ON n.id = dep.id WHERE dep.id != ?1
+		SELECT `+nodeColumns+` FROM node n WHERE n.id != ?1 AND n.id IN (
+			SELECT id FROM chain
+			UNION
+			SELECT e.src FROM edge e JOIN chain c ON e.dst = c.id WHERE e.type IN ('cites', 'implements', 'reopens')
+		)
 		ORDER BY n.kind, n.id`, id)
 }
 
 // Implementers is the code that implements a decision, or a decision that
-// rests on it.
+// refines it.
 func (s *Store) Implementers(id string) ([]Node, error) {
 	all, err := s.Dependents(id)
 	if err != nil {
@@ -404,15 +595,20 @@ func (s *Store) Implementers(id string) ([]Node, error) {
 	return out, nil
 }
 
-// Grounds is what a decision rests on, transitively: the decisions it
-// refines or cites. It says why the decision exists.
+// Grounds is what a decision rests on: the decisions it refines, directly
+// or through others, and the ones any of them cites or reopens. It says why
+// the decision exists.
 func (s *Store) Grounds(id string) ([]Node, error) {
-	return s.nodes(`WITH RECURSIVE g(id) AS (
+	return s.nodes(`WITH RECURSIVE chain(id) AS (
 			SELECT ?1
 			UNION
-			SELECT e.dst FROM edge e JOIN g ON e.src = g.id WHERE e.type IN ('refines', 'cites')
+			SELECT e.dst FROM edge e JOIN chain c ON e.src = c.id WHERE e.type = 'refines'
 		)
-		SELECT `+nodeColumns+` FROM g JOIN node n ON n.id = g.id WHERE g.id != ?1 AND n.kind = 'decision'
+		SELECT `+nodeColumns+` FROM node n WHERE n.kind = 'decision' AND n.id != ?1 AND n.id IN (
+			SELECT id FROM chain
+			UNION
+			SELECT e.dst FROM edge e JOIN chain c ON e.src = c.id WHERE e.type IN ('cites', 'reopens')
+		)
 		ORDER BY n.id`, id)
 }
 
