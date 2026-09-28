@@ -148,4 +148,4 @@ jobs:
       # already ran them on (D-0079).
       - name: Show the gate rejects gaming, and synthesis can't touch the lock
         if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'invariant/')
-        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/
+        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/ ./internal/conformance/

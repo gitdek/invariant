@@ -38,6 +38,9 @@ type Result struct {
 	Loop     int
 	Stutters bool
 	ExitCode int
+	// Printed is what the model printed with Print or PrintT: the text
+	// between TLC's own messages, one entry per run of lines.
+	Printed []string
 }
 
 // State is one step of a counterexample trace. Values are TLA+ text as TLC
@@ -70,6 +73,7 @@ const (
 	codeVersion       = 2262
 	codeSuccess       = 2193
 	codeViolated      = 2110
+	codeViolatedStart = 2107 // an invariant fails in an initial state, which the message carries
 	codeDeadlock      = 2114
 	codeBehavior      = 2121
 	codeTraceState    = 2217
@@ -107,6 +111,11 @@ var informational = map[int]bool{
 // Parse reads the output of `tlc2.TLC -tool` and its exit code.
 func Parse(out string, exitCode int) Result {
 	r := Result{ExitCode: exitCode}
+	for _, text := range message.Split(out, -1) {
+		if text = strings.TrimSpace(text); text != "" && !strings.HasPrefix(text, "@!@!@") {
+			r.Printed = append(r.Printed, text)
+		}
+	}
 	var success, deadlock, temporal bool
 	var problems []string
 	for _, m := range message.FindAllStringSubmatch(out, -1) {
@@ -120,6 +129,16 @@ func Parse(out string, exitCode int) Result {
 		case codeViolated:
 			if v := violated.FindStringSubmatch(body); v != nil {
 				r.Invariant = v[1]
+			}
+		case codeViolatedStart:
+			if v := violated.FindStringSubmatch(body); v != nil {
+				r.Invariant = v[1]
+			}
+			// The state follows the first line, written as a trace state's is.
+			if _, vars, ok := strings.Cut(body, "\n"); ok {
+				if s, ok := parseState("1: <Initial predicate>\n" + vars); ok {
+					r.Trace = append(r.Trace, s)
+				}
 			}
 		case codeDeadlock:
 			deadlock = true

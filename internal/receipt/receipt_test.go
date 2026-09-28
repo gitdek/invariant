@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gitdek/invariant/internal/conformance"
 	"github.com/gitdek/invariant/internal/verify"
 )
 
@@ -35,5 +36,42 @@ func TestLivenessRows(t *testing.T) {
 	r.Properties, r.Fairness = nil, nil
 	if md := Markdown(r); strings.Contains(md, "Liveness") || strings.Contains(md, "Fairness") {
 		t.Errorf("a receipt without properties shows liveness rows:\n%s", md)
+	}
+}
+
+// A driver that records its attempts gets a row saying whether it tried
+// every step; one that explores completely but records only runs says its
+// steps weren't checked (D-0082).
+func TestEveryStepTriedRow(t *testing.T) {
+	r := &verify.Report{
+		Project:   "queue",
+		Bounds:    map[string]string{"Capacity": "1", "MaxPuts": "2"},
+		Design:    verify.Design{Passed: true, Outcome: "passed", DistinctStates: 5},
+		Build:     verify.Build{Passed: true},
+		Assurance: "tested against the model",
+		Conformance: &conformance.Result{Passed: true, Exhaustive: true, Steps: 12, States: 5, ModelStates: 5,
+			Tried: &conformance.Tried{Passed: true, Attempts: 12, States: 5}},
+	}
+	for _, want := range []string{
+		"| Every step tried | ✅ in every state reached, but where only the environment's bounds rule a step out | 12 attempts in 5 states, refusals included |",
+		"| Code · conformance | ✅ tested against the model: every reachable state, no step outside it | 12 steps recorded, 5 of 5 model states visited |",
+	} {
+		if md := Markdown(r); !strings.Contains(md, want) {
+			t.Errorf("receipt lacks %q:\n%s", want, md)
+		}
+	}
+	r.Conformance.Tried = &conformance.Tried{Attempts: 11, States: 5, Untried: `{<<"Take">>}`, In: "q = <<>> /\\ puts = 0", Message: "the driver never tried a step that more than a bound rules out"}
+	md := Markdown(r)
+	for _, want := range []string{
+		"| Every step tried | ❌ a step never tried | `{<<\"Take\">>}` in `q = <<>> /\\ puts = 0` |",
+		"- Every step tried: the driver never tried a step that more than a bound rules out. `{<<\"Take\">>}` in `q = <<>> /\\ puts = 0`",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("receipt lacks %q:\n%s", want, md)
+		}
+	}
+	r.Conformance.Tried = nil
+	if md := Markdown(r); !strings.Contains(md, "| Every step tried | ➖ not checked | the driver records its runs, not its attempts (D-0082) |") {
+		t.Errorf("a driver that records runs doesn't say its steps weren't checked:\n%s", md)
 	}
 }

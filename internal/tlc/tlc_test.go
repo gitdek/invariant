@@ -143,3 +143,21 @@ func TestParseActionProperty(t *testing.T) {
 		t.Fatalf("Outcome = %s, Property = %q, trace %d states; want OtherIsNext violated in 2", r.Outcome, r.Property, len(r.Trace))
 	}
 }
+
+// What a model prints with PrintT comes back beside TLC's own messages.
+func TestParseKeepsWhatTheModelPrinted(t *testing.T) {
+	out := "@!@!@STARTMSG 2189:0 @!@!@\nComputing initial states...\n@!@!@ENDMSG 2189 @!@!@\n" +
+		"<<\"invariant-untried\", {<<\"MakeCall\", a1>>}>>\n" +
+		"@!@!@STARTMSG 2107:1 @!@!@\nInvariant Invariant_EveryStepTried is violated by the initial state:\n" +
+		"/\\ clock = 3\n/\\ invariant_i = 2\n\n@!@!@ENDMSG 2107 @!@!@\n"
+	r := Parse(out, 12)
+	if len(r.Trace) != 1 || len(r.Trace[0].Vars) != 2 || r.Trace[0].Vars[1] != (Var{Name: "invariant_i", Value: "2"}) {
+		t.Errorf("trace = %+v; want the initial state the message carries", r.Trace)
+	}
+	if len(r.Printed) != 1 || r.Printed[0] != `<<"invariant-untried", {<<"MakeCall", a1>>}>>` {
+		t.Errorf("Printed = %q", r.Printed)
+	}
+	if r.Outcome != Violated || r.Invariant != "Invariant_EveryStepTried" {
+		t.Errorf("outcome %s, invariant %q", r.Outcome, r.Invariant)
+	}
+}

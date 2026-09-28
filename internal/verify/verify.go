@@ -526,7 +526,16 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 			if err != nil {
 				return nil, err
 			}
-			if c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, evidence.Traces); err != nil {
+			// A driver that explores completely, and records its attempts,
+			// is checked for trying every step (D-0082, D-0085).
+			var model *conformance.Model
+			if p.Manifest.Exhaustive {
+				model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
+				if model.Steps, err = tla.Steps(src); err != nil {
+					model.Problem = err.Error()
+				}
+			}
+			if c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, evidence.Traces, model); err != nil {
 				return nil, err
 			}
 		}
@@ -549,6 +558,9 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	}
 	if r.Conformance != nil {
 		r.Passed = r.Passed && r.Conformance.Passed
+		if t := r.Conformance.Tried; t != nil {
+			r.Passed = r.Passed && t.Passed
+		}
 	}
 	if r.Code != nil {
 		r.Passed = r.Passed && r.Code.Passed
