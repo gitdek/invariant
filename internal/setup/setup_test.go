@@ -15,10 +15,13 @@ func TestWorkflowPinsInvariant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ref: " + ref, "name: invariant/gate", "secrets.INVARIANT_DEPLOY_KEY", "persist-credentials: false", "invariant\" verify", "contents: read"} {
+	for _, want := range []string{"ref: " + ref, "name: invariant/gate", "persist-credentials: false", "invariant\" verify", "contents: read"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("the workflow lacks %q", want)
 		}
+	}
+	if strings.Contains(w, "ssh-key") || strings.Contains(w, "secrets.") {
+		t.Error("Invariant is public, so CI needs no key or secret to read it")
 	}
 	if strings.Contains(w, "{{REF}}") || strings.Contains(w, "contents: write") {
 		t.Error("the workflow isn't pinned, or it can write")

@@ -22,13 +22,12 @@ jobs:
           fetch-depth: 0
           lfs: false
 
-      # Invariant is private, so a read-only deploy key checks it out.
+      # Invariant is public, so CI checks it out without a key.
       - uses: actions/checkout@v7
         with:
           repository: gitdek/invariant
           ref: {{REF}}
           path: .invariant-gate
-          ssh-key: ${{ secrets.INVARIANT_DEPLOY_KEY }}
           persist-credentials: false
 
       - uses: actions/setup-go@v7
