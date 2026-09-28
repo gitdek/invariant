@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -25,25 +26,27 @@ func render(steps []Step) []string {
 	return out
 }
 
-// Every model in the repository writes Next in one of the shapes Steps reads.
-func TestStepsOfEveryModel(t *testing.T) {
-	root := filepath.Join("..", "..")
+// Steps reads the models in this repository as they were written, each in
+// one of the shapes it handles. They're copies in testdata, since the
+// factory changes a model's Next when it rebuilds a project, as #79 did.
+func TestStepsOfTheRepositorysModels(t *testing.T) {
+	root := "testdata"
 	for file, want := range map[string][]string{
-		"examples/02-twophase-commit/.invariant/specs/TwoPhase.tla": {
+		"TwoPhase.tla": {
 			"TMCommit", "TMAbort",
 			`\E r \in RM : TMRcvPrepared(r)`, `\E r \in RM : RMPrepare(r)`, `\E r \in RM : RMChooseToAbort(r)`,
 			`\E r \in RM : RMRcvCommitMsg(r)`, `\E r \in RM : RMRcvAbortMsg(r)`,
 		},
-		"examples/03-log-buffer-ts/.invariant/specs/LogBuffer.tla": {
+		"LogBuffer.tla": {
 			`\E p \in Producers : Write(p)`, "Ship", "ShipFail", "Done",
 		},
-		"examples/04-api-rate-limiter/.invariant/specs/RateLimiter.tla": {
+		"RateLimiter.tla": {
 			`\E a \in Apis : MakeCall(a)`, "Tick", "Done",
 		},
-		"examples/05-connection-pool/.invariant/specs/ConnectionPool.tla": {
+		"ConnectionPool.tla": {
 			`\E c \in Clients : Acquire(c)`, `\E c \in Clients : Refuse(c)`, `\E c \in Clients : Release(c)`,
 		},
-		"factory/protocol/.invariant/specs/IssueProtocol.tla": {
+		"IssueProtocol.tla": {
 			`\E a \in Actors : Solve(a)`, `\E a \in Actors : Revise(a)`, `\E a \in Actors : Retry(a)`,
 			`\E a \in Actors : \E q \in Questions : Choose(a, q)`, `\E a \in Actors : \E p \in Proposals : Ratify(a, p)`,
 			"Build", "StopBuild", "RefuseBuild", "BuildFailsGate",
@@ -51,7 +54,7 @@ func TestStepsOfEveryModel(t *testing.T) {
 			"CIGate", "NoticeFail", "NoticeUnmergeable", "Merge", "OthersMerge", "OthersClose",
 			`\E l \in Locks : BaseMoves(l)`, "Finished",
 		},
-		"factory/recovery/.invariant/specs/WatcherRecovery.tla": {
+		"WatcherRecovery.tla": {
 			`\E c \in Cmds : Give(c)`, "CIPass", "Expire",
 			`\E w \in Watchers : Acquire(w)`, `\E w \in Watchers : Crash(w)`, `\E w \in Watchers : Stall(w)`, `\E w \in Watchers : Restart(w)`,
 			`\E w \in Watchers : Act(w)`, `\E w \in Watchers : FinishRun(w)`, `\E w \in Watchers : DropRun(w)`,
@@ -69,6 +72,41 @@ func TestStepsOfEveryModel(t *testing.T) {
 		}
 		if got := render(steps); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s:\n got %q\nwant %q", file, got, want)
+		}
+	}
+}
+
+// Every model in the repository, as it is now, writes Next in a shape Steps
+// reads, and every step it finds is an operator the model defines.
+func TestStepsOfEveryModel(t *testing.T) {
+	var files []string
+	for _, dir := range []string{"examples", "factory"} {
+		found, err := filepath.Glob(filepath.Join("..", "..", dir, "*", ".invariant", "specs", "*.tla"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, found...)
+	}
+	if len(files) < 10 {
+		t.Fatalf("found only %d models", len(files))
+	}
+	for _, file := range files {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps, err := Steps(string(src))
+		if err != nil {
+			t.Errorf("%s: %v", file, err)
+			continue
+		}
+		if len(steps) == 0 {
+			t.Errorf("%s: no steps", file)
+		}
+		for _, st := range steps {
+			if !regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(st.Name) + `\s*(\(|==)`).MatchString(string(src)) {
+				t.Errorf("%s: %s isn't an operator the model defines", file, st.Name)
+			}
 		}
 	}
 }
