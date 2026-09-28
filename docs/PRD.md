@@ -37,7 +37,7 @@ Invariant is a code factory that turns GitHub issues into merged pull requests. 
 
 ## Non-goals, for now
 
-- **Whole applications.** The factory builds small cores that are state machines, and the rest of an application calls them. It doesn't prove arbitrary existing code.
+- **Proving whole applications.** The factory proves small cores that are state machines, and the rest of an application calls them. From slice 13 it builds the rest too, tested rather than proved (D-0105). It doesn't prove arbitrary existing code.
 - **A hosted service.** The factory runs on the owner's machine, with the owner's accounts. A hosted factory would use an API key. `D-0028`
 - **Claims beyond the checked bounds.** No "100%", and no "bug-free". `D-0015`
 - **Deciding what to build.** The factory never makes a call a person should make. `D-0002`
@@ -56,6 +56,8 @@ Invariant can't build all of itself, and it shouldn't. The factory builds only w
 Once a requirement is ratified, it becomes code in one of two ways. If it's a rule with a model, an agent writes an issue that describes it completely, @gitdek answers the forks and ratifies, and the factory builds and proves it. Anything else, an agent builds in a session with @gitdek.
 
 That split is the ideal, not a compromise. Proofs go where the rules are, tests go where the plumbing is, and a person makes every decision.
+
+From slice 13, the factory runs both. A plumbing issue goes through the same flow as a modeled one, with a plan and tests where statements and a proof don't fit, and a PRD becomes a plan of issues a person ratifies. Coding agents start every change as an issue, and build by hand only what the factory can't take yet. `D-0105`
 
 ## The trusted base
 
@@ -98,6 +100,7 @@ Each requirement serves one goal.
 - **2.5 After ratification, nothing more is asked of people** unless something fails. Synthesis, the pull request and the merge happen on their own. Built. `D-0036`
 - **2.6 A failure explains itself** on the issue, and `/invariant retry` picks it up again once someone fixes the cause. Built. `D-0000` `D-0047`
 - **2.7 Three languages,** chosen per issue by label. Go and Python are proved, and TypeScript is tested in every state it can reach. Built. `D-0038` `D-0039` `D-0040`
+- **2.8 Every change goes through the factory, and so can a whole PRD.** A change that isn't a state machine is a plumbing issue: its proposal is a plan with acceptance tests, which a person ratifies by hash, and its checks are CI's tests, the decision graph and a second agent's review. Its pull request changes only the files the plan names, and only a person merges a change to the trusted base. `/invariant plan` turns a PRD into a plan of at most 10 issues, which a person ratifies, and the factory works them one at a time. Slice 13. `D-0105`
 
 ### 3 · Every claim is backed by tool output, and states its limits
 
@@ -166,6 +169,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Done `D-0007` `D-0033` `D-0048` `D-0075` |
 | 11 | A driver can't skip a step (3.11) | Done `D-0059` `D-0082` `D-0090` |
 | 12 | One decision graph for every project (3.12) | In progress `D-0096` |
+| 13 | The factory takes every change, and a whole PRD (2.8) | Next `D-0105` |
 | Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
@@ -174,6 +178,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 - **Slice 9 is done when** a model of the watcher shows that no step is lost or doubled, including a crash at any point and a second watcher. The factory proves the core that decides what to do after a restart, the watcher runs on it, and a test kills the watcher after each kind of step and shows the issue still merges.
 - **Slice 10 is done when** `invariant/gate` is a required check, GitHub's auto-merge does the merging, and a review of the issue surface, seen as someone without write access, is written up with its findings fixed.
 - **Slice 12 is done when** every decision in this repository and copythis-ad is in the store, each repository's journal rebuilds it exactly, an agent answers what depends on a decision through the tools, and CI fails a pull request that cites a decision that doesn't exist or has been superseded. `D-0096`
+- **Slice 13 is done when** a plumbing issue goes from opened to merged through the factory, a trusted-base change it built waits for a person's merge, a PRD with at least three issues becomes a ratified plan the factory works through, and the dashboard's graph and copythis-ad's decisions land that way. `D-0105`
 
 ## Risks
 
