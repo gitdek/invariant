@@ -146,4 +146,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Undecided: don't build against these
 
-Nothing is undecided right now.
+- One decision graph for every project, in an embedded store: SQLite used as a graph, with a journal in each repository and traversal tools over MCP, recommended over LadybugDB for now. Proposed, waiting for @gitdek. `D-0096`
