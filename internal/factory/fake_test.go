@@ -30,12 +30,14 @@ type fakeGitHub struct {
 	prs      map[int]*github.PullRequest
 	checks   map[string][]github.CheckRun
 	refused  map[int64]bool // check runs whose jobs GitHub never started
-	merged   []int
-	deleted  []string
-	bodies   map[int]string
-	nextID   int64
-	nextPR   int
-	failPRs  int // pull requests to refuse, as GitHub can
+	// noActions is an App without the Actions permission: it can't read jobs.
+	noActions bool
+	merged    []int
+	deleted   []string
+	bodies    map[int]string
+	nextID    int64
+	nextPR    int
+	failPRs   int // pull requests to refuse, as GitHub can
 }
 
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
@@ -218,6 +220,9 @@ func (g *fakeGitHub) refuse(pr int) {
 }
 
 func (g *fakeGitHub) Job(_ context.Context, id int64) (github.Job, error) {
+	if g.noActions {
+		return github.Job{}, fmt.Errorf("GET actions/jobs/%d: %w", id, github.ErrNoPermission)
+	}
 	job := github.Job{ID: id, Name: "invariant/gate", Status: "completed"}
 	if !g.refused[id] {
 		job.RunnerID = 7
@@ -253,6 +258,8 @@ type scriptedFormalizer struct {
 	// amend drafts an amendment of the current project, when the issue
 	// names one.
 	amend func(c *formalize.Current) *formalize.Proposal
+	// revised is what a draft says people's later comments changed.
+	revised []formalize.Revision
 }
 
 const bufferModule = `---- MODULE BoundedBuffer ----
@@ -318,7 +325,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
 	}
 	p := bufferProposal(s.t)
-	p.Language = req.Language
+	p.Language, p.Revised = req.Language, s.revised
 	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
 }
 
@@ -326,9 +333,11 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // synthesis would, and reports the gate result it's told to.
 type fakeBuilder struct {
 	pass    bool
-	stop    bool // the agent stops before it finishes
-	crash   bool // the factory itself stops partway through the build
+	stop    bool   // the agent stops before it finishes
+	crash   bool   // the factory itself stops partway through the build
 	review  string // what a second agent says of the driver, if it read one
+	account string // what the building agent says when it's done
+	runs    []bool // the agent's gate runs, when not just the final one
 	built   []string
 	amended []bool
 }
@@ -363,8 +372,14 @@ func (b *fakeBuilder) Build(_ context.Context, dir, out string, amend bool) (*sy
 	}
 	final := &verify.Report{Project: "bounded buffer", Passed: b.pass, Assurance: "proved",
 		Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3}, Build: verify.Build{Passed: b.pass}}
-	res := &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25},
+	res := &synth.Result{Project: "bounded buffer", Final: final, Usage: synth.Usage{Backend: "fake", Turns: 3, CostUSD: 0.25, Summary: b.account},
 		GateRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}
+	if b.runs != nil {
+		res.GateRuns = nil
+		for i, passed := range b.runs {
+			res.GateRuns = append(res.GateRuns, synth.GateRun{Run: i + 1, Passed: passed})
+		}
+	}
 	if b.review != "" && b.pass {
 		res.Review = &synth.Review{Usage: synth.Usage{CostUSD: 0.05}, Text: b.review}
 	}

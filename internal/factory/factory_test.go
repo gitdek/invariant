@@ -222,6 +222,28 @@ func TestARedGateIsNeverMerged(t *testing.T) {
 	}
 }
 
+// An App without the Actions permission can't read the gate's job, so it
+// can't tell a gate that ran from one GitHub never started. It says so once,
+// and doesn't merge, instead of asking again every poll (copythis-ad#38).
+func TestAGateJobTheAppCantReadIsSaidOnce(t *testing.T) {
+	r := newRig(t)
+	pr := ratified(t, r)
+	r.gh.noActions = true
+	r.gh.refuse(pr.Marker.PR)
+	r.poll()
+	failed := r.expect(1, KindFailed, LabelHumanReview)
+	for _, want := range []string{"failed on #", "can't tell whether the job ran", "Actions read-only permission", "`/invariant retry`"} {
+		if !strings.Contains(failed.Comment.Body, want) {
+			t.Errorf("the post doesn't say %q:\n%s", want, failed.Comment.Body)
+		}
+	}
+	n := len(r.gh.posts(1))
+	r.poll()
+	if len(r.gh.posts(1)) != n || len(r.gh.merged) != 0 {
+		t.Error("it says so once, and never merges")
+	}
+}
+
 // A gate GitHub never started, as when the account's Actions minutes run
 // out, didn't fail, and the factory says so. It still doesn't merge, and a
 // re-run that passes merges once a writer says retry.
@@ -288,6 +310,10 @@ func TestOutOfScopeIsNeverMerged(t *testing.T) {
 func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	r := newRig(t)
 	r.build.pass = false
+	// The agent passed a run with a step turned off, to diagnose the
+	// failure, then turned it back on, as copythis-ad#37's did.
+	r.build.runs = []bool{false, false, true}
+	r.build.account = "The gate does not pass, and it shouldn't: the existing code breaks the calendar-day policy."
 	failed := ratified(t, r)
 	if failed.Marker.Kind != KindFailed || !sameSet(r.gh.labelsOf(1), []string{LabelHumanReview}) {
 		t.Fatalf("post = %+v, labels = %v", failed.Marker, r.gh.labelsOf(1))
@@ -296,11 +322,98 @@ func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	if !pr.Draft || !strings.Contains(failed.Comment.Body, "draft pull request #") {
 		t.Errorf("pr = %+v\n%s", pr, failed.Comment.Body)
 	}
+	// The post carries the agent's account, marked as unchecked, and the
+	// draft says the final gate failed, not that a run passed.
+	if !strings.Contains(failed.Comment.Body, "The agent's own account, which the gate doesn't check:\n\n> The gate does not pass, and it shouldn't") {
+		t.Errorf("the post lacks the agent's account:\n%s", failed.Comment.Body)
+	}
+	if body := r.gh.prBody(pr.Number); !strings.Contains(body, "the final gate failed, after 3 runs") || strings.Contains(body, "the gate passed on run") {
+		t.Errorf("the draft's body:\n%s", body)
+	}
 	r.gh.ci(pr.Number, "success")
 	r.poll()
 	if len(r.gh.merged) != 0 {
 		t.Error("a draft for people must never be merged")
 	}
+}
+
+// A writer's later comment can change a fork they decided. The draft
+// follows it and says so, and the proposal records what was decided, citing
+// the comment, instead of the old answer (D-0094, copythis-ad#36). A change
+// the draft claims that doesn't check out is ignored.
+func TestALaterCommentChangesADecision(t *testing.T) {
+	r := newRig(t)
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
+	r.poll()
+	r.expect(1, KindForks, LabelAsking)
+	r.gh.say(1, "gitdek", "/invariant choose F1 B")
+	r.poll()
+	if p := r.expect(1, KindProposal, LabelProposal); !strings.Contains(p.Comment.Body, "Get an error right away.") {
+		t.Fatalf("the first proposal records B:\n%s", p.Comment.Body)
+	}
+	later := r.gh.say(1, "gitdek", "Actually, producers should wait: F1 A instead.")
+	r.gh.say(1, "mallory", "Make it B again.")
+	r.form.revised = []formalize.Revision{{Fork: "F1", Option: "A", By: "gitdek"}, {Fork: "F2", Option: "A", By: "gitdek"}, {Fork: "F1", Option: "B", By: "mallory"}}
+	r.gh.say(1, "gitdek", "/invariant revise")
+	r.poll()
+	p := r.expect(1, KindProposal, LabelProposal)
+	if a := p.Marker.Answers; len(a) != 1 || a[0].Option != "A" || a[0].By != "gitdek" || a[0].Comment != later.URL || a[0].Says != "Wait until there's room." {
+		t.Fatalf("answers %+v; want F1 A, citing %s", a, later.URL)
+	}
+	if !strings.Contains(p.Comment.Body, "Wait until there's room.") || strings.Contains(p.Comment.Body, "Get an error right away.") {
+		t.Errorf("the proposal should record A:\n%s", p.Comment.Body)
+	}
+}
+
+// revise ignores changes that don't check out: a fork nobody decided, an
+// option the fork doesn't have, and a person who didn't say anything. A
+// change that does cites the person's latest comment beyond commands.
+func TestReviseKeepsAnswersThatDontCheckOut(t *testing.T) {
+	fork := formalize.Fork{ID: "F1", Options: []formalize.Option{{ID: "A", Says: "a"}, {ID: "B", Says: "b"}}}
+	th := Thread{Posts: []Post{{Marker: Marker{Kind: KindForks, Forks: []formalize.Fork{fork}}}},
+		People: []github.Comment{{User: github.User{Login: "gitdek"}, Body: "Use A.", URL: "u1"}, {User: github.User{Login: "gitdek"}, Body: "/invariant revise", URL: "u2"}}}
+	answers := []formalize.Answer{{Fork: "F1", Option: "B", Says: "b", By: "gitdek", Comment: "u0"}}
+	for _, c := range []struct {
+		change          formalize.Revision
+		option, comment string
+	}{
+		{formalize.Revision{Fork: "f1", Option: "a", By: "GitDek"}, "A", "u1"},
+		{formalize.Revision{Fork: "F2", Option: "A", By: "gitdek"}, "B", "u0"},
+		{formalize.Revision{Fork: "F1", Option: "Z", By: "gitdek"}, "B", "u0"},
+		{formalize.Revision{Fork: "F1", Option: "A", By: "mallory"}, "B", "u0"},
+	} {
+		got := revise(th, answers, []formalize.Revision{c.change})[0]
+		if got.Option != c.option || got.Comment != c.comment || (got.Option == "A") != (got.Says == "a") {
+			t.Errorf("%+v: got %+v; want option %s citing %s", c.change, got, c.option, c.comment)
+		}
+	}
+	if answers[0].Option != "B" {
+		t.Error("revise must not change the answers it was given")
+	}
+}
+
+// To change what must be true after a failed build, a person closes its
+// draft and drafts again. The protocol has the step (OthersClose from a
+// failed build), and the factory takes it (copythis-ad#36).
+func TestClosingAFailedDraftLetsPeopleDraftAgain(t *testing.T) {
+	r := newRig(t)
+	r.build.pass = false
+	failed := ratified(t, r)
+	n := failed.Marker.PR
+	// While the draft is open, a revise says how to go on.
+	r.gh.say(1, "gitdek", "/invariant revise")
+	r.poll()
+	note := r.gh.last(1)
+	if note.Marker.Kind != KindNote || !strings.Contains(note.Comment.Body, fmt.Sprintf("close #%d and comment `/invariant revise` again", n)) {
+		t.Fatalf("the note doesn't say how to go on:\n%s", note.Comment.Body)
+	}
+	// Once it's closed, the factory records it, and a revise drafts again.
+	r.gh.prs[n].State = "closed"
+	r.poll()
+	r.expect(1, KindClosed)
+	r.gh.say(1, "gitdek", "/invariant revise")
+	r.poll()
+	r.expect(1, KindProposal, LabelProposal)
 }
 
 // A build that stops before it makes a pull request asks a person to look.

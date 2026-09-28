@@ -50,7 +50,9 @@ Init ==
     /\ written = [p \in Producers |-> 0]
     /\ retrying = FALSE
 
-\* A producer writes its next line; it waits (is not enabled) while the buffer is full.
+\* A producer writes its next line. Capacity is the buffer's own limit: a write into
+\* a full buffer is not enabled, so the code must refuse it and change nothing.
+\* MaxLines bounds the environment: a producer that has written all its lines is not asked again.
 Write(p) ==
     /\ written[p] < MaxLines
     /\ Len(buf) < Capacity

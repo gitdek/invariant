@@ -101,6 +101,14 @@ Look for every place where the issue allows materially different behavior that a
 
 Each option says in one plain sentence what the system would do. When you ask, leave `+"`statements`"+` empty and don't write the module: people answer first, and you'll be asked again with their answers. Don't ask about anything that doesn't change what must be true, such as names, data structures or the checking bounds. Choose those yourself. Never ask again about something already decided above.
 
+If a person's later comment in the discussion changes a decision above, follow the comment, and record the change in `+"`revised`"+`, so the record says what was decided:
+
+`+"```json"+`
+"revised": [{"fork": "F1", "option": "A", "by": "gitdek"}]
+`+"```"+`
+
+`+"`by`"+` is the login of the person whose comment asked for it. Never change a decision nobody asked to change.
+
 If the issue isn't something this factory can build as a new, self-contained project, set `+"`unsupported`"+` to one sentence saying why, and leave everything else empty.
 
 # Check your draft

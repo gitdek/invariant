@@ -2,5 +2,8 @@
   "name": "bounded log shipping buffer",
   "module": ".invariant/specs/LogBuffer.tla",
   "code": "logbuffer",
-  "language": "go"
+  "language": "go",
+  "parameters": [
+    "Capacity"
+  ]
 }

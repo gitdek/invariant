@@ -33,6 +33,9 @@
   // copythis-ad#1.
   const short = (repo) => (repo || "").split("/").pop();
   const ref = (repo, n) => (repo && state && repo !== state.repo ? short(repo) : "") + "#" + n;
+  // amendsRef names what an amendment replaces: the issue that ratified it,
+  // or a decision, such as D-0027, for a project ratified by hand.
+  const amendsRef = (repo, amends) => (/^#\d+$/.test(String(amends)) ? ref(repo, Number(String(amends).slice(1))) : String(amends));
   const issueKey = (is) => `${is.repo || ""}#${is.number}`;
 
   // ---------- time ----------
@@ -1049,7 +1052,17 @@
       box.innerHTML = `<div class="calm">${calmGlyph()}<span>Nothing needs you right now. When the factory asks a question, proposes statements or needs a person, it shows up here.</span></div>`;
       return;
     }
-    box.innerHTML = items.map(needCard).join("");
+    // The longest wait first: the order the factory took them in.
+    items.sort((a, b) => new Date(a.waiting.since) - new Date(b.waiting.since));
+    box.innerHTML = batchBanner(items) + items.map(needCard).join("");
+  }
+  // proposalText says what a proposal asks a person to ratify. A rebuild
+  // that changes no statement says so first, since that's all there is to
+  // check.
+  function proposalText(w, repo, who) {
+    const n = (w.statements || []).length, name = `<strong>${esc(w.name)}</strong>`;
+    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
+    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
   }
   // why says, in words, why a failed issue needs a person.
   function why(w, repo) {
@@ -1057,13 +1070,17 @@
     switch (w.failure) {
       case "stopped": return "The build stopped before it made a pull request. Try again, or draft again from the comments.";
       case "limit": return "Two builds stopped before they made a pull request, so the factory won't start another on its own. Try again, or draft again.";
-      case "gate": return `The code didn't pass the gate in the factory's own run. It's in draft ${pr}. Once the cause is fixed, have the factory try again.`;
+      case "gate": return `The code didn't pass the gate in the factory's own run. Its last attempt is in draft ${pr}. If the code needs fixing, fix it, then have the factory try again. If what must be true should change instead, close ${pr}, then have it draft again.`;
       case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified. Once it's fixed, have the factory try again.`;
       case "ci": return `CI's gate didn't pass on ${pr}. Once the cause is fixed, have the factory try again.`;
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.`;
   }
   const stoppedBuild = (w) => w.failure === "stopped" || w.failure === "limit";
+  // A failure with a pull request can also be drafted again, once the pull
+  // request is closed.
+  const redraftable = (w) => stoppedBuild(w) || Boolean(w.pr);
+  const closedText = (w, repo) => `${w.pr ? `<strong>${esc(ref(repo, w.pr))}</strong>` : "The pull request"} was closed without merging, so the factory stopped. To go on, have it draft again from the comments on the issue.`;
   function needCard(is) {
     if (ACT) return actCard(is);
     const w = is.waiting, repo = is.repo, n = is.number;
@@ -1078,13 +1095,16 @@
         return `<button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>`;
       }).join("")}</div>`).join("") + `<div class="cmds">${cmd("/invariant revise")}${open}</div>`;
     } else if (w.kind === "proposal") {
-      body = `<p class="ask">${w.amends ? `An amendment to what ${esc(ref(repo, Number(String(w.amends).replace("#", ""))) || w.amends)} ratified: ` : ""}<strong>${(w.statements || []).length}</strong> statements for <strong>${esc(w.name)}</strong>, already checked by TLC, and waiting for a person to ratify them.</p>
+      body = `${proposalText(w, repo, "a person")}
         <details class="stmts"><summary>Read what they say</summary><ul>${(w.statements || []).map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${cmd("/invariant revise")}${open}</div>`;
+    } else if (w.kind === "closed") {
+      body = `<p class="ask">${closedText(w, repo)}</p>
+        <div class="cmds">${cmd("/invariant revise", true)}${open}</div>`;
     } else {
       cls = "failed";
       body = `<p class="ask">${why(w, repo)}</p>
-        <div class="cmds">${cmd("/invariant retry", true)}${stoppedBuild(w) ? cmd("/invariant revise") : ""}${open}</div>`;
+        <div class="cmds">${cmd("/invariant retry", true)}${redraftable(w) ? cmd("/invariant revise") : ""}${open}</div>`;
     }
     return `<article class="need ${cls}"><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
@@ -1102,6 +1122,20 @@
     if (cp) cp.textContent = e.shiftKey ? "gh copied" : "copied";
     setTimeout(() => { b.classList.remove("copied"); if (cp) cp.textContent = "copy"; }, 1600);
   });
+
+  // On /act, rebuilds that change no statement can be ratified together.
+  // Each still posts its own ratify, on its own issue, as the owner, and the
+  // factory builds them one at a time.
+  const batch = { confirm: false, busy: false, error: "" };
+  function batchBanner(items) {
+    const same = items.filter((i) => i.waiting.kind === "proposal" && i.waiting.unchanged && !actOf(`${i.repo}#${i.number}`).posted);
+    if (!ACT || same.length < 2) return "";
+    const refs = same.map((i) => esc(ref(i.repo, i.number))).join(", ");
+    const row = batch.confirm
+      ? `<div class="confirm"><span>Ratify all ${same.length} as you? Each pins statements that don't change, and the factory builds them one at a time.</span><button class="cmd act primary" type="button" data-batch="post"${batch.busy ? " disabled" : ""}>Yes, ratify all ${same.length}</button><button class="cmd" type="button" data-batch="cancel">Cancel</button></div>`
+      : `<div class="cmds"><button class="cmd act primary" type="button" data-batch="ask">Ratify all ${same.length}</button></div>`;
+    return `<div class="batch"><p class="ask"><b class="same">${same.length} rebuilds change no statement:</b> ${refs}. Only their code changes.</p>${row}${batch.error ? `<p class="acterr">${esc(batch.error)}</p>` : ""}</div>`;
+  }
 
   // ---------- acting: at /act, the owner's clicks post to GitHub (D-0065) ----------
   // Cloudflare Access signs the owner in, and the server checks it again on
@@ -1133,18 +1167,23 @@
         : `<button class="cmd act primary" type="button" disabled>Choose ${forks.length === 1 ? "an answer" : `all ${forks.length}`} to post</button>`;
       actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
-      body = `<p class="ask">${w.amends ? `An amendment to what ${esc(ref(repo, Number(String(w.amends).replace("#", ""))) || w.amends)} ratified: ` : ""}<strong>${(w.statements || []).length}</strong> statements for <strong>${esc(w.name)}</strong>, already checked by TLC, and waiting for you to ratify them.</p>
+      body = `${proposalText(w, repo, "you")}
         <details class="stmts"><summary>Read what they say</summary><ul>${(w.statements || []).map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>`;
       actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + ask("Draft again", "/invariant revise");
+    } else if (w.kind === "closed") {
+      body = `<p class="ask">${closedText(w, repo)}</p>`;
+      actions = ask("Draft again", "/invariant revise", true);
     } else {
       cls = "failed";
       body = `<p class="ask">${why(w, repo)}</p>`;
-      actions = ask("Retry", "/invariant retry", true) + (stoppedBuild(w) ? ask("Draft again", "/invariant revise") : "");
+      actions = ask("Retry", "/invariant retry", true) + (redraftable(w) ? ask("Draft again", "/invariant revise") : "");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
     if (a.confirm) {
       const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins these statements, and the factory starts building.`
-        : a.confirm === "/invariant retry" ? "Have the factory try again, as you?" : "Have the factory draft again from the comments, as you?";
+        : a.confirm === "/invariant retry" ? "Have the factory try again, as you?"
+        : w.kind === "failed" && w.pr && !stoppedBuild(w) ? `Have the factory draft again from the comments, as you? Close <b>${esc(ref(repo, w.pr))}</b> first, or it will ask you to.`
+        : "Have the factory draft again from the comments, as you?";
       row = `<div class="confirm"><span>${what}</span>${post("Yes, post it", a.confirm, true)}<button class="cmd" type="button" data-act-key="${esc(key)}" data-act-cancel>Cancel</button></div>`;
     }
     if (a.posted) row = `<p class="posted">✓ Posted <a href="${esc(a.posted)}" target="_blank" rel="noopener">on GitHub</a> as you. The factory picks it up within 30 seconds.</p>`;
@@ -1153,6 +1192,34 @@
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}${row}</div></article>`;
   }
   if (ACT) {
+    document.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-batch]");
+      if (!b || b.disabled || !state) return;
+      batch.error = "";
+      if (b.dataset.batch === "ask") batch.confirm = true;
+      if (b.dataset.batch === "cancel") batch.confirm = false;
+      if (b.dataset.batch === "post") {
+        batch.busy = true;
+        renderInbox(state);
+        const same = state.issues.filter((i) => i.open && i.waiting && inScope(i.repo) && i.waiting.kind === "proposal" && i.waiting.unchanged);
+        for (const i of same) {
+          const a = actOf(`${i.repo}#${i.number}`);
+          if (a.posted) continue;
+          try {
+            const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+              body: JSON.stringify({ repo: i.repo, issue: i.number, body: `/invariant ratify ${i.waiting.hash}` }) });
+            if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
+            a.posted = (await r.json()).url || `https://github.com/${i.repo}/issues/${i.number}`;
+          } catch (err) {
+            batch.error = `Stopped at ${ref(i.repo, i.number)}: ${err.message}`;
+            break;
+          }
+        }
+        batch.busy = false;
+        batch.confirm = false;
+      }
+      renderInbox(state);
+    });
     document.addEventListener("click", async (e) => {
       const b = e.target.closest("[data-act-key]");
       if (!b || b.disabled) return;
