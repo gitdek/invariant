@@ -1,8 +1,0 @@
-{
-  "name": "API rate limiter",
-  "module": ".invariant/specs/RateLimiter.tla",
-  "code": "src",
-  "language": "typescript",
-  "conformance": "conformance.ts",
-  "exhaustive": true
-}
