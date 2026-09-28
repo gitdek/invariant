@@ -315,6 +315,30 @@ func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	}
 }
 
+// To change what must be true after a failed build, a person closes its
+// draft and drafts again. The protocol has the step (OthersClose from a
+// failed build), and the factory takes it (copythis-ad#36).
+func TestClosingAFailedDraftLetsPeopleDraftAgain(t *testing.T) {
+	r := newRig(t)
+	r.build.pass = false
+	failed := ratified(t, r)
+	n := failed.Marker.PR
+	// While the draft is open, a revise says how to go on.
+	r.gh.say(1, "gitdek", "/invariant revise")
+	r.poll()
+	note := r.gh.last(1)
+	if note.Marker.Kind != KindNote || !strings.Contains(note.Comment.Body, fmt.Sprintf("close #%d and comment `/invariant revise` again", n)) {
+		t.Fatalf("the note doesn't say how to go on:\n%s", note.Comment.Body)
+	}
+	// Once it's closed, the factory records it, and a revise drafts again.
+	r.gh.prs[n].State = "closed"
+	r.poll()
+	r.expect(1, KindClosed)
+	r.gh.say(1, "gitdek", "/invariant revise")
+	r.poll()
+	r.expect(1, KindProposal, LabelProposal)
+}
+
 // A build that stops before it makes a pull request asks a person to look.
 func TestABuildThatStopsAsksForHelp(t *testing.T) {
 	r := newRig(t)

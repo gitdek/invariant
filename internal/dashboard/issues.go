@@ -79,8 +79,11 @@ type Waiting struct {
 	Hash       string     `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
 	Statements []Said     `json:"statements,omitempty"` // what the proposal says
 	Amends     string     `json:"amends,omitempty"`     // what an amendment replaces
-	PR         int        `json:"pr,omitempty"`         // the pull request that failed
-	Since      time.Time  `json:"since"`
+	// Unchanged is an amendment whose statements and bounds are exactly
+	// those of the lock it amends, so only the code changes.
+	Unchanged bool      `json:"unchanged,omitempty"`
+	PR        int       `json:"pr,omitempty"` // the pull request that failed, or was closed
+	Since     time.Time `json:"since"`
 }
 
 // Question is one fork the factory asked about.
@@ -221,6 +224,11 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 		}
 		if l.Waiting != nil && answered(l.Waiting, since) {
 			l.Waiting = nil
+			// Its label still says a person must act until the factory gets
+			// to it, as when it's building another issue first. It's queued.
+			if l.Stage == StageAsking || l.Stage == StageRatifying || l.Stage == StageReview {
+				l.Stage = StageQueued
+			}
 		}
 	}
 	if !l.Open {
@@ -294,7 +302,7 @@ func answered(w *Waiting, cmds []factory.Command) bool {
 				return true
 			}
 		case factory.Solve:
-			if w.Kind == factory.KindStuck {
+			if w.Kind == factory.KindStuck || w.Kind == factory.KindClosed {
 				return true
 			}
 		case factory.Retry:
@@ -364,9 +372,14 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 		}
 		if p.Target != nil {
 			w.Amends = p.Target.Previous
+			w.Unchanged = p.Target.Amends != "" && p.Target.Amends == p.Hash
 		}
 	case factory.KindFailed, factory.KindStuck:
 		w.PR, w.Failure = m.PR, m.Why()
+	case factory.KindClosed:
+		// Its pull request was closed without merging, and the issue is
+		// still open: the factory waits for a person to draft again.
+		w.PR = m.PR
 	default:
 		return nil
 	}

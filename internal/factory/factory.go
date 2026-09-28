@@ -304,6 +304,19 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	case KindRatified:
 		// A build that stopped partway, when the factory stopped. Pick it up.
 		return f.build(ctx, t, state)
+	case KindFailed:
+		// A person can merge or close the pull request of a build that
+		// failed, and the protocol has both steps. Record them as watch does
+		// for an open pull request, so the issue can go on (copythis-ad#36).
+		if state.Marker.PR != 0 {
+			pr, err := f.GitHub.PullRequest(ctx, state.Marker.PR)
+			if err != nil {
+				return err
+			}
+			if pr.Merged || pr.State == "closed" {
+				return f.watch(ctx, t, state)
+			}
+		}
 	}
 	pending := t.Pending()
 	if len(pending) == 0 {
@@ -321,6 +334,13 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		switch {
 		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
+		case kind == KindFailed && state.Marker.PR != 0:
+			n := state.Marker.PR
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet. To change what must be true, close #%d and comment `/invariant revise` again. "+
+				"To build the same statements again, once the cause is fixed, comment `/invariant retry`.", n, n))
+		case kind == KindPR:
+			n := state.Marker.PR
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet. To change what must be true, close #%d and comment `/invariant revise` again.", n, n))
 		}
 		return f.note(ctx, t, c, "There's no draft to revise right now.")
 	case Choose:
