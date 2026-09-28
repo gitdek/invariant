@@ -63,7 +63,9 @@ jobs:
     # step fails, the gate runs.
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Verifying every project takes about 20 minutes since slice 11, and the
+    # gate's own tests about 8 more on a pull request (D-0100).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
