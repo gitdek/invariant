@@ -1,0 +1,97 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-25T18:10:59Z",
+    "issue": 1,
+    "comment": "https://github.com/gitdek/invariant/issues/1#issuecomment-5837225662",
+    "proposal": "sha256:e5dca8da9f151cf7fa217820968afabe1c39297d3a8be1ede25712f463a58d23"
+  },
+  "bounds": {
+    "Capacity": "2",
+    "MaxLines": "2",
+    "Producers": "{p1, p2}"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "The system starts in Init, and every step is a Next step.",
+      "sha256": "sha256:71e5ada548bff4ac8eff84c638f1ac1602bb574438b452e47af110cc0ef0fd22"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "The buffer, the shipped lines and the write history are lists of log lines, each producer has written a bounded number of lines, and the shipper is either retrying or not.",
+      "sha256": "sha256:fa8713a219f2db415522087fa38e8f9b109f0cedc291b83fc9e99537030e4eea"
+    },
+    {
+      "name": "BoundedCapacity",
+      "kind": "invariant",
+      "says": "The buffer never holds more lines than its capacity.",
+      "sha256": "sha256:a303924cda7f441cba52b1eed405fcc5f877bff1b8c2087d2d8fcb85d854d125"
+    },
+    {
+      "name": "NoLineLost",
+      "kind": "invariant",
+      "says": "Every line a producer has written is either still in the buffer or has been shipped.",
+      "sha256": "sha256:4195c3ffbb4e77bd8bc732dfb718079b3d1b8a76198523e7c00062e9e9bb3d1d"
+    },
+    {
+      "name": "ShippedOnce",
+      "kind": "invariant",
+      "says": "No line is shipped more than once.",
+      "sha256": "sha256:4d3b8a454385945894ffb6d01a8b37e8fcdac2a86bcaa6c18206a9ba32f58e95"
+    },
+    {
+      "name": "ShippedInOrder",
+      "kind": "invariant",
+      "says": "The shipped lines are exactly the oldest written lines, in the order they were written.",
+      "sha256": "sha256:769363f454b14684bb032e130bc188c6a97261f1c3005ac78dbdc1c94c169ef8"
+    },
+    {
+      "name": "BufferInOrder",
+      "kind": "invariant",
+      "says": "The buffer holds exactly the written lines not yet shipped, oldest first.",
+      "sha256": "sha256:862c93131d2a9fb67e786e8a0fe98a748159b461821e4866c6925f70b44687f8"
+    },
+    {
+      "name": "BufferFull",
+      "kind": "witness",
+      "says": "The buffer can fill up to its capacity.",
+      "sha256": "sha256:80f0d0944730619b084ac770a14fd9c9d21648941dad1cb491fdc4eab8c25ee1"
+    },
+    {
+      "name": "RetryPending",
+      "kind": "witness",
+      "says": "A send can fail and leave its line in the buffer to be retried.",
+      "sha256": "sha256:96682c6fe092cb3a3c439cdc91f8bd5139315efec8a17e89f147d32114b0d4d1"
+    },
+    {
+      "name": "AllShipped",
+      "kind": "witness",
+      "says": "Every producer can finish writing and every line can be shipped.",
+      "sha256": "sha256:3ea60c920056d9770354b8846d6a924d4acb0907c3f08fd4fcac8f08cd97d25e"
+    },
+    {
+      "name": "WriteOverCapacity",
+      "kind": "bug",
+      "says": "A producer adds a line to a buffer that is already full.",
+      "expect": "BoundedCapacity",
+      "sha256": "sha256:1079fc99b89e09541dd4330725f773db32c853e6c391cb9767dbe8bc4d14b57a"
+    },
+    {
+      "name": "DropOnFailure",
+      "kind": "bug",
+      "says": "When a send fails, the line is thrown away instead of retried.",
+      "expect": "NoLineLost",
+      "sha256": "sha256:f5da4e6db520cf2211a01ee54a63d603496936d502680a92c23860bf2d62b696"
+    },
+    {
+      "name": "ResendDelivered",
+      "kind": "bug",
+      "says": "A send that actually went through is treated as failed and retried, so the line is shipped twice.",
+      "expect": "ShippedOnce",
+      "sha256": "sha256:54ab9512cf75812dadb391ac8da5284b230fc2c4340795d0e565be9c26dfad02"
+    }
+  ]
+}

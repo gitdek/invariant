@@ -102,7 +102,8 @@ func TestPrompt(t *testing.T) {
 	request, _ := p.Request()
 	got := Prompt(p, skeleton, request, 4, false, false)
 	for _, want := range []string{"Implement two-phase commit", "`TCConsistent`", "`EarlyCommit`", "It must violate TCConsistent.",
-		"`RM = {r1, r2, r3}`", "Go package `twophase`", "You have 4 gate runs", "func Successors(s State) []State",
+		"`RM = {r1, r2, r3}`", "Go package `twophase`", "You have 4 gate runs", "func Try(s State, tried func(step string, args []any, next State))",
+		"func Abstract(s State) map[string]any", `tried("RMPrepare", []any{map[string]any{"$mv": "r1"}}, next)`, `{"$mv": "p1"}`,
 		tla.ModelMarker, "// +gobra", "The skeleton of"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the prompt lacks %q", want)
@@ -110,6 +111,13 @@ func TestPrompt(t *testing.T) {
 	}
 	if strings.Contains(got, "RMRcvCommitMsg(s State") {
 		t.Error("the prompt must not contain the hand-built answer")
+	}
+	// Go's explorer tries every step, and the code refuses: nothing asks for
+	// only the enabled steps, the skip copythis-ad#33 made (D-0090).
+	for _, stale := range []string{"Successors", "For each action enabled", "guard them in the explorer", "requires 0 < b.N"} {
+		if strings.Contains(got, stale) {
+			t.Errorf("the prompt still says %q", stale)
+		}
 	}
 	if draft := Prompt(p, skeleton, request, 4, true, false); !strings.Contains(draft, "It's already drafted") || strings.Contains(draft, "The skeleton of") {
 		t.Error("with a draft model, the prompt should say the model is drafted")
@@ -478,6 +486,17 @@ func TestAReviewerOnlyReads(t *testing.T) {
 	}
 }
 
+// copyDir copies a project for a test to change.
+func copyDir(from, to string) error {
+	return filepath.WalkDir(from, func(file string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() {
+			return err
+		}
+		rel, _ := filepath.Rel(from, file)
+		return copyFile(file, filepath.Join(to, rel))
+	})
+}
+
 // reviewer is a backend that records the job it was given, and whether the
 // harness was there to read, and answers.
 type reviewer struct {
@@ -524,8 +543,48 @@ func TestReviewDriver(t *testing.T) {
 	if res.Spend() != 1.12 {
 		t.Errorf("spend %v; the review counts", res.Spend())
 	}
-	// A project with no driver gets no review.
-	if r, err := ReviewDriver(context.Background(), reviewer{job: &job}, "../../examples/02-twophase-commit", filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r != nil {
-		t.Errorf("review %+v, %v; a Go project has no driver to review", r, err)
+	// A driver on the harness explores every state, whatever its manifest
+	// says (D-0088), and its reviewer is told so.
+	if _, err := ReviewDriver(context.Background(), reviewer{job: &job}, "../../examples/02-twophase-commit-ts", filepath.Join(t.TempDir(), "r.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(job.Prompt, "explores every state") || strings.Contains(job.Prompt, "samples runs at random") {
+		t.Errorf("a harness driver's review prompt:\n%s", job.Prompt)
+	}
+	// A Go project's explorer is its driver, and it's reviewed too (D-0090).
+	// One with only Successors has the review as the check of its steps.
+	dir = filepath.Join(t.TempDir(), "twophase")
+	if err := copyDir("../../examples/02-twophase-commit", dir); err != nil {
+		t.Fatal(err)
+	}
+	explorer := filepath.Join(dir, "twophase", "explore.go")
+	if err := os.WriteFile(explorer, []byte("package twophase\n\nfunc Successors(s State) []State { return nil }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := ReviewDriver(context.Background(), reviewer{job: &job, answer: "No problem."}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r == nil || r.Of != "explorer" {
+		t.Fatalf("review %+v, %v; a Go explorer is reviewed", r, err)
+	}
+	for _, want := range []string{"reviewing an explorer that another agent wrote a moment ago. It drives a Go project's code", "An explorer is evidence", "the explorer is `twophase/explore.go`",
+		"It has no `Try`, only `Successors`", "constants in a `const` block", "reports the state it was given", "the explorer's steps"} {
+		if !strings.Contains(job.Prompt, want) {
+			t.Errorf("the Go review prompt lacks %q:\n%s", want, job.Prompt)
+		}
+	}
+	// One with Try is explored by the gate, which checks its attempts.
+	if err := os.WriteFile(explorer, []byte("package twophase\n\nfunc Try(s State, tried func(string, []any, State)) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReviewDriver(context.Background(), reviewer{job: &job}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(job.Prompt, "explores the code from `Init()` through `Try`") || strings.Contains(job.Prompt, "only `Successors`") {
+		t.Errorf("the review prompt for an explorer with Try:\n%s", job.Prompt)
+	}
+	// A project with nothing that drives its code gets no review.
+	if err := os.Remove(explorer); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := ReviewDriver(context.Background(), reviewer{job: &job}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r != nil {
+		t.Errorf("review %+v, %v; there's nothing to review", r, err)
 	}
 }

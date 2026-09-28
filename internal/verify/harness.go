@@ -61,14 +61,18 @@ func writeHarness(src, runtime string, p *project.Project) error {
 // harnessImport is how a driver built on the harness imports it.
 var harnessImport = regexp.MustCompile(`(?m)^\s*(import\s[^\n]*["']\./invariant-explore\.ts["']|from\s+invariant_explore\s+import\s)`)
 
-// explores says whether a project's driver explores every state the code
-// can reach: its manifest says so, or the driver is built on the harness,
-// which always does (D-0088). Either way the gate holds it to that: the code
+// Explores says whether a project's driver explores every state the code
+// can reach: its manifest says so, the driver is built on the harness, which
+// always does (D-0088), or it's a Go explorer with Try, which the gate's own
+// harness explores (D-0090). Either way the gate holds it to that: the code
 // must reach every state the model does, and the driver must have tried
 // every step.
-func explores(p *project.Project) bool {
+func Explores(p *project.Project) bool {
 	if p.Manifest.Exhaustive {
 		return true
+	}
+	if l := p.Manifest.Language; l == "" || l == "go" {
+		return triesSteps(p.CodeDir())
 	}
 	if p.Manifest.Conformance == "" || len(p.Manifest.Existing) > 0 {
 		return false

@@ -17,6 +17,8 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/synth"
+	"github.com/gitdek/invariant/internal/verify"
 )
 
 type rig struct {
@@ -927,5 +929,10 @@ func TestThePullRequestCarriesTheReview(t *testing.T) {
 	}
 	if pr.Marker.Spend != 0.30 {
 		t.Errorf("spend %v; synthesis's 0.25 and the review's 0.05", pr.Marker.Spend)
+	}
+	// A Go project's review read its explorer, and says so (D-0090).
+	res := &synth.Result{Final: &verify.Report{}, Review: &synth.Review{Text: "No problem.", Of: "explorer"}}
+	if body := pullRequestBody(Thread{Issue: github.Issue{Number: 7}}, Marker{Project: "pool"}, res, nil); !strings.Contains(body, "### A second agent's review of the explorer") || !strings.Contains(body, "read the explorer, and changed nothing") {
+		t.Errorf("the pull request's body:\n%s", body)
 	}
 }

@@ -15,7 +15,7 @@ import (
 // The log buffer's code has no bounds in it: it's proved at every size, and
 // it agrees with the model one size past the bounds too (D-0068).
 func TestTheLogBufferHoldsAtEverySize(t *testing.T) {
-	r := run(t, filepath.Join("..", "..", "examples", "03-log-buffer"))
+	r := run(t, copyProject(t, "testdata/examples/03-log-buffer", nil))
 	if !r.Passed || !r.EverySize() {
 		t.Fatalf("the log buffer should be proved at every size: passed %v, larger %+v", r.Passed, r.Larger)
 	}
@@ -24,10 +24,7 @@ func TestTheLogBufferHoldsAtEverySize(t *testing.T) {
 // Code that hardcodes a size fails, even when Gobra proves it: its explorer
 // names its bounds, so it must agree one size larger, and it can't.
 func TestAHardcodedSizeFails(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "03-log-buffer")
-	if err := copyTree(filepath.Join("..", "..", "examples", "03-log-buffer"), dir); err != nil {
-		t.Fatal(err)
-	}
+	dir := copyProject(t, "testdata/examples/03-log-buffer", nil)
 	code := filepath.Join(dir, "logbuffer", "logbuffer.go")
 	b, err := os.ReadFile(code)
 	if err != nil {

@@ -387,8 +387,12 @@ func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.
 		b.WriteString("\n" + receipt.Markdown(res.Final))
 	}
 	if res != nil && res.Review != nil && res.Review.Text != "" {
-		b.WriteString("\n### A second agent's review of the driver\n\n")
-		b.WriteString("An agent with fresh context read the driver, and changed nothing. This is its opinion, not evidence, and the receipt above doesn't count it (D-0082).\n\n")
+		of := res.Review.Of
+		if of == "" {
+			of = "driver"
+		}
+		fmt.Fprintf(&b, "\n### A second agent's review of the %s\n\n", of)
+		fmt.Fprintf(&b, "An agent with fresh context read the %s, and changed nothing. This is its opinion, not evidence, and the receipt above doesn't count it (D-0082).\n\n", of)
 		b.WriteString(quote(clip(res.Review.Text, reviewLimit), 400))
 		b.WriteString("\n")
 	}
