@@ -3,7 +3,8 @@ id: D-0082
 title: Slice 11 · a driver can't skip a step
 date: 2026-09-27
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: slice 11 planning, the afternoon slice 10's plan was ratified, from D-0059 and the drivers in this repository
 ---
@@ -58,6 +59,16 @@ A driver that explores completely, as every synthesized driver does, can meet al
 3. **Existing drivers: rebuild them now, or when an issue next touches each project?** Recommend now, through the factory, one amendment per project, so the receipts stop claiming more than was checked.
 4. **Go's explorers?** Gobra proves Go code against contracts the same agent writes, so the same gap exists in principle. Recommend checking them the same way once the harness has worked for TypeScript and Python, in this slice if it fits.
 5. **Who says which sizes are the code's parameters?** The agent that writes the code, in the manifest. Calling a capacity an environment bound would let its driver stop at the limit, the same kind of skip as copythis-ad#33's. Recommend the second agent's review checks them against the code, as C has it, since a size the code takes is plain to see there.
+
+## Ratified by @gitdek
+
+@gitdek answered all five questions with their recommendations on the morning of 2026-09-28, right after the repository went public and slices 9 and 10 closed:
+
+1. **Slice 11 is this,** before the Codex backend (5.5).
+2. **C, both checks.** The gate checks attempts in every driver that explores completely, and only a bound excuses a skip. A second agent reviews every driver: all of one that samples, and the sizes the manifest of one that explores calls the code's parameters.
+3. **Existing drivers are rebuilt now,** through the factory, one amendment per project that changes no statement. Until then, a receipt says its driver's steps weren't checked.
+4. **Go's explorers** are checked the same way once the harness has worked for TypeScript and Python, in this slice if it fits.
+5. **The agent that writes the code names its parameters** in the manifest, and the second agent's review checks them against the code.
 
 ## What would reopen this
 
