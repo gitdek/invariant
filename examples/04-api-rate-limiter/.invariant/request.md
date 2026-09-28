@@ -1,14 +1,14 @@
-# Take the rate limiter's model bounds out of its code
+# Rebuild the rate limiter's driver on the harness
 
-Issue #28 in gitdek/invariant, opened by @gitdek.
+Issue #47 in gitdek/invariant, opened by @gitdek.
 
-The rate limiter's code still carries the model's bounds. Its calls stop at `MAX_CALLS = 5` and its clock at `MAX_TIME = 3`, because the model needs those limits to stay finite. Change the code so that it's the rate limiter alone, written the way someone would ship it (D-0068):
+The rate limiter's conformance driver records only its runs, so its receipt says its steps weren't checked (D-0082). Rebuild the driver on Invariant's harness (D-0086), so the gate can check that it tried every step:
 
-- Its capacity, and how many calls may wait, are chosen when it's made. The time is passed in with each call.
-- Nothing in it depends on the bounds: not the number of calls, how far the clock runs, or which APIs there are.
-- The conformance driver keeps the bounds, as constants named after the model's, and it can count, so the gate checks the code one size larger too (D-0076).
+- It tries every step the model's Next names, with every argument, in every state it reaches, and lets the code refuse what the model rules out. Only the environment's bounds stop a step: how many calls are made, and how far the clock runs.
+- The capacity, and how many calls may wait, are sizes the code takes, so name them as parameters in the manifest. The driver tries a call when the queue is full, and sees the code refuse it.
+- It keeps the bounds as constants named after the model's, so the gate counts one size larger too.
 
-What must be true doesn't change. Keep every ratified statement exactly as it is.
+What must be true doesn't change. Keep every ratified statement exactly as it is, and change the code only where the new driver finds it doesn't do what the model says.
 
 Project: examples/04-api-rate-limiter
 

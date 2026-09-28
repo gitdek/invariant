@@ -1,12 +1,12 @@
 {
   "ratified": {
     "by": "gitdek",
-    "at": "2026-09-27T14:15:18Z",
-    "issue": 28,
-    "comment": "https://github.com/gitdek/invariant/issues/28#issuecomment-5856623615",
+    "at": "2026-09-28T15:20:57Z",
+    "issue": 47,
+    "comment": "https://github.com/gitdek/invariant/issues/47#issuecomment-5873044925",
     "proposal": "sha256:93f4926d456289ed75a82508a8229a25073126be0f819a3a5c8b8b9476a495a6",
     "amends": "sha256:93f4926d456289ed75a82508a8229a25073126be0f819a3a5c8b8b9476a495a6",
-    "previous": "#5"
+    "previous": "#28"
   },
   "bounds": {
     "Apis": "{a1, a2}",

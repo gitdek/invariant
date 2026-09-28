@@ -1,6 +1,6 @@
-// The rate limiter's environment: explores it breadth first within the model's
-// bounds, and records one run per step (or counts states with INVARIANT_COUNT).
-import { writeFileSync } from "node:fs";
+// The rate limiter's environment: explores it on Invariant's harness within the
+// model's bounds, trying every step Next names in every state it reaches.
+import { explore } from "./invariant-explore.ts";
 import { RateLimiter } from "./src/machine.ts";
 import type { Snapshot } from "./src/machine.ts";
 
@@ -60,20 +60,24 @@ function initial(): Node {
   return { sys: new RateLimiter(Capacity, MaxWaiting).snapshot(), env: { sent, refused, made, clock: 0 } };
 }
 
-function makeCall(n: Node, a: string): Node | null {
-  if (n.env.made[a] >= MaxCalls) return null;
+// MakeCall(a): only the bound on calls rules it out. When the queue is full,
+// the code refuses the call and the environment records the refusal.
+function makeCall(n: Node, a: { $mv: string }): Node | null {
+  const api = a.$mv;
+  if (n.env.made[api] >= MaxCalls) return null;
   const r = RateLimiter.from(n.sys);
   const env = copyEnv(n.env);
-  const id = env.sent[a].length + r.waiting(a).length + 1;
-  const o = r.request(a, id, env.clock);
-  env.made[a] += 1;
-  if (o.kind === "sent") env.sent[a].push({ id, madeAt: env.clock, at: env.clock });
+  const id = env.sent[api].length + r.waiting(api).length + 1;
+  const o = r.request(api, id, env.clock);
+  env.made[api] += 1;
+  if (o.kind === "sent") env.sent[api].push({ id, madeAt: env.clock, at: env.clock });
   else if (o.kind === "refused") {
-    env.refused[a].push({ madeAt: env.clock, tokens: o.tokens, queued: o.queued });
+    env.refused[api].push({ madeAt: env.clock, tokens: o.tokens, queued: o.queued });
   }
   return { sys: r.snapshot(), env };
 }
 
+// Tick: only the bound on the clock rules it out.
 function tick(n: Node): Node | null {
   if (n.env.clock >= MaxTime) return null;
   const r = RateLimiter.from(n.sys);
@@ -85,20 +89,9 @@ function tick(n: Node): Node | null {
   return { sys: r.snapshot(), env };
 }
 
-function done(n: Node): Node | null {
-  if (n.env.clock !== MaxTime) return null;
-  for (const a of apis) if (n.env.made[a] !== MaxCalls) return null;
+// Done changes nothing, and before the end it can't happen yet.
+function done(n: Node): Node {
   return n;
-}
-
-function successors(n: Node): Node[] {
-  const out: Node[] = [];
-  for (const a of apis) {
-    const t = makeCall(n, a);
-    if (t) out.push(t);
-  }
-  for (const t of [tick(n), done(n)]) if (t) out.push(t);
-  return out;
 }
 
 function tokensOf(n: Node, a: string): number {
@@ -107,17 +100,6 @@ function tokensOf(n: Node, a: string): number {
 
 function waitingOf(n: Node, a: string) {
   return n.sys.buckets[a]?.waiting ?? [];
-}
-
-function key(n: Node): string {
-  return JSON.stringify([
-    apis.map((a) => tokensOf(n, a)),
-    apis.map((a) => waitingOf(n, a).map((w) => [w.id, w.madeAt])),
-    apis.map((a) => n.env.sent[a].map((c) => [c.id, c.madeAt, c.at])),
-    apis.map((a) => n.env.refused[a].map((r) => [r.madeAt, r.tokens, r.queued])),
-    apis.map((a) => n.env.made[a]),
-    n.env.clock,
-  ]);
 }
 
 function fn<T>(f: (a: string) => T): unknown {
@@ -137,44 +119,12 @@ export function abstract(n: Node): unknown {
   };
 }
 
-const out = process.env.INVARIANT_TRACES;
-if (!out) throw new Error("INVARIANT_TRACES is not set");
-const counting = !!process.env.INVARIANT_COUNT;
-
-const start = initial();
-const nodes: Node[] = [start];
-const parent: number[] = [-1];
-const level: number[] = [1];
-const index = new Map<string, number>([[key(start), 0]]);
-const traces: unknown[][] = [];
-let depth = 1;
-
-function pathTo(i: number): unknown[] {
-  const path: unknown[] = [];
-  for (let cur = i; cur !== -1; cur = parent[cur]) path.push(abstract(nodes[cur]));
-  return path.reverse();
-}
-
-for (let i = 0; i < nodes.length; i++) {
-  const n = nodes[i];
-  const prefix = counting ? [] : pathTo(i);
-  for (const t of successors(n)) {
-    if (!counting) traces.push([...prefix, abstract(t)]);
-    const tk = key(t);
-    if (!index.has(tk)) {
-      index.set(tk, nodes.length);
-      nodes.push(t);
-      parent.push(i);
-      level.push(level[i] + 1);
-      if (level[i] + 1 > depth) depth = level[i] + 1;
-    }
-  }
-}
-
-if (counting) {
-  writeFileSync(out, JSON.stringify({ states: nodes.length, depth }));
-  console.log(`${nodes.length} states, depth ${depth}`);
-} else {
-  writeFileSync(out, JSON.stringify({ traces }));
-  console.log(`${nodes.length} states, ${traces.length} runs`);
-}
+explore<Node>({
+  initial: [initial()],
+  steps: [
+    { name: "MakeCall", args: apis.map((a) => [{ $mv: a }]), take: makeCall },
+    { name: "Tick", take: tick },
+    { name: "Done", take: done },
+  ],
+  abstract,
+});
