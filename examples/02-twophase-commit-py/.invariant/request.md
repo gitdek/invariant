@@ -1,11 +1,20 @@
-# Implement two-phase commit
+# Rebuild the Python two-phase commit's driver on the harness
 
-A transaction spans several resource managers. Implement two-phase commit so they all agree on the outcome.
+Issue #51 in gitdek/invariant, opened by @gitdek.
 
-- A transaction manager coordinates the resource managers.
-- Each resource manager either prepares, which means it's ready to commit, or aborts on its own before it has prepared.
-- The transaction manager commits only once every resource manager has prepared. It may abort at any time before it has decided.
-- Every resource manager then follows the transaction manager's decision.
-- Messages are never lost.
+The Python two-phase commit's conformance driver samples runs at random, so no check can say it tried every step in every state (D-0082). Rebuild it on Invariant's harness (D-0086, D-0088), so it explores every state the code can reach and the gate can check that it tried every step there:
 
-The formal statements this must satisfy are ratified in `ratified.lock`, and their text is in `specs/TwoPhase.tla`.
+- It tries every step the model's Next names, for every resource manager, in every state it reaches, and lets the code refuse what the model rules out. The model has no numeric bound, so no step goes untried anywhere.
+
+What must be true doesn't change. Keep every ratified statement exactly as it is, and change the code only where the new driver finds it doesn't do what the model says.
+
+Project: examples/02-twophase-commit-py
+
+
+_Posted for @gitdek by a coding agent, through the dashboard._
+
+## Discussion
+
+**@gitdek:**
+
+_Posted for @gitdek by a coding agent, through the dashboard._
