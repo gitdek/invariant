@@ -457,23 +457,30 @@ func TestAReviewerOnlyReads(t *testing.T) {
 	}
 }
 
-// reviewer is a backend that records the job it was given and answers.
+// reviewer is a backend that records the job it was given, and whether the
+// harness was there to read, and answers.
 type reviewer struct {
-	job    *Job
-	answer string
+	job     *Job
+	harness *bool
+	answer  string
 }
 
 func (r reviewer) Name() string { return "reviewer" }
 
 func (r reviewer) Run(_ context.Context, job Job) (Usage, error) {
 	*r.job = job
+	if r.harness != nil {
+		_, err := os.Stat(filepath.Join(job.Workspace, "invariant-explore.ts"))
+		*r.harness = err == nil
+	}
 	return Usage{Backend: "reviewer", CostUSD: 0.12, Outcome: "success", Summary: r.answer}, nil
 }
 
 func TestReviewDriver(t *testing.T) {
 	var job Job
 	dir := "../../examples/04-api-rate-limiter"
-	r, err := ReviewDriver(context.Background(), reviewer{job: &job, answer: "  I found no problem. I checked every step.  "}, dir, filepath.Join(t.TempDir(), "review.jsonl"))
+	var harness bool
+	r, err := ReviewDriver(context.Background(), reviewer{job: &job, harness: &harness, answer: "  I found no problem. I checked every step.  "}, dir, filepath.Join(t.TempDir(), "review.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +490,11 @@ func TestReviewDriver(t *testing.T) {
 	if !job.ReadOnly || job.Workspace == dir || !strings.Contains(job.Workspace, "invariant-review-") {
 		t.Errorf("job %+v; the reviewer reads a copy, read only", job)
 	}
-	for _, want := range []string{"`conformance.ts`", "explores every state", "Claim nothing you didn't read"} {
+	if !harness {
+		t.Error("the reviewer's copy lacks the harness it's told to read")
+	}
+	for _, want := range []string{"`conformance.ts`", "explores every state", "Claim nothing you didn't read",
+		"a Done before the end, returns the node it was given", "never grows a set", "`invariant-explore.ts`, is in this directory"} {
 		if !strings.Contains(job.Prompt, want) {
 			t.Errorf("the review prompt lacks %q", want)
 		}
