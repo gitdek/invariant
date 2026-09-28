@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/verify"
 )
 
 // Review is a second agent's reading of a driver another agent just wrote,
@@ -47,6 +48,16 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 	}); err != nil {
 		return nil, err
 	}
+	// Invariant's harness, as the gate supplies it, for the reviewer to read.
+	if name, source := verify.Harness(p.Manifest.Language); name != "" && len(p.Manifest.Existing) == 0 {
+		dir := ws
+		if p.Manifest.Language == "typescript" {
+			dir = filepath.Join(ws, filepath.Dir(p.Manifest.Conformance))
+		}
+		if err := writeFile(filepath.Join(dir, name), string(source)); err != nil {
+			return nil, err
+		}
+	}
 	f, err := os.Create(transcript)
 	if err != nil {
 		return nil, err
@@ -74,6 +85,12 @@ The project is this directory. Its model is `+"`%s`"+`, the TLA+ spec the code m
 
 A driver is evidence only if it tries every step a person or worker could take, wherever they could take it, lets the code refuse what the model rules out, and records every state as the code reports it. %s
 
+Some things are the gate's conventions, so don't report them as problems:
+
+- The driver's bounds are constants at its top, named after the model's constants. The gate makes each one size larger and runs the driver again, which ties the driver's sizes to the ones TLC checks.
+- The manifest's parameters name only numbers the code takes, such as a capacity. A set of participants the code is made with needs no entry, because the gate never grows a set when it checks the driver's steps.
+- A step of the environment alone that can't happen yet, such as a Done before the end, returns the node it was given. Trying it there changes nothing, and that's right: skipping it would be the problem.%s
+
 Look for:
 
 1. A step the driver skips because of the state the code is in. Only the environment's bounds may stop a step, such as a sixth call when five is the bound.
@@ -82,7 +99,16 @@ Look for:
 4. A size the code takes, such as a capacity it's made with, that's missing from the parameters, or a parameter that's really the environment's bound.
 
 Reply with a short review in Markdown, with no heading. Say first, in one sentence, whether you found a problem. For each problem, name the file and line, what's wrong, and why it matters. If you found none, say what you checked. Claim nothing you didn't read.`,
-		p.Manifest.Module, p.Manifest.Code, p.Manifest.Conformance, params, how)
+		p.Manifest.Module, p.Manifest.Code, p.Manifest.Conformance, params, how, harnessNote(p))
+}
+
+// harnessNote tells the reviewer where Invariant's harness is, for a driver
+// built on it: the review copies it in, as the gate does when the driver runs.
+func harnessNote(p *project.Project) string {
+	if name, _ := verify.Harness(p.Manifest.Language); name != "" && len(p.Manifest.Existing) == 0 {
+		return "\n- Invariant's harness, `" + name + "`, is in this directory for you to read. It isn't the project's: the gate writes its own copy in when the driver runs."
+	}
+	return ""
 }
 
 // ReviewTranscript is where a review's transcript goes, beside synthesis's.
