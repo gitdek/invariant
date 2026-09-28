@@ -1,8 +1,0 @@
-{
-  "name": "bounded log shipping buffer (TypeScript)",
-  "module": ".invariant/specs/LogBuffer.tla",
-  "code": "src",
-  "language": "typescript",
-  "conformance": "conformance.ts",
-  "exhaustive": true
-}

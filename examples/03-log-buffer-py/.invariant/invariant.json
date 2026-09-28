@@ -1,8 +1,0 @@
-{
-  "name": "bounded log shipping buffer (Python)",
-  "module": ".invariant/specs/LogBuffer.tla",
-  "code": "logbuffer",
-  "language": "python",
-  "conformance": "conformance.py",
-  "exhaustive": true
-}
