@@ -1,98 +1,65 @@
-// Bounded log shipping buffer, as a state machine that mirrors LogBuffer.tla.
-
-export const PRODUCERS = ["p1", "p2"] as const;
-export const CAPACITY = 2;
-export const MAX_LINES = 2;
-
-export type Producer = (typeof PRODUCERS)[number];
+// Bounded log shipping buffer, the system that LogBuffer.tla models.
+//
+// Producers write lines into the buffer and a shipper sends them on, oldest
+// first. The buffer's capacity is given when it's made; a write into a full
+// buffer is refused, and the producer waits.
 
 // A line is identified by the producer that wrote it and its per-producer number.
-export type Line = { producer: Producer; n: number };
+export type Line = { producer: string; n: number };
 
+// The buffer's own state: its capacity, the lines it holds, oldest first, and
+// whether the shipper is retrying the oldest line.
 export type State = {
+  capacity: number;
   buf: Line[];
-  sent: Line[];
-  log: Line[];
-  written: Record<Producer, number>;
   retrying: boolean;
 };
 
-export function init(): State {
-  return {
-    buf: [],
-    sent: [],
-    log: [],
-    written: { p1: 0, p2: 0 },
-    retrying: false,
-  };
-}
+export class LogBuffer {
+  readonly capacity: number;
+  private buf: Line[];
+  private retrying: boolean;
 
-// A producer writes its next line; it waits (is not enabled) while the buffer is full.
-export function write(s: State, p: Producer): State | null {
-  if (s.written[p] >= MAX_LINES) return null;
-  if (s.buf.length >= CAPACITY) return null;
-  const line: Line = { producer: p, n: s.written[p] + 1 };
-  return {
-    buf: [...s.buf, line],
-    sent: [...s.sent],
-    log: [...s.log, line],
-    written: { ...s.written, [p]: s.written[p] + 1 },
-    retrying: s.retrying,
-  };
-}
+  constructor(capacity: number, buf: Line[] = [], retrying = false) {
+    if (!Number.isInteger(capacity) || capacity < 0) throw new RangeError("capacity must be a natural number");
+    this.capacity = capacity;
+    this.buf = buf.map((l) => ({ ...l }));
+    this.retrying = retrying;
+  }
 
-// The shipper sends the oldest line successfully and removes it.
-export function ship(s: State): State | null {
-  if (s.buf.length === 0) return null;
-  return {
-    buf: s.buf.slice(1),
-    sent: [...s.sent, s.buf[0]],
-    log: [...s.log],
-    written: { ...s.written },
-    retrying: false,
-  };
-}
+  static from(s: State): LogBuffer {
+    return new LogBuffer(s.capacity, s.buf, s.retrying);
+  }
 
-// Sending the oldest line fails; it stays at the front to be retried.
-export function shipFail(s: State): State | null {
-  if (s.buf.length === 0) return null;
-  if (s.retrying) return null;
-  return {
-    buf: [...s.buf],
-    sent: [...s.sent],
-    log: [...s.log],
-    written: { ...s.written },
-    retrying: true,
-  };
-}
+  state(): State {
+    return { capacity: this.capacity, buf: this.buf.map((l) => ({ ...l })), retrying: this.retrying };
+  }
 
-// Every producer has written all its lines and everything has been shipped.
-export function done(s: State): State | null {
-  if (!PRODUCERS.every((p) => s.written[p] === MAX_LINES)) return null;
-  if (s.buf.length !== 0) return null;
-  return {
-    buf: [],
-    sent: [...s.sent],
-    log: [...s.log],
-    written: { ...s.written },
-    retrying: s.retrying,
-  };
-}
+  // A producer writes a line; it's refused (the producer waits) while the buffer is full.
+  write(line: Line): boolean {
+    if (this.buf.length >= this.capacity) return false;
+    this.buf.push({ ...line });
+    return true;
+  }
 
-export function successors(s: State): State[] {
-  const out: (State | null)[] = [];
-  for (const p of PRODUCERS) out.push(write(s, p));
-  out.push(ship(s), shipFail(s), done(s));
-  return out.filter((x): x is State => x !== null);
-}
+  // The shipper sends the oldest line successfully and removes it. Returns
+  // the line shipped, or null when there's nothing to ship.
+  ship(): Line | null {
+    const line = this.buf.shift();
+    if (line === undefined) return null;
+    this.retrying = false;
+    return line;
+  }
 
-export function key(s: State): string {
-  const line = (l: Line) => `${l.producer}.${l.n}`;
-  return JSON.stringify([
-    s.buf.map(line),
-    s.sent.map(line),
-    s.log.map(line),
-    PRODUCERS.map((p) => s.written[p]),
-    s.retrying,
-  ]);
+  // Sending the oldest line fails; it stays at the front to be retried.
+  // Refused when there's nothing to send or a retry is already pending.
+  shipFail(): boolean {
+    if (this.buf.length === 0 || this.retrying) return false;
+    this.retrying = true;
+    return true;
+  }
+
+  isEmpty(): boolean {
+    return this.buf.length === 0;
+  }
 }
