@@ -39,6 +39,9 @@ type GitHub interface {
 	// OpenPullRequest finds the open pull request from a branch, if there is one.
 	OpenPullRequest(ctx context.Context, branch string) (github.PullRequest, bool, error)
 	CheckRuns(ctx context.Context, sha, name string) ([]github.CheckRun, error)
+	// Job reads the job behind a check run, to tell a gate that failed from
+	// one GitHub never started.
+	Job(ctx context.Context, id int64) (github.Job, error)
 	Merge(ctx context.Context, n int, sha, method string) (string, error)
 	DeleteBranch(ctx context.Context, branch string) error
 }
@@ -1283,13 +1286,21 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	next.Kind = KindFailed
 	if run.Conclusion != "success" {
+		started := true
+		if run.Conclusion == "failure" {
+			job, err := f.GitHub.Job(ctx, run.ID)
+			if err != nil {
+				return err
+			}
+			started = job.Started()
+		}
 		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, protocol.KindFailed, protocol.Nobody)
 		to.failure = FailCI
 		if err := f.allowed(ctx, n, fmt.Sprintf("say CI's gate failed on #%d", pr.Number), from, to); err != nil {
 			return err
 		}
 		next.Failure = FailCI
-		return f.say(ctx, n, ciFailedComment(pr, run, next), LabelHumanReview)
+		return f.say(ctx, n, ciFailedComment(pr, run, started, next), LabelHumanReview)
 	}
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err

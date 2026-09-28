@@ -92,7 +92,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Merging
 
-- Factory pull requests merge on green, starting with the first. `invariant/gate` is the check. GitHub Free can't require a check or auto-merge on a private repository, so for now the factory merges its own pull request, pinned to the head commit that passed. When the repository goes public, `invariant/gate` becomes a required check, so GitHub refuses any merge the gate didn't pass, and the factory keeps merging its own proved way. `D-0004` `D-0021` `D-0033` `D-0075`
+- Factory pull requests merge on green, starting with the first. `invariant/gate` is the check. GitHub Free can't require a check or auto-merge on a private repository, so for now the factory merges its own pull request, pinned to the head commit that passed. When the repository goes public, `invariant/gate` becomes a required check, so GitHub refuses any merge the gate didn't pass, and the factory keeps merging its own proved way. When the gate doesn't pass, the factory says how on the issue and waits for a writer's `retry`. A gate GitHub never started, as when the account's Actions minutes ran out, is said not to have run, never to have failed, and the dashboard says the same. `D-0004` `D-0021` `D-0033` `D-0075` `D-0081`
 - The gate passes only when all of these hold. `D-0004` `D-0013` `D-0014`
   - The pinned statements match.
   - TLC reports no invariant violation and no deadlock.

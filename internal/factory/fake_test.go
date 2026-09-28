@@ -29,6 +29,7 @@ type fakeGitHub struct {
 	perms    map[string]string
 	prs      map[int]*github.PullRequest
 	checks   map[string][]github.CheckRun
+	refused  map[int64]bool // check runs whose jobs GitHub never started
 	merged   []int
 	deleted  []string
 	bodies   map[int]string
@@ -40,7 +41,7 @@ type fakeGitHub struct {
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
 	return &fakeGitHub{t: t, origin: origin, me: "gitdek", issues: map[int]*github.Issue{}, comments: map[int][]github.Comment{},
 		events: map[int][]github.Event{}, perms: map[string]string{"gitdek": "admin", "mallory": "read"},
-		prs: map[int]*github.PullRequest{}, checks: map[string][]github.CheckRun{}, bodies: map[int]string{}, nextID: 1000, nextPR: 100}
+		prs: map[int]*github.PullRequest{}, checks: map[string][]github.CheckRun{}, refused: map[int64]bool{}, bodies: map[int]string{}, nextID: 1000, nextPR: 100}
 }
 
 func (g *fakeGitHub) open(n int, by, title, body string, labels ...string) {
@@ -207,6 +208,24 @@ func (g *fakeGitHub) ci(pr int, conclusion string) {
 	g.nextID++
 	g.checks[sha] = append(g.checks[sha], github.CheckRun{ID: g.nextID, Name: "invariant/gate", Status: "completed",
 		Conclusion: conclusion, URL: fmt.Sprintf("https://github.com/o/r/actions/runs/%d", g.nextID), HeadSHA: sha})
+}
+
+// refuse records a gate run on a pull request's head that GitHub failed
+// without starting, as it does when the account's Actions minutes run out.
+func (g *fakeGitHub) refuse(pr int) {
+	g.ci(pr, "failure")
+	g.refused[g.nextID] = true
+}
+
+func (g *fakeGitHub) Job(_ context.Context, id int64) (github.Job, error) {
+	job := github.Job{ID: id, Name: "invariant/gate", Status: "completed"}
+	if !g.refused[id] {
+		job.RunnerID = 7
+		job.Steps = append(job.Steps, struct {
+			Name string `json:"name"`
+		}{Name: "Verify every project"})
+	}
+	return job, nil
 }
 
 func (g *fakeGitHub) Merge(_ context.Context, n int, sha, method string) (string, error) {

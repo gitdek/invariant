@@ -84,6 +84,10 @@ type sources struct {
 	prd      string
 	merges   map[int]mergeCheck
 	lease    *Lease
+	// refused marks the failed gate runs GitHub never started, such as when
+	// the account's Actions minutes ran out, with the ones it did start. A
+	// finished run never changes, so each is looked up once.
+	refused map[int64]bool
 }
 
 type cachedComments struct {
@@ -222,6 +226,9 @@ type RunRef struct {
 	Conclusion string    `json:"conclusion,omitempty"`
 	Started    time.Time `json:"started"`
 	Updated    time.Time `json:"updated"`
+	// NotStarted is a failed run GitHub never started, so the gate didn't
+	// run at all.
+	NotStarted bool `json:"notStarted,omitempty"`
 }
 
 // Project is one project's evidence, from CI's receipt for it.
@@ -325,6 +332,7 @@ func (s *Server) Start(ctx context.Context) {
 	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
 	for _, r := range s.Repos {
 		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
+		r.src.refused = map[int64]bool{}
 	}
 	s.pending = make(chan graphJob, 64)
 	go s.drawGraphs(ctx)
@@ -386,6 +394,9 @@ func (s *Server) refresh(ctx context.Context) error {
 			fail("CI runs", err)
 		} else {
 			r.src.runs = runs
+			if err := r.readRefused(ctx); err != nil {
+				fail("CI jobs", err)
+			}
 		}
 		if err := s.readReceipts(ctx, r); err != nil {
 			fail("receipts", err)
@@ -688,12 +699,12 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		}
 		for _, run := range r.src.runs {
 			if run.Name == "gate" {
-				rs.Gate = runRef(run)
+				rs.Gate = r.runRef(run)
 				break
 			}
 		}
 		if set := r.src.receipts; set != nil {
-			rs.Receipts = runRef(set.run)
+			rs.Receipts = r.runRef(set.run)
 			if i == 0 {
 				snap.Receipts = rs.Receipts
 			}
@@ -741,9 +752,12 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			if k >= 12 || run.Name != "gate" {
 				continue
 			}
-			e := Event{At: parseTime(run.UpdatedAt), Repo: r.Name, Who: WhoCI, Kind: run.Status, Text: "gate " + runWords(run) + " on " + run.HeadSHA[:7]}
+			e := Event{At: parseTime(run.UpdatedAt), Repo: r.Name, Who: WhoCI, Kind: run.Status, Text: "gate " + runWords(run, r.src.refused[run.ID]) + " on " + run.HeadSHA[:7]}
 			if run.Conclusion != "" {
 				e.Kind = run.Conclusion
+			}
+			if r.src.refused[run.ID] {
+				e.Kind = "unstarted"
 			}
 			snap.Activity = append(snap.Activity, e)
 		}
@@ -774,9 +788,9 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	if len(primary.src.commits) > 0 {
 		c := primary.src.commits[0]
 		m := &MainState{SHA: c.SHA, Title: firstLine(c.Commit.Message), By: author(c), At: parseTime(c.Commit.Committer.Date)}
-		for _, r := range primary.src.runs {
-			if r.Name == "gate" && r.HeadSHA == c.SHA {
-				m.Gate = runRef(r)
+		for _, run := range primary.src.runs {
+			if run.Name == "gate" && run.HeadSHA == c.SHA {
+				m.Gate = primary.runRef(run)
 				break
 			}
 		}
@@ -1033,21 +1047,55 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 	return n
 }
 
-func runRef(r github.Run) *RunRef {
-	return &RunRef{ID: r.ID, SHA: r.HeadSHA, Title: r.DisplayTitle, Status: r.Status, Conclusion: r.Conclusion,
-		Started: parseTime(r.StartedAt), Updated: parseTime(r.UpdatedAt)}
+func (r *Repo) runRef(run github.Run) *RunRef {
+	return &RunRef{ID: run.ID, SHA: run.HeadSHA, Title: run.DisplayTitle, Status: run.Status, Conclusion: run.Conclusion,
+		Started: parseTime(run.StartedAt), Updated: parseTime(run.UpdatedAt), NotStarted: r.src.refused[run.ID]}
 }
 
-func runWords(r github.Run) string {
+func runWords(run github.Run, refused bool) string {
 	switch {
-	case r.Status != "completed":
+	case run.Status != "completed":
 		return "running"
-	case r.Conclusion == "success":
+	case refused:
+		return "didn't start"
+	case run.Conclusion == "success":
 		return "passed"
-	case r.Conclusion == "failure":
+	case run.Conclusion == "failure":
 		return "failed"
 	}
-	return r.Conclusion
+	return strings.ReplaceAll(run.Conclusion, "_", " ")
+}
+
+// readRefused looks up, once each, whether GitHub started the failed gate
+// runs the page shows: the newest dozen, which include main's.
+func (r *Repo) readRefused(ctx context.Context) error {
+	if r.src.refused == nil {
+		r.src.refused = map[int64]bool{}
+	}
+	for k, run := range r.src.runs {
+		if k >= 12 || run.Name != "gate" || run.Status != "completed" || run.Conclusion != "failure" {
+			continue
+		}
+		if _, known := r.src.refused[run.ID]; known {
+			continue
+		}
+		jobs, err := r.GitHub.Jobs(ctx, run.ID)
+		if err != nil {
+			return err
+		}
+		r.src.refused[run.ID] = refused(jobs)
+	}
+	return nil
+}
+
+// refused says whether GitHub failed a run without starting any of its jobs.
+func refused(jobs []github.Job) bool {
+	for _, j := range jobs {
+		if j.Started() {
+			return false
+		}
+	}
+	return len(jobs) > 0
 }
 
 func author(c github.Commit) string {
