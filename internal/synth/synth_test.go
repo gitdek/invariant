@@ -552,8 +552,16 @@ func TestReviewDriver(t *testing.T) {
 		t.Errorf("a harness driver's review prompt:\n%s", job.Prompt)
 	}
 	// A Go project's explorer is its driver, and it's reviewed too (D-0090).
-	// This one has only Successors, so the review is the check of its steps.
-	if r, err := ReviewDriver(context.Background(), reviewer{job: &job, answer: "No problem."}, "../../examples/02-twophase-commit", filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r == nil || r.Of != "explorer" {
+	// One with only Successors has the review as the check of its steps.
+	dir = filepath.Join(t.TempDir(), "twophase")
+	if err := copyDir("../../examples/02-twophase-commit", dir); err != nil {
+		t.Fatal(err)
+	}
+	explorer := filepath.Join(dir, "twophase", "explore.go")
+	if err := os.WriteFile(explorer, []byte("package twophase\n\nfunc Successors(s State) []State { return nil }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := ReviewDriver(context.Background(), reviewer{job: &job, answer: "No problem."}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r == nil || r.Of != "explorer" {
 		t.Fatalf("review %+v, %v; a Go explorer is reviewed", r, err)
 	}
 	for _, want := range []string{"reviewing an explorer that another agent wrote a moment ago. It drives a Go project's code", "An explorer is evidence", "the explorer is `twophase/explore.go`",
@@ -562,12 +570,18 @@ func TestReviewDriver(t *testing.T) {
 			t.Errorf("the Go review prompt lacks %q:\n%s", want, job.Prompt)
 		}
 	}
-	// A project with nothing that drives its code gets no review.
-	dir = filepath.Join(t.TempDir(), "twophase")
-	if err := copyDir("../../examples/02-twophase-commit", dir); err != nil {
+	// One with Try is explored by the gate, which checks its attempts.
+	if err := os.WriteFile(explorer, []byte("package twophase\n\nfunc Try(s State, tried func(string, []any, State)) {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(dir, "twophase", "explore.go")); err != nil {
+	if _, err := ReviewDriver(context.Background(), reviewer{job: &job}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(job.Prompt, "explores the code from `Init()` through `Try`") || strings.Contains(job.Prompt, "only `Successors`") {
+		t.Errorf("the review prompt for an explorer with Try:\n%s", job.Prompt)
+	}
+	// A project with nothing that drives its code gets no review.
+	if err := os.Remove(explorer); err != nil {
 		t.Fatal(err)
 	}
 	if r, err := ReviewDriver(context.Background(), reviewer{job: &job}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r != nil {

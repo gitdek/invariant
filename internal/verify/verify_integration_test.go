@@ -162,13 +162,15 @@ func contains(xs []string, x string) bool {
 }
 
 // Conformance: the TypeScript and Python implementations are tested against
-// the same model, and the gate says so rather than claiming a proof.
+// the same model. TypeScript has no proof, and the gate says so rather than
+// claiming one. The Python example's core is proved with Nagini too, since
+// its rebuild on #59.
 func TestConformingImplementationsPass(t *testing.T) {
-	for _, dir := range []string{typescriptExample, pythonExample} {
+	for dir, assurance := range map[string]string{typescriptExample: "tested against the model", pythonExample: "proved"} {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			t.Parallel()
 			r := run(t, copyProject(t, dir, nil))
-			if !r.Passed || r.Conformance == nil || r.Code != nil || r.Assurance != "tested against the model" {
+			if !r.Passed || r.Conformance == nil || (r.Code != nil) != (assurance == "proved") || r.Assurance != assurance {
 				t.Fatalf("passed = %v, assurance = %q, failed = %v\n%s", r.Passed, r.Assurance, Failed(r), Feedback(r))
 			}
 			if r.Conformance.States < 250 {
@@ -184,7 +186,7 @@ func TestConformingImplementationsPass(t *testing.T) {
 func TestEarlyCommitInCodeFailsConformance(t *testing.T) {
 	cases := map[string]map[string]func(string) string{
 		typescriptExample: {"src/transaction.ts": replace(t, "this.#votes.size < this.participants.length", "this.#votes.size === 0")},
-		pythonExample:     {"twophase/transaction.py": replace(t, "len(self._votes) < len(self.participants)", "not self._votes")},
+		pythonExample:     {"twophase/core.py": replace(t, "        if not ok:\n            return False\n        self.decided = True\n", "        if not any(votes):\n            return False\n        self.decided = True\n")},
 	}
 	for dir, edits := range cases {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
