@@ -431,42 +431,63 @@ func TestFailuresSayWhy(t *testing.T) {
 }
 
 // A gate run GitHub never started, as when the account's Actions minutes
-// run out, didn't fail: the gate didn't run at all.
-func TestAGateGitHubNeverStartedDidntFail(t *testing.T) {
-	ran := github.Job{RunnerID: 5}
+// run out, didn't fail: the gate didn't run at all. Nor did one that a docs
+// change skipped, and neither may stand for a gate that passed (D-0083).
+func TestAGateThatDidntRunIsNeverAPass(t *testing.T) {
+	ran := github.Job{Name: "invariant/gate", RunnerID: 5, Conclusion: "success"}
 	ran.Steps = append(ran.Steps, struct {
 		Name string `json:"name"`
 	}{Name: "Verify every project"})
+	changes := github.Job{Name: "What changed", RunnerID: 4, Conclusion: "success"}
+	changes.Steps = ran.Steps
 	for _, c := range []struct {
 		jobs []github.Job
-		want bool
+		want string
 	}{
-		{nil, false},
-		{[]github.Job{{Name: "invariant/gate"}}, true},
-		{[]github.Job{{Name: "What changed"}, ran}, false},
+		{[]github.Job{ran}, gateRan},
+		{[]github.Job{changes, ran}, gateRan},
+		{[]github.Job{changes, {Name: "invariant/gate", Conclusion: "skipped"}}, gateSkipped},
+		{[]github.Job{{Name: "invariant/gate", Conclusion: "failure"}}, gateRefused},
+		{[]github.Job{{Name: "What changed", Conclusion: "failure"}, {Name: "invariant/gate", Conclusion: "failure"}}, gateRefused},
 	} {
-		if got := refused(c.jobs); got != c.want {
-			t.Errorf("refused(%+v) = %v; want %v", c.jobs, got, c.want)
+		if got := gateState(c.jobs); got != c.want {
+			t.Errorf("gateState(%+v) = %q; want %q", c.jobs, got, c.want)
 		}
 	}
+	if refused(nil) || !refused([]github.Job{{Name: "invariant/gate"}}) || refused([]github.Job{changes}) {
+		t.Error("refused misreads a run's jobs")
+	}
+
 	run := github.Run{ID: 9, Name: "gate", HeadSHA: "9121057", Status: "completed", Conclusion: "failure"}
 	r := &Repo{Name: "o/r"}
-	r.src.refused = map[int64]bool{9: true}
-	if got := runWords(run, true); got != "didn't start" {
+	r.src.gates = map[int64]string{9: gateRefused}
+	if got := runWords(run, gateRefused); got != "didn't start" {
 		t.Errorf("runWords = %q", got)
 	}
-	if ref := r.runRef(run); !ref.NotStarted {
+	if ref := r.runRef(run); !ref.NotStarted || ref.Skipped {
 		t.Errorf("runRef = %+v; want NotStarted", ref)
 	}
-	r.src.refused[9] = false
-	if got := runWords(run, false); got != "failed" {
+	r.src.gates[9] = gateRan
+	if got := runWords(run, gateRan); got != "failed" {
 		t.Errorf("runWords = %q", got)
 	}
-	if ref := r.runRef(run); ref.NotStarted {
+	if ref := r.runRef(run); ref.NotStarted || ref.Skipped {
 		t.Errorf("runRef = %+v; a gate that ran and failed started", ref)
 	}
+	run.Conclusion = "success"
+	r.src.gates[9] = gateSkipped
+	if got := runWords(run, gateSkipped); got != "skipped" {
+		t.Errorf("runWords = %q; a skipped gate didn't pass", got)
+	}
+	if ref := r.runRef(run); !ref.Skipped || ref.NotStarted {
+		t.Errorf("runRef = %+v; want Skipped", ref)
+	}
+	run.Conclusion = "cancelled"
+	if got := runWords(run, ""); got != "cancelled" {
+		t.Errorf("runWords = %q", got)
+	}
 	run.Conclusion = "timed_out"
-	if got := runWords(run, false); got != "timed out" {
+	if got := runWords(run, gateRan); got != "timed out" {
 		t.Errorf("runWords = %q", got)
 	}
 }

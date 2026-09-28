@@ -84,11 +84,18 @@ type sources struct {
 	prd      string
 	merges   map[int]mergeCheck
 	lease    *Lease
-	// refused marks the failed gate runs GitHub never started, such as when
-	// the account's Actions minutes ran out, with the ones it did start. A
-	// finished run never changes, so each is looked up once.
-	refused map[int64]bool
+	// gates says, for each finished gate run looked at, whether the gate
+	// ran in it: gateRan, gateSkipped or gateRefused. A finished run never
+	// changes, so each is looked up once.
+	gates map[int64]string
 }
+
+// Whether the gate job ran in a finished run (D-0081, D-0083).
+const (
+	gateRan     = "ran"
+	gateSkipped = "skipped" // only docs changed, so the workflow skipped it
+	gateRefused = "refused" // GitHub never gave it a runner
+)
 
 type cachedComments struct {
 	updated  string
@@ -229,6 +236,9 @@ type RunRef struct {
 	// NotStarted is a failed run GitHub never started, so the gate didn't
 	// run at all.
 	NotStarted bool `json:"notStarted,omitempty"`
+	// Skipped is a run that changed only docs, so the gate had nothing to
+	// check and didn't run.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 // Project is one project's evidence, from CI's receipt for it.
@@ -332,7 +342,7 @@ func (s *Server) Start(ctx context.Context) {
 	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
 	for _, r := range s.Repos {
 		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
-		r.src.refused = map[int64]bool{}
+		r.src.gates = map[int64]string{}
 	}
 	s.pending = make(chan graphJob, 64)
 	go s.drawGraphs(ctx)
@@ -394,7 +404,7 @@ func (s *Server) refresh(ctx context.Context) error {
 			fail("CI runs", err)
 		} else {
 			r.src.runs = runs
-			if err := r.readRefused(ctx); err != nil {
+			if err := r.readGates(ctx); err != nil {
 				fail("CI jobs", err)
 			}
 		}
@@ -439,12 +449,22 @@ func (s *Server) refresh(ctx context.Context) error {
 // readReceipts takes the receipts from the newest gate run on the branch
 // that passed, and the projects as they were at that commit.
 func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
+	// The newest gate that passed, and ran: a run that changed only docs
+	// skips the gate, and has no receipts (D-0083).
 	var run *github.Run
 	for i, run2 := range r.src.runs {
-		if run2.Name == "gate" && run2.Status == "completed" && run2.Conclusion == "success" {
-			run = &r.src.runs[i]
-			break
+		if run2.Name != "gate" || run2.Status != "completed" || run2.Conclusion != "success" {
+			continue
 		}
+		state, err := r.gateIn(ctx, run2)
+		if err != nil {
+			return err
+		}
+		if state == gateSkipped {
+			continue
+		}
+		run = &r.src.runs[i]
+		break
 	}
 	if run == nil {
 		return nil // no gate run on the branch has passed yet, so there are no receipts
@@ -752,12 +772,16 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			if k >= 12 || run.Name != "gate" {
 				continue
 			}
-			e := Event{At: parseTime(run.UpdatedAt), Repo: r.Name, Who: WhoCI, Kind: run.Status, Text: "gate " + runWords(run, r.src.refused[run.ID]) + " on " + run.HeadSHA[:7]}
+			state := r.src.gates[run.ID]
+			e := Event{At: parseTime(run.UpdatedAt), Repo: r.Name, Who: WhoCI, Kind: run.Status, Text: "gate " + runWords(run, state) + " on " + run.HeadSHA[:7]}
 			if run.Conclusion != "" {
 				e.Kind = run.Conclusion
 			}
-			if r.src.refused[run.ID] {
+			switch state {
+			case gateRefused:
 				e.Kind = "unstarted"
+			case gateSkipped:
+				e.Kind, e.Text = "skipped", e.Text+", which changed only docs"
 			}
 			snap.Activity = append(snap.Activity, e)
 		}
@@ -1048,16 +1072,22 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 }
 
 func (r *Repo) runRef(run github.Run) *RunRef {
+	state := r.src.gates[run.ID]
 	return &RunRef{ID: run.ID, SHA: run.HeadSHA, Title: run.DisplayTitle, Status: run.Status, Conclusion: run.Conclusion,
-		Started: parseTime(run.StartedAt), Updated: parseTime(run.UpdatedAt), NotStarted: r.src.refused[run.ID]}
+		Started: parseTime(run.StartedAt), Updated: parseTime(run.UpdatedAt), NotStarted: state == gateRefused, Skipped: state == gateSkipped}
 }
 
-func runWords(run github.Run, refused bool) string {
+// runWords says how a gate run went, given whether its gate ran.
+func runWords(run github.Run, state string) string {
 	switch {
 	case run.Status != "completed":
 		return "running"
-	case refused:
+	case run.Conclusion == "cancelled":
+		return "cancelled"
+	case state == gateRefused:
 		return "didn't start"
+	case state == gateSkipped:
+		return "skipped"
 	case run.Conclusion == "success":
 		return "passed"
 	case run.Conclusion == "failure":
@@ -1066,26 +1096,60 @@ func runWords(run github.Run, refused bool) string {
 	return strings.ReplaceAll(run.Conclusion, "_", " ")
 }
 
-// readRefused looks up, once each, whether GitHub started the failed gate
-// runs the page shows: the newest dozen, which include main's.
-func (r *Repo) readRefused(ctx context.Context) error {
-	if r.src.refused == nil {
-		r.src.refused = map[int64]bool{}
-	}
+// readGates looks up whether the gate ran in each finished run the page
+// shows: the newest dozen, which include main's.
+func (r *Repo) readGates(ctx context.Context) error {
 	for k, run := range r.src.runs {
-		if k >= 12 || run.Name != "gate" || run.Status != "completed" || run.Conclusion != "failure" {
+		if k >= 12 {
+			break
+		}
+		if run.Name != "gate" || run.Status != "completed" || (run.Conclusion != "success" && run.Conclusion != "failure") {
 			continue
 		}
-		if _, known := r.src.refused[run.ID]; known {
-			continue
-		}
-		jobs, err := r.GitHub.Jobs(ctx, run.ID)
-		if err != nil {
+		if _, err := r.gateIn(ctx, run); err != nil {
 			return err
 		}
-		r.src.refused[run.ID] = refused(jobs)
 	}
 	return nil
+}
+
+// gateIn is whether the gate ran in a finished run, looked up once.
+func (r *Repo) gateIn(ctx context.Context, run github.Run) (string, error) {
+	if r.src.gates == nil {
+		r.src.gates = map[int64]string{}
+	}
+	if state, ok := r.src.gates[run.ID]; ok {
+		return state, nil
+	}
+	jobs, err := r.GitHub.Jobs(ctx, run.ID)
+	if err != nil {
+		return "", err
+	}
+	state := gateState(jobs)
+	r.src.gates[run.ID] = state
+	return state, nil
+}
+
+// gateState says whether the gate ran, from a run's jobs. The gate is the job
+// named after its check. Runs from before the gate had a job ahead of it
+// have only that one.
+func gateState(jobs []github.Job) string {
+	for _, j := range jobs {
+		if j.Name != "invariant/gate" {
+			continue
+		}
+		switch {
+		case j.Conclusion == "skipped":
+			return gateSkipped
+		case !j.Started():
+			return gateRefused
+		}
+		return gateRan
+	}
+	if refused(jobs) {
+		return gateRefused
+	}
+	return gateRan
 }
 
 // refused says whether GitHub failed a run without starting any of its jobs.
