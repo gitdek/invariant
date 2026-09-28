@@ -261,8 +261,41 @@ func TestWaitingSaysWhatAPersonMustDo(t *testing.T) {
 		Hash: "sha256:6db634c64b0912345678"}
 	issue.Labels = []github.Label{{Name: factory.LabelTrigger}, {Name: factory.LabelProposal}}
 	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, factory.Marker{Kind: factory.KindProposal, Proposal: proposal})}}, "", now)
-	if w := l.Waiting; w == nil || w.Hash != "6db634c64b09" || len(w.Statements) != 1 || w.Statements[0].Name != "OneLeaseHolder" {
+	if w := l.Waiting; w == nil || w.Hash != "6db634c64b09" || len(w.Statements) != 1 || w.Statements[0].Name != "OneLeaseHolder" || w.Unchanged {
 		t.Fatalf("waiting %+v", l.Waiting)
+	}
+	// An amendment at the hash of the lock it amends changes no statement,
+	// so only its code changes (D-0093).
+	for _, c := range []struct {
+		amends string
+		want   bool
+	}{{proposal.Hash, true}, {"sha256:0000", false}, {"", false}} {
+		proposal.Target = &formalize.Target{Previous: "D-0027", Amends: c.amends}
+		l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, factory.Marker{Kind: factory.KindProposal, Proposal: proposal})}}, "", now)
+		if w := l.Waiting; w == nil || w.Unchanged != c.want || w.Amends != "D-0027" {
+			t.Errorf("amending %q: waiting %+v", c.amends, l.Waiting)
+		}
+	}
+	// A pull request closed without merging, on an open issue, waits for a
+	// person to draft again, and a revise answers it.
+	closed := marker(t, factory.Marker{Kind: factory.KindClosed, PR: 37})
+	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: closed}}, "", now)
+	if w := l.Waiting; w == nil || w.Kind != factory.KindClosed || w.PR != 37 {
+		t.Fatalf("waiting %+v", l.Waiting)
+	}
+	later := now.Add(-30 * time.Second).Format(time.RFC3339)
+	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: closed}, {User: github.User{Login: "gitdek"}, CreatedAt: later, Body: "/invariant revise"}}, "", now)
+	if l.Waiting != nil {
+		t.Errorf("a revise answers a closed pull request: waiting %+v", l.Waiting)
+	}
+	// A ratification the factory hasn't reached yet, while it builds another
+	// issue, is the factory's move: the issue is queued, not waiting on
+	// anyone.
+	proposal.Target = nil
+	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, factory.Marker{Kind: factory.KindProposal, Proposal: proposal})},
+		{User: github.User{Login: "gitdek"}, CreatedAt: later, Body: "/invariant ratify 6db634c64b09"}}, "", now)
+	if l.Waiting != nil || l.Stage != StageQueued {
+		t.Errorf("ratified and not yet taken: stage %q, waiting %+v", l.Stage, l.Waiting)
 	}
 	issue.State = "closed"
 	if l = Lane(issue, nil, "", now); l.Waiting != nil {

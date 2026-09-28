@@ -566,6 +566,12 @@ footer p { margin: 0; max-width: 60em; }
 .need .ask { margin: 10px 0 4px; font-size: 15px; color: var(--ink); line-height: 1.5; }
 .need .ask b { font-family: var(--mono); color: var(--people); margin-right: 6px; }
 .need .ask strong { color: var(--ink); font-weight: 600; }
+.need .ask b.same, .batch .ask b.same { font-family: inherit; font-weight: 600; color: var(--accent); margin-right: 4px; }
+.batch {
+  padding: 16px 20px; border: 1px solid rgba(var(--accent-rgb), 0.45); border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--accent-soft), transparent 70%), var(--card);
+}
+.batch .ask { margin: 0 0 4px; font-size: 15px; color: var(--ink); line-height: 1.5; }
 .opts { display: grid; gap: 8px; margin: 10px 0 6px; }
 .opt {
   display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: start; text-align: left; width: 100%;
