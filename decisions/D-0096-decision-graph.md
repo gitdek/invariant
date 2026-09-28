@@ -3,7 +3,8 @@ id: D-0096
 title: One decision graph for every project, in an embedded store
 date: 2026-09-28
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: "@gitdek's direction on 2026-09-28: one embedded graph store holds the decisions of all his projects, since flat files scattered across many repositories get disorganized. An agent researched the engines the same day."
 ---
@@ -77,6 +78,16 @@ LLMs write SQL most accurately: 47% correct with no examples, against 34% for Cy
 3. **Where the store lives.** Recommend one file on the machine that runs the factory, rebuilt from the journals anywhere else, CI included.
 4. **The journal's place.** Recommend `decisions/journal.jsonl` in each repository, one line per write. An edge to another project's decision is checked against that project's journal.
 5. **When.** Recommend slice 12, before the Codex backend, since every agent's work after it writes to the store.
+
+## Ratified by @gitdek
+
+@gitdek answered all five questions with their recommendations on the evening of 2026-09-28, the day slice 11 closed:
+
+1. **B:** SQLite used as the graph, with LadybugDB as the planned upgrade.
+2. **Decision IDs** keep each project's own numbering under its name, such as `invariant/D-0096` and `copythis-ad/D-0001`.
+3. **The store** is one file on the machine that runs the factory, rebuilt from the journals anywhere else, CI included.
+4. **The journal** is `decisions/journal.jsonl` in each repository, one line per write.
+5. **It's slice 12,** before the Codex backend.
 
 ## What would reopen this
 
