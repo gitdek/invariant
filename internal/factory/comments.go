@@ -315,6 +315,11 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 			fmt.Fprintf(&b, " My last attempt is in draft pull request #%d.", pr.Number)
 		}
 		b.WriteString(" What failed:\n\n" + quote(verify.Feedback(res.Final), 60))
+		// The agent's own account often says why in plain words, such as
+		// existing code breaking a ratified choice. The gate checks none of it.
+		if account := strings.TrimSpace(res.Usage.Summary); account != "" {
+			b.WriteString("\n\nThe agent's own account, which the gate doesn't check:\n\n" + quote(clip(account, accountLimit), 120))
+		}
 	}
 	b.WriteString("\n\nA person needs to look at this.")
 	return post("needs a person", b.String(), m)
@@ -378,6 +383,12 @@ func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.
 				break
 			}
 		}
+		// Only the final gate counts. An agent can pass a run and change the
+		// code afterwards, as copythis-ad#37's did with a step turned off to
+		// diagnose a failure.
+		if res.Final != nil && !res.Final.Passed {
+			gate = fmt.Sprintf("the final gate failed, after %d runs", len(res.GateRuns))
+		}
 		fmt.Fprintf(&b, "- **Synthesis:** %s, %d turns, %s\n", res.Usage.Backend, res.Usage.Turns, gate)
 		if len(res.Tampered) > 0 {
 			fmt.Fprintf(&b, "- **Discarded:** the agent edited protected files (%s), and its edits were thrown away\n", strings.Join(res.Tampered, ", "))
@@ -412,8 +423,11 @@ func clip(text string, n int) string {
 	if cut < 0 {
 		cut = n
 	}
-	return text[:cut] + "\n\n(The review goes on; the rest is in the build's log.)"
+	return text[:cut] + "\n\n(It goes on; the rest is in the build's log.)"
 }
+
+// accountLimit keeps an agent's account from crowding a post.
+const accountLimit = 6000
 
 // projectReadme introduces a project the factory built.
 func projectReadme(t Thread, dir string, p *formalize.Proposal, answers []formalize.Answer, ratifiedBy, commentURL string) string {

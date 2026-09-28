@@ -288,6 +288,10 @@ func TestOutOfScopeIsNeverMerged(t *testing.T) {
 func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	r := newRig(t)
 	r.build.pass = false
+	// The agent passed a run with a step turned off, to diagnose the
+	// failure, then turned it back on, as copythis-ad#37's did.
+	r.build.runs = []bool{false, false, true}
+	r.build.account = "The gate does not pass, and it shouldn't: the existing code breaks the calendar-day policy."
 	failed := ratified(t, r)
 	if failed.Marker.Kind != KindFailed || !sameSet(r.gh.labelsOf(1), []string{LabelHumanReview}) {
 		t.Fatalf("post = %+v, labels = %v", failed.Marker, r.gh.labelsOf(1))
@@ -295,6 +299,14 @@ func TestAFailedBuildOpensADraftForPeople(t *testing.T) {
 	pr := r.gh.prs[failed.Marker.PR]
 	if !pr.Draft || !strings.Contains(failed.Comment.Body, "draft pull request #") {
 		t.Errorf("pr = %+v\n%s", pr, failed.Comment.Body)
+	}
+	// The post carries the agent's account, marked as unchecked, and the
+	// draft says the final gate failed, not that a run passed.
+	if !strings.Contains(failed.Comment.Body, "The agent's own account, which the gate doesn't check:\n\n> The gate does not pass, and it shouldn't") {
+		t.Errorf("the post lacks the agent's account:\n%s", failed.Comment.Body)
+	}
+	if body := r.gh.prBody(pr.Number); !strings.Contains(body, "the final gate failed, after 3 runs") || strings.Contains(body, "the gate passed on run") {
+		t.Errorf("the draft's body:\n%s", body)
 	}
 	r.gh.ci(pr.Number, "success")
 	r.poll()
