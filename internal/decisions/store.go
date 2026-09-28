@@ -558,23 +558,29 @@ func (s *Store) nodes(query string, args ...any) ([]Node, error) {
 	return scanNodes(rows)
 }
 
-// Dependents is everything that rests on a decision, transitively: the
-// decisions that refine or cite it, and the SPEC lines, docs and code that
-// cite or implement any of them. It's what reopening the decision touches.
-// UNION keeps each node once, so the walk always ends, however the graph
-// loops.
+// Dependents is everything that rests on a decision: every decision that
+// refines it, directly or through others, and every decision, SPEC line,
+// doc or piece of code that mentions or implements any of them. It's what
+// reopening the decision touches. A mention counts one step and no further,
+// since a citation is often only an example, and following citations on
+// would make every decision rest on nearly every other one. UNION keeps
+// each node once, so the walk ends however the graph loops.
 func (s *Store) Dependents(id string) ([]Node, error) {
-	return s.nodes(`WITH RECURSIVE dep(id) AS (
+	return s.nodes(`WITH RECURSIVE chain(id) AS (
 			SELECT ?1
 			UNION
-			SELECT e.src FROM edge e JOIN dep d ON e.dst = d.id WHERE e.type IN ('refines', 'cites', 'implements')
+			SELECT e.src FROM edge e JOIN chain c ON e.dst = c.id WHERE e.type = 'refines'
 		)
-		SELECT `+nodeColumns+` FROM dep JOIN node n ON n.id = dep.id WHERE dep.id != ?1
+		SELECT `+nodeColumns+` FROM node n WHERE n.id != ?1 AND n.id IN (
+			SELECT id FROM chain
+			UNION
+			SELECT e.src FROM edge e JOIN chain c ON e.dst = c.id WHERE e.type IN ('cites', 'implements', 'reopens')
+		)
 		ORDER BY n.kind, n.id`, id)
 }
 
 // Implementers is the code that implements a decision, or a decision that
-// rests on it.
+// refines it.
 func (s *Store) Implementers(id string) ([]Node, error) {
 	all, err := s.Dependents(id)
 	if err != nil {
@@ -589,15 +595,20 @@ func (s *Store) Implementers(id string) ([]Node, error) {
 	return out, nil
 }
 
-// Grounds is what a decision rests on, transitively: the decisions it
-// refines or cites. It says why the decision exists.
+// Grounds is what a decision rests on: the decisions it refines, directly
+// or through others, and the ones any of them cites or reopens. It says why
+// the decision exists.
 func (s *Store) Grounds(id string) ([]Node, error) {
-	return s.nodes(`WITH RECURSIVE g(id) AS (
+	return s.nodes(`WITH RECURSIVE chain(id) AS (
 			SELECT ?1
 			UNION
-			SELECT e.dst FROM edge e JOIN g ON e.src = g.id WHERE e.type IN ('refines', 'cites')
+			SELECT e.dst FROM edge e JOIN chain c ON e.src = c.id WHERE e.type = 'refines'
 		)
-		SELECT `+nodeColumns+` FROM g JOIN node n ON n.id = g.id WHERE g.id != ?1 AND n.kind = 'decision'
+		SELECT `+nodeColumns+` FROM node n WHERE n.kind = 'decision' AND n.id != ?1 AND n.id IN (
+			SELECT id FROM chain
+			UNION
+			SELECT e.dst FROM edge e JOIN chain c ON e.src = c.id WHERE e.type IN ('cites', 'reopens')
+		)
 		ORDER BY n.id`, id)
 }
 

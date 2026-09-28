@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,12 +174,19 @@ func TestJournalOnlyGrowsAndQueriesOnlyRead(t *testing.T) {
 	}
 }
 
-// Walking what rests on a decision ends even where the graph loops, and
-// reaches the SPEC, the docs and the code that name it.
-func TestDependentsThroughTextAndLoops(t *testing.T) {
+// What rests on a decision follows refines all the way, and a mention one
+// step: it reaches the SPEC, the docs and the code that name any decision
+// in the chain, and ends even where the graph loops.
+func TestDependentsFollowRefinesAndOneMention(t *testing.T) {
 	s, repo := fixture(t)
-	for _, text := range []string{"The store is SQLite.", "Journal every write, for D-0001.", "Check it in CI, for D-0002, as D-0003 says."} {
-		if _, err := s.Decide(repo, NewDecision{Door: "two-way", Status: "decided", Who: "agent", Text: text}, "agent"); err != nil {
+	for _, d := range []NewDecision{
+		{Text: "The store is SQLite."},
+		{Text: "Journal every write.", Edges: []Edge{{Refines, "D-0001"}}},
+		{Text: "Check it in CI, as D-0003 says.", Edges: []Edge{{Refines, "D-0002"}}},
+		{Text: "Name the tools as D-0001 does."},
+	} {
+		d.Door, d.Status, d.Who = "two-way", "decided", "agent"
+		if _, err := s.Decide(repo, d, "agent"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -188,6 +194,8 @@ func TestDependentsThroughTextAndLoops(t *testing.T) {
 	write(t, filepath.Join(repo.Dir, "decisions", "D-0001-store.md"), "# D-0001\n\nSee D-0003.\n")
 	write(t, filepath.Join(repo.Dir, "SPEC.md"), "# Spec\n\n- The store journals every write. `D-0002`\n")
 	write(t, filepath.Join(repo.Dir, "store", "store.go"), "package store\n\n// append writes a line (D-0003).\nfunc append() {}\n")
+	// D-0004 only mentions D-0001, so what implements D-0004 doesn't rest on D-0001.
+	write(t, filepath.Join(repo.Dir, "tools", "tools.go"), "package tools\n\n// Names, as D-0004 says.\n")
 	write(t, filepath.Join(repo.Dir, "testdata", "copy.go"), "// D-0001 in a test copy is left out.\n")
 	if err := s.Rebuild([]Repo{repo}); err != nil {
 		t.Fatal(err)
@@ -196,19 +204,16 @@ func TestDependentsThroughTextAndLoops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "demo/store/store.go:3,demo/D-0002,demo/D-0003,demo/SPEC.md:3"
-	got := ids(deps)
-	sort.Slice(got, func(i, j int) bool { return deps[i].Kind+got[i] < deps[j].Kind+got[j] })
-	if strings.Join(got, ",") != want {
-		t.Errorf("dependents = %v; want %s", got, want)
+	if got, want := strings.Join(ids(deps), ","), "demo/store/store.go:3,demo/D-0002,demo/D-0003,demo/D-0004,demo/SPEC.md:3"; got != want {
+		t.Errorf("dependents = %s; want %s", got, want)
 	}
 	code, _ := s.Implementers("demo/D-0001")
 	if len(code) != 1 || code[0].ID != "demo/store/store.go:3" || code[0].Text != "// append writes a line (D-0003)." {
 		t.Errorf("implementers = %+v", code)
 	}
 	grounds, _ := s.Grounds("demo/D-0003")
-	if strings.Join(ids(grounds), ",") != "demo/D-0001,demo/D-0002" {
-		t.Errorf("grounds = %v", ids(grounds))
+	if got := strings.Join(ids(grounds), ","); got != "demo/D-0001,demo/D-0002" {
+		t.Errorf("grounds = %s", got)
 	}
 	found, _ := s.Search("journal WRITE")
 	if len(found) != 1 || found[0].ID != "demo/D-0002" {
