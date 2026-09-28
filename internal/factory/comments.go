@@ -327,9 +327,24 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 
 // ciFailedComment says why CI's gate didn't pass. A gate GitHub never
 // started didn't fail, so it says that instead, and how to go on.
-func ciFailedComment(pr github.PullRequest, run github.CheckRun, started bool, m Marker) string {
-	if !started {
+// gateStart is whether CI's gate job ran. GitHub fails a job it never gives
+// a runner, as when the account's Actions minutes run out (D-0081).
+type gateStart int
+
+const (
+	gateRan gateStart = iota
+	gateNeverStarted
+	gateUnknown // the App can't read the job to tell
+)
+
+func ciFailedComment(pr github.PullRequest, run github.CheckRun, started gateStart, m Marker) string {
+	switch started {
+	case gateNeverStarted:
 		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment `/invariant retry`.",
+			pr.Number, run.URL), m)
+	case gateUnknown:
+		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here: "+
+			"give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.",
 			pr.Number, run.URL), m)
 	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` %s on #%d ([run](%s)), so I won't merge it. A person needs to look at this.",
