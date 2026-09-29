@@ -175,6 +175,22 @@ func (c Clone) RevParse(ctx context.Context, ref string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+// Manifests are the paths of every project's manifest at ref (#153).
+func (c Clone) Manifests(ctx context.Context, ref string) ([]string, error) {
+	defer c.lock()()
+	out, err := c.git(ctx, "ls-tree", "-r", "--name-only", ref)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, p := range strings.Split(out, "\n") {
+		if p == ".invariant/invariant.json" || strings.HasSuffix(p, "/.invariant/invariant.json") {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
 func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
 	defer c.lock()()
 	out, err := c.git(ctx, "show", ref+":"+file)
