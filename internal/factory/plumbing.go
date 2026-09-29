@@ -355,3 +355,20 @@ func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr gi
 	next.Failure = FailTrusted
 	return f.say(ctx, n, trustedComment(pr, trusted, next), LabelHumanReview)
 }
+
+// trustedAt is what a plan's pull request changes in the trusted base, as
+// the scope check the watcher runs before a merge reads its branch now. A
+// project's pull request isn't checked: only a plan's waits for a person.
+func (f *Factory) trustedAt(ctx context.Context, n int, m Marker) ([]string, error) {
+	if !isPlan(m.Project) {
+		return nil, nil
+	}
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return nil, err
+	}
+	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, "origin/"+m.Branch, n)
+	if err != nil {
+		return nil, err
+	}
+	return sc.Trusted, nil
+}
