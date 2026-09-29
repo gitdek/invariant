@@ -81,9 +81,20 @@ type Waiting struct {
 	Amends     string     `json:"amends,omitempty"`     // what an amendment replaces
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
-	Unchanged bool      `json:"unchanged,omitempty"`
-	PR        int       `json:"pr,omitempty"` // the pull request that failed, or was closed
-	Since     time.Time `json:"since"`
+	Unchanged bool `json:"unchanged,omitempty"`
+	// Plan is a plumbing plan to ratify (D-0105). Its acceptance tests are
+	// in Statements, each of kind test.
+	Plan  *PlanView `json:"plan,omitempty"`
+	PR    int       `json:"pr,omitempty"` // the pull request that failed, or was closed
+	Since time.Time `json:"since"`
+}
+
+// PlanView is what a plumbing plan says: the change, the files it may
+// write, and which of them are in the trusted base.
+type PlanView struct {
+	Summary string   `json:"summary"`
+	Files   []string `json:"files"`
+	Trusted []string `json:"trusted,omitempty"`
 }
 
 // Question is one fork the factory asked about.
@@ -369,6 +380,12 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 		}
 		for _, s := range p.Statements {
 			w.Statements = append(w.Statements, Said{Name: s.Name, Kind: s.Kind, Says: s.Says})
+		}
+		if pl := p.Plan; pl != nil {
+			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted}
+			for _, t := range pl.Tests {
+				w.Statements = append(w.Statements, Said{Name: t.Name, Kind: "test", Says: t.Says})
+			}
 		}
 		if p.Target != nil {
 			w.Amends = p.Target.Previous

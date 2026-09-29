@@ -101,6 +101,10 @@ const (
 	FailGate        = "gate"        // the code failed the gate in the factory's own run
 	FailCI          = "ci"          // CI's gate failed on the pull request
 	FailUnmergeable = "unmergeable" // CI's gate passed, but the pull request can't merge
+	// FailTrusted is a plan's pull request that passed CI's gate and the
+	// review, and changes the trusted base, so a person merges it (D-0105).
+	// The protocol counts it as one the factory can't merge.
+	FailTrusted = "trusted"
 )
 
 // maxStops is how many builds of an issue can stop before it makes a pull

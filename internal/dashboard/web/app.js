@@ -1097,6 +1097,11 @@
   // check.
   function proposalText(w, repo, who) {
     const n = (w.statements || []).length, name = `<strong>${esc(w.name)}</strong>`;
+    // A plumbing plan is tested, not proved (D-0105).
+    if (w.plan) {
+      const files = (w.plan.files || []).length, trusted = (w.plan.trusted || []).length;
+      return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.plan.summary)}</p>`;
+    }
     if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
     return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
   }
@@ -1109,6 +1114,7 @@
       case "gate": return `The code didn't pass the gate in the factory's own run. Its last attempt is in draft ${pr}. If the code needs fixing, fix it, then have the factory try again. If what must be true should change instead, close ${pr}, then have it draft again.`;
       case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified. Once it's fixed, have the factory try again.`;
       case "ci": return `CI's gate didn't pass on ${pr}. Once the cause is fixed, have the factory try again.`;
+      case "trusted": return `${pr} passed CI's gate and the review, and it changes the trusted base, so a person merges it. Review it and merge it on GitHub.`;
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.`;
   }

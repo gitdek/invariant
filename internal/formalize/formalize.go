@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
@@ -87,6 +88,9 @@ type Proposal struct {
 	// a new project placed the usual way.
 	Target *Target `json:"target,omitempty"`
 	Dir    string  `json:"dir,omitempty"`
+	// Plan is a plumbing change's proposal, in place of statements: what
+	// changes, the files it may touch, and its acceptance tests (D-0105).
+	Plan *plumbing.Plan `json:"plan,omitempty"`
 }
 
 // Target is the project an amendment changes, as it stood when the

@@ -109,7 +109,7 @@ If a person's later comment in the discussion changes a decision above, follow t
 
 `+"`by`"+` is the login of the person whose comment asked for it. Never change a decision nobody asked to change.
 
-If the issue isn't something this factory can build as a new, self-contained project, set `+"`unsupported`"+` to one sentence saying why, and leave everything else empty.
+If the issue isn't something this factory can build as a new, self-contained project, set `+"`unsupported`"+` to one sentence saying why, and leave everything else empty. If it's a change to code that isn't a state machine, say so: marked `+"`Kind: plumbing`"+`, the factory plans it instead (D-0105).
 
 # Check your draft
 

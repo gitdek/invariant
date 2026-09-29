@@ -108,6 +108,22 @@ jobs:
           if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
           "$RUNNER_TEMP/invariant" decisions check $base
 
+      # A factory pull request that adds its issue's ratified plan builds
+      # plumbing, not a project (D-0105). It gets the whole gate, as a
+      # person's pull request does, since it can change the gate itself.
+      - name: What the factory built
+        id: kind
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          if git diff --name-only --no-renames "origin/$BASE...HEAD" | grep -Eq '^\.invariant/plans/issue-[0-9]+\.json$'; then
+            echo "plumbing=true" >> "$GITHUB_OUTPUT"
+            echo "It builds a ratified plan."
+          else
+            echo "It builds a project."
+          fi
+
       # The branch names the issue: invariant/issue-<n>-<slug>. Only that
       # issue's ratification may amend an existing project (D-0045).
       - name: Keep a factory pull request in scope
@@ -126,7 +142,7 @@ jobs:
       - name: Verify every project
         env:
           BASE: ${{ github.base_ref }}
-          FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') }}
+          FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') && steps.kind.outputs.plumbing != 'true' }}
         run: |
           manifests=$(git ls-files '*/.invariant/invariant.json')
           if [ "$FACTORY" = "true" ]; then
@@ -153,7 +169,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           projects=$(git ls-files '*/.invariant/invariant.json' | sed 's#/.invariant/invariant.json$##')
-          "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects
+          plans=$(git ls-files '.invariant/plans/*.json')
+          "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects $plans
 
       - name: Publish the receipt
         if: always()
@@ -174,5 +191,5 @@ jobs:
       # factory pull request can't, and main gets only what a pull request
       # already ran them on (D-0079).
       - name: Show the gate rejects gaming, and synthesis can't touch the lock
-        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'invariant/')
-        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/ ./internal/conformance/
+        if: github.event_name == 'pull_request' && (!startsWith(github.head_ref, 'invariant/') || steps.kind.outputs.plumbing == 'true')
+        run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/ ./internal/conformance/ ./internal/plumbing/

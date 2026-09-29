@@ -12,6 +12,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/verify"
@@ -260,6 +261,8 @@ type scriptedFormalizer struct {
 	amend func(c *formalize.Current) *formalize.Proposal
 	// revised is what a draft says people's later comments changed.
 	revised []formalize.Revision
+	// plan is what a plumbing issue's draft plans (D-0105).
+	plan *plumbing.Plan
 }
 
 const bufferModule = `---- MODULE BoundedBuffer ----
@@ -311,6 +314,20 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 	s.requests = append(s.requests, req)
 	if s.fail != "" {
 		return &formalize.Result{Problem: s.fail}, nil
+	}
+	if req.Plumbing != "" {
+		if s.plan == nil {
+			return &formalize.Result{Problem: "no plan scripted"}, nil
+		}
+		if _, err := os.Stat(filepath.Join(req.Plumbing, "README.md")); err != nil {
+			s.t.Errorf("the planner should get the base branch to read: %v", err)
+		}
+		plan := *s.plan
+		if err := plan.Validate(); err != nil {
+			s.t.Fatal(err)
+		}
+		return &formalize.Result{Proposal: &formalize.Proposal{Draft: formalize.Draft{Name: plan.Name, Language: "go"}, Plan: &plan, Hash: plan.Hash()},
+			Usage: synth.Usage{CostUSD: 0.10}}, nil
 	}
 	if len(req.Answers) < len(s.forks) {
 		return &formalize.Result{Proposal: &formalize.Proposal{Draft: formalize.Draft{Forks: s.forks}}, Usage: synth.Usage{CostUSD: 0.10}}, nil

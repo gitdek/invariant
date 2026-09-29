@@ -148,7 +148,7 @@ func failureValue(why string) int8 {
 		return protocol.FailGate
 	case FailCI:
 		return protocol.FailCI
-	case FailUnmergeable:
+	case FailUnmergeable, FailTrusted:
 		return protocol.FailUnmergeable
 	}
 	return protocol.FailNone

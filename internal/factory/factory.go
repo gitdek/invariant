@@ -20,6 +20,7 @@ import (
 	"github.com/gitdek/invariant/factory/recovery/recovery"
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/scope"
 	"github.com/gitdek/invariant/internal/synth"
@@ -92,11 +93,12 @@ type Factory struct {
 	Repo       Repo
 	Formalizer Formalizer
 	Builder    Builder
-	Base       string // the branch pull requests merge into
-	Projects   string // the directory new projects go in, such as examples
-	Work       string // where transcripts and logs go
-	Check      string // the CI check that gates a merge: invariant/gate
-	Language   string // the code's language when an issue has no language label (D-0040)
+	Plumbing   PlanBuilder // builds a plumbing issue's ratified plan (D-0105); nil takes none
+	Base       string      // the branch pull requests merge into
+	Projects   string      // the directory new projects go in, such as examples
+	Work       string      // where transcripts and logs go
+	Check      string      // the CI check that gates a merge: invariant/gate
+	Language   string      // the code's language when an issue has no language label (D-0040)
 	// Self is the factory's own login when it acts as its App's bot
 	// (D-0041). Then only the bot's comments count as the factory's posts,
 	// and no bot's comment is ever a command. Empty means the factory posts
@@ -469,6 +471,19 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	f.doing(n, "formalizing")
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
 	req := f.request(t, answers, previous)
+	// A plumbing issue gets a plan instead of statements, checked against
+	// the base branch as it is (D-0105).
+	if kindLine(t.Issue.Body) == "plumbing" {
+		if projectLine(t.Issue.Body) != "" || len(codeLines(t.Issue.Body)) > 0 {
+			return stuck("A plumbing issue's plan names the files it changes, so it names no project or code to check. Take out the Project: and Code: lines, or the Kind: plumbing line.")
+		}
+		root, err := f.planBase(ctx)
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(root)
+		req.Plumbing, req.Language = root, "go"
+	}
 	// A Project: line names the project the issue changes, or where a new
 	// one goes (D-0045).
 	var newDir string
@@ -544,6 +559,9 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	case len(p.Forks) > 0:
 		m.Kind, m.Forks, m.Proposal = KindForks, p.Forks, p
 		return f.drafted(ctx, t, cause, base, m, forksComment(p.Forks, m), LabelAsking)
+	case p.Plan != nil:
+		m.Kind, m.Proposal = KindProposal, p
+		return f.drafted(ctx, t, cause, base, m, planComment(p, m), LabelProposal)
 	case p.Target != nil:
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, amendmentComment(p, res.Report, res.Changes, m), LabelProposal)
@@ -813,6 +831,9 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return Post{}, err
 	}
+	if p.Plan != nil {
+		return f.commitPlan(ctx, t, state, c)
+	}
 	if p.Target != nil {
 		cur, err := f.current(ctx, p.Target.Dir)
 		if err != nil {
@@ -1021,6 +1042,19 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if stops >= maxStops {
 			return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)))
 		}
+		if isPlan(m.Project) {
+			built, res, runErr, err := f.runPlanBuild(ctx, t, ratified, step)
+			if err != nil {
+				return err
+			}
+			if built == "" {
+				if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
+					return err
+				}
+				return failed(FailStopped, planFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
+			}
+			return f.publish(ctx, t, ratified, built, next, stops)
+		}
 		built, res, runErr, err := f.runBuild(ctx, t, ratified, step)
 		if err != nil {
 			return err
@@ -1050,8 +1084,9 @@ func buildStepName(ratified Post) string {
 // builtResult is what a build's run leaves in its record, on top of the
 // code it wrote: what synthesis reported, and what went wrong, if anything.
 type builtResult struct {
-	Result *synth.Result `json:"result"`
-	Error  string        `json:"error,omitempty"`
+	Result   *synth.Result         `json:"result"`
+	Plumbing *plumbing.BuildResult `json:"plumbing,omitempty"` // a plan's build, in place of a project's (D-0105)
+	Error    string                `json:"error,omitempty"`
 }
 
 // runBuild records the build's agent run, runs it, and commits the code it
@@ -1181,6 +1216,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if err := f.loadResult(ctx, result, &built); err != nil {
 		return err
 	}
+	if built.Plumbing != nil {
+		return f.publishPlan(ctx, t, ratified, result, built, next, stops)
+	}
 	res := built.Result
 	if res == nil || res.Final == nil {
 		return fmt.Errorf("the build's record at %s holds no result", result)
@@ -1214,7 +1252,8 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	// The pull request this makes, in the protocol's terms: its head, the
 	// lock there, and whether it changes only its project.
 	at := pullRequest{head: code, gate: protocol.GatePending}
-	at.lock = headLock(f.Repo.Show(ctx, code, m.Project+"/.invariant/ratified.lock"))
+	b, lockErr := f.Repo.Show(ctx, code, lockFileOf(m.Project))
+	at.lock = lockAt(m.Project, b, lockErr)
 	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
 	if err != nil {
 		return err
@@ -1399,17 +1438,16 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if sc.Project != m.Project {
 		problems = append(problems, fmt.Sprintf("it changes %q, not the ratified project %q", sc.Project, m.Project))
 	}
-	b, lockErr := f.Repo.Show(ctx, head, m.Project+"/.invariant/ratified.lock")
+	b, lockErr := f.Repo.Show(ctx, head, lockFileOf(m.Project))
 	if lockErr != nil {
 		problems = append(problems, "its lock can't be read: "+lockErr.Error())
-	} else {
-		var lock project.Lock
-		if err := json.Unmarshal(b, &lock); err != nil || lock.Ratified == nil || lock.Ratified.Proposal != m.Hash ||
-			project.ProposalHash(lock.Bounds, lock.Statements) != m.Hash {
-			problems = append(problems, "its lock isn't the proposal that was ratified")
-		}
+	} else if lockAt(m.Project, b, nil) != m.Hash {
+		problems = append(problems, "its lock isn't the proposal that was ratified")
 	}
-	at := pullRequest{head: pr.Head.SHA, gate: gateOf(run, done), lock: headLock(b, lockErr), scopeMany: len(sc.Problems) > 0 || sc.Project != m.Project}
+	// A change to the trusted base is outside what the factory may merge,
+	// so the protocol sees it as out of scope (D-0105).
+	at := pullRequest{head: pr.Head.SHA, gate: gateOf(run, done), lock: lockAt(m.Project, b, lockErr),
+		scopeMany: len(sc.Problems) > 0 || sc.Project != m.Project || len(sc.Trusted) > 0}
 	if len(problems) > 0 {
 		from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
 		to.failure = FailUnmergeable
@@ -1421,6 +1459,10 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		}
 		next.Failure = FailUnmergeable
 		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
+	}
+	// Only a person merges a change to the trusted base (D-0105).
+	if sc.Plumbing && len(sc.Trusted) > 0 {
+		return f.waitForPerson(ctx, t, state, pr, at, sc.Trusted, next)
 	}
 	// The protocol has the last word on merging.
 	from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
