@@ -16,10 +16,27 @@ import (
 // any draft, and ratify it by its hash, as the protocol has it. Its
 // ratification is recorded on the issue, and the plan itself builds nothing.
 
-// isPRD says whether a writer asked for a plan of issues on the issue. From
-// then on, the issue is a PRD through its forks, answers and revisions,
-// whatever its own Kind:, Project: and Code: lines say.
-func isPRD(t Thread) bool { return hasVerb(t.Commands, Plan) }
+// isPRD says whether a writer asked for a plan of issues on the issue, in a
+// /invariant plan the factory didn't turn down with a note, as it does one
+// that comes while it's building. From then on, the issue is a PRD through
+// its forks, answers and revisions, whatever its own Kind:, Project: and
+// Code: lines say.
+func isPRD(t Thread) bool {
+	declined := map[int64]bool{}
+	for _, p := range t.Posts {
+		if p.Marker.Kind == KindNote {
+			for _, id := range p.Marker.ReplyTo {
+				declined[id] = true
+			}
+		}
+	}
+	for _, c := range t.Commands {
+		if c.Verb == Plan && !declined[c.Comment] {
+			return true
+		}
+	}
+	return false
+}
 
 // isIssuePlan says whether a post's proposal is a plan of issues.
 func isIssuePlan(m Marker) bool { return m.Proposal != nil && m.Proposal.IssuePlan != nil }

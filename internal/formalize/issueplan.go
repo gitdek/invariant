@@ -47,6 +47,22 @@ func (p *IssuePlan) Hash() string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// MaxPlanText is how long a plan's name, summary, titles and bodies may be,
+// together. Its proposal post shows all of them, and the post's marker holds
+// them again, compressed, so a plan within this fits in one comment whatever
+// its text. A longer one would be cut off at GitHub's limit, its ratify
+// command first, while its hash still pinned what no one could see.
+const MaxPlanText = 24000
+
+// textLen is how long the plan's name, summary, titles and bodies are.
+func (p *IssuePlan) textLen() int {
+	n := len(p.Name) + len(p.Summary)
+	for _, is := range p.Issues {
+		n += len(is.Title) + len(is.Body)
+	}
+	return n
+}
+
 // Validate checks a plan as its draft left it: a name, a summary, and 1 to
 // MaxIssues issues. Each has a title and a whole body that says how the
 // factory takes it: modeled, with a Project: line naming a clean directory
@@ -61,6 +77,11 @@ func (p *IssuePlan) Validate() error {
 		return errors.New("the plan has no issues")
 	case len(p.Issues) > MaxIssues:
 		return fmt.Errorf("the plan has %d issues, and a plan holds at most %d: plan the first %d, and say in the summary what's left", len(p.Issues), MaxIssues, MaxIssues)
+	case strings.Contains(p.Name+p.Summary, "<!--"):
+		return errors.New("the plan's name or summary has an HTML comment, which its proposal wouldn't show though its hash pins it, so it has none")
+	}
+	if n := p.textLen(); n > MaxPlanText {
+		return fmt.Errorf("the plan's name, summary, titles and bodies come to %d characters, and its proposal has to fit in one comment, so they come to at most %d: shorten the bodies, or plan fewer issues and say in the summary what's left", n, MaxPlanText)
 	}
 	for i, is := range p.Issues {
 		if err := is.validate(); err != nil {
@@ -78,6 +99,10 @@ func (is PlannedIssue) validate() error {
 		return errors.New("its title is more than one line")
 	case strings.TrimSpace(is.Body) == "":
 		return errors.New("it has no body")
+	case strings.Contains(is.Title+is.Body, "<!--"):
+		// A person ratifies what the proposal shows, and GitHub shows no
+		// HTML comment. One in the proposal could also pass for its marker.
+		return errors.New("it has an HTML comment, which its proposal wouldn't show though its hash pins it, so it has none")
 	}
 	if line := commandLine(is.Body); line != "" {
 		return fmt.Errorf("its body has the command %q, and the factory takes each issue itself, so no body carries an /invariant command", line)
