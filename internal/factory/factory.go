@@ -1162,7 +1162,12 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if err != nil {
 		return "", nil, nil, err
 	}
-	saved := builtResult{Result: res}
+	// Anyone can fetch the record, so the result it holds names its directory
+	// by where it is under the work directory: the watcher's own path names
+	// its user.
+	kept := *res
+	kept.Dir = f.workRelative(res.Dir)
+	saved := builtResult{Result: &kept}
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
@@ -1177,6 +1182,29 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 		return "", nil, nil, err
 	}
 	return result, res, runErr, nil
+}
+
+// workRelative names dir by where it is under the factory's work directory,
+// in slash form, such as issue-1/build-20260928-120000/result, or "" when
+// it isn't under it. Synthesis reports an absolute path even when the work
+// directory is relative, so both are made absolute first.
+func (f *Factory) workRelative(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	work, err := filepath.Abs(f.Work)
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(work, abs)
+	if err != nil || !filepath.IsLocal(rel) {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 // saveResult commits a run's result as result.json, on top of parent.
