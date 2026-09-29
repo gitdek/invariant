@@ -2,6 +2,7 @@ package factory
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -11,19 +12,21 @@ import (
 
 // Numbers is what an issue took, read from its thread (D-0048, 5.4): the
 // factory's time, CI included; the time it waited on people; the comments
-// people directed it with; the agents' estimated spend; and the gate runs
-// synthesis used.
+// people directed it with; the agents' estimated spend; the gate runs
+// synthesis used; and every coding agent that ran for it (#179).
 type Numbers struct {
-	FactorySeconds int     `json:"factory_seconds"`
-	PeopleSeconds  int     `json:"people_seconds"`
-	PeopleComments int     `json:"people_comments"`
-	SpendUSD       float64 `json:"spend_usd,omitempty"`
-	GateRuns       int     `json:"gate_runs,omitempty"`
+	FactorySeconds int      `json:"factory_seconds"`
+	PeopleSeconds  int      `json:"people_seconds"`
+	PeopleComments int      `json:"people_comments"`
+	SpendUSD       float64  `json:"spend_usd,omitempty"`
+	GateRuns       int      `json:"gate_runs,omitempty"`
+	Agents         []string `json:"agents,omitempty"`
 }
 
 // NumbersOf counts what the thread took, from the issue's opening to end.
 // Time before a person's command was spent waiting on people. All other
-// time is the factory's, CI's gate included.
+// time is the factory's, CI's gate included. The agents are the ones the
+// posts name, each once, in the order the posts first name them.
 func NumbersOf(t Thread, end time.Time) Numbers {
 	type event struct {
 		at     time.Time
@@ -46,6 +49,9 @@ func NumbersOf(t Thread, end time.Time) Numbers {
 		events = append(events, event{at: at})
 		n.SpendUSD += p.Marker.Spend
 		n.GateRuns += p.Marker.GateRuns
+		if a := p.Marker.Agent; a != "" && !slices.Contains(n.Agents, a) {
+			n.Agents = append(n.Agents, a)
+		}
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
 	for i, e := range events {
@@ -75,6 +81,13 @@ func (n Numbers) Sentence() string {
 			s += fmt.Sprintf(", and synthesis used %s", plural(n.GateRuns, "gate run"))
 		}
 		s += "."
+	}
+	switch len(n.Agents) {
+	case 0:
+	case 1:
+		s += " Its coding agent was " + list(n.Agents) + "."
+	default:
+		s += " Its coding agents were " + list(n.Agents) + "."
 	}
 	return s
 }

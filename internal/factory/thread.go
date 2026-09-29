@@ -137,9 +137,13 @@ type Marker struct {
 	// Spend is the agents' estimated cost for the step this post reports,
 	// and GateRuns the gate runs its synthesis used. A post that carries an
 	// earlier marker forward clears them, so nothing counts twice (D-0048).
-	Spend    float64  `json:"spend,omitempty"`
-	GateRuns int      `json:"gate_runs,omitempty"`
-	Numbers  *Numbers `json:"numbers,omitempty"` // the issue's record, on the post that merges it
+	Spend    float64 `json:"spend,omitempty"`
+	GateRuns int     `json:"gate_runs,omitempty"`
+	// Agent is the coding agent whose run this post reports: the one that
+	// drafted or built what it says (#179). A post that carries an earlier
+	// marker forward clears it too, since it reports no run.
+	Agent   string   `json:"agent,omitempty"`
+	Numbers *Numbers `json:"numbers,omitempty"` // the issue's record, on the post that merges it
 	// A plan's record names one of its steps, counting from 1, the issue the
 	// factory opened for it, and the writer who ratified the plan, on whose
 	// authority that issue is solved (#126). Its Hash is the plan's.
@@ -149,9 +153,9 @@ type Marker struct {
 }
 
 // carried is the marker a later post carries forward: the same issue state,
-// without the step's own numbers.
+// without the step's own numbers or agent.
 func (m Marker) carried() Marker {
-	m.Spend, m.GateRuns, m.Numbers = 0, 0, nil
+	m.Spend, m.GateRuns, m.Agent, m.Numbers = 0, 0, "", nil
 	return m
 }
 

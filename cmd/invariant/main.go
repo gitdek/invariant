@@ -771,8 +771,9 @@ func watchCmd(ctx context.Context, args []string) int {
 	// What the factory is doing goes in a status file for the dashboard
 	// (D-0049). It holds no secrets: the process, the repository, the
 	// watcher's name on its lease, which the page follows, and the steps in
-	// hand, each of which the page shows (D-0113). Issue, doing and since
-	// name the longest-running step that's doing something.
+	// hand, each of which the page shows (D-0113), with the coding agent it
+	// runs (#179). Issue, doing and since name the longest-running step
+	// that's doing something.
 	statusPath := dashboard.StatusPath(*work, *repo)
 	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
 	f.Activity = func(steps []factory.Step) {
@@ -780,7 +781,7 @@ func watchCmd(ctx context.Context, args []string) int {
 		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
 		for _, s := range steps {
 			since := s.Since.UTC()
-			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since})
+			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since, Agent: s.Agent})
 			if s.Doing != "" && (status.Since == nil || since.Before(*status.Since)) {
 				status.Issue, status.Doing, status.Since = s.Issue, s.Doing, &since
 			}

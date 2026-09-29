@@ -31,9 +31,9 @@ const maxComment = 60000
 var details = regexp.MustCompile(`(?s)\n*<details>.*?</details>\n*`)
 
 func post(title, body string, m Marker) string {
-	marker := m.encode()
+	marker, by := m.encode(), byline(m)
 	compose := func(body string) string {
-		return header + title + "\n\n" + strings.TrimSpace(body) + "\n\n" + marker + "\n"
+		return header + title + "\n\n" + strings.TrimSpace(body) + by + "\n\n" + marker + "\n"
 	}
 	out := compose(body)
 	if len(out) <= maxComment {
@@ -45,6 +45,23 @@ func post(title, body string, m Marker) string {
 		body = strings.ToValidUTF8(body[:max(room, 0)], "")
 	}
 	return compose(strings.TrimSpace(body) + short)
+}
+
+// byline names the coding agent behind a post, as its marker records it
+// (#179): the one that drafted it, for a draft's post, whether it asks,
+// proposes or is stuck, and the one that built it, for a build's, whether
+// it passed or failed. A post that reports no agent's run has none.
+func byline(m Marker) string {
+	if m.Agent == "" {
+		return ""
+	}
+	switch m.Kind {
+	case KindForks, KindProposal, KindStuck, KindUnsupported:
+		return "\n\n_Drafted by `" + m.Agent + "`._"
+	case KindPR, KindFailed:
+		return "\n\n_Built by `" + m.Agent + "`._"
+	}
+	return ""
 }
 
 func forksComment(forks []formalize.Fork, m Marker) string {
@@ -412,11 +429,15 @@ func closedComment(pr github.PullRequest, m Marker) string {
 	return post("closed", fmt.Sprintf("#%d was closed without merging, so I've stopped. Comment `/invariant revise` to start again from a new proposal.", pr.Number), m)
 }
 
+// pullRequestBody is a project's pull request. m is the marker of the
+// build's post: its project, the ratified proposal's hash, and the agent
+// that built it.
 func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.Proposal) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Closes #%d.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "◉ Written by Invariant for #%d, against the statements ratified there.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "- **Project:** `%s`\n- **Ratified proposal:** `%s`\n", m.Project, short(m.Hash))
+	b.WriteString(agentsLine(t, m, res != nil && res.Review != nil && res.Review.Text != ""))
 	if res != nil {
 		gate := fmt.Sprintf("the gate never passed in %d runs", len(res.GateRuns))
 		for _, g := range res.GateRuns {
@@ -453,6 +474,40 @@ func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// agentsLine names a pull request's coding agents (D-0087, D-0108): the one
+// that drafted what was ratified, and the one that built it, whose review,
+// when there is one, the builder makes with the same agent. m is the
+// marker of the build's post. A post or a record from before they named
+// their agents leaves its part out.
+func agentsLine(t Thread, m Marker, reviewed bool) string {
+	var parts []string
+	if drafted := draftedBy(t, m.Hash); drafted != "" {
+		parts = append(parts, "drafted by `"+drafted+"`")
+	}
+	switch {
+	case m.Agent == "":
+	case reviewed:
+		parts = append(parts, "built and reviewed by `"+m.Agent+"`")
+	default:
+		parts = append(parts, "built by `"+m.Agent+"`")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "- **Agents:** " + strings.Join(parts, ", ") + "\n"
+}
+
+// draftedBy is the agent that drafted the proposal ratified as hash, as the
+// latest post that proposed it names it.
+func draftedBy(t Thread, hash string) string {
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		if m := t.Posts[i].Marker; m.Kind == KindProposal && m.Proposal != nil && m.Proposal.Hash == hash {
+			return m.Agent
+		}
+	}
+	return ""
 }
 
 // reviewLimit keeps a review from crowding the pull request's body, which

@@ -196,45 +196,47 @@ func (f *Factory) commitPlan(ctx context.Context, t Thread, state Post, c Comman
 }
 
 // runPlanBuild records a plan's build, runs it, and commits what it wrote
-// on top of the branch, without pushing it, as runBuild does for a project.
-// The issue's agent builds it, and no other (#173).
-func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, step string) (string, *plumbing.BuildResult, error, error) {
+// on top of the branch, without pushing it, as runBuild does for a project,
+// and returns the same. The issue's agent builds it, and no other (#173),
+// and the run's record and its result name it (#179).
+func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, step string) (string, string, *plumbing.BuildResult, error, error) {
 	n, m := t.Issue.Number, ratified.Marker
 	agent, run, ok := f.buildAgent(m)
 	switch {
 	case !ok:
-		return "", nil, cantRun(agent), nil
+		return "", "", nil, cantRun(agent), nil
 	case run.Plumbing == nil:
-		return "", nil, fmt.Errorf("this watcher can't build plumbing with %s", agent), nil
+		return "", "", nil, fmt.Errorf("this watcher can't build plumbing with %s", agent), nil
 	}
 	if err := f.Repo.Fetch(ctx); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	wt, err := f.Repo.Worktree(ctx, m.Branch, "origin/"+m.Branch)
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	defer f.Repo.RemoveWorktree(ctx, wt)
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "build-"+f.now().Format("20060102-150405"))
 	if err := os.MkdirAll(out, 0o755); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	if err := f.recovers(ctx, n, "start the build's agent run", f.canStartRun(building(RunNone, false, false), recovery.Build)); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
-	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of #%d's plan", n)); err != nil {
-		return "", nil, nil, err
+	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of #%d's plan by %s", n, agent)); err != nil {
+		return "", "", nil, nil, err
 	}
+	f.runsAgent(n, agent)
 	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
 	if !f.holds() {
-		return "", nil, nil, errLeaseLost
+		return "", "", nil, nil, errLeaseLost
 	}
 	// As for a project, the run's error, summary and review name the paths on
 	// this machine as localPaths does. The summary quotes the agent run's
 	// error.
 	runErr = localError(runErr, f.Work)
 	if res == nil {
-		return "", nil, runErr, nil
+		return "", agent, nil, runErr, nil
 	}
 	res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
 	verdict := "It passed every test, and the review approves it."
@@ -250,23 +252,23 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		code, err = f.Repo.RevParse(ctx, m.Branch)
 	}
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
-	saved := builtResult{Plumbing: res}
+	saved := builtResult{Plumbing: res, Agent: agent}
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
-	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d", n), code)
+	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
-	return result, res, runErr, nil
+	return result, agent, res, runErr, nil
 }
 
 // publishPlan takes a finished plan build to its post, as publish does for
@@ -278,7 +280,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if built.Error != "" {
 		runErr = errors.New(built.Error)
 	}
-	next.Spend, next.GateRuns = res.Spend, len(res.TestRuns)
+	next.Spend, next.GateRuns, next.Agent = res.Spend, len(res.TestRuns), built.Agent
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err
 	}
@@ -325,7 +327,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 			return err
 		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
-			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !ok, Body: planPullRequestBody(t, m, res, sc.Trusted),
+			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !ok, Body: planPullRequestBody(t, next, res, sc.Trusted),
 		}); err != nil {
 			return err
 		}

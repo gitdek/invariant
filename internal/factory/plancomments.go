@@ -112,12 +112,14 @@ func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
 }
 
 // planPullRequestBody is a plan's pull request: the plan, how the build
-// went, and the second agent's review.
+// went, and the second agent's review. m is the marker of the build's post,
+// as for a project's.
 func planPullRequestBody(t Thread, m Marker, res *plumbing.BuildResult, trusted []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Closes #%d.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "◉ Built by Invariant for #%d, to the plan ratified there. It's plumbing: tested, not proved (D-0105).\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "- **Plan:** `%s`, `%s`\n", m.Project, short(m.Hash))
+	b.WriteString(agentsLine(t, m, res.Review != ""))
 	fmt.Fprintf(&b, "- **Build:** %s, %d turns, %d test runs\n", res.Usage.Backend, res.Usage.Turns, len(res.TestRuns))
 	if len(res.Changes.Written) > 0 {
 		fmt.Fprintf(&b, "- **Written:** %s\n", codeList(res.Changes.Written))

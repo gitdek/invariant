@@ -60,6 +60,9 @@ type Usage struct {
 	Summary   string         `json:"summary"`  // the agent's closing message
 	ToolCalls map[string]int `json:"tool_calls"`
 	GateTool  string         `json:"gate_tool"` // whether the gate's MCP server connected
+	// Tokens is what the run used, where the agent reports tokens rather
+	// than a cost, as Codex does on an account (#153).
+	Tokens *Tokens `json:"tokens,omitempty"`
 }
 
 // GateRun is one call to the gate tool during synthesis.
@@ -234,9 +237,11 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	}
 	r.Dir = final
 	// A final gate that can't run, as when the agent wrote no code, leaves the
-	// result with no final report.
+	// result with no final report. Its receipt names the agent that wrote the
+	// code, which the fingerprint leaves out (#179).
 	report, gateErr := verify.Run(ctx, final, filepath.Join(out, "gate"), o.Toolchain)
 	if gateErr == nil {
+		report.Agent = usage.Backend
 		r.Final = report
 	}
 	if r.GateRuns, err = readGateRuns(gateLog); err != nil {
