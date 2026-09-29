@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/internal/decisions"
+	"github.com/gitdek/invariant/internal/mcp"
 )
 
 const decisionsUsage = `invariant decisions keeps every project's decisions in one graph (D-0096).
@@ -626,4 +627,36 @@ func printShow(n decisions.Node, near []decisions.Neighbor) {
 		}
 		fmt.Println(strings.Join(lines, "\n"))
 	}
+}
+
+// decisionsMCP serves the decision graph's tools to a coding agent over MCP,
+// as the checkout at dir has the graph (D-0096).
+func decisionsMCP(ctx context.Context, dir, store string, write bool) int {
+	repo, err := checkout(ctx, dir, "")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	f := decisionFlags{store: &store}
+	shared, err := f.open()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	defer shared.Close()
+	session, err := decisions.NewSession(shared, repo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	defer session.Close()
+	for _, s := range session.Skipped {
+		fmt.Fprintln(os.Stderr, "invariant: left out of the graph:", s)
+	}
+	server := mcp.Server{Name: "invariant-decisions", Version: "0.1", Tools: session.Tools(write)}
+	if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 1
+	}
+	return 0
 }

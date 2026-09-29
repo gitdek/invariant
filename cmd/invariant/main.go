@@ -288,9 +288,16 @@ func mcpCmd(ctx context.Context, args []string) int {
 	formal := fs.Bool("formalize", false, "serve the check tool to a formalizing agent, instead of the gate")
 	maxRuns := fs.Int("max-runs", 4, "the most gate runs to allow")
 	logPath := fs.String("log", "", "append a line per gate run to this file")
+	graph := fs.Bool("decisions", false, "serve the decision graph's tools for the checkout at -C")
+	dir := fs.String("C", ".", "with -decisions: the checkout")
+	storePath := fs.String("store", "", "with -decisions: the store (default: the one on this machine)")
+	write := fs.Bool("write", false, "with -decisions: let the agent record decisions and links; it never ratifies")
 	fs.Parse(args)
+	if *graph {
+		return decisionsMCP(ctx, *dir, *storePath, *write)
+	}
 	if fs.NArg() != 1 || (*ratified == "") == !*formal {
-		fmt.Fprintln(os.Stderr, "usage: invariant mcp (-ratified PROJECT | -formalize) [-max-runs N] [-log FILE] WORKSPACE")
+		fmt.Fprintln(os.Stderr, "usage: invariant mcp (-ratified PROJECT | -formalize) [-max-runs N] [-log FILE] WORKSPACE\n       invariant mcp -decisions [-C DIR] [-store FILE] [-write]")
 		return 2
 	}
 	ws := fs.Arg(0)
