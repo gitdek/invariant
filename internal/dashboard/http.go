@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 )
 
 //go:embed web
@@ -48,7 +49,8 @@ var version = func() string {
 
 var graphPath = regexp.MustCompile(`^/api/graph/([0-9a-f]{16})\.json$`)
 
-// Handler serves the page, its assets, the snapshot and the state graphs.
+// Handler serves the page, its assets, the snapshot, the running step's
+// live view and the state graphs.
 // It answers only GET and HEAD, except at /act, where @gitdek can post
 // commands once Cloudflare Access has signed him in.
 func (s *Server) Handler() http.Handler {
@@ -79,11 +81,17 @@ func (s *Server) Handler() http.Handler {
 			}
 			h.Set("Cache-Control", "no-store")
 			serveGzip(w, r, "application/json", body)
+		case p == "/api/live.json":
+			body, err := s.LiveJSON(time.Now())
+			if err != nil {
+				http.Error(w, "couldn't read the running step", http.StatusInternalServerError)
+				return
+			}
+			h.Set("Cache-Control", "no-store")
+			h.Set("Content-Type", "application/json")
+			w.Write(body)
 		case graphPath.MatchString(p):
-			key := graphPath.FindStringSubmatch(p)[1]
-			s.mu.RLock()
-			body := s.graphs[key]
-			s.mu.RUnlock()
+			body := s.graph(graphPath.FindStringSubmatch(p)[1])
 			if body == nil {
 				http.Error(w, "that state graph isn't drawn yet", http.StatusNotFound)
 				return

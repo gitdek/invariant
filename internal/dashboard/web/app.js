@@ -1,7 +1,8 @@
 "use strict";
 // Invariant · Live. Everything drawn here comes from /api/state.json and
 // /api/graph/<model>.json, which the server reads from GitHub, CI's
-// receipts and TLC. Nothing is typed by hand.
+// receipts and TLC, and /api/live.json, which it reads from the watcher's
+// work directory. Nothing is typed by hand.
 (() => {
   // The page's own version, from its script's URL. Graph URLs carry it, so
   // a new dashboard never draws a graph the browser kept from an old one.
@@ -61,14 +62,19 @@
   }
   const stamp = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const clockOf = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // fillTimes writes every relative time under root.
+  function fillTimes(root = document) {
+    root.querySelectorAll("[data-ago]").forEach((el) => (el.textContent = ago(el.dataset.ago)));
+    root.querySelectorAll("[data-since]").forEach((el) => (el.textContent = dur((Date.now() - T(el.dataset.since)) / 1000)));
+  }
   function tick() {
-    document.querySelectorAll("[data-ago]").forEach((el) => (el.textContent = ago(el.dataset.ago)));
-    document.querySelectorAll("[data-since]").forEach((el) => (el.textContent = dur((Date.now() - T(el.dataset.since)) / 1000)));
+    fillTimes();
     if (state) {
       const u = $("#updated");
       u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
       u.classList.toggle("stale", !!state.stale?.length);
     }
+    liveTick(false);
   }
 
   // ---------- the loop ----------
@@ -111,6 +117,7 @@
     if (changed("who", [s.who, s.decisions.status])) renderWho(s);
     if (changed("decisions", s.decisions)) renderDecisions(s.decisions);
     if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
+    if (live) renderLive();
     tick();
   }
 
@@ -416,7 +423,8 @@
 
   const graphs = new Map(); // model key → graph JSON (or a promise)
   function getGraph(key) {
-    if (!graphs.has(key)) graphs.set(key, fetch(`/api/graph/${key}.json?v=${VERSION}`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((g) => { g.layout = layoutGraph(g); return g; }));
+    // A graph that fails to load is asked for again at the next draw.
+    if (!graphs.has(key)) graphs.set(key, fetch(`/api/graph/${key}.json?v=${VERSION}`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((g) => { g.layout = layoutGraph(g); return g; }).catch((e) => { graphs.delete(key); throw e; }));
     return graphs.get(key);
   }
 
@@ -1477,7 +1485,194 @@
   });
   document.querySelector('meta[name="theme-color"]').setAttribute("content", V.light ? "#f4f6f8" : "#090c11");
 
+  // ---------- the running step, live (#97) ----------
+  // /api/live.json is read from the watcher's work directory, every few
+  // seconds while a step runs. It holds counts, times and file paths only,
+  // never the agent's code, words or thinking (D-0051).
+  const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["edit", "editing"], ["gate", "gate runs"], ["check", "draft checks"], ["test", "test runs"], ["other", "other tools"]];
+  const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
+  const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
+  let live = null, liveKey = "", liveMarks = 0, liveRuns = 0, liveLit = "";
+  const kilo = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
+  const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
+  const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
+  const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
+
+  async function loadLive() {
+    let wait = 12000;
+    try {
+      const r = await fetch("/api/live.json", { cache: "no-store" });
+      if (r.ok) {
+        live = await r.json();
+        renderLive();
+        if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+      }
+    } catch (e) {}
+    setTimeout(loadLive, wait);
+  }
+
+  // The step to show: the one running in the chosen repositories, or the
+  // last one that ended.
+  function liveStep() {
+    const steps = (live?.steps || []).filter((l) => inScope(l.repo));
+    return steps.find((l) => !l.ended) || steps[0];
+  }
+
+  // put replaces what el shows only when it changed, so its times don't
+  // blink and its animations don't start over, and fills its times at once.
+  function put(el, html) {
+    if (el.dataset.html === html) return;
+    el.dataset.html = html;
+    el.innerHTML = html;
+    fillTimes(el);
+  }
+
+  function renderLive() {
+    const sec = $("#live"), l = liveStep();
+    sec.hidden = !l;
+    if (!l) return;
+    const key = `${l.repo}#${l.issue}@${l.since}`;
+    if (key !== liveKey) {
+      liveKey = key;
+      liveMarks = liveRuns = 0;
+      liveLit = "";
+      sec.classList.remove("arrive");
+      void sec.offsetWidth;
+      sec.classList.add("arrive");
+    }
+    sec.classList.toggle("ended", !!l.ended);
+    const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
+    put($("#live-title"), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}`);
+
+    // What the agent is doing now, or how its run ended.
+    let now;
+    if (l.ended) now = `This step ended <span data-ago="${esc(l.ended)}"></span>${l.agent ? `. The agent ${esc(l.agent)}` : ""}.`;
+    else if (l.agent) now = `<b>The agent ${esc(l.agent)}.</b> The factory is checking its work.`;
+    else {
+      // How long it's been at it: this stretch of thinking, or the tool
+      // call still waiting for its result.
+      const at = l.now && [...(l.marks || [])].reverse().find((m) => !m.until && (l.now === "thinking" ? m.kind === "think" : m.kind === l.now));
+      now = `<b>${esc(LIVE_NOW[l.now] || "Working")}</b>${at ? ` for <span data-since="${esc(at.at)}"></span>` : ""}`;
+      if (l.last) now += ` · last activity <span data-ago="${esc(l.last)}"></span>`;
+    }
+    put($("#live-now"), now);
+
+    const calls = Object.values(l.tools || {}).reduce((a, b) => a + b, 0);
+    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", `≈${kilo(l.thinking)}`, "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
+    if (l.output) stats.push(["Wrote", kilo(l.output), "output tokens"]);
+    put($("#live-stats"), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
+
+    put($("#live-legend"), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
+      + (l.thinking ? `<span class="lg think"><i></i>thinking ≈${kilo(l.thinking)} tokens</span>` : ""));
+
+    put($("#live-runs"), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
+
+    const files = l.files || [], shown = files.slice(0, 12);
+    put($("#live-files"), !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
+      const cut = f.path.lastIndexOf("/") + 1;
+      const fresh = f.lit && f.path !== liveLit && !REDUCED;
+      return `<div class="file${f.lit ? " lit" : ""}${fresh ? " fresh" : ""}"><code><span class="dir">${esc(f.path.slice(0, cut))}</span>${esc(f.path.slice(cut))}</code>`
+        + `<span class="counts">${f.reads ? `<span class="r">read ${f.reads}</span>` : ""}${f.edits ? `<span class="e">edited ${f.edits}</span>` : ""}</span><span class="size">${f.size > 0 ? esc(bytes(f.size)) : ""}</span></div>`;
+    }).join("") + (files.length > shown.length ? `<div class="more">and ${files.length - shown.length} more</div>` : ""));
+    liveLit = files.find((f) => f.lit)?.path || "";
+
+    liveTick(true);
+    liveMarks = (l.marks || []).length;
+    liveRuns = (l.runs || []).length;
+  }
+
+  // liveTick moves the dial and the strip's clock. Only a render with new
+  // data lands new marks. The dial is drawn once for each step and then
+  // moved, so its motion never starts over: with a limit, its ring fills
+  // toward it; without one, a hand sweeps the ring once a minute.
+  function liveTick(landing) {
+    const l = liveStep();
+    if (!l || $("#live").hidden) return;
+    const end = l.ended ? T(l.ended) : Date.now();
+    const elapsed = Math.max(0, (end - T(l.since)) / 1000);
+    const C = 2 * Math.PI * 52;
+    const dial = $("#live-dial"), key = `${liveKey}|${l.limit || 0}|${!!l.ended}`;
+    if (dial.dataset.key !== key) {
+      dial.dataset.key = key;
+      dial.innerHTML = `<svg viewBox="0 0 128 128" role="img"><circle cx="64" cy="64" r="52" class="track"/>`
+        + `<circle cx="64" cy="64" r="52" class="arc"/><text x="64" y="62" class="big"></text><text x="64" y="84" class="small"></text></svg>`;
+    }
+    const arc = $(".arc", dial);
+    if (l.limit) {
+      const frac = Math.min(1, elapsed / l.limit);
+      arc.setAttribute("class", `arc fill ${frac > 0.95 ? "bug" : frac > 0.8 ? "people" : "accent"}`);
+      arc.setAttribute("stroke-dasharray", `${(C * frac).toFixed(1)} ${C.toFixed(1)}`);
+      arc.style.transform = "rotate(-90deg)";
+      $(".small", dial).textContent = `of ${dur(l.limit)}`;
+    } else {
+      // The angle only grows, so the hand never turns back at the top.
+      arc.setAttribute("class", `arc hand${l.ended ? " still" : ""}`);
+      arc.setAttribute("stroke-dasharray", `26 ${C.toFixed(1)}`);
+      arc.style.transform = `rotate(${(elapsed * 6 - 90).toFixed(1)}deg)`;
+      $(".small", dial).textContent = l.ended ? "it ran" : "running";
+    }
+    $(".big", dial).textContent = clock(elapsed);
+    $("svg", dial).setAttribute("aria-label", `${clock(elapsed)}${l.limit ? ` of ${dur(l.limit)}` : ""}`);
+    drawStrip(l, end, landing);
+  }
+
+  // The heartbeat: the step's whole run in time. A tick per tool call,
+  // colored by kind, a band per stretch of thinking, brighter the faster it
+  // thought, and a diamond per check, green when it passed.
+  function drawStrip(l, end, landing) {
+    const box = $("#live-strip");
+    const W = Math.max(280, box.clientWidth), H = 100, top = 16, bottom = 70;
+    const marks = l.marks || [];
+    const t0 = T(l.since) || (marks[0] ? T(marks[0].at) : end);
+    const span = Math.max(60000, end - t0);
+    const x = (t) => 8 + ((T(t) - t0) / span) * (W - 16);
+    const parts = [];
+    const steps = [60, 300, 600, 900, 1800, 3600, 7200].map((s) => s * 1000);
+    const step = steps.find((s) => span / s <= Math.max(3, Math.floor(W / 90))) || 7200000;
+    for (let g = Math.ceil(t0 / step) * step; g < end; g += step) {
+      const gx = x(g).toFixed(1);
+      parts.push(`<line x1="${gx}" x2="${gx}" y1="${top - 8}" y2="${bottom + 4}" class="grid"/><text x="${gx}" y="${H - 4}" class="tick">${esc(clockOf(g))}</text>`);
+    }
+    for (const m of marks) {
+      if (m.kind !== "think") continue;
+      const a = x(m.at), stop = m.until ? T(m.until) : end, b = x(stop);
+      const rate = Math.min(1, (m.tokens || 0) / Math.max(0.2, (stop - T(m.at)) / 60000) / 9000);
+      parts.push(`<rect x="${a.toFixed(1)}" y="${top + 9}" width="${Math.max(2, b - a).toFixed(1)}" height="${bottom - top - 18}" rx="4" class="think${m.until ? "" : " on"}" fill-opacity="${(0.22 + 0.6 * rate).toFixed(2)}"><title>Thinking, ≈${kilo(m.tokens)} tokens</title></rect>`);
+    }
+    // A tool call that ran a while, or is still running, is a band in its
+    // color from its start to its end, or to now.
+    const running = !l.ended ? [...marks].reverse().find((m) => m.kind !== "think") : null;
+    for (const m of marks) {
+      if (m.kind === "think") continue;
+      const open = !m.until && m === running;
+      const stop = m.until ? T(m.until) : open ? end : 0;
+      if (stop - T(m.at) < 8000) continue;
+      const a = x(m.at);
+      parts.push(`<rect x="${a.toFixed(1)}" y="${top + 9}" width="${Math.max(2, x(stop) - a).toFixed(1)}" height="${bottom - top - 18}" rx="4" class="span ${esc(m.kind)}${open ? " on" : ""}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} for ${esc(clock((stop - T(m.at)) / 1000))}</title></rect>`);
+    }
+    marks.forEach((m, i) => {
+      if (m.kind === "think") return;
+      const mx = x(m.at).toFixed(1);
+      const land = landing && i >= liveMarks && !REDUCED ? ` new" style="animation-delay:${Math.min(i - liveMarks, 60) * 14}ms` : "";
+      parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(clockOf(m.at))}</title></line>`);
+    });
+    (l.runs || []).forEach((r, i) => {
+      if (!r.at) return;
+      const label = `${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? ": " + r.failed.join(", ") : ""}`;
+      const flash = landing && i >= liveRuns && !REDUCED ? " new" : "";
+      parts.push(`<g transform="translate(${x(r.at).toFixed(1)} ${bottom + 12})"><path d="M0 -7L7 0L0 7L-7 0Z" class="checkpoint ${r.passed ? "pass" : "fail"}${flash}"><title>${esc(label)}</title></path></g>`);
+    });
+    if (!l.ended) {
+      const nx = x(end).toFixed(1);
+      parts.push(`<line x1="${nx}" x2="${nx}" y1="${top - 10}" y2="${bottom + 6}" class="nowline"/><circle cx="${nx}" cy="${top - 10}" r="3.5" class="nowdot"/>`);
+    }
+    const said = `${marks.filter((m) => m.kind !== "think").length} tool calls and ${marks.filter((m) => m.kind === "think").length} stretches of thinking over ${clock(span / 1000)}`;
+    box.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(said)}">${parts.join("")}</svg>`;
+  }
+  new ResizeObserver(() => liveTick(false)).observe($("#live-strip"));
+
   cosmos.init();
   load();
+  loadLive();
   setInterval(tick, 1000);
 })();

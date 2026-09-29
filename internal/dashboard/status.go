@@ -21,6 +21,7 @@ type Status struct {
 	Issue     int        `json:"issue,omitempty"` // the issue it's working on, if any
 	Doing     string     `json:"doing,omitempty"` // formalizing, answering, ratifying or building
 	Since     *time.Time `json:"since,omitempty"` // when it started doing it
+	Limit     float64    `json:"limit,omitempty"` // seconds an agent's run may take, from the watcher's -timeout
 }
 
 // StatusPath is where the watcher for repo keeps its status, under its work

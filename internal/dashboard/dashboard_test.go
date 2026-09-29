@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -333,7 +334,6 @@ func TestTheNextSliceIsNow(t *testing.T) {
 // watcher's own log for that step.
 func TestRunsOfTheCurrentStep(t *testing.T) {
 	work := t.TempDir()
-	s := &Server{Work: work}
 	write := func(dir, file, text string) {
 		p := filepath.Join(work, "gitdek", "app", "issues", "issue-4", dir)
 		if err := os.MkdirAll(p, 0o755); err != nil {
@@ -346,16 +346,16 @@ func TestRunsOfTheCurrentStep(t *testing.T) {
 	write("build-20260926-230000", "gate-runs.jsonl", `{"run":1,"passed":false}`+"\n")
 	write("build-20260927-010000", "gate-runs.jsonl", `{"run":1,"passed":false,"at":"x"}`+"\n"+`{"run":2,"passed":true}`+"\n")
 	write("formalize-20260926-220000", "check-runs.jsonl", `{"run":1,"passed":true}`+"\n")
-	runs, kind := s.runsOf("gitdek/app", Watcher{Running: true, Issue: 4, Doing: "building"})
+	runs, kind := runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "building"})
 	if kind != "gate" || len(runs) != 2 || runs[0].Passed || !runs[1].Passed {
 		t.Errorf("building: %s %+v; want the newest build's two gate runs", kind, runs)
 	}
-	runs, kind = s.runsOf("gitdek/app", Watcher{Running: true, Issue: 4, Doing: "formalizing"})
+	runs, kind = runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "formalizing"})
 	if kind != "check" || len(runs) != 1 {
 		t.Errorf("formalizing: %s %+v", kind, runs)
 	}
 	for _, w := range []Watcher{{Running: true, Issue: 4, Doing: "ratifying"}, {Issue: 4, Doing: "building"}, {Running: true, Doing: "building"}} {
-		if runs, _ := s.runsOf("gitdek/app", w); runs != nil {
+		if runs, _ := runsOf(work, "gitdek/app", w); runs != nil {
 			t.Errorf("%+v shows runs %+v", w, runs)
 		}
 	}
@@ -534,5 +534,55 @@ func TestAGateThatDidntRunIsNeverAPass(t *testing.T) {
 	run.Conclusion = "timed_out"
 	if got := runWords(run, gateRan); got != "timed out" {
 		t.Errorf("runWords = %q", got)
+	}
+}
+
+// A dashboard that restarts serves the last snapshot it kept at once, until
+// its first read of GitHub replaces it, and only for the same repository.
+func TestARestartServesTheLastSnapshot(t *testing.T) {
+	cache := t.TempDir()
+	js, err := json.Marshal(Snapshot{Repo: "gitdek/app", Issues: []Issue{{Number: 7, Title: "a buffer"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzipped(js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(&Server{Cache: cache}).saveSnapshot(gz)
+
+	s := &Server{Cache: cache, Repos: []*Repo{{Name: "gitdek/app"}}}
+	s.loadSnapshot()
+	if !bytes.Equal(s.state, gz) || len(s.issues) != 1 || s.issues[0].Number != 7 {
+		t.Errorf("a restarted dashboard serves %d bytes and issues %+v, want the kept snapshot", len(s.state), s.issues)
+	}
+	other := &Server{Cache: cache, Repos: []*Repo{{Name: "gitdek/other"}}}
+	other.loadSnapshot()
+	if other.state != nil {
+		t.Error("a dashboard for another repository served the kept snapshot")
+	}
+}
+
+// A graph the kept snapshot names is served from the cache on disk, before
+// the restarted dashboard has read it into memory.
+func TestAGraphIsServedFromTheCache(t *testing.T) {
+	s := &Server{Cache: t.TempDir()}
+	key := "0123456789abcdef"
+	gz, err := gzipped([]byte(`{"nodes":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.graphFile(key)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.graphFile(key), gz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{key, "fedcba9876543210"} {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/graph/"+k+".json", nil))
+		if want := map[string]int{key: 200}[k]; (want == 200) != (rec.Code == 200) {
+			t.Errorf("graph %s: %d", k, rec.Code)
+		}
 	}
 }

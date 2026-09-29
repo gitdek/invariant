@@ -62,7 +62,7 @@ Usage:
   invariant decisions COMMAND ...              record decisions and ask what rests on them
   invariant pin PROJECT                        record the statements' current text as ratified
   invariant trace FILE                         replay a counterexample trace
-  invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-addr HOST:PORT]
+  invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-work DIR]... [-addr HOST:PORT]
                                                serve a live view of the factory and its evidence
 
   invariant ledger -repo OWNER/NAME [-json]      what each of the factory's issues took: time, comments, spend
@@ -682,7 +682,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	// (D-0049). It holds no secrets: the process, the repository, and the
 	// issue and step in hand.
 	statusPath := dashboard.StatusPath(*work, *repo)
-	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Started: time.Now().UTC(), Every: every.Seconds()}
+	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
 	f.Activity = func(issue int, doing string) {
 		now := time.Now().UTC()
 		status.Heartbeat = now
@@ -820,7 +820,11 @@ func dashboardCmd(ctx context.Context, args []string) int {
 	every := fs.Duration("every", 30*time.Second, "how often to read GitHub")
 	base := fs.String("base", "main", "the branch the factory merges into")
 	cache, _ := os.UserCacheDir()
-	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "the watchers' work directory, where they write what they're doing")
+	var works []string
+	fs.Func("work", "a watcher's work directory, where it writes what it's doing; repeat it for each watcher, and the page follows the one that's working (default "+filepath.Join(cache, "invariant", "watch")+")", func(v string) error {
+		works = append(works, v)
+		return nil
+	})
 	team := fs.String("access-team", "", "the Cloudflare Access team domain in front of /act, such as puglisij.cloudflareaccess.com. Without it, there's no /act")
 	aud := fs.String("access-aud", "", "the AUD tag of the Access application that protects /act")
 	agentAddr := fs.String("agent-addr", "", "serve the agent's door on this loopback address, such as 127.0.0.1:8485: a coding agent acting for @gitdek posts through the same narrow check as /act. The tunnel never publishes it. Empty turns it off")
@@ -834,8 +838,11 @@ func dashboardCmd(ctx context.Context, args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
+	if len(works) == 0 {
+		works = []string{filepath.Join(cache, "invariant", "watch")}
+	}
 	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
-	s := &dashboard.Server{Branch: *base, Cache: filepath.Join(cache, "invariant", "dashboard"), Work: *work, Every: *every, Log: logger.Printf}
+	s := &dashboard.Server{Branch: *base, Cache: filepath.Join(cache, "invariant", "dashboard"), Work: works[0], Works: works, Every: *every, Log: logger.Printf}
 	if *team != "" {
 		s.Access = &dashboard.Access{Team: *team, Audience: *aud, Emails: emails}
 		logger.Printf("/act lets %s post commands, behind Cloudflare Access", strings.Join(emails, ", "))
@@ -850,7 +857,7 @@ func dashboardCmd(ctx context.Context, args []string) int {
 		defer door.Close()
 	}
 	for _, r := range repos {
-		s.Repos = append(s.Repos, &dashboard.Repo{Name: r, GitHub: github.Client{Repo: r}, Status: dashboard.StatusPath(*work, r)})
+		s.Repos = append(s.Repos, &dashboard.Repo{Name: r, GitHub: github.Client{Repo: r}, Status: dashboard.StatusPath(works[0], r)})
 	}
 	// State graphs come from TLC, so they need Docker. Without it, the page
 	// still shows everything else.

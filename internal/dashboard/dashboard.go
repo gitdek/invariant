@@ -39,8 +39,12 @@ type Server struct {
 	Runner *tlc.Runner // draws state graphs; nil leaves them out
 	Cache  string      // where drawn graphs are kept between runs
 	Work   string      // the watchers' work directory, whose logs show a step's checks as they run
-	Every  time.Duration
-	Log    func(format string, args ...any)
+	// Works are every watcher's work directory, when there's more than one.
+	// The page shows the watcher that's working on something, so it follows
+	// whichever one holds the lease. Empty means Work alone.
+	Works []string
+	Every time.Duration
+	Log   func(format string, args ...any)
 	// Access, when set, lets @gitdek post commands from /act, behind
 	// Cloudflare Access (D-0065). Post is how a command reaches GitHub; nil
 	// posts through gh's login.
@@ -55,6 +59,7 @@ type Server struct {
 	drawing map[string]bool
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
 	pending chan graphJob
+	live    live
 }
 
 // Repo is one repository the page shows.
@@ -198,13 +203,15 @@ type Watcher struct {
 	// Runs are the checks the current step has run so far: TLC checks of a
 	// draft while formalizing, or gate runs while building.
 	Runs     []RunMark `json:"runs,omitempty"`
-	RunsKind string    `json:"runsKind,omitempty"` // check or gate
+	RunsKind string    `json:"runsKind,omitempty"` // check, gate or test
 }
 
 // RunMark is one check the factory ran during its current step.
 type RunMark struct {
-	Run    int  `json:"run"`
-	Passed bool `json:"passed"`
+	Run    int      `json:"run"`
+	Passed bool     `json:"passed"`
+	Failed []string `json:"failed,omitempty"` // the checks that failed
+	At     string   `json:"at,omitempty"`
 }
 
 // Now is the one line at the top of the page: what the factory is doing,
@@ -347,6 +354,7 @@ func (s *Server) Start(ctx context.Context) {
 		r.src.gates = map[int64]string{}
 	}
 	s.pending = make(chan graphJob, 64)
+	s.loadSnapshot()
 	go s.drawGraphs(ctx)
 	go func() {
 		for {
@@ -445,7 +453,56 @@ func (s *Server) refresh(ctx context.Context) error {
 	s.mu.Lock()
 	s.state, s.issues = gz, snap.Issues
 	s.mu.Unlock()
+	s.saveSnapshot(gz)
 	return nil
+}
+
+// snapshotFile is where the last snapshot is kept between runs, so a
+// dashboard that restarts serves it at once, while it reads GitHub again.
+// The page says how old it is.
+func (s *Server) snapshotFile() string { return filepath.Join(s.Cache, "state.json.gz") }
+
+func (s *Server) saveSnapshot(gz []byte) {
+	if s.Cache == "" {
+		return
+	}
+	tmp := s.snapshotFile() + ".tmp"
+	if err := os.MkdirAll(s.Cache, 0o755); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+		return
+	}
+	if err := os.WriteFile(tmp, gz, 0o644); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.snapshotFile()); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+	}
+}
+
+// loadSnapshot serves the last run's snapshot until the first read of
+// GitHub replaces it, if it's for the same repository.
+func (s *Server) loadSnapshot() {
+	if s.Cache == "" || len(s.Repos) == 0 {
+		return
+	}
+	gz, err := os.ReadFile(s.snapshotFile())
+	if err != nil {
+		return
+	}
+	js, err := gunzip(gz)
+	if err != nil {
+		return
+	}
+	var snap Snapshot
+	if json.Unmarshal(js, &snap) != nil || snap.Repo != s.Repos[0].Name {
+		return
+	}
+	s.mu.Lock()
+	if s.state == nil {
+		s.state, s.issues = gz, snap.Issues
+	}
+	s.mu.Unlock()
 }
 
 // readReceipts takes the receipts from the newest gate run on the branch
@@ -691,14 +748,14 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	for i, r := range s.Repos {
 		rs := RepoState{Name: r.Name, Short: r.Short(), Primary: i == 0, Lease: r.src.lease}
 		repoPins, repoModels := map[string]bool{}, map[string]bool{}
-		if st, err := ReadStatus(r.Status); err == nil && st.PID != 0 {
+		if st, work := s.watcherOf(r); st.PID != 0 {
 			w := Watcher{Running: st.Running(), Issue: st.Issue, Doing: st.Doing, Since: st.Since}
 			started, beat := st.Started, st.Heartbeat
 			w.Started, w.Heartbeat = &started, &beat
 			if !w.Running {
 				w.Issue, w.Doing, w.Since = 0, "", nil
 			}
-			w.Runs, w.RunsKind = s.runsOf(r.Name, w)
+			w.Runs, w.RunsKind = runsOf(work, r.Name, w)
 			rs.Factory = w
 		}
 		watchers = append(watchers, namedWatcher{repo: r.Name, w: rs.Factory})
@@ -897,38 +954,18 @@ func (s *Server) assemble(now time.Time) Snapshot {
 }
 
 // runsOf reads the checks a watcher's current step has run, from its own
-// log in the work directory: the newest formalize or build directory for
+// log in its work directory: the newest formalize or build directory for
 // the issue it's on.
-func (s *Server) runsOf(repo string, w Watcher) ([]RunMark, string) {
-	if s.Work == "" || !w.Running || w.Issue == 0 {
+func runsOf(work, repo string, w Watcher) ([]RunMark, string) {
+	prefix, _ := stepFiles(w.Doing)
+	if work == "" || !w.Running || w.Issue == 0 || prefix == "" {
 		return nil, ""
 	}
-	var kind, prefix, file string
-	switch w.Doing {
-	case "building":
-		kind, prefix, file = "gate", "build-", "gate-runs.jsonl"
-	case "formalizing", "answering":
-		kind, prefix, file = "check", "formalize-", "check-runs.jsonl"
-	default:
-		return nil, ""
+	dir := newestStep(work, repo, w.Issue, prefix)
+	if dir == "" {
+		return nil, runsKindOf(w.Doing)
 	}
-	dirs, _ := filepath.Glob(filepath.Join(s.Work, filepath.FromSlash(repo), "issues", fmt.Sprintf("issue-%d", w.Issue), prefix+"*"))
-	if len(dirs) == 0 {
-		return nil, kind
-	}
-	sort.Strings(dirs)
-	b, err := os.ReadFile(filepath.Join(dirs[len(dirs)-1], file))
-	if err != nil {
-		return nil, kind
-	}
-	var runs []RunMark
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		var r RunMark
-		if json.Unmarshal([]byte(line), &r) == nil && r.Run > 0 {
-			runs = append(runs, r)
-		}
-	}
-	return runs, kind
+	return readRuns(dir, w.Doing)
 }
 
 // namedWatcher is a repository's watcher.
@@ -1319,6 +1356,29 @@ func (s *Server) draw(ctx context.Context, j graphJob) ([]byte, error) {
 		}
 	}
 	return gz, nil
+}
+
+// graph is a drawn state graph, from memory or else from the cache on
+// disk, which a restarted dashboard's kept snapshot can name before the
+// dashboard has read it again.
+func (s *Server) graph(key string) []byte {
+	s.mu.RLock()
+	body := s.graphs[key]
+	s.mu.RUnlock()
+	if body != nil || s.Cache == "" {
+		return body
+	}
+	b, err := os.ReadFile(s.graphFile(key))
+	if err != nil {
+		return nil
+	}
+	s.mu.Lock()
+	if s.graphs == nil {
+		s.graphs = map[string][]byte{}
+	}
+	s.graphs[key] = b
+	s.mu.Unlock()
+	return b
 }
 
 func (s *Server) graphFile(key string) string {
