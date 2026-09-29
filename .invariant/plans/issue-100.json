@@ -1,0 +1,37 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-29T04:21:43Z",
+    "issue": 100,
+    "comment": "https://github.com/gitdek/invariant/issues/100#issuecomment-5883588412",
+    "proposal": "sha256:491cb18a8ca29ebfe425fda68d22c75d41447604af1102a2407c8c72f2c0c8ef"
+  },
+  "plan": {
+    "name": "Clear a stopped watcher's worktrees before polling",
+    "summary": "Clone gets ClearWorktrees, which force-removes every worktree registered in the clone other than the clone itself (the first one git lists), whether or not its directory still exists, and then runs git worktree prune. It joins the Repo interface. Before each poll, while it holds the lease, Watch calls ClearWorktrees: the clone is the watcher's own and polls run one at a time, so any worktree it finds is left over from a watcher that stopped mid-build. If clearing fails, Watch logs the error and skips that poll. A one-off run (-once) doesn't clear, since it may share a clone with a running watcher.",
+    "files": [
+      "internal/factory/factory.go",
+      "internal/factory/repo.go"
+    ],
+    "tests": [
+      {
+        "name": "TestClearWorktreesFreesALeftoverBranch",
+        "file": "internal/factory/worktrees_accept_test.go",
+        "says": "Leftover worktrees in the clone, with or without their directories, are removed and pruned, so a new worktree can take their branches."
+      },
+      {
+        "name": "TestWatchBuildsPastALeftoverWorktree",
+        "file": "internal/factory/worktrees_accept_test.go",
+        "says": "With a leftover worktree holding an issue's branch, the watcher adds a worktree for that branch, builds, and opens the pull request."
+      }
+    ],
+    "sources": {
+      "internal/factory/worktrees_accept_test.go": "package factory\n\nimport (\n\t\"context\"\n\t\"os\"\n\t\"strings\"\n\t\"testing\"\n\t\"time\"\n\n\t\"github.com/gitdek/invariant/internal/github\"\n)\n\n// A watcher that stopped mid-build leaves its worktrees registered in its\n// clone: one whose directory is still there, and one whose directory is gone.\n// Clearing them frees their branches for a new worktree, and leaves the clone\n// with no worktree but its own and the new one.\nfunc TestClearWorktreesFreesALeftoverBranch(t *testing.T) {\n\tctx := context.Background()\n\t_, clone := gitRepos(t)\n\tkept, err := clone.Worktree(ctx, \"invariant/issue-1-buffer\", \"origin/main\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tgone, err := clone.Worktree(ctx, \"invariant/issue-2-queue\", \"origin/main\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif err := os.RemoveAll(gone); err != nil {\n\t\tt.Fatal(err)\n\t}\n\n\tif err := clone.ClearWorktrees(ctx); err != nil {\n\t\tt.Fatalf(\"ClearWorktrees = %v\", err)\n\t}\n\tif _, err := os.Stat(kept); !os.IsNotExist(err) {\n\t\tt.Errorf(\"the leftover worktree %s is still on disk: %v\", kept, err)\n\t}\n\tif list := git(t, clone.Dir, \"worktree\", \"list\", \"--porcelain\"); strings.Count(list, \"worktree \") != 1 {\n\t\tt.Fatalf(\"after clearing, the clone still holds other worktrees:\\n%s\", list)\n\t}\n\tfor _, branch := range []string{\"invariant/issue-1-buffer\", \"invariant/issue-2-queue\"} {\n\t\twt, err := clone.Worktree(ctx, branch, \"origin/main\")\n\t\tif err != nil {\n\t\t\tt.Fatalf(\"a worktree for %s after clearing: %v\", branch, err)\n\t\t}\n\t\tdefer clone.RemoveWorktree(ctx, wt)\n\t}\n\t// Clearing a clone with no leftovers does nothing, and doesn't fail.\n\tif err := clone.ClearWorktrees(ctx); err != nil {\n\t\tt.Fatalf(\"ClearWorktrees = %v\", err)\n\t}\n}\n\n// prWatch ends a watch once the factory posts its pull request.\ntype prWatch struct {\n\tGitHub\n\tstop func()\n}\n\nfunc (g prWatch) PostComment(ctx context.Context, issue int, body string) (github.Comment, error) {\n\tc, err := g.GitHub.PostComment(ctx, issue, body)\n\tif m, ok := DecodeMarker(body); ok \u0026\u0026 err == nil \u0026\u0026 m.Kind == KindPR {\n\t\tg.stop()\n\t}\n\treturn c, err\n}\n\n// With a leftover worktree holding an issue's branch, as a watcher that\n// stopped mid-build leaves it, the watcher adds a worktree for that branch\n// and builds.\nfunc TestWatchBuildsPastALeftoverWorktree(t *testing.T) {\n\tr := newRig(t)\n\tr.form.forks = nil\n\tr.gh.open(1, \"gitdek\", \"Add a bounded buffer\", \"Producers put log lines in a buffer; a shipper takes them out in order.\\n\\n/invariant solve\")\n\tr.poll()\n\tproposal := r.expect(1, KindProposal, LabelProposal)\n\tp := proposal.Marker.Proposal\n\n\tleftover, err := r.f.Repo.(Clone).Worktree(context.Background(), \"invariant/issue-1-\"+p.Slug, \"origin/main\")\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tt.Logf(\"a stopped watcher's worktree: %s\", leftover)\n\n\tr.gh.say(1, \"gitdek\", \"/invariant ratify \"+strings.TrimPrefix(p.Hash, \"sha256:\")[:hashChars])\n\tctx, cancel := context.WithTimeout(context.Background(), time.Minute)\n\tdefer cancel()\n\tr.f.GitHub = prWatch{r.gh, cancel}\n\tr.f.Watch(ctx, 20*time.Millisecond)\n\n\tif len(r.build.built) != 1 {\n\t\tt.Fatalf(\"builds = %v; want one, past the leftover worktree\", r.build.built)\n\t}\n\tr.expect(1, KindPR, LabelPR)\n}\n"
+    },
+    "trusted": [
+      "internal/factory/factory.go",
+      "internal/factory/repo.go",
+      "internal/factory/worktrees_accept_test.go"
+    ]
+  }
+}
