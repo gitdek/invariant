@@ -94,7 +94,23 @@ func (c Codex) reads() []string {
 	if c.GoModCache != "" {
 		reads = append(reads, c.GoModCache)
 	}
-	return reads
+	return append(reads, c.codexDirs()...)
+}
+
+// codexDirs are where Codex's binary is, as it's run and as it really is.
+// Codex runs itself under the profile to read a workspace's instructions,
+// so its commands may read it too. A copy run that way can't read Codex's
+// sign-in or reach the network any more than they can.
+func (c Codex) codexDirs() []string {
+	p, err := exec.LookPath(c.Binary)
+	if err != nil {
+		return nil
+	}
+	dirs := []string{filepath.Dir(p)}
+	if real, err := filepath.EvalSymlinks(p); err == nil && filepath.Dir(real) != dirs[0] {
+		dirs = append(dirs, filepath.Dir(real))
+	}
+	return dirs
 }
 
 // commandEnv is what the agent's commands get beyond the environment's core
@@ -282,6 +298,13 @@ func (c Codex) Probe(ctx context.Context) error {
 	}
 	if _, err := os.Stat(filepath.Join(ws, "written")); err != nil {
 		return errors.New("a command in codex's sandbox couldn't write in its workspace")
+	}
+	// Codex runs itself under the profile to read a workspace's
+	// instructions, so it must run there.
+	if bin, err := exec.LookPath(c.Binary); err == nil {
+		if err := sandbox(bin, "--version"); err != nil {
+			return fmt.Errorf("codex can't run itself under the factory's profile, as it does to read a workspace's instructions: %v", err)
+		}
 	}
 	if sandbox("/bin/cat", probe) == nil {
 		return fmt.Errorf("a command in codex's sandbox read a file in its home, %s, where its sign-in lives. Keep Codex's home in your home directory, outside the temporary directories its commands may read", c.Home)

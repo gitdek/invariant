@@ -101,7 +101,7 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 		// else (D-0138).
 		{"-c", `default_permissions="invariant"`},
 		{"-c", `permissions.invariant.extends=":workspace"`},
-		{"-c", `permissions.invariant.filesystem={":root"="deny", ":minimal"="read", ":tmpdir"="deny", "/opt/toolchain"="read", "/cache/mod"="read"}`},
+
 		// The job's effort wins over the backend's own (D-0125).
 		{"-c", `model_reasoning_effort="max"`},
 		{"-c", `mcp_servers.invariant={command="/bin/invariant", args=["mcp","-gate"], required=true, default_tools_approval_mode="approve", enabled_tools=["gate","check"], startup_timeout_sec=60, tool_timeout_sec=900}`},
@@ -118,6 +118,12 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	}
 	if slices.Contains(args, "-s") || slices.Contains(args, "--sandbox") {
 		t.Errorf("a sandbox mode turns Codex's permission profile off: %q", args)
+	}
+	// Its commands may also read Codex's own binary, which Codex runs under
+	// the profile to read the workspace's instructions.
+	fs := `permissions.invariant.filesystem={":root"="deny", ":minimal"="read", ":tmpdir"="deny", "/opt/toolchain"="read", "/cache/mod"="read", "` + filepath.Dir(c.Binary) + `"="read"`
+	if !slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, fs) }) {
+		t.Errorf("codex's arguments %q lack the profile's files, %s…}", args, fs)
 	}
 	// Its commands get a temporary directory of the run's own, outside the
 	// workspace, and build Go offline into a cache there, which is gone once
