@@ -336,19 +336,34 @@ func Journals(repo Repo) (map[string][]Event, []string, error) {
 // appendLine writes one event to the end of a decision's journal, chained to
 // the line before it. A new decision's file must not exist yet.
 func appendLine(repo Repo, e *Event, create bool) error {
-	path := filepath.Join(repo.JournalDir(), e.ID+".jsonl")
-	if err := os.MkdirAll(repo.JournalDir(), 0o755); err != nil {
-		return err
-	}
-	e.Prev = ""
+	var events []Event
 	if !create {
-		events, err := ReadJournal(path)
-		if err != nil {
+		var err error
+		if events, err = ReadJournal(filepath.Join(repo.JournalDir(), e.ID+".jsonl")); err != nil {
 			return err
 		}
+	}
+	if err := e.chain(events); err != nil {
+		return err
+	}
+	return writeLine(repo, *e, create)
+}
+
+// chain seals an event as the line after events, its decision's journal as
+// the checkout holds it.
+func (e *Event) chain(events []Event) error {
+	e.Prev = ""
+	if len(events) > 0 {
 		e.Prev = events[len(events)-1].Hash
 	}
-	if err := e.seal(); err != nil {
+	return e.seal()
+}
+
+// writeLine writes a sealed event to the end of its decision's journal. A
+// new decision's file must not exist yet.
+func writeLine(repo Repo, e Event, create bool) error {
+	path := filepath.Join(repo.JournalDir(), e.ID+".jsonl")
+	if err := os.MkdirAll(repo.JournalDir(), 0o755); err != nil {
 		return err
 	}
 	b, err := json.Marshal(e)

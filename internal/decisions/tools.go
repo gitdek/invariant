@@ -70,12 +70,23 @@ func (s *Session) Close() error {
 // Refresh puts one decision into the store again, as the checkout's journal
 // has it.
 func (s *Store) Refresh(repo Repo, short string) error {
+	events, err := ReadJournal(filepath.Join(repo.JournalDir(), short+".jsonl"))
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	floor, err := journalFloor(tx, repo.Name, map[string][]Event{short: events})
+	if err != nil {
+		return err
+	}
 	if err := putFile(tx, repo, short); err != nil {
+		return err
+	}
+	if err := holdsFloor(tx, repo.Name, floor); err != nil {
 		return err
 	}
 	return tx.Commit()
