@@ -19,15 +19,21 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 )
 
 // Result is what a pull request changes, and anything out of bounds.
 type Result struct {
-	Project  string   `json:"project"` // the one project directory the changes are in
+	Project  string   `json:"project"` // the one project directory the changes are in, or a plumbing plan's record
 	New      bool     `json:"new"`     // whether the pull request adds the project
 	Files    []string `json:"files"`
 	Problems []string `json:"problems,omitempty"`
+	// Plumbing says the pull request builds a ratified plan, not a project
+	// (D-0105), and Trusted is what it changes in the trusted base, which
+	// only a person merges.
+	Plumbing bool     `json:"plumbing,omitempty"`
+	Trusted  []string `json:"trusted,omitempty"`
 }
 
 // OK says whether the pull request stays in bounds.
@@ -56,6 +62,13 @@ func Check(ctx context.Context, dir, base, head string, issue int) (Result, erro
 	if len(r.Files) == 0 {
 		r.Problems = append(r.Problems, "it changes nothing")
 		return r, nil
+	}
+	// A pull request that adds its issue's ratified plan builds that plan,
+	// and changes only what the plan names (D-0105).
+	for _, f := range r.Files {
+		if n := plumbing.LockIssue(f); n != 0 {
+			return plan(g, base, head, issue, r), nil
+		}
 	}
 	projects := map[string]bool{}
 	for _, f := range r.Files {
@@ -304,4 +317,52 @@ func sorted(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// plan checks a plumbing pull request: it adds its own issue's ratified
+// plan and no other, the plan is the one ratified, and it changes only the
+// files the plan names. It notes what it changes in the trusted base.
+func plan(g git, base, head string, issue int, r Result) Result {
+	r.Plumbing, r.Project, r.New = true, plumbing.LockPath(issue), true
+	for _, f := range r.Files {
+		if n := plumbing.LockIssue(f); n != 0 && n != issue {
+			r.Problems = append(r.Problems, fmt.Sprintf("it changes issue #%d's plan, not this issue's", n))
+		}
+	}
+	if issue == 0 || g.exists(base, r.Project) {
+		r.Problems = append(r.Problems, "it doesn't add its own issue's plan")
+		return r
+	}
+	b, err := g.show(head, r.Project)
+	if err != nil {
+		r.Problems = append(r.Problems, "its plan can't be read: "+err.Error())
+		return r
+	}
+	lock, err := plumbing.ReadLock([]byte(b))
+	if err != nil {
+		r.Problems = append(r.Problems, "its plan isn't one that was ratified: "+err.Error())
+		return r
+	}
+	if lock.Ratified.Issue != issue {
+		r.Problems = append(r.Problems, fmt.Sprintf("its plan was ratified on #%d, not #%d", lock.Ratified.Issue, issue))
+	}
+	touches := lock.Plan.Touches(issue)
+	for _, f := range r.Files {
+		switch {
+		case f == ".github" || strings.HasPrefix(f, ".github/"):
+			r.Problems = append(r.Problems, "it edits CI configuration: "+f)
+		case !touches[f]:
+			r.Problems = append(r.Problems, "it changes "+f+", which its plan doesn't name")
+		}
+		if plumbing.Trusted(f) {
+			r.Trusted = append(r.Trusted, f)
+		}
+	}
+	// The acceptance tests are the plan's, as ratified.
+	for f, src := range lock.Plan.Sources {
+		if got, err := g.show(head, f); err != nil || got != src {
+			r.Problems = append(r.Problems, "its acceptance test "+f+" isn't the one ratified")
+		}
+	}
+	return r
 }

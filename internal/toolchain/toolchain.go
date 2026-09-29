@@ -122,6 +122,30 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// PlumbingDockerfile is the recipe for the plumbing sandbox: GoImage with
+// git added, since the repository's tests build git repositories (D-0108).
+//
+//go:embed plumbing.Dockerfile
+var PlumbingDockerfile []byte
+
+// PlumbingImage returns the plumbing sandbox's tag, building it from its
+// recipe the first time. Building needs the network; running never does.
+func PlumbingImage(ctx context.Context) (string, error) {
+	sum := sha256.Sum256(PlumbingDockerfile)
+	tag := "invariant-plumbing:" + hex.EncodeToString(sum[:])[:12]
+	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
+		return tag, nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, "-")
+	cmd.Stdin = bytes.NewReader(PlumbingDockerfile)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("building the plumbing sandbox: %w\n%s", err, out.String())
+	}
+	return tag, nil
+}
+
 // NaginiDockerfile is the recipe for the Nagini sandbox: a Python base pinned
 // by digest, the Java runtime from JavaImage, and Nagini, with every Python
 // package pinned by wheel hash (D-0031, D-0032).

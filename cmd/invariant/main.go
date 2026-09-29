@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
@@ -36,6 +37,7 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/mcp"
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/scope"
@@ -55,8 +57,8 @@ Usage:
   invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L] [-lease D]
                                                turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
-  invariant ratification -repo OWNER/NAME PROJECT...
-                                               check factory projects' ratifications on GitHub
+  invariant ratification -repo OWNER/NAME PROJECT|PLAN...
+                                               check factory projects' and plans' ratifications on GitHub
   invariant decisions COMMAND ...              record decisions and ask what rests on them
   invariant pin PROJECT                        record the statements' current text as ratified
   invariant trace FILE                         replay a counterexample trace
@@ -292,9 +294,34 @@ func mcpCmd(ctx context.Context, args []string) int {
 	dir := fs.String("C", ".", "with -decisions: the checkout")
 	storePath := fs.String("store", "", "with -decisions: the store (default: the one on this machine)")
 	write := fs.Bool("write", false, "with -decisions: let the agent record decisions and links; it never ratifies")
+	plan := fs.Bool("plan", false, "serve the check tool to an agent drafting a plumbing plan, with the repository under WORKSPACE/repo")
+	pipes := fs.Bool("plumbing", false, "serve the test tool to an agent building issue -issue's ratified plan, from the checkout at -ratified")
+	issue := fs.Int("issue", 0, "with -plumbing: the issue whose plan is built")
+	cache := fs.String("cache", "", "with -plan or -plumbing: a Go build cache to keep between test runs")
 	fs.Parse(args)
 	if *graph {
 		return decisionsMCP(ctx, *dir, *storePath, *write)
+	}
+	if (*plan || *pipes) && fs.NArg() == 1 {
+		sb, err := sandbox(ctx, *cache)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 2
+		}
+		tool := planTool(fs.Arg(0), sb, *maxRuns, *logPath)
+		if *pipes {
+			if *ratified == "" || *issue == 0 {
+				fmt.Fprintln(os.Stderr, "usage: invariant mcp -plumbing -ratified CHECKOUT -issue N [-max-runs N] [-log FILE] [-cache DIR] WORKSPACE")
+				return 2
+			}
+			tool = testTool(*ratified, *issue, fs.Arg(0), sb, *maxRuns, *logPath)
+		}
+		server := mcp.Server{Name: "invariant", Version: "0.5", Tools: []mcp.Tool{tool}}
+		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 1
+		}
+		return 0
 	}
 	if fs.NArg() != 1 || (*ratified == "") == !*formal {
 		fmt.Fprintln(os.Stderr, "usage: invariant mcp (-ratified PROJECT | -formalize) [-max-runs N] [-log FILE] WORKSPACE\n       invariant mcp -decisions [-C DIR] [-store FILE] [-write]")
@@ -358,6 +385,95 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// sandbox is where plumbing's tests run: the pinned Go image, with this
+// machine's module cache read-only.
+func sandbox(ctx context.Context, cache string) (plumbing.Sandbox, error) {
+	out, err := exec.CommandContext(ctx, "go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		return plumbing.Sandbox{}, fmt.Errorf("finding the module cache: %w", err)
+	}
+	image, err := toolchain.PlumbingImage(ctx)
+	if err != nil {
+		return plumbing.Sandbox{}, err
+	}
+	return plumbing.Sandbox{Image: image, ModCache: strings.TrimSpace(string(out)), Cache: cache}, nil
+}
+
+// planTool checks the plan an agent drafts for a plumbing issue (D-0105):
+// it holds together, and its acceptance tests fail on the code as it is.
+func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
+	runs := 0
+	return mcp.Tool{
+		Name: "check",
+		Description: fmt.Sprintf("Check the plan in plan.json and its acceptance tests under tests/ against the repository in repo/: "+
+			"the plan holds together, and every acceptance test fails on the code as it is. You have %d checks in total.", maxRuns),
+		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
+			if runs >= maxRuns {
+				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
+			}
+			runs++
+			if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
+				if _, err := os.Stat(filepath.Join(ws, "proposal.json")); err == nil {
+					return fmt.Sprintf("There's no plan.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
+						"If that's what you mean to send, you're done.\n\n(Check %d of %d.)", runs, maxRuns), false
+				}
+			}
+			c, err := plumbing.Check(ctx, ws, filepath.Join(ws, "repo"), sb)
+			if err != nil {
+				return fmt.Sprintf("The plan couldn't be checked: %v\n\n(Check %d of %d.)", err, runs, maxRuns), true
+			}
+			if logPath != "" {
+				run := synth.GateRun{Run: runs, Passed: c.Problem == "", At: time.Now().UTC().Format(time.RFC3339)}
+				if c.Problem != "" {
+					run.Failed = []string{c.Problem}
+				}
+				synth.LogGateRun(logPath, run)
+			}
+			return c.Feedback() + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
+		},
+	}
+}
+
+// testTool runs a plumbing build's checks for its agent: the ratified plan
+// and its acceptance tests from the checkout at root, and the agent's
+// changes to the files the plan names, in the sandbox.
+func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
+	runs := 0
+	return mcp.Tool{
+		Name: "test",
+		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, "+
+			"in a sandbox with no network. You have %d runs in total.", maxRuns),
+		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
+			if runs >= maxRuns {
+				return fmt.Sprintf("No test runs left: you've used all %d.", maxRuns), true
+			}
+			runs++
+			lock, err := plumbing.ReadLockFile(root, n)
+			if err != nil {
+				return "The ratified plan can't be read: " + err.Error(), true
+			}
+			staged, err := os.MkdirTemp("", "invariant-plumbing-test-")
+			if err != nil {
+				return "The test run couldn't start: " + err.Error(), true
+			}
+			defer os.RemoveAll(staged)
+			if err := plumbing.Stage(ctx, root, ws, &lock.Plan, staged); err != nil {
+				return "Your changes couldn't be staged: " + err.Error(), true
+			}
+			r, err := sb.Run(ctx, staged, &lock.Plan)
+			if err != nil {
+				return fmt.Sprintf("The tests couldn't run: %v\n\n(Test run %d of %d.)", err, runs, maxRuns), true
+			}
+			if logPath != "" {
+				synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: r.Passed(), Failed: r.Failing(), At: time.Now().UTC().Format(time.RFC3339)})
+			}
+			return r.Summary() + "\n" + r.Tail(8000) + fmt.Sprintf("\n\n(Test run %d of %d.)", runs, maxRuns), false
+		},
+	}
 }
 
 // checkTool runs the gate's model checks on a formalizing agent's draft.
@@ -526,13 +642,22 @@ func watchCmd(ctx context.Context, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	sb, err := sandbox(ctx, "")
+	if err != nil {
+		return fail(err)
+	}
 	f := &factory.Factory{
 		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate", Language: *language, Self: bot,
 		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
 		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns},
-			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc},
+			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
 			Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc}},
+		// A plumbing issue's plan is built with tests, not proofs, and a
+		// second agent reviews it (D-0105).
+		Plumbing: plumbing.Builder{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
+			Reviewer: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns},
+			Binary:   self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb},
 		Holder: factory.NewHolder(), LeaseFor: *leaseFor,
 	}
 	if err := f.Prepare(ctx); err != nil {
@@ -606,6 +731,24 @@ func ratificationCmd(ctx context.Context, args []string) int {
 	gh := github.Client{Repo: *repo}
 	code := 0
 	for _, dir := range fs.Args() {
+		// A plumbing plan's record is checked the same way (D-0105).
+		if plumbing.LockIssue(filepath.ToSlash(dir)) != 0 {
+			b, err := os.ReadFile(dir)
+			var lock *plumbing.Lock
+			if err == nil {
+				lock, err = plumbing.ReadLock(b)
+			}
+			if err == nil {
+				err = factory.VerifyPlan(ctx, gh, *repo, *lock)
+			}
+			if err != nil {
+				fmt.Printf("❌ %s: %v\n", dir, err)
+				code = 1
+				continue
+			}
+			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, lock.Ratified.By, lock.Ratified.Issue, lock.Ratified.Comment)
+			continue
+		}
 		p, err := project.Load(dir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invariant: %s: %v\n", dir, err)

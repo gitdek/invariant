@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/toolchain"
@@ -31,6 +32,9 @@ type Request struct {
 	Previous *Proposal // the draft people asked to revise, if any
 	Current  *Current  // the project an amendment changes, if any (D-0045)
 	Existing *Existing // the existing code the issue asks the factory to check, if any (D-0054)
+	// Plumbing is the base branch, exported, for a plumbing issue: the
+	// agent plans a change to it instead of drafting statements (D-0105).
+	Plumbing string
 }
 
 // Existing is code an issue names for the factory to check as it is: its
@@ -112,6 +116,7 @@ type Formalizer struct {
 	CheckRuns int    // the most checks the agent gets
 	Timeout   time.Duration
 	Toolchain toolchain.Toolchain
+	Sandbox   plumbing.Sandbox // where a plumbing plan's acceptance tests run
 }
 
 // Result is how a formalization went.
@@ -127,6 +132,9 @@ type Result struct {
 // Formalize runs the agent on a request. Its transcript and draft land in
 // out. Whatever the agent says, the factory checks the draft itself.
 func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Result, error) {
+	if req.Plumbing != "" {
+		return f.Plan(ctx, req, req.Plumbing, out)
+	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
