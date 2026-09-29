@@ -2,7 +2,7 @@
 
 Written by Invariant for [#91](https://github.com/gitdek/invariant/issues/91): Prove the decision journal: no two decisions share an ID, the journal only grows, and only a person ratifies.
 
-@gitdek ratified these statements [on the issue](https://github.com/gitdek/invariant/issues/91#issuecomment-5881475888). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/DecisionJournal.tla`](.invariant/specs/DecisionJournal.tla).
+@gitdek ratified these statements [on the issue](https://github.com/gitdek/invariant/issues/91#issuecomment-5882074258). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/DecisionJournal.tla`](.invariant/specs/DecisionJournal.tla).
 
 | Statement | Kind | Says |
 | :-- | :-- | :-- |

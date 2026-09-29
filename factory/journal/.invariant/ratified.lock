@@ -1,9 +1,9 @@
 {
   "ratified": {
     "by": "gitdek",
-    "at": "2026-09-29T00:46:40Z",
+    "at": "2026-09-29T01:47:03Z",
     "issue": 91,
-    "comment": "https://github.com/gitdek/invariant/issues/91#issuecomment-5881475888",
+    "comment": "https://github.com/gitdek/invariant/issues/91#issuecomment-5882074258",
     "proposal": "sha256:d7eebb8d69540485776e47dc72f394c6a7fb7d5fbdd02aad0a6ec2a7ba8966bb"
   },
   "bounds": {
