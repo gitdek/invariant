@@ -64,3 +64,63 @@ func TestTheSandboxRunsAcceptanceTests(t *testing.T) {
 		t.Errorf("gofmt: %v\n%s", r.Gofmt, r.Output)
 	}
 }
+
+// Git in the sandbox names a committer at once. With no network, the
+// container's hostname didn't resolve, and each lookup waited five seconds
+// on DNS, so a run of the repository's tests outlived the agent's tool
+// limit (#100).
+func TestGitIsQuickInTheSandbox(t *testing.T) {
+	root := t.TempDir()
+	write := func(p, text string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, p), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.com/quick\n\ngo 1.27.1\n")
+	write("quick.go", "package quick\n")
+	accept := `package quick
+
+import (
+	"os/exec"
+	"testing"
+	"time"
+)
+
+func TestGitNamesACommitterQuickly(t *testing.T) {
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		exec.Command("git", "var", "GIT_COMMITTER_IDENT").Run()
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("three identity lookups took %s: git is waiting on DNS", took)
+	}
+}
+`
+	write("quick_accept_test.go", accept)
+	if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	p := &Plan{Name: "quick", Summary: "Git is quick.", Files: []string{"quick.go"},
+		Tests:   []Test{{Name: "TestGitNamesACommitterQuickly", File: "quick_accept_test.go", Says: "Git names a committer at once."}},
+		Sources: map[string]string{"quick_accept_test.go": accept}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	mod, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := toolchain.PlumbingImage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Sandbox{Image: image, ModCache: strings.TrimSpace(string(mod)), Cache: filepath.Join(t.TempDir(), "cache")}
+	r, err := s.Run(context.Background(), root, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Accepted["quick_accept_test.go:TestGitNamesACommitterQuickly"] {
+		t.Fatalf("git was slow in the sandbox:\n%s", r.Output)
+	}
+}
