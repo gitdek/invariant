@@ -394,7 +394,11 @@ func sandbox(ctx context.Context, cache string) (plumbing.Sandbox, error) {
 	if err != nil {
 		return plumbing.Sandbox{}, fmt.Errorf("finding the module cache: %w", err)
 	}
-	return plumbing.Sandbox{Image: toolchain.GoImage, ModCache: strings.TrimSpace(string(out)), Cache: cache}, nil
+	image, err := toolchain.PlumbingImage(ctx)
+	if err != nil {
+		return plumbing.Sandbox{}, err
+	}
+	return plumbing.Sandbox{Image: image, ModCache: strings.TrimSpace(string(out)), Cache: cache}, nil
 }
 
 // planTool checks the plan an agent drafts for a plumbing issue (D-0105):
@@ -440,7 +444,7 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 	runs := 0
 	return mcp.Tool{
 		Name: "test",
-		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., every test and the acceptance tests on your changes to the plan's files, "+
+		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, "+
 			"in a sandbox with no network. You have %d runs in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {

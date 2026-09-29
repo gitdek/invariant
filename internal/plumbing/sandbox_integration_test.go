@@ -40,7 +40,11 @@ func TestTheSandboxRunsAcceptanceTests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := Sandbox{Image: toolchain.GoImage, ModCache: strings.TrimSpace(string(mod)), Cache: filepath.Join(t.TempDir(), "cache")}
+	image, err := toolchain.PlumbingImage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Sandbox{Image: image, ModCache: strings.TrimSpace(string(mod)), Cache: filepath.Join(t.TempDir(), "cache")}
 	r, err := s.Run(context.Background(), root, p)
 	if err != nil {
 		t.Fatal(err)

@@ -16,7 +16,7 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	plan := p.Plan
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's my plan for **%s**. It's plumbing, so it's tested, not proved. Once you ratify it, the plan and its acceptance tests are pinned by hash: "+
-		"the build writes only the files it names, and it has to make every test pass without changing them.\n\n", plan.Name)
+		"the build writes only the files it names, and it has to make every acceptance test pass without changing them.\n\n", plan.Name)
 	fmt.Fprintf(&b, "**What changes.** %s\n\n", strings.TrimSpace(plan.Summary))
 	b.WriteString("**The files the build may write:** " + codeList(plan.Files) + "\n\n")
 	b.WriteString("**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n")
@@ -52,7 +52,7 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 	if len(trusted) > 0 {
 		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on it, a person merges it.", codeList(trusted))
 	}
-	return post("pull request", fmt.Sprintf("The change is built: gofmt, go vet, every test and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
+	return post("pull request", fmt.Sprintf("The change is built: gofmt, go vet, the tests of every package it touches and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
 		res.Tests, pr.Number, merge), m)
 }
 
@@ -62,7 +62,7 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	case res == nil:
 		fmt.Fprintf(&b, "I couldn't build the plan: %v", runErr)
 	case res.Passed && !res.Approved:
-		b.WriteString("The change passes every test, but the second agent's review asks for changes:\n\n" + quote(clip(res.Review, accountLimit), 120))
+		b.WriteString("The change passes its checks, but the second agent's review asks for changes:\n\n" + quote(clip(res.Review, accountLimit), 120))
 	default:
 		fmt.Fprintf(&b, "I couldn't build a change that passes every check in %d test runs. What the factory's own run found:\n\n%s", max(len(res.TestRuns), 1), quote(res.Summary, 60))
 		if account := strings.TrimSpace(res.Usage.Summary); account != "" {

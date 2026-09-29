@@ -32,7 +32,7 @@ type Sandbox struct {
 type Result struct {
 	Gofmt    []string        // files gofmt would change
 	Vet      bool            // go vet passed
-	Tests    bool            // every test passed, the acceptance tests included
+	Tests    bool            // the tests of every package the change touches passed
 	Accepted map[string]bool // each acceptance test, as file:Name, and whether it passed
 	Output   string          // the whole run, for the transcript and the agent
 }
@@ -65,7 +65,7 @@ func (r Result) Failing() []string {
 const script = `cd /src
 for f in $GOFMT_FILES; do [ -f "$f" ] && gofmt -l "$f" | sed 's/^/@@gofmt /'; done
 go vet ./... ; echo "@@invariant vet=$?"
-go test -count=1 ./... ; echo "@@invariant test=$?"
+if [ -n "$TEST_PKGS" ]; then go test -count=1 -timeout 20m $TEST_PKGS ; echo "@@invariant test=$?"; else echo "@@invariant test=0"; fi
 for pkg in $ACCEPT_PKGS; do
   go test -count=1 -v -run "$ACCEPT_RUN" "./$pkg" ; echo "@@invariant accept=$?"
 done
@@ -77,8 +77,9 @@ var (
 	testLine   = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): (Test\w+)`)
 )
 
-// Run copies the checkout at root, and runs gofmt, go vet, every test, and
-// the plan's acceptance tests on the copy.
+// Run copies the checkout at root, and runs gofmt, go vet, the tests of
+// every package the change touches, and the plan's acceptance tests on the
+// copy.
 func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, error) {
 	work, err := os.MkdirTemp("", "invariant-plumbing-")
 	if err != nil {
@@ -104,7 +105,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
-		"-e", "GOFMT_FILES=" + strings.Join(goFiles(plan), " "),
+		"-e", "GOFMT_FILES=" + strings.Join(goFiles(plan), " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
 	if s.Cache != "" {
 		if err := os.MkdirAll(s.Cache, 0o777); err != nil {
@@ -123,6 +124,31 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		}
 	}
 	return parse(buf.String(), plan), nil
+}
+
+// packages is every Go package the change touches, as ./dir: each file's
+// nearest directory holding Go files, so a change to a page a package
+// embeds tests that package. CI runs every test before anything merges;
+// the sandbox runs these, which is quick enough to build against.
+func packages(src string, plan *Plan) []string {
+	seen := map[string]bool{}
+	var out []string
+	for f := range plan.Touches(0) {
+		for dir := path.Dir(f); ; dir = path.Dir(dir) {
+			if matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(dir), "*.go")); len(matches) > 0 {
+				if !seen[dir] {
+					seen[dir] = true
+					out = append(out, "./"+dir)
+				}
+				break
+			}
+			if dir == "." || dir == "/" {
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // goFiles is every Go file the change touches, which gofmt checks.
@@ -167,7 +193,7 @@ func (r Result) Summary() string {
 	var b strings.Builder
 	switch {
 	case r.Passed():
-		b.WriteString("Everything passed: gofmt, go vet, every test, and every acceptance test.\n")
+		b.WriteString("Everything passed: gofmt, go vet, the tests of every package the change touches, and every acceptance test.\n")
 	default:
 		if len(r.Gofmt) > 0 {
 			fmt.Fprintf(&b, "gofmt would change: %s\n", strings.Join(r.Gofmt, ", "))

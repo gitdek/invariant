@@ -31,7 +31,7 @@ The plan's record is `+"`%s`"+`.
 
 1. Read AGENTS.md for the repository's rules, then the acceptance tests, then the code the plan changes.
 2. Write the change in the files the plan names. Write it the way the code around it is written: its naming, its comment density, its idiom. Keep to what the plan says.
-3. Run the `+"`test`"+` tool. It copies the repository with your changes to the plan's files and runs, in a sandbox with no network: gofmt on the files the change touches, `+"`go vet ./...`"+`, every test, and the acceptance tests. You have %d runs, so use them to check your work, not to explore.
+3. Run the `+"`test`"+` tool. It copies the repository with your changes to the plan's files and runs, in a sandbox with no network: gofmt on the files the change touches, `+"`go vet ./...`"+`, the tests of every package the change touches, and the acceptance tests. CI runs every test before anything merges. You have %d runs, so use them to check your work, not to explore.
 4. When every check passes, stop, and say in a few sentences what you changed and any call you made that the plan didn't settle.
 
 You have no shell and no network. Don't change the acceptance tests, the plan's record, or anything under decisions/, and don't write anywhere but the files the plan names.
@@ -48,7 +48,7 @@ In this directory:
 - plan.json: the plan a person ratified. It says what changes, which files the build may write, and the acceptance tests that show it works.
 - change.diff: the change to files that already existed.
 - new-files.txt: the files it added, which you can read under repo/.
-- tests.txt: the factory's own run, on the change, of gofmt, go vet, every test and the acceptance tests.
+- tests.txt: the factory's own run, on the change, of gofmt, go vet, the tests of every package it touches, and the acceptance tests.
 - repo/: the repository with the change in it. AGENTS.md there holds its rules.
 
 Check, citing file:line for each finding:
