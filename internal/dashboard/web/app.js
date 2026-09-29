@@ -114,7 +114,9 @@
     if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
     if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
-    if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
+    // The headline counts what needs a person, which a post from /act
+    // changes at once without changing anything else it draws (#175).
+    if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
     if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states])])) renderTabs(s);
