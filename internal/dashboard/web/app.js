@@ -1221,6 +1221,7 @@
     const box = $("#inbox");
     if (!items.length) {
       box.innerHTML = `<div class="calm">${calmGlyph()}<span>Nothing needs you right now. When the factory asks a question, proposes statements or needs a person, it shows up here.</span></div>`;
+      toOpen = "";
       return;
     }
     // Invariant's own first, then the longest wait first: the order the
@@ -1228,6 +1229,7 @@
     const first = (i) => (i.repo === s.repo ? 0 : 1);
     items.sort((a, b) => first(a) - first(b) || new Date(a.waiting.since) - new Date(b.waiting.since));
     box.innerHTML = batchBanner(items) + items.map(needCard).join("");
+    if (toOpen) openAt(box);
   }
   // proposalText says what a proposal asks a person to ratify. A rebuild
   // that changes no statement says so first, since that's all there is to
@@ -1238,6 +1240,11 @@
     if (w.plan) {
       const files = (w.plan.files || []).length, trusted = (w.plan.trusted || []).length;
       return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.plan.summary)}</p>`;
+    }
+    // A plan of issues pins no statement: it's the issues, in order.
+    if (w.issuePlan) {
+      const titles = w.issuePlan.issues || [];
+      return `<p class="ask">A plan for ${name}: <strong>${titles.length}</strong> issue${titles.length === 1 ? "" : "s"}, in order. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.issuePlan.summary)}</p><ol class="planned">${titles.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>`;
     }
     if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
     return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
@@ -1260,12 +1267,20 @@
   // request is closed.
   const redraftable = (w) => stoppedBuild(w) || Boolean(w.pr);
   const closedText = (w, repo) => `${w.pr ? `<strong>${esc(ref(repo, w.pr))}</strong>` : "The pull request"} was closed without merging, so the factory stopped. To go on, have it draft again from the comments on the issue.`;
+  // said is what a proposal's statements, or a plan's tests, say. A plan of
+  // issues has none: its card lists the issues.
+  const said = (w) => (w.statements || []).length
+    ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>`
+    : "";
   function needCard(is) {
     if (ACT) return actCard(is);
     const w = is.waiting, repo = is.repo, n = is.number;
     const gh = (body) => `gh issue comment ${n} -R ${repo} --body "${body}"`;
     const url = `https://github.com/${repo}/issues/${n}`;
-    const open = `<a class="gh" href="${esc(url)}" target="_blank" rel="noopener">Open on GitHub ↗</a>`;
+    // The same card on /act, where the owner posts it with a button, signed
+    // in through Cloudflare Access. This page only links there.
+    const toAct = w.actURL ? `<a class="toact" href="${esc(w.actURL)}" title="The owner posts it from there, signed in through Cloudflare Access">Post from /act →</a>` : "";
+    const open = `<a class="gh" href="${esc(url)}" target="_blank" rel="noopener">Open on GitHub ↗</a>${toAct}`;
     const cmd = (c, primary) => `<button class="cmd${primary ? " primary" : ""}" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy. Shift-click copies it as a gh command.">${esc(c)}<span class="cp">copy</span></button>`;
     let body = "", cls = "";
     if (w.kind === "forks") {
@@ -1274,8 +1289,7 @@
         return `<button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>`;
       }).join("")}</div>`).join("") + `<div class="cmds">${cmd("/invariant revise")}${open}</div>`;
     } else if (w.kind === "proposal") {
-      body = `${proposalText(w, repo, "a person")}
-        <details class="stmts"><summary>Read what they say</summary><ul>${(w.statements || []).map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>
+      body = `${proposalText(w, repo, "a person")}${said(w)}
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${cmd("/invariant revise")}${open}</div>`;
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>
@@ -1302,18 +1316,24 @@
     setTimeout(() => { b.classList.remove("copied"); if (cp) cp.textContent = "copy"; }, 1600);
   });
 
-  // On /act, rebuilds that change no statement can be ratified together.
-  // Each still posts its own ratify, on its own issue, as the owner, and the
-  // factory builds them one at a time.
-  const batch = { confirm: false, busy: false, error: "" };
+  // On /act, proposals that change no statement can be ratified together:
+  // plans, of either kind, and rebuilds at their lock's hash. One Ratify all
+  // asks once, listing each, and sends exactly those. The server checks each
+  // as it checks a single command, then posts each ratify on its own issue,
+  // as the owner. A proposal that changes statements ratifies alone, from
+  // its own card.
+  const batch = { shown: [], confirm: null, busy: false, error: "" };
   function batchBanner(items) {
-    const same = items.filter((i) => i.waiting.kind === "proposal" && i.waiting.unchanged && !actOf(`${i.repo}#${i.number}`).posted);
-    if (!ACT || same.length < 2) return "";
-    const refs = same.map((i) => esc(ref(i.repo, i.number))).join(", ");
+    if (!ACT) return "";
+    const all = (batch.shown = items.filter((i) => i.waiting.kind === "proposal" && i.waiting.together && !actOf(`${i.repo}#${i.number}`).posted));
+    const err = batch.error ? `<p class="acterr">${esc(batch.error)}</p>` : "";
+    if (all.length < 2 && !batch.confirm) return err && `<div class="batch">${err}</div>`;
+    const list = batch.confirm || [], off = batch.busy ? " disabled" : "";
     const row = batch.confirm
-      ? `<div class="confirm"><span>Ratify all ${same.length} as you? Each pins statements that don't change, and the factory builds them one at a time.</span><button class="cmd act primary" type="button" data-batch="post"${batch.busy ? " disabled" : ""}>Yes, ratify all ${same.length}</button><button class="cmd" type="button" data-batch="cancel">Cancel</button></div>`
-      : `<div class="cmds"><button class="cmd act primary" type="button" data-batch="ask">Ratify all ${same.length}</button></div>`;
-    return `<div class="batch"><p class="ask"><b class="same">${same.length} rebuilds change no statement:</b> ${refs}. Only their code changes.</p>${row}${batch.error ? `<p class="acterr">${esc(batch.error)}</p>` : ""}</div>`;
+      ? `<div class="confirm"><span>Ratify all ${list.length} as you? Each posts its own ratify, on its own issue:</span><ul class="batchlist">${list.map((i) => `<li><span class="ref">${esc(ref(i.repo, i.issue))}</span><b>${esc(i.name)}</b><code>${esc(i.hash)}</code></li>`).join("")}</ul><button class="cmd act primary" type="button" data-batch="post"${off}>Yes, ratify all ${list.length}</button><button class="cmd" type="button" data-batch="cancel"${off}>Cancel</button></div>`
+      : `<div class="cmds"><button class="cmd act primary" type="button" data-batch="ask">Ratify all ${all.length}</button></div>`;
+    const refs = all.map((i) => esc(ref(i.repo, i.number))).join(", ");
+    return `<div class="batch"><p class="ask"><b class="same">${all.length === 1 ? "1 proposal changes" : `${all.length} proposals change`} no statement:</b> ${refs}. Each is a plan, or a rebuild whose statements stay as they were ratified, so they can be ratified together.</p>${row}${err}</div>`;
   }
 
   // ---------- acting: at /act, the owner's clicks post to GitHub (D-0065) ----------
@@ -1321,6 +1341,18 @@
   // every post. Each card offers only what its issue is waiting for, and a
   // ratify or a retry asks first.
   const ACT = document.body.dataset.act || "";
+  // A card on the public page links to the same card here, and the server
+  // marks the page with its issue when it shows that issue. The page opens
+  // scrolled to the card, highlighted, with its repository shown.
+  const OPEN = ACT ? document.body.dataset.open || "" : "";
+  let toOpen = OPEN;
+  if (OPEN && !inScope(OPEN.slice(0, OPEN.lastIndexOf("#")))) scope = "all";
+  // openAt scrolls to the card the page opened at, once.
+  function openAt(box) {
+    const card = [...box.querySelectorAll(".need[data-issue]")].find((el) => el.dataset.issue === toOpen);
+    toOpen = "";
+    if (card) requestAnimationFrame(() => card.scrollIntoView({ behavior: REDUCED ? "auto" : "smooth", block: "center" }));
+  }
   const acts = new Map(); // "repo#n" → { chosen: {F1: "C"}, confirm, busy, posted, error }
   function actOf(key) {
     if (!acts.has(key)) acts.set(key, { chosen: {} });
@@ -1346,8 +1378,7 @@
         : `<button class="cmd act primary" type="button" disabled>Choose ${forks.length === 1 ? "an answer" : `all ${forks.length}`} to post</button>`;
       actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
-      body = `${proposalText(w, repo, "you")}
-        <details class="stmts"><summary>Read what they say</summary><ul>${(w.statements || []).map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>`;
+      body = `${proposalText(w, repo, "you")}${said(w)}`;
       actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + ask("Draft again", "/invariant revise");
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>`;
@@ -1367,7 +1398,7 @@
     }
     if (a.posted) row = `<p class="posted">✓ Posted <a href="${esc(a.posted)}" target="_blank" rel="noopener">on GitHub</a> as you. The factory picks it up within 30 seconds.</p>`;
     if (a.error) row += `<p class="acterr">${esc(a.error)}</p>`;
-    return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)}><div>${needGlyph(w.kind)}</div><div>
+    return `<article class="need ${cls}${key === OPEN ? " opened" : ""}${quiet(repo)}" ${tag(repo)} data-issue="${esc(key)}"><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}${row}</div></article>`;
   }
   if (ACT) {
@@ -1375,27 +1406,30 @@
       const b = e.target.closest("[data-batch]");
       if (!b || b.disabled || !state) return;
       batch.error = "";
-      if (b.dataset.batch === "ask") batch.confirm = true;
-      if (b.dataset.batch === "cancel") batch.confirm = false;
-      if (b.dataset.batch === "post") {
+      // What the owner confirms is what the banner listed when asked.
+      if (b.dataset.batch === "ask") batch.confirm = batch.shown.map((i) => ({ repo: i.repo, issue: i.number, name: i.waiting.name, hash: i.waiting.hash }));
+      if (b.dataset.batch === "cancel") batch.confirm = null;
+      if (b.dataset.batch === "post" && batch.confirm) {
+        const sent = batch.confirm;
+        let posted = [];
         batch.busy = true;
         renderInbox(state);
-        const same = state.issues.filter((i) => i.open && i.waiting && inScope(i.repo) && i.waiting.kind === "proposal" && i.waiting.unchanged);
-        for (const i of same) {
-          const a = actOf(`${i.repo}#${i.number}`);
-          if (a.posted) continue;
-          try {
-            const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
-              body: JSON.stringify({ repo: i.repo, issue: i.number, body: `/invariant ratify ${i.waiting.hash}` }) });
-            if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
-            a.posted = (await r.json()).url || `https://github.com/${i.repo}/issues/${i.number}`;
-          } catch (err) {
-            batch.error = `Stopped at ${ref(i.repo, i.number)}: ${err.message}`;
-            break;
-          }
+        try {
+          const r = await fetch("/act/api/ratify", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+            body: JSON.stringify({ ratify: sent.map(({ repo, issue, hash }) => ({ repo, issue, hash })) }) });
+          // A refusal is words, and a batch GitHub stopped partway through
+          // still says which went.
+          const text = await r.text();
+          let j = {};
+          try { j = JSON.parse(text) || {}; } catch {}
+          posted = j.posted || [];
+          for (const p of posted) actOf(`${p.repo}#${p.issue}`).posted = p.url || `https://github.com/${p.repo}/issues/${p.issue}`;
+          if (!r.ok) throw new Error(j.error || text.trim() || `HTTP ${r.status}`);
+        } catch (err) {
+          batch.error = posted.length ? err.message : `Nothing posted: ${err.message}`;
         }
         batch.busy = false;
-        batch.confirm = false;
+        batch.confirm = null;
       }
       renderInbox(state);
     });

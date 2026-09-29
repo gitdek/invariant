@@ -271,13 +271,77 @@ func offered(forks []Question, id, option string) bool {
 	return false
 }
 
-// actPage is the page, marked for acting as the person signed in.
-func actPage(email string) []byte {
-	page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
-	return []byte(strings.Replace(page, "<body>", `<body data-act="`+html.EscapeString(email)+`">`, 1))
+// batch is what the page's Ratify all sends once the owner confirms it: each
+// issue it listed, with the hash it showed.
+type batch struct {
+	Ratify []struct {
+		Repo  string `json:"repo"`
+		Issue int    `json:"issue"`
+		Hash  string `json:"hash"`
+	} `json:"ratify"`
 }
 
-// serveAct answers /act: the page, and the command it posts.
+// check says whether every line of a batch is the ratify its issue is
+// waiting for, checked exactly as a single command is, of a proposal that
+// changes no statement, and gives each as the command to post. A proposal
+// that changes statements ratifies alone, from its own card.
+func (b batch) check(issues []Issue) ([]act, error) {
+	if len(b.Ratify) == 0 {
+		return nil, errors.New("that batch ratifies nothing")
+	}
+	var out []act
+	seen := map[string]bool{}
+	for _, one := range b.Ratify {
+		c := act{Repo: one.Repo, Issue: one.Issue, Body: "/invariant ratify " + one.Hash}
+		if err := c.check(issues); err != nil {
+			return nil, err
+		}
+		key := fmt.Sprintf("%s#%d", c.Repo, c.Issue)
+		if seen[key] {
+			return nil, fmt.Errorf("%s is in the batch twice", key)
+		}
+		seen[key] = true
+		for _, is := range issues {
+			if is.Repo == c.Repo && is.Number == c.Issue && (is.Waiting == nil || !is.Waiting.Together) {
+				return nil, fmt.Errorf("%s changes statements, so it ratifies alone, from its own card", key)
+			}
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// actURL is an issue's own card on /act, which the same card on the public
+// page links to.
+func actURL(repo string, n int) string {
+	return fmt.Sprintf("/act?issue=%s%%23%d", repo, n)
+}
+
+// actPage is the page, marked for acting as the person signed in, and for
+// opening at the card of the issue open names, if any.
+func actPage(email, open string) []byte {
+	page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
+	body := `<body data-act="` + html.EscapeString(email) + `"`
+	if open != "" {
+		body += ` data-open="` + html.EscapeString(open) + `"`
+	}
+	return []byte(strings.Replace(page, "<body>", body+">", 1))
+}
+
+// shows is the issue a link to /act names, repo#n, when the dashboard shows
+// it, and empty otherwise.
+func (s *Server) shows(issue string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, is := range s.issues {
+		if issue == fmt.Sprintf("%s#%d", is.Repo, is.Number) {
+			return issue
+		}
+	}
+	return ""
+}
+
+// serveAct answers /act: the page, and the commands it posts.
 func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
@@ -294,9 +358,15 @@ func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/act" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(actPage(email))
+		w.Write(actPage(email, s.shows(r.URL.Query().Get("issue"))))
 	case r.URL.Path == "/act/api/comment" && r.Method == http.MethodPost:
 		s.postAct(w, r, email)
+	case r.URL.Path == "/act/api/ratify" && r.Method == http.MethodPost:
+		if !fromPage(r) {
+			http.Error(w, "only the page can post", http.StatusForbidden)
+			return
+		}
+		s.ratifyAll(w, r, email)
 	case r.URL.Path == "/act/api/issue" && r.Method == http.MethodPost:
 		if !fromPage(r) {
 			http.Error(w, "only the page can post", http.StatusForbidden)
@@ -319,6 +389,51 @@ func (s *Server) postAct(w http.ResponseWriter, r *http.Request, email string) {
 	s.post(w, r, email, "")
 }
 
+// ratifyAll posts each ratify of a batch on its own issue, as @gitdek, once
+// every one of them checks out. If any doesn't, it posts none.
+func (s *Server) ratifyAll(w http.ResponseWriter, r *http.Request, who string) {
+	var b batch
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&b); err != nil {
+		http.Error(w, "that isn't a batch of ratifications", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	issues := s.issues
+	s.mu.RUnlock()
+	cmds, err := b.check(issues)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// What was posted, and why it stopped if GitHub didn't take one, so the
+	// page knows which went.
+	type posted struct {
+		Repo  string `json:"repo"`
+		Issue int    `json:"issue"`
+		URL   string `json:"url"`
+	}
+	out := struct {
+		Posted []posted `json:"posted"`
+		Error  string   `json:"error,omitempty"`
+	}{Posted: []posted{}}
+	code := http.StatusOK
+	for _, c := range cmds {
+		body := strings.TrimSpace(c.Body)
+		url, err := s.poster()(r.Context(), c.Repo, c.Issue, body)
+		if err != nil {
+			s.logf("act: posting on %s#%d for %s: %v", c.Repo, c.Issue, who, err)
+			out.Error = fmt.Sprintf("GitHub didn't take the ratify on %s#%d, so the batch stopped there; try again", c.Repo, c.Issue)
+			code = http.StatusBadGateway
+			break
+		}
+		s.logf("act: %s posted %q on %s#%d", who, body, c.Repo, c.Issue)
+		out.Posted = append(out.Posted, posted{Repo: c.Repo, Issue: c.Issue, URL: url})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(out)
+}
+
 // fromPage says whether a request came from the page itself: another site
 // can't set its header, and its origin must be this one.
 func fromPage(r *http.Request) bool {
@@ -336,7 +451,8 @@ const agentNote = "\n\n_Posted for @gitdek by a coding agent, through the dashbo
 // give an issue what it's waiting for. It's served on its own listener,
 // which only this machine can reach and the tunnel never publishes, and it
 // takes the token the dashboard wrote where only @gitdek's account can read
-// it. Browsers can't use it at all.
+// it. Browsers can't use it at all, and it takes no batch of ratifications:
+// only his own page ratifies proposals together.
 func (s *Server) AgentHandler(token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -375,14 +491,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	post := s.Post
-	if post == nil {
-		post = func(ctx context.Context, repo string, issue int, body string) (string, error) {
-			comment, err := github.Client{Repo: repo}.PostComment(ctx, issue, body)
-			return comment.URL, err
-		}
-	}
-	url, err := post(r.Context(), c.Repo, c.Issue, strings.TrimSpace(c.Body)+note)
+	url, err := s.poster()(r.Context(), c.Repo, c.Issue, strings.TrimSpace(c.Body)+note)
 	if err != nil {
 		s.logf("act: posting on %s#%d for %s: %v", c.Repo, c.Issue, who, err)
 		http.Error(w, "GitHub didn't take it; try again", http.StatusBadGateway)
@@ -392,6 +501,17 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
+// poster is how a command reaches GitHub: Post, or else gh's login.
+func (s *Server) poster() func(ctx context.Context, repo string, issue int, body string) (string, error) {
+	if s.Post != nil {
+		return s.Post
+	}
+	return func(ctx context.Context, repo string, issue int, body string) (string, error) {
+		comment, err := github.Client{Repo: repo}.PostComment(ctx, issue, body)
+		return comment.URL, err
+	}
 }
 
 // newIssue is an issue the page asks to open, for the factory to solve.
