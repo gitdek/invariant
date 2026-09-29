@@ -84,9 +84,19 @@ type Waiting struct {
 	Unchanged bool `json:"unchanged,omitempty"`
 	// Plan is a plumbing plan to ratify (D-0105). Its acceptance tests are
 	// in Statements, each of kind test.
-	Plan  *PlanView `json:"plan,omitempty"`
-	PR    int       `json:"pr,omitempty"` // the pull request that failed, or was closed
-	Since time.Time `json:"since"`
+	Plan *PlanView `json:"plan,omitempty"`
+	// IssuePlan is a plan of issues to ratify, in place of statements.
+	IssuePlan *IssuePlanView `json:"issuePlan,omitempty"`
+	// Together is a proposal that changes no statement: a plumbing plan, a
+	// plan of issues, or a rebuild at its lock's hash. /act can ratify it
+	// with others, with one confirmation. One that changes statements
+	// ratifies alone, from its own card.
+	Together bool `json:"together,omitempty"`
+	// ActURL is the issue's own card on /act, when the dashboard serves
+	// /act, so the public page's card can link to it.
+	ActURL string    `json:"actURL,omitempty"`
+	PR     int       `json:"pr,omitempty"` // the pull request that failed, or was closed
+	Since  time.Time `json:"since"`
 }
 
 // PlanView is what a plumbing plan says: the change, the files it may
@@ -95,6 +105,13 @@ type PlanView struct {
 	Summary string   `json:"summary"`
 	Files   []string `json:"files"`
 	Trusted []string `json:"trusted,omitempty"`
+}
+
+// IssuePlanView is what a plan of issues says: what the issues do together,
+// and each one's title, in order.
+type IssuePlanView struct {
+	Summary string   `json:"summary"`
+	Issues  []string `json:"issues"`
 }
 
 // Question is one fork the factory asked about.
@@ -387,10 +404,19 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 				w.Statements = append(w.Statements, Said{Name: t.Name, Kind: "test", Says: t.Says})
 			}
 		}
+		if ip := p.IssuePlan; ip != nil {
+			w.IssuePlan = &IssuePlanView{Summary: ip.Summary, Issues: []string{}}
+			for _, is := range ip.Issues {
+				w.IssuePlan.Issues = append(w.IssuePlan.Issues, is.Title)
+			}
+		}
 		if p.Target != nil {
 			w.Amends = p.Target.Previous
 			w.Unchanged = p.Target.Amends != "" && p.Target.Amends == p.Hash
 		}
+		// A plan, of either kind, pins no statement, and a rebuild at its
+		// lock's hash changes none.
+		w.Together = w.Unchanged || (len(p.Statements) == 0 && (p.Plan != nil || p.IssuePlan != nil))
 	case factory.KindFailed, factory.KindStuck:
 		w.PR, w.Failure = m.PR, m.Why()
 	case factory.KindClosed:

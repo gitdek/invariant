@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -42,6 +43,10 @@ type Job struct {
 	// ReadOnly gives the agent only the tools that read files, and no gate:
 	// a reviewer's job (D-0086).
 	ReadOnly bool
+	// Effort is how hard the agent thinks, in place of the backend's own. Only
+	// a build's fallback run names one (D-0125); every first run leaves it
+	// empty, and thinks at the backend's own effort.
+	Effort string
 }
 
 // Usage is how the agent's run went, by the agent's own account.
@@ -81,6 +86,9 @@ type Options struct {
 	GateRuns  int // the most gate runs the agent gets: one attempt and its repairs
 	Timeout   time.Duration
 	Toolchain toolchain.Toolchain
+	// FallbackEffort is the effort the agent runs at once more when the loop
+	// guard stops its first run (D-0125). Empty never runs it again.
+	FallbackEffort string
 }
 
 // Result is what a synthesis produced.
@@ -95,6 +103,9 @@ type Result struct {
 	// Review is a second agent's reading of the driver, when synthesis
 	// passed and the project has one (D-0082, D-0086).
 	Review *Review `json:"review,omitempty"`
+	// Fallback says the agent ran once more, when the loop guard stopped its
+	// first run (D-0125). Usage is the second run's.
+	Fallback *Fallback `json:"fallback,omitempty"`
 }
 
 // Spend is the agents' estimated cost for the build: synthesis, and the
@@ -107,8 +118,41 @@ func (r *Result) Spend() float64 {
 	return spend
 }
 
+// Fallback is a build's second run of its agent, after the loop guard
+// stopped the first (D-0125).
+type Fallback struct {
+	Effort string `json:"effort"` // what the second run thought at
+	Why    string `json:"why"`    // the first run's error
+}
+
+// RunAgent runs a build's agent on job, cut off after timeout. When the loop
+// guard stops the run and fallback names an effort, it runs the same job once
+// more at that effort, its timeout starting again, in the same workspace, so
+// the agent keeps what it wrote (D-0125). That run's usage and error are the
+// build's, and there's never a third. RunAgent returns the fallback it took,
+// or nil.
+func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Duration, fallback string) (Usage, *Fallback, error) {
+	usage, err := runWithin(ctx, backend, job, timeout)
+	if fallback == "" || !errors.Is(err, ErrThinkingLoop) {
+		return usage, nil, err
+	}
+	fb := &Fallback{Effort: fallback, Why: err.Error()}
+	job.Effort = fallback
+	usage, err = runWithin(ctx, backend, job, timeout)
+	return usage, fb, err
+}
+
+// runWithin runs backend on job, cut off after timeout.
+func runWithin(ctx context.Context, backend Backend, job Job, timeout time.Duration) (Usage, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return backend.Run(ctx, job)
+}
+
 // Synthesize runs one synthesis. The result lands in Out/result as a
-// complete project, with the final gate's receipt in Out/gate.
+// complete project, with the final gate's receipt in Out/gate. When the
+// final gate can't run, Synthesize returns the result with no final report,
+// and an error.
 func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	start := time.Now()
 	src, err := filepath.Abs(o.Project)
@@ -171,17 +215,15 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	defer transcript.Close()
 	gateLog := filepath.Join(out, "gate-runs.jsonl")
 
-	runCtx, cancel := context.WithTimeout(ctx, o.Timeout)
-	defer cancel()
-	usage, runErr := o.Backend.Run(runCtx, Job{
+	usage, fallback, runErr := RunAgent(ctx, o.Backend, Job{
 		Workspace:  ws,
 		Prompt:     Prompt(p, skeleton, request, o.GateRuns, o.KeepModel, o.KeepCode),
 		GateServer: []string{o.Binary, "mcp", "-ratified", src, "-max-runs", fmt.Sprint(o.GateRuns), "-log", gateLog, ws},
 		Transcript: transcript,
-	})
+	}, o.Timeout, o.FallbackEffort)
 	usage.Backend = o.Backend.Name()
 
-	r := &Result{Project: p.Manifest.Name, Usage: usage}
+	r := &Result{Project: p.Manifest.Name, Usage: usage, Fallback: fallback}
 	if r.Tampered, err = Tampered(p, ws); err != nil {
 		return nil, err
 	}
@@ -190,8 +232,11 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	r.Dir = final
-	if r.Final, err = verify.Run(ctx, final, filepath.Join(out, "gate"), o.Toolchain); err != nil {
-		return nil, fmt.Errorf("the final gate couldn't run: %w", err)
+	// A final gate that can't run, as when the agent wrote no code, leaves the
+	// result with no final report.
+	report, gateErr := verify.Run(ctx, final, filepath.Join(out, "gate"), o.Toolchain)
+	if gateErr == nil {
+		r.Final = report
 	}
 	if r.GateRuns, err = readGateRuns(gateLog); err != nil {
 		return nil, err
@@ -200,7 +245,15 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	if err := writeJSON(filepath.Join(out, "synthesis.json"), r); err != nil {
 		return nil, err
 	}
-	if runErr != nil {
+	// A failed run's error comes first, since it's the likelier cause: #91's
+	// error said only that the gate found no Go files, when its agent had
+	// looped.
+	switch {
+	case runErr != nil && gateErr != nil:
+		return r, fmt.Errorf("the agent's run failed: %w; then the final gate couldn't run: %w", runErr, gateErr)
+	case gateErr != nil:
+		return r, fmt.Errorf("the final gate couldn't run: %w", gateErr)
+	case runErr != nil:
 		return r, fmt.Errorf("the agent's run failed: %w", runErr)
 	}
 	return r, nil
@@ -499,6 +552,9 @@ func Summary(r *Result) string {
 	}
 	fmt.Fprintf(&b, "**%s** %s, model %s, %d turns, about $%.2f by the agent's own estimate, %.0f seconds.\n\n",
 		verdict, r.Usage.Backend, r.Usage.Model, r.Usage.Turns, r.Usage.CostUSD, r.Seconds)
+	if fb := r.Fallback; fb != nil {
+		fmt.Fprintf(&b, "The loop guard stopped the agent's first run, so it ran once more, at %s effort (D-0125). The first run's error: %s\n\n", fb.Effort, fb.Why)
+	}
 	if len(r.GateRuns) > 0 {
 		b.WriteString("| Gate run | Result |\n| :-- | :-- |\n")
 		for _, g := range r.GateRuns {

@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -234,6 +235,7 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	out := fs.String("out", "out/synthesis", "where the result, its receipt and the logs go")
 	model := fs.String("model", "opus", "the model the agent uses")
 	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
+	fallback := fs.String("fallback-effort", "xhigh", "the effort the agent runs at once more when the loop guard stops its first run, if it's below -effort; empty never runs it again")
 	budget := fs.Float64("budget", 5, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
 	turns := fs.Int("max-turns", 80, "cap on the agent's turns")
 	runs := fs.Int("gate-runs", 4, "the most gate runs the agent gets: one attempt and three repairs")
@@ -243,6 +245,10 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	fs.Parse(args)
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
+	if *fallback != "" && !validEffort(*fallback) {
+		fmt.Fprintf(os.Stderr, "invariant: -fallback-effort is empty, low, medium, high, xhigh or max, not %q\n", *fallback)
 		return 2
 	}
 	if fs.NArg() != 1 {
@@ -261,7 +267,8 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	}
 	r, err := synth.Synthesize(ctx, synth.Options{
 		Project: fs.Arg(0), Out: *out, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc, KeepModel: *draft,
-		Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
+		Backend:        synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
+		FallbackEffort: fallbackEffort(*effort, *fallback),
 	})
 	if r != nil && r.Final != nil {
 		md := receipt.Markdown(r.Final)
@@ -641,6 +648,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "where the clone, transcripts and logs go")
 	model := fs.String("model", "opus", "the model the agents use")
 	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
+	fallback := fs.String("fallback-effort", "xhigh", "the effort a build's agent runs at once more when the loop guard stops its first run, if it's below -effort; empty never runs it again")
 	fbudget := fs.Float64("formalize-budget", 3, "cap on a formalization's estimated cost, in USD")
 	budget := fs.Float64("budget", 5, "cap on a synthesis's estimated cost, in USD")
 	turns := fs.Int("max-turns", 80, "cap on an agent's turns")
@@ -655,6 +663,10 @@ func watchCmd(ctx context.Context, args []string) int {
 	fs.Parse(args)
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
+	if *fallback != "" && !validEffort(*fallback) {
+		fmt.Fprintf(os.Stderr, "invariant: -fallback-effort is empty, low, medium, high, xhigh or max, not %q\n", *fallback)
 		return 2
 	}
 	if *repo == "" || fs.NArg() != 0 || *parallel < 1 || formalize.Languages[*language] == "" || (*leaseFor > 0 && (*leaseFor < 3*(*every) || *leaseFor <= 2*time.Minute)) {
@@ -721,12 +733,12 @@ func watchCmd(ctx context.Context, args []string) int {
 		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns, Effort: *effort},
 			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
-			Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc}},
+			Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc, FallbackEffort: fallbackEffort(*effort, *fallback)}},
 		// A plumbing issue's plan is built with tests, not proofs, and a
-		// second agent reviews it (D-0105).
+		// second agent reviews it (D-0105). Only builds fall back (D-0125).
 		Plumbing: plumbing.Builder{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
 			Reviewer: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns, Effort: *effort},
-			Binary:   self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb},
+			Binary:   self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb, FallbackEffort: fallbackEffort(*effort, *fallback)},
 		Holder: factory.NewHolder(), LeaseFor: *leaseFor, Parallel: *parallel,
 	}
 	if err := f.Prepare(ctx); err != nil {
@@ -1136,11 +1148,18 @@ func clock(secs int) string {
 	return fmt.Sprintf("%dm%02ds", secs/60, secs%60)
 }
 
+// efforts are the efforts Claude Code takes, from the least to the most.
+var efforts = []string{"low", "medium", "high", "xhigh", "max"}
+
 // validEffort says whether e is an effort Claude Code takes.
-func validEffort(e string) bool {
-	switch e {
-	case "low", "medium", "high", "xhigh", "max":
-		return true
+func validEffort(e string) bool { return slices.Contains(efforts, e) }
+
+// fallbackEffort is the effort a build runs its agent at once more when the
+// loop guard stops its first run, at effort (D-0125): fallback, when it's
+// below effort, and otherwise none.
+func fallbackEffort(effort, fallback string) string {
+	if fallback == "" || slices.Index(efforts, fallback) >= slices.Index(efforts, effort) {
+		return ""
 	}
-	return false
+	return fallback
 }

@@ -24,6 +24,10 @@ type Builder struct {
 	TestRuns int           // the most test runs the agent gets
 	Timeout  time.Duration
 	Sandbox  Sandbox
+	// FallbackEffort is the effort the agent runs at once more when the loop
+	// guard stops its first run (D-0125). Empty never runs it again. The
+	// review never runs again.
+	FallbackEffort string
 }
 
 // BuildResult is how a build went.
@@ -38,6 +42,9 @@ type BuildResult struct {
 	Usage    synth.Usage     `json:"usage"`
 	Spend    float64         `json:"spend"` // both agents' estimated cost
 	TestRuns []synth.GateRun `json:"test_runs,omitempty"`
+	// Fallback says the agent ran once more, when the loop guard stopped its
+	// first run (D-0125). Usage is the second run's.
+	Fallback *synth.Fallback `json:"fallback,omitempty"`
 }
 
 // Build implements issue n's ratified plan in the checkout at root, which
@@ -70,18 +77,16 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 	// One build cache serves the agent's test runs and the factory's own, so
 	// only the first compiles everything.
 	b.Sandbox.Cache = filepath.Join(out, "gocache")
-	runCtx, cancel := context.WithTimeout(ctx, b.Timeout)
-	usage, runErr := b.Backend.Run(runCtx, synth.Job{
+	usage, fallback, runErr := synth.RunAgent(ctx, b.Backend, synth.Job{
 		Workspace: ws,
 		Prompt:    BuildPrompt(plan, n, b.TestRuns),
 		GateServer: []string{b.Binary, "mcp", "-plumbing", "-ratified", root, "-issue", fmt.Sprint(n), "-max-runs", fmt.Sprint(b.TestRuns),
 			"-log", testLog, "-cache", b.Sandbox.Cache, ws},
 		Tools:      []string{"test"},
 		Transcript: transcript,
-	})
-	cancel()
+	}, b.Timeout, b.FallbackEffort)
 	usage.Backend = b.Backend.Name()
-	r := &BuildResult{Usage: usage, Spend: usage.CostUSD, Tests: len(plan.Tests)}
+	r := &BuildResult{Usage: usage, Spend: usage.CostUSD, Tests: len(plan.Tests), Fallback: fallback}
 	r.TestRuns, _ = readRuns(testLog)
 	if r.Changes, err = Diff(ctx, root, ws, plan); err != nil {
 		return nil, err
