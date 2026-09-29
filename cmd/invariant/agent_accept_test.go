@@ -39,12 +39,12 @@ func agentCLI(t *testing.T, args ...string) (int, string) {
 }
 
 // watch, formalize and synthesize each take -agent, the coding agent they
-// run: claude-code unless it says otherwise (#173). Claude Code is the only
-// agent Invariant can run yet, so each refuses any other, Codex or one it
-// doesn't know, with its other flags, before anything else runs: it exits 2,
-// naming the agent it was given and claude-code, the one it can run.
-// claude-code itself is taken: formalize goes on past its flags, and fails
-// only reading a request that isn't there.
+// run: claude-code unless it says otherwise (#173). Invariant can run Claude
+// Code and Codex (#153), so each refuses an agent it doesn't know with its
+// other flags, before anything else runs: it exits 2, naming the agent it
+// was given and claude-code, one it can run. claude-code and codex are
+// taken: formalize goes on past its flags, and fails only reading a request
+// that isn't there.
 func TestTheCommandsTakeTheAgentTheyRun(t *testing.T) {
 	for _, c := range []struct {
 		command string
@@ -58,7 +58,7 @@ func TestTheCommandsTakeTheAgentTheyRun(t *testing.T) {
 		if !strings.Contains(help, "-agent") || !strings.Contains(help, `(default "claude-code")`) {
 			t.Errorf("invariant %s -h doesn't show -agent, defaulting to claude-code:\n%s", c.command, help)
 		}
-		for _, agent := range []string{"codex", "gemini"} {
+		for _, agent := range []string{"gemini"} {
 			args := append([]string{c.command, "-agent", agent}, c.rest...)
 			code, out := agentCLI(t, args...)
 			if code != 2 || !strings.Contains(out, agent) || !strings.Contains(out, "claude-code") || strings.Contains(out, "flag provided but not defined") {
@@ -67,8 +67,10 @@ func TestTheCommandsTakeTheAgentTheyRun(t *testing.T) {
 		}
 	}
 
-	code, out := agentCLI(t, "formalize", "-agent", "claude-code", "no-such-request.md")
-	if code != 2 || !strings.Contains(out, "no-such-request.md") || strings.Contains(out, "flag provided but not defined") {
-		t.Errorf("invariant formalize -agent claude-code exited %d; want 2, from reading a request that isn't there:\n%s", code, out)
+	for _, agent := range []string{"claude-code", "codex"} {
+		code, out := agentCLI(t, "formalize", "-agent", agent, "no-such-request.md")
+		if code != 2 || !strings.Contains(out, "no-such-request.md") || strings.Contains(out, "flag provided but not defined") {
+			t.Errorf("invariant formalize -agent %s exited %d; want 2, from reading a request that isn't there:\n%s", agent, code, out)
+		}
 	}
 }
