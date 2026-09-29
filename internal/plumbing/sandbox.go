@@ -103,7 +103,12 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		names = append(names, t.Name)
 	}
 	sort.Strings(pkgs)
-	args := []string{"run", "--rm", "--network", "none", "--memory", "4g", "--pids-limit", "1024",
+	// With no network, a container's own hostname isn't in its hosts file,
+	// so git, building an identity for a commit, waited five seconds on DNS
+	// for every one. The repository's tests make hundreds of commits, and a
+	// run of them outlived the agent's 15-minute tool limit (#100). Named
+	// localhost, the container resolves itself at once.
+	args := []string{"run", "--rm", "--network", "none", "--hostname", "localhost", "--memory", "4g", "--pids-limit", "1024",
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
