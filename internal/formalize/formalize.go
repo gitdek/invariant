@@ -91,6 +91,9 @@ type Proposal struct {
 	// Plan is a plumbing change's proposal, in place of statements: what
 	// changes, the files it may touch, and its acceptance tests (D-0105).
 	Plan *plumbing.Plan `json:"plan,omitempty"`
+	// IssuePlan is a PRD's proposal, in place of statements: the issues
+	// that carry it out, in order (#112).
+	IssuePlan *IssuePlan `json:"issue_plan,omitempty"`
 }
 
 // Target is the project an amendment changes, as it stood when the

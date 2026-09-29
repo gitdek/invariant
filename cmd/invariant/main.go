@@ -304,9 +304,18 @@ func mcpCmd(ctx context.Context, args []string) int {
 	pipes := fs.Bool("plumbing", false, "serve the test tool to an agent building issue -issue's ratified plan, from the checkout at -ratified")
 	issue := fs.Int("issue", 0, "with -plumbing: the issue whose plan is built")
 	cache := fs.String("cache", "", "with -plan or -plumbing: a Go build cache to keep between test runs")
+	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
 	fs.Parse(args)
 	if *graph {
 		return decisionsMCP(ctx, *dir, *storePath, *write)
+	}
+	if *issues && fs.NArg() == 1 {
+		server := mcp.Server{Name: "invariant", Version: "0.6", Tools: []mcp.Tool{issuesTool(fs.Arg(0), *maxRuns, *logPath)}}
+		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 1
+		}
+		return 0
 	}
 	if (*plan || *pipes) && fs.NArg() == 1 {
 		sb, err := sandbox(ctx, *cache)
@@ -439,6 +448,43 @@ func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.T
 				synth.LogGateRun(logPath, run)
 			}
 			return c.Feedback() + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
+		},
+	}
+}
+
+// issuesTool checks the plan of issues an agent drafts for a PRD (#112): it
+// holds together as a plan a person can ratify.
+func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
+	runs := 0
+	return mcp.Tool{
+		Name: "check",
+		Description: fmt.Sprintf("Check the plan of issues in issues.json: it has a name, a summary and 1 to %d issues, each with a title and a whole body that's "+
+			"modeled, with a Project: line, or plumbing, with a Kind: plumbing line, and carries no /invariant command. You have %d checks in total.", formalize.MaxIssues, maxRuns),
+		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Call: func(_ context.Context, _ json.RawMessage) (string, bool) {
+			if runs >= maxRuns {
+				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
+			}
+			runs++
+			if _, err := os.Stat(filepath.Join(ws, "issues.json")); err != nil {
+				if _, err := os.Stat(filepath.Join(ws, "proposal.json")); err == nil {
+					return fmt.Sprintf("There's no issues.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
+						"If that's what you mean to send, you're done.\n\n(Check %d of %d.)", runs, maxRuns), false
+				}
+			}
+			plan, err := formalize.ReadIssues(ws)
+			if logPath != "" {
+				run := synth.GateRun{Run: runs, Passed: err == nil, At: time.Now().UTC().Format(time.RFC3339)}
+				if err != nil {
+					run.Failed = []string{err.Error()}
+				}
+				synth.LogGateRun(logPath, run)
+			}
+			if err != nil {
+				return fmt.Sprintf("The plan can't be proposed yet: %v.\n\n(Check %d of %d.)", err, runs, maxRuns), false
+			}
+			return fmt.Sprintf("The plan holds together: each of its %d issues has a title and a body that's modeled or plumbing, and none carries a command.\n\n(Check %d of %d.)",
+				len(plan.Issues), runs, maxRuns), false
 		},
 	}
 }

@@ -35,6 +35,10 @@ type Request struct {
 	// Plumbing is the base branch, exported, for a plumbing issue: the
 	// agent plans a change to it instead of drafting statements (D-0105).
 	Plumbing string
+	// PRD is the base branch, exported, for an issue a writer asked to plan
+	// as a PRD: the agent drafts a plan of issues instead of statements
+	// (#112).
+	PRD string
 }
 
 // Existing is code an issue names for the factory to check as it is: its
@@ -132,6 +136,9 @@ type Result struct {
 // Formalize runs the agent on a request. Its transcript and draft land in
 // out. Whatever the agent says, the factory checks the draft itself.
 func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Result, error) {
+	if req.PRD != "" {
+		return f.PlanIssues(ctx, req, req.PRD, out)
+	}
 	if req.Plumbing != "" {
 		return f.Plan(ctx, req, req.Plumbing, out)
 	}
