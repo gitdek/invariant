@@ -111,6 +111,10 @@ const (
 	// review, and changes the trusted base, so a person merges it (D-0105).
 	// The protocol counts it as one the factory can't merge.
 	FailTrusted = "trusted"
+	// FailMerge is a pull request whose gate passed that GitHub refused to
+	// merge, or to mark ready for review when it was a draft (#145). The
+	// protocol counts it as one the factory can't merge.
+	FailMerge = "merge"
 )
 
 // maxStops is how many builds of an issue can stop before it makes a pull
