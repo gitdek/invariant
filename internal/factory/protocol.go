@@ -200,11 +200,16 @@ func viewOf(state Post, started bool, stops int) view {
 
 // director is who a command's author is to the protocol: a person with
 // write access directs the factory, and anyone else, or any bot, doesn't.
+// Write access is what GitHub last said, so a step that runs across polls
+// keeps what it read (D-0113).
 func (f *Factory) director(login string) (actor int8) {
+	f.mu.Lock()
+	writes := f.writers[login]
+	f.mu.Unlock()
 	switch {
 	case login == f.Self || strings.HasSuffix(login, "[bot]"):
 		return protocol.ByInvbot
-	case f.writers[login]:
+	case writes:
 		return protocol.ByAlice
 	}
 	return protocol.ByMallory

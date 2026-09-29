@@ -108,6 +108,14 @@ func (g *fakeGitHub) OpenIssues(context.Context) ([]github.Issue, error) {
 	return out, nil
 }
 
+// Issue reads one issue as it is now, open or closed.
+func (g *fakeGitHub) Issue(_ context.Context, n int) (github.Issue, error) {
+	if i, ok := g.issues[n]; ok {
+		return *i, nil
+	}
+	return github.Issue{}, github.ErrNotFound
+}
+
 func (g *fakeGitHub) Comments(_ context.Context, n int) ([]github.Comment, error) {
 	return append([]github.Comment(nil), g.comments[n]...), nil
 }

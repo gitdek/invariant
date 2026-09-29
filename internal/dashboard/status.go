@@ -11,7 +11,8 @@ import (
 
 // Status is what the watcher is doing right now. The watcher writes it to a
 // file each time it starts or finishes something, and the dashboard reads
-// it (D-0049).
+// it (D-0049). Issue, Doing and Since are its longest-running step that's
+// doing something, the one the page shows.
 type Status struct {
 	PID       int        `json:"pid"`
 	Repo      string     `json:"repo"`
@@ -21,7 +22,17 @@ type Status struct {
 	Issue     int        `json:"issue,omitempty"` // the issue it's working on, if any
 	Doing     string     `json:"doing,omitempty"` // formalizing, answering, ratifying or building
 	Since     *time.Time `json:"since,omitempty"` // when it started doing it
+	Steps     []Step     `json:"steps,omitempty"` // every step it's running, one per issue (D-0113)
 	Limit     float64    `json:"limit,omitempty"` // seconds an agent's run may take, from the watcher's -timeout
+}
+
+// Step is one step the watcher is running: its issue, what it's doing,
+// formalizing, answering, ratifying or building, or nothing yet, and since
+// when.
+type Step struct {
+	Issue int       `json:"issue"`
+	Doing string    `json:"doing,omitempty"`
+	Since time.Time `json:"since"`
 }
 
 // StatusPath is where the watcher for repo keeps its status, under its work

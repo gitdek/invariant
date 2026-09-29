@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitdek/invariant/factory/protocol/protocol"
@@ -29,6 +30,8 @@ import (
 // GitHub is what the factory does on GitHub. github.Client is the real one.
 type GitHub interface {
 	OpenIssues(ctx context.Context) ([]github.Issue, error)
+	// Issue reads one issue as it is now, open or closed.
+	Issue(ctx context.Context, n int) (github.Issue, error)
 	Comments(ctx context.Context, issue int) ([]github.Comment, error)
 	Events(ctx context.Context, issue int) ([]github.Event, error)
 	Permission(ctx context.Context, login string) (string, error)
@@ -108,18 +111,29 @@ type Factory struct {
 	Self string
 	Log  func(format string, args ...any)
 	Now  func() time.Time
-	// Activity, when set, hears what the factory starts on an issue:
-	// formalizing, answering, ratifying or building. It hears 0 and "" when
-	// the factory is between steps. The watcher writes it down for the
-	// dashboard (D-0049).
-	Activity func(issue int, doing string)
+	// Activity, when set, hears the steps the watcher is running, as Steps
+	// lists them, each time they change and at the end of each poll. It
+	// hears one change at a time, in order, and the steps wait while it
+	// runs, so it mustn't call the factory. The watcher writes them down for
+	// the dashboard (D-0049).
+	Activity func(steps []Step)
 	// Holder names this watcher, and LeaseFor is how long its lease on the
 	// repository lasts (D-0069). A watcher acts only while it holds the
 	// lease. Zero means no lease, as in a one-off run.
 	Holder   string
 	LeaseFor time.Duration
+	// Parallel is how many issues the watcher takes steps on at once, one
+	// step per issue (D-0113). 0 or 1 takes one step at a time.
+	Parallel int
 
+	// mu guards the cache of who can write, which steps share: writers is
+	// what GitHub last said of each login, and asked is whom the latest poll
+	// has asked. Each poll asks again, and a step that runs across polls
+	// keeps the answers it read.
+	mu      sync.Mutex
 	writers map[string]bool
+	asked   map[string]bool
+	running running
 	lease   lease
 }
 
@@ -163,12 +177,14 @@ func (f *Factory) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// Watch polls until ctx ends. With a lease, it polls only while it holds
-// the lease, and checks it before each effect. Before each poll, it clears
-// the clone's worktrees: the clone is the watcher's own, and its polls run
-// one at a time, so any worktree there is left over from a watcher that
-// stopped mid-build. A one-off run doesn't clear them, since it may share
-// the clone with a running watcher.
+// Watch polls until ctx ends, and then waits for its steps to end. With a
+// lease, it polls only while it holds the lease, and checks it before each
+// effect. The first time it may act, before it starts any step, it clears
+// the clone's worktrees: the clone is the watcher's own, so any worktree
+// there is left over from a watcher that stopped mid-build. It clears them
+// only then, since after that its steps run across polls, each in a
+// worktree of its own (D-0113). A one-off run doesn't clear them, since it
+// may share the clone with a running watcher.
 func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 	if f.LeaseFor > 0 {
 		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
@@ -183,40 +199,166 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 			}
 		}()
 	}
+	cleared := false
+	clearOnce := func() error {
+		if cleared {
+			return nil
+		}
+		err := f.Repo.ClearWorktrees(ctx)
+		cleared = err == nil
+		return err
+	}
 	for {
 		if !f.holds() {
 			// Another watcher holds the lease. Wait for it to run out.
-		} else if err := f.Repo.ClearWorktrees(ctx); err != nil {
+		} else if err := clearOnce(); err != nil {
 			f.logf("worktrees: %v", err)
 		} else if err := f.Poll(ctx); err != nil {
 			f.logf("poll: %v", err)
 		}
 		select {
 		case <-ctx.Done():
+			f.Wait()
 			return ctx.Err()
 		case <-time.After(every):
 		}
 	}
 }
 
-// Poll takes one step on every open issue that needs one.
+// Poll starts a step on every open issue that has none running, in order of
+// number, and each step reads its issue again first. With Parallel above 1,
+// up to that many run at once (D-0113): Poll waits for a free slot whenever
+// that many are running, and returns without waiting for its steps, so
+// they run across polls, and each logs its error as it ends. Otherwise Poll
+// takes one step at a time, and returns their errors once they've ended.
 func (f *Factory) Poll(ctx context.Context) error {
-	f.writers = map[string]bool{}
+	f.mu.Lock()
+	if f.writers == nil {
+		f.writers = map[string]bool{}
+	}
+	f.asked = map[string]bool{}
+	f.mu.Unlock()
 	issues, err := f.GitHub.OpenIssues(ctx)
 	if err != nil {
 		return err
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+	most := max(f.Parallel, 1)
 	var errs []error
 	for _, issue := range issues {
-		err := f.safeStep(ctx, issue)
-		f.doing(0, "")
+		n := issue.Number
+		started, err := f.start(ctx, n, most)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("#%d: %w", issue.Number, err))
+			errs = append(errs, err)
+			break
+		}
+		switch {
+		case !started:
+			// Its last step is still running.
+		case most == 1:
+			err := f.safeStep(ctx, n)
+			f.end(n)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("#%d: %w", n, err))
+			}
+		default:
+			go func() {
+				defer f.end(n)
+				if err := f.safeStep(ctx, n); err != nil {
+					f.logf("#%d: %v", n, err)
+				}
+			}()
 		}
 	}
-	f.doing(0, "")
+	// Activity hears the end of every poll, as the watcher's heartbeat.
+	f.running.mu.Lock()
+	f.tell()
+	f.running.mu.Unlock()
 	return errors.Join(errs...)
+}
+
+// Step is a step the watcher is running on an issue: what it's doing,
+// formalizing, answering, ratifying or building, or "" before it starts
+// one of those, and since when.
+type Step struct {
+	Issue int
+	Doing string
+	Since time.Time
+}
+
+// running is the steps a watcher is running, one per issue (D-0113).
+type running struct {
+	mu    sync.Mutex
+	steps map[int]Step
+	ended chan struct{} // closed, and made anew, each time a step ends
+}
+
+// list is the steps running, by issue.
+func (r *running) list() []Step {
+	steps := make([]Step, 0, len(r.steps))
+	for _, s := range r.steps {
+		steps = append(steps, s)
+	}
+	sort.Slice(steps, func(i, j int) bool { return steps[i].Issue < steps[j].Issue })
+	return steps
+}
+
+// Steps lists the steps the watcher is running, by issue.
+func (f *Factory) Steps() []Step {
+	f.running.mu.Lock()
+	defer f.running.mu.Unlock()
+	return f.running.list()
+}
+
+// Wait waits until no step is running.
+func (f *Factory) Wait() {
+	for {
+		f.running.mu.Lock()
+		n, ended := len(f.running.steps), f.running.ended
+		f.running.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		<-ended
+	}
+}
+
+// start waits until fewer than most steps are running, then starts one on
+// issue n, unless its last step is still running. It says whether it
+// started one, and stops waiting when ctx ends.
+func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
+	for {
+		f.running.mu.Lock()
+		if f.running.steps == nil {
+			f.running.steps, f.running.ended = map[int]Step{}, make(chan struct{})
+		}
+		_, busy := f.running.steps[n]
+		free := !busy && len(f.running.steps) < most
+		if free {
+			f.running.steps[n] = Step{Issue: n, Since: f.now()}
+			f.tell()
+		}
+		ended := f.running.ended
+		f.running.mu.Unlock()
+		if busy || free {
+			return free, nil
+		}
+		select {
+		case <-ended:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+}
+
+// end ends the step on issue n.
+func (f *Factory) end(n int) {
+	f.running.mu.Lock()
+	defer f.running.mu.Unlock()
+	delete(f.running.steps, n)
+	f.tell()
+	close(f.running.ended)
+	f.running.ended = make(chan struct{})
 }
 
 // read gathers an issue's thread: the factory's posts, and the commands and
@@ -288,16 +430,22 @@ func (f *Factory) labeledBy(ctx context.Context, issue github.Issue) (string, er
 	return "", nil
 }
 
+// writer says whether login can write, asking GitHub once each poll.
 func (f *Factory) writer(ctx context.Context, login string) (bool, error) {
-	if ok, seen := f.writers[login]; seen {
+	f.mu.Lock()
+	ok, asked := f.writers[login], f.asked[login]
+	f.mu.Unlock()
+	if asked {
 		return ok, nil
 	}
 	perm, err := f.GitHub.Permission(ctx, login)
 	if err != nil {
 		return false, err
 	}
-	ok := perm == "admin" || perm == "maintain" || perm == "write"
-	f.writers[login] = ok
+	ok = perm == "admin" || perm == "maintain" || perm == "write"
+	f.mu.Lock()
+	f.writers[login], f.asked[login] = ok, true
+	f.mu.Unlock()
 	return ok, nil
 }
 
@@ -1640,19 +1788,41 @@ func (f *Factory) now() time.Time {
 }
 
 // safeStep takes one step on an issue, and turns a panic into an error,
-// so that one issue's bug can't stop the factory's work on the others.
-func (f *Factory) safeStep(ctx context.Context, issue github.Issue) (err error) {
+// so that one issue's bug can't stop the factory's work on the others. It
+// reads the issue again first, and takes no step on one closed since the
+// poll listed it.
+func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("the factory's step panicked: %v\n%s", r, debug.Stack())
 		}
 	}()
+	issue, err := f.GitHub.Issue(ctx, n)
+	if err != nil {
+		return err
+	}
+	if issue.State == "closed" {
+		return nil
+	}
 	return f.step(ctx, issue)
 }
 
+// doing records what the step on an issue starts doing.
 func (f *Factory) doing(issue int, what string) {
+	f.running.mu.Lock()
+	defer f.running.mu.Unlock()
+	if s, ok := f.running.steps[issue]; ok && s.Doing != what {
+		s.Doing, s.Since = what, f.now()
+		f.running.steps[issue] = s
+		f.tell()
+	}
+}
+
+// tell lets Activity hear the steps running. Its caller holds their lock,
+// so Activity hears one change at a time, in order.
+func (f *Factory) tell() {
 	if f.Activity != nil {
-		f.Activity(issue, what)
+		f.Activity(f.running.list())
 	}
 }
 

@@ -46,6 +46,12 @@ func runRef(issue int, step string) string {
 
 // Run reads a step's record: its state, and the commit its ref points at.
 func (c Clone) Run(ctx context.Context, issue int, step string) (RunState, string, error) {
+	defer c.lock()()
+	return c.readRun(ctx, issue, step)
+}
+
+// readRun is Run, for a call that holds the clone's lock.
+func (c Clone) readRun(ctx context.Context, issue int, step string) (RunState, string, error) {
 	ref := runRef(issue, step)
 	sha, err := c.remoteRef(ctx, ref)
 	if err != nil || sha == "" {
@@ -64,7 +70,8 @@ func (c Clone) Run(ctx context.Context, issue int, step string) (RunState, strin
 // Recorded is what a step's record says it's for, while it's recorded with
 // no result, or "" otherwise.
 func (c Clone) Recorded(ctx context.Context, issue int, step string) (string, error) {
-	state, sha, err := c.Run(ctx, issue, step)
+	defer c.lock()()
+	state, sha, err := c.readRun(ctx, issue, step)
 	if err != nil || state != RunRecorded {
 		return "", err
 	}
@@ -82,6 +89,7 @@ func (c Clone) Recorded(ctx context.Context, issue int, step string) (string, er
 // Record records a step before it happens. It fails with ErrRecorded if the
 // step already has a record.
 func (c Clone) Record(ctx context.Context, issue int, step, what string) error {
+	defer c.lock()()
 	// The nonce makes every record its own commit. Two watchers making the
 	// same commit would both "succeed", since pushing a ref where it already
 	// points changes nothing.
@@ -90,7 +98,7 @@ func (c Clone) Record(ctx context.Context, issue int, step, what string) error {
 		return err
 	}
 	if err := c.pushRef(ctx, runRef(issue, step), "", commit); err != nil {
-		if state, _, readErr := c.Run(ctx, issue, step); readErr == nil && state != RunNone {
+		if state, _, readErr := c.readRun(ctx, issue, step); readErr == nil && state != RunNone {
 			return ErrRecorded
 		}
 		return err
@@ -100,7 +108,8 @@ func (c Clone) Record(ctx context.Context, issue int, step, what string) error {
 
 // Finish moves a recorded step's ref to its result, the commit result.
 func (c Clone) Finish(ctx context.Context, issue int, step, result string) error {
-	state, recorded, err := c.Run(ctx, issue, step)
+	defer c.lock()()
+	state, recorded, err := c.readRun(ctx, issue, step)
 	switch {
 	case err != nil:
 		return err
@@ -114,6 +123,7 @@ func (c Clone) Finish(ctx context.Context, issue int, step, result string) error
 // returns the commit: a run's result, for Finish. A build's result sits on
 // top of the code it pushes.
 func (c Clone) Save(ctx context.Context, dir, message, parent string) (string, error) {
+	defer c.lock()()
 	index := filepath.Join(c.Dir, ".git", "invariant-save-index")
 	defer os.Remove(index)
 	env := []string{"GIT_INDEX_FILE=" + index, "GIT_WORK_TREE=" + dir}
@@ -134,11 +144,13 @@ func (c Clone) Save(ctx context.Context, dir, message, parent string) (string, e
 
 // Load writes the files of commit, such as a draft's result, into dir.
 func (c Clone) Load(ctx context.Context, commit, dir string) error {
-	return c.Export(ctx, commit, []string{"."}, dir)
+	defer c.lock()()
+	return c.export(ctx, commit, []string{"."}, dir)
 }
 
 // Holds says whether ref already holds commit.
 func (c Clone) Holds(ctx context.Context, ref, commit string) (bool, error) {
+	defer c.lock()()
 	_, err := c.git(ctx, "merge-base", "--is-ancestor", commit, ref)
 	var exit *exec.ExitError
 	switch {
@@ -153,6 +165,7 @@ func (c Clone) Holds(ctx context.Context, ref, commit string) (bool, error) {
 // PushCommit pushes commit to branch. It never forces, so the branch must
 // be behind it.
 func (c Clone) PushCommit(ctx context.Context, commit, branch string) error {
+	defer c.lock()()
 	env, err := c.auth(ctx)
 	if err != nil {
 		return err
