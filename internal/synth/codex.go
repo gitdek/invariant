@@ -25,7 +25,8 @@ import (
 // run ignores any configuration there, so nothing of the user's own Codex
 // settings, servers or history applies. Its only tools are its own and
 // Invariant's MCP server, with only the job's tools on it. Codex's apps and
-// plugins, which reach the services connected to the account, are off.
+// plugins, which reach the services connected to the account, are off, and
+// so is its web search.
 // Its sandbox writes only in the workspace, with no network (D-0014), and
 // a reviewer's reads only, with no server (D-0087). Its commands get only
 // the environment's core variables, not its keys or tokens.
@@ -137,6 +138,9 @@ func (c Codex) args(job Job, tmp string) ([]string, error) {
 		"--ignore-user-config", "--ephemeral",
 		"--skip-git-repo-check",
 		"--disable", "apps", "--disable", "plugins",
+		// Codex's own web search runs on its service, outside the sandbox,
+		// and Claude Code's agents get no web either (D-0037).
+		"-c", `web_search="disabled"`,
 		"-C", job.Workspace,
 		"-c", `shell_environment_policy.inherit="core"`,
 		"-c", c.commandEnv(tmp),
