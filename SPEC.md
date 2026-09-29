@@ -158,4 +158,4 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
 
 ## Undecided: don't build against these
 
-Nothing is undecided right now.
+- **Whether the factory works on several issues at once.** [D-0113](decisions/D-0113-factory-works-issues-at-once.md) proposes one step per issue and up to `-parallel` steps at a time, 3 by default. Until it's ratified, the watcher takes one step at a time. `D-0113`
