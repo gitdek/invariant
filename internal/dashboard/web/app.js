@@ -1784,7 +1784,7 @@
     const { el, l } = c;
     el.classList.toggle("ended", !!l.ended);
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
-    put($(".live-title", el), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}`);
+    put($(".live-title", el), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}${l.by ? ` <span class="by">by ${esc(l.by)}</span>` : ""}`);
 
     // What the agent is doing now, or how its run ended.
     let now;

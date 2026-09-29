@@ -39,6 +39,7 @@ type Live struct {
 	Runs     []RunMark      `json:"runs,omitempty"`
 	RunsKind string         `json:"runsKind,omitempty"` // check, gate or test
 	Agent    string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
+	By       string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
 	Ended    *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
 }
 
@@ -88,6 +89,10 @@ type transcript struct {
 	touches  int
 	last     time.Time // the newest time an event carried
 	now      string
+	// codex reads the transcript as Codex writes it, and items are its tool
+	// calls waiting to end, by their ids, as indexes into marks (#153).
+	codex bool
+	items map[string]int
 }
 
 type touched struct {
@@ -97,7 +102,7 @@ type touched struct {
 }
 
 func newTranscript() *transcript {
-	return &transcript{ids: map[string]bool{}, tools: map[string]int{}, files: map[string]*touched{}, think: -1}
+	return &transcript{ids: map[string]bool{}, tools: map[string]int{}, files: map[string]*touched{}, think: -1, items: map[string]int{}}
 }
 
 // read takes in whatever whole lines were added since the last read.
@@ -112,7 +117,9 @@ func (t *transcript) read(path string) error {
 		return err
 	}
 	if info.Size() < t.offset {
+		codex := t.codex
 		*t = *newTranscript() // the file was replaced: start again
+		t.codex = codex
 	}
 	if _, err := f.Seek(t.offset, io.SeekStart); err != nil {
 		return err
@@ -125,7 +132,13 @@ func (t *transcript) read(path string) error {
 	if end < 0 {
 		return nil
 	}
-	for _, line := range bytes.Split(b[:end], []byte{'\n'}) {
+	for i, line := range bytes.Split(b[:end], []byte{'\n'}) {
+		// Codex's backend starts its transcript by naming the workspace, so
+		// a reader made before the watcher named the step's agent still
+		// reads it as Codex writes it.
+		if i == 0 && t.offset == 0 && codexStart(line) {
+			t.codex = true
+		}
 		t.line(line)
 	}
 	t.offset += int64(end + 1)
@@ -169,6 +182,11 @@ type block struct {
 }
 
 func (t *transcript) line(b []byte) {
+	if t.codex {
+		t.codexLine(b)
+		t.trim()
+		return
+	}
 	var e event
 	if json.Unmarshal(b, &e) != nil {
 		return // not an event: skip it
@@ -231,6 +249,11 @@ func (t *transcript) line(b []byte) {
 		t.agent = agentEnded(e.Subtype, e.IsError)
 		t.now = ""
 	}
+	t.trim()
+}
+
+// trim keeps the newest marks, up to maxMarks.
+func (t *transcript) trim() {
 	if len(t.marks) > maxMarks {
 		drop := len(t.marks) - maxMarks
 		t.marks = append([]Mark(nil), t.marks[drop:]...)
@@ -244,7 +267,120 @@ func (t *transcript) line(b []byte) {
 			}
 		}
 		t.open = open
+		for id, i := range t.items {
+			if i < drop {
+				delete(t.items, id)
+			} else {
+				t.items[id] = i - drop
+			}
+		}
 	}
+}
+
+// codexEvent is the part of a line of Codex's transcript the live view
+// reads (#153). Everything else, such as what the agent wrote, its
+// reasoning, its commands and what they and its tools returned, is never
+// decoded. A reasoning's text is measured, raw, to estimate its tokens.
+type codexEvent struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	Cwd       string `json:"cwd"`
+	Usage     struct {
+		Output int `json:"output_tokens"`
+	} `json:"usage"`
+	Item struct {
+		ID      string          `json:"id"`
+		Type    string          `json:"type"`
+		Server  string          `json:"server"`
+		Tool    string          `json:"tool"`
+		Text    json.RawMessage `json:"text"`
+		Changes []struct {
+			Path string `json:"path"`
+		} `json:"changes"`
+	} `json:"item"`
+}
+
+// codexStart says whether a transcript's first line is the one Codex's
+// backend starts it with.
+func codexStart(line []byte) bool {
+	var e struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(line, &e) == nil && e.Type == "invariant.workspace"
+}
+
+// codexLine reads one line of Codex's transcript: its tool calls in time,
+// by kind, as Claude Code's are, the files it changed, its reasoning as
+// stretches of thinking, and how its run ended. Codex doesn't say what
+// files it reads, or how much it holds, so the view doesn't either.
+func (t *transcript) codexLine(b []byte) {
+	var e codexEvent
+	if json.Unmarshal(b, &e) != nil {
+		return // not an event: skip it
+	}
+	before := t.last
+	if at, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil && at.After(t.last) {
+		t.last = at.UTC()
+	}
+	switch e.Type {
+	case "invariant.workspace":
+		if e.Cwd != "" {
+			t.cwd = filepath.Clean(e.Cwd)
+		}
+	case "turn.started":
+		t.now = "thinking"
+	case "item.started":
+		if kind := codexKind(e.Item.Type, e.Item.Server, e.Item.Tool); kind != "" {
+			t.tools[kind]++
+			t.marks = append(t.marks, Mark{At: t.last, Kind: kind})
+			t.items[e.Item.ID] = len(t.marks) - 1
+			t.now = kind
+		}
+	case "item.completed":
+		switch e.Item.Type {
+		case "reasoning":
+			// Its thinking came between the event before and this one.
+			until, tokens := t.last, len(e.Item.Text)/4
+			t.thinking += tokens
+			t.marks = append(t.marks, Mark{At: before, Kind: "think", Until: &until, Tokens: tokens})
+			return
+		case "todo_list", "error":
+			return
+		}
+		t.ids[e.Item.ID] = true // a step, as the backend counts its turns
+		until := t.last
+		if i, ok := t.items[e.Item.ID]; ok {
+			t.marks[i].Until = &until
+			delete(t.items, e.Item.ID)
+		} else if kind := codexKind(e.Item.Type, e.Item.Server, e.Item.Tool); kind != "" {
+			t.tools[kind]++
+			t.marks = append(t.marks, Mark{At: t.last, Kind: kind, Until: &until})
+		}
+		for _, c := range e.Item.Changes {
+			t.touch(c.Path, "edit")
+		}
+		t.now = "thinking"
+	case "turn.completed":
+		t.output, t.agent, t.now = e.Usage.Output, "finished", ""
+	case "turn.failed":
+		t.agent, t.now = "stopped", ""
+	}
+}
+
+// codexKind sorts one of Codex's items into what the page colors it by: a
+// file change is an edit, Invariant's gate, check and test are themselves,
+// and anything else, a shell command included, is other. A message is no
+// tool call.
+func codexKind(item, server, tool string) string {
+	switch item {
+	case "agent_message", "reasoning", "todo_list", "error", "":
+		return ""
+	case "file_change":
+		return "edit"
+	case "mcp_tool_call":
+		return toolKind("mcp__" + server + "__" + tool)
+	}
+	return "other"
 }
 
 // stamp moves the transcript's clock to an event's time, which ends any
@@ -472,13 +608,16 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 	t := s.live.reads[path]
 	if t == nil {
 		t = newTranscript()
+		// Each agent writes its own transcript, so the view reads it as the
+		// step's agent writes it (#153).
+		t.codex = step.Agent == "codex"
 		s.live.reads[path] = t
 	}
 	if err := t.read(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		s.logf("live: %v", err)
 	}
 	v := t.view()
-	v.Repo, v.Issue, v.Doing, v.Limit = repo, step.Issue, step.Doing, st.Limit
+	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, st.Limit, step.Agent
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
