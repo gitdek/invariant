@@ -1,0 +1,10 @@
+# Codex doesn't read .mcp.json. It reads this for a trusted checkout, and
+# starts Invariant's decision graph tools with it, as .mcp.json starts them
+# for the agents that read that file (D-0106). With no cwd, the server
+# starts where Codex starts, so start Codex at the checkout's root. The
+# first go run builds the CLI, which takes longer than Codex's default ten
+# seconds for a server to start.
+[mcp_servers.invariant-decisions]
+command = "go"
+args = ["run", "./cmd/invariant", "mcp", "-decisions", "-write"]
+startup_timeout_sec = 120
