@@ -83,7 +83,7 @@ func (ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build,
 	}
 
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "HOME=/tmp", "-e", "DRIVER="+driver, "-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
