@@ -709,37 +709,30 @@ func (s *Server) readDocs(ctx context.Context, r *Repo) error {
 }
 
 // readJournal reads decisions/journal at the branch's newest commit, once
-// for each commit: it lists the commit's tree, reads only the files whose
-// blob it hasn't read yet, and forgets removed ones. When any changed, it
-// builds the decision graph again, and until a build succeeds the page keeps
-// the last good one.
+// for each commit, in one query that gives every file's blob and text. It
+// takes only the files whose blob it doesn't have yet, and forgets removed
+// ones. When any changed, it builds the decision graph again, and until a
+// build succeeds the page keeps the last good one.
 func (s *Server) readJournal(ctx context.Context, r *Repo) error {
 	if len(r.src.commits) == 0 {
 		return errors.New("no commits read")
 	}
 	if sha := r.src.commits[0].SHA; sha != r.src.journalAt {
-		tree, err := r.GitHub.Tree(ctx, sha)
-		if err != nil {
+		// A commit without the directory has no journal files.
+		entries, err := r.GitHub.Files(ctx, "decisions/journal", sha)
+		if err != nil && !errors.Is(err, github.ErrNotFound) {
 			return err
 		}
-		// Until every file is read, the cache may hold some of this commit's
-		// and some of the last one's, so it names neither.
-		r.src.journalAt = ""
 		at := map[string]bool{}
-		for _, e := range tree {
-			name, ok := strings.CutPrefix(e.Path, "decisions/journal/")
-			if !ok || e.Type != "blob" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".jsonl") {
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name, ".jsonl") {
 				continue
 			}
-			at[name] = true
-			if f, ok := r.src.journal[name]; ok && f.blob == e.SHA {
+			at[e.Name] = true
+			if f, ok := r.src.journal[e.Name]; ok && f.blob == e.OID {
 				continue
 			}
-			b, err := r.GitHub.File(ctx, e.Path, sha)
-			if err != nil {
-				return fmt.Errorf("%s at %s: %w", e.Path, sha[:7], err)
-			}
-			r.src.journal[name], r.src.rebuild = journalFile{blob: e.SHA, text: b}, true
+			r.src.journal[e.Name], r.src.rebuild = journalFile{blob: e.OID, text: []byte(e.Text)}, true
 		}
 		for name := range r.src.journal {
 			if !at[name] {

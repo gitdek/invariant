@@ -2,9 +2,12 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
+	"strings"
 )
 
 // These reads serve the dashboard (D-0049). None of them changes anything
@@ -179,4 +182,63 @@ func (c Client) CommitMessage(ctx context.Context, sha string) (string, error) {
 // File reads one file as it is at ref.
 func (c Client) File(ctx context.Context, path, ref string) ([]byte, error) {
 	return c.run(ctx, nil, "api", "-H", "Accept: application/vnd.github.raw+json", c.path("contents/"+path+"?ref="+url.QueryEscape(ref)))
+}
+
+// DirFile is one file in a directory, as it is at a commit.
+type DirFile struct {
+	Name string
+	OID  string // its blob ID, which changes whenever the file does
+	Text string
+}
+
+// Files reads each file directly in a directory at ref, leaving out its
+// subdirectories, in one GraphQL query however many files there are. A
+// directory that isn't there is ErrNotFound, and a file whose text GitHub
+// doesn't give whole is an error.
+func (c Client) Files(ctx context.Context, dir, ref string) ([]DirFile, error) {
+	owner, name, _ := strings.Cut(c.Repo, "/")
+	stdout, err := c.run(ctx, nil, "api", "graphql",
+		"-f", "query=query($owner: String!, $name: String!, $expression: String!) { repository(owner: $owner, name: $name) { object(expression: $expression) { ... on Tree { entries { name type oid object { ... on Blob { text isTruncated } } } } } } }",
+		"-f", "owner="+owner, "-f", "name="+name, "-f", "expression="+ref+":"+dir)
+	if err != nil {
+		return nil, fmt.Errorf("POST graphql: %w", err)
+	}
+	var out struct {
+		Data struct {
+			Repository *struct {
+				Object *struct {
+					Entries []struct {
+						Name   string `json:"name"`
+						Type   string `json:"type"` // blob, tree or commit
+						OID    string `json:"oid"`
+						Object struct {
+							Text        *string `json:"text"`
+							IsTruncated bool    `json:"isTruncated"`
+						} `json:"object"`
+					} `json:"entries"`
+				} `json:"object"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout, &out); err != nil {
+		return nil, err
+	}
+	if out.Data.Repository == nil {
+		return nil, fmt.Errorf("GitHub didn't find %s", c.Repo)
+	}
+	if out.Data.Repository.Object == nil {
+		return nil, fmt.Errorf("%s at %s: %w", dir, ref, ErrNotFound)
+	}
+	var files []DirFile
+	for _, e := range out.Data.Repository.Object.Entries {
+		if e.Type != "blob" {
+			continue
+		}
+		// GitHub gives a binary file no text, and cuts a big one's short.
+		if e.Object.Text == nil || e.Object.IsTruncated {
+			return nil, fmt.Errorf("%s at %s can't be read whole", path.Join(dir, e.Name), ref)
+		}
+		files = append(files, DirFile{Name: e.Name, OID: e.OID, Text: *e.Object.Text})
+	}
+	return files, nil
 }

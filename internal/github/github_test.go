@@ -93,3 +93,44 @@ esac
 		}
 	}
 }
+
+// Files reads each file directly in a directory at a ref in one GraphQL
+// query, with the query and its variables as fields: each file's name, blob
+// ID and text, leaving out a subdirectory. A directory that isn't there is
+// ErrNotFound. A repository GitHub doesn't find is an error too, but not
+// that one, so it's never taken for a missing directory.
+func TestFilesReadsADirectoryInOneQuery(t *testing.T) {
+	gh := fakeGH(t, `case "$*" in
+"api graphql -f query="*"{ ... on Tree { entries { name type oid object { ... on Blob { text isTruncated } } } } }"*" -f owner=acme -f name=widgets -f expression=main:decisions/journal")
+  printf '%s\n' '{"data": {"repository": {"object": {"entries": [{"name": "D-0001.jsonl", "type": "blob", "oid": "8c9d", "object": {"text": "{\"id\": \"D-0001\"}\n", "isTruncated": false}}, {"name": "empty.md", "type": "blob", "oid": "e69d", "object": {"text": "", "isTruncated": false}}, {"name": "old", "type": "tree", "oid": "4b82", "object": {}}]}}}}' ;;
+*" -f name=widgets "*) printf '%s\n' '{"data": {"repository": {"object": null}}}' ;;
+*) printf '%s\n' '{"data": {"repository": null}}' ;;
+esac
+`)
+	widgets, gadgets := Client{Repo: "acme/widgets", GH: gh}, Client{Repo: "acme/gadgets", GH: gh}
+	got, err := widgets.Files(context.Background(), "decisions/journal", "main")
+	want := []DirFile{{Name: "D-0001.jsonl", OID: "8c9d", Text: "{\"id\": \"D-0001\"}\n"}, {Name: "empty.md", OID: "e69d"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("the files in decisions/journal on main = %q, %v; want %q", got, err, want)
+	}
+	if got, err := widgets.Files(context.Background(), "docs", "main"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("main has no docs directory, but its files = %q, %v; want ErrNotFound", got, err)
+	}
+	if _, err := gadgets.Files(context.Background(), "decisions/journal", "main"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("GitHub didn't find acme/gadgets, but reading its journal gave %v; want an error that isn't ErrNotFound", err)
+	}
+}
+
+// A file GitHub doesn't give whole, cut short as a big one's text is or with
+// no text as a binary one has, makes reading its directory an error, and not
+// ErrNotFound.
+func TestFilesRefusesAFileItCantReadWhole(t *testing.T) {
+	for _, object := range []string{`{"text": "{\"id\": \"D-00", "isTruncated": true}`, `{"text": null, "isTruncated": false}`} {
+		gh := fakeGH(t, `printf '%s\n' '{"data": {"repository": {"object": {"entries": [{"name": "D-0001.jsonl", "type": "blob", "oid": "8c9d", "object": `+object+`}]}}}}'
+`)
+		got, err := Client{Repo: "acme/widgets", GH: gh}.Files(context.Background(), "decisions/journal", "main")
+		if err == nil || errors.Is(err, ErrNotFound) {
+			t.Errorf("GitHub answered D-0001.jsonl with %s, but the files in decisions/journal = %q, %v; want an error", object, got, err)
+		}
+	}
+}
