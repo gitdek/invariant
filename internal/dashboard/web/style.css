@@ -759,6 +759,12 @@ footer p { margin: 0; max-width: 60em; }
 .need.opened.failed { border-color: var(--bug); box-shadow: 0 0 0 1px var(--bug), 0 0 32px rgba(var(--bug-rgb), 0.28); }
 .posted { margin: 12px 0 0; font: 500 13px var(--mono); color: var(--accent); animation: needin 0.5s ease both; }
 .acterr { margin: 8px 0 0; font: 500 13px var(--mono); color: var(--bug); }
+/* an issue acted on, shown until a read of GitHub finds what was posted (#175) */
+.need.acted { border-color: rgba(var(--accent-rgb), 0.45); }
+.need.acted::before { background: radial-gradient(600px 120px at 0% 0%, rgba(var(--accent-rgb), 0.1), transparent 70%); }
+.need.acted .need-top .ref { color: var(--accent); }
+.need.acted.opened { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 32px rgba(var(--accent-rgb), 0.28); }
+.need .sent { margin: 8px 0 0; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line2); background: rgba(var(--glass-rgb), 0.6); font: 500 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pill.acting { border-color: rgba(var(--people-rgb), 0.55); color: var(--people); }
 .pill.acting i { background: var(--people); }
 @media (max-width: 560px) { .pill.acting { display: none; } }
