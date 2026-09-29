@@ -1,0 +1,73 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-29T21:21:58Z",
+    "issue": 192,
+    "comment": "https://github.com/gitdek/invariant/issues/192#issuecomment-5899177695",
+    "proposal": "sha256:f4fdccc6abf01a1c6d532df23256e003c1c6348db3a4239e9bead84cc1cbf5b1"
+  },
+  "bounds": {
+    "Checkouts": "{c1, c2}",
+    "MaxDecides": "2",
+    "MaxStops": "1"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "Checkouts on branches of their own decide at once, under the store's lock, and a decide can stop at any step. Branches merge into main and take main in.",
+      "sha256": "sha256:89e2fe05fd79d0c0e7e2418ca2f0ba6b83fe6b654e25f32d14494e5f2b658a77"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "The store holds IDs, each checkout and main hold decisions, the lock is a checkout's or no one's, and each decide is idle, has taken an ID, has had the store record it, or has written it.",
+      "sha256": "sha256:f00a85111d0117f6c880603a74b7784a869d9fbc04fd4b97daaac3f3988119ca"
+    },
+    {
+      "name": "NoSharedID",
+      "kind": "invariant",
+      "says": "No two decisions share an ID, in any checkout, on any branch, merged or not.",
+      "sha256": "sha256:70675d6bc748270a24d9fce966a07e9cf82c50f7b125562749f4a2b8e20a09b0"
+    },
+    {
+      "name": "BothDecided",
+      "kind": "witness",
+      "says": "Both checkouts can write decisions.",
+      "sha256": "sha256:8adec5427a4f4ff328d6206f2d7cedb00f0c862b54bc597c7f949c02680420a1"
+    },
+    {
+      "name": "BothMerged",
+      "kind": "witness",
+      "says": "Main can hold decisions from both checkouts.",
+      "sha256": "sha256:d23d6cc7005b31ae4f7edbae0e7f33a2fd40fb4a12bf6a82bf9a543aa403e44a"
+    },
+    {
+      "name": "GapAfterStop",
+      "kind": "witness",
+      "says": "A decide that stops after the store records its ID leaves a gap: an ID no decision has.",
+      "sha256": "sha256:103ffde2c5a648bea23d2e63d8770cffc42130603ed38b8ef87ded2bb5bad958"
+    },
+    {
+      "name": "WriteBeforeReserve",
+      "kind": "bug",
+      "says": "The journal file is written before the store records the ID, so a stop between them leaves an ID the store doesn't know, and another checkout takes it again.",
+      "expect": "NoSharedID",
+      "sha256": "sha256:f0edb72d48f62accb0d7676d424764edef527e751d1d57ec7bfe0f19736e93b9"
+    },
+    {
+      "name": "TakeWithoutLock",
+      "kind": "bug",
+      "says": "A decide takes its ID without the store's lock, so two checkouts take the same one.",
+      "expect": "NoSharedID",
+      "sha256": "sha256:d5095747bf2a4797d0ec88459afce4dd6ba199391bc330f69462bc624dedf34b"
+    },
+    {
+      "name": "CheckoutOnly",
+      "kind": "bug",
+      "says": "A decide takes one more than the highest ID its checkout holds, and never asks the store.",
+      "expect": "NoSharedID",
+      "sha256": "sha256:f76813673e06f813db6de538e4ea8d94ab59cb3487e61e592b692fcf114c9c66"
+    }
+  ]
+}

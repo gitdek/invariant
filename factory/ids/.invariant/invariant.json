@@ -1,0 +1,6 @@
+{
+  "name": "unique decision IDs",
+  "module": ".invariant/specs/DecisionIDs.tla",
+  "code": "ids",
+  "language": "go"
+}
