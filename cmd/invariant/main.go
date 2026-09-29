@@ -730,6 +730,12 @@ func watchCmd(ctx context.Context, args []string) int {
 	if err := clone.Ensure(ctx); err != nil {
 		return fail(err)
 	}
+	// It runs whichever coding agent an issue or its project picks, so it
+	// doesn't start unless it can run each one it may be asked for: its own,
+	// and every one a project's manifest names on the base branch (#153).
+	if err := checkAgents(ctx, clone, *base, *agent, map[string]setup.Agent{"claude-code": setup.ClaudeCode(*claude)}); err != nil {
+		return fail(err)
+	}
 	tc, err := toolchain.Ensure(ctx)
 	if err != nil {
 		return fail(err)
@@ -1172,6 +1178,32 @@ var efforts = []string{"low", "medium", "high", "xhigh", "max"}
 
 // validEffort says whether e is an effort Claude Code takes.
 func validEffort(e string) bool { return slices.Contains(efforts, e) }
+
+// checkAgents checks that the watcher can run each coding agent it may be
+// asked for: own, its own, and every one a project's manifest names on base.
+// can is how it checks each agent it can run (#153).
+func checkAgents(ctx context.Context, clone factory.Clone, base, own string, can map[string]setup.Agent) error {
+	if err := clone.Fetch(ctx); err != nil {
+		return err
+	}
+	ref := "origin/" + base
+	paths, err := clone.Manifests(ctx, ref)
+	if err != nil {
+		return err
+	}
+	need := []string{own}
+	for _, p := range paths {
+		b, err := clone.Show(ctx, ref, p)
+		if err != nil {
+			return err
+		}
+		var m project.Manifest
+		if json.Unmarshal(b, &m) == nil && m.Agent != "" {
+			need = append(need, m.Agent)
+		}
+	}
+	return setup.CheckAgents(ctx, need, can)
+}
 
 // agents are the coding agents Invariant can run, by the names -agent
 // takes. Codex comes in #153's later issues.
