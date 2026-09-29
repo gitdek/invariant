@@ -48,10 +48,19 @@ func (c Clone) Fetch(ctx context.Context) error {
 	return err
 }
 
-// Dirs lists the directories directly under dir at ref.
+// Dirs lists the directories directly under dir at ref. A dir that isn't
+// there at ref has none, like a new repository's projects directory (#101).
+// Any other failure is an error, such as a ref that isn't there or a dir
+// that's a file.
 func (c Clone) Dirs(ctx context.Context, ref, dir string) ([]string, error) {
 	out, err := c.git(ctx, "ls-tree", "-d", "--name-only", ref+":"+dir)
 	if err != nil {
+		// git fails the same way whether ref or dir isn't there, but
+		// looking for dir in ref's tree finds nothing only when ref is there
+		// and dir isn't.
+		if found, err2 := c.git(ctx, "ls-tree", "--name-only", ref, "--", dir); err2 == nil && found == "" {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return strings.Fields(out), nil
