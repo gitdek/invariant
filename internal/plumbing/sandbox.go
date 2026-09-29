@@ -107,6 +107,11 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
 		"-e", "GOFMT_FILES=" + strings.Join(goFiles(plan), " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
+	// The code runs as the user who runs the sandbox, not as root, so what
+	// it leaves in the build cache stays that user's to remove.
+	if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {
+		args = append(args, "--user", fmt.Sprintf("%d:%d", uid, gid))
+	}
 	if s.Cache != "" {
 		if err := os.MkdirAll(s.Cache, 0o777); err != nil {
 			return Result{}, err
