@@ -39,6 +39,44 @@ func TestLivenessRows(t *testing.T) {
 	}
 }
 
+// A receipt names the coding agent that wrote the code, when its report
+// names one, and nothing else about it (#179). The gate checks the code
+// whoever wrote it, so two receipts that differ only in their agent share a
+// fingerprint, and it's the one a report that names no agent has: a
+// factory's receipt, which names the agent that built the code, matches
+// CI's, which names the one its project's manifest records, if any.
+func TestAReceiptNamesItsAgentOutsideTheFingerprint(t *testing.T) {
+	r := verify.Report{
+		Project:     "queue",
+		Passed:      true,
+		Bounds:      map[string]string{"Capacity": "1", "MaxPuts": "2"},
+		Design:      verify.Design{Passed: true, Outcome: "passed", DistinctStates: 5},
+		Build:       verify.Build{Passed: true},
+		Assurance:   "tested against the model",
+		Conformance: &conformance.Result{Passed: true, Exhaustive: true, Steps: 12, States: 5, ModelStates: 5},
+	}
+	codex, claude := r, r
+	codex.Agent, claude.Agent = "codex", "claude-code"
+	if a, b, none := verify.Fingerprint(codex), verify.Fingerprint(claude), verify.Fingerprint(r); a != b || a != none {
+		t.Errorf("receipts that differ only in their agent have fingerprints %s, %s and, with none, %s", a, b, none)
+	}
+	for _, c := range []struct {
+		report verify.Report
+		want   string
+	}{
+		{codex, "Coding agent: `codex`. The fingerprint leaves it out.\n"},
+		{claude, "Coding agent: `claude-code`. The fingerprint leaves it out.\n"},
+	} {
+		c.report.Fingerprint = verify.Fingerprint(c.report)
+		if md := Markdown(&c.report); !strings.Contains(md, c.want) {
+			t.Errorf("receipt lacks %q:\n%s", c.want, md)
+		}
+	}
+	if md := Markdown(&r); strings.Contains(md, "Coding agent") {
+		t.Errorf("a receipt whose report names no agent names one:\n%s", md)
+	}
+}
+
 // A driver that records its attempts gets a row saying whether it tried
 // every step; one that explores completely but records only runs says its
 // steps weren't checked (D-0082).

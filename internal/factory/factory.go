@@ -292,11 +292,13 @@ func (f *Factory) Poll(ctx context.Context) error {
 
 // Step is a step the watcher is running on an issue: what it's doing,
 // formalizing, answering, ratifying or building, or "" before it starts
-// one of those, and since when.
+// one of those, and since when. Agent is the coding agent it runs, from
+// when its run starts (#179).
 type Step struct {
 	Issue int
 	Doing string
 	Since time.Time
+	Agent string
 }
 
 // running is the steps a watcher is running, one per issue (D-0113).
@@ -756,7 +758,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// The draft's agent run is recorded before it starts, where every
 	// watcher sees it (D-0069). One recorded and never finished stopped
 	// partway, and only a writer's command starts another.
-	res, err := f.draft(ctx, n, draftStepName(cause), run.Formalizer, req, out)
+	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req, out)
 	if err != nil {
 		return err
 	}
@@ -764,7 +766,10 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		if err := f.recovers(ctx, n, "say the draft stopped", f.canReportStopped(drafting(RunRecorded), recovery.Solve)); err != nil {
 			return err
 		}
-		return stuck("The draft's agent run stopped partway, when the factory stopped. Comment `/invariant revise` to draft again.")
+		// The issue's agent ran the draft that stopped, so its post names it
+		// (#179).
+		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Agent: agent}
+		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the factory stopped. Comment `/invariant revise` to draft again.", m), LabelHumanReview)
 	}
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
 		return err
@@ -782,7 +787,8 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	if res.Proposal != nil {
 		answers = revise(t, answers, res.Proposal.Revised)
 	}
-	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD}
+	// The post names the agent that drafted it, beside what it spent (#179).
+	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
 	switch p := res.Proposal; {
 	case res.Problem != "":
 		m.Kind, m.Proposal = KindStuck, p
@@ -817,10 +823,11 @@ func draftStepName(cause Command) string {
 }
 
 // draft returns what the draft's agent run made of the request: running it
-// with form, the issue's agent's, when nothing was recorded, or reading what
-// a finished run left, whichever watcher ran it. It returns nil for a run
-// recorded and never finished.
-func (f *Factory) draft(ctx context.Context, n int, step string, form Formalizer, req formalize.Request, out string) (*formalize.Result, error) {
+// with form, the formalizer of agent, the issue's agent, when nothing was
+// recorded, or reading what a finished run left, whichever watcher ran it.
+// It returns nil for a run recorded and never finished. The run's record
+// and its result name the agent (#179).
+func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request, out string) (*formalize.Result, error) {
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -834,9 +841,10 @@ func (f *Factory) draft(ctx context.Context, n int, step string, form Formalizer
 	if err := f.recovers(ctx, n, "start a draft's agent run", f.canStartRun(drafting(RunNone), recovery.Solve)); err != nil {
 		return nil, err
 	}
-	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("a draft for #%d", n)); err != nil {
+	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("a draft for #%d by %s", n, agent)); err != nil {
 		return nil, err
 	}
+	f.runsAgent(n, agent)
 	res, runErr := form.Formalize(ctx, req, out)
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped.
@@ -857,7 +865,7 @@ func (f *Factory) draft(ctx context.Context, n int, step string, form Formalizer
 	// paths on this machine as localPaths does, whether it's the formalizer's
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
-	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d", n), "")
+	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
 		return nil, err
 	}
@@ -1281,6 +1289,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
 			return err
 		}
+		// The ratified proposal settles the agent whose run stopped, so its
+		// post names it (#179).
+		next.Agent, _, _ = f.buildAgent(m)
 		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the factory stopped"), withFailure(next, FailStopped)))
 	case RunNone:
 		// Each build costs an agent run, so after two stop, a writer decides
@@ -1289,7 +1300,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 			return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)))
 		}
 		if isPlan(m.Project) {
-			built, res, runErr, err := f.runPlanBuild(ctx, t, ratified, step)
+			built, agent, res, runErr, err := f.runPlanBuild(ctx, t, ratified, step)
 			if err != nil {
 				return err
 			}
@@ -1297,11 +1308,12 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 				if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
 					return err
 				}
+				next.Agent = agent
 				return failed(FailStopped, planFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 			}
 			return f.publish(ctx, t, ratified, built, next, stops)
 		}
-		built, res, runErr, err := f.runBuild(ctx, t, ratified, step)
+		built, agent, res, runErr, err := f.runBuild(ctx, t, ratified, step)
 		if err != nil {
 			return err
 		}
@@ -1314,6 +1326,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 			if res != nil {
 				next.Spend, next.GateRuns = res.Spend(), len(res.GateRuns)
 			}
+			next.Agent = agent
 			return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 		}
 		result = built
@@ -1328,52 +1341,57 @@ func buildStepName(ratified Post) string {
 }
 
 // builtResult is what a build's run leaves in its record, on top of the
-// code it wrote: what synthesis reported, and what went wrong, if anything.
+// code it wrote: what synthesis reported, what went wrong, if anything, and
+// the agent that built it (#179).
 type builtResult struct {
 	Result   *synth.Result         `json:"result"`
 	Plumbing *plumbing.BuildResult `json:"plumbing,omitempty"` // a plan's build, in place of a project's (D-0105)
 	Error    string                `json:"error,omitempty"`
+	Agent    string                `json:"agent,omitempty"`
 }
 
 // runBuild records the build's agent run, runs it, and commits the code it
 // wrote on top of the branch, without pushing it. Then the run's record
 // moves to its result: a commit on top of that code, holding what the run
-// reported. runBuild returns that commit, or "" when the run gave no result.
-func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step string) (string, *synth.Result, error, error) {
+// reported. runBuild returns that commit, or "" when the run gave no result,
+// and the agent that ran, or "" when none did. The run's record and its
+// result name the agent (#179).
+func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step string) (string, string, *synth.Result, error, error) {
 	n, m := t.Issue.Number, ratified.Marker
 	// The issue's agent builds it, and no other, so a build whose agent the
 	// watcher can't run fails before anything is recorded (#173).
 	agent, run, ok := f.buildAgent(m)
 	if !ok || run.Builder == nil {
-		return "", nil, cantRun(agent), nil
+		return "", "", nil, cantRun(agent), nil
 	}
 	if err := f.Repo.Fetch(ctx); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	wt, err := f.Repo.Worktree(ctx, m.Branch, "origin/"+m.Branch)
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	defer f.Repo.RemoveWorktree(ctx, wt)
 	root := filepath.Join(wt, filepath.FromSlash(m.Project))
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "build-"+f.now().Format("20060102-150405"))
 	if err := os.MkdirAll(out, 0o755); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	// An agent run is an effect: only the lease's holder records and starts
 	// one, and it's recorded before it starts.
 	if err := f.recovers(ctx, n, "start the build's agent run", f.canStartRun(building(RunNone, false, false), recovery.Build)); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
-	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of %s for #%d", m.Project, n)); err != nil {
-		return "", nil, nil, err
+	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of %s for #%d by %s", m.Project, n, agent)); err != nil {
+		return "", "", nil, nil, err
 	}
+	f.runsAgent(n, agent)
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := run.Builder.Build(ctx, root, out, amend)
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped.
 	if !f.holds() {
-		return "", nil, nil, errLeaseLost
+		return "", "", nil, nil, errLeaseLost
 	}
 	// Anyone can read the run's error and review, in a post or the record, so
 	// they name the paths on this machine as localPaths does.
@@ -1382,18 +1400,21 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 		res.Review.Text = localPaths(res.Review.Text, f.Work)
 	}
 	if res == nil || res.Final == nil {
-		return "", res, runErr, nil
+		return "", agent, res, runErr, nil
 	}
+	// The receipt the pull request carries names the agent that built the
+	// code, which its fingerprint leaves out (#179).
+	res.Final.Agent = agent
 	// The agent's files replace the project's, so a file it removed is gone.
 	if err := removeOwned(root); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	dir := res.Dir
 	if dir == "" {
 		dir = filepath.Join(out, "result")
 	}
 	if err := copyResult(dir, root); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	verdict := "passed the gate"
 	if !res.Final.Passed {
@@ -1411,28 +1432,28 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 		code, err = f.Repo.RevParse(ctx, m.Branch)
 	}
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	// Anyone can fetch the record, so the result it holds names its directory
 	// by where it is under the work directory: the watcher's own path names
 	// its user.
 	kept := *res
 	kept.Dir = f.workRelative(res.Dir)
-	saved := builtResult{Result: &kept}
+	saved := builtResult{Result: &kept, Agent: agent}
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
-	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d", n), code)
+	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
 	if err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
-		return "", nil, nil, err
+		return "", "", nil, nil, err
 	}
-	return result, res, runErr, nil
+	return result, agent, res, runErr, nil
 }
 
 // workRelative names dir by where it is under the factory's work directory,
@@ -1513,7 +1534,8 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if built.Error != "" {
 		runErr = errors.New(built.Error)
 	}
-	next.Spend, next.GateRuns = res.Spend(), len(res.GateRuns)
+	// The post and the pull request name the agent the record names (#179).
+	next.Spend, next.GateRuns, next.Agent = res.Spend(), len(res.GateRuns), built.Agent
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err
 	}
@@ -1562,7 +1584,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
 			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
-			Body: pullRequestBody(t, m, res, m.Proposal),
+			Body: pullRequestBody(t, next, res, m.Proposal),
 		}); err != nil {
 			return err
 		}
@@ -1973,12 +1995,25 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	return f.step(ctx, issue)
 }
 
-// doing records what the step on an issue starts doing.
+// doing records what the step on an issue starts doing, with no agent
+// running yet.
 func (f *Factory) doing(issue int, what string) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
 	if s, ok := f.running.steps[issue]; ok && s.Doing != what {
-		s.Doing, s.Since = what, f.now()
+		s.Doing, s.Since, s.Agent = what, f.now(), ""
+		f.running.steps[issue] = s
+		f.tell()
+	}
+}
+
+// runsAgent records the coding agent the step on an issue runs, as its run
+// starts, so the watcher's status file names it (#179).
+func (f *Factory) runsAgent(issue int, agent string) {
+	f.running.mu.Lock()
+	defer f.running.mu.Unlock()
+	if s, ok := f.running.steps[issue]; ok && s.Agent != agent {
+		s.Agent = agent
 		f.running.steps[issue] = s
 		f.tell()
 	}

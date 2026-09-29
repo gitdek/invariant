@@ -60,11 +60,16 @@ type Report struct {
 	Existing []ExistingCode `json:"existing,omitempty"`
 	// Assurance says how the code was checked: "proved", or "tested against
 	// the model". A receipt never blurs the two (D-0024).
-	Assurance   string    `json:"assurance"`
-	Build       Build     `json:"build"`
-	Toolchain   Toolchain `json:"toolchain"`
-	Fingerprint string    `json:"fingerprint"`
-	GeneratedAt string    `json:"generated_at"`
+	Assurance string    `json:"assurance"`
+	Build     Build     `json:"build"`
+	Toolchain Toolchain `json:"toolchain"`
+	// Agent names the coding agent that wrote the code, and nothing else
+	// about it (#179): the one the project's manifest records, or the one
+	// that built it, where synthesis or the factory knows it. The gate
+	// checks the code whoever wrote it, so the fingerprint leaves it out.
+	Agent       string `json:"agent,omitempty"`
+	Fingerprint string `json:"fingerprint"`
+	GeneratedAt string `json:"generated_at"`
 }
 
 // Pin compares a ratified statement's pinned hash with its text today,
@@ -220,6 +225,9 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		Bounds:    p.Lock.Bounds,
 		Pins:      checkPins(src, p.Lock.Statements),
 		Toolchain: Toolchain{TLCRelease: toolchain.TLCRelease, TLCJarSHA256: toolchain.TLCJarSHA256, JavaImage: tc.JavaImage},
+		// The gate reads only the project, so it names the agent its manifest
+		// records, if any (#179).
+		Agent: p.Manifest.Agent,
 	}
 	if l := p.Lock; l.Ratified != nil {
 		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
@@ -629,10 +637,11 @@ func agree(d Design, e Exploration) Agreement {
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
 // results and verifier pins. It leaves out timestamps, test timings, the Go
-// toolchain's patch version and where traces were written, so a local run
-// and a CI run of the same commit have the same fingerprint.
+// toolchain's patch version, where traces were written and the coding agent
+// that wrote the code, so a local run and a CI run of the same commit have
+// the same fingerprint.
 func Fingerprint(r Report) string {
-	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go = "", "", "", ""
+	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go, r.Agent = "", "", "", "", ""
 	r.Bugs = append([]Bug(nil), r.Bugs...)
 	for i := range r.Bugs {
 		r.Bugs[i].Trace = ""
