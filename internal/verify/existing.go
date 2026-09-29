@@ -89,7 +89,7 @@ func (ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build,
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
 		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c",
 		// tsx runs TypeScript that Node can't, when the package has it.
-		`ln -s /deps/node_modules node_modules && if [ -x node_modules/.bin/tsx ]; then node_modules/.bin/tsx "$DRIVER"; else node "$DRIVER"; fi ; echo "@@invariant conform=$?"`)
+		`exec 2>&1; ln -s /deps/node_modules node_modules && if [ -x node_modules/.bin/tsx ]; then node_modules/.bin/tsx "$DRIVER"; else node "$DRIVER"; fi ; echo "@@invariant conform=$?"`)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

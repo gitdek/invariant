@@ -164,7 +164,8 @@ func largerExplorer(src []byte, sizes map[string]int) []byte {
 }
 
 // agreementOnly runs just the agreement step, in the same sandbox.
-const agreementOnly = `cd /src
+const agreementOnly = `exec 2>&1
+cd /src
 cp /agree/zz_invariant_agreement_test.go "./$PKG/" && go test -count=1 -run '^TestInvariantAgreement$' -v "./$PKG" ; echo "@@invariant agree=$?"
 `
 
@@ -238,7 +239,8 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 // countScript runs a TypeScript or Python conformance driver in count mode:
 // it explores as always, and writes only how many states it reached, and
 // how deep its search went, to $INVARIANT_COUNT.
-const countScript = `cd /src
+const countScript = `exec 2>&1
+cd /src
 timeout %d %s "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
 `
 
