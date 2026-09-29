@@ -1547,7 +1547,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
-	return f.say(ctx, n, prComment(pr, res.Final, next), LabelPR)
+	return f.say(ctx, n, prComment(pr, res, next), LabelPR)
 }
 
 // removeOwned deletes the files in a project that the agent owns, before
