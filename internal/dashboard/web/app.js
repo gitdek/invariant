@@ -117,7 +117,7 @@
     if (changed("who", [s.who, s.decisions.status])) renderWho(s);
     if (changed("decisions", s.decisions)) renderDecisions(s.decisions);
     if (changed("dgraph", s.decisions.graph || null)) dgraph.update(s.decisions.graph);
-    if (changed("activity",[scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
+    if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
     if (live) renderLive();
     tick();
   }

@@ -722,6 +722,9 @@ func (s *Server) readJournal(ctx context.Context, r *Repo) error {
 		if err != nil {
 			return err
 		}
+		// Until every file is read, the cache may hold some of this commit's
+		// and some of the last one's, so it names neither.
+		r.src.journalAt = ""
 		at := map[string]bool{}
 		for _, e := range tree {
 			name, ok := strings.CutPrefix(e.Path, "decisions/journal/")
