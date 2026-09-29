@@ -29,6 +29,18 @@ type PlanBuilder interface {
 	Build(ctx context.Context, root string, n int, out string) (*plumbing.BuildResult, error)
 }
 
+// invariantRepository is Invariant's own repository, the only one the
+// factory plans plumbing on for now (#103). What a plan's build and checks
+// rest on is Invariant's own: the gate, the prompts, the trusted base and
+// the sandbox's dependencies.
+const invariantRepository = "gitdek/invariant"
+
+// plansPlumbing says whether the factory plans plumbing issues on the
+// repository it watches.
+func (f *Factory) plansPlumbing() bool {
+	return strings.EqualFold(f.Repository, invariantRepository)
+}
+
 // isPlan says whether a marker's project is a plumbing plan's record.
 func isPlan(project string) bool { return strings.HasPrefix(project, plumbing.LockDir+"/") }
 
