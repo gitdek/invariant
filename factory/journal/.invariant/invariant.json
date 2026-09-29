@@ -1,0 +1,6 @@
+{
+  "name": "decision journal",
+  "module": ".invariant/specs/DecisionJournal.tla",
+  "code": "journal",
+  "language": "go"
+}
