@@ -88,9 +88,10 @@ type Proposal struct {
 	// a new project placed the usual way.
 	Target *Target `json:"target,omitempty"`
 	Dir    string  `json:"dir,omitempty"`
-	// Agent is the coding agent a new project's issue picked with its
-	// Agent: line, which the project's manifest records (#173). The factory
-	// sets it, as it sets Dir. An amendment keeps its project's manifest as
+	// Agent is the coding agent the issue picked with its Agent: line when
+	// it was drafted, if it picked one (#173). The factory sets it, as it
+	// sets Dir, and the build runs the agent it settles. A new project's
+	// manifest records it, and an amendment keeps its project's manifest as
 	// it is (D-0046).
 	Agent string `json:"agent,omitempty"`
 	// Plan is a plumbing change's proposal, in place of statements: what

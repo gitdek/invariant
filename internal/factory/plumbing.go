@@ -200,7 +200,7 @@ func (f *Factory) commitPlan(ctx context.Context, t Thread, state Post, c Comman
 // The issue's agent builds it, and no other (#173).
 func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, step string) (string, *plumbing.BuildResult, error, error) {
 	n, m := t.Issue.Number, ratified.Marker
-	agent, run, ok := f.buildAgent(t, m)
+	agent, run, ok := f.buildAgent(m)
 	switch {
 	case !ok:
 		return "", nil, cantRun(agent), nil

@@ -12,7 +12,9 @@ import (
 // agent run for the issue is that agent's: the draft of its statements, its
 // plan or its plan of issues, and the build of its project or plan, whose
 // review the builder makes with the same agent (D-0087, D-0108). The watcher
-// never runs another in its place.
+// never runs another in its place. The draft settles the agent: the build
+// runs the one its ratified proposal names, so an edit to the issue after
+// the draft changes nothing until a writer's revise drafts it again.
 
 // claudeCode is the agent a watcher runs when it names none of its own.
 const claudeCode = "claude-code"
@@ -56,12 +58,12 @@ func (f *Factory) ownAgent() string {
 	return f.Agent
 }
 
-// agentOf picks an issue's agent: the one its own Agent: line names, else
-// named, the one the manifest of the project it changes names, else the
-// watcher's own.
-func (f *Factory) agentOf(body, named string) string {
-	if agent := agentLine(body); agent != "" {
-		return agent
+// agentOf picks an issue's agent: line, the one its own Agent: line names,
+// else named, the one the manifest of the project it changes names, else
+// the watcher's own.
+func (f *Factory) agentOf(line, named string) string {
+	if line != "" {
+		return line
 	}
 	if named != "" {
 		return named
@@ -92,15 +94,20 @@ func (f *Factory) runnable() []string {
 }
 
 // buildAgent is the agent that builds a ratified proposal, with its runners
-// and whether the watcher can run it: the issue's, as its Agent: line picks
-// it now, else as the manifest of its project was ratified, else the
-// watcher's own. A plan has no manifest.
-func (f *Factory) buildAgent(t Thread, m Marker) (string, Runners, bool) {
-	named := ""
-	if p := m.Proposal; p != nil && !isPlan(m.Project) {
-		named = p.Manifest().Agent
+// and whether the watcher can run it: the one that drafted it, as the
+// proposal settled it. That's the agent its issue's Agent: line picked when
+// it was drafted, else the one the manifest of its project named as it was
+// ratified, else the watcher's own. It never reads the issue, which anyone
+// who can edit it may have changed since. A plan has no manifest.
+func (f *Factory) buildAgent(m Marker) (string, Runners, bool) {
+	line, named := "", ""
+	if p := m.Proposal; p != nil {
+		line = p.Agent
+		if !isPlan(m.Project) {
+			named = p.Manifest().Agent
+		}
 	}
-	agent := f.agentOf(t.Issue.Body, named)
+	agent := f.agentOf(line, named)
 	run, ok := f.runners(agent)
 	return agent, run, ok
 }

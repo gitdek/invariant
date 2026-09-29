@@ -743,11 +743,11 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// The issue's agent drafts it (#173). One the watcher can't run, or
 	// doesn't know, gets an answer instead, with nothing drafted, as a
 	// plumbing issue on another repository does (D-0121).
-	named := ""
+	line, named := agentLine(t.Issue.Body), ""
 	if req.Current != nil {
 		named = req.Current.Manifest.Agent
 	}
-	agent := f.agentOf(t.Issue.Body, named)
+	agent := f.agentOf(line, named)
 	run, ok := f.runners(agent)
 	if !ok || run.Formalizer == nil {
 		m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers}
@@ -772,10 +772,12 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
 	}
-	// A new project's manifest records the agent its issue's line picked
-	// (#173). An amendment keeps its project's as it is (D-0046).
-	if p := res.Proposal; p != nil && req.Current == nil && p.Plan == nil && p.IssuePlan == nil {
-		p.Agent = agentLine(t.Issue.Body)
+	// The proposal settles the agent its issue's line picked, so its build
+	// runs the agent that drafted it, however the issue reads by then, and a
+	// new project's manifest records it (#173). An amendment keeps its
+	// project's manifest as it is (D-0046).
+	if res.Proposal != nil {
+		res.Proposal.Agent = line
 	}
 	if res.Proposal != nil {
 		answers = revise(t, answers, res.Proposal.Revised)
@@ -1341,7 +1343,7 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	n, m := t.Issue.Number, ratified.Marker
 	// The issue's agent builds it, and no other, so a build whose agent the
 	// watcher can't run fails before anything is recorded (#173).
-	agent, run, ok := f.buildAgent(t, m)
+	agent, run, ok := f.buildAgent(m)
 	if !ok || run.Builder == nil {
 		return "", nil, cantRun(agent), nil
 	}
