@@ -213,6 +213,12 @@ func TestLiveReadsARunningStep(t *testing.T) {
 	if !l.Marks[8].At.Equal(time.Date(2026, 9, 28, 12, 1, 30, 0, time.UTC)) {
 		t.Errorf("the gate call at %v, want 12:01:30", l.Marks[8].At)
 	}
+	if read := l.Marks[1]; read.Until == nil || !read.Until.Equal(time.Date(2026, 9, 28, 12, 0, 11, 0, time.UTC)) {
+		t.Errorf("the first read %+v: want it ended by its result at 12:00:11", read)
+	}
+	if l.Marks[8].Until != nil {
+		t.Errorf("the gate call ended at %v, but its result hasn't come", l.Marks[8].Until)
+	}
 	if l.Now != "gate" {
 		t.Errorf("now %q, want the gate it's running", l.Now)
 	}

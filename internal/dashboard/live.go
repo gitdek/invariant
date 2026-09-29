@@ -46,7 +46,7 @@ type Live struct {
 type Mark struct {
 	At     time.Time  `json:"at"`
 	Kind   string     `json:"kind"`             // read, search, edit, gate, check, test, other or think
-	Until  *time.Time `json:"until,omitempty"`  // a stretch of thinking: when it ended, or nil while it goes on
+	Until  *time.Time `json:"until,omitempty"`  // when it ended: nil while it goes on, as a tool call waiting for its result
 	Tokens int        `json:"tokens,omitempty"` // a stretch of thinking: its estimated tokens
 }
 
@@ -82,7 +82,8 @@ type transcript struct {
 	agent    string
 	tools    map[string]int
 	marks    []Mark
-	think    int // the stretch of thinking going on, as an index into marks, or -1
+	think    int   // the stretch of thinking going on, as an index into marks, or -1
+	open     []int // tool calls waiting for their results, oldest first, as indexes into marks
 	files    map[string]*touched
 	touches  int
 	last     time.Time // the newest time an event carried
@@ -205,6 +206,7 @@ func (t *transcript) line(b []byte) {
 			kind := toolKind(bl.Name)
 			t.tools[kind]++
 			t.marks = append(t.marks, Mark{At: t.last, Kind: kind})
+			t.open = append(t.open, len(t.marks)-1)
 			t.now = kind
 			p := bl.Input.FilePath
 			if p == "" {
@@ -215,6 +217,12 @@ func (t *transcript) line(b []byte) {
 	case e.Type == "user":
 		t.stamp(e.Timestamp)
 		t.now = ""
+		// A result ends the oldest call still waiting for one.
+		if len(t.open) > 0 {
+			until := t.last
+			t.marks[t.open[0]].Until = &until
+			t.open = t.open[1:]
+		}
 	case e.Type == "tool_progress":
 		t.now = toolKind(e.ToolName)
 	case e.Type == "result":
@@ -229,6 +237,13 @@ func (t *transcript) line(b []byte) {
 		if t.think >= 0 {
 			t.think -= drop
 		}
+		open := t.open[:0]
+		for _, i := range t.open {
+			if i >= drop {
+				open = append(open, i-drop)
+			}
+		}
+		t.open = open
 	}
 }
 

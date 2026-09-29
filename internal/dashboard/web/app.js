@@ -1536,8 +1536,10 @@
     if (l.ended) now = `This step ended <span data-ago="${esc(l.ended)}"></span>${l.agent ? `. The agent ${esc(l.agent)}` : ""}.`;
     else if (l.agent) now = `<b>The agent ${esc(l.agent)}.</b> The factory is checking its work.`;
     else {
-      const thinking = l.now === "thinking" ? [...(l.marks || [])].reverse().find((m) => m.kind === "think" && !m.until) : null;
-      now = `<b>${esc(LIVE_NOW[l.now] || "Working")}</b>${thinking ? ` for <span data-since="${esc(thinking.at)}"></span>` : ""}`;
+      // How long it's been at it: this stretch of thinking, or the tool
+      // call still waiting for its result.
+      const at = l.now && [...(l.marks || [])].reverse().find((m) => !m.until && (l.now === "thinking" ? m.kind === "think" : m.kind === l.now));
+      now = `<b>${esc(LIVE_NOW[l.now] || "Working")}</b>${at ? ` for <span data-since="${esc(at.at)}"></span>` : ""}`;
       if (l.last) now += ` · last activity <span data-ago="${esc(l.last)}"></span>`;
     }
     $("#live-now").innerHTML = now;
@@ -1623,6 +1625,17 @@
       const a = x(m.at), stop = m.until ? T(m.until) : end, b = x(stop);
       const rate = Math.min(1, (m.tokens || 0) / Math.max(0.2, (stop - T(m.at)) / 60000) / 9000);
       parts.push(`<rect x="${a.toFixed(1)}" y="${top + 9}" width="${Math.max(2, b - a).toFixed(1)}" height="${bottom - top - 18}" rx="4" class="think${m.until ? "" : " on"}" fill-opacity="${(0.22 + 0.6 * rate).toFixed(2)}"><title>Thinking, ≈${kilo(m.tokens)} tokens</title></rect>`);
+    }
+    // A tool call that ran a while, or is still running, is a band in its
+    // color from its start to its end, or to now.
+    const running = !l.ended ? [...marks].reverse().find((m) => m.kind !== "think") : null;
+    for (const m of marks) {
+      if (m.kind === "think") continue;
+      const open = !m.until && m === running;
+      const stop = m.until ? T(m.until) : open ? end : 0;
+      if (stop - T(m.at) < 8000) continue;
+      const a = x(m.at);
+      parts.push(`<rect x="${a.toFixed(1)}" y="${top + 9}" width="${Math.max(2, x(stop) - a).toFixed(1)}" height="${bottom - top - 18}" rx="4" class="span ${esc(m.kind)}${open ? " on" : ""}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} for ${esc(clock((stop - T(m.at)) / 1000))}</title></rect>`);
     }
     marks.forEach((m, i) => {
       if (m.kind === "think") return;

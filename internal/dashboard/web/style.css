@@ -737,7 +737,13 @@ footer p { margin: 0; max-width: 60em; }
 .strip .grid { stroke: var(--line2); stroke-dasharray: 2 5; }
 .strip .tick { font: 500 10px var(--mono); fill: var(--ink3); text-anchor: middle; }
 .strip .think { fill: var(--agent); }
-.strip .think.on { animation: breathe 2.4s ease-in-out infinite; }
+.strip .think.on, .strip .span.on { animation: breathe 2.4s ease-in-out infinite; }
+.strip .span { fill-opacity: 0.2; }
+.strip .span.read { fill: var(--ci); }
+.strip .span.search { fill: var(--search); }
+.strip .span.edit { fill: var(--people); }
+.strip .span.gate, .strip .span.check, .strip .span.test { fill: var(--accent); }
+.strip .span.other { fill: var(--ink3); }
 @keyframes breathe { 50% { fill-opacity: 0.85; } }
 .strip .tool { stroke-width: 2.5; stroke-linecap: round; transform-box: fill-box; transform-origin: center; }
 .strip .tool.read { stroke: var(--ci); }
