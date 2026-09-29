@@ -29,6 +29,7 @@ const (
 	Ratify = "ratify" // /invariant ratify <hash>: ratify the current proposal
 	Retry  = "retry"  // /invariant retry: look at a failed pull request again, once people have fixed what failed
 	Plan   = "plan"   // /invariant plan: draft a plan of issues for the PRD this issue holds or links
+	Stop   = "stop"   // /invariant stop: open no more of the ratified plan of issues on this issue (#126)
 )
 
 // Command is one instruction from a person with write access.
@@ -73,7 +74,7 @@ func ParseCommands(body string) []Command {
 			continue
 		}
 		switch verb := strings.ToLower(f[1]); verb {
-		case Solve, Choose, Revise, Ratify, Retry, Plan:
+		case Solve, Choose, Revise, Ratify, Retry, Plan, Stop:
 			out = append(out, Command{Verb: verb, Args: f[2:]})
 		}
 	}
@@ -92,6 +93,10 @@ const (
 	KindMerged      = "merged"      // merged
 	KindClosed      = "closed"      // the pull request was closed without merging
 	KindNote        = "note"        // answered a command without changing anything
+	// A ratified plan's posts on its issue, which, like notes, leave that
+	// issue's state as it was (#126).
+	KindPlanOpened = "plan-opened" // recorded the issue opened for one of the plan's steps
+	KindPlanDone   = "plan-done"   // every one of the plan's issues has merged
 )
 
 // Why the issue's latest failure happened, as a failed post records it
@@ -131,6 +136,12 @@ type Marker struct {
 	Spend    float64  `json:"spend,omitempty"`
 	GateRuns int      `json:"gate_runs,omitempty"`
 	Numbers  *Numbers `json:"numbers,omitempty"` // the issue's record, on the post that merges it
+	// A plan's record names one of its steps, counting from 1, the issue the
+	// factory opened for it, and the writer who ratified the plan, on whose
+	// authority that issue is solved (#126). Its Hash is the plan's.
+	Step     int    `json:"step,omitempty"`
+	Opened   int    `json:"opened,omitempty"`
+	Ratifier string `json:"ratifier,omitempty"`
 }
 
 // carried is the marker a later post carries forward: the same issue state,
@@ -221,11 +232,13 @@ type Thread struct {
 	People   []github.Comment // comments from people with write access
 }
 
-// State is the factory's latest post, not counting notes. ok is false for
-// an issue the factory hasn't touched.
+// State is the factory's latest post, not counting notes or a plan's posts
+// on its issue. ok is false for an issue the factory hasn't touched.
 func (t Thread) State() (post Post, ok bool) {
 	for i := len(t.Posts) - 1; i >= 0; i-- {
-		if t.Posts[i].Marker.Kind != KindNote {
+		switch t.Posts[i].Marker.Kind {
+		case KindNote, KindPlanOpened, KindPlanDone:
+		default:
 			return t.Posts[i], true
 		}
 	}

@@ -202,6 +202,13 @@ func (g leasedGitHub) PostComment(ctx context.Context, issue int, body string) (
 	return g.GitHub.PostComment(ctx, issue, body)
 }
 
+func (g leasedGitHub) CreateIssue(ctx context.Context, is github.NewIssue) (i github.Issue, err error) {
+	if !g.f.holds() {
+		return i, errLeaseLost
+	}
+	return g.GitHub.CreateIssue(ctx, is)
+}
+
 func (g leasedGitHub) AddLabels(ctx context.Context, issue int, labels ...string) error {
 	if !g.f.holds() {
 		return errLeaseLost
