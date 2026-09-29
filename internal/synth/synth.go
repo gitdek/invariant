@@ -60,6 +60,9 @@ type Usage struct {
 	Summary   string         `json:"summary"`  // the agent's closing message
 	ToolCalls map[string]int `json:"tool_calls"`
 	GateTool  string         `json:"gate_tool"` // whether the gate's MCP server connected
+	// Tokens is what the run used, where the agent reports tokens rather
+	// than a cost, as Codex does on an account (#153).
+	Tokens *Tokens `json:"tokens,omitempty"`
 }
 
 // GateRun is one call to the gate tool during synthesis.
