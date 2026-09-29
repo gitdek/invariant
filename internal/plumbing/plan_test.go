@@ -88,7 +88,8 @@ func TestAPlanNamesWhatItTouchesInTheTrustedBase(t *testing.T) {
 	if strings.Join(p.Trusted, ",") != "internal/dashboard/act.go,internal/factory/factory.go" {
 		t.Errorf("trusted = %v", p.Trusted)
 	}
-	for f, want := range map[string]bool{"go.mod": true, "cmd/invariant/main.go": true, "internal/dashboard/graph.go": false, "README.md": false, ".github/x": true} {
+	for f, want := range map[string]bool{"go.mod": true, "cmd/invariant/main.go": true, "internal/dashboard/graph.go": false, "README.md": false, ".github/x": true,
+		".mcp.json": true, ".codex/config.toml": true, ".claude/settings.json": true, ".mcp.json.example": false} {
 		if Trusted(f) != want {
 			t.Errorf("Trusted(%s) = %v", f, !want)
 		}
