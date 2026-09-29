@@ -2,5 +2,8 @@
   "name": "ratified plan runner",
   "module": ".invariant/specs/PlanRun.tla",
   "code": "plans",
-  "language": "go"
+  "language": "go",
+  "parameters": [
+    "N"
+  ]
 }
