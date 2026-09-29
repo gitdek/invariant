@@ -42,6 +42,18 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	return post("plan for ratification", b.String(), m)
 }
 
+// plumbingElsewhereComment answers a plumbing issue on a repository that
+// isn't Invariant's own: plumbing isn't supported there yet, and why (#103).
+func plumbingElsewhereComment(m Marker) string {
+	return post("not one I can take", fmt.Sprintf("This issue is marked `Kind: plumbing`, and plumbing isn't supported on this repository yet. "+
+		"For now, I plan it only on Invariant's own repository, `%s`, because it isn't ready for any other:\n\n"+
+		"- The gate workflow `invariant init` writes doesn't run the repository's tests or check a plan's ratification.\n"+
+		"- The build and review prompts describe Invariant.\n"+
+		"- The trusted base, which only a person merges, is Invariant's own layout.\n"+
+		"- The sandbox the build is tested in has no network, so it has no way to fetch the repository's dependencies.\n\n"+
+		"So I haven't drafted anything, and I've left this issue for a person.", invariantRepository), m)
+}
+
 func planRatifiedComment(by, branch string, n int, p *formalize.Proposal, m Marker) string {
 	return post("ratified", fmt.Sprintf("Ratified by @%s. I recorded the plan in `%s` on branch `%s`, with its %d acceptance tests (plan `%s`). Building it now.",
 		by, plumbing.LockPath(n), branch, len(p.Plan.Tests), short(p.Hash)), m)

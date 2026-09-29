@@ -54,9 +54,12 @@ func (b *fakePlanBuilder) Build(_ context.Context, root string, n int, out strin
 		Usage: synth.Usage{Backend: "fake", Turns: 2, CostUSD: 0.30}, Spend: 0.40, TestRuns: []synth.GateRun{{Run: 1, Passed: b.pass}}}, nil
 }
 
-// plumbingRig is a rig whose formalizer plans a plumbing change to files.
+// plumbingRig is a rig whose formalizer plans a plumbing change to files. It
+// runs on Invariant's own repository, the only one that plans plumbing for
+// now (#103).
 func plumbingRig(t *testing.T, files ...string) (*rig, *fakePlanBuilder) {
 	r := newRig(t)
+	r.f.Repository = "gitdek/invariant"
 	r.form.forks = nil
 	r.form.plan = &plumbing.Plan{Name: "a hello page", Summary: "Add a page that says hello.", Files: files,
 		Tests:   []plumbing.Test{{Name: "TestPageSaysHello", File: "page/page_accept_test.go", Says: "The page says hello."}},

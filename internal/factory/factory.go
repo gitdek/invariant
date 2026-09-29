@@ -479,8 +479,14 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
 	req := f.request(t, answers, previous)
 	// A plumbing issue gets a plan instead of statements, checked against
-	// the base branch as it is (D-0105).
+	// the base branch as it is (D-0105). Only on Invariant's own repository,
+	// for now: anywhere else, it gets an answer and is left for a person,
+	// with nothing drafted (#103).
 	if kindLine(t.Issue.Body) == "plumbing" {
+		if !f.plansPlumbing() {
+			m := Marker{Kind: KindUnsupported, ReplyTo: replyTo}
+			return f.drafted(ctx, t, cause, base, m, plumbingElsewhereComment(m), LabelHumanReview)
+		}
 		if projectLine(t.Issue.Body) != "" || len(codeLines(t.Issue.Body)) > 0 {
 			return stuck("A plumbing issue's plan names the files it changes, so it names no project or code to check. Take out the Project: and Code: lines, or the Kind: plumbing line.")
 		}
