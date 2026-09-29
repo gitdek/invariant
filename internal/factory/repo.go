@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gitdek/invariant/internal/scope"
 )
@@ -31,8 +32,26 @@ type Clone struct {
 	Token func(ctx context.Context) (string, error)
 }
 
+// A watcher's steps run at once and share its clone, and so does its lease
+// (D-0113). So every call on a clone takes the clone's lock and runs alone:
+// no two git commands in the clone overlap, and one call's commands never
+// take in another's, as two results saved through Save's index would.
+var clones sync.Map // a clone's directory → *sync.Mutex
+
+// lock takes the clone's lock, and returns what gives it back.
+func (c Clone) lock() (unlock func()) {
+	dir, err := filepath.Abs(c.Dir)
+	if err != nil {
+		dir = filepath.Clean(c.Dir)
+	}
+	mu, _ := clones.LoadOrStore(dir, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	return mu.(*sync.Mutex).Unlock
+}
+
 // Ensure clones the repository, unless it already has.
 func (c Clone) Ensure(ctx context.Context) error {
+	defer c.lock()()
 	if _, err := os.Stat(c.Dir + "/.git"); err == nil {
 		return nil
 	}
@@ -44,6 +63,7 @@ func (c Clone) Ensure(ctx context.Context) error {
 }
 
 func (c Clone) Fetch(ctx context.Context) error {
+	defer c.lock()()
 	_, err := c.git(ctx, "fetch", "--quiet", "--prune", "origin")
 	return err
 }
@@ -53,6 +73,7 @@ func (c Clone) Fetch(ctx context.Context) error {
 // Any other failure is an error, such as a ref that isn't there or a dir
 // that's a file.
 func (c Clone) Dirs(ctx context.Context, ref, dir string) ([]string, error) {
+	defer c.lock()()
 	out, err := c.git(ctx, "ls-tree", "-d", "--name-only", ref+":"+dir)
 	if err != nil {
 		// git fails the same way whether ref or dir isn't there, but
@@ -69,6 +90,7 @@ func (c Clone) Dirs(ctx context.Context, ref, dir string) ([]string, error) {
 // Worktree checks out a new branch, starting at from, in a directory of its
 // own.
 func (c Clone) Worktree(ctx context.Context, branch, from string) (string, error) {
+	defer c.lock()()
 	dir, err := os.MkdirTemp("", "invariant-worktree-")
 	if err != nil {
 		return "", err
@@ -81,6 +103,7 @@ func (c Clone) Worktree(ctx context.Context, branch, from string) (string, error
 }
 
 func (c Clone) RemoveWorktree(ctx context.Context, dir string) error {
+	defer c.lock()()
 	_, err := c.git(ctx, "worktree", "remove", "--force", dir)
 	os.RemoveAll(dir)
 	return err
@@ -91,6 +114,7 @@ func (c Clone) RemoveWorktree(ctx context.Context, dir string) error {
 // is still there, then runs git worktree prune. A watcher that stopped
 // mid-build leaves its worktrees behind, each holding its branch.
 func (c Clone) ClearWorktrees(ctx context.Context) error {
+	defer c.lock()()
 	out, err := c.git(ctx, "worktree", "list", "--porcelain")
 	if err != nil {
 		return err
@@ -118,6 +142,7 @@ func (c Clone) ClearWorktrees(ctx context.Context) error {
 // Commit commits everything under dir, and nothing outside it, as the
 // factory's author.
 func (c Clone) Commit(ctx context.Context, worktree, dir, message string) (string, error) {
+	defer c.lock()()
 	if _, err := run(ctx, worktree, "git", "add", "--all", "--", dir); err != nil {
 		return "", err
 	}
@@ -134,6 +159,7 @@ func (c Clone) Commit(ctx context.Context, worktree, dir, message string) (strin
 
 // Push pushes a worktree's branch. It never forces.
 func (c Clone) Push(ctx context.Context, worktree, branch string) error {
+	defer c.lock()()
 	env, err := c.auth(ctx)
 	if err != nil {
 		return err
@@ -143,11 +169,13 @@ func (c Clone) Push(ctx context.Context, worktree, branch string) error {
 }
 
 func (c Clone) RevParse(ctx context.Context, ref string) (string, error) {
+	defer c.lock()()
 	out, err := c.git(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	return strings.TrimSpace(out), err
 }
 
 func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
+	defer c.lock()()
 	out, err := c.git(ctx, "show", ref+":"+file)
 	return []byte(out), err
 }
@@ -156,6 +184,12 @@ func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
 // existing code an issue names, for the formalizer to read (D-0054). It
 // never reads the working tree, and it keeps every file inside dst.
 func (c Clone) Export(ctx context.Context, ref string, paths []string, dst string) error {
+	defer c.lock()()
+	return c.export(ctx, ref, paths, dst)
+}
+
+// export is Export, for a call that holds the clone's lock.
+func (c Clone) export(ctx context.Context, ref string, paths []string, dst string) error {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"archive", "--format=tar", ref, "--"}, paths...)...)
 	cmd.Dir, cmd.Env = c.Dir, append(os.Environ(), noLFS)
 	var out, errOut bytes.Buffer
@@ -191,6 +225,7 @@ func (c Clone) Export(ctx context.Context, ref string, paths []string, dst strin
 }
 
 func (c Clone) Scope(ctx context.Context, base, head string, issue int) (scope.Result, error) {
+	defer c.lock()()
 	return scope.Check(ctx, c.Dir, base, head, issue)
 }
 

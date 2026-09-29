@@ -55,7 +55,7 @@ Usage:
   invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
   invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
   invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
-  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L] [-lease D]
+  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L] [-lease D] [-parallel N]
                                                turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
   invariant ratification -repo OWNER/NAME PROJECT|PLAN...
@@ -605,12 +605,13 @@ func watchCmd(ctx context.Context, args []string) int {
 	home, _ := os.UserHomeDir()
 	appKey := fs.String("app-key", filepath.Join(home, ".config", "invariant", "factory.pem"), "the App's private key")
 	leaseFor := fs.Duration("lease", 5*time.Minute, "how long the watcher's lease on the repository lasts, renewed every poll: over 2m and at least three polls; 0 watches without one")
+	parallel := fs.Int("parallel", 3, "how many issues the watcher takes steps on at once, one step per issue; 1 takes one step at a time")
 	fs.Parse(args)
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
 		return 2
 	}
-	if *repo == "" || fs.NArg() != 0 || formalize.Languages[*language] == "" || (*leaseFor > 0 && (*leaseFor < 3*(*every) || *leaseFor <= 2*time.Minute)) {
+	if *repo == "" || fs.NArg() != 0 || *parallel < 1 || formalize.Languages[*language] == "" || (*leaseFor > 0 && (*leaseFor < 3*(*every) || *leaseFor <= 2*time.Minute)) {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
@@ -680,31 +681,39 @@ func watchCmd(ctx context.Context, args []string) int {
 		Plumbing: plumbing.Builder{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
 			Reviewer: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns, Effort: *effort},
 			Binary:   self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb},
-		Holder: factory.NewHolder(), LeaseFor: *leaseFor,
+		Holder: factory.NewHolder(), LeaseFor: *leaseFor, Parallel: *parallel,
 	}
 	if err := f.Prepare(ctx); err != nil {
 		return fail(err)
 	}
 	// What the factory is doing goes in a status file for the dashboard
 	// (D-0049). It holds no secrets: the process, the repository, and the
-	// issue and step in hand.
+	// steps in hand (D-0113). The page shows one of them, as it did: the
+	// longest-running step that's doing something.
 	statusPath := dashboard.StatusPath(*work, *repo)
 	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
-	f.Activity = func(issue int, doing string) {
-		now := time.Now().UTC()
-		status.Heartbeat = now
-		if issue != status.Issue || doing != status.Doing {
-			status.Issue, status.Doing, status.Since = issue, doing, &now
+	f.Activity = func(steps []factory.Step) {
+		status.Heartbeat = time.Now().UTC()
+		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
+		for _, s := range steps {
+			since := s.Since.UTC()
+			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since})
+			if s.Doing != "" && (status.Since == nil || since.Before(*status.Since)) {
+				status.Issue, status.Doing, status.Since = s.Issue, s.Doing, &since
+			}
 		}
 		if err := dashboard.WriteStatus(statusPath, status); err != nil {
 			logger.Printf("status: %v", err)
 		}
 	}
-	f.Activity(0, "")
+	f.Activity(nil)
 	defer os.Remove(statusPath)
 	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
-		if err := f.Poll(ctx); err != nil {
+		// The poll's steps can run on after it returns, so it waits for them.
+		err := f.Poll(ctx)
+		f.Wait()
+		if err != nil {
 			return fail(err)
 		}
 		return 0

@@ -26,7 +26,9 @@ import (
 // it still holds it just before each effect. It stops acting leaseSkew
 // before its lease runs out, by its own clock, and other watchers wait until
 // leaseSkew after, by theirs, so clocks that disagree by less than that
-// can't let two act at once.
+// can't let two act at once. Each of its running steps checks for itself, so
+// losing the lease stops every one before its next effect, and each drops
+// its agent run (D-0113).
 
 const leaseRef = "refs/invariant/lease"
 
@@ -57,6 +59,12 @@ func NewHolder() string {
 // Lease reads the repository's lease: the commit its ref points to, empty
 // when there's none, and what that commit says.
 func (c Clone) Lease(ctx context.Context) (sha string, rec LeaseRecord, err error) {
+	defer c.lock()()
+	return c.readLease(ctx)
+}
+
+// readLease is Lease, for a call that holds the clone's lock.
+func (c Clone) readLease(ctx context.Context) (sha string, rec LeaseRecord, err error) {
 	sha, err = c.remoteRef(ctx, leaseRef)
 	if err != nil || sha == "" {
 		return "", rec, err
@@ -75,6 +83,7 @@ func (c Clone) Lease(ctx context.Context) (sha string, rec LeaseRecord, err erro
 // when old is empty. It fails with ErrLeaseMoved if the ref isn't at old any
 // more.
 func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (string, error) {
+	defer c.lock()()
 	msg, err := json.Marshal(rec)
 	if err != nil {
 		return "", err
@@ -84,7 +93,7 @@ func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (stri
 		return "", err
 	}
 	if err := c.pushRef(ctx, leaseRef, old, commit); err != nil {
-		now, _, readErr := c.Lease(ctx)
+		now, _, readErr := c.readLease(ctx)
 		if readErr == nil && now != old && now != commit {
 			return "", ErrLeaseMoved
 		}
