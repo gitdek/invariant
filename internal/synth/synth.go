@@ -237,9 +237,11 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	}
 	r.Dir = final
 	// A final gate that can't run, as when the agent wrote no code, leaves the
-	// result with no final report.
+	// result with no final report. Its receipt names the agent that wrote the
+	// code, which the fingerprint leaves out (#179).
 	report, gateErr := verify.Run(ctx, final, filepath.Join(out, "gate"), o.Toolchain)
 	if gateErr == nil {
+		report.Agent = usage.Backend
 		r.Final = report
 	}
 	if r.GateRuns, err = readGateRuns(gateLog); err != nil {

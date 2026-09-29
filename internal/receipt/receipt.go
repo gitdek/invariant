@@ -21,6 +21,11 @@ func Markdown(r *verify.Report) string {
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", short(r.Fingerprint))
 	}
+	// The gate checks the code whoever wrote it, so the receipt names the
+	// agent but the fingerprint leaves it out (#179).
+	if r.Agent != "" {
+		fmt.Fprintf(&b, "Coding agent: `%s`. The fingerprint leaves it out.\n\n", r.Agent)
+	}
 
 	b.WriteString("| Check | Result | Evidence |\n| :-- | :-- | :-- |\n")
 	row(&b, "Pinned statements", pinsOK(r) && r.RatificationMatches(), pinsResult(r), provenance(r))
