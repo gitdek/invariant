@@ -333,7 +333,6 @@ func TestTheNextSliceIsNow(t *testing.T) {
 // watcher's own log for that step.
 func TestRunsOfTheCurrentStep(t *testing.T) {
 	work := t.TempDir()
-	s := &Server{Work: work}
 	write := func(dir, file, text string) {
 		p := filepath.Join(work, "gitdek", "app", "issues", "issue-4", dir)
 		if err := os.MkdirAll(p, 0o755); err != nil {
@@ -346,16 +345,16 @@ func TestRunsOfTheCurrentStep(t *testing.T) {
 	write("build-20260926-230000", "gate-runs.jsonl", `{"run":1,"passed":false}`+"\n")
 	write("build-20260927-010000", "gate-runs.jsonl", `{"run":1,"passed":false,"at":"x"}`+"\n"+`{"run":2,"passed":true}`+"\n")
 	write("formalize-20260926-220000", "check-runs.jsonl", `{"run":1,"passed":true}`+"\n")
-	runs, kind := s.runsOf("gitdek/app", Watcher{Running: true, Issue: 4, Doing: "building"})
+	runs, kind := runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "building"})
 	if kind != "gate" || len(runs) != 2 || runs[0].Passed || !runs[1].Passed {
 		t.Errorf("building: %s %+v; want the newest build's two gate runs", kind, runs)
 	}
-	runs, kind = s.runsOf("gitdek/app", Watcher{Running: true, Issue: 4, Doing: "formalizing"})
+	runs, kind = runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "formalizing"})
 	if kind != "check" || len(runs) != 1 {
 		t.Errorf("formalizing: %s %+v", kind, runs)
 	}
 	for _, w := range []Watcher{{Running: true, Issue: 4, Doing: "ratifying"}, {Issue: 4, Doing: "building"}, {Running: true, Doing: "building"}} {
-		if runs, _ := s.runsOf("gitdek/app", w); runs != nil {
+		if runs, _ := runsOf(work, "gitdek/app", w); runs != nil {
 			t.Errorf("%+v shows runs %+v", w, runs)
 		}
 	}
