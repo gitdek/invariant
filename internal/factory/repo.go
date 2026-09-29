@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -164,7 +165,7 @@ func (c Clone) Push(ctx context.Context, worktree, branch string) error {
 	if err != nil {
 		return err
 	}
-	_, err = runEnv(ctx, worktree, env, "git", "push", "--quiet", "origin", "HEAD:refs/heads/"+branch)
+	_, err = runEnv(ctx, worktree, env, "git", "push", "--quiet", receivePack, "origin", "HEAD:refs/heads/"+branch)
 	return err
 }
 
@@ -190,7 +191,7 @@ func (c Clone) Export(ctx context.Context, ref string, paths []string, dst strin
 
 // export is Export, for a call that holds the clone's lock.
 func (c Clone) export(ctx context.Context, ref string, paths []string, dst string) error {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"archive", "--format=tar", ref, "--"}, paths...)...)
+	cmd := exec.CommandContext(ctx, "git", slices.Concat(noDetach, []string{"archive", "--format=tar", ref, "--"}, paths)...)
 	cmd.Dir, cmd.Env = c.Dir, append(os.Environ(), noLFS)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
@@ -242,12 +243,31 @@ func run(ctx context.Context, dir, name string, args ...string) (string, error) 
 // the factory never needs more (D-0055).
 const noLFS = "GIT_LFS_SKIP_SMUDGE=1"
 
+// noDetach goes before the subcommand of every git command a clone runs, so
+// the upkeep the command starts, git gc --auto by way of git maintenance run
+// --auto, has ended when it returns. By default git runs it in the
+// background, where it goes on writing to the clone after the call that ran
+// git has returned, even alongside the clone's next command, which should
+// run alone (D-0113, #170). Upkeep isn't turned off: a command that finds it
+// due takes that much longer.
+var noDetach = []string{"-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false"}
+
+// receivePack has every push run the receive-pack of the repository it
+// pushes to with noDetach as well, since git passes no -c setting to the
+// receive-pack of a repository on the same machine. GitHub, over HTTPS, runs
+// its own and ignores it.
+var receivePack = "--receive-pack=git " + strings.Join(noDetach, " ") + " receive-pack"
+
+// runEnv runs a command with env added to its environment. When it fails,
+// its error names the command as its caller wrote it, without noDetach.
 func runEnv(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
+	command := args
 	if name == "git" {
+		command = slices.Concat(noDetach, args)
 		env = append(env, noLFS)
 	}
+	cmd := exec.CommandContext(ctx, name, command...)
+	cmd.Dir = dir
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}

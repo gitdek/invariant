@@ -170,7 +170,7 @@ func (c Clone) PushCommit(ctx context.Context, commit, branch string) error {
 	if err != nil {
 		return err
 	}
-	_, err = runEnv(ctx, c.Dir, env, "git", "push", "--quiet", "origin", commit+":refs/heads/"+branch)
+	_, err = runEnv(ctx, c.Dir, env, "git", "push", "--quiet", receivePack, "origin", commit+":refs/heads/"+branch)
 	return err
 }
 
@@ -215,6 +215,6 @@ func (c Clone) pushRef(ctx context.Context, ref, old, commit string) error {
 	if err != nil {
 		return err
 	}
-	_, err = runEnv(ctx, c.Dir, env, "git", "push", "--quiet", "--force-with-lease="+ref+":"+old, "origin", commit+":"+ref)
+	_, err = runEnv(ctx, c.Dir, env, "git", "push", "--quiet", receivePack, "--force-with-lease="+ref+":"+old, "origin", commit+":"+ref)
 	return err
 }
