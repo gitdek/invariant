@@ -446,6 +446,68 @@ h2 { margin: 0; font-size: clamp(24px, 3vw, 34px); font-weight: 600; letter-spac
 .st.open { color: var(--bug); background: var(--bug-soft); }
 .dlist .txt { font-size: 14px; color: var(--ink2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .dlist li.open-text .txt { -webkit-line-clamp: unset; }
+
+/* The decision graph: the journal on one spiral, the oldest at its center.
+   Ratified is the accent, proposed the people color, decided neutral, and
+   superseded faded. Refinements and supersessions are the strong lines. */
+.dgraph { margin-top: 28px; }
+.dgraph h3 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+.dkey { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 12px; font: 500 11.5px/1 var(--mono); color: var(--ink3); }
+.dkey span { display: inline-flex; align-items: center; gap: 6px; }
+.dkey i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--ink2); }
+.dkey i.ratified { background: var(--accent); }
+.dkey i.proposed { background: var(--people); }
+.dkey i.superseded { background: rgba(var(--ink-rgb), 0.16); box-shadow: inset 0 0 0 1px var(--ink3); }
+.dkey i.oneway { width: 8px; height: 8px; border-radius: 1px; transform: rotate(45deg); }
+.dkey i.edge { width: 18px; height: 0; border-radius: 0; background: none; border-top: 2px solid rgba(var(--ink-rgb), 0.45); }
+.dkey i.edge.reopens { border-top-style: dashed; }
+.dkey i.edge.cites { border-top: 1px solid rgba(var(--ink-rgb), 0.2); }
+.dmap { margin-top: 8px; }
+.dmap svg { display: block; width: 100%; height: auto; overflow: visible; }
+.dmap .arm { fill: none; stroke: rgba(var(--ink-rgb), 0.08); stroke-width: 1; }
+.dmap .edges { opacity: 0; transition: opacity 0.8s ease 0.6s; }
+.dmap .shown .edges { opacity: 1; }
+.dmap .de { fill: none; stroke: var(--ink); stroke-opacity: 0.14; stroke-width: 1; transition: opacity 0.25s, stroke-opacity 0.25s; }
+.dmap .de.refines, .dmap .de.supersedes { stroke-opacity: 0.45; stroke-width: 1.6; }
+.dmap .de.reopens { stroke-opacity: 0.4; stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dmap .choosing .de { opacity: 0.2; }
+.dmap .choosing .de.lit { opacity: 1; stroke-opacity: 0.85; stroke-width: 1.8; stroke-dasharray: 4 5; animation: flow 1.2s linear infinite; }
+.dmap .dn { cursor: pointer; opacity: 0; transition: opacity 0.45s ease var(--d, 0ms); -webkit-tap-highlight-color: transparent; }
+.dmap .shown .dn { opacity: 1; }
+.dmap .dn.fresh { animation: arrive 1s ease both; }
+.dmap .dn:focus { outline: none; }
+.dmap .hit { fill: transparent; }
+.dmap .dot { fill: var(--ink2); stroke: var(--bg); stroke-width: 1.5; transition: opacity 0.25s; }
+.dmap .ratified .dot { fill: var(--accent); }
+.dmap .proposed .dot { fill: var(--people); }
+.dmap .superseded .dot { fill: rgba(var(--ink-rgb), 0.16); stroke: var(--ink3); stroke-width: 1; }
+.dmap .open .dot { fill: var(--bg); stroke: var(--people); }
+.dmap .lbl { font: 500 10px var(--mono); fill: var(--ink3); pointer-events: none; transition: opacity 0.25s; }
+.dmap .dense .lbl { display: none; }
+.dmap .dense .chosen .lbl, .dmap .dense .lit .lbl { display: inline; }
+.dmap .choosing .dot, .dmap .choosing .lbl { opacity: 0.22; }
+.dmap .choosing .chosen .dot, .dmap .choosing .chosen .lbl, .dmap .choosing .lit .dot, .dmap .choosing .lit .lbl { opacity: 1; }
+.dmap .dn.lit .dot { stroke: var(--ink); stroke-width: 1.5; }
+.dmap .dn.chosen .dot, .dmap .dn:focus-visible .dot { stroke: var(--ink); stroke-width: 2.5; }
+.dmap .dn.chosen .lbl, .dmap .dn.lit .lbl { fill: var(--ink); font-weight: 600; }
+.dmap .dhalo { fill: none; stroke: var(--ink); stroke-width: 1.5; opacity: 0; pointer-events: none; }
+.dmap .dhalo.on { opacity: 0.7; transform-box: fill-box; transform-origin: center; animation: halo 2.2s ease-out infinite; }
+.dcard { margin-top: 10px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.dcard .hint { margin: 0; font-size: 14px; color: var(--ink3); }
+.dcard .top { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font: 500 11.5px var(--mono); color: var(--ink3); }
+.dcard .id { font: 600 13px var(--mono); color: var(--ink); }
+.dcard .top b { color: var(--ink); font-weight: 600; }
+.dcard .ds { padding: 3px 7px; border-radius: 5px; font-weight: 600; letter-spacing: 0.05em; color: var(--ink2); background: rgba(var(--ink-rgb), 0.08); }
+.dcard .ds.ratified { color: var(--accent); background: var(--accent-soft); }
+.dcard .ds.proposed { color: var(--people); background: var(--people-soft); }
+.dcard .ds.superseded { color: var(--ink3); background: rgba(var(--ink-rgb), 0.04); }
+.dcard .ds.open { color: var(--people); background: none; outline: 1px dashed var(--people); }
+.dcard .txt { margin: 8px 0 0; font-size: 14.5px; line-height: 1.55; color: var(--ink); }
+.dcard .deps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; font-size: 13px; color: var(--ink2); }
+.dcard .deps span { margin-right: 4px; }
+.dcard .deps b { color: var(--ink); }
+.dcard .deps button { font: 600 11.5px/1 var(--mono); color: var(--ink); background: rgba(var(--glass-rgb), 0.6); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 7px; cursor: pointer; }
+.dcard .deps button:hover { border-color: rgba(var(--ink-rgb), 0.4); }
 .activity { list-style: none; margin: 0; padding: 0; position: relative; }
 .activity::before { content: ""; position: absolute; left: 9px; top: 6px; bottom: 6px; width: 1px; background: var(--line2); }
 .activity li { position: relative; padding: 0 0 16px 32px; font-size: 14px; color: var(--ink2); animation: slidein 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }

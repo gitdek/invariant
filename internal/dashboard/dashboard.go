@@ -93,6 +93,13 @@ type sources struct {
 	// ran in it: gateRan, gateSkipped or gateRefused. A finished run never
 	// changes, so each is looked up once.
 	gates map[int64]string
+	// journal is decisions/journal's files, by name, as they were at
+	// journalAt, the commit they were last read at. graph is the last
+	// decision graph that built, and rebuild says the files changed since.
+	journal   map[string]journalFile
+	journalAt string
+	rebuild   bool
+	graph     *DecisionGraph
 }
 
 // Whether the gate job ran in a finished run (D-0081, D-0083).
@@ -110,6 +117,13 @@ type cachedComments struct {
 type mergeCheck struct {
 	sha   string
 	green bool
+}
+
+// journalFile is one of decisions/journal's files, and the blob it was read
+// from, which changes whenever the file does.
+type journalFile struct {
+	blob string
+	text []byte
 }
 
 type receiptSet struct {
@@ -310,6 +324,7 @@ type Decisions struct {
 	Status map[string]int `json:"status"`
 	Who    map[string]int `json:"who"`
 	Latest []Decision     `json:"latest"`
+	Graph  *DecisionGraph `json:"graph,omitempty"` // the journal's, once it's been read
 }
 
 // Totals are the big numbers. Projects that check the same model count
@@ -351,7 +366,7 @@ func (s *Server) Start(ctx context.Context) {
 	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
 	for _, r := range s.Repos {
 		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
-		r.src.gates = map[int64]string{}
+		r.src.gates, r.src.journal = map[int64]string{}, map[string]journalFile{}
 	}
 	s.pending = make(chan graphJob, 64)
 	s.loadSnapshot()
@@ -430,6 +445,9 @@ func (s *Server) refresh(ctx context.Context) error {
 		if i == 0 {
 			if err := s.readDocs(ctx, r); err != nil {
 				fail("docs", err)
+			}
+			if err := s.readJournal(ctx, r); err != nil {
+				fail("decision journal", err)
 			}
 		}
 		s.checkMerges(ctx, r)
@@ -690,6 +708,62 @@ func (s *Server) readDocs(ctx context.Context, r *Repo) error {
 	return nil
 }
 
+// readJournal reads decisions/journal at the branch's newest commit, once
+// for each commit: it lists the commit's tree, reads only the files whose
+// blob it hasn't read yet, and forgets removed ones. When any changed, it
+// builds the decision graph again, and until a build succeeds the page keeps
+// the last good one.
+func (s *Server) readJournal(ctx context.Context, r *Repo) error {
+	if len(r.src.commits) == 0 {
+		return errors.New("no commits read")
+	}
+	if sha := r.src.commits[0].SHA; sha != r.src.journalAt {
+		tree, err := r.GitHub.Tree(ctx, sha)
+		if err != nil {
+			return err
+		}
+		// Until every file is read, the cache may hold some of this commit's
+		// and some of the last one's, so it names neither.
+		r.src.journalAt = ""
+		at := map[string]bool{}
+		for _, e := range tree {
+			name, ok := strings.CutPrefix(e.Path, "decisions/journal/")
+			if !ok || e.Type != "blob" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".jsonl") {
+				continue
+			}
+			at[name] = true
+			if f, ok := r.src.journal[name]; ok && f.blob == e.SHA {
+				continue
+			}
+			b, err := r.GitHub.File(ctx, e.Path, sha)
+			if err != nil {
+				return fmt.Errorf("%s at %s: %w", e.Path, sha[:7], err)
+			}
+			r.src.journal[name], r.src.rebuild = journalFile{blob: e.SHA, text: b}, true
+		}
+		for name := range r.src.journal {
+			if !at[name] {
+				delete(r.src.journal, name)
+				r.src.rebuild = true
+			}
+		}
+		r.src.journalAt = sha
+	}
+	if !r.src.rebuild {
+		return nil
+	}
+	files := map[string][]byte{}
+	for name, f := range r.src.journal {
+		files[name] = f.text
+	}
+	g, err := BuildDecisionGraph(r.Short(), files)
+	if err != nil {
+		return err
+	}
+	r.src.graph, r.src.rebuild = g, false
+	return nil
+}
+
 func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, error) {
 	key := r.Name + "@" + sha + ":" + p
 	if b, ok := r.src.files[key]; ok {
@@ -897,7 +971,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	}
 
 	decisions := ParseLog(primary.src.log)
-	snap.Decisions = Decisions{Total: len(decisions), Status: map[string]int{}, Who: map[string]int{}, Latest: []Decision{}}
+	snap.Decisions = Decisions{Total: len(decisions), Status: map[string]int{}, Who: map[string]int{}, Latest: []Decision{}, Graph: primary.src.graph}
 	for i := len(decisions) - 1; i >= 0; i-- {
 		d := decisions[i]
 		snap.Decisions.Status[d.Status]++

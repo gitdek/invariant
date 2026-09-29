@@ -116,6 +116,7 @@
     if (changed("road", s.slices)) renderRoad(s.slices);
     if (changed("who", [s.who, s.decisions.status])) renderWho(s);
     if (changed("decisions", s.decisions)) renderDecisions(s.decisions);
+    if (changed("dgraph", s.decisions.graph || null)) dgraph.update(s.decisions.graph);
     if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
     if (live) renderLive();
     tick();
@@ -994,6 +995,134 @@
     document.querySelectorAll("#decisions .dlist li").forEach((li) => li.addEventListener("click", () => li.classList.toggle("open-text")));
   }
 
+  // ---------- the decision graph ----------
+  // Every decision in the journal on one spiral arm, the oldest at its center
+  // and the newest at its end, with every edge the journal records between
+  // two of them. Choosing one shows its words and who made the call, and
+  // lights up what rests on it, as `invariant decisions dependents` lists it.
+  const dgraph = {
+    box: $("#dgraph"), map: $("#dmap"), card: $("#dcard"),
+    g: null, byId: new Map(), pos: new Map(), known: new Set(), fresh: new Set(),
+    chosen: "", width: 0, shown: REDUCED,
+    init() {
+      new ResizeObserver(() => {
+        if (!this.g || this.map.clientWidth === this.width) return;
+        clearTimeout(this.rt);
+        this.rt = setTimeout(() => this.draw(), 120);
+      }).observe(this.map);
+      // The spiral unwinds, oldest first, the first time it's seen.
+      if (!this.shown) {
+        const io = new IntersectionObserver((es) => {
+          if (!es[0].isIntersecting || !this.g) return;
+          this.shown = true;
+          $("svg", this.map)?.classList.add("shown");
+          io.disconnect();
+        }, { threshold: 0.1 });
+        io.observe(this.map);
+      }
+      const pick = (el) => this.choose(el && el.dataset.id !== this.chosen ? el.dataset.id : "");
+      this.map.addEventListener("click", (e) => pick(e.target.closest(".dn")));
+      this.map.addEventListener("keydown", (e) => {
+        const el = e.target.closest(".dn");
+        if (!el || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        pick(el);
+      });
+      this.card.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-dg]");
+        if (b) this.choose(b.dataset.dg);
+      });
+    },
+    update(g) {
+      this.box.hidden = !g?.nodes?.length;
+      if (this.box.hidden) return;
+      // A decision that's new since the last graph arrives on its own.
+      this.fresh = new Set(this.known.size ? g.nodes.filter((n) => !this.known.has(n.id)).map((n) => n.id) : []);
+      g.nodes.forEach((n) => this.known.add(n.id));
+      this.g = g;
+      this.byId = new Map(g.nodes.map((n) => [n.id, n]));
+      this.draw();
+    },
+    draw() {
+      const g = this.g, N = g.nodes.length, f = (v) => v.toFixed(1);
+      const W = (this.width = this.map.clientWidth || 320);
+      // Decision k, from 1, sits s·k along an Archimedean spiral whose arms
+      // are s apart, so each is about s from the decisions just before and
+      // after it, and from its neighbors on the next arm.
+      const pad = 24, turns = Math.sqrt(N / Math.PI);
+      const s = Math.max(8, Math.min(64, (Math.min(W, 640) / 2 - pad) / turns));
+      const R = s * turns, H = Math.ceil(2 * (R + pad)), cx = W / 2, cy = H / 2, dense = s < 30;
+      const spot = (k) => {
+        const t = Math.sqrt(4 * Math.PI * k), r = s * Math.sqrt(k / Math.PI);
+        return [cx + r * Math.cos(t), cy + r * Math.sin(t)];
+      };
+      // What rests on a decision makes it a little bigger.
+      const rb = Math.max(3, Math.min(6.5, s * 0.15));
+      this.pos = new Map(g.nodes.map((n, i) => [n.id, [...spot(i + 1), rb * (1 + Math.min(0.7, Math.sqrt(n.dependents.length) * 0.12))]]));
+      let arm = "";
+      for (let k = 1; k <= N; k += 0.25) {
+        const [x, y] = spot(k);
+        arm += `${arm ? "L" : "M"}${f(x)} ${f(y)}`;
+      }
+      // An edge bends toward the center, the more the farther it reaches.
+      const curve = ([x1, y1], [x2, y2]) => {
+        const k = 1 - 0.5 * Math.min(1, Math.hypot(x2 - x1, y2 - y1) / (2 * R));
+        return `M${f(x1)} ${f(y1)}Q${f(cx + ((x1 + x2) / 2 - cx) * k)} ${f(cy + ((y1 + y2) / 2 - cy) * k)} ${f(x2)} ${f(y2)}`;
+      };
+      const edges = g.edges.filter((e) => e.from !== e.to && this.pos.has(e.from) && this.pos.has(e.to))
+        .sort((a, b) => (b.kind === "cites") - (a.kind === "cites"))
+        .map((e) => `<path class="de ${esc(e.kind)}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="${curve(this.pos.get(e.from), this.pos.get(e.to))}"><title>${esc(`${e.from} ${e.kind} ${e.to}`)}</title></path>`).join("");
+      const nodes = g.nodes.map((n, i) => {
+        const [x, y, r] = this.pos.get(n.id), q = r * 1.25;
+        const dot = n.door === "one-way" ? `<path class="dot" d="M0 ${f(-q)}L${f(q)} 0L0 ${f(q)}L${f(-q)} 0Z"/>` : `<circle class="dot" r="${f(r)}"/>`;
+        // Its number sits outward from the center.
+        const a = Math.atan2(y - cy, x - cx), ca = Math.cos(a), sa = Math.sin(a), d = r + 5;
+        const anchor = ca > 0.38 ? "start" : ca < -0.38 ? "end" : "middle";
+        const ly = sa * d + (anchor !== "middle" ? 3.5 : sa > 0 ? 8.5 : -1.5);
+        return `<g class="dn ${esc(n.status)}${this.fresh.has(n.id) ? " fresh" : ""}" data-id="${esc(n.id)}" transform="translate(${f(x)} ${f(y)})" style="--d:${Math.min(i * 8, 1200)}ms" tabindex="0" role="button" aria-pressed="false" aria-label="${esc(`${n.id}, ${n.status}: ${n.says}`)}">`
+          + `<title>${esc(`${n.id} · ${n.status} · ${n.says}`)}</title><circle class="hit" r="${f(Math.max(r + 4, Math.min(s / 2, 18)))}"/>${dot}`
+          + `<text class="lbl" x="${f(ca * d)}" y="${f(ly)}" text-anchor="${anchor}">${esc(n.id.replace(/^D-0*(?=\d)/, ""))}</text></g>`;
+      }).join("");
+      this.map.innerHTML = `<svg class="${this.shown ? "shown" : ""}${dense ? " dense" : ""}" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="group" aria-label="${esc(`The decision graph: ${N} decisions, the oldest at the center`)}">`
+        + `<path class="arm" d="${arm}"/><g class="edges">${edges}</g><g class="nodes">${nodes}</g><circle class="dhalo" r="0"/></svg>`;
+      this.fresh = new Set();
+      this.choose(this.chosen);
+    },
+    choose(id) {
+      const n = this.byId.get(id), svg = $("svg", this.map), lit = new Set(n ? n.dependents : []);
+      this.chosen = n ? id : "";
+      if (svg) {
+        svg.classList.toggle("choosing", !!n);
+        svg.querySelectorAll(".dn").forEach((el) => {
+          el.classList.toggle("chosen", el.dataset.id === this.chosen);
+          el.classList.toggle("lit", lit.has(el.dataset.id));
+          el.setAttribute("aria-pressed", String(el.dataset.id === this.chosen));
+        });
+        svg.querySelectorAll(".de").forEach((el) => el.classList.toggle("lit", lit.has(el.dataset.from) && (el.dataset.to === this.chosen || lit.has(el.dataset.to))));
+        const halo = $(".dhalo", svg), p = this.pos.get(this.chosen);
+        halo.classList.toggle("on", !!p);
+        if (p) {
+          halo.setAttribute("cx", p[0].toFixed(1));
+          halo.setAttribute("cy", p[1].toFixed(1));
+          halo.setAttribute("r", (p[2] + 5).toFixed(1));
+        }
+      }
+      this.say(n);
+    },
+    say(n) {
+      if (!n) {
+        this.card.innerHTML = `<p class="hint">Choose a decision to read it, see who made the call, and light up what rests on it.</p>`;
+        return;
+      }
+      const doors = { "one-way": "◆ one-way", "two-way": "◇ two-way" };
+      const deps = n.dependents, who = n.who === "agent" ? "an agent" : n.who;
+      const rests = deps.length ? `<b>${deps.length}</b> ${deps.length === 1 ? "decision rests" : "decisions rest"} on it:` : "Nothing in the journal rests on it yet.";
+      this.card.innerHTML = `<div class="top"><span class="id">${esc(n.id)}</span><span class="ds ${esc(n.status)}">${esc(n.status)}</span><span>${esc(doors[n.door] || n.door)}</span><span>${esc(n.date)}</span>${who ? `<span>made by <b>${esc(who)}</b></span>` : ""}</div>
+        <p class="txt">${esc(n.text)}</p>
+        <div class="deps"><span>${rests}</span>${deps.map((d) => `<button type="button" data-dg="${esc(d)}">${esc(d)}</button>`).join("")}</div>`;
+    },
+  };
+
   // ---------- activity ----------
   const known = new Set();
   function renderActivity(items) {
@@ -1672,6 +1801,7 @@
   new ResizeObserver(() => liveTick(false)).observe($("#live-strip"));
 
   cosmos.init();
+  dgraph.init();
   load();
   loadLive();
   setInterval(tick, 1000);

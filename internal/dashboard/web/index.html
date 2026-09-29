@@ -171,6 +171,13 @@
       <h2>Decisions</h2>
       <p class="lede">A decision that isn't written down didn't happen. These are the newest in the log.</p>
       <div id="decisions"></div>
+      <div class="dgraph" id="dgraph" hidden>
+        <h3>What rests on what</h3>
+        <p class="lede">Every decision in the journal, on a spiral from the oldest, at its center, to the newest. Choose one to read it and light up what rests on it. Only the journal is read, so what records, docs and code cite isn't drawn.</p>
+        <div class="dkey"><span><i class="ratified"></i>ratified</span><span><i class="proposed"></i>proposed</span><span><i></i>decided</span><span><i class="superseded"></i>superseded</span><span><i class="oneway"></i>one-way door</span><span><i class="edge"></i>refines, supersedes</span><span><i class="edge reopens"></i>reopens</span><span><i class="edge cites"></i>cites</span></div>
+        <div class="dmap" id="dmap"></div>
+        <div class="dcard" id="dcard" aria-live="polite"></div>
+      </div>
     </div>
     <div>
       <h2>Activity</h2>
