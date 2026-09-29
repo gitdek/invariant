@@ -163,6 +163,7 @@ type Snapshot struct {
 	Decisions   Decisions      `json:"decisions"`
 	Slices      []Slice        `json:"slices"`
 	Totals      Totals         `json:"totals"`
+	Tiles       []Tile         `json:"tiles"` // the numbers row, from Totals
 	Who         Who            `json:"who"`
 	Activity    []Event        `json:"activity"`
 	Stale       []string       `json:"stale,omitempty"` // sources that couldn't be read this time
@@ -179,6 +180,7 @@ type RepoState struct {
 	Projects int     `json:"projects"`
 	Lease    *Lease  `json:"lease,omitempty"` // which watcher may act (D-0069)
 	Totals   Totals  `json:"totals"`          // the big numbers for this repository alone
+	Tiles    []Tile  `json:"tiles"`           // its numbers row, from its own totals
 }
 
 // Lease is a repository's lease as its ref says: the one watcher that may
@@ -1016,6 +1018,13 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	sort.SliceStable(snap.Activity, func(i, j int) bool { return snap.Activity[i].At.After(snap.Activity[j].At) })
 	if len(snap.Activity) > 40 {
 		snap.Activity = snap.Activity[:40]
+	}
+
+	// The numbers row, for everything and for each repository from its own
+	// totals, which the page shows when that repository is chosen (#152).
+	snap.Tiles = Tiles(snap.Totals, snap.Who)
+	for i := range snap.Repos {
+		snap.Repos[i].Tiles = Tiles(snap.Repos[i].Totals, snap.Who)
 	}
 	return snap
 }
