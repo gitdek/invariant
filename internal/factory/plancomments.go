@@ -64,8 +64,12 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 	if len(trusted) > 0 {
 		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on it, a person merges it.", codeList(trusted))
 	}
-	return post("pull request", fmt.Sprintf("The change is built: gofmt, go vet, the tests of every package it touches and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
-		res.Tests, pr.Number, merge), m)
+	body := fmt.Sprintf("The change is built: gofmt, go vet, the tests of every package it touches and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
+		res.Tests, pr.Number, merge)
+	if res.Fallback != nil {
+		body += "\n\n" + fellBack(res.Fallback)
+	}
+	return post("pull request", body, m)
 }
 
 // retriedComment answers a writer's retry of a pull request that failed. It
@@ -91,6 +95,9 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 		if account := strings.TrimSpace(res.Usage.Summary); account != "" {
 			b.WriteString("\n\nThe agent's own account, which nothing checks:\n\n" + quote(clip(account, accountLimit), 120))
 		}
+	}
+	if res != nil && res.Fallback != nil {
+		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
 	if pr != nil {
 		fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
@@ -120,6 +127,9 @@ func planPullRequestBody(t Thread, m Marker, res *plumbing.BuildResult, trusted 
 	}
 	if len(trusted) > 0 {
 		fmt.Fprintf(&b, "- **Trusted base:** it changes %s, so a person merges it\n", codeList(trusted))
+	}
+	if res.Fallback != nil {
+		b.WriteString("\n" + fellBack(res.Fallback) + "\n")
 	}
 	fmt.Fprintf(&b, "\n**The factory's own run:** %s", res.Summary)
 	if res.Review != "" {

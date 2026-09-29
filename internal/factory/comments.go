@@ -299,9 +299,21 @@ func ratifiedComment(by, dir, branch, hash string, statements int, m Marker) str
 		by, statements, dir, branch, short(hash)), m)
 }
 
-func prComment(pr github.PullRequest, r *verify.Report, m Marker) string {
-	return post("pull request", fmt.Sprintf("The code is written, and it passed the gate here: it's **%s**. "+
-		"I opened #%d, and I'll merge it once CI's `invariant/gate` passes on it.", r.Claim(), pr.Number), m)
+func prComment(pr github.PullRequest, res *synth.Result, m Marker) string {
+	body := fmt.Sprintf("The code is written, and it passed the gate here: it's **%s**. "+
+		"I opened #%d, and I'll merge it once CI's `invariant/gate` passes on it.", res.Final.Claim(), pr.Number)
+	if res.Fallback != nil {
+		body += "\n\n" + fellBack(res.Fallback)
+	}
+	return post("pull request", body, m)
+}
+
+// fellBack says a build ran its agent once more, at a fallback effort,
+// because the loop guard stopped its first run (D-0125), and quotes that
+// run's error.
+func fellBack(fb *synth.Fallback) string {
+	return fmt.Sprintf("The loop guard stopped the agent's first run, so the build ran it once more, at `%s` effort (D-0125). The first run's error:\n\n%s",
+		fb.Effort, quote(fb.Why, 20))
 }
 
 func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error, m Marker) string {
@@ -320,6 +332,9 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		if account := strings.TrimSpace(res.Usage.Summary); account != "" {
 			b.WriteString("\n\nThe agent's own account, which the gate doesn't check:\n\n" + quote(clip(account, accountLimit), 120))
 		}
+	}
+	if res != nil && res.Fallback != nil {
+		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
 	b.WriteString("\n\nA person needs to look at this.")
 	return post("needs a person", b.String(), m)
@@ -373,6 +388,18 @@ func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) stri
 		pr.Number, strings.Join(problems, "\n- ")), m)
 }
 
+// mergeRefusedComment says GitHub refused to merge a pull request whose gate
+// passed, or to mark it ready for review when it was a draft, quoting what
+// GitHub said, and how to go on (#145).
+func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Marker) string {
+	what := "GitHub refused to merge it"
+	if unready {
+		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
+	}
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s\n\n"+
+		"A person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.", pr.Number, what, quote(answer.Error(), 20)), m)
+}
+
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
 	body := fmt.Sprintf("CI's `invariant/gate` passed on #%d ([run](%s)), and I merged it as %s.", pr.Number, run.URL, sha)
 	if r.Numbers != nil {
@@ -407,6 +434,9 @@ func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.
 		fmt.Fprintf(&b, "- **Synthesis:** %s, %d turns, %s\n", res.Usage.Backend, res.Usage.Turns, gate)
 		if len(res.Tampered) > 0 {
 			fmt.Fprintf(&b, "- **Discarded:** the agent edited protected files (%s), and its edits were thrown away\n", strings.Join(res.Tampered, ", "))
+		}
+		if res.Fallback != nil {
+			b.WriteString("\n" + fellBack(res.Fallback) + "\n")
 		}
 	}
 	if res != nil && res.Final != nil {

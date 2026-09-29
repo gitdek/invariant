@@ -51,6 +51,9 @@ type GitHub interface {
 	// one GitHub never started.
 	Job(ctx context.Context, id int64) (github.Job, error)
 	Merge(ctx context.Context, n int, sha, method string) (string, error)
+	// MarkReady marks a draft pull request ready for review, since GitHub
+	// won't merge a draft (#145).
+	MarkReady(ctx context.Context, n int) error
 	DeleteBranch(ctx context.Context, branch string) error
 }
 
@@ -1529,6 +1532,10 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}); err != nil {
 			return err
 		}
+	} else if res.Final.Passed {
+		if err := f.markReady(ctx, n, pr); err != nil {
+			return err
+		}
 	}
 	next.PR = pr.Number
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
@@ -1542,7 +1549,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
-	return f.say(ctx, n, prComment(pr, res.Final, next), LabelPR)
+	return f.say(ctx, n, prComment(pr, res, next), LabelPR)
 }
 
 // removeOwned deletes the files in a project that the agent owns, before
@@ -1604,10 +1611,13 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	switch {
 	case pr.Merged:
 		// A merge the factory recorded, at this head, is the factory's: it
-		// stopped after merging and before it said so (D-0069).
+		// stopped after merging and before it said so (D-0069). Only while
+		// its latest post is the pull request's, though: the record of an
+		// attempt GitHub refused stays, and a person may merge after that
+		// (#145).
 		if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
 			return err
-		} else if ok && at.head == pr.Head.SHA {
+		} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR {
 			runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
 			if err != nil {
 				return err
@@ -1727,9 +1737,17 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if err := f.recordMerge(ctx, n, pr.Number, at); err != nil && !errors.Is(err, ErrRecorded) {
 		return err
 	}
+	// GitHub won't merge a draft, such as a failed build's that a writer
+	// retried, so the factory marks it ready for review first, and merges it
+	// only if GitHub did (#145).
+	if pr.Draft {
+		if err := f.GitHub.MarkReady(ctx, pr.Number); err != nil {
+			return f.refusedMerge(ctx, t, state, pr, at, true, err, next)
+		}
+	}
 	sha, err := f.GitHub.Merge(ctx, pr.Number, pr.Head.SHA, "merge")
 	if err != nil {
-		return err
+		return f.refusedMerge(ctx, t, state, pr, at, false, err, next)
 	}
 	f.logf("#%d: merged #%d as %s", n, pr.Number, sha)
 	if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
@@ -1749,6 +1767,54 @@ func (f *Factory) saidMerged(ctx context.Context, t Thread, pr github.PullReques
 	numbers := NumbersOf(t, f.now())
 	next.Numbers = &numbers
 	return f.say(ctx, n, mergedComment(pr, run, sha, &next), LabelMerged)
+}
+
+// refusedMerge says once, on the issue, that GitHub refused to merge the
+// pull request, or, when unready, to mark its draft ready for review, and
+// quotes GitHub's answer (#145). Nothing is tried again until a writer's
+// retry has the factory watch the pull request again. The protocol sees a
+// pull request the factory can't merge, as it sees a change to the trusted
+// base (D-0105), and the recovery core sees one GitHub can't merge. A lost
+// lease or an ended context isn't GitHub's answer, and is returned instead.
+func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, unready bool, answer error, next Marker) error {
+	if !refused(ctx, answer) {
+		return answer
+	}
+	n := t.Issue.Number
+	f.logf("#%d: GitHub refused the merge of #%d: %v", n, pr.Number, answer)
+	at.scopeMany = true
+	from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
+	to.failure = FailMerge
+	if err := f.allowed(ctx, n, fmt.Sprintf("say GitHub refused the merge of #%d", pr.Number), from, to); err != nil {
+		return err
+	}
+	if err := f.recovers(ctx, n, "say GitHub refused the merge", f.canPost(merging(false, false), recovery.Merge)); err != nil {
+		return err
+	}
+	next.Kind, next.Failure = KindFailed, FailMerge
+	return f.say(ctx, n, mergeRefusedComment(pr, unready, answer, next), LabelHumanReview)
+}
+
+// refused says whether err is GitHub's answer to a request, rather than this
+// watcher losing its lease, or its context ending, before GitHub answered.
+func refused(ctx context.Context, err error) bool {
+	return !errors.Is(err, errLeaseLost) && ctx.Err() == nil
+}
+
+// markReady marks a draft ready for review when a build that passed finds it
+// open from its branch, opened without the build's result, before the build
+// says the pull request is open (#145). A refusal is logged, and the build
+// goes on, since the merge marks it ready again.
+func (f *Factory) markReady(ctx context.Context, n int, pr github.PullRequest) error {
+	if !pr.Draft {
+		return nil
+	}
+	err := f.GitHub.MarkReady(ctx, pr.Number)
+	if err != nil && refused(ctx, err) {
+		f.logf("#%d: GitHub refused to mark draft #%d ready for review: %v", n, pr.Number, err)
+		return nil
+	}
+	return err
 }
 
 // mergeRecordJSON is a pull request as the protocol saw it just before the

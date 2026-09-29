@@ -66,7 +66,10 @@ jobs:
       # gate runs and fails on the same check (D-0096).
       - name: Check the decision graph
         env:
-          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          # On a pull request, the base the test merge was made from, its first
+          # parent: main as the job fetches it may have gained decisions since
+          # (#159). On a push, the commit before it.
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
         run: |
           base=""
           if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
@@ -103,7 +106,10 @@ jobs:
 
       - name: Check the decision graph
         env:
-          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          # On a pull request, the base the test merge was made from, its first
+          # parent: main as the job fetches it may have gained decisions since
+          # (#159). On a push, the commit before it.
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
         run: |
           base=""
           if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
