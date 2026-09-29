@@ -72,16 +72,17 @@ jobs:
           if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
           go run ./cmd/invariant decisions check $base
 
-  gate:
-    # The check the factory merges its pull requests on (D-0004, D-0033).
-    name: invariant/gate
+  verify:
+    # Everything but the gate's own tests. invariant/gate, below, is the
+    # check the factory merges on, and it passes when this does.
+    name: invariant/verify
     needs: changes
     # Skipped only when the step above says the change is docs alone. If that
     # step fails, the gate runs.
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
-    # Verifying every project takes about 20 minutes since slice 11, and the
-    # gate's own tests about 8 more on a pull request (D-0100).
+    # Verifying every project takes about 13 minutes, three at a time and
+    # the heaviest first (D-0100, D-0118).
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -205,9 +206,55 @@ jobs:
           path: out
           if-no-files-found: ignore
 
-      # The gate's own tests, on a pull request that can change the gate. A
-      # factory pull request can't, and main gets only what a pull request
-      # already ran them on (D-0079).
+  integration:
+    # The gate's own tests, on a pull request that can change the gate, on a
+    # runner of their own, so they run alongside the projects' verification
+    # instead of after it. A factory pull request can't change the gate, and
+    # main gets only what a pull request already ran them on (D-0079).
+    name: invariant/integration
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # A factory pull request that adds its issue's ratified plan builds
+      # plumbing, which can change the gate itself (D-0105).
+      - name: What the factory built
+        id: kind
+        if: startsWith(github.head_ref, 'invariant/')
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          if git diff --name-only --no-renames "origin/$BASE...HEAD" | grep -Eq '^\.invariant/plans/issue-[0-9]+\.json$'; then
+            echo "plumbing=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Show the gate rejects gaming, and synthesis can't touch the lock
-        if: github.event_name == 'pull_request' && (!startsWith(github.head_ref, 'invariant/') || steps.kind.outputs.plumbing == 'true')
+        if: ${{ !startsWith(github.head_ref, 'invariant/') || steps.kind.outputs.plumbing == 'true' }}
         run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/ ./internal/conformance/ ./internal/plumbing/
+
+  gate:
+    # The check the factory merges its pull requests on (D-0004, D-0033). It
+    # passes when the projects' verification did, and the gate's own tests
+    # did or had nothing to run. Skipped only when the change is docs alone.
+    name: invariant/gate
+    needs: [changes, verify, integration]
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verification and the gate's own tests
+        env:
+          VERIFY: ${{ needs.verify.result }}
+          INTEGRATION: ${{ needs.integration.result }}
+        run: |
+          echo "Verification: $VERIFY. The gate's own tests: $INTEGRATION."
+          [ "$VERIFY" = success ] && { [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ]; }
