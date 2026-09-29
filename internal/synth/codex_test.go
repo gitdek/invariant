@@ -94,7 +94,7 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	args := strings.Split(strings.TrimSpace(standInFile(t, dir, "args")), "\n")
 	for _, want := range [][]string{
 		{"exec", "--json"}, {"--ignore-user-config"}, {"--ephemeral"}, {"--skip-git-repo-check"},
-		{"--disable", "apps"}, {"--disable", "plugins"}, {"-C", ws}, {"-m", "gpt-stand-in"},
+		{"--disable", "apps"}, {"--disable", "plugins"}, {"-c", `web_search="disabled"`}, {"-C", ws}, {"-m", "gpt-stand-in"},
 		{"-c", `shell_environment_policy.inherit="core"`},
 		// Its commands run under Codex's own permission profile: the
 		// workspace, the system's own files and the toolchains, and nothing
