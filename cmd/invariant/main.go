@@ -232,6 +232,7 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("synthesize", flag.ExitOnError)
 	out := fs.String("out", "out/synthesis", "where the result, its receipt and the logs go")
 	model := fs.String("model", "opus", "the model the agent uses")
+	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
 	budget := fs.Float64("budget", 5, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
 	turns := fs.Int("max-turns", 80, "cap on the agent's turns")
 	runs := fs.Int("gate-runs", 4, "the most gate runs the agent gets: one attempt and three repairs")
@@ -239,6 +240,10 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	claude := fs.String("claude", "claude", "the Claude Code CLI")
 	draft := fs.Bool("draft", false, "start from the module's drafted model instead of a skeleton of the pinned definitions")
 	fs.Parse(args)
+	if !validEffort(*effort) {
+		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
 	if fs.NArg() != 1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -255,7 +260,7 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	}
 	r, err := synth.Synthesize(ctx, synth.Options{
 		Project: fs.Arg(0), Out: *out, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc, KeepModel: *draft,
-		Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
+		Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
 	})
 	if r != nil && r.Final != nil {
 		md := receipt.Markdown(r.Final)
@@ -514,12 +519,17 @@ func formalizeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("formalize", flag.ExitOnError)
 	out := fs.String("out", "out/formalize", "where the draft, the transcript and the check log go")
 	model := fs.String("model", "opus", "the model the agent uses")
+	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
 	budget := fs.Float64("budget", 3, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
 	turns := fs.Int("max-turns", 60, "cap on the agent's turns")
 	checks := fs.Int("checks", 4, "the most model checks the agent gets")
 	timeout := fs.Duration("timeout", 25*time.Minute, "wall-clock cap on the agent's run")
 	claude := fs.String("claude", "claude", "the Claude Code CLI")
 	fs.Parse(args)
+	if !validEffort(*effort) {
+		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
 	if fs.NArg() != 1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -541,7 +551,7 @@ func formalizeCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	f := formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
+	f := formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
 		Binary: self, CheckRuns: *checks, Timeout: *timeout, Toolchain: tc}
 	r, err := f.Formalize(ctx, req, *out)
 	if err != nil {
@@ -583,6 +593,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	cache, _ := os.UserCacheDir()
 	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "where the clone, transcripts and logs go")
 	model := fs.String("model", "opus", "the model the agents use")
+	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
 	fbudget := fs.Float64("formalize-budget", 3, "cap on a formalization's estimated cost, in USD")
 	budget := fs.Float64("budget", 5, "cap on a synthesis's estimated cost, in USD")
 	turns := fs.Int("max-turns", 80, "cap on an agent's turns")
@@ -594,6 +605,10 @@ func watchCmd(ctx context.Context, args []string) int {
 	appKey := fs.String("app-key", filepath.Join(home, ".config", "invariant", "factory.pem"), "the App's private key")
 	leaseFor := fs.Duration("lease", 5*time.Minute, "how long the watcher's lease on the repository lasts, renewed every poll: over 2m and at least three polls; 0 watches without one")
 	fs.Parse(args)
+	if !validEffort(*effort) {
+		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
 	if *repo == "" || fs.NArg() != 0 || formalize.Languages[*language] == "" || (*leaseFor > 0 && (*leaseFor < 3*(*every) || *leaseFor <= 2*time.Minute)) {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -649,14 +664,14 @@ func watchCmd(ctx context.Context, args []string) int {
 	f := &factory.Factory{
 		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate", Language: *language, Self: bot,
 		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
-		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns},
+		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns, Effort: *effort},
 			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
-		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
+		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
 			Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc}},
 		// A plumbing issue's plan is built with tests, not proofs, and a
 		// second agent reviews it (D-0105).
-		Plumbing: plumbing.Builder{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns},
-			Reviewer: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns},
+		Plumbing: plumbing.Builder{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
+			Reviewer: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns, Effort: *effort},
 			Binary:   self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb},
 		Holder: factory.NewHolder(), LeaseFor: *leaseFor,
 	}
@@ -994,4 +1009,13 @@ func clock(secs int) string {
 		return fmt.Sprintf("%dh%02dm", secs/3600, secs%3600/60)
 	}
 	return fmt.Sprintf("%dm%02ds", secs/60, secs%60)
+}
+
+// validEffort says whether e is an effort Claude Code takes.
+func validEffort(e string) bool {
+	switch e {
+	case "low", "medium", "high", "xhigh", "max":
+		return true
+	}
+	return false
 }
