@@ -1,0 +1,159 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-29T01:28:49Z",
+    "issue": 94,
+    "comment": "https://github.com/gitdek/invariant/issues/94#issuecomment-5881897708",
+    "proposal": "sha256:577e61c323a55d0b635065f0293706aeaba47c88d0c3e50c8b922e655d5e40d1"
+  },
+  "bounds": {
+    "MaxCrashes": "2",
+    "N": "3",
+    "NoOne": "NoOne",
+    "People": "{p1, p2}",
+    "Watchers": "{w1, w2}"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "The plan starts unratified with no issues opened, and every step is one of the model's steps.",
+      "sha256": "sha256:20c2bd4f465a920a5028ec0978e39680e64625e8c6d87727cfa727f18b09ecb4"
+    },
+    {
+      "name": "OpenedAtMostOnce",
+      "kind": "invariant",
+      "says": "Each of the plan's issues is created on GitHub at most once, however the factory crashes and restarts.",
+      "sha256": "sha256:86ba3ea1287a805d2d19f498e7a5f69fbb60e4721dbbae7bf63af78fd792c11b"
+    },
+    {
+      "name": "NoneOpenedAfterStop",
+      "kind": "invariant",
+      "says": "No issue is opened after the plan is stopped.",
+      "sha256": "sha256:12aa5f1c9ac2ac86fc5b0e144f867a9d28db787e5d2cc0cef331c7fe0123d618"
+    },
+    {
+      "name": "SolvedOnRatifierAuthority",
+      "kind": "invariant",
+      "says": "Every issue the plan opens is solved on the authority of the person who ratified the plan, and no one else's.",
+      "sha256": "sha256:f86bcf9b411b2ffb3e685ed6049b6067d1248662278b2046634bddc7915bf983"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "The plan's ratifier, stop, opened issues, records, done post, lease holder and crash count always have their expected types.",
+      "sha256": "sha256:c710f8d26ad4bbc6d11729a8b42b1ce43707ac586bc8b1f184f2b0bd077078ca"
+    },
+    {
+      "name": "OpenedOnlyWhenRatified",
+      "kind": "invariant",
+      "says": "No issue is opened before the plan is ratified.",
+      "sha256": "sha256:be6da1cbbbbcbf9b45a54a8921b757742a9699a66e9b00cb3ce854ebbcd181d0"
+    },
+    {
+      "name": "OnlyPlannedIssues",
+      "kind": "invariant",
+      "says": "Every issue the factory opens is one of the ratified plan's issues.",
+      "sha256": "sha256:5c3f5588c8d1200ccd5d8a023129d7a1423a86515080062b2f9aa79f2aa7a6f1"
+    },
+    {
+      "name": "InOrderAfterMerge",
+      "kind": "invariant",
+      "says": "Issues open in the plan's order, and each opens only after every issue before it in the plan has been opened and merged.",
+      "sha256": "sha256:7825c890e0b4ff18eabbe4a47fbd018b21e667c66064884d616a2051846460fb"
+    },
+    {
+      "name": "AtMostOneOpen",
+      "kind": "invariant",
+      "says": "At most one of the plan's issues is open (not yet merged) at a time.",
+      "sha256": "sha256:1f0dd222cff90e48e20c677f89d22e161189c0f753b45cbd531abae0e8618056"
+    },
+    {
+      "name": "RecordsAreReal",
+      "kind": "invariant",
+      "says": "The plan's issue only records issues that were actually created.",
+      "sha256": "sha256:bf34d819035d83bd4a65d249b64d2bd13d70859985910d5592e7ca1bbceff127"
+    },
+    {
+      "name": "DoneOnlyWhenAllMerged",
+      "kind": "invariant",
+      "says": "The factory says the plan is done only once every one of its issues has merged.",
+      "sha256": "sha256:d754d1fbec52994c9bf844ad5924b31a4de50f8eacfa346a3352687cc917e9d1"
+    },
+    {
+      "name": "PlanDone",
+      "kind": "witness",
+      "says": "A plan can run to the end, with every issue opened, recorded and merged, and the plan said done.",
+      "sha256": "sha256:e07cbbe0a5f3947a229b2e19c3c54ee145e04689000f67fc05695717ca0d4eba"
+    },
+    {
+      "name": "IssueFailed",
+      "kind": "witness",
+      "says": "One of the plan's issues can fail and hold the plan up.",
+      "sha256": "sha256:c5ff668f9ca3a99b8ceac491e932200d29d003b1ace7ed1912b3631966ee2691"
+    },
+    {
+      "name": "StoppedWithIssueOpen",
+      "kind": "witness",
+      "says": "A person can stop the plan while one of its issues is still open.",
+      "sha256": "sha256:fe83b7abd5e0d93d324895f96e78b8f3300862d54e4d28ff8a8f9ef8dc951aeb"
+    },
+    {
+      "name": "FinishedAfterCrashes",
+      "kind": "witness",
+      "says": "A plan can still finish after the factory has crashed and another watcher took over.",
+      "sha256": "sha256:2498438aa5842d9c2309016e974d3709b93ce740fc126c491a32c50ad3e89f4a"
+    },
+    {
+      "name": "PlanFinishes",
+      "kind": "property",
+      "says": "As long as every opened issue eventually merges and a watcher keeps running once crashes stop, a ratified plan eventually finishes unless a person stops it.",
+      "sha256": "sha256:6959c2695c8fa254b767345f0ac23e8695204abee12f11e983bfb37ec8f463cc"
+    },
+    {
+      "name": "AcquireFair",
+      "kind": "fairness",
+      "says": "When no watcher holds the lease, a watcher eventually takes it.",
+      "sha256": "sha256:c344357a1533f02250e72ef75de9b00a3e7484e0b22b89f1889e3694fe68c216"
+    },
+    {
+      "name": "CreateFair",
+      "kind": "fairness",
+      "says": "A watcher holding the lease that can create the next issue eventually does.",
+      "sha256": "sha256:f659228d1c310ee4b8c56f386ba2020dddb0263c9e1abbe74f85b32178f95a44"
+    },
+    {
+      "name": "RecordFair",
+      "kind": "fairness",
+      "says": "A watcher holding the lease eventually records each created issue on the plan's issue.",
+      "sha256": "sha256:fb9e83544810d47268405aafd2d03197f47e0846cca5b7fc33ad2bf598408e85"
+    },
+    {
+      "name": "FinishFair",
+      "kind": "fairness",
+      "says": "A watcher holding the lease eventually says the plan is done once every issue has merged.",
+      "sha256": "sha256:4e8133e598207c3275e484459f673ce3bc6dec792a777729f56b8a0bcd9e8d17"
+    },
+    {
+      "name": "CreateUnlessRecorded",
+      "kind": "bug",
+      "says": "The factory trusts the plan's issue instead of GitHub, and creates the next issue again after a crash between creating and recording it.",
+      "expect": "OpenedAtMostOnce",
+      "sha256": "sha256:0d03eb61d4756855aa8ff7b73aa51113a7278255f228aa6a95724396e092f775"
+    },
+    {
+      "name": "CreateIgnoringStop",
+      "kind": "bug",
+      "says": "The factory opens the next issue without checking whether the plan was stopped.",
+      "expect": "NoneOpenedAfterStop",
+      "sha256": "sha256:f5c5309b37acac7760d33240d5e4bc6f2995a351b2fc6401f4bc934b292f3bc2"
+    },
+    {
+      "name": "CreateAsSomeoneElse",
+      "kind": "bug",
+      "says": "The factory opens an issue on the authority of someone other than the ratifier.",
+      "expect": "SolvedOnRatifierAuthority",
+      "sha256": "sha256:81a82bb57393e614f691e91834b6f42b9c2468a893242d6c461211bb948deaee"
+    }
+  ]
+}
