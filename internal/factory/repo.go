@@ -77,6 +77,35 @@ func (c Clone) RemoveWorktree(ctx context.Context, dir string) error {
 	return err
 }
 
+// ClearWorktrees force-removes every worktree registered in the clone but
+// the clone itself, the first one git lists, whether or not its directory
+// is still there, then runs git worktree prune. A watcher that stopped
+// mid-build leaves its worktrees behind, each holding its branch.
+func (c Clone) ClearWorktrees(ctx context.Context) error {
+	out, err := c.git(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	var dirs []string
+	for _, line := range strings.Split(out, "\n") {
+		if dir, ok := strings.CutPrefix(line, "worktree "); ok {
+			dirs = append(dirs, dir)
+		}
+	}
+	for i, dir := range dirs {
+		if i == 0 {
+			continue // the clone itself
+		}
+		// git keeps a worktree locked until it's checked out, so one that a
+		// watcher stopped while adding it takes a second --force.
+		if _, err := c.git(ctx, "worktree", "remove", "--force", "--force", dir); err != nil {
+			return err
+		}
+	}
+	_, err = c.git(ctx, "worktree", "prune")
+	return err
+}
+
 // Commit commits everything under dir, and nothing outside it, as the
 // factory's author.
 func (c Clone) Commit(ctx context.Context, worktree, dir, message string) (string, error) {
