@@ -354,6 +354,7 @@ func (s *Server) Start(ctx context.Context) {
 		r.src.gates = map[int64]string{}
 	}
 	s.pending = make(chan graphJob, 64)
+	s.loadSnapshot()
 	go s.drawGraphs(ctx)
 	go func() {
 		for {
@@ -452,7 +453,56 @@ func (s *Server) refresh(ctx context.Context) error {
 	s.mu.Lock()
 	s.state, s.issues = gz, snap.Issues
 	s.mu.Unlock()
+	s.saveSnapshot(gz)
 	return nil
+}
+
+// snapshotFile is where the last snapshot is kept between runs, so a
+// dashboard that restarts serves it at once, while it reads GitHub again.
+// The page says how old it is.
+func (s *Server) snapshotFile() string { return filepath.Join(s.Cache, "state.json.gz") }
+
+func (s *Server) saveSnapshot(gz []byte) {
+	if s.Cache == "" {
+		return
+	}
+	tmp := s.snapshotFile() + ".tmp"
+	if err := os.MkdirAll(s.Cache, 0o755); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+		return
+	}
+	if err := os.WriteFile(tmp, gz, 0o644); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.snapshotFile()); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+	}
+}
+
+// loadSnapshot serves the last run's snapshot until the first read of
+// GitHub replaces it, if it's for the same repository.
+func (s *Server) loadSnapshot() {
+	if s.Cache == "" || len(s.Repos) == 0 {
+		return
+	}
+	gz, err := os.ReadFile(s.snapshotFile())
+	if err != nil {
+		return
+	}
+	js, err := gunzip(gz)
+	if err != nil {
+		return
+	}
+	var snap Snapshot
+	if json.Unmarshal(js, &snap) != nil || snap.Repo != s.Repos[0].Name {
+		return
+	}
+	s.mu.Lock()
+	if s.state == nil {
+		s.state, s.issues = gz, snap.Issues
+	}
+	s.mu.Unlock()
 }
 
 // readReceipts takes the receipts from the newest gate run on the branch

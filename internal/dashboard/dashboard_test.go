@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -533,5 +534,31 @@ func TestAGateThatDidntRunIsNeverAPass(t *testing.T) {
 	run.Conclusion = "timed_out"
 	if got := runWords(run, gateRan); got != "timed out" {
 		t.Errorf("runWords = %q", got)
+	}
+}
+
+// A dashboard that restarts serves the last snapshot it kept at once, until
+// its first read of GitHub replaces it, and only for the same repository.
+func TestARestartServesTheLastSnapshot(t *testing.T) {
+	cache := t.TempDir()
+	js, err := json.Marshal(Snapshot{Repo: "gitdek/app", Issues: []Issue{{Number: 7, Title: "a buffer"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzipped(js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(&Server{Cache: cache}).saveSnapshot(gz)
+
+	s := &Server{Cache: cache, Repos: []*Repo{{Name: "gitdek/app"}}}
+	s.loadSnapshot()
+	if !bytes.Equal(s.state, gz) || len(s.issues) != 1 || s.issues[0].Number != 7 {
+		t.Errorf("a restarted dashboard serves %d bytes and issues %+v, want the kept snapshot", len(s.state), s.issues)
+	}
+	other := &Server{Cache: cache, Repos: []*Repo{{Name: "gitdek/other"}}}
+	other.loadSnapshot()
+	if other.state != nil {
+		t.Error("a dashboard for another repository served the kept snapshot")
 	}
 }
