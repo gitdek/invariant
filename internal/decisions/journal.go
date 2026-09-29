@@ -281,6 +281,26 @@ func highest(repo Repo) (int, error) {
 	return top, nil
 }
 
+// heldIDs are the numbers of the project's own decisions whose journal files
+// a checkout holds.
+func heldIDs(repo Repo) ([]int, error) {
+	entries, err := os.ReadDir(repo.JournalDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var held []int
+	for _, e := range entries {
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		if m := idPattern.FindStringSubmatch(id); m != nil && m[1] == "" && number(id) > 0 {
+			held = append(held, number(id))
+		}
+	}
+	return held, nil
+}
+
 // Journals reads every decision's journal in a repository, in the order of
 // their IDs.
 func Journals(repo Repo) (map[string][]Event, []string, error) {

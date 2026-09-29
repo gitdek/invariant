@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
+	idcore "github.com/gitdek/invariant/factory/ids/ids"
 	_ "modernc.org/sqlite" // a pure-Go SQLite, so Invariant needs no cgo (D-0096)
 )
 
@@ -54,6 +56,18 @@ CREATE TRIGGER IF NOT EXISTS journal_no_update BEFORE UPDATE ON journal
 BEGIN SELECT RAISE(ABORT, 'the journal only grows'); END;
 CREATE TRIGGER IF NOT EXISTS journal_no_delete BEFORE DELETE ON journal
 BEGIN SELECT RAISE(ABORT, 'the journal only grows'); END;
+-- The IDs decides have taken, each recorded before its journal file is
+-- written, so a decide that stops partway leaves a gap, never an ID another
+-- decide takes again (#192). An ID once taken stays taken.
+CREATE TABLE IF NOT EXISTS taken (
+	project TEXT NOT NULL,
+	id      TEXT NOT NULL,
+	PRIMARY KEY (project, id)
+);
+CREATE TRIGGER IF NOT EXISTS taken_no_update BEFORE UPDATE ON taken
+BEGIN SELECT RAISE(ABORT, 'a taken ID stays taken'); END;
+CREATE TRIGGER IF NOT EXISTS taken_no_delete BEFORE DELETE ON taken
+BEGIN SELECT RAISE(ABORT, 'a taken ID stays taken'); END;
 CREATE TABLE IF NOT EXISTS repo (
 	project TEXT PRIMARY KEY,
 	dir     TEXT NOT NULL, -- the checkout it was last rebuilt from
@@ -64,7 +78,7 @@ CREATE TABLE IF NOT EXISTS repo (
 // schemaVersion is the schema's version. A store with another has its
 // nodes, edges and checkouts dropped, since a rebuild brings them back, and
 // keeps its journal, which only grows.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Store is the decision graph in one SQLite file. Every process that needs
 // it opens it directly: SQLite in WAL mode lets many read while one writes,
@@ -293,12 +307,13 @@ type NewDecision struct {
 
 var slug = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
-// Decide writes a new decision: it takes the project's next ID, writes the
-// decision's journal in the checkout, then puts it in the graph. The ID is
-// taken under the store's write lock, past every ID the store has ever
-// journaled for the project and every one in the checkout, so processes and
-// checkouts on one machine never take the same one. A branch that's
-// abandoned leaves a gap in the numbers.
+// Decide writes a new decision, in the order factory/ids proves (#192):
+// holding the store's decide lock from start to finish, it takes one more
+// than the highest ID the store has taken or journaled for the project, or
+// the checkout holds, has the store record it, writes the decision's journal
+// in the checkout, and puts it in the graph. So processes and checkouts on
+// one machine never take the same ID: a decide that stops after the store
+// records its ID leaves a gap, and so does a branch that's abandoned.
 func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 	text := strings.Join(strings.Fields(d.Text), " ")
 	switch {
@@ -324,39 +339,138 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 			return "", err
 		}
 	}
+	now := time.Now().UTC()
+	e := Event{At: now.Format(time.RFC3339), By: by, Op: OpDecide, Date: now.Format("2006-01-02"),
+		Door: d.Door, Status: d.Status, Who: d.Who, Text: text, Edges: d.Edges}
+	// A decision the fold would refuse takes no ID.
+	if _, err := fold(repo.Name, []Event{e}); err != nil {
+		return "", err
+	}
+	unlock, err := s.lockDecides()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	id, c, err := s.take(repo)
+	if err != nil {
+		return "", err
+	}
+	e.ID = id
+	if d.Record != "" {
+		e.Record = id + "-" + d.Record + ".md"
+	}
+	if !c.core.Write(c.checkout, idcore.Decision{By: 1, Number: 1}) {
+		return "", errOffCore("write the journal file of " + id)
+	}
+	if err := appendLine(repo, &e, true); err != nil {
+		return "", err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", err
 	}
 	defer tx.Rollback()
-	var journaled sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(CAST(substr(id, length(?1) + 4) AS INTEGER)) FROM journal WHERE project = ?1`, repo.Name).Scan(&journaled); err != nil {
-		return "", err
-	}
-	next, err := highest(repo)
-	if err != nil {
-		return "", err
-	}
-	if journaled.Valid && int(journaled.Int64) > next {
-		next = int(journaled.Int64)
-	}
-	id := fmt.Sprintf("D-%04d", max(next+1, 1))
-	now := time.Now().UTC()
-	e := Event{At: now.Format(time.RFC3339), By: by, Op: OpDecide, ID: id, Date: now.Format("2006-01-02"),
-		Door: d.Door, Status: d.Status, Who: d.Who, Text: text, Edges: d.Edges}
-	if d.Record != "" {
-		e.Record = id + "-" + d.Record + ".md"
-	}
-	if _, err := fold(repo.Name, []Event{e}); err != nil {
-		return "", err
-	}
-	if err := appendLine(repo, &e, true); err != nil {
-		return "", err
-	}
 	if err := putFile(tx, repo, id); err != nil {
 		return "", err
 	}
+	if !c.core.Finish(c.checkout) {
+		return "", errOffCore("finish deciding " + id)
+	}
 	return id, tx.Commit()
+}
+
+// onCore is a decide as factory/ids, its proved core, sees it (#192): the IDs
+// the store has taken, the IDs the checkout holds, and how far the decide
+// has come. Each of the decide's steps is the core's first, and a step the
+// core refuses isn't taken.
+type onCore struct {
+	core     *idcore.Core
+	checkout *idcore.Checkout
+}
+
+// errOffCore is a step factory/ids refused. It never should be: the steps
+// come in the core's order.
+func errOffCore(step string) error {
+	return fmt.Errorf("the decision store can't %s: factory/ids, its proved core, refuses the step", step)
+}
+
+// take takes a decide's ID on factory/ids, and has the store record it, in
+// a transaction of its own, so the ID is the store's before its journal file
+// is written. The core's Take chooses it: one more than the highest ID the
+// store has taken or journaled for the project, or the checkout holds.
+func (s *Store) take(repo Repo) (string, onCore, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", onCore{}, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT CAST(substr(id, length(?1) + 4) AS INTEGER) FROM journal WHERE project = ?1
+		UNION SELECT CAST(substr(id, 3) AS INTEGER) FROM taken WHERE project = ?1`, repo.Name)
+	if err != nil {
+		return "", onCore{}, err
+	}
+	var taken []int
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return "", onCore{}, err
+		}
+		taken = append(taken, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", onCore{}, err
+	}
+	held, err := heldIDs(repo)
+	if err != nil {
+		return "", onCore{}, err
+	}
+	// The core holds room for one more ID than any taken or held.
+	top := 0
+	for _, n := range append(append([]int(nil), taken...), held...) {
+		top = max(top, n)
+	}
+	c := onCore{core: idcore.New(top + 1), checkout: idcore.NewCheckout(top + 1)}
+	for _, n := range taken {
+		if n > 0 {
+			c.core.Store[n-1] = true
+		}
+	}
+	for _, n := range held {
+		if n > 0 {
+			c.checkout.Files[n-1] = idcore.Decision{By: 1, Number: 1}
+		}
+	}
+	if !c.core.Take(c.checkout, 1) {
+		return "", onCore{}, errOffCore("take an ID")
+	}
+	id := fmt.Sprintf("D-%04d", c.checkout.Next)
+	if !c.core.Reserve(c.checkout) {
+		return "", onCore{}, errOffCore("record " + id)
+	}
+	if _, err := tx.Exec(`INSERT INTO taken (project, id) VALUES (?, ?)`, repo.Name, id); err != nil {
+		return "", onCore{}, err
+	}
+	return id, c, tx.Commit()
+}
+
+// lockDecides holds the store's decide lock, a lock on a file beside it, until
+// the function it returns is called. A decide that stops lets it go with
+// its process.
+func (s *Store) lockDecides() (func(), error) {
+	f, err := os.OpenFile(s.Path+".decide.lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }
 
 // checkEdge refuses an edge a decision can't have: an unknown type, code's
