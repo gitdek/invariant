@@ -268,6 +268,15 @@ The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-001
 This repository runs on its own rule: **a decision that isn't written down didn't happen.**
 
 - [`decisions/`](decisions/) is the record of what was decided, when, and by whom: a journal with one file per decision, and [`log.md`](decisions/log.md), its table. Decisions that are hard to reverse also record the options considered, the reasoning, and what would reopen them. `invariant decisions` writes them, and answers what rests on each one.
+- A coding agent asks the record through MCP tools, which `invariant mcp -decisions -write` serves for the checkout. [`.mcp.json`](.mcp.json) starts them for agents that read it. Codex reads [`.codex/config.toml`](.codex/config.toml) instead, once you trust the checkout, and starts the server where Codex starts, so start Codex at the checkout's root. To give Codex the tools wherever it starts, add this to `~/.codex/config.toml`, with your checkout's path:
+
+  ```toml
+  [mcp_servers.invariant-decisions]
+  command = "go"
+  args = ["run", "./cmd/invariant", "mcp", "-decisions", "-write"]
+  cwd = "/path/to/invariant"
+  startup_timeout_sec = 120
+  ```
 - [`SPEC.md`](SPEC.md) is the current state, rolled up from the record. If the spec says something the record doesn't support, the spec is wrong.
 
 <br>

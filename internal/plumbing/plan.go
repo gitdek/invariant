@@ -49,9 +49,11 @@ type Test struct {
 // TrustedBase is what only a person merges (D-0105): the gate and the
 // verifiers, the scope and ratification checks, CI and its decision check,
 // the factory's own code, its proved rules and its CLI, the dependencies,
-// the page that posts the owner's commands, and the rules agents work by.
+// the page that posts the owner's commands, the rules agents work by, and
+// the configuration that starts their tools in a session (D-0132).
 var TrustedBase = []string{
 	".github/", "cmd/", "factory/", "go.mod", "go.sum", "AGENTS.md", "CLAUDE.md",
+	".claude/", ".codex/", ".mcp.json",
 	"internal/conformance/", "internal/decisions/", "internal/factory/", "internal/formalize/",
 	"internal/github/", "internal/gobra/", "internal/mcp/", "internal/plumbing/", "internal/project/",
 	"internal/receipt/", "internal/scope/", "internal/setup/", "internal/synth/", "internal/tla/",
