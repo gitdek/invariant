@@ -1358,6 +1358,29 @@ func (s *Server) draw(ctx context.Context, j graphJob) ([]byte, error) {
 	return gz, nil
 }
 
+// graph is a drawn state graph, from memory or else from the cache on
+// disk, which a restarted dashboard's kept snapshot can name before the
+// dashboard has read it again.
+func (s *Server) graph(key string) []byte {
+	s.mu.RLock()
+	body := s.graphs[key]
+	s.mu.RUnlock()
+	if body != nil || s.Cache == "" {
+		return body
+	}
+	b, err := os.ReadFile(s.graphFile(key))
+	if err != nil {
+		return nil
+	}
+	s.mu.Lock()
+	if s.graphs == nil {
+		s.graphs = map[string][]byte{}
+	}
+	s.graphs[key] = b
+	s.mu.Unlock()
+	return b
+}
+
 func (s *Server) graphFile(key string) string {
 	return filepath.Join(s.Cache, "graphs", key+".json.gz")
 }

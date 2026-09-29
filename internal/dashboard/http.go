@@ -91,10 +91,7 @@ func (s *Server) Handler() http.Handler {
 			h.Set("Content-Type", "application/json")
 			w.Write(body)
 		case graphPath.MatchString(p):
-			key := graphPath.FindStringSubmatch(p)[1]
-			s.mu.RLock()
-			body := s.graphs[key]
-			s.mu.RUnlock()
+			body := s.graph(graphPath.FindStringSubmatch(p)[1])
 			if body == nil {
 				http.Error(w, "that state graph isn't drawn yet", http.StatusNotFound)
 				return

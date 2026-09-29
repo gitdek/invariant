@@ -562,3 +562,27 @@ func TestARestartServesTheLastSnapshot(t *testing.T) {
 		t.Error("a dashboard for another repository served the kept snapshot")
 	}
 }
+
+// A graph the kept snapshot names is served from the cache on disk, before
+// the restarted dashboard has read it into memory.
+func TestAGraphIsServedFromTheCache(t *testing.T) {
+	s := &Server{Cache: t.TempDir()}
+	key := "0123456789abcdef"
+	gz, err := gzipped([]byte(`{"nodes":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(s.graphFile(key)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.graphFile(key), gz, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{key, "fedcba9876543210"} {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/graph/"+k+".json", nil))
+		if want := map[string]int{key: 200}[k]; (want == 200) != (rec.Code == 200) {
+			t.Errorf("graph %s: %d", k, rec.Code)
+		}
+	}
+}

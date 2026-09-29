@@ -419,7 +419,8 @@
 
   const graphs = new Map(); // model key → graph JSON (or a promise)
   function getGraph(key) {
-    if (!graphs.has(key)) graphs.set(key, fetch(`/api/graph/${key}.json?v=${VERSION}`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((g) => { g.layout = layoutGraph(g); return g; }));
+    // A graph that fails to load is asked for again at the next draw.
+    if (!graphs.has(key)) graphs.set(key, fetch(`/api/graph/${key}.json?v=${VERSION}`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((g) => { g.layout = layoutGraph(g); return g; }).catch((e) => { graphs.delete(key); throw e; }));
     return graphs.get(key);
   }
 
