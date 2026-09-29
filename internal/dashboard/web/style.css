@@ -644,6 +644,7 @@ footer p { margin: 0; max-width: 60em; }
 .need .ask { margin: 10px 0 4px; font-size: 15px; color: var(--ink); line-height: 1.5; }
 .need .ask b { font-family: var(--mono); color: var(--people); margin-right: 6px; }
 .need .ask strong { color: var(--ink); font-weight: 600; }
+.need ol.planned { margin: 8px 0 4px; padding-left: 22px; display: grid; gap: 4px; font-size: 14.5px; color: var(--ink2); }
 .need .ask b.same, .batch .ask b.same { font-family: inherit; font-weight: 600; color: var(--accent); margin-right: 4px; }
 .batch {
   padding: 16px 20px; border: 1px solid rgba(var(--accent-rgb), 0.45); border-radius: var(--radius);
@@ -670,6 +671,8 @@ footer p { margin: 0; max-width: 60em; }
 .cmd.primary { border-color: rgba(var(--people-rgb), 0.6); }
 .gh { font: 500 13px var(--sans); color: var(--ink2); text-decoration: none; margin-left: auto; }
 .gh:hover { color: var(--ink); }
+.toact { font: 600 13px var(--sans); color: var(--people); text-decoration: none; margin-left: 6px; }
+.toact:hover { text-decoration: underline; }
 .stmts { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 .stmts summary { cursor: pointer; font-size: 14px; color: var(--ink2); }
 .stmts ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
@@ -741,6 +744,14 @@ footer p { margin: 0; max-width: 60em; }
 .cmd.act[disabled] { opacity: 0.45; cursor: not-allowed; }
 .confirm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(var(--people-rgb), 0.5); background: rgba(var(--people-rgb), 0.08); }
 .confirm span { flex: 1 1 240px; font-size: 14px; }
+.batchlist { flex: 1 1 100%; list-style: none; margin: 0 0 4px; padding: 0; display: grid; gap: 4px; }
+.batchlist li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 14px; }
+.confirm .batchlist .ref { flex: none; font: 600 13px var(--mono); color: var(--people); }
+.batchlist b { font-weight: 600; }
+.batchlist code { font: 500 12.5px var(--mono); color: var(--ink2); }
+/* the card a link from the public page opened /act at */
+.need.opened { border-color: var(--people); box-shadow: 0 0 0 1px var(--people), 0 0 32px rgba(var(--people-rgb), 0.28); }
+.need.opened.failed { border-color: var(--bug); box-shadow: 0 0 0 1px var(--bug), 0 0 32px rgba(var(--bug-rgb), 0.28); }
 .posted { margin: 12px 0 0; font: 500 13px var(--mono); color: var(--accent); animation: needin 0.5s ease both; }
 .acterr { margin: 8px 0 0; font: 500 13px var(--mono); color: var(--bug); }
 .pill.acting { border-color: rgba(var(--people-rgb), 0.55); color: var(--people); }

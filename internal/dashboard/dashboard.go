@@ -46,7 +46,8 @@ type Server struct {
 	Every time.Duration
 	Log   func(format string, args ...any)
 	// Access, when set, lets @gitdek post commands from /act, behind
-	// Cloudflare Access (D-0065). Post is how a command reaches GitHub; nil
+	// Cloudflare Access (D-0065), and each card in the public page's Needs
+	// you links to its card there. Post is how a command reaches GitHub; nil
 	// posts through gh's login.
 	Access *Access
 	Post   func(ctx context.Context, repo string, issue int, body string) (url string, err error)
@@ -832,6 +833,11 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			l.Repo = r.Name
 			for k := range l.Events {
 				l.Events[k].Repo = r.Name
+			}
+			// Each card in Needs you links to the same card on /act, when the
+			// dashboard serves it.
+			if l.Waiting != nil && s.Access != nil {
+				l.Waiting.ActURL = actURL(r.Name, l.Number)
 			}
 			if l.Stage == StageMerged && l.PR != 0 {
 				m, checked := r.src.merges[l.PR]
