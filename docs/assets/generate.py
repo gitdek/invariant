@@ -410,10 +410,10 @@ def go_spans(line, c):
     if line.lstrip().startswith("//"):
         return [(line, c["muted"])]
     out = []
-    for part in re.split(r'(\bfunc\b|\breturn\b|\bState\b|\bint\b|\btrue\b|\bfalse\b)', line):
-        if part in ("func", "return"):
+    for part in re.split(r'(\bfunc\b|\breturn\b|\bif\b|\bState\b|\bint\b|\bbool\b|\btrue\b|\bfalse\b)', line):
+        if part in ("func", "return", "if"):
             out.append((part, "#FF7B72"))
-        elif part in ("State", "int"):
+        elif part in ("State", "int", "bool"):
             out.append((part, "#FFA657"))
         elif part in ("true", "false"):
             out.append((part, "#79C0FF"))
@@ -423,92 +423,105 @@ def go_spans(line, c):
 
 
 def source_lines():
+    """The RMPrepare action, and the Go method whose contract restates it,
+    without the clauses that only grant it access to memory."""
     spec = open(os.path.join(EXAMPLE, ".invariant", "specs", "TwoPhase.tla")).read().split("\n")
     i = next(i for i, l in enumerate(spec) if l.startswith("RMPrepare(r) =="))
     j = next(j for j in range(i + 1, len(spec)) if not spec[j].strip())
     tla = spec[i:j]
     code = open(os.path.join(EXAMPLE, "twophase", "twophase.go")).read().replace("\t", "    ").split("\n")
-    k = next(k for k, l in enumerate(code) if l.startswith("func RMPrepare("))
+    k = next(k for k, l in enumerate(code) if re.match(r"func (\([^)]*\) )?RMPrepare\(", l))
     s = k
     while code[s - 1].startswith("//"):
         s -= 1
     e = next(e for e in range(k, len(code)) if code[e] == "}")
-    return tla, code[s:e + 1]
+    return tla, [l for l in code[s:e + 1] if "acc(" not in l]
 
 
 def dual_card(receipt):
-    """The RMPrepare action beside the Go function whose contract restates
-    it, with each part of the contract matched to the part of the action it
-    restates."""
-    c, W, H = DARK, 960, 452
+    """The RMPrepare action above the Go method whose contract restates it,
+    with each part of the action matched to the clauses that restate it. The
+    code refuses a step the model can't take by itself, so its contract says
+    both outcomes: what a step does when it's taken, and that a refusal
+    changes nothing (D-0082, D-0090)."""
+    c, W = DARK, 960
     tla, go = source_lines()
-    T = 18.0
-    lh, top = 18, 104
-    panes = [(20, "TwoPhase.tla · the model", tla, tla_spans), (490, "twophase.go · the code", go, go_spans)]
+    lh, px, pw = 18, 20, W - 40
+    # Which lines restate which: (the model's part, the code's part, words
+    # in the model, words in the code).
+    pairs = [("the enabling condition", "ok exactly when it held", ['= "working"'], ["ensures ok == ("]),
+             ("the effect", "what a step it takes does", ["rmState'"], ["ensures ok ==> "]),
+             ("no step when it doesn't hold", "a refusal changes nothing", ['= "working"'], ["ensures !ok ==> ", "return false"]),
+             ("everything else unchanged", "nothing else changes", ["UNCHANGED"], ["ensures forall", "ensures t.TM ==", "ensures len("]),
+             ("the message it sends", "the caller sends it", ["msgs'"], ["The caller sends"])]
+    for model, code, mw, cw in pairs:
+        if not any(w in l for l in tla for w in mw) or not any(w in l for l in go for w in cw):
+            sys.exit(f"the example no longer has what the card pairs: {model} with {code}")
+    panes, y = [], 56
+    for heading, lines, spans in (("TwoPhase.tla · the model", tla, tla_spans),
+                                  ("twophase.go · the code, without the clauses that grant it memory", go, go_spans)):
+        h = 66 + (len(lines) - 1) * lh
+        panes.append((y, h, heading, lines, spans))
+        y += h + 12
+    caption_y = y + 14
+    box = caption_y + 12
+    H = box + 58 + 14
+    per = (0.3, 0.2)
+    typed = 0.4 + sum(per[side] * len(p[3]) + 0.3 for side, p in enumerate(panes))
+    cmd_start = typed + 0.2
+    results_at = cmd_start + 1.4
+    pair_start = results_at + 1.4
+    T = round(pair_start + 2.0 * len(pairs) + 1.2, 1)
+
     defs = ['<defs>']
-    for side, (px, _, lines, _) in enumerate(panes):
-        defs.append(f'<clipPath id="pane{side}"><rect x="{px}" y="56" width="450" height="{top + lh * 13 - 50}"/></clipPath>')
-        defs.append(f'<linearGradient id="fade{side}" x1="0" x2="1"><stop offset="0" stop-color="{c["panel"]}" stop-opacity="0"/>'
-                    f'<stop offset="1" stop-color="{c["panel"]}"/></linearGradient>')
-    typing = []
     t = 0.4
-    for side, (px, _, lines, _) in enumerate(panes):
-        per = 0.3 if side == 0 else 0.22
+    for side, (py, _, _, lines, _) in enumerate(panes):
         for n in range(len(lines)):
-            defs.append(f'<clipPath id="type{side}_{n}"><rect x="{px}" y="{top + n * lh - 14}" height="{lh}" width="0">'
-                        f'{ramp("width", "0", "450", t, t + per, T)}</rect></clipPath>')
-            t += per
+            base = py + 48 + n * lh
+            defs.append(f'<clipPath id="type{side}_{n}"><rect x="{px}" y="{base - 14}" height="{lh}" width="0">'
+                        f'{ramp("width", "0", str(pw), t, t + per[side], T)}</rect></clipPath>')
+            t += per[side]
         t += 0.3
-    cmd_start = t + 0.2
-    defs.append(f'<clipPath id="cmd"><rect x="36" y="386" height="22" width="0">'
+    defs.append(f'<clipPath id="cmd"><rect x="36" y="{box + 8}" height="22" width="0">'
                 f'{ramp("width", "0", "520", cmd_start, cmd_start + 1.0, T)}</rect></clipPath>')
     defs.append('</defs>')
 
-    # Which lines restate which: (caption, words in the model, words in the code).
-    pairs = [("the enabling condition", "the requires clauses", ['= "working"'], ["requires"]),
-             ("the effect", "ensures what changes", ["rmState'", "msgs'"], ["ensures t.RM[r] == Prepared"]),
-             ("everything else", "ensures nothing else changes", ["UNCHANGED"], ["ensures forall", "ensures t.TM ==", "ensures t.CommitMsg"])]
-    results_at = cmd_start + 1.4
-    pair_start = results_at + 1.4
-
     out = [card(W, H, c, "Each contract restates one TLA+ action", "RMPrepare"), f'<g font-family="{SANS}">']
-    for side, (px, heading, lines, spans) in enumerate(panes):
-        out.append(f'<rect x="{px}" y="56" width="450" height="{top + lh * 13 - 50}" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
-        out.append(f'<text x="{px + 16}" y="78" font-size="12" font-weight="600" fill="{c["muted"]}">{esc(heading)}</text>')
+    for side, (py, h, heading, lines, spans) in enumerate(panes):
+        out.append(f'<rect x="{px}" y="{py}" width="{pw}" height="{h}" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
+        out.append(f'<text x="{px + 16}" y="{py + 22}" font-size="12" font-weight="600" fill="{c["muted"]}">{esc(heading)}</text>')
         for p, (_, _, model, code) in enumerate(pairs):
             words = model if side == 0 else code
             s = pair_start + p * 2.0
             for n, line in enumerate(lines):
                 if any(wd in line for wd in words):
-                    out.append(f'<rect x="{px + 6}" y="{top + n * lh - 14}" width="438" height="{lh}" rx="4" '
+                    out.append(f'<rect x="{px + 6}" y="{py + 48 + n * lh - 14}" width="{pw - 12}" height="{lh}" rx="4" '
                                f'fill="{c["accent"]}" fill-opacity="0.16" opacity="0">{shown(s, s + 2.0, T)}</rect>')
-        out.append(f'<g clip-path="url(#pane{side})">')
         for n, line in enumerate(lines):
             tspans = "".join(f'<tspan fill="{col}">{esc(txt)}</tspan>' for txt, col in spans(line, c))
-            out.append(f'<text x="{px + 16}" y="{top + n * lh}" xml:space="preserve" font-family="{MONO}" font-size="12" '
+            out.append(f'<text x="{px + 16}" y="{py + 48 + n * lh}" xml:space="preserve" font-family="{MONO}" font-size="12" '
                        f'clip-path="url(#type{side}_{n})">{tspans}</text>')
-        out.append('</g>')
-        out.append(f'<rect x="{px + 390}" y="86" width="56" height="{lh * 13}" fill="url(#fade{side})"/>')
     for p, (model, code, _, _) in enumerate(pairs):
         s = pair_start + p * 2.0
-        out.append(f'<text x="{W / 2}" y="368" text-anchor="middle" font-size="13" fill="{c["accent"]}" opacity="0">'
+        out.append(f'<text x="{W / 2}" y="{caption_y}" text-anchor="middle" font-size="13" fill="{c["accent"]}" opacity="0">'
                    f'{shown(s, s + 2.0, T)}{esc(model)} in the model  ⟷  {esc(code)} in the code</text>')
     # The gate's verdict, from the receipt.
-    y = 402
-    out.append(f'<rect x="20" y="380" width="{W - 40}" height="58" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
-    out.append(f'<text x="36" y="{y}" xml:space="preserve" font-family="{MONO}" font-size="12.5" clip-path="url(#cmd)">'
+    yb = box + 22
+    out.append(f'<rect x="20" y="{box}" width="{W - 40}" height="58" rx="10" fill="{c["panel"]}" stroke="{c["line"]}"/>')
+    out.append(f'<text x="36" y="{yb}" xml:space="preserve" font-family="{MONO}" font-size="12.5" clip-path="url(#cmd)">'
                f'<tspan fill="{c["accent"]}">$</tspan><tspan fill="{c["text"]}"> invariant verify examples/02-twophase-commit</tspan></text>')
     d, code = receipt["design"], receipt["code"]
     tlc = f"TLC    {d['distinct_states']} states, no violations, no deadlock"
     gobra = f"Gobra  {len(code['functions'])} of {len(code['functions'])} functions verified, overflow checked"
     for n, (words, at) in enumerate(((tlc, results_at), (gobra, results_at + 0.5))):
-        out.append(f'<text x="{36 + n * 440}" y="{y + 24}" xml:space="preserve" font-family="{MONO}" font-size="12.5" '
+        out.append(f'<text x="{36 + n * 440}" y="{yb + 24}" xml:space="preserve" font-family="{MONO}" font-size="12.5" '
                    f'opacity="0">{shown(at, T, T)}<tspan fill="{c["green"]}">✓ </tspan><tspan fill="{c["text"]}">{esc(words)}</tspan></text>')
     out.append('</g>')
     return svg_doc(W, H, "\n".join(out),
-                   "The TLA+ action RMPrepare beside the Go function RMPrepare, whose Gobra contract restates it: "
-                   f"requires matches the enabling condition, ensures matches the effect and the frame. TLC checks "
-                   f"{d['distinct_states']} states; Gobra verifies all {len(code['functions'])} functions.",
+                   "The TLA+ action RMPrepare above the Go method RMPrepare, whose Gobra contract restates it: "
+                   "ok exactly when the enabling condition held, the effect when the step is taken, nothing changed "
+                   "when it's refused, and nothing else changed either; the caller sends the message. "
+                   f"TLC checks {d['distinct_states']} states; Gobra verifies all {len(code['functions'])} functions.",
                    "\n".join(defs) + "\n")
 
 
@@ -516,26 +529,40 @@ def dual_card(receipt):
 
 def receipt_card(r):
     """The receipt, checking itself off row by row."""
-    c, W, H = DARK, 860, 424
+    c, W = DARK, 860
     T = 12.0
     d, code = r["design"], r["code"]
     reached = [w for w in r["witnesses"] if w["reached"]]
     caught = [b for b in r["bugs"] if b["caught"]]
-    a = r["agreement"]
+    a, larger, conf = r["agreement"], r.get("larger"), r.get("conformance")
+    bounds = ", ".join(f"{k} = {v}" for k, v in sorted(r["bounds"].items()))
+    ratified = r.get("ratified")
+    unverified = code.get("unverified") or []
     rows = [
-        ("Pinned statements", f"{sum(p['match'] for p in r['pins'])} of {len(r['pins'])} match", f"recorded in {r['decision']}"),
+        ("Pinned statements", f"{sum(p['match'] for p in r['pins'])} of {len(r['pins'])} match",
+         f"ratified by @{ratified['by']} on #{ratified['issue']}" if ratified else f"recorded in {r['decision']}"),
         ("Design · TLC", "no violations, no deadlock", f"{d['distinct_states']} distinct states, depth {d['depth']}"),
         ("Reachability", f"{len(reached)} of {len(r['witnesses'])} witnesses reached",
          ", ".join(f"{w['name']} in {w['steps']} steps" for w in reached)),
         ("Known bugs", f"{len(caught)} of {len(r['bugs'])} caught",
          ", ".join(f"{b['label']} after {b['steps']} steps" for b in caught)),
         ("Agreement", "code reaches the model's states", f"{a['states']} states, depth {a['depth']}"),
-        (f"Code · {code['verifier']}", f"{len(code['functions'])} of {len(code['functions'])} functions verified",
-         ", ".join((["overflow checked"] if code["overflow_checked"] else [])
-                   + [f"{name} unverified" for name in code.get("unverified") or []])),
-        ("Build", ", ".join(s["name"] for s in r["build"]["steps"]), "sandboxed, no network"),
     ]
-    bounds = ", ".join(f"{k} = {v}" for k, v in sorted(r["bounds"].items()))
+    if larger:
+        within = ", ".join(f"{k} = {v}" for k, v in sorted(larger["bounds"].items()))
+        rows.append(("One size larger", "code reaches the model's states", f"{larger['states']:,} states within {within}"))
+    rows.append((f"Code · {code['verifier']}", f"{len(code['functions'])} of {len(code['functions'])} functions verified",
+                 ", ".join((["overflow checked"] if code["overflow_checked"] else [])
+                           + ([f"{len(unverified)} unverified"] if unverified else []))))
+    if conf and conf.get("exhaustive"):
+        rows.append(("Conformance", "every reachable state, no step outside it",
+                     f"{conf['states']} of {conf['model_states']} model states"))
+    if conf and conf.get("tried"):
+        rows.append(("Every step tried", "in every state reached", f"{conf['tried']['attempts']:,} attempts, refusals included"))
+    rows.append(("Build", ", ".join(s["name"] for s in r["build"]["steps"]), "sandboxed, no network"))
+    # The card grows with the rows: the rule under them, then the verdict.
+    rule = 84 + len(rows) * 40 - 18
+    H = rule + 78
     out = [card(W, H, c, f"Invariant receipt · {r['project']}", "invariant verify"), f'<g font-family="{SANS}">']
     for i, (check, result, evidence) in enumerate(rows):
         s = 0.6 + i * 0.55
@@ -552,14 +579,14 @@ def receipt_card(r):
                    f'<text x="{W - 32}" y="{y + 5}" text-anchor="end" font-family="{MONO}" font-size="12" '
                    f'fill="{c["muted"]}">{esc(evidence)}</text></g>')
     done = 0.6 + len(rows) * 0.55 + 0.4
-    out.append(f'<path d="M20 346H{W - 20}" stroke="{c["line"]}"/>')
+    out.append(f'<path d="M20 {rule}H{W - 20}" stroke="{c["line"]}"/>')
     out.append(f'<g opacity="0">{shown(done, T - 0.6, T)}'
-               f'<rect x="32" y="366" width="208" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
-               f'<text x="136" y="386" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
+               f'<rect x="32" y="{rule + 20}" width="208" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
+               f'<text x="136" y="{rule + 40}" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
                f'✓ invariant/gate passed</text>'
-               f'<text x="{W - 32}" y="376" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'<text x="{W - 32}" y="{rule + 30}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
                f'exhaustive within {esc(bounds)}</text>'
-               f'<text x="{W - 32}" y="394" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'<text x="{W - 32}" y="{rule + 48}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
                f'fingerprint {esc(r["fingerprint"][:19])}…</text></g>')
     out.append('</g>')
     return svg_doc(W, H, "\n".join(out),
