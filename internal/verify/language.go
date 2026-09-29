@@ -239,14 +239,19 @@ func explorerTest(pkg, name string) string {
 }
 
 // sandboxScript runs inside the container. Markers separate the steps.
-const sandboxScript = `cd /src
+// Docker carries a container's stdout and stderr apart, and doesn't keep
+// their order when it merges them, so every sandbox script starts by sending
+// its stderr to its stdout: all of a step's output then comes before its
+// marker (#124).
+const sandboxScript = `exec 2>&1
+cd /src
 go vet ./... ; echo "@@invariant vet=$?"
 go test -count=1 ./... ; echo "@@invariant test=$?"
 cp /agree/zz_invariant_agreement_test.go "./$PKG/" && go test -count=1 -run '^TestInvariantAgreement$' -v "./$PKG" ; echo "@@invariant agree=$?"
 `
 
 var (
-	marker   = regexp.MustCompile(`(?m)^@@invariant (\w+)=(\d+)$`)
+	marker   = regexp.MustCompile(`(?m)@@invariant (\w+)=(\d+)$`)
 	explored = regexp.MustCompile(`invariant-agreement states=(\d+) depth=(\d+)`)
 )
 
@@ -326,8 +331,10 @@ type section struct {
 	code int
 }
 
-// splitMarkers splits a sandbox's output at lines like "@@invariant name=0",
-// each closing the step before it.
+// splitMarkers splits a sandbox's output at markers like "@@invariant name=0",
+// each closing the step before it. A marker ends its line wherever it starts
+// on it: text before it on its line, from a step whose output doesn't end
+// with a newline, belongs to the step it closes.
 func splitMarkers(out string, want int) ([]section, error) {
 	marks := marker.FindAllStringSubmatchIndex(out, -1)
 	if len(marks) != want {
@@ -347,7 +354,7 @@ func splitMarkers(out string, want int) ([]section, error) {
 
 // pulled makes sure an image is on this machine before a sandbox runs in it.
 // docker run would pull it itself, but it writes the pull's progress into the
-// sandbox's own output, and a marker that lands mid-line isn't found.
+// sandbox's own output, where it would be read as the first step's.
 func pulled(ctx context.Context, image string) error {
 	if exec.CommandContext(ctx, "docker", "image", "inspect", image).Run() == nil {
 		return nil
@@ -480,7 +487,8 @@ type TypeScript struct{ Image string }
 func (TypeScript) Verify(context.Context, string) (*Code, error) { return nil, nil }
 
 func (t TypeScript) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, t.Image, p, []string{"node --test"}, `cd /src
+	return runConformance(ctx, t.Image, p, []string{"node --test"}, `exec 2>&1
+cd /src
 node --test ; echo "@@invariant test=$?"
 node "$DRIVER" ; echo "@@invariant conform=$?"
 `)
@@ -504,7 +512,8 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `cd /src
+	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
+cd /src
 python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
 python -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
 python "$DRIVER" ; echo "@@invariant conform=$?"

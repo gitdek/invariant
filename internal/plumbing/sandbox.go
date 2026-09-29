@@ -64,7 +64,12 @@ func (r Result) Failing() []string {
 	return out
 }
 
-const script = `cd /src
+// script runs inside the container. Docker carries a container's stdout and
+// stderr apart, and doesn't keep their order when it merges them, so the
+// script starts by sending its stderr to its stdout: all of a step's output
+// then comes before its marker (#124).
+const script = `exec 2>&1
+cd /src
 for f in $GOFMT_FILES; do [ -f "$f" ] && gofmt -l "$f" | sed 's/^/@@gofmt /'; done
 go vet ./... ; echo "@@invariant vet=$?"
 if [ -n "$TEST_PKGS" ]; then go test -count=1 -timeout 20m $TEST_PKGS ; echo "@@invariant test=$?"; else echo "@@invariant test=0"; fi
@@ -74,7 +79,9 @@ done
 `
 
 var (
-	markerLine = regexp.MustCompile(`(?m)^@@invariant (\w+)=(\d+)$`)
+	// A marker ends its line wherever it starts on it, after the last line
+	// of a step whose output doesn't end with a newline.
+	markerLine = regexp.MustCompile(`(?m)@@invariant (\w+)=(\d+)$`)
 	gofmtLine  = regexp.MustCompile(`(?m)^@@gofmt (.+)$`)
 	testLine   = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): (Test\w+)`)
 )
