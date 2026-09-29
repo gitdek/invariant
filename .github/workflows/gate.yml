@@ -163,7 +163,9 @@ jobs:
           mkdir -p out/logs
           verify() {
             name=$(basename "$1")
+            start=$(date +%s)
             if "$RUNNER_TEMP/invariant" verify -out "out/$name" "$1" > "out/logs/$name.log" 2>&1; then echo 0; else echo 1; fi > "out/logs/$name.exit"
+            echo $(( $(date +%s) - start )) > "out/logs/$name.secs"
           }
           export -f verify
           projects=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##')
@@ -171,7 +173,7 @@ jobs:
           printf '%s\n' $projects | tail -n +2 | xargs -r -P 3 -I{} bash -c 'verify "{}"'
           for project in $projects; do
             name=$(basename "$project")
-            echo "::group::$project"
+            echo "::group::$project, $(cat "out/logs/$name.secs")s"
             cat "out/logs/$name.log"
             echo "::endgroup::"
             [ "$(cat "out/logs/$name.exit")" = "0" ] || status=1
