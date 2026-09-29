@@ -130,7 +130,7 @@ Each requirement serves one goal.
 - **5.2 Effort is bounded.** Each agent run has a cost budget, a turn limit and a timeout, and synthesis gets at most four gate runs. Built. `D-0000` `D-0026`
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
 - **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Built. `D-0048`
-- **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Planned. `D-0028` `D-0052`
+- **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. In progress: an issue picks its coding agent with an `Agent:` line, else its project's manifest does, and the draft settles it (#173). Codex itself comes next. `D-0028` `D-0052` `D-0130`
 - **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. Built: copythis-ad's lease protocol is checked on every pull request, and the check caught a real bug. `D-0053` `D-0054` `D-0059`
 - **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
 
@@ -170,7 +170,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 11 | A driver can't skip a step (3.11) | Done `D-0059` `D-0082` `D-0090` |
 | 12 | One decision graph for every project (3.12) | Done `D-0096` |
 | 13 | The factory takes every change, and a whole PRD (2.8) | In progress `D-0105` |
-| 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | Next `D-0129` |
+| 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | In progress `D-0129` |
 | Later | Type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
