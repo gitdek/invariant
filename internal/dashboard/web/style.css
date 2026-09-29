@@ -242,7 +242,12 @@ a.chip:hover { border-color: currentColor; }
   background: var(--tile); padding: 22px 20px 20px; min-height: 150px;
   display: flex; flex-direction: column; gap: 6px; position: relative; overflow: hidden;
 }
-.num .v { font: 600 clamp(30px, 3.4vw, 42px)/1 var(--sans); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+/* A tile's number is set no larger than the tile's inside width over its
+   width in em, --ems, which the page gives it (#152), so it always fits.
+   The numbers row's tiles are size containers for it. The projects table's
+   cells share the num class, and aren't. */
+.numbers .num { container-type: inline-size; }
+.num .v { font: 600 clamp(30px, 3.4vw, 42px)/1 var(--sans); font-size: min(clamp(30px, 3.4vw, 42px), 100cqi / var(--ems, 1)); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .num .l { font-size: 14px; color: var(--ink); font-weight: 500; line-height: 1.3; }
 .num .s { font-size: 12.5px; color: var(--ink3); line-height: 1.4; margin-top: auto; }
 .num.holds .v { color: var(--accent); text-shadow: 0 0 28px rgba(var(--accent-rgb), 0.45); }

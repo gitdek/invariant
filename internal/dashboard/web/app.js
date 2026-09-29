@@ -109,7 +109,7 @@
     if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
     if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
-    if (changed("numbers", [scope, s.totals, (s.repos || []).map((r) => r.totals), s.who.ratified])) renderNumbers(s);
+    if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states])])) renderTabs(s);
     if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
     if (changed("projects", [scope, pview, s.projects])) renderProjects(s);
@@ -333,39 +333,56 @@
   };
 
   // ---------- numbers ----------
-  function countTo(el, to, fmtFn = (v) => nf.format(Math.round(v))) {
-    const from = Number(el.dataset.v || 0);
+  // countTo counts el from the number it last counted to, up or down, to
+  // to, and calls done once it's there. Drawing the numbers again stops
+  // every count still running.
+  let counting = 0;
+  function countTo(el, to, fmtFn = (v) => nf.format(Math.round(v)), done = () => {}) {
+    const from = Number(el.dataset.v || 0), run = counting;
     el.dataset.v = to;
-    if (REDUCED || from === to) return (el.textContent = fmtFn(to));
+    if (REDUCED || from === to) {
+      el.textContent = fmtFn(to);
+      return done();
+    }
     const t0 = performance.now();
     const step = (now) => {
+      if (run !== counting) return;
       const t = Math.min(1, (now - t0) / 1600), e = 1 - Math.pow(1 - t, 4);
       el.textContent = fmtFn(from + (to - from) * e);
       if (t < 1) requestAnimationFrame(step);
+      else done();
     };
     requestAnimationFrame(step);
   }
+  // The tiles' words come from the server (#152). A number below a million
+  // shows in full and counts up, as 30/30 counts up its 30 caught. One of a
+  // million or more shows short, as 1.29M, with the number exactly in the
+  // small text and the tooltip. style.css sets a number no larger than its
+  // tile's inside width over its width in em, --ems, and a counting one for
+  // the wider of where it counts from and to.
   function renderNumbers(s) {
-    const t = totalsOf(s);
-    const logged = t.decisions ? `${s.who.ratified} ratified by @gitdek, ${s.who.logged} decided by agents as they built` : "none logged in this repository yet";
-    const tiles = [
-      { k: "bad", cls: "holds", v: t.badMerges, l: "merges without a green gate", d: `CI's gate passed on the exact head of all ${t.mergesChecked} pull requests the factory merged. ${t.badLocks === 0 ? `All ${t.locksChecked} factory locks are exactly what a person ratified.` : `${t.badLocks} locks differ from what was ratified.`}` },
-      { k: "states", v: t.states, l: "states TLC explored", d: `across ${t.models} models, exhaustively, within the ratified bounds` },
-      { k: "stmts", v: t.statements, l: "statements people ratified", d: "each pinned by hash, so the factory can't change them" },
-      { k: "bugs", v: t.bugsCaught, of: t.bugs, l: "planted bugs caught", d: "each one breaks an invariant, and TLC finds the step" },
-      { k: "proved", v: t.proved, l: "functions proved", d: "by Gobra and Nagini, against contracts that restate the model" },
-      { k: "dec", v: t.decisions, l: "decisions logged", d: logged },
-    ];
-    const box = $("#numbers");
+    const tiles = tilesOf(s), box = $("#numbers");
+    counting++;
     if (!box.children.length) {
-      box.innerHTML = tiles.map((x) => `<div class="num ${x.cls || ""}" data-k="${x.k}"><div class="v">0</div><div class="l">${esc(x.l)}</div><div class="s"></div></div>`).join("");
+      box.innerHTML = tiles.map((x) => `<div class="num${x.key === "bad" ? " holds" : ""}" data-k="${esc(x.key)}"><div class="v">0</div><div class="l"></div><div class="s"></div></div>`).join("");
     }
     tiles.forEach((x) => {
-      const el = box.querySelector(`[data-k="${x.k}"]`);
-      el.querySelector(".s").textContent = x.d;
-      const v = el.querySelector(".v");
-      if (x.of !== undefined) countTo(v, x.v, (n) => `${nf.format(Math.round(n))}/${nf.format(x.of)}`);
-      else countTo(v, x.v);
+      const el = box.querySelector(`[data-k="${x.key}"]`);
+      if (!el) return;
+      el.title = x.title || "";
+      el.querySelector(".l").textContent = x.label;
+      el.querySelector(".s").textContent = x.small;
+      const v = el.querySelector(".v"), fit = (ems) => v.style.setProperty("--ems", ems);
+      const full = /^([\d,]+)(\/[\d,]+)?$/.exec(x.shown);
+      if (!full) {
+        // A short number shows as it is, and the next count starts from 0.
+        v.textContent = x.shown;
+        v.dataset.v = v.dataset.ems = 0;
+        return fit(x.ems);
+      }
+      fit(Math.max(Number(v.dataset.ems || 0), x.ems));
+      v.dataset.ems = x.ems;
+      countTo(v, Number(full[1].replaceAll(",", "")), (n) => nf.format(Math.round(n)) + (full[2] || ""), () => fit(x.ems));
     });
   }
 
@@ -1154,6 +1171,8 @@
   const quiet = (repo) => (scope === "all" && repo && state && repo !== state.repo ? " aside" : "");
   // The big numbers, for the chosen repository alone.
   const totalsOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.totals) || s.totals;
+  // And their tiles, in the server's words.
+  const tilesOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.tiles) || s.tiles || [];
   let fading = 0;
   function setScope(v) {
     if (v === scope) return;
