@@ -3,6 +3,8 @@ package plumbing
 import (
 	"fmt"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/synth"
 )
 
 // BuildPrompt is the task for the agent that builds a ratified plan.
@@ -34,8 +36,10 @@ The plan's record is `+"`%s`"+`.
 3. Run the `+"`test`"+` tool. It copies the repository with your changes to the plan's files and runs, in a sandbox with no network: gofmt on the files the change touches, `+"`go vet ./...`"+`, the tests of every package the change touches, and the acceptance tests. CI runs every test before anything merges. You have %d runs, so use them to check your work, not to explore.
 4. When every check passes, stop, and say in a few sentences what you changed and any call you made that the plan didn't settle.
 
+%s
+
 You have no shell and no network. Don't change the acceptance tests, the plan's record, or anything under decisions/, and don't write anywhere but the files the plan names.
-`, LockPath(n), runs)
+`, LockPath(n), runs, synth.WriteAsYouGo("", "test runs"))
 	return b.String()
 }
 

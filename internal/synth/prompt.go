@@ -91,6 +91,8 @@ TLC checks everything with these constants: %s.
 
 1. **The model**, in `+"`%s`"+`. %s
 %s
+%s
+
 # What the gate checks
 
 - **Pins:** the ratified definitions are unchanged.
@@ -104,13 +106,29 @@ TLC checks everything with these constants: %s.
 `+"```tla"+`
 %s`+"```"+`
 `, intro, strings.TrimSpace(request), amendment, p.Manifest.Module, lang.protected, statements.String(), kinds.String(), strings.Join(bounds, ", "),
-		p.Manifest.Module, modelTask, lang.task(p, gateRuns), lang.checks, lang.primer, moduleHeading, p.Manifest.Module, skeleton)
+		p.Manifest.Module, modelTask, lang.task(p, gateRuns), WriteAsYouGo(lang.order, "gate runs"), lang.checks, lang.primer, moduleHeading, p.Manifest.Module, skeleton)
+}
+
+// WriteAsYouGo tells an agent that writes files how its replies work, and to
+// write each file as soon as it's decided. At max effort (D-0114), #91's
+// build agent spent whole replies thinking, and lost each one at the output
+// limit before it wrote a file. order is the order to write the files in, if
+// there is one, and budget names the runs the agent checks its work with,
+// such as "gate runs".
+func WriteAsYouGo(order, budget string) string {
+	if order != "" {
+		order = " (" + order + ")"
+	}
+	return fmt.Sprintf("A reply holds about 128,000 tokens of output, thinking included, and anything past that is cut off and lost: a reply that runs out of room loses what it didn't write. "+
+		"So write each file as soon as you've decided what it holds%s, rather than reasoning the whole job through in one reply. "+
+		"Writing files early costs none of your %s: they're for checking what you've written.", order, budget)
 }
 
 // language is what the prompt says for one target language.
 type language struct {
 	name      string
 	protected string // the language's protected files, as the prompt lists them
+	order     string // the order the agent writes its files in
 	task      func(p *project.Project, gateRuns int) string
 	checks    string // the gate's code-level checks
 	primer    string // what the agent needs to know about the language's tools
@@ -120,6 +138,7 @@ var languages = map[string]language{
 	"go": {
 		name:      "Go",
 		protected: " and go.mod",
+		order:     "the model first, then the code, then its contracts, then the explorer",
 		task: func(p *project.Project, gateRuns int) string {
 			return fmt.Sprintf(`2. **The code**, in `+"`%s/`"+` as Go package `+"`%s`"+`. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068).
    - **No bound is in it.** Sizes are parameters: a capacity passed to a constructor, a slice made at that size, an operation that refuses when there's no room. No constant, array length or loop limit in it comes from the bounds above. The one exception is a machine limit that keeps arithmetic from overflowing, far above any bound.
@@ -226,6 +245,7 @@ Its ` + "`New(capacity)`" + ` follows the same pattern, and ` + "`Write(l)`" + `
 	"typescript": {
 		name:      "TypeScript",
 		protected: " and package.json",
+		order:     "the model first, then the code, then the driver",
 		task: func(p *project.Project, gateRuns int) string {
 			return fmt.Sprintf(`2. **The code**, in TypeScript in `+"`%s/`"+`. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068). Node 24 runs `+"`.ts`"+` files directly by stripping their types, so use only erasable syntax: types, interfaces and `+"`as`"+` are fine, but not `+"`enum`"+`, `+"`namespace`"+` or constructor parameter properties. Import local files with their `+"`.ts`"+` extension. No dependencies: Node's standard library only, and no network.
    - **No bound is in it.** Sizes, limits and clocks are parameters or inputs: a capacity or a limit passed in when it's made, the time passed to each call, and an operation that refuses when the model wouldn't take its action. No constant in it comes from the bounds above.
@@ -250,6 +270,7 @@ Its ` + "`New(capacity)`" + ` follows the same pattern, and ` + "`Write(l)`" + `
 	"python": {
 		name:      "Python",
 		protected: "",
+		order:     "the model first, then the code, then its contracts, then the explorer, then the driver",
 		task: func(p *project.Project, gateRuns int) string {
 			pkg := p.Manifest.Code
 			return fmt.Sprintf(`2. **The code**, in Python, as package `+"`%s/`"+`, with the standard library only and no network. It's the system alone, written the way someone would ship it, and it must do what your model's system does (D-0068). Nagini proves the core.
@@ -334,6 +355,7 @@ class Queue:
 var existingLanguage = language{
 	name:      "TypeScript",
 	protected: " and package.json",
+	order:     "the driver first, then any change the model needs",
 	task: func(p *project.Project, gateRuns int) string {
 		rel := "the project's directory"
 		up := "../../"

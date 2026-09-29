@@ -3,6 +3,8 @@ package formalize
 import (
 	"fmt"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/synth"
 )
 
 // Prompt is the formalization task: the request, what to write, the rules
@@ -115,6 +117,8 @@ If the issue isn't something this factory can build as a new, self-contained pro
 
 The `+"`check`"+` tool pins your statements and runs the gate's model checks on your files. TLC must find no invariant violated and no deadlock, every witness must be reachable, every property must hold, every fairness statement's action must be a `+"`Next`"+` step, and every bug must be caught. You have %d checks, so reread your files before each one. If you're proposing statements, you're done when the check passes. Then reply with a two-sentence summary.
 
+%s
+
 # An example
 
 A complete draft for a different request: "Two processes share a printer. Only one may print at a time."
@@ -173,7 +177,7 @@ Spec == Init /\ [][Next]_vars
   "forks": []
 }
 `+"```"+`
-`, req.Repo, req.Issue, writes, req.Markdown(), previous, checks)
+`, req.Repo, req.Issue, writes, req.Markdown(), previous, checks, synth.WriteAsYouGo("the module first, then `proposal.json`", "checks"))
 }
 
 // backticked lists paths in code spans: `a`, `b` and `c`.
