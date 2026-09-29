@@ -86,28 +86,37 @@
     seen[key] = js;
     return true;
   }
+  // /act reads the snapshot again as soon as GitHub takes a post (#175), and
+  // the newest read is the one drawn, and the one that reads again later.
+  let reads = 0, again = 0;
   async function load() {
+    const read = ++reads;
+    clearTimeout(again);
     let wait = 15000;
     try {
       const r = await fetch("/api/state.json", { cache: "no-store" });
       if (r.status === 503) wait = 3000;
       else if (!r.ok) throw new Error(`HTTP ${r.status}`);
       else {
-        state = await r.json();
+        const s = await r.json();
+        if (read !== reads) return;
+        state = s;
         render(state);
       }
     } catch (e) {
       $("#updated").textContent = "can't reach the server; retrying";
     }
-    setTimeout(load, wait);
+    if (read === reads) again = setTimeout(load, wait);
   }
 
   function render(s) {
     renderTop(s);
     if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
-    if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting]), [...acts]])) renderInbox(s);
+    if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
     if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
-    if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos])) renderNow(s);
+    // The headline counts what needs a person, which a post from /act
+    // changes at once without changing anything else it draws (#175).
+    if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
     if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states])])) renderTabs(s);
@@ -1229,6 +1238,9 @@
       <path d="M20 44 c4 -6 6 4 9 -1 s4 -5 6 0 s3 3 8 -2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="40" stroke-dashoffset="${REDUCED ? 0 : 40}">
         ${REDUCED ? "" : `<animate attributeName="stroke-dashoffset" values="40;0;0;40" keyTimes="0;.35;.85;1" dur="3.6s" repeatCount="indefinite"/>`}</path>
       <circle cx="50" cy="50" r="8" fill="var(--bg)" stroke="currentColor" stroke-width="2"/><path d="M46.5 50 l2.5 2.5 l5 -5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if (kind === "acted") return `<svg class="glyph" viewBox="0 0 64 64" aria-hidden="true" style="color:var(--accent)">
+      <circle cx="32" cy="32" r="22" fill="currentColor" fill-opacity=".12" stroke="currentColor" stroke-opacity=".6" stroke-width="2"/>
+      <path d="M22 33 l7 7 l14 -15" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     return `<svg class="glyph" viewBox="0 0 64 64" aria-hidden="true" style="color:var(--bug)">
       <circle cx="32" cy="32" r="14" fill="currentColor" fill-opacity=".14" stroke="currentColor" stroke-width="2"/>
       ${REDUCED ? "" : `<circle cx="32" cy="32" r="14" fill="none" stroke="currentColor" stroke-width="2"><animate attributeName="r" values="14;29" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values=".8;0" dur="1.8s" repeatCount="indefinite"/></circle>`}
@@ -1241,18 +1253,35 @@
   }
   function renderInbox(s) {
     const items = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
+    // On /act, each issue acted on shows after those that wait, as the
+    // snapshot says, until a read of GitHub finds what was posted (#175).
+    // The public page shows only what waits.
+    const done = ACT ? s.issues.filter((i) => i.open && i.acted && inScope(i.repo)) : [];
+    if (ACT) for (const i of s.issues) if (i.acted) acts.delete(issueKey(i));
     const box = $("#inbox");
-    if (!items.length) {
-      box.innerHTML = `<div class="calm">${calmGlyph()}<span>Nothing needs you right now. When the factory asks a question, proposes statements or needs a person, it shows up here.</span></div>`;
+    const calm = `<div class="calm">${calmGlyph()}<span>Nothing needs you right now. When the factory asks a question, proposes statements or needs a person, it shows up here.</span></div>`;
+    if (!items.length && !done.length) {
+      box.innerHTML = calm;
       toOpen = "";
       return;
     }
     // Invariant's own first, then the longest wait first: the order the
-    // factory took them in.
+    // factory took them in. What was posted comes in the order it was.
     const first = (i) => (i.repo === s.repo ? 0 : 1);
     items.sort((a, b) => first(a) - first(b) || new Date(a.waiting.since) - new Date(b.waiting.since));
-    box.innerHTML = batchBanner(items) + items.map(needCard).join("");
+    done.sort((a, b) => first(a) - first(b) || new Date(a.acted.at) - new Date(b.acted.at));
+    box.innerHTML = (items.length ? batchBanner(items) + items.map(needCard).join("") : calm) + done.map(actedCard).join("");
     if (toOpen) openAt(box);
+  }
+  // actedCard is an issue acted on from /act, its Ratify all or the agent's
+  // door: the command, what the factory does next, when it was posted, and
+  // the comment on GitHub. It offers nothing to post.
+  function actedCard(is) {
+    const a = is.acted, repo = is.repo, key = `${repo}#${is.number}`;
+    return `<article class="need acted${key === OPEN ? " opened" : ""}${quiet(repo)}" ${tag(repo)} data-issue="${esc(key)}"><div>${needGlyph("acted")}</div><div>
+      <div class="need-top"><span class="ref">${esc(ref(repo, is.number))}</span><span class="title">${esc(is.title)}</span><span class="since">posted <span data-ago="${esc(a.at)}"></span></span></div>
+      <p class="ask">${esc(a.text)}</p><pre class="sent">${esc(a.command)}</pre>
+      <div class="cmds"><a class="gh" href="${esc(a.url)}" target="_blank" rel="noopener">See the comment on GitHub ↗</a></div></div></article>`;
   }
   // proposalText says what a proposal asks a person to ratify. A rebuild
   // that changes no statement says so first, since that's all there is to
@@ -1447,6 +1476,7 @@
           try { j = JSON.parse(text) || {}; } catch {}
           posted = j.posted || [];
           for (const p of posted) actOf(`${p.repo}#${p.issue}`).posted = p.url || `https://github.com/${p.repo}/issues/${p.issue}`;
+          if (posted.length) load();
           if (!r.ok) throw new Error(j.error || text.trim() || `HTTP ${r.status}`);
         } catch (err) {
           batch.error = posted.length ? err.message : `Nothing posted: ${err.message}`;
@@ -1478,6 +1508,7 @@
           if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
           a.posted = (await r.json()).url || `https://github.com/${repo}/issues/${n}`;
           a.confirm = "";
+          load();
         } catch (err) {
           a.error = `Not posted: ${err.message}`;
         }

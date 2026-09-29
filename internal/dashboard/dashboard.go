@@ -55,7 +55,7 @@ type Server struct {
 	Open   func(ctx context.Context, repo string, is github.NewIssue) (number int, url string, err error)
 
 	mu      sync.RWMutex
-	state   []byte            // the latest snapshot, gzipped JSON
+	state   []byte            // the latest snapshot, as every page reads it, gzipped JSON
 	issues  []Issue           // the latest snapshot's issues, which say what each is waiting for
 	holders map[string]string // each repository's lease holder, as last read, whose watcher the page follows
 	graphs  map[string][]byte
@@ -63,6 +63,7 @@ type Server struct {
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
 	pending chan graphJob
 	live    live
+	acted   acted // the snapshot as last read, and the commands posted since, which it's served with
 }
 
 // Repo is one repository the page shows.
@@ -488,17 +489,10 @@ func (s *Server) refresh(ctx context.Context) error {
 
 	snap := s.assemble(time.Now().UTC())
 	snap.Stale = stale
-	js, err := json.Marshal(snap)
+	gz, err := s.publish(snap)
 	if err != nil {
 		return err
 	}
-	gz, err := gzipped(js)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.state, s.issues = gz, snap.Issues
-	s.mu.Unlock()
 	s.saveSnapshot(gz)
 	return nil
 }
@@ -544,11 +538,7 @@ func (s *Server) loadSnapshot() {
 	if json.Unmarshal(js, &snap) != nil || snap.Repo != s.Repos[0].Name {
 		return
 	}
-	s.mu.Lock()
-	if s.state == nil {
-		s.state, s.issues = gz, snap.Issues
-	}
-	s.mu.Unlock()
+	s.resume(snap, gz)
 }
 
 // readReceipts takes the receipts from the newest gate run on the branch

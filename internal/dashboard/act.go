@@ -427,6 +427,7 @@ func (s *Server) ratifyAll(w http.ResponseWriter, r *http.Request, who string) {
 			break
 		}
 		s.logf("act: %s posted %q on %s#%d", who, body, c.Repo, c.Issue)
+		s.took(c, url)
 		out.Posted = append(out.Posted, posted{Repo: c.Repo, Issue: c.Issue, URL: url})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -498,6 +499,7 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 		return
 	}
 	s.logf("act: %s posted %q on %s#%d", who, c.Body, c.Repo, c.Issue)
+	s.took(c, url)
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"url": url})

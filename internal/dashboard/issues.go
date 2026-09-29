@@ -68,6 +68,10 @@ type Issue struct {
 	// that failed. It comes from the factory's own post, never from
 	// people's comments.
 	Waiting *Waiting `json:"waiting,omitempty"`
+	// Acted is a command posted from /act, its Ratify all or the agent's
+	// door that GitHub took, and no read of GitHub has found yet (#175).
+	// Until one does, the issue waits on no one.
+	Acted *Acted `json:"acted,omitempty"`
 }
 
 // Waiting is what an open issue needs from a person.
