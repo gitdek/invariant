@@ -81,10 +81,10 @@ Passing TLC only means something if the invariants could have failed. So the gat
 ## One action, one contract
 
 <p align="center">
-  <img src="docs/assets/model-and-code.svg" alt="The TLA+ action RMPrepare beside the Go function RMPrepare. Its Gobra requires clauses restate the action's enabling condition, and its ensures clauses restate the effect and everything left unchanged." width="100%">
+  <img src="docs/assets/model-and-code.svg" alt="The TLA+ action RMPrepare above the Go method RMPrepare, whose Gobra contract restates it: ok exactly when the enabling condition held, the effect when the step is taken, nothing changed when it's refused, and nothing else changed either; the caller sends the message. TLC checks 288 states; Gobra verifies all 10 functions." width="100%">
 </p>
 
-The factory owns both the model and the code, and each Go function's contract restates exactly one TLA+ action. `requires` is the action's enabling condition. `ensures` is its effect, including everything the action leaves unchanged. TLC checks the model, Gobra checks the code, and a test confirms that both reach the same 288 states.
+The factory owns both the model and the code, and each Go method's contract restates exactly one TLA+ action. The code refuses a step the model can't take, by itself, so its contract says both outcomes. `ok` holds exactly when the action's enabling condition held. A step it takes has the action's effect, a refusal changes nothing, and nothing else ever changes. Sending the action's message is the caller's job, since messages belong to the environment. TLC checks the model, Gobra proves the code at every size, and the gate explores the code to confirm that both reach the same 288 states.
 
 ## The gate
 
