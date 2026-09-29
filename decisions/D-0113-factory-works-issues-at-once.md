@@ -3,7 +3,8 @@ id: D-0113
 title: The factory works on several issues at once
 date: 2026-09-28
 door: two-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: "@gitdek's direction on 2026-09-28, after #97 to #103 waited behind #91's build without a word"
 ---
@@ -49,6 +50,15 @@ The lease stays one per repository. Every effect already checks it before it's t
 2. **How many at once?** Recommend 3 by default. That's enough for a build, a draft and an answer at the same time, and it keeps the machine's load and the account's usage in check. `-parallel` changes it.
 3. **Proved or tested?** Recommend tested. The scheduler is plumbing, and each issue's rules stay proved by the models that prove them now. Its tests run two issues' steps at the same time with Go's race detector on. The crash test stops the watcher before each effect of two overlapping issues, and checks that both still finish with every effect done once. If an interaction between issues ever turns up, model it then.
 4. **How?** Recommend a plumbing issue the factory builds once this is ratified. It changes the factory's own code, so a person merges it.
+
+## Ratified by @gitdek
+
+@gitdek ratified D-0113 with all four recommendations on the night of 2026-09-28:
+
+1. **Option A.** The factory works on several issues at once in one watcher, with one step per issue.
+2. **Three at a time** by default, which `-parallel` changes.
+3. **Tested, not proved.** The scheduler is plumbing, and each issue's rules stay proved as they are.
+4. **Built by the factory** as a plumbing issue, and merged by a person, since it's the factory's own code.
 
 ## Acceptance
 
