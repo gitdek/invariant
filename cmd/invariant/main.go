@@ -941,7 +941,7 @@ func initCmd(args []string) int {
 
 Next:
 
-1. Commit the workflow and push it, with an invariant/ directory for new projects, empty but for a .gitkeep. The factory can't change CI, so a person does.
+1. Commit the workflow and push it. The factory can't change CI, so a person does. The projects directory needn't exist: the factory makes it with the first project.
 
 2. Require invariant/gate on main, and allow merge commits. GitHub then refuses any merge the gate didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
 
