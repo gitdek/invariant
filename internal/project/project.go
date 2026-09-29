@@ -41,6 +41,11 @@ type Manifest struct {
 	// a step only one of those rules out is one a driver may leave untried
 	// (D-0082, D-0085).
 	Parameters []string `json:"parameters,omitempty"`
+	// Agent is the coding agent that drafts and builds an issue that changes
+	// the project and picks none itself, such as codex (#173). Empty leaves
+	// it to the watcher's own. A factory pull request never changes it, as
+	// it changes nothing here but the parameters (D-0086).
+	Agent string `json:"agent,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,

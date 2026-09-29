@@ -197,10 +197,15 @@ func (f *Factory) commitPlan(ctx context.Context, t Thread, state Post, c Comman
 
 // runPlanBuild records a plan's build, runs it, and commits what it wrote
 // on top of the branch, without pushing it, as runBuild does for a project.
+// The issue's agent builds it, and no other (#173).
 func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, step string) (string, *plumbing.BuildResult, error, error) {
 	n, m := t.Issue.Number, ratified.Marker
-	if f.Plumbing == nil {
-		return "", nil, errors.New("this watcher can't build plumbing"), nil
+	agent, run, ok := f.buildAgent(t, m)
+	switch {
+	case !ok:
+		return "", nil, cantRun(agent), nil
+	case run.Plumbing == nil:
+		return "", nil, fmt.Errorf("this watcher can't build plumbing with %s", agent), nil
 	}
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", nil, nil, err
@@ -220,7 +225,7 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of #%d's plan", n)); err != nil {
 		return "", nil, nil, err
 	}
-	res, runErr := f.Plumbing.Build(ctx, wt, n, out)
+	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
 	if !f.holds() {
 		return "", nil, nil, errLeaseLost
 	}

@@ -56,7 +56,7 @@ Usage:
   invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
   invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
   invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
-  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-language L] [-lease D] [-parallel N]
+  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-agent A] [-language L] [-lease D] [-parallel N]
                                                turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
   invariant ratification -repo OWNER/NAME PROJECT|PLAN...
@@ -233,6 +233,7 @@ func traceCmd(args []string) int {
 func synthesizeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("synthesize", flag.ExitOnError)
 	out := fs.String("out", "out/synthesis", "where the result, its receipt and the logs go")
+	agent := fs.String("agent", "claude-code", "the coding agent that writes the model and code: claude-code, the only one Invariant can run yet")
 	model := fs.String("model", "opus", "the model the agent uses")
 	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
 	fallback := fs.String("fallback-effort", "xhigh", "the effort the agent runs at once more when the loop guard stops its first run, if it's below -effort; empty never runs it again")
@@ -243,6 +244,10 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	claude := fs.String("claude", "claude", "the Claude Code CLI")
 	draft := fs.Bool("draft", false, "start from the module's drafted model instead of a skeleton of the pinned definitions")
 	fs.Parse(args)
+	if !validAgent(*agent) {
+		fmt.Fprintf(os.Stderr, "invariant: -agent is claude-code, the only coding agent Invariant can run yet, not %q\n", *agent)
+		return 2
+	}
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
 		return 2
@@ -572,6 +577,7 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) m
 func formalizeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("formalize", flag.ExitOnError)
 	out := fs.String("out", "out/formalize", "where the draft, the transcript and the check log go")
+	agent := fs.String("agent", "claude-code", "the coding agent that drafts the statements: claude-code, the only one Invariant can run yet")
 	model := fs.String("model", "opus", "the model the agent uses")
 	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
 	budget := fs.Float64("budget", 3, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
@@ -580,6 +586,10 @@ func formalizeCmd(ctx context.Context, args []string) int {
 	timeout := fs.Duration("timeout", 25*time.Minute, "wall-clock cap on the agent's run")
 	claude := fs.String("claude", "claude", "the Claude Code CLI")
 	fs.Parse(args)
+	if !validAgent(*agent) {
+		fmt.Fprintf(os.Stderr, "invariant: -agent is claude-code, the only coding agent Invariant can run yet, not %q\n", *agent)
+		return 2
+	}
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
 		return 2
@@ -646,6 +656,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	language := fs.String("language", "go", "the code's language when an issue has no language label: go, typescript or python")
 	cache, _ := os.UserCacheDir()
 	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "where the clone, transcripts and logs go")
+	agent := fs.String("agent", "claude-code", "the coding agent that drafts and builds an issue when neither it nor its project picks one: claude-code, the only one Invariant can run yet")
 	model := fs.String("model", "opus", "the model the agents use")
 	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
 	fallback := fs.String("fallback-effort", "xhigh", "the effort a build's agent runs at once more when the loop guard stops its first run, if it's below -effort; empty never runs it again")
@@ -661,6 +672,10 @@ func watchCmd(ctx context.Context, args []string) int {
 	leaseFor := fs.Duration("lease", 5*time.Minute, "how long the watcher's lease on the repository lasts, renewed every poll: over 2m and at least three polls; 0 watches without one")
 	parallel := fs.Int("parallel", 3, "how many issues the watcher takes steps on at once, one step per issue; 1 takes one step at a time")
 	fs.Parse(args)
+	if !validAgent(*agent) {
+		fmt.Fprintf(os.Stderr, "invariant: -agent is claude-code, the only coding agent Invariant can run yet, not %q\n", *agent)
+		return 2
+	}
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
 		return 2
@@ -730,6 +745,9 @@ func watchCmd(ctx context.Context, args []string) int {
 	f := &factory.Factory{
 		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate", Language: *language, Self: bot,
 		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
+		// Claude Code is the watcher's own agent, and the only one Invariant
+		// can run yet, so it drafts, builds and reviews every issue (#173).
+		Agent: *agent,
 		Formalizer: formalize.Formalizer{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *fbudget, MaxTurns: *turns, Effort: *effort},
 			Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 		Builder: factory.Synthesis{Options: synth.Options{Backend: synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort},
@@ -1153,6 +1171,13 @@ var efforts = []string{"low", "medium", "high", "xhigh", "max"}
 
 // validEffort says whether e is an effort Claude Code takes.
 func validEffort(e string) bool { return slices.Contains(efforts, e) }
+
+// agents are the coding agents Invariant can run, by the names -agent
+// takes. Codex comes in #153's later issues.
+var agents = []string{"claude-code"}
+
+// validAgent says whether a is a coding agent Invariant can run.
+func validAgent(a string) bool { return slices.Contains(agents, a) }
 
 // fallbackEffort is the effort a build runs its agent at once more when the
 // loop guard stops its first run, at effort (D-0125): fallback, when it's
