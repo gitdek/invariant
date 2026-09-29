@@ -2,13 +2,15 @@
 
 The factory acts as its own bot once it has a GitHub App ([D-0041](../decisions/log.md)). It comments, pushes and merges as the App's bot, and only people's comments can direct it or ratify.
 
-For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, bot `invariant-code-factory[bot]`, installed on this repository only ([D-0044](../decisions/log.md)). `Invariant Factory` was taken, because it's reserved for an existing account. Creating the App and holding its private key is the repository owner's job. The factory only ever reads the key from the path you give it.
+The App is optional. Without one, the factory posts, pushes and merges as you, through `gh`, and tells its own posts from people's by the markers in them. With one, its work shows as the bot's, and the App's narrow permissions bound what it can do.
+
+For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, bot `invariant-code-factory[bot]`, installed on gitdek/invariant and on copythis-ad, the one other repository it works on ([D-0044](../decisions/log.md), [D-0054](../decisions/D-0054-slice-6-part-b-plan.md)). `Invariant Factory` was taken, because it's reserved for an existing account. Creating the App and holding its private key is the repository owner's job. The factory only ever reads the key from the path you give it.
 
 ## Create the App
 
 1. Open [github.com/settings/apps/new](https://github.com/settings/apps/new).
 2. **GitHub App name:** a name nobody has taken, such as `Invariant Code Factory`. Names are unique across GitHub, and a name that matches an existing account is reserved for it.
-3. **Homepage URL:** `https://puglisij.com`
+3. **Homepage URL:** your repository's URL, or your own site's.
 4. Leave **Callback URL** and **Setup URL** empty, and leave **Request user authorization (OAuth) during installation** unticked.
 5. **Webhook:** untick **Active**. The factory polls, so it needs no webhook.
 6. **Repository permissions:**
@@ -33,7 +35,7 @@ For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, b
 3. Move the key out of Downloads and make it readable only by you:
 
    ```bash
-   mkdir -p ~/.config/invariant && mv ~/Downloads/invariant-code-factory*.private-key.pem ~/.config/invariant/factory.pem && chmod 600 ~/.config/invariant/factory.pem
+   mkdir -p ~/.config/invariant && mv ~/Downloads/YOUR-APP-SLUG*.private-key.pem ~/.config/invariant/factory.pem && chmod 600 ~/.config/invariant/factory.pem
    ```
 
    The file is named after the App's slug. Never commit the key or paste it anywhere. The App doesn't need a client secret, which is only for signing users in.
@@ -41,12 +43,12 @@ For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, b
 ## Install it
 
 1. On the App's page, click **Install App** in the sidebar, then **Install** next to your account.
-2. Choose **Only select repositories**, pick `gitdek/invariant`, and click **Install**.
+2. Choose **Only select repositories**, pick the repositories the factory works on, and click **Install**. To add one later, open the installation's settings and add it under **Repository access**.
 
 ## Run the factory as the App
 
 ```bash
-go run ./cmd/invariant watch -repo gitdek/invariant -app-id 5079269
+invariant watch -repo OWNER/NAME -app-id APP_ID
 ```
 
-`-app-key` defaults to `~/.config/invariant/factory.pem`. The watcher reads the repository with your own git credentials. Everything it writes, it writes as the App.
+`-app-key` defaults to `~/.config/invariant/factory.pem`. The watcher reads the repository with your own git credentials, so for a private repository, run `gh auth setup-git` first. Everything it writes, it writes as the App.

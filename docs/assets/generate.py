@@ -516,26 +516,40 @@ def dual_card(receipt):
 
 def receipt_card(r):
     """The receipt, checking itself off row by row."""
-    c, W, H = DARK, 860, 424
+    c, W = DARK, 860
     T = 12.0
     d, code = r["design"], r["code"]
     reached = [w for w in r["witnesses"] if w["reached"]]
     caught = [b for b in r["bugs"] if b["caught"]]
-    a = r["agreement"]
+    a, larger, conf = r["agreement"], r.get("larger"), r.get("conformance")
+    bounds = ", ".join(f"{k} = {v}" for k, v in sorted(r["bounds"].items()))
+    ratified = r.get("ratified")
+    unverified = code.get("unverified") or []
     rows = [
-        ("Pinned statements", f"{sum(p['match'] for p in r['pins'])} of {len(r['pins'])} match", f"recorded in {r['decision']}"),
+        ("Pinned statements", f"{sum(p['match'] for p in r['pins'])} of {len(r['pins'])} match",
+         f"ratified by @{ratified['by']} on #{ratified['issue']}" if ratified else f"recorded in {r['decision']}"),
         ("Design · TLC", "no violations, no deadlock", f"{d['distinct_states']} distinct states, depth {d['depth']}"),
         ("Reachability", f"{len(reached)} of {len(r['witnesses'])} witnesses reached",
          ", ".join(f"{w['name']} in {w['steps']} steps" for w in reached)),
         ("Known bugs", f"{len(caught)} of {len(r['bugs'])} caught",
          ", ".join(f"{b['label']} after {b['steps']} steps" for b in caught)),
         ("Agreement", "code reaches the model's states", f"{a['states']} states, depth {a['depth']}"),
-        (f"Code · {code['verifier']}", f"{len(code['functions'])} of {len(code['functions'])} functions verified",
-         ", ".join((["overflow checked"] if code["overflow_checked"] else [])
-                   + [f"{name} unverified" for name in code.get("unverified") or []])),
-        ("Build", ", ".join(s["name"] for s in r["build"]["steps"]), "sandboxed, no network"),
     ]
-    bounds = ", ".join(f"{k} = {v}" for k, v in sorted(r["bounds"].items()))
+    if larger:
+        within = ", ".join(f"{k} = {v}" for k, v in sorted(larger["bounds"].items()))
+        rows.append(("One size larger", "code reaches the model's states", f"{larger['states']:,} states within {within}"))
+    rows.append((f"Code · {code['verifier']}", f"{len(code['functions'])} of {len(code['functions'])} functions verified",
+                 ", ".join((["overflow checked"] if code["overflow_checked"] else [])
+                           + ([f"{len(unverified)} unverified"] if unverified else []))))
+    if conf and conf.get("exhaustive"):
+        rows.append(("Conformance", "every reachable state, no step outside it",
+                     f"{conf['states']} of {conf['model_states']} model states"))
+    if conf and conf.get("tried"):
+        rows.append(("Every step tried", "in every state reached", f"{conf['tried']['attempts']:,} attempts, refusals included"))
+    rows.append(("Build", ", ".join(s["name"] for s in r["build"]["steps"]), "sandboxed, no network"))
+    # The card grows with the rows: the rule under them, then the verdict.
+    rule = 84 + len(rows) * 40 - 18
+    H = rule + 78
     out = [card(W, H, c, f"Invariant receipt · {r['project']}", "invariant verify"), f'<g font-family="{SANS}">']
     for i, (check, result, evidence) in enumerate(rows):
         s = 0.6 + i * 0.55
@@ -552,14 +566,14 @@ def receipt_card(r):
                    f'<text x="{W - 32}" y="{y + 5}" text-anchor="end" font-family="{MONO}" font-size="12" '
                    f'fill="{c["muted"]}">{esc(evidence)}</text></g>')
     done = 0.6 + len(rows) * 0.55 + 0.4
-    out.append(f'<path d="M20 346H{W - 20}" stroke="{c["line"]}"/>')
+    out.append(f'<path d="M20 {rule}H{W - 20}" stroke="{c["line"]}"/>')
     out.append(f'<g opacity="0">{shown(done, T - 0.6, T)}'
-               f'<rect x="32" y="366" width="208" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
-               f'<text x="136" y="386" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
+               f'<rect x="32" y="{rule + 20}" width="208" height="30" rx="15" fill="{c["green"]}" fill-opacity="0.16" stroke="{c["green"]}"/>'
+               f'<text x="136" y="{rule + 40}" text-anchor="middle" font-size="13" font-weight="600" fill="{c["green"]}">'
                f'✓ invariant/gate passed</text>'
-               f'<text x="{W - 32}" y="376" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'<text x="{W - 32}" y="{rule + 30}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
                f'exhaustive within {esc(bounds)}</text>'
-               f'<text x="{W - 32}" y="394" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
+               f'<text x="{W - 32}" y="{rule + 48}" text-anchor="end" font-family="{MONO}" font-size="12" fill="{c["muted"]}">'
                f'fingerprint {esc(r["fingerprint"][:19])}…</text></g>')
     out.append('</g>')
     return svg_doc(W, H, "\n".join(out),

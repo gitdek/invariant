@@ -6,7 +6,7 @@ This file and the data beside it are the source of truth for copy and numbers. T
 
 ## Before you build
 
-- **The repository is private.** Don't link to `github.com/gitdek/invariant`, its issues or its pull requests yet: visitors would get a 404. Joseph will make it public later. Until then, name the issue and PR numbers without links, or ask Joseph.
+- **The repository is public** ([D-0075](../../decisions/D-0075-slice-10-plan.md)). Link to `github.com/gitdek/invariant`, its issues and its pull requests.
 - **Publishing is Joseph's call**, as with every page on the site. Build on a branch, such as `work/invariant`, and propose a plan first.
 - **Audience.** The homepage speaks to business owners, and Invariant is an engineering project. Where it sits on the homepage is an open decision (see the end of this file).
 
@@ -166,7 +166,7 @@ Regenerating needs Go and Docker. If you regenerate, fingerprints must match the
 
 ## Open decisions for Joseph
 
-1. **When to publish.** The page can be built now. Links to the repository, issue #1 and PR #2 wait until it's public.
+1. **When to publish.** The page can be built now, with links to the repository, issue #1 and PR #2.
 2. **Homepage placement.** Invariant is an engineering showcase on a site written for business owners. It could be a full Work row, a smaller "lab" row, or reachable only from its own page.
-3. **Naming the tools.** The factory runs its agents with Claude Code. Say so, or say "AI coding agents".
+3. **Naming the tools.** Invariant is agent-agnostic ([D-0052](../../decisions/log.md)): name roles, such as "a coding agent". Where the page says which agents the factory runs, it runs Claude Code today, and a Codex backend is planned.
 4. **Costs.** The first issue's three agent runs cost about $0.80 by the agent's own estimate, on a Max plan, so not a charge. Show it or leave it out.

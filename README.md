@@ -29,6 +29,8 @@ Invariant splits the work where it belongs:
 | What must always be true: invariants, safety properties, and the bounds they're checked at | That the code satisfies them, using a model checker for the design and a verifier for the code |
 | Every fork the factory can't resolve on its own | Only what it was asked to prove. Ratified statements are pinned, and the factory can't edit them |
 
+<p align="center"><a href="#try-it"><strong>Try it</strong></a> in a minute · <a href="#use-it-on-your-repository"><strong>Use it on your repository</strong></a></p>
+
 ## How it works
 
 <picture>
@@ -60,8 +62,10 @@ People steer the factory with comments on the issue, and only people with write 
 | `/invariant choose F1 A` | Decides a question the factory asked |
 | `/invariant revise` | The factory drafts again, reading the comments |
 | `/invariant ratify <hash>` | Ratifies exactly the proposal with that hash, and the factory builds it |
-| The `invariant:typescript` or `invariant:python` label | The factory writes the code in that language. Go is the default here |
+| The `invariant:go`, `invariant:typescript` or `invariant:python` label | The factory writes the code in that language. Without one, the repository's default applies: Go here |
 | A `Project: <dir>` line in the issue | Changes that existing project. The factory proposes a diff of its statements, and calls out anything removed or loosened |
+| `Code: <path>` lines in the issue | Checks existing TypeScript code as it is, without changing a line. The factory writes only the model and a driver that runs the real code |
+| A `Kind: plumbing` line in the issue | For a change that isn't a state machine. The factory proposes a plan: what changes, the files it may touch, and acceptance tests. Once a writer ratifies it, the build must pass those tests unchanged, and a person merges anything in the trusted base. On this repository only, for now |
 | `/invariant retry` | Looks again at a pull request that failed, once someone has fixed the cause |
 
 Anyone can open an issue, but the factory takes one only when a writer labels it or says `/invariant solve`. That hands the issue's text to a coding agent, so read someone else's issue before you do either. The agent that drafts statements has no network and no GitHub access, and nothing it drafts is built until a person ratifies it.
@@ -105,10 +109,10 @@ The same ratified two-phase commit, pinned by the same hashes, checked in each o
 
 | Implementation | How the code is checked | Evidence |
 | :-- | :-- | :-- |
-| [Go](examples/02-twophase-commit) | **Proved.** Gobra verifies every function against a contract that restates a TLA+ action. | The code reaches exactly the model's 288 states |
-| [Go, written by the factory](examples/02-twophase-commit-synthesized) | **Proved**, in the same way | Written from the ratified statements alone. It passed on its first gate run |
-| [TypeScript](examples/02-twophase-commit-ts) | **Tested against the model.** Ordinary code, driven at random. TLC checks every step it takes. | 1,000 runs, no step outside the model, 283 of 288 states visited |
-| [Python](examples/02-twophase-commit-py) | **Tested against the model**, in the same way | 1,000 runs, no step outside the model, 275 of 288 states visited |
+| [Go](examples/02-twophase-commit) | **Proved at every size.** Gobra verifies every function against a contract that restates a TLA+ action. | The code reaches exactly the model's 288 states, and its 1,568 one size larger |
+| [Go, written by the factory](examples/02-twophase-commit-synthesized) | **Proved at every size**, in the same way | Written from the ratified statements alone. It passed on its first gate run |
+| [TypeScript](examples/02-twophase-commit-ts) | **Tested against the model** in every state it can reach. Its driver tries every step in every state, and TLC checks each one. | All 288 of the model's states, 4,896 steps tried, refusals included, and none outside the model |
+| [Python](examples/02-twophase-commit-py) | **Proved at every size.** The factory rebuilt it on [#51](https://github.com/gitdek/invariant/issues/51) around a core Nagini verifies, 8 of 8 functions | All 288 of the model's states, no step outside it |
 | [Python, proved](examples/02-twophase-commit-py-proved) | **Proved.** Nagini verifies every step function against a contract that restates a TLA+ action. | Explored completely: all 288 of the model's states, no step outside it |
 
 The receipt always says which kind of evidence it is. Plant the early-commit bug in the TypeScript or the Python and the gate rejects it at the exact step: the coordinator commits after a single vote.
@@ -159,16 +163,17 @@ The test above stops the watcher before each of its effects and starts a fresh o
 
 ## Try it
 
-With Go and Docker installed, run:
+With Go 1.27.1 or later and Docker installed, run:
 
 ```bash
+git clone https://github.com/gitdek/invariant && cd invariant
 go run ./cmd/invariant verify examples/02-twophase-commit
 ```
 
-It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
+The first run pulls about 440 MB of pinned images, and Docker must run linux/amd64 images, as Rosetta does on Apple Silicon. It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
 
 <p align="center">
-  <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit. Every check passed: 6 of 6 pins match; TLC found no violations or deadlocks in 288 distinct states; 2 of 2 witnesses were reached; 1 of 1 known bugs was caught; the code reaches the model's 288 states; Gobra verified 10 of 10 functions; go vet and go test passed." width="100%">
+  <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit: every check passed. Pinned statements: 6 of 6 match. Design · TLC: no violations, no deadlock. Reachability: 2 of 2 witnesses reached. Known bugs: 1 of 1 caught. Agreement: code reaches the model's states. One size larger: code reaches the model's states. Code · Gobra: 10 of 10 functions verified. Conformance: every reachable state, no step outside it. Every step tried: in every state reached. Build: go vet, go test." width="100%">
 </p>
 
 <details>
@@ -176,25 +181,62 @@ It prints a receipt. This is the real one for the [two-phase commit example](exa
 
 | Check | Result | Evidence |
 | :-- | :-- | :-- |
-| Pinned statements | ✅ 6 of 6 match | recorded in D-0027 |
+| Pinned statements | ✅ 6 of 6 match | ratified by @gitdek on [#65](https://github.com/gitdek/invariant/issues/65#issuecomment-5875563672), amending D-0027 |
 | Design · TLC | ✅ no violations, no deadlock | 288 distinct states (1,146 generated), depth 11 |
 | Reachability | ✅ 2 of 2 witnesses reached | `AllCommitted` in 10 steps, `AllAborted` in 3 steps |
 | Known bugs | ✅ 1 of 1 caught | early-commit: `TCConsistent` violated after 5 steps |
 | Agreement | ✅ code reaches the model's states | 288 states, depth 11 |
-| Code · Gobra | ✅ proved: 10 of 10 functions verified | 10 with contracts, overflow checked, not verified: Successors |
+| One size larger | ✅ code reaches the model's states | 1,568 states, depth 14, within `RM = {r1, r2, r3, r4}` |
+| Code · Gobra | ✅ proved: 10 of 10 functions verified | 10 with contracts, overflow checked, not verified: Init, load, store, mv, Try, Abstract |
+| Code · conformance | ✅ tested against the model: every reachable state, no step outside it | 4,896 steps recorded, 288 of 288 model states visited |
+| Every step tried | ✅ in every state reached, but where only the environment's bounds rule a step out | 4,896 attempts in 288 states, refusals included |
 | Build | ✅ go vet, go test | sandboxed, no network |
 
-Checked within `RM = {r1, r2, r3}`. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.
+Checked within `RM = {r1, r2, r3}`, and again one size larger, within `RM = {r1, r2, r3, r4}`. Within each, TLC's search is exhaustive. Gobra proves the code against its contracts at every size, and the design's rules are claimed only within the sizes checked.
 
 </details>
 
-To run the factory on a repository of your own, with `gh` logged in and Claude Code installed:
+## Use it on your repository
 
-```bash
-go run ./cmd/invariant watch -repo owner/name
-```
+The factory runs on your machine. It polls GitHub through `gh`, runs its agents with your own headless coding agent, on your account, and merges only what your CI's gate passes. You need:
 
-It runs on your machine, polls GitHub through `gh`, and runs its agents with your Claude Code, confined to their workspace. Then open an issue with the `invariant` label.
+- **Go 1.27.1 or later, and Docker** that can run linux/amd64 images, as for [Try it](#try-it).
+- **`gh`,** logged in as someone with write access to the repository.
+- **A headless coding agent,** logged in. The factory runs Claude Code today, and a Codex backend is planned.
+
+1. **Build the CLI from a clean checkout,** so it knows which commit of Invariant it is. `go install` doesn't work yet, because the module has `replace` directives. Any directory on your `PATH` will do:
+
+   ```bash
+   git clone https://github.com/gitdek/invariant && cd invariant && go build -o ~/.local/bin/invariant ./cmd/invariant
+   ```
+
+2. **Add the gate to your repository,** and commit it yourself, since the factory can't change CI. The workflow builds Invariant at your CLI's commit and runs the gate on every pull request:
+
+   ```bash
+   cd path/to/your-repo && invariant init -repo OWNER/NAME
+   git add .github/workflows/gate.yml && git commit -m "Add Invariant's gate" && git push
+   ```
+
+3. **Require the gate, and allow merge commits.** GitHub then refuses any merge the gate didn't pass, yours included. `app_id` 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
+
+   ```bash
+   gh api -X PUT repos/OWNER/NAME/branches/main/protection --input - <<'EOF'
+   {"required_status_checks":{"strict":false,"checks":[{"context":"invariant/gate","app_id":15368}]},"enforce_admins":true,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null}
+   EOF
+   gh api -X PATCH repos/OWNER/NAME -F allow_merge_commit=true
+   ```
+
+4. **Run the factory:**
+
+   ```bash
+   invariant watch -repo OWNER/NAME -projects invariant -language go
+   ```
+
+   `-projects` is the directory new projects go in. `-language` is what the factory writes when an issue doesn't pick one: `go`, `typescript` or `python`. The factory acts as you, through `gh`. To have it act as its own bot, [set up a GitHub App](docs/factory-app.md) and add `-app-id`. Each issue's agents may spend up to $3 of estimated cost drafting statements, and $5 a build, on your account (`-formalize-budget`, `-budget`).
+
+5. **Open an issue** that describes a component and what must always be true of it, and label it `invariant` or comment `/invariant solve`. [#18](https://github.com/gitdek/invariant/issues/18) is a good model. The factory asks about anything it can't settle, proposes statements, and builds once a writer ratifies them.
+
+`Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).
 
 ## Status
 
