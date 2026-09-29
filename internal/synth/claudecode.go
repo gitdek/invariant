@@ -28,7 +28,9 @@ type ClaudeCode struct {
 	MaxTurns  int
 	// Effort is --effort: how hard the agent thinks, low, medium, high, xhigh
 	// or max. Empty leaves Claude Code's own default, which let one build's
-	// agent spend every turn's whole output on thinking, and never act.
+	// agent spend every turn's whole output on thinking, and never act. A job
+	// that names its own effort, as a build's fallback run does, thinks at
+	// that instead (D-0125).
 	Effort string
 }
 
@@ -54,7 +56,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"--disallowedTools", "Bash,Write,Edit,WebFetch,WebSearch,Task,NotebookEdit,Read(~/**),Glob(~/**),Grep(~/**)",
 			"--setting-sources", "project",
 			"--no-session-persistence",
-		}, c.effort()...), nil
+		}, c.effort(job)...), nil
 	}
 	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
 		"invariant": map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]},
@@ -85,15 +87,20 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 		"--permission-mode", "acceptEdits",
 		"--setting-sources", "project",
 		"--no-session-persistence",
-	}, c.effort()...), nil
+	}, c.effort(job)...), nil
 }
 
-// effort is the --effort flag, when an effort is set.
-func (c ClaudeCode) effort() []string {
-	if c.Effort == "" {
+// effort is the --effort flag: the job's effort, when it names one, or else
+// the agent's own, when one is set.
+func (c ClaudeCode) effort(job Job) []string {
+	effort := job.Effort
+	if effort == "" {
+		effort = c.Effort
+	}
+	if effort == "" {
 		return nil
 	}
-	return []string{"--effort", c.Effort}
+	return []string{"--effort", effort}
 }
 
 func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
