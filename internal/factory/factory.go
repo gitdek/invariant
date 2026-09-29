@@ -469,11 +469,13 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	case KindPR:
 		return f.watch(ctx, t, state)
 	case KindRatified:
-		// A build that stopped partway, when the factory stopped. Pick it up.
-		// A ratified plan of issues builds nothing itself (#112).
-		if !isIssuePlan(state.Marker) {
-			return f.build(ctx, t, state)
+		// A ratified plan of issues builds nothing itself (#112), and working
+		// it is its issue's whole step (#148).
+		if isIssuePlan(state.Marker) {
+			return f.workRatified(ctx, t, state)
 		}
+		// A build that stopped partway, when the factory stopped. Pick it up.
+		return f.build(ctx, t, state)
 	case KindFailed:
 		// A person can merge or close the pull request of a build that
 		// failed, and the protocol has both steps. Record them as watch does
@@ -488,9 +490,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			}
 		}
 	}
-	// A stop is for a plan of issues, and WorkPlan answers it on the plan's
-	// issue (#126). An issue's own step never answers one, and one never
-	// holds up the commands after it.
+	// A stop is for a ratified plan of issues, and WorkPlan answers it on the
+	// plan's issue (#126). Any other issue's step never answers one, and one
+	// never holds up the commands after it.
 	pending := slices.DeleteFunc(t.Pending(), func(c Command) bool { return c.Verb == Stop })
 	if len(pending) == 0 {
 		return nil

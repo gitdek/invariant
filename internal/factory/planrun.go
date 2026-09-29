@@ -31,8 +31,9 @@ import (
 // opened for that step: a watcher can stop between opening an issue and
 // recording it, and the issue it left is recorded, not opened again.
 //
-// #112 drafts and ratifies a plan, and WorkPlan is handed one to work,
-// within a poll or on its own.
+// #112 drafts and ratifies a plan. Each poll hands WorkPlan the plan
+// ratified on every open issue, exactly as ratified, and that is the issue's
+// whole step (#148).
 
 // PlanOfIssues is a ratified plan of issues: the issue it was ratified on,
 // its hash, the writer who ratified it, the ratifying comment's URL, and its
@@ -117,6 +118,37 @@ func (f *Factory) WorkPlan(ctx context.Context, plan PlanOfIssues) error {
 		return f.finishPlan(ctx, plan, run)
 	}
 	return nil
+}
+
+// workRatified is the whole step on an issue whose state is a ratified plan
+// of issues (#148): WorkPlan takes the plan's next steps and answers a
+// writer's stop, so the issue builds nothing of its own and answers no other
+// command. Once the issue says the plan is done, it gets no step at all.
+func (f *Factory) workRatified(ctx context.Context, t Thread, ratified Post) error {
+	plan := ratifiedPlan(t, ratified)
+	for _, p := range t.Posts {
+		if p.Marker.Kind == KindPlanDone && p.Marker.Hash == plan.Hash {
+			return nil
+		}
+	}
+	return f.WorkPlan(ctx, plan)
+}
+
+// ratifiedPlan is the plan of issues ratified on t, exactly as its ratified
+// post records it, with the writer whose /invariant ratify that post answers
+// and that comment's URL. When no writer's ratify is found there, as when
+// the ratifier can no longer write, the plan has no ratifier, and the core
+// opens nothing more.
+func ratifiedPlan(t Thread, ratified Post) PlanOfIssues {
+	m := ratified.Marker
+	plan := PlanOfIssues{Issue: t.Issue.Number, Hash: m.Proposal.Hash, Issues: m.Proposal.IssuePlan.Issues}
+	for _, c := range t.Commands {
+		if c.Verb == Ratify && slices.Contains(m.ReplyTo, c.Comment) {
+			plan.By, plan.Comment = c.By, c.URL
+			break
+		}
+	}
+	return plan
 }
 
 // planRun is a plan as GitHub shows it: the issue opened for each of its
