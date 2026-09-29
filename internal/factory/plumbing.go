@@ -324,6 +324,10 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		}); err != nil {
 			return err
 		}
+	} else if ok {
+		if err := f.markReady(ctx, n, pr); err != nil {
+			return err
+		}
 	}
 	next.PR = pr.Number
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
