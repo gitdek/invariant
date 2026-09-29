@@ -155,12 +155,26 @@ jobs:
             done | sort -u)
             if [ -z "$manifests" ]; then echo "The pull request changes no project."; exit 1; fi
           fi
+          # Each project's checks run mostly on one core, so three run at a
+          # time on the runner's four. The first runs alone, so it pulls and
+          # builds the toolchain's images once. Each log is shown whole, in
+          # order, once they're all done.
           status=0
-          for manifest in $manifests; do
-            project="${manifest%/.invariant/invariant.json}"
+          mkdir -p out/logs
+          verify() {
+            name=$(basename "$1")
+            if "$RUNNER_TEMP/invariant" verify -out "out/$name" "$1" > "out/logs/$name.log" 2>&1; then echo 0; else echo 1; fi > "out/logs/$name.exit"
+          }
+          export -f verify
+          projects=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##')
+          verify "$(printf '%s\n' $projects | head -1)"
+          printf '%s\n' $projects | tail -n +2 | xargs -r -P 3 -I{} bash -c 'verify "{}"'
+          for project in $projects; do
+            name=$(basename "$project")
             echo "::group::$project"
-            "$RUNNER_TEMP/invariant" verify -out "out/$(basename "$project")" "$project" || status=1
+            cat "out/logs/$name.log"
             echo "::endgroup::"
+            [ "$(cat "out/logs/$name.exit")" = "0" ] || status=1
           done
           exit $status
 
