@@ -132,17 +132,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 // removing the ones the build removed.
 func apply(root, ws string, plan *Plan) error {
 	for _, f := range plan.Files {
-		from, to := filepath.Join(ws, filepath.FromSlash(f)), filepath.Join(root, filepath.FromSlash(f))
-		if _, err := os.Lstat(from); os.IsNotExist(err) {
-			if err := os.Remove(to); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
-			return err
-		}
-		if err := copyFile(from, to, 0o644); err != nil {
+		if err := take(ws, f, filepath.Join(root, filepath.FromSlash(f))); err != nil {
 			return err
 		}
 	}
