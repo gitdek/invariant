@@ -88,6 +88,12 @@ type Proposal struct {
 	// a new project placed the usual way.
 	Target *Target `json:"target,omitempty"`
 	Dir    string  `json:"dir,omitempty"`
+	// Agent is the coding agent the issue picked with its Agent: line when
+	// it was drafted, if it picked one (#173). The factory sets it, as it
+	// sets Dir, and the build runs the agent it settles. A new project's
+	// manifest records it, and an amendment keeps its project's manifest as
+	// it is (D-0046).
+	Agent string `json:"agent,omitempty"`
 	// Plan is a plumbing change's proposal, in place of statements: what
 	// changes, the files it may touch, and its acceptance tests (D-0105).
 	Plan *plumbing.Plan `json:"plan,omitempty"`
@@ -203,12 +209,13 @@ func (p *Proposal) Pin() error {
 
 // Manifest is the project's manifest. TypeScript lives in src and Python in
 // its package, each with a conformance driver that explores every state the
-// code can reach (D-0038, D-0039).
+// code can reach (D-0038, D-0039). An amendment's is its project's as it is,
+// and a new project's names the agent its issue picked, if it picked one.
 func (p *Proposal) Manifest() project.Manifest {
 	if p.Target != nil {
 		return p.Target.Manifest
 	}
-	m := project.Manifest{Name: p.Name, Module: ".invariant/specs/" + p.Module + ".tla", Code: p.Package, Language: "go"}
+	m := project.Manifest{Name: p.Name, Module: ".invariant/specs/" + p.Module + ".tla", Code: p.Package, Language: "go", Agent: p.Agent}
 	if len(p.Existing) > 0 {
 		// The project holds a model and a driver, and checks the named code
 		// where it is (D-0054).

@@ -109,6 +109,13 @@ type Factory struct {
 	Work       string      // where transcripts and logs go
 	Check      string      // the CI check that gates a merge: invariant/gate
 	Language   string      // the code's language when an issue has no language label (D-0040)
+	// Agent names the coding agent that Formalizer, Builder and Plumbing
+	// run, which an issue gets unless it or its project picks another
+	// (#173). Empty is claude-code. Agents are the other agents the watcher
+	// can run, by name. An issue that picks one it can't run is answered,
+	// and never drafted or built by another.
+	Agent  string
+	Agents map[string]Runners
 	// Self is the factory's own login when it acts as its App's bot
 	// (D-0041). Then only the bot's comments count as the factory's posts,
 	// and no bot's comment is ever a command. Empty means the factory posts
@@ -733,10 +740,23 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		req.Existing, req.Language = &formalize.Existing{Paths: paths, Root: root}, "typescript"
 	}
+	// The issue's agent drafts it (#173). One the watcher can't run, or
+	// doesn't know, gets an answer instead, with nothing drafted, as a
+	// plumbing issue on another repository does (D-0121).
+	line, named := agentLine(t.Issue.Body), ""
+	if req.Current != nil {
+		named = req.Current.Manifest.Agent
+	}
+	agent := f.agentOf(line, named)
+	run, ok := f.runners(agent)
+	if !ok || run.Formalizer == nil {
+		m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers}
+		return f.drafted(ctx, t, cause, base, m, unrunnableComment(agent, f.runnable(), m), LabelHumanReview)
+	}
 	// The draft's agent run is recorded before it starts, where every
 	// watcher sees it (D-0069). One recorded and never finished stopped
 	// partway, and only a writer's command starts another.
-	res, err := f.draft(ctx, n, draftStepName(cause), req, out)
+	res, err := f.draft(ctx, n, draftStepName(cause), run.Formalizer, req, out)
 	if err != nil {
 		return err
 	}
@@ -751,6 +771,13 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	}
 	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
+	}
+	// The proposal settles the agent its issue's line picked, so its build
+	// runs the agent that drafted it, however the issue reads by then, and a
+	// new project's manifest records it (#173). An amendment keeps its
+	// project's manifest as it is (D-0046).
+	if res.Proposal != nil {
+		res.Proposal.Agent = line
 	}
 	if res.Proposal != nil {
 		answers = revise(t, answers, res.Proposal.Revised)
@@ -789,10 +816,11 @@ func draftStepName(cause Command) string {
 	return fmt.Sprintf("draft-%d", cause.Comment)
 }
 
-// draft returns what the draft's agent run made of the request: running it,
-// when nothing was recorded, or reading what a finished run left, whichever
-// watcher ran it. It returns nil for a run recorded and never finished.
-func (f *Factory) draft(ctx context.Context, n int, step string, req formalize.Request, out string) (*formalize.Result, error) {
+// draft returns what the draft's agent run made of the request: running it
+// with form, the issue's agent's, when nothing was recorded, or reading what
+// a finished run left, whichever watcher ran it. It returns nil for a run
+// recorded and never finished.
+func (f *Factory) draft(ctx context.Context, n int, step string, form Formalizer, req formalize.Request, out string) (*formalize.Result, error) {
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -809,7 +837,7 @@ func (f *Factory) draft(ctx context.Context, n int, step string, req formalize.R
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("a draft for #%d", n)); err != nil {
 		return nil, err
 	}
-	res, runErr := f.Formalizer.Formalize(ctx, req, out)
+	res, runErr := form.Formalize(ctx, req, out)
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped.
 	if !f.holds() {
@@ -1313,6 +1341,12 @@ type builtResult struct {
 // reported. runBuild returns that commit, or "" when the run gave no result.
 func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step string) (string, *synth.Result, error, error) {
 	n, m := t.Issue.Number, ratified.Marker
+	// The issue's agent builds it, and no other, so a build whose agent the
+	// watcher can't run fails before anything is recorded (#173).
+	agent, run, ok := f.buildAgent(m)
+	if !ok || run.Builder == nil {
+		return "", nil, cantRun(agent), nil
+	}
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", nil, nil, err
 	}
@@ -1335,7 +1369,7 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 		return "", nil, nil, err
 	}
 	amend := m.Proposal != nil && m.Proposal.Target != nil
-	res, runErr := f.Builder.Build(ctx, root, out, amend)
+	res, runErr := run.Builder.Build(ctx, root, out, amend)
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped.
 	if !f.holds() {
