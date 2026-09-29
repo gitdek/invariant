@@ -300,7 +300,7 @@ func (g Go) check(ctx context.Context, projectDir, pkg string) (Build, Explorati
 		args = append(args, "-e", "INVARIANT_TRACES=/out/traces.json")
 	}
 	args = append(args, "-v", src+":/src", "-v", agreeDir+":/agree:ro", "-v", out+":/out", "-w", "/src", g.GoImage, "sh", "-c", sandboxScript)
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
@@ -539,7 +539,7 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
 		"-e", "INVARIANT_TRACES=/out/traces.json",

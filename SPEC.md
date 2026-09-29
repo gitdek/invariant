@@ -55,6 +55,7 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - Nagini 1.3.1 runs in an image built from a recipe inside Invariant, for linux/amd64 only. Every input is pinned: the base by digest, the Java runtime by copying it from TLC's Temurin image, and every Python package by wheel hash. Receipts name the recipe by its hash. `D-0031` `D-0032`
   - Existing TypeScript code runs in an image built from its package's own lockfile, starting from `node:24-bookworm-slim`, pinned by digest. Only that build has network. Receipts name its recipe. `D-0054` `D-0055`
   - Nothing runs with network access or with the host's environment.
+  - Each container is named, and removed when its check ends or is cut off, so a check the gate gives up on stops running. The factory built this through #98, its first plumbing issue. `D-0111`
 - Invariant converts TLC counterexamples into JSON traces. `D-0016`
 - Each project is its own Go module. `D-0020`
 - Synthesis backends are pluggable: direct model APIs, or headless coding agents such as Claude Code and Codex. `D-0000`

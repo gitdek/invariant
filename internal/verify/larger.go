@@ -17,6 +17,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tlc"
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Larger is the check one size past the bounds (D-0068): TLC and agreement
@@ -210,7 +211,7 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 		return Exploration{}, err
 	}
 	var out bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOCACHE=/tmp/gocache", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "PKG="+filepath.ToSlash(rel),
 		"-v", src+":/src", "-v", agreeDir+":/agree:ro", "-w", "/src", g.GoImage, "sh", "-c", agreementOnly)
@@ -291,7 +292,7 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 		return Exploration{}, err
 	}
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance), "-e", "INVARIANT_COUNT=/out/count.json",
 		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", fmt.Sprintf(countScript, int(countTimeout.Seconds()), runner))

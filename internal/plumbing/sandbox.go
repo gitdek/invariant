@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Sandbox runs a checkout's checks on a throwaway copy of it, in the
@@ -120,7 +122,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 	}
 	args = append(args, "-w", "/src", s.Image, "sh", "-c", script)
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
