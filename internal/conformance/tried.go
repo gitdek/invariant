@@ -180,8 +180,9 @@ const triedBatch = 1000
 // checkTried has TLC find, in each state the driver reached, a step it never
 // tried that more than a bound rules out. The module extends the model at
 // the ratified bounds and instantiates it with the environment's bounds one
-// larger, so TLC evaluates each step both ways (D-0085).
-func checkTried(ctx context.Context, runner tlc.Runner, dir, module, header string, constants map[string]string, vars []string, m Model, rec recorded) (Tried, error) {
+// larger, so TLC evaluates each step both ways (D-0085). The states are
+// checked in batches, several at once, as Check checks the steps.
+func checkTried(ctx context.Context, runner Runner, dir, module, header string, constants map[string]string, vars []string, m Model, rec recorded) (Tried, error) {
 	t := Tried{Attempts: len(rec.attempts), States: len(rec.states)}
 	if m.Problem != "" {
 		t.Message = m.Problem
@@ -230,7 +231,9 @@ func checkTried(ctx context.Context, runner tlc.Runner, dir, module, header stri
 		larger += " WITH " + strings.Join(subs, ", ")
 	}
 	untried := untriedText(m.Steps)
-	for start := 0; start < len(rec.states); start += triedBatch {
+	n := (len(rec.states) + triedBatch - 1) / triedBatch
+	b, res, err := atOnce(ctx, n, func(ctx context.Context, b int) (tlc.Result, error) {
+		start := b * triedBatch
 		end := min(start+triedBatch, len(rec.states))
 		sets := make([]string, 0, end-start)
 		for i := start; i < end; i++ {
@@ -250,25 +253,30 @@ func checkTried(ctx context.Context, runner tlc.Runner, dir, module, header stri
 			"Invariant_TSpec == Invariant_TInit /\\ [][UNCHANGED <<vars, invariant_i>>]_<<vars, invariant_i>>\n" +
 			"Invariant_Untried ==\n  " + untried + "\n" +
 			"Invariant_EveryStepTried == Invariant_Untried = {} \\/ (PrintT(<<\"invariant-untried\", Invariant_Untried>>) /\\ FALSE)\n====\n"
-		if err := os.WriteFile(filepath.Join(dir, "Invariant_Tried.tla"), []byte(text), 0o644); err != nil {
-			return t, err
-		}
-		res, err := runner.Check(ctx, dir, "Invariant_Tried", tlc.Config{Specification: "Invariant_TSpec", Constants: constants, Invariants: []string{"Invariant_EveryStepTried"}})
+		d, err := batchDir(dir, fmt.Sprintf("tried-%d", b+1))
 		if err != nil {
-			return t, err
+			return tlc.Result{}, err
 		}
-		switch {
-		case res.Outcome == tlc.Violated && res.Invariant == "Invariant_EveryStepTried":
-			t.Untried = printedUntried(res.Printed)
-			if i := stateIndex(res.Trace); i >= 1 && start+i-1 < len(rec.pretty) {
-				t.In = rec.pretty[start+i-1]
-			}
-			t.Message = "the driver never tried a step that more than a bound rules out"
-			return t, nil
-		case res.Outcome != tlc.Passed:
-			t.Message = "TLC couldn't check the driver's attempts: " + res.Message
-			return t, nil
+		if err := os.WriteFile(filepath.Join(d, "Invariant_Tried.tla"), []byte(text), 0o644); err != nil {
+			return tlc.Result{}, err
 		}
+		return runner.Check(ctx, d, "Invariant_Tried", tlc.Config{Specification: "Invariant_TSpec", Constants: constants, Invariants: []string{"Invariant_EveryStepTried"}})
+	})
+	if err != nil {
+		return t, err
+	}
+	switch {
+	case res.Outcome == tlc.Violated && res.Invariant == "Invariant_EveryStepTried":
+		t.Untried = printedUntried(res.Printed)
+		start := b * triedBatch
+		if i := stateIndex(res.Trace); i >= 1 && start+i-1 < len(rec.pretty) {
+			t.In = rec.pretty[start+i-1]
+		}
+		t.Message = "the driver never tried a step that more than a bound rules out"
+		return t, nil
+	case res.Outcome != tlc.Passed:
+		t.Message = "TLC couldn't check the driver's attempts: " + res.Message
+		return t, nil
 	}
 	t.Passed = true
 	return t, nil

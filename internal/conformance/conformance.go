@@ -15,9 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gitdek/invariant/internal/tlc"
 )
@@ -52,10 +54,16 @@ type Traces struct {
 	Traces [][]map[string]any `json:"traces"`
 }
 
+// Runner model-checks module, a file in dir, against cfg. tlc.Runner is one,
+// and a stand-in can take its place in tests.
+type Runner interface {
+	Check(ctx context.Context, dir, module string, cfg tlc.Config) (tlc.Result, error)
+}
+
 // Check tests what a driver recorded against module, staged in dir, with
 // TLC. A driver that records its attempts (D-0085) is also checked for
 // trying every step: model says what that needs, and nil skips it.
-func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, raw []byte, model *Model) (Result, error) {
+func Check(ctx context.Context, runner Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, raw []byte, model *Model) (Result, error) {
 	r := Result{ModelStates: modelStates}
 	rec, problem := decode(raw, vars)
 	if problem != "" {
@@ -109,14 +117,16 @@ func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds ma
 
 	// Every step that changed the state must be a Next step. TLC checks the
 	// steps in batches, each carrying only the states it uses, so memory
-	// stays flat however many steps the code took.
+	// stays flat however many steps the code took, and several batches at
+	// once, each in a directory of its own.
 	var all [][2]int
 	for p := range steps {
 		all = append(all, p)
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i][0] < all[j][0] || all[i][0] == all[j][0] && all[i][1] < all[j][1] })
-	for _, batch := range batches(all, stepBatch) {
-		local, pairs := renumber(batch)
+	split := batches(all, stepBatch)
+	b, res, err := atOnce(ctx, len(split), func(ctx context.Context, b int) (tlc.Result, error) {
+		local, pairs := renumber(split[b])
 		used := make([]string, len(local))
 		for i, s := range local {
 			used[i] = states[s]
@@ -134,38 +144,43 @@ func Check(ctx context.Context, runner tlc.Runner, dir, module string, bounds ma
 			"       /\\ invariant_done' = TRUE\n       /\\ UNCHANGED <<invariant_source, invariant_target>>\n" +
 			"    \\/ /\\ invariant_done\n       /\\ UNCHANGED <<vars, invariant_source, invariant_target, invariant_done>>\n" +
 			"Invariant_CSpec == Invariant_CInit /\\ [][Invariant_CNext]_<<vars, invariant_source, invariant_target, invariant_done>>\n====\n"
-		if err := os.WriteFile(filepath.Join(dir, "Invariant_Conformance.tla"), []byte(stepModule), 0o644); err != nil {
-			return r, err
-		}
-		res, err := runner.Check(ctx, dir, "Invariant_Conformance", tlc.Config{Specification: "Invariant_CSpec", Constants: cfgConstants})
+		d, err := batchDir(dir, fmt.Sprintf("steps-%d", b+1))
 		if err != nil {
-			return r, err
+			return tlc.Result{}, err
 		}
-		switch {
-		case res.Outcome == tlc.Deadlock && len(res.Trace) > 0:
-			// The stuck state is the start of a step no Next step can make; it
-			// carries the step's two ends as indexes into the recorded states.
-			stuck := res.Trace[len(res.Trace)-1]
-			step := &Step{From: stateText(stuck, vars)}
-			for _, v := range stuck.Vars {
-				i, err := strconv.Atoi(v.Value)
-				if err != nil || i < 1 || i > len(local) {
-					continue
-				}
-				switch v.Name {
-				case "invariant_source":
-					step.From = pretty[local[i-1]]
-				case "invariant_target":
-					step.To = pretty[local[i-1]]
-				}
+		if err := os.WriteFile(filepath.Join(d, "Invariant_Conformance.tla"), []byte(stepModule), 0o644); err != nil {
+			return tlc.Result{}, err
+		}
+		return runner.Check(ctx, d, "Invariant_Conformance", tlc.Config{Specification: "Invariant_CSpec", Constants: cfgConstants})
+	})
+	if err != nil {
+		return r, err
+	}
+	switch {
+	case res.Outcome == tlc.Deadlock && len(res.Trace) > 0:
+		// The stuck state is the start of a step no Next step can make; it
+		// carries the step's two ends as indexes into the batch's states.
+		local, _ := renumber(split[b])
+		stuck := res.Trace[len(res.Trace)-1]
+		step := &Step{From: stateText(stuck, vars)}
+		for _, v := range stuck.Vars {
+			i, err := strconv.Atoi(v.Value)
+			if err != nil || i < 1 || i > len(local) {
+				continue
 			}
-			r.BadStep = step
-			r.Message = "the code took a step the model doesn't allow"
-			return r, nil
-		case res.Outcome != tlc.Passed:
-			r.Message = "TLC couldn't check the steps: " + res.Message
-			return r, nil
+			switch v.Name {
+			case "invariant_source":
+				step.From = pretty[local[i-1]]
+			case "invariant_target":
+				step.To = pretty[local[i-1]]
+			}
 		}
+		r.BadStep = step
+		r.Message = "the code took a step the model doesn't allow"
+		return r, nil
+	case res.Outcome != tlc.Passed:
+		r.Message = "TLC couldn't check the steps: " + res.Message
+		return r, nil
 	}
 	r.Passed = true
 	if rec.attempts != nil && model != nil {
@@ -212,6 +227,96 @@ func renumber(batch [][2]int) (local []int, pairs []string) {
 		pairs = append(pairs, fmt.Sprintf("<<%d, %d>>", id(p[0]), id(p[1])))
 	}
 	return local, pairs
+}
+
+// atOnce checks batches 0 to n-1 with check, as many at once as
+// runtime.GOMAXPROCS(0) says, up to maxAtOnce: they don't depend on each
+// other, and most of each TLC run is starting its JVM. What it finds is what checking them in
+// order would: the earliest batch that doesn't pass and what check found
+// there, or n and a passing result. Once a batch fails, those after it don't
+// start and those running are stopped through their context, but every batch
+// before it runs to its end, and atOnce returns only once every batch it
+// started has.
+func atOnce(ctx context.Context, n int, check func(ctx context.Context, b int) (tlc.Result, error)) (int, tlc.Result, error) {
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		first    = n
+		found    = tlc.Result{Outcome: tlc.Passed}
+		foundErr error
+		cancels  = make([]context.CancelFunc, n)
+	)
+	// A batch holds a slot while it runs.
+	slots := make(chan struct{}, min(runtime.GOMAXPROCS(0), maxAtOnce))
+	for b := range n {
+		slots <- struct{}{}
+		mu.Lock()
+		if first < b {
+			mu.Unlock()
+			break
+		}
+		batchCtx, cancel := context.WithCancel(ctx)
+		cancels[b] = cancel
+		mu.Unlock()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			defer cancel()
+			res, err := check(batchCtx, b)
+			if err == nil && res.Outcome == tlc.Passed {
+				return
+			}
+			mu.Lock()
+			if b < first {
+				first, found, foundErr = b, res, err
+				for _, later := range cancels[b+1:] {
+					if later != nil {
+						later()
+					}
+				}
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return first, found, foundErr
+}
+
+// maxAtOnce is the most batches checked at once, however many CPUs there
+// are. Each is a TLC JVM whose heap may grow to a quarter of the machine's
+// memory: on a Mac with 18 cores, 18 at once ran out of memory, and TLC was
+// killed partway through a batch (#142). Four at once checked
+// factory/protocol there in 258 seconds, against 371 one at a time.
+const maxAtOnce = 4
+
+// batchDir makes dir/name, the directory one batch is checked in, holding
+// copies of every .tla file directly in dir. The runner writes its config
+// beside the module it checks, so batches checked at once each need a
+// directory, and TLC's container sees only that one, so links out of it
+// wouldn't do.
+func batchDir(dir, name string) (string, error) {
+	d := filepath.Join(dir, name)
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tla") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(filepath.Join(d, e.Name()), b, 0o644); err != nil {
+			return "", err
+		}
+	}
+	return d, nil
 }
 
 // is states that the variables equal the fields of record expression s, or,
