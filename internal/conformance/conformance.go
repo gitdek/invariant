@@ -230,8 +230,8 @@ func renumber(batch [][2]int) (local []int, pairs []string) {
 }
 
 // atOnce checks batches 0 to n-1 with check, as many at once as
-// runtime.GOMAXPROCS(0) says: they don't depend on each other, and most of
-// each TLC run is starting its JVM. What it finds is what checking them in
+// runtime.GOMAXPROCS(0) says, up to maxAtOnce: they don't depend on each
+// other, and most of each TLC run is starting its JVM. What it finds is what checking them in
 // order would: the earliest batch that doesn't pass and what check found
 // there, or n and a passing result. Once a batch fails, those after it don't
 // start and those running are stopped through their context, but every batch
@@ -247,7 +247,7 @@ func atOnce(ctx context.Context, n int, check func(ctx context.Context, b int) (
 		cancels  = make([]context.CancelFunc, n)
 	)
 	// A batch holds a slot while it runs.
-	slots := make(chan struct{}, runtime.GOMAXPROCS(0))
+	slots := make(chan struct{}, min(runtime.GOMAXPROCS(0), maxAtOnce))
 	for b := range n {
 		slots <- struct{}{}
 		mu.Lock()
@@ -282,6 +282,13 @@ func atOnce(ctx context.Context, n int, check func(ctx context.Context, b int) (
 	wg.Wait()
 	return first, found, foundErr
 }
+
+// maxAtOnce is the most batches checked at once, however many CPUs there
+// are. Each is a TLC JVM whose heap may grow to a quarter of the machine's
+// memory: on a Mac with 18 cores, 18 at once ran out of memory, and TLC was
+// killed partway through a batch (#142). Four at once checked
+// factory/protocol there in 258 seconds, against 371 one at a time.
+const maxAtOnce = 4
 
 // batchDir makes dir/name, the directory one batch is checked in, holding
 // copies of every .tla file directly in dir. The runner writes its config
