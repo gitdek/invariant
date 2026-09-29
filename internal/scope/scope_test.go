@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 )
 
@@ -213,6 +214,58 @@ func TestAManifestChangesOnlyInItsParameters(t *testing.T) {
 		}
 		if r.OK() != c.ok {
 			t.Errorf("manifest %s: ok %v, problems %q", c.manifest, r.OK(), r.Problems)
+		}
+	}
+}
+
+// A plumbing pull request stays in scope when it changes only what its
+// ratified plan names, and it says what it changes in the trusted base.
+func TestAPlanKeepsAPlumbingPullRequestInScope(t *testing.T) {
+	accept := "package page\n\nimport \"testing\"\n\nfunc TestPageSaysHello(t *testing.T) {}\n"
+	plan := plumbing.Plan{Name: "a page", Summary: "Add a page.", Files: []string{"page/page.go", "internal/factory/hook.go"},
+		Tests:   []plumbing.Test{{Name: "TestPageSaysHello", File: "page/page_accept_test.go", Says: "It says hello."}},
+		Sources: map[string]string{"page/page_accept_test.go": accept}}
+	if err := plan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	record := func(issue int) string {
+		b, _ := json.Marshal(plumbing.Lock{Ratified: plumbing.Ratification{By: "gitdek", Issue: issue, Comment: "https://example.com/c", Proposal: plan.Hash()}, Plan: plan})
+		return string(b)
+	}
+	check := func(files map[string]string) Result {
+		t.Helper()
+		dir := repo(t)
+		write(t, dir, files)
+		commit(t, dir, "plan")
+		r, err := Check(context.Background(), dir, "main", "HEAD", 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	ok := map[string]string{plumbing.LockPath(7): record(7), "page/page_accept_test.go": accept, "page/page.go": "package page\n", "internal/factory/hook.go": "package factory\n"}
+	r := check(ok)
+	if !r.OK() || !r.Plumbing || r.Project != plumbing.LockPath(7) || !reflect.DeepEqual(r.Trusted, []string{"internal/factory/hook.go"}) {
+		t.Fatalf("result = %+v", r)
+	}
+	for name, change := range map[string]func(map[string]string){
+		"outside the plan": func(f map[string]string) { f["README.md"] = "changed\n" },
+		"a weakened test":  func(f map[string]string) { f["page/page_accept_test.go"] = accept + "\n// skipped\n" },
+		"another's plan":   func(f map[string]string) { delete(f, plumbing.LockPath(7)); f[plumbing.LockPath(8)] = record(8) },
+		"an edited plan": func(f map[string]string) {
+			f[plumbing.LockPath(7)] = strings.Replace(record(7), "Add a page.", "Add two pages.", 1)
+		},
+		"a different issue": func(f map[string]string) {
+			f[plumbing.LockPath(7)] = strings.Replace(record(7), `"issue":7`, `"issue":9`, 1)
+		},
+	} {
+		files := map[string]string{}
+		for k, v := range ok {
+			files[k] = v
+		}
+		change(files)
+		if r := check(files); r.OK() {
+			t.Errorf("%s: the pull request was in scope: %+v", name, r)
 		}
 	}
 }
