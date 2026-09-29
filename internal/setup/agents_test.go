@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,8 @@ func TestTheWatcherChecksItsAgentsAtStart(t *testing.T) {
 	claude := standIn(t, dir, "claude", `{"loggedIn":true,"email":"SECRET@example.com"}`, true)
 	codex := standIn(t, dir, "codex", "Logged in using ChatGPT SECRET", true)
 	home := filepath.Join(dir, "codex-home")
-	can := map[string]Agent{"claude-code": ClaudeCode(claude), "codex": Codex(codex, home)}
+	probed := 0
+	can := map[string]Agent{"claude-code": ClaudeCode(claude), "codex": Codex(codex, home, func(context.Context) error { probed++; return nil })}
 
 	if err := CheckAgents(ctx, []string{"claude-code", "codex", "claude-code"}, can); err != nil {
 		t.Fatalf("both agents run and are signed in: %v", err)
@@ -44,6 +46,9 @@ func TestTheWatcherChecksItsAgentsAtStart(t *testing.T) {
 	calls, _ := os.ReadFile(filepath.Join(dir, "codex.calls"))
 	if !strings.Contains(string(calls), "login status CODEX_HOME="+home) {
 		t.Errorf("codex's status wasn't asked of its own home: %s", calls)
+	}
+	if probed != 1 {
+		t.Errorf("codex's sandbox was probed %d times; want once", probed)
 	}
 
 	for _, c := range []struct {
@@ -55,7 +60,9 @@ func TestTheWatcherChecksItsAgentsAtStart(t *testing.T) {
 		{"claude-code signed out", []string{"claude-code"},
 			map[string]Agent{"claude-code": ClaudeCode(standIn(t, dir, "claude-out", `{"loggedIn":false}`, true))}, "claude auth login"},
 		{"codex signed out", []string{"claude-code", "codex"},
-			map[string]Agent{"claude-code": ClaudeCode(claude), "codex": Codex(standIn(t, dir, "codex-out", "Not logged in", false), home)}, "codex-out login"},
+			map[string]Agent{"claude-code": ClaudeCode(claude), "codex": Codex(standIn(t, dir, "codex-out", "Not logged in", false), home, nil)}, "codex-out login"},
+		{"codex's sandbox doesn't hold", []string{"codex"},
+			map[string]Agent{"codex": Codex(codex, home, func(context.Context) error { return errors.New("a command read its home") })}, "codex can't run where the factory runs it: a command read its home"},
 		{"a CLI that doesn't run", []string{"claude-code"},
 			map[string]Agent{"claude-code": ClaudeCode(filepath.Join(dir, "missing"))}, "Install it, or name it with -claude"},
 		{"an agent the watcher can't run", []string{"claude-code", "codex"},

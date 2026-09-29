@@ -84,6 +84,7 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	t.Setenv("GH_TOKEN", "ghp_stand-in")
 	c, dir, ws := codexRig(t, codexRun)
 	c.Model, c.Effort = "gpt-stand-in", "high"
+	c.Reads, c.GoModCache = []string{"/opt/toolchain"}, "/cache/mod"
 	var transcript bytes.Buffer
 	u, err := c.Run(context.Background(), Job{Workspace: ws, Prompt: "-build the code", GateServer: []string{"/bin/invariant", "mcp", "-gate"},
 		Tools: []string{"gate", "check"}, Transcript: &transcript, Effort: "max"})
@@ -93,8 +94,14 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	args := strings.Split(strings.TrimSpace(standInFile(t, dir, "args")), "\n")
 	for _, want := range [][]string{
 		{"exec", "--json"}, {"--ignore-user-config"}, {"--ephemeral"}, {"--skip-git-repo-check"},
-		{"--disable", "apps"}, {"--disable", "plugins"}, {"-C", ws}, {"-s", "workspace-write"}, {"-m", "gpt-stand-in"},
+		{"--disable", "apps"}, {"--disable", "plugins"}, {"-C", ws}, {"-m", "gpt-stand-in"},
 		{"-c", `shell_environment_policy.inherit="core"`},
+		// Its commands run under Codex's own permission profile: the
+		// workspace, the system's own files and the toolchains, and nothing
+		// else (D-0138).
+		{"-c", `default_permissions="invariant"`},
+		{"-c", `permissions.invariant.extends=":workspace"`},
+
 		// The job's effort wins over the backend's own (D-0125).
 		{"-c", `model_reasoning_effort="max"`},
 		{"-c", `mcp_servers.invariant={command="/bin/invariant", args=["mcp","-gate"], required=true, default_tools_approval_mode="approve", enabled_tools=["gate","check"], startup_timeout_sec=60, tool_timeout_sec=900}`},
@@ -108,6 +115,35 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	}
 	if args[len(args)-1] != "-build the code" {
 		t.Errorf("the prompt isn't last: %q", args)
+	}
+	if slices.Contains(args, "-s") || slices.Contains(args, "--sandbox") {
+		t.Errorf("a sandbox mode turns Codex's permission profile off: %q", args)
+	}
+	// Its commands may also read Codex's own binary, which Codex runs under
+	// the profile to read the workspace's instructions.
+	fs := `permissions.invariant.filesystem={":root"="deny", ":minimal"="read", ":tmpdir"="deny", "/opt/toolchain"="read", "/cache/mod"="read", "` + filepath.Dir(c.Binary) + `"="read"`
+	if !slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, fs) }) {
+		t.Errorf("codex's arguments %q lack the profile's files, %s…}", args, fs)
+	}
+	// Its commands get a temporary directory of the run's own, outside the
+	// workspace, and build Go offline into a cache there, which is gone once
+	// the run is.
+	var commands string
+	for _, a := range args {
+		if strings.HasPrefix(a, "shell_environment_policy.set=") {
+			commands = a
+		}
+	}
+	for _, want := range []string{`GOPROXY="off"`, `GOFLAGS="-mod=mod"`, `GOTOOLCHAIN="local"`, `GIT_CONFIG_GLOBAL="/dev/null"`, `GOMODCACHE="/cache/mod"`, `TMPDIR="/tmp/invariant-codex-`, `GOCACHE="/tmp/invariant-codex-`} {
+		if !strings.Contains(commands, want) {
+			t.Errorf("the commands' environment %s lacks %s", commands, want)
+		}
+	}
+	if i := strings.Index(commands, `GOCACHE="`); i >= 0 {
+		cache := strings.SplitN(commands[i+len(`GOCACHE="`):], `"`, 2)[0]
+		if _, err := os.Stat(cache); !os.IsNotExist(err) {
+			t.Errorf("the run's build cache %s outlived it", cache)
+		}
 	}
 	env := standInFile(t, dir, "env")
 	if !strings.Contains(env, "CODEX_HOME="+c.Home+"\n") {
@@ -182,8 +218,39 @@ func TestCodexReviewsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(standInFile(t, dir, "args")), "\n")
-	if !containsRun(args, []string{"-s", "read-only"}) || slices.Contains(args, "workspace-write") || strings.Contains(strings.Join(args, " "), "mcp_servers") {
+	if !containsRun(args, []string{"-c", `permissions.invariant.extends=":read-only"`}) || !strings.Contains(strings.Join(args, " "), `":workspace_roots"="read"`) ||
+		strings.Contains(strings.Join(args, " "), ":workspace\"") || strings.Contains(strings.Join(args, " "), "mcp_servers") {
 		t.Errorf("a reviewer's arguments: %q", args)
+	}
+}
+
+// Codex runs go one at a time, since runs that share a sign-in can break
+// each other's token refresh (D-0138).
+func TestCodexRunsOneAtATime(t *testing.T) {
+	c, dir, ws := codexRig(t, codexRun)
+	script := strings.Replace(standIn, `cat "$here/events.jsonl"`, `echo "start $(date +%s%N)" >> "$here/turns"; sleep 0.4; echo "end $(date +%s%N)" >> "$here/turns"; cat "$here/events.jsonl"`, 1)
+	if err := os.WriteFile(c.Binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := c.Run(context.Background(), Job{Workspace: ws, Prompt: "build", GateServer: []string{"/bin/invariant"}})
+			done <- err
+		}()
+	}
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns := strings.Fields(standInFile(t, dir, "turns"))
+	var kinds []string
+	for i := 0; i < len(turns); i += 2 {
+		kinds = append(kinds, turns[i])
+	}
+	if !slices.Equal(kinds, []string{"start", "end", "start", "end"}) {
+		t.Errorf("two runs overlapped: %v", turns)
 	}
 }
 

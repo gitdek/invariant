@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,9 +30,15 @@ import (
 // a reviewer's reads only, with no server (D-0087). Its commands get only
 // the environment's core variables, not its keys or tokens.
 //
-// Codex's sandbox doesn't stop reads outside the workspace, and its agent
-// has a shell, so the factory doesn't run it until it has a place where it
-// can see nothing but its workspace (D-0037).
+// Its agent has a shell, so its commands run under a permission profile of
+// Codex's own (D-0138): they read only the workspace, the system's own
+// files and the toolchains it names, write only in the workspace and the
+// system's temporary directories, and reach no network. Everything else is
+// denied, the home directory included, and Codex's home with its sign-in
+// is kept there. Codex's own connection to its service, and Invariant's
+// server, aren't sandboxed, so the agent still thinks and checks its work.
+// Codex runs go one at a time, since runs that share a sign-in can break
+// each other's token refresh.
 type Codex struct {
 	Binary string // the codex CLI
 	Home   string // CODEX_HOME: its sign-in, and nothing of the user's own configuration
@@ -47,6 +54,75 @@ type Codex struct {
 	// ToolTimeout is how long a call to Invariant's tool may take, in
 	// seconds. A gate run takes minutes.
 	ToolTimeout int
+	// Reads are what its commands may read beyond the workspace and the
+	// system's own files: the toolchains they build with (D-0138).
+	Reads []string
+	// GoModCache is Go's module cache, which its commands read to build Go
+	// without the network.
+	GoModCache string
+}
+
+// codexTurn lets one Codex run go at a time (D-0138).
+var codexTurn = make(chan struct{}, 1)
+
+// profile is the permission profile Codex's commands run under (D-0138):
+// Codex's workspace profile, or its read-only one for a reviewer, with
+// everything denied but the system's own files, the workspace and what the
+// backend's Reads name. The user's temporary directory, where every
+// agent's workspace is, is denied too, so a run reads no other's. Codex's
+// minimal files include the shared temporary directories, /tmp among them,
+// which its commands may also write.
+func (c Codex) profile(readOnly bool) []string {
+	base, fs := ":workspace", []string{`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="deny"`}
+	if readOnly {
+		// The read-only profile reads everything, so once everything is
+		// denied, the workspace is named again.
+		base, fs = ":read-only", append(fs, `":workspace_roots"="read"`)
+	}
+	for _, p := range c.reads() {
+		fs = append(fs, tomlString(p)+`="read"`)
+	}
+	return []string{
+		"-c", `default_permissions="invariant"`,
+		"-c", `permissions.invariant.extends="` + base + `"`,
+		"-c", "permissions.invariant.filesystem={" + strings.Join(fs, ", ") + "}",
+	}
+}
+
+func (c Codex) reads() []string {
+	reads := append([]string{}, c.Reads...)
+	if c.GoModCache != "" {
+		reads = append(reads, c.GoModCache)
+	}
+	return append(reads, c.codexDirs()...)
+}
+
+// codexDirs are where Codex's binary is, as it's run and as it really is.
+// Codex runs itself under the profile to read a workspace's instructions,
+// so its commands may read it too. A copy run that way can't read Codex's
+// sign-in or reach the network any more than they can.
+func (c Codex) codexDirs() []string {
+	p, err := exec.LookPath(c.Binary)
+	if err != nil {
+		return nil
+	}
+	dirs := []string{filepath.Dir(p)}
+	if real, err := filepath.EvalSymlinks(p); err == nil && filepath.Dir(real) != dirs[0] {
+		dirs = append(dirs, filepath.Dir(real))
+	}
+	return dirs
+}
+
+// commandEnv is what the agent's commands get beyond the environment's core
+// variables: a temporary directory of the run's own, tmp, which they may
+// write, Go set to build offline, from the module cache, into a build cache
+// there, and git kept from the home directory it can't read.
+func (c Codex) commandEnv(tmp string) string {
+	set := []string{"TMPDIR=" + tomlString(tmp), "GOCACHE=" + tomlString(filepath.Join(tmp, "go-build")), `GOPROXY="off"`, `GOFLAGS="-mod=mod"`, `GOTOOLCHAIN="local"`, `GIT_CONFIG_GLOBAL="/dev/null"`}
+	if c.GoModCache != "" {
+		set = append(set, "GOMODCACHE="+tomlString(c.GoModCache))
+	}
+	return "shell_environment_policy.set={" + strings.Join(set, ", ") + "}"
 }
 
 func (c Codex) Name() string { return "codex" }
@@ -54,7 +130,7 @@ func (c Codex) Name() string { return "codex" }
 // codexServer is Invariant's MCP server's name in Codex's configuration.
 const codexServer = "invariant"
 
-func (c Codex) args(job Job) ([]string, error) {
+func (c Codex) args(job Job, tmp string) ([]string, error) {
 	args := []string{"exec", "--json",
 		// Nothing in the Codex home's own configuration applies, and the
 		// run keeps no session to resume.
@@ -63,10 +139,10 @@ func (c Codex) args(job Job) ([]string, error) {
 		"--disable", "apps", "--disable", "plugins",
 		"-C", job.Workspace,
 		"-c", `shell_environment_policy.inherit="core"`,
+		"-c", c.commandEnv(tmp),
 	}
-	if job.ReadOnly {
-		args = append(args, "-s", "read-only")
-	} else {
+	args = append(args, c.profile(job.ReadOnly)...)
+	if !job.ReadOnly {
 		if len(job.GateServer) == 0 {
 			return nil, errors.New("codex needs Invariant's MCP server for this job")
 		}
@@ -83,7 +159,7 @@ func (c Codex) args(job Job) ([]string, error) {
 		// call.
 		server := fmt.Sprintf(`mcp_servers.%s={command=%s, args=%s, required=true, default_tools_approval_mode="approve", enabled_tools=%s, startup_timeout_sec=60, tool_timeout_sec=%d}`,
 			codexServer, tomlString(job.GateServer[0]), tomlStrings(job.GateServer[1:]), tomlStrings(tools), timeout)
-		args = append(args, "-s", "workspace-write", "-c", server)
+		args = append(args, "-c", server)
 	}
 	if c.Model != "" {
 		args = append(args, "-m", c.Model)
@@ -131,7 +207,21 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if c.Home == "" {
 		return Usage{}, errors.New("codex needs a home of its own, where its sign-in lives")
 	}
-	args, err := c.args(job)
+	select {
+	case codexTurn <- struct{}{}:
+		defer func() { <-codexTurn }()
+	case <-ctx.Done():
+		return Usage{}, ctx.Err()
+	}
+	// The agent's commands get a temporary directory of the run's own, which
+	// holds their Go build cache, where the profile lets them write. In the
+	// workspace, it would count as the agent's work.
+	tmp, err := os.MkdirTemp("/tmp", "invariant-codex-")
+	if err != nil {
+		return Usage{}, err
+	}
+	defer os.RemoveAll(tmp)
+	args, err := c.args(job, tmp)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -181,6 +271,66 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 		return usage, fmt.Errorf("codex stopped: %s", usage.Summary)
 	}
 	return usage, nil
+}
+
+// Probe checks, before the factory runs Codex, that its sandbox holds as
+// D-0138 needs: a command under a build's profile writes in its workspace,
+// and can't read a file in Codex's home, where its sign-in lives, or one in
+// the temporary directory where other runs' workspaces are. It runs no
+// agent and spends nothing.
+func (c Codex) Probe(ctx context.Context) error {
+	ws, err := os.MkdirTemp("", "invariant-codex-probe-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(ws)
+	if err := os.MkdirAll(c.Home, 0o700); err != nil {
+		return err
+	}
+	probe := filepath.Join(c.Home, "sandbox-probe")
+	if err := os.WriteFile(probe, []byte("invariant\n"), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(probe)
+	sandbox := func(command ...string) error { return c.sandboxed(ctx, ws, command...) }
+	if err := sandbox("/usr/bin/touch", filepath.Join(ws, "written")); err != nil {
+		return fmt.Errorf("codex's sandbox didn't run a command under the factory's profile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "written")); err != nil {
+		return errors.New("a command in codex's sandbox couldn't write in its workspace")
+	}
+	// Codex runs itself under the profile to read a workspace's
+	// instructions, so it must run there.
+	if bin, err := exec.LookPath(c.Binary); err == nil {
+		if err := sandbox(bin, "--version"); err != nil {
+			return fmt.Errorf("codex can't run itself under the factory's profile, as it does to read a workspace's instructions: %v", err)
+		}
+	}
+	if sandbox("/bin/cat", probe) == nil {
+		return fmt.Errorf("a command in codex's sandbox read a file in its home, %s, where its sign-in lives. Keep Codex's home in your home directory, outside the temporary directories its commands may read", c.Home)
+	}
+	other, err := os.MkdirTemp("", "invariant-codex-probe-other-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(other)
+	if err := os.WriteFile(filepath.Join(other, "probe"), []byte("invariant\n"), 0o600); err != nil {
+		return err
+	}
+	if sandbox("/bin/cat", filepath.Join(other, "probe")) == nil {
+		return errors.New("a command in codex's sandbox read a file in the temporary directory, where other runs' workspaces are")
+	}
+	return nil
+}
+
+// sandboxed runs a command as a build's agent would, under the factory's
+// profile with ws as its workspace, through codex sandbox, which runs no
+// agent.
+func (c Codex) sandboxed(ctx context.Context, ws string, command ...string) error {
+	args := append([]string{"sandbox", "-P", "invariant", "-C", ws}, c.profile(false)...)
+	cmd := exec.CommandContext(ctx, c.Binary, append(append(args, "--"), command...)...)
+	cmd.Env = c.codexEnv()
+	return cmd.Run()
 }
 
 // ErrTooManyTurns is a Codex run the factory stopped at its cap on steps,
