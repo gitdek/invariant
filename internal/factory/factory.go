@@ -547,10 +547,16 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if err := f.allowed(ctx, t.Issue.Number, fmt.Sprintf("look at #%d again", m.PR), from, to); err != nil {
 			return err
 		}
+		// Only a person merges a plan's pull request that changes the trusted
+		// base (D-0105), so the answer doesn't promise the factory will.
+		trusted, err := f.trustedAt(ctx, t.Issue.Number, m)
+		if err != nil {
+			return err
+		}
 		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(noting(), recovery.Note)); err != nil {
 			return err
 		}
-		return f.say(ctx, t.Issue.Number, post("pull request", fmt.Sprintf("Watching #%d again. I'll merge it once CI's `invariant/gate` passes on its current head.", m.PR), m), LabelPR)
+		return f.say(ctx, t.Issue.Number, retriedComment(m.PR, trusted, m), LabelPR)
 	case Ratify:
 		if kind != KindProposal {
 			return f.note(ctx, t, c, "There's no proposal waiting for ratification right now.")

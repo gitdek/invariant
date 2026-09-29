@@ -68,6 +68,17 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 		res.Tests, pr.Number, merge), m)
 }
 
+// retriedComment answers a writer's retry of a pull request that failed. It
+// promises a merge only when the factory will make one: a plan's pull
+// request that changes the trusted base waits for a person (D-0105).
+func retriedComment(pr int, trusted []string, m Marker) string {
+	merge := "I'll merge it once CI's `invariant/gate` passes on its current head."
+	if len(trusted) > 0 {
+		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on its current head, a person merges it.", codeList(trusted))
+	}
+	return post("pull request", fmt.Sprintf("Watching #%d again. %s", pr, merge), m)
+}
+
 func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr error, m Marker) string {
 	var b strings.Builder
 	switch {
