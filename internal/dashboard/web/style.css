@@ -800,6 +800,7 @@ footer p { margin: 0; max-width: 60em; }
 .livestep > header { margin-bottom: 18px; }
 .livestep h2 .n { color: var(--accent); }
 .livestep h2 q { color: var(--ink2); font-weight: 500; quotes: "\201C" "\201D"; }
+.livestep h2 .by { color: var(--agent); font-size: 0.72em; font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; }
 .livestep .lede b { color: var(--agent); font-weight: 600; }
 .livedot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bug); margin-left: 4px; animation: beat 1.6s ease-out infinite; }
 .livestep.ended .livedot { background: var(--ink3); animation: none; }

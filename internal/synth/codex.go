@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Codex runs OpenAI's Codex CLI headlessly, with codex exec, its documented
@@ -154,6 +155,13 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err := cmd.Start(); err != nil {
 		return Usage{}, err
 	}
+	// Codex's events carry no time and no workspace, which the live view
+	// needs, so the transcript starts with the workspace, and each event is
+	// stamped with when it came (#153).
+	if job.Transcript != nil {
+		start, _ := json.Marshal(map[string]string{"type": "invariant.workspace", "cwd": job.Workspace})
+		job.Transcript.Write(append(stamped(start, time.Now()), '\n'))
+	}
 	usage, readErr := ReadCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
 	if readErr != nil {
 		cancel() // stop the agent, rather than wait for it
@@ -194,7 +202,7 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if transcript != nil {
-			transcript.Write(append(append([]byte{}, line...), '\n'))
+			transcript.Write(append(stamped(line, time.Now()), '\n'))
 		}
 		var ev struct {
 			Type    string `json:"type"`
@@ -256,6 +264,20 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 		u.Summary = lastError
 	}
 	return u, scanner.Err()
+}
+
+// stamped is a JSON event with when it came, as its first field. Anything
+// else is left as it is.
+func stamped(line []byte, at time.Time) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) < 2 || trimmed[0] != '{' {
+		return append([]byte{}, line...)
+	}
+	out := []byte(`{"timestamp":"` + at.UTC().Format(time.RFC3339Nano) + `"`)
+	if rest := bytes.TrimSpace(trimmed[1:]); len(rest) > 0 && rest[0] != '}' {
+		out = append(out, ',')
+	}
+	return append(out, trimmed[1:]...)
 }
 
 // Tokens is what an agent's run used, where its agent counts tokens rather

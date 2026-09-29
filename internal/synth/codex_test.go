@@ -3,9 +3,12 @@ package synth
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -127,8 +130,47 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	if u.Tokens == nil || *u.Tokens != (Tokens{Input: 1200, CachedInput: 800, Output: 300, Reasoning: 120}) || u.CostUSD != 0 {
 		t.Errorf("tokens = %+v, cost %v", u.Tokens, u.CostUSD)
 	}
-	if transcript.String() != codexRun {
-		t.Errorf("the transcript isn't every event:\n%s", transcript.String())
+	// The transcript is every event, each stamped with when it came, after
+	// a first line naming the workspace, for the live view.
+	got := strings.Split(strings.TrimSpace(transcript.String()), "\n")
+	events := strings.Split(strings.TrimSpace(codexRun), "\n")
+	if len(got) != len(events)+1 {
+		t.Fatalf("the transcript has %d lines; want the workspace and %d events", len(got), len(events))
+	}
+	var first map[string]any
+	if json.Unmarshal([]byte(got[0]), &first) != nil || first["type"] != "invariant.workspace" || first["cwd"] != ws {
+		t.Errorf("the transcript starts %s; want the workspace", got[0])
+	}
+	for i, line := range got {
+		var stampedEv, event map[string]any
+		if err := json.Unmarshal([]byte(line), &stampedEv); err != nil {
+			t.Fatalf("line %d isn't an event: %s", i, line)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, fmt.Sprint(stampedEv["timestamp"])); err != nil {
+			t.Errorf("line %d has no time: %s", i, line)
+		}
+		if i == 0 {
+			continue
+		}
+		delete(stampedEv, "timestamp")
+		json.Unmarshal([]byte(events[i-1]), &event)
+		if !reflect.DeepEqual(stampedEv, event) {
+			t.Errorf("line %d is %s; want the event %s", i, line, events[i-1])
+		}
+	}
+}
+
+// Stamping adds a time to an event, and leaves anything else as it is.
+func TestStampingAddsATimeToAnEvent(t *testing.T) {
+	at := time.Date(2026, 9, 29, 12, 0, 0, 5, time.UTC)
+	for in, want := range map[string]string{
+		`{"type":"turn.started"}`: `{"timestamp":"2026-09-29T12:00:00.000000005Z","type":"turn.started"}`,
+		`{}`:                      `{"timestamp":"2026-09-29T12:00:00.000000005Z"}`,
+		`not an event`:            `not an event`,
+	} {
+		if got := string(stamped([]byte(in), at)); got != want {
+			t.Errorf("stamped(%s) = %s; want %s", in, got, want)
+		}
 	}
 }
 
