@@ -156,11 +156,60 @@ func TestAnOpenIssueIsWaitingOnSomeone(t *testing.T) {
 		t.Errorf("an issue that needs a person took the headline: %+v", n)
 	}
 	n = nowLine([]namedWatcher{{repo: "gitdek/invariant", w: Watcher{Running: true, Issue: 7, Doing: "building"}}}, []Issue{l}, "gitdek/invariant")
-	if n.Headline != "Writing the code for #7" || n.Detail != "Refuse duplicates" {
+	if n.Headline != "Writing the code for #7" || n.Detail != "Refuse duplicates" || n.Running != 1 {
 		t.Errorf("now %+v", n)
 	}
 	if n := nowLine(nil, nil, "gitdek/invariant"); n.Stage != "idle" || !strings.Contains(n.Headline, "switched off") {
 		t.Errorf("now %+v", n)
+	}
+}
+
+// With several steps doing something, in one repository or more, the
+// headline names each one, grouped by what each is doing: the groups in the
+// order of their longest-running step, and each group's issues
+// longest-running first. It counts them, and no one issue's title is its
+// detail. With one step, it's that step's headline, with its issue's title.
+func TestTheHeadlineNamesEveryStep(t *testing.T) {
+	at := func(min int) time.Time { return time.Date(2026, 9, 29, 10, min, 0, 0, time.UTC) }
+	issues := []Issue{{Repo: "gitdek/invariant", Number: 148, Title: "Show every step", Open: true, Stage: StageBuilding}}
+	ws := []namedWatcher{
+		{repo: "gitdek/invariant", w: Watcher{Running: true, Steps: []Step{
+			{Issue: 150, Doing: "building", Since: at(2)}, {Issue: 148, Doing: "building", Since: at(0)}, {Issue: 152, Doing: "formalizing", Since: at(5)},
+			{Issue: 154, Doing: "ratifying", Since: at(8)}, {Issue: 156, Doing: "building", Since: at(9)}}}},
+		{repo: "gitdek/copythis-ad", w: Watcher{Running: true, Steps: []Step{{Issue: 3, Doing: "answering", Since: at(1)}}}},
+		{repo: "gitdek/stopped", w: Watcher{Steps: []Step{{Issue: 4, Doing: "building", Since: at(0)}}}},
+	}
+	n := nowLine(ws, issues, "gitdek/invariant")
+	want := "Building #148, #150 and #156 · answering copythis-ad#3 · drafting #152 · committing the ratification on #154"
+	if n.Headline != want || n.Running != 6 || n.Detail != "" || n.WaitingOn != WhoFactory || n.Since == nil || !n.Since.Equal(at(0)) {
+		t.Errorf("now %+v; want %q, 6 steps running, no detail, and the factory at work since 10:00", n, want)
+	}
+
+	since := at(0)
+	one := []namedWatcher{{repo: "gitdek/invariant", w: Watcher{Running: true, Issue: 148, Doing: "building", Since: &since,
+		Steps: []Step{{Issue: 148, Doing: "building", Since: since}}}}}
+	if n := nowLine(one, issues, "gitdek/invariant"); n.Headline != "Writing the code for #148" || n.Detail != "Show every step" || n.Running != 1 {
+		t.Errorf("one step: now %+v", n)
+	}
+
+	// The snapshot's watcher lists the steps it's running that are doing
+	// something, longest-running first.
+	work := t.TempDir()
+	path := StatusPath(work, "gitdek/invariant")
+	st := Status{PID: os.Getpid(), Repo: "gitdek/invariant", Started: since, Heartbeat: since, Issue: 148, Doing: "building", Since: &since,
+		Steps: []Step{{Issue: 150, Doing: "building", Since: at(2)}, {Issue: 155, Since: at(3)}, {Issue: 148, Doing: "building", Since: since}}}
+	if err := WriteStatus(path, st); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Work: work, Repos: []*Repo{{Name: "gitdek/invariant", Status: path}}}
+	snap := s.assemble(at(10))
+	var steps []string
+	for _, step := range snap.Repos[0].Factory.Steps {
+		steps = append(steps, fmt.Sprintf("#%d %s", step.Issue, step.Doing))
+	}
+	if got := strings.Join(steps, ", "); got != "#148 building, #150 building" || snap.Now.Headline != "Building #148 and #150" || snap.Now.Running != 2 {
+		t.Errorf("the snapshot's watcher lists [%s], headlined %q with %d running; want [#148 building, #150 building], %q with 2",
+			got, snap.Now.Headline, snap.Now.Running, "Building #148 and #150")
 	}
 }
 

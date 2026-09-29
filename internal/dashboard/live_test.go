@@ -306,8 +306,92 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 	}
 }
 
-// With a watcher per work directory, the page follows the one that's
-// working, whichever holds the lease.
+// Every step with an agent at work is listed, each read from its own step's
+// directory, and a step doing nothing yet isn't. Once none of them runs,
+// the page keeps them all, marked ended, until one runs again, and then
+// shows that one alone, read again from the start.
+func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
+	f := newLiveStepFixture(t)
+	f.write(t, true)
+	draft := filepath.Join(f.work, "gitdek", "app", "issues", "issue-9", "formalize-20260928-120500")
+	if err := os.MkdirAll(draft, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		ev(t, map[string]any{"type": "system", "subtype": "init", "cwd": f.ws}),
+		ev(t, map[string]any{"type": "assistant", "timestamp": "2026-09-28T12:05:10Z", "message": map[string]any{"id": "d1",
+			"content": []map[string]any{{"type": "tool_use", "id": "t-check", "name": "mcp__invariant__check", "input": map[string]any{}}}}}),
+	}
+	if err := os.WriteFile(filepath.Join(draft, "transcript.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	running := func(steps ...Step) {
+		t.Helper()
+		if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since, Limit: 9000, Steps: steps}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	build := Step{Issue: 7, Doing: "building", Since: f.since}
+	drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute)}
+	idle := Step{Issue: 11, Since: f.since}
+
+	running(drafting, idle, build)
+	steps, _ := f.read(t)
+	if len(steps) != 2 || steps[0].Issue != 7 || steps[1].Issue != 9 {
+		t.Fatalf("%d steps %+v; want #7's build, then #9's draft", len(steps), steps)
+	}
+	if b, d := steps[0], steps[1]; b.Turns != 8 || b.RunsKind != "gate" || d.Turns != 1 || d.Tools["check"] != 1 || d.RunsKind != "check" || d.Limit != 9000 || d.Since == nil || !d.Since.Equal(drafting.Since) {
+		t.Errorf("the build has %d turns and %s runs, the draft %d turns, tools %v, %s runs, a limit of %v and since %v; want each read from its own directory",
+			b.Turns, b.RunsKind, d.Turns, d.Tools, d.RunsKind, d.Limit, d.Since)
+	}
+
+	running(idle)
+	steps, _ = f.read(t)
+	if len(steps) != 2 || steps[0].Ended == nil || steps[1].Ended == nil || steps[0].Turns != 8 || steps[1].Turns != 1 {
+		t.Fatalf("after every step ended: %+v; want both last steps, marked ended", steps)
+	}
+
+	running(drafting)
+	steps, _ = f.read(t)
+	if len(steps) != 1 || steps[0].Issue != 9 || steps[0].Ended != nil || steps[0].Turns != 1 {
+		t.Errorf("once #9's draft runs again: %+v; want it alone, running, with its one turn", steps)
+	}
+}
+
+// With a watcher per work directory, the page follows the one whose status
+// names the holder of the repository's lease, even when another is working
+// and comes first. When the lease names none of them, or isn't known, it
+// follows the one that's working.
+func TestLiveFollowsTheLeaseHolder(t *testing.T) {
+	f := newLiveStepFixture(t)
+	f.write(t, true)
+	since := f.since
+	if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Holder: "watcher-a", Started: f.since, Heartbeat: f.since, Issue: 7, Doing: "building", Since: &since}); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	if err := WriteStatus(StatusPath(other, "gitdek/app"), Status{PID: os.Getpid(), Repo: "gitdek/app", Holder: "watcher-b", Started: f.since, Heartbeat: f.since}); err != nil {
+		t.Fatal(err)
+	}
+	f.s.Works = []string{f.work, other}
+	for _, c := range []struct {
+		lease *Lease
+		want  string
+	}{
+		{&Lease{Holder: "watcher-b"}, other},
+		{&Lease{Holder: "watcher-a"}, f.work},
+		{&Lease{Holder: "watcher-gone"}, f.work},
+		{nil, f.work},
+	} {
+		f.s.holding("gitdek/app", c.lease)
+		if st, work := f.s.watcherOf(f.s.Repos[0]); work != c.want {
+			t.Errorf("with the lease %+v, the page follows %s, in %s; want the one in %s", c.lease, st.Holder, work, c.want)
+		}
+	}
+}
+
+// With a watcher per work directory and no lease the dashboard knows of,
+// the page follows the one that's working.
 func TestLiveFollowsTheWorkingWatcher(t *testing.T) {
 	f := newLiveStepFixture(t)
 	f.write(t, true)

@@ -40,8 +40,9 @@ type Server struct {
 	Cache  string      // where drawn graphs are kept between runs
 	Work   string      // the watchers' work directory, whose logs show a step's checks as they run
 	// Works are every watcher's work directory, when there's more than one.
-	// The page shows the watcher that's working on something, so it follows
-	// whichever one holds the lease. Empty means Work alone.
+	// The page shows the watcher whose status names the holder of the
+	// repository's lease, or, when the lease is unknown or names none of
+	// them, the one that's working on something. Empty means Work alone.
 	Works []string
 	Every time.Duration
 	Log   func(format string, args ...any)
@@ -53,8 +54,9 @@ type Server struct {
 	Open   func(ctx context.Context, repo string, is github.NewIssue) (number int, url string, err error)
 
 	mu      sync.RWMutex
-	state   []byte  // the latest snapshot, gzipped JSON
-	issues  []Issue // the latest snapshot's issues, which say what each is waiting for
+	state   []byte            // the latest snapshot, gzipped JSON
+	issues  []Issue           // the latest snapshot's issues, which say what each is waiting for
+	holders map[string]string // each repository's lease holder, as last read, whose watcher the page follows
 	graphs  map[string][]byte
 	drawing map[string]bool
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
@@ -206,7 +208,8 @@ func readLease(ctx context.Context, r *Repo) (*Lease, error) {
 	return &l, nil
 }
 
-// Watcher is the factory's watcher, as its status file tells it.
+// Watcher is the factory's watcher, as its status file tells it. Issue,
+// Doing and Since are its longest-running step that's doing something.
 type Watcher struct {
 	Running   bool       `json:"running"`
 	Started   *time.Time `json:"started,omitempty"`
@@ -214,10 +217,29 @@ type Watcher struct {
 	Issue     int        `json:"issue,omitempty"`
 	Doing     string     `json:"doing,omitempty"`
 	Since     *time.Time `json:"since,omitempty"`
+	// Steps are every step it's running that's doing something,
+	// longest-running first (D-0113).
+	Steps []Step `json:"steps,omitempty"`
 	// Runs are the checks the current step has run so far: TLC checks of a
 	// draft while formalizing, or gate runs while building.
 	Runs     []RunMark `json:"runs,omitempty"`
 	RunsKind string    `json:"runsKind,omitempty"` // check, gate or test
+}
+
+// doing is every step the watcher is running that's doing something. A
+// watcher that lists none counts as the one its issue, doing and since name.
+func (w Watcher) doing() []Step {
+	if !w.Running {
+		return nil
+	}
+	if len(w.Steps) > 0 || w.Issue == 0 || w.Doing == "" {
+		return w.Steps
+	}
+	step := Step{Issue: w.Issue, Doing: w.Doing}
+	if w.Since != nil {
+		step.Since = *w.Since
+	}
+	return []Step{step}
 }
 
 // RunMark is one check the factory ran during its current step.
@@ -229,7 +251,8 @@ type RunMark struct {
 }
 
 // Now is the one line at the top of the page: what the factory is doing,
-// or waiting for.
+// or waiting for. With several steps doing something, it names each one,
+// and the rest is about the longest-running.
 type Now struct {
 	Headline  string     `json:"headline"`
 	Detail    string     `json:"detail,omitempty"`
@@ -238,6 +261,7 @@ type Now struct {
 	Stage     string     `json:"stage"`               // idle, or the issue's stage
 	WaitingOn string     `json:"waitingOn,omitempty"` // factory, people or ci
 	Since     *time.Time `json:"since,omitempty"`
+	Running   int        `json:"running,omitempty"` // the steps doing something, which the headline names
 }
 
 type MainState struct {
@@ -455,6 +479,7 @@ func (s *Server) refresh(ctx context.Context) error {
 			fail("lease", err)
 		} else {
 			r.src.lease = lease
+			s.holding(r.Name, lease)
 		}
 	}
 
@@ -822,6 +847,12 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			if !w.Running {
 				w.Issue, w.Doing, w.Since = 0, "", nil
 			}
+			for _, step := range st.steps() {
+				if w.Running && step.Issue != 0 && step.Doing != "" {
+					w.Steps = append(w.Steps, step)
+				}
+			}
+			sort.SliceStable(w.Steps, func(i, j int) bool { return w.Steps[i].Since.Before(w.Steps[j].Since) })
 			w.Runs, w.RunsKind = runsOf(work, r.Name, w)
 			rs.Factory = w
 		}
@@ -1041,6 +1072,49 @@ type namedWatcher struct {
 	w    Watcher
 }
 
+// namedStep is a step a repository's watcher is running.
+type namedStep struct {
+	repo string
+	Step
+}
+
+// stepWords say what a step is doing, in a headline that names several.
+var stepWords = map[string]string{"building": "building", "formalizing": "drafting", "answering": "answering", "ratifying": "committing the ratification on"}
+
+// stepsLine names every step, grouped by what each is doing, as "Building
+// #148 and #150 · drafting #152". The steps come longest-running first, so
+// the groups come in the order of their longest-running step, and each
+// group's issues longest-running first.
+func stepsLine(steps []namedStep, primary string) string {
+	var words []string
+	refs := map[string][]string{}
+	for _, st := range steps {
+		word := stepWords[st.Doing]
+		if word == "" {
+			word = st.Doing
+		}
+		if refs[word] == nil {
+			words = append(words, word)
+		}
+		refs[word] = append(refs[word], issueRef(st.repo, primary, st.Issue))
+	}
+	parts := make([]string, len(words))
+	for i, word := range words {
+		parts[i] = word + " " + andList(refs[word])
+	}
+	line := strings.Join(parts, " · ")
+	return strings.ToUpper(line[:1]) + line[1:]
+}
+
+// andList joins words as a sentence lists them: "a", "a and b", or "a, b
+// and c".
+func andList(words []string) string {
+	if len(words) < 2 {
+		return strings.Join(words, "")
+	}
+	return strings.Join(words[:len(words)-1], ", ") + " and " + words[len(words)-1]
+}
+
 // combined is the factory as the page's top bar shows it: on when any
 // watcher runs, and working on whatever one of them is working on.
 func combined(repos []RepoState) Watcher {
@@ -1150,15 +1224,25 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 		return nil
 	}
 	running := false
+	// Every step that's doing something, in every watcher here,
+	// longest-running first (D-0113).
+	var steps []namedStep
 	for _, nw := range ws {
-		w := nw.w
-		running = running || w.Running
-		if !w.Running || w.Issue == 0 || w.Doing == "" {
-			continue
+		running = running || nw.w.Running
+		for _, step := range nw.w.doing() {
+			steps = append(steps, namedStep{repo: nw.repo, Step: step})
 		}
-		ref := issueRef(nw.repo, primary, w.Issue)
-		n := Now{Issue: w.Issue, Repo: nw.repo, Since: w.Since, WaitingOn: WhoFactory, Stage: StageBuilding}
-		switch w.Doing {
+	}
+	sort.SliceStable(steps, func(i, j int) bool { return steps[i].Since.Before(steps[j].Since) })
+	if len(steps) > 0 {
+		st := steps[0]
+		ref := issueRef(st.repo, primary, st.Issue)
+		n := Now{Issue: st.Issue, Repo: st.repo, WaitingOn: WhoFactory, Stage: StageBuilding, Running: len(steps)}
+		if !st.Since.IsZero() {
+			since := st.Since
+			n.Since = &since
+		}
+		switch st.Doing {
 		case "formalizing":
 			n.Headline, n.Stage = "Drafting what must be true for "+ref, StageQueued
 		case "answering":
@@ -1168,7 +1252,11 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 		default:
 			n.Headline = "Writing the code for " + ref
 		}
-		if is := find(nw.repo, w.Issue); is != nil {
+		// Several steps share the headline, and no one issue's title is
+		// the detail.
+		if len(steps) > 1 {
+			n.Headline = stepsLine(steps, primary)
+		} else if is := find(st.repo, st.Issue); is != nil {
 			n.Detail = is.Title
 		}
 		return n
