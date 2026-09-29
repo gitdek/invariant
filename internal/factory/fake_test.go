@@ -135,6 +135,26 @@ func (g *fakeGitHub) PostComment(_ context.Context, n int, body string) (github.
 	return g.say(n, g.me, body), nil
 }
 
+// CreateIssue opens an issue as whoever the factory acts as, numbered after
+// every issue so far.
+func (g *fakeGitHub) CreateIssue(_ context.Context, is github.NewIssue) (github.Issue, error) {
+	n := 1
+	for k := range g.issues {
+		n = max(n, k+1)
+	}
+	kind := "User"
+	if strings.HasSuffix(g.me, "[bot]") {
+		kind = "Bot"
+	}
+	issue := &github.Issue{Number: n, Title: is.Title, Body: is.Body, User: github.User{Login: g.me, Type: kind}, State: "open",
+		URL: fmt.Sprintf("https://github.com/o/r/issues/%d", n), CreatedAt: "2026-09-25T12:00:00Z"}
+	for _, l := range is.Labels {
+		issue.Labels = append(issue.Labels, github.Label{Name: l})
+	}
+	g.issues[n] = issue
+	return *issue, nil
+}
+
 func (g *fakeGitHub) EnsureLabel(context.Context, string, string, string) error { return nil }
 
 func (g *fakeGitHub) AddLabels(_ context.Context, n int, labels ...string) error {

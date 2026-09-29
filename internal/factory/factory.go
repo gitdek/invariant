@@ -36,6 +36,9 @@ type GitHub interface {
 	Events(ctx context.Context, issue int) ([]github.Event, error)
 	Permission(ctx context.Context, login string) (string, error)
 	PostComment(ctx context.Context, issue int, body string) (github.Comment, error)
+	// CreateIssue opens an issue, as the factory does for each step of a
+	// ratified plan of issues (#126).
+	CreateIssue(ctx context.Context, is github.NewIssue) (github.Issue, error)
 	EnsureLabel(ctx context.Context, name, color, description string) error
 	AddLabels(ctx context.Context, issue int, labels ...string) error
 	RemoveLabel(ctx context.Context, issue int, label string) error
@@ -375,7 +378,9 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 		}
 	}
 	// A new issue is the factory's if a writer opened it with /invariant solve,
-	// or a writer gave it the invariant label.
+	// or a writer gave it the invariant label. One the factory opened for a
+	// ratified plan is solved as if the plan's ratifier had opened it with
+	// /invariant solve (#126).
 	if len(t.Posts) == 0 {
 		if ok, err := f.writer(ctx, issue.User.Login); err != nil {
 			return t, err
@@ -387,6 +392,10 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 			} else if by != "" {
 				t.Commands = append(t.Commands, Command{Verb: Solve, By: by, URL: issue.URL, At: issue.CreatedAt})
 			}
+		} else if by, err := f.plannedBy(ctx, issue); err != nil {
+			return t, err
+		} else if by != "" {
+			t.Commands = append(t.Commands, Command{Verb: Solve, By: by, URL: issue.URL, At: issue.CreatedAt})
 		}
 	}
 	for _, c := range comments {
@@ -479,7 +488,10 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			}
 		}
 	}
-	pending := t.Pending()
+	// A stop is for a plan of issues, and WorkPlan answers it on the plan's
+	// issue (#126). An issue's own step never answers one, and one never
+	// holds up the commands after it.
+	pending := slices.DeleteFunc(t.Pending(), func(c Command) bool { return c.Verb == Stop })
 	if len(pending) == 0 {
 		return nil
 	}
