@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -617,5 +618,62 @@ func TestReviewDriver(t *testing.T) {
 	}
 	if r, err := ReviewDriver(context.Background(), reviewer{job: &job}, dir, filepath.Join(t.TempDir(), "r.jsonl")); err != nil || r != nil {
 		t.Errorf("review %+v, %v; there's nothing to review", r, err)
+	}
+}
+
+// The agent thinks as hard as the factory's effort says, for building and
+// for reviewing alike. No effort leaves Claude Code's own default.
+func TestClaudeCodeEffort(t *testing.T) {
+	for _, job := range []Job{{Prompt: "p", GateServer: []string{"invariant", "mcp"}}, {Prompt: "p", ReadOnly: true}} {
+		args, err := ClaudeCode{Model: "opus", BudgetUSD: 5, MaxTurns: 80, Effort: "max"}.args(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i := slices.Index(args, "--effort"); i < 0 || i+1 >= len(args) || args[i+1] != "max" {
+			t.Errorf("read-only %v: args %q, want --effort max", job.ReadOnly, args)
+		}
+		args, _ = ClaudeCode{Model: "opus", BudgetUSD: 5, MaxTurns: 80}.args(job)
+		if slices.Contains(args, "--effort") {
+			t.Errorf("read-only %v: no effort was set, but args %q pass one", job.ReadOnly, args)
+		}
+	}
+}
+
+// A run whose replies keep ending at the output limit with nothing but
+// thinking is stopped after the second, before it spends its whole budget
+// starting the same reasoning again. One such reply, then a tool call,
+// carries on.
+func TestReadStreamStopsAThinkingLoop(t *testing.T) {
+	cut := `{"type":"user","message":{"content":[{"type":"text","text":"Output token limit hit. Resume directly."}]}}`
+	loop := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Read"}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result"}]}}`,
+		`{"type":"system","subtype":"thinking_tokens","estimated_tokens_delta":127950}`,
+		`{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":""}]}}`,
+		cut,
+		`{"type":"assistant","message":{"id":"m3","content":[{"type":"thinking","thinking":""}]}}`,
+		cut,
+		`{"type":"assistant","message":{"id":"m4","content":[{"type":"tool_use","name":"Write"}]}}`,
+	}, "\n")
+	u, err := ReadStream(strings.NewReader(loop), nil)
+	if err != ErrThinkingLoop {
+		t.Fatalf("err %v, want the thinking loop stopped", err)
+	}
+	if u.ToolCalls["Write"] != 0 {
+		t.Error("the stream was read past the second reply that ran out of room")
+	}
+
+	once := strings.Join([]string{
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":""}]}}`,
+		cut,
+		`{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":""}]}}`,
+		`{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","name":"Write"}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result"}]}}`,
+		`{"type":"assistant","message":{"id":"m3","content":[{"type":"thinking","thinking":""}]}}`,
+		cut,
+		`{"type":"result","subtype":"success","result":"Done.","num_turns":3}`,
+	}, "\n")
+	if u, err := ReadStream(strings.NewReader(once), nil); err != nil || u.Outcome != "success" || u.ToolCalls["Write"] != 1 {
+		t.Errorf("err %v, usage %+v; one reply that ran out of room, then a tool call, should carry on", err, u)
 	}
 }

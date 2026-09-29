@@ -26,6 +26,10 @@ type ClaudeCode struct {
 	Model     string  // "opus", "sonnet" or a full model name
 	BudgetUSD float64 // --max-budget-usd: a cap on the run's estimated cost
 	MaxTurns  int
+	// Effort is --effort: how hard the agent thinks, low, medium, high, xhigh
+	// or max. Empty leaves Claude Code's own default, which let one build's
+	// agent spend every turn's whole output on thinking, and never act.
+	Effort string
 }
 
 func (c ClaudeCode) Name() string { return "claude-code" }
@@ -38,7 +42,7 @@ const readTools = "Read,Glob,Grep"
 
 func (c ClaudeCode) args(job Job) ([]string, error) {
 	if job.ReadOnly {
-		return []string{
+		return append([]string{
 			"-p", job.Prompt,
 			"--output-format", "stream-json", "--verbose",
 			"--model", c.Model,
@@ -50,7 +54,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"--disallowedTools", "Bash,Write,Edit,WebFetch,WebSearch,Task,NotebookEdit,Read(~/**),Glob(~/**),Grep(~/**)",
 			"--setting-sources", "project",
 			"--no-session-persistence",
-		}, nil
+		}, c.effort()...), nil
 	}
 	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
 		"invariant": map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]},
@@ -66,7 +70,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 	for _, t := range tools {
 		allowed += ",mcp__invariant__" + t
 	}
-	return []string{
+	return append([]string{
 		"-p", job.Prompt,
 		"--output-format", "stream-json", "--verbose",
 		"--model", c.Model,
@@ -81,7 +85,15 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 		"--permission-mode", "acceptEdits",
 		"--setting-sources", "project",
 		"--no-session-persistence",
-	}, nil
+	}, c.effort()...), nil
+}
+
+// effort is the --effort flag, when an effort is set.
+func (c ClaudeCode) effort() []string {
+	if c.Effort == "" {
+		return nil
+	}
+	return []string{"--effort", c.Effort}
 }
 
 func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
@@ -89,6 +101,8 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace
 	// The gate takes a while; give its tool calls time.
@@ -103,6 +117,9 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 		return Usage{}, err
 	}
 	usage, readErr := ReadStream(stdout, job.Transcript)
+	if readErr != nil {
+		cancel() // stop the agent, rather than wait for it
+	}
 	waitErr := cmd.Wait()
 	switch {
 	case readErr != nil:
@@ -115,10 +132,27 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	return usage, nil
 }
 
+// ErrThinkingLoop is a run the factory stopped because the agent's replies
+// kept ending at the output limit with nothing but thinking. Claude Code
+// asks the agent to carry on each time, and without the thinking it lost,
+// it can start the same reasoning again, and never act.
+var ErrThinkingLoop = fmt.Errorf("the agent's last %d replies each ran out of room while it was still thinking, before it did anything, so the factory stopped it", maxThinkingOnly)
+
+// maxThinkingOnly is how many replies in a row may end at the output limit
+// with nothing but thinking before the factory stops the run.
+const maxThinkingOnly = 2
+
 // ReadStream reads Claude Code's stream-json events, copying each to
-// transcript, and returns what the closing result event reports.
+// transcript, and returns what the closing result event reports. It stops
+// early, with ErrThinkingLoop, once the agent's replies keep ending with
+// nothing but thinking.
 func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 	u := Usage{ToolCalls: map[string]int{}}
+	// A reply is one message, whose blocks can come in several events. It
+	// ran out of room if it held only thinking when the next turn began.
+	var reply string
+	var thinkingOnly bool
+	cutOff := 0
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 64<<20)
 	for scanner.Scan() {
@@ -138,14 +172,19 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 				Status string `json:"status"`
 			} `json:"mcp_servers"`
 			Message struct {
-				Content []struct {
-					Type string `json:"type"`
-					Name string `json:"name"`
-				} `json:"content"`
+				ID      string          `json:"id"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(line, &ev) != nil {
 			continue
+		}
+		var content []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(ev.Message.Content), []byte("[")) {
+			json.Unmarshal(ev.Message.Content, &content)
 		}
 		switch ev.Type {
 		case "system":
@@ -158,10 +197,29 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 				}
 			}
 		case "assistant":
-			for _, c := range ev.Message.Content {
+			if ev.Message.ID != reply {
+				reply, thinkingOnly = ev.Message.ID, true
+			}
+			for _, c := range content {
 				if c.Type == "tool_use" {
 					u.ToolCalls[c.Name]++
 				}
+				if c.Type != "thinking" && c.Type != "redacted_thinking" {
+					thinkingOnly = false
+				}
+			}
+		case "user":
+			if reply == "" {
+				break
+			}
+			if thinkingOnly {
+				cutOff++
+			} else {
+				cutOff = 0
+			}
+			reply = ""
+			if cutOff >= maxThinkingOnly {
+				return u, ErrThinkingLoop
 			}
 		case "result":
 			u.Outcome, u.Summary, u.CostUSD, u.Turns = ev.Subtype, ev.Result, ev.Cost, ev.Turns
