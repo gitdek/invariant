@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"time"
 )
 
 // Tool is one tool the server offers.
@@ -43,8 +45,28 @@ type rpcError struct {
 }
 
 // Serve answers newline-delimited JSON-RPC requests from in until it closes.
-// Notifications, which carry no id, get no answer.
+// Notifications, which carry no id, get no answer. A server whose client
+// has gone stops the call it's in, rather than finish it for no one: an
+// agent's run that's stopped can leave its server behind, holding a gate
+// run and its containers.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		for t := time.NewTicker(orphanCheck); ; {
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return
+			case <-t.C:
+				if orphaned() {
+					cancel()
+					t.Stop()
+					return
+				}
+			}
+		}
+	}()
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 1<<20), 64<<20)
 	enc := json.NewEncoder(out)
@@ -70,6 +92,13 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 	return scanner.Err()
 }
+
+// orphanCheck is how often Serve checks that its client is still there.
+var orphanCheck = 5 * time.Second
+
+// orphaned says whether the server's client has gone: a process whose parent
+// exits is taken on by the system's first process, launchd or init.
+var orphaned = func() bool { return os.Getppid() == 1 }
 
 func (s *Server) handle(ctx context.Context, req request) (any, *rpcError) {
 	switch req.Method {

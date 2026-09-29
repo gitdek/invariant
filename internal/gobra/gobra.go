@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gitdek/invariant/internal/toolchain"
 )
@@ -63,13 +64,21 @@ func Parse(out string, exitCode int) Result {
 // exploration code the agreement check runs.
 const Header = "// +gobra"
 
+// Timeout caps one Gobra run. A proof that doesn't finish by then fails,
+// rather than holding up the gate, and whoever called it, for good: one
+// that looped held an agent's gate call for most of an hour.
+var Timeout = 20 * time.Minute
+
 // Run verifies the package in dir with the Gobra image, which is pinned by
-// digest and published for linux/amd64 only. It runs with no network.
+// digest and published for linux/amd64 only. It runs with no network, and
+// for Timeout at most.
 func Run(ctx context.Context, image, dir string, overflow bool) (Result, error) {
 	files, skipped, err := sources(dir)
 	if err != nil {
 		return Result{}, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, Timeout)
+	defer cancel()
 	args := []string{"run", "--rm", "--network", "none", "--platform", "linux/amd64", "-v", dir + ":/work:ro", image}
 	if overflow {
 		args = append(args, "--overflow")
@@ -83,6 +92,9 @@ func Run(ctx context.Context, image, dir string, overflow bool) (Result, error) 
 	cmd.Stdout, cmd.Stderr = &out, &out
 	code := 0
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return Result{}, fmt.Errorf("Gobra didn't finish within %s: simplify the contracts, or split the function whose proof runs long", Timeout)
+		}
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
 			return Result{}, fmt.Errorf("running Gobra: %w", err)
