@@ -224,9 +224,14 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if !f.holds() {
 		return "", nil, nil, errLeaseLost
 	}
+	// As for a project, the run's error, summary and review name the paths on
+	// this machine as localPaths does. The summary quotes the agent run's
+	// error.
+	runErr = localError(runErr, f.Work)
 	if res == nil {
 		return "", nil, runErr, nil
 	}
+	res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
 	verdict := "It passed every test, and the review approves it."
 	switch {
 	case !res.Passed:

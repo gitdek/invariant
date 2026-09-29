@@ -776,6 +776,10 @@ func (f *Factory) draft(ctx context.Context, n int, step string, req formalize.R
 	case res.Proposal == nil && res.Problem == "":
 		res.Problem = "the formalizer left no draft"
 	}
+	// Anyone can read the problem, in a post or the record, so it names the
+	// paths on this machine as localPaths does, whether it's the formalizer's
+	// own or its run's error.
+	res.Problem = localPaths(res.Problem, f.Work)
 	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d", n), "")
 	if err != nil {
 		return nil, err
@@ -1283,6 +1287,12 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	// find it recorded, and say it stopped.
 	if !f.holds() {
 		return "", nil, nil, errLeaseLost
+	}
+	// Anyone can read the run's error and review, in a post or the record, so
+	// they name the paths on this machine as localPaths does.
+	runErr = localError(runErr, f.Work)
+	if res != nil && res.Review != nil {
+		res.Review.Text = localPaths(res.Review.Text, f.Work)
 	}
 	if res == nil || res.Final == nil {
 		return "", res, runErr, nil
