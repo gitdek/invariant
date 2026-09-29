@@ -210,11 +210,12 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
    git clone https://github.com/gitdek/invariant && cd invariant && go build -o ~/.local/bin/invariant ./cmd/invariant
    ```
 
-2. **Add the gate to your repository,** and commit it yourself, since the factory can't change CI. The workflow builds Invariant at your CLI's commit and runs the gate on every pull request:
+2. **Add the gate to your repository,** and commit it yourself, since the factory can't change CI. The workflow builds Invariant at your CLI's commit and runs the gate on every pull request. Commit an empty `invariant/` directory with it, where new projects go, until [#101](https://github.com/gitdek/invariant/issues/101) lets the factory create it:
 
    ```bash
    cd path/to/your-repo && invariant init -repo OWNER/NAME
-   git add .github/workflows/gate.yml && git commit -m "Add Invariant's gate" && git push
+   mkdir -p invariant && touch invariant/.gitkeep
+   git add .github/workflows/gate.yml invariant/.gitkeep && git commit -m "Add Invariant's gate" && git push
    ```
 
 3. **Require the gate, and allow merge commits.** GitHub then refuses any merge the gate didn't pass, yours included. `app_id` 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
