@@ -262,14 +262,28 @@ func (g *fakeGitHub) Job(_ context.Context, id int64) (github.Job, error) {
 	return job, nil
 }
 
+// Merge refuses a draft, as GitHub does (#145).
 func (g *fakeGitHub) Merge(_ context.Context, n int, sha, method string) (string, error) {
 	pr := g.prs[n]
-	if pr.Head.SHA != sha {
+	switch {
+	case pr.Draft:
+		return "", fmt.Errorf("PUT repos/o/r/pulls/%d/merge: exit status 1: gh: Pull Request is still a draft (HTTP 405)", n)
+	case pr.Head.SHA != sha:
 		return "", fmt.Errorf("head moved")
 	}
 	pr.Merged, pr.State, pr.MergeCommitSHA = true, "closed", "abc123merge"
 	g.merged = append(g.merged, n)
 	return "abc123merge", nil
+}
+
+// MarkReady marks a pull request ready for review.
+func (g *fakeGitHub) MarkReady(_ context.Context, n int) error {
+	pr, ok := g.prs[n]
+	if !ok {
+		return github.ErrNotFound
+	}
+	pr.Draft = false
+	return nil
 }
 
 func (g *fakeGitHub) DeleteBranch(_ context.Context, branch string) error {

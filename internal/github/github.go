@@ -268,6 +268,40 @@ func (c Client) Merge(ctx context.Context, n int, sha, method string) (string, e
 	return out.SHA, err
 }
 
+// MarkReady takes a draft pull request out of draft, so it can merge. The
+// REST API can't, so it reads the pull request's node ID and runs GraphQL's
+// markPullRequestReadyForReview mutation on it (#145).
+func (c Client) MarkReady(ctx context.Context, n int) error {
+	var pr struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := c.call(ctx, "GET", c.path(fmt.Sprintf("pulls/%d", n)), nil, &pr); err != nil {
+		return err
+	}
+	stdout, err := c.run(ctx, nil, "api", "graphql",
+		"-f", "query=mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
+		"-f", "id="+pr.NodeID)
+	if err != nil {
+		return fmt.Errorf("POST graphql: %w", err)
+	}
+	var out struct {
+		Data struct {
+			Marked *struct {
+				PullRequest struct {
+					IsDraft bool `json:"isDraft"`
+				} `json:"pullRequest"`
+			} `json:"markPullRequestReadyForReview"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout, &out); err != nil {
+		return err
+	}
+	if out.Data.Marked == nil || out.Data.Marked.PullRequest.IsDraft {
+		return fmt.Errorf("GitHub didn't mark #%d ready for review", n)
+	}
+	return nil
+}
+
 // DeleteBranch deletes a branch. Deleting one that's already gone is not an
 // error.
 func (c Client) DeleteBranch(ctx context.Context, branch string) error {

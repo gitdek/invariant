@@ -237,6 +237,13 @@ func (g leasedGitHub) Merge(ctx context.Context, n int, sha, method string) (str
 	return g.GitHub.Merge(ctx, n, sha, method)
 }
 
+func (g leasedGitHub) MarkReady(ctx context.Context, n int) error {
+	if !g.f.holds() {
+		return errLeaseLost
+	}
+	return g.GitHub.MarkReady(ctx, n)
+}
+
 func (g leasedGitHub) DeleteBranch(ctx context.Context, branch string) error {
 	if !g.f.holds() {
 		return errLeaseLost

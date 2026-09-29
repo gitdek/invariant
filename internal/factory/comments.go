@@ -373,6 +373,18 @@ func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) stri
 		pr.Number, strings.Join(problems, "\n- ")), m)
 }
 
+// mergeRefusedComment says GitHub refused to merge a pull request whose gate
+// passed, or to mark it ready for review when it was a draft, quoting what
+// GitHub said, and how to go on (#145).
+func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Marker) string {
+	what := "GitHub refused to merge it"
+	if unready {
+		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
+	}
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s\n\n"+
+		"A person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.", pr.Number, what, quote(answer.Error(), 20)), m)
+}
+
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
 	body := fmt.Sprintf("CI's `invariant/gate` passed on #%d ([run](%s)), and I merged it as %s.", pr.Number, run.URL, sha)
 	if r.Numbers != nil {
