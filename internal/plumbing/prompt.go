@@ -36,6 +36,8 @@ The plan's record is `+"`%s`"+`.
 3. Run the `+"`test`"+` tool. It copies the repository with your changes to the plan's files and runs, in a sandbox with no network: gofmt on the files the change touches, `+"`go vet ./...`"+`, the tests of every package the change touches, and the acceptance tests. CI runs every test before anything merges. You have %d runs, so use them to check your work, not to explore.
 4. When every check passes, stop, and say in a few sentences what you changed and any call you made that the plan didn't settle.
 
+SPEC.md and the README describe Invariant as it is (D-0122). When the plan names either one, change it as the plan's summary says. A new or changed SPEC bullet cites the decisions it rests on, as `+"`decisions check`"+` requires, and only decisions already recorded, since you can't write decisions/. When the change needs a decision no one has recorded yet, say so when you stop, and whoever merges it records the decision.
+
 %s
 
 You have no shell and no network. Don't change the acceptance tests, the plan's record, or anything under decisions/, and don't write anywhere but the files the plan names.
