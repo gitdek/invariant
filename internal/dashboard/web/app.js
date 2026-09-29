@@ -62,9 +62,13 @@
   }
   const stamp = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const clockOf = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // fillTimes writes every relative time under root.
+  function fillTimes(root = document) {
+    root.querySelectorAll("[data-ago]").forEach((el) => (el.textContent = ago(el.dataset.ago)));
+    root.querySelectorAll("[data-since]").forEach((el) => (el.textContent = dur((Date.now() - T(el.dataset.since)) / 1000)));
+  }
   function tick() {
-    document.querySelectorAll("[data-ago]").forEach((el) => (el.textContent = ago(el.dataset.ago)));
-    document.querySelectorAll("[data-since]").forEach((el) => (el.textContent = dur((Date.now() - T(el.dataset.since)) / 1000)));
+    fillTimes();
     if (state) {
       const u = $("#updated");
       u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
@@ -1514,6 +1518,15 @@
     return steps.find((l) => !l.ended) || steps[0];
   }
 
+  // put replaces what el shows only when it changed, so its times don't
+  // blink and its animations don't start over, and fills its times at once.
+  function put(el, html) {
+    if (el.dataset.html === html) return;
+    el.dataset.html = html;
+    el.innerHTML = html;
+    fillTimes(el);
+  }
+
   function renderLive() {
     const sec = $("#live"), l = liveStep();
     sec.hidden = !l;
@@ -1529,7 +1542,7 @@
     }
     sec.classList.toggle("ended", !!l.ended);
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
-    $("#live-title").innerHTML = `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}`;
+    put($("#live-title"), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}`);
 
     // What the agent is doing now, or how its run ended.
     let now;
@@ -1542,25 +1555,25 @@
       now = `<b>${esc(LIVE_NOW[l.now] || "Working")}</b>${at ? ` for <span data-since="${esc(at.at)}"></span>` : ""}`;
       if (l.last) now += ` · last activity <span data-ago="${esc(l.last)}"></span>`;
     }
-    $("#live-now").innerHTML = now;
+    put($("#live-now"), now);
 
     const calls = Object.values(l.tools || {}).reduce((a, b) => a + b, 0);
     const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", `≈${kilo(l.thinking)}`, "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
     if (l.output) stats.push(["Wrote", kilo(l.output), "output tokens"]);
-    $("#live-stats").innerHTML = stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join("");
+    put($("#live-stats"), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
 
-    $("#live-legend").innerHTML = LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
-      + (l.thinking ? `<span class="lg think"><i></i>thinking ≈${kilo(l.thinking)} tokens</span>` : "");
+    put($("#live-legend"), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
+      + (l.thinking ? `<span class="lg think"><i></i>thinking ≈${kilo(l.thinking)} tokens</span>` : ""));
 
-    $("#live-runs").innerHTML = (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join("");
+    put($("#live-runs"), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
-    $("#live-files").innerHTML = !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
+    put($("#live-files"), !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
       const cut = f.path.lastIndexOf("/") + 1;
       const fresh = f.lit && f.path !== liveLit && !REDUCED;
       return `<div class="file${f.lit ? " lit" : ""}${fresh ? " fresh" : ""}"><code><span class="dir">${esc(f.path.slice(0, cut))}</span>${esc(f.path.slice(cut))}</code>`
         + `<span class="counts">${f.reads ? `<span class="r">read ${f.reads}</span>` : ""}${f.edits ? `<span class="e">edited ${f.edits}</span>` : ""}</span><span class="size">${f.size > 0 ? esc(bytes(f.size)) : ""}</span></div>`;
-    }).join("") + (files.length > shown.length ? `<div class="more">and ${files.length - shown.length} more</div>` : "");
+    }).join("") + (files.length > shown.length ? `<div class="more">and ${files.length - shown.length} more</div>` : ""));
     liveLit = files.find((f) => f.lit)?.path || "";
 
     liveTick(true);
