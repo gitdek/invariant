@@ -745,11 +745,12 @@ func watchCmd(ctx context.Context, args []string) int {
 		return fail(err)
 	}
 	// What the factory is doing goes in a status file for the dashboard
-	// (D-0049). It holds no secrets: the process, the repository, and the
-	// steps in hand (D-0113). The page shows one of them, as it did: the
-	// longest-running step that's doing something.
+	// (D-0049). It holds no secrets: the process, the repository, the
+	// watcher's name on its lease, which the page follows, and the steps in
+	// hand, each of which the page shows (D-0113). Issue, doing and since
+	// name the longest-running step that's doing something.
 	statusPath := dashboard.StatusPath(*work, *repo)
-	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
+	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
 	f.Activity = func(steps []factory.Step) {
 		status.Heartbeat = time.Now().UTC()
 		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
@@ -895,7 +896,7 @@ func dashboardCmd(ctx context.Context, args []string) int {
 	base := fs.String("base", "main", "the branch the factory merges into")
 	cache, _ := os.UserCacheDir()
 	var works []string
-	fs.Func("work", "a watcher's work directory, where it writes what it's doing; repeat it for each watcher, and the page follows the one that's working (default "+filepath.Join(cache, "invariant", "watch")+")", func(v string) error {
+	fs.Func("work", "a watcher's work directory, where it writes what it's doing; repeat it for each watcher, and the page follows the one that holds the lease, or else the one that's working (default "+filepath.Join(cache, "invariant", "watch")+")", func(v string) error {
 		works = append(works, v)
 		return nil
 	})

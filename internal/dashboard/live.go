@@ -373,13 +373,12 @@ func (t *transcript) view() Live {
 }
 
 // live keeps what the dashboard has read of each repository's running
-// step, and the last step it saw, which the page shows until the next one
-// starts.
+// steps, and the steps it last read for each, which the page shows until
+// one runs again.
 type live struct {
 	mu    sync.Mutex
 	reads map[string]*transcript // by transcript path
-	path  map[string]string      // each repository's current transcript
-	last  map[string]*Live       // each repository's last step
+	last  map[string][]*Live     // each repository's steps, as last read
 	at    time.Time
 	body  []byte
 }
@@ -388,8 +387,8 @@ type live struct {
 // dashboard reads again, however many pages ask.
 const liveEvery = 2 * time.Second
 
-// LiveJSON is every repository's running step, or the last one it ran, as
-// the page's live view reads it.
+// LiveJSON is every step each repository's watcher is running, or the ones
+// it last ran, longest-running first, as the page's live view reads it.
 func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	s.live.mu.Lock()
 	defer s.live.mu.Unlock()
@@ -397,15 +396,24 @@ func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 		return s.live.body, nil
 	}
 	if s.live.reads == nil {
-		s.live.reads, s.live.path, s.live.last = map[string]*transcript{}, map[string]string{}, map[string]*Live{}
+		s.live.reads, s.live.last = map[string]*transcript{}, map[string][]*Live{}
 	}
 	steps := []Live{}
+	read := map[string]bool{}
 	for _, r := range s.Repos {
 		st, work := s.watcherOf(r)
-		if v := s.liveStep(r.Name, st, work, now); v != nil {
-			steps = append(steps, *v)
+		steps = append(steps, s.liveSteps(r.Name, st, work, now, read)...)
+	}
+	// A transcript no running step is on anymore is forgotten.
+	for path := range s.live.reads {
+		if !read[path] {
+			delete(s.live.reads, path)
 		}
 	}
+	sort.SliceStable(steps, func(i, j int) bool {
+		a, b := steps[i].Since, steps[j].Since
+		return a != nil && (b == nil || a.Before(*b))
+	})
 	body, err := json.Marshal(map[string]any{"at": now.UTC(), "steps": steps})
 	if err != nil {
 		return nil, err
@@ -414,55 +422,77 @@ func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	return body, nil
 }
 
-// liveStep reads the step repo's watcher is running. Once the step ends, it
-// shows the last read of it, marked ended, until the next step starts.
-func (s *Server) liveStep(repo string, st Status, work string, now time.Time) *Live {
-	prefix, _ := stepFiles(st.Doing)
-	if st.Running() && st.Issue != 0 && prefix != "" && work != "" {
-		if dir := newestStep(work, repo, st.Issue, prefix); dir != "" {
-			path := filepath.Join(dir, "transcript.jsonl")
-			if old := s.live.path[repo]; old != path {
-				delete(s.live.reads, old)
-				s.live.path[repo] = path
+// liveSteps reads every step repo's watcher is running with an agent at
+// work, and notes each transcript it reads in read. Once none of them is
+// running, it shows the steps it last read, marked ended, until one runs
+// again.
+func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, read map[string]bool) []Live {
+	var running []*Live
+	if st.Running() && work != "" {
+		for _, step := range st.steps() {
+			if v := s.liveStep(repo, st, step, work, read); v != nil {
+				running = append(running, v)
 			}
-			t := s.live.reads[path]
-			if t == nil {
-				t = newTranscript()
-				s.live.reads[path] = t
-			}
-			if err := t.read(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				s.logf("live: %v", err)
-			}
-			v := t.view()
-			v.Repo, v.Issue, v.Doing, v.Since, v.Limit = repo, st.Issue, st.Doing, st.Since, st.Limit
-			if info, err := os.Stat(path); err == nil {
-				m := info.ModTime().UTC()
-				v.Last = &m
-			}
-			v.Runs, v.RunsKind = readRuns(dir, st.Doing)
-			for i := range v.Marks {
-				if v.Marks[i].At.IsZero() && v.Since != nil {
-					v.Marks[i].At = *v.Since // thinking before the first tool call
+		}
+	}
+	if len(running) > 0 {
+		s.live.last[repo] = running
+	}
+	var out []Live
+	for _, last := range s.live.last[repo] {
+		if last.Ended == nil && len(running) == 0 {
+			ended := now.UTC()
+			last.Ended, last.Now = &ended, ""
+			for i := range last.Marks {
+				if last.Marks[i].Kind == "think" && last.Marks[i].Until == nil {
+					last.Marks[i].Until = last.Last
 				}
 			}
-			s.live.last[repo] = &v
-			return &v
 		}
+		out = append(out, *last)
 	}
-	last := s.live.last[repo]
-	if last == nil {
+	return out
+}
+
+// liveStep reads one step from its own issue's newest step directory: its
+// transcript, only as far as it's new, and its checks' log. It's nil for a
+// step with no agent at work, doing nothing yet or ratifying, and for one
+// whose directory isn't there yet.
+func (s *Server) liveStep(repo string, st Status, step Step, work string, read map[string]bool) *Live {
+	prefix, _ := stepFiles(step.Doing)
+	if step.Issue == 0 || prefix == "" {
 		return nil
 	}
-	if last.Ended == nil {
-		ended := now.UTC()
-		last.Ended, last.Now = &ended, ""
-		for i := range last.Marks {
-			if last.Marks[i].Kind == "think" && last.Marks[i].Until == nil {
-				last.Marks[i].Until = last.Last
-			}
+	dir := newestStep(work, repo, step.Issue, prefix)
+	if dir == "" {
+		return nil
+	}
+	path := filepath.Join(dir, "transcript.jsonl")
+	read[path] = true
+	t := s.live.reads[path]
+	if t == nil {
+		t = newTranscript()
+		s.live.reads[path] = t
+	}
+	if err := t.read(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.logf("live: %v", err)
+	}
+	v := t.view()
+	v.Repo, v.Issue, v.Doing, v.Limit = repo, step.Issue, step.Doing, st.Limit
+	if !step.Since.IsZero() {
+		since := step.Since
+		v.Since = &since
+	}
+	if info, err := os.Stat(path); err == nil {
+		m := info.ModTime().UTC()
+		v.Last = &m
+	}
+	v.Runs, v.RunsKind = readRuns(dir, step.Doing)
+	for i := range v.Marks {
+		if v.Marks[i].At.IsZero() && v.Since != nil {
+			v.Marks[i].At = *v.Since // thinking before the first tool call
 		}
 	}
-	v := *last
 	return &v
 }
 
@@ -523,37 +553,68 @@ func runsKindOf(doing string) string {
 }
 
 // watcherOf is the watcher to show for r, with its work directory. With
-// several watchers, it's the one working on something, or else the first
-// that's running.
+// several watchers, it's the running one whose status names the holder of
+// r's lease. When the lease is unknown or names none of them, it's the one
+// working on something, or else the first that's running.
 func (s *Server) watcherOf(r *Repo) (Status, string) {
 	works := s.Works
 	if len(works) == 0 {
 		st, _ := ReadStatus(r.Status)
 		return st, s.Work
 	}
-	var first, running *Status
-	var firstWork, runningWork string
+	type watcher struct {
+		st   Status
+		work string
+	}
+	holder := s.holderOf(r.Name)
+	var working, running, first *watcher
 	for _, w := range works {
 		st, err := ReadStatus(StatusPath(w, r.Name))
 		if err != nil || st.PID == 0 {
 			continue
 		}
-		if st.Running() && st.Doing != "" {
+		on := st.Running()
+		if on && holder != "" && st.Holder == holder {
 			return st, w
 		}
-		if first == nil {
-			first, firstWork = &st, w
+		this := &watcher{st, w}
+		if working == nil && on && st.Doing != "" {
+			working = this
 		}
-		if running == nil && st.Running() {
-			st := st
-			running, runningWork = &st, w
+		if running == nil && on {
+			running = this
+		}
+		if first == nil {
+			first = this
 		}
 	}
-	switch {
-	case running != nil:
-		return *running, runningWork
-	case first != nil:
-		return *first, firstWork
+	for _, w := range []*watcher{working, running, first} {
+		if w != nil {
+			return w.st, w.work
+		}
 	}
 	return Status{}, ""
+}
+
+// holding keeps who holds repo's lease, as the dashboard last read it, where
+// the live view, which is served apart from the reads, can see it.
+func (s *Server) holding(repo string, l *Lease) {
+	holder := ""
+	if l != nil {
+		holder = l.Holder
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.holders == nil {
+		s.holders = map[string]string{}
+	}
+	s.holders[repo] = holder
+}
+
+// holderOf is who holds repo's lease, as last read, or "" when that isn't
+// known.
+func (s *Server) holderOf(repo string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.holders[repo]
 }

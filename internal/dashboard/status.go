@@ -12,10 +12,11 @@ import (
 // Status is what the watcher is doing right now. The watcher writes it to a
 // file each time it starts or finishes something, and the dashboard reads
 // it (D-0049). Issue, Doing and Since are its longest-running step that's
-// doing something, the one the page shows.
+// doing something, and a status that lists no steps counts as that one.
 type Status struct {
 	PID       int        `json:"pid"`
 	Repo      string     `json:"repo"`
+	Holder    string     `json:"holder,omitempty"` // its name on the repository's lease, whose holder the page follows
 	Started   time.Time  `json:"started"`
 	Heartbeat time.Time  `json:"heartbeat"`
 	Every     float64    `json:"every"`           // seconds between polls
@@ -33,6 +34,19 @@ type Step struct {
 	Issue int       `json:"issue"`
 	Doing string    `json:"doing,omitempty"`
 	Since time.Time `json:"since"`
+}
+
+// steps is every step the status lists, or, from a watcher that lists none,
+// the one its issue, doing and since name.
+func (s Status) steps() []Step {
+	if len(s.Steps) > 0 || s.Issue == 0 {
+		return s.Steps
+	}
+	step := Step{Issue: s.Issue, Doing: s.Doing}
+	if s.Since != nil {
+		step.Since = *s.Since
+	}
+	return []Step{step}
 }
 
 // StatusPath is where the watcher for repo keeps its status, under its work

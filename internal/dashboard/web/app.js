@@ -74,7 +74,7 @@
       u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
       u.classList.toggle("stale", !!state.stale?.length);
     }
-    liveTick(false);
+    liveTick();
   }
 
   // ---------- the loop ----------
@@ -164,12 +164,16 @@
       const t = totalsOf(s);
       chips.push(`<span class="chip holds"><i></i>${t.badMerges} bad merges in ${t.merged}</span>`);
     } else {
-      const w = { people: ["people", "Waiting on a person"], ci: ["ci pulse", "CI's gate is running"], factory: ["factory pulse", "The factory is working"] }[n.waitingOn] || ["", n.stage];
+      // With several steps running, the chip counts them, and no one step's
+      // checks are shown (D-0113).
+      const many = n.running > 1;
+      const w = many ? ["factory pulse", `${n.running} steps running`]
+        : { people: ["people", "Waiting on a person"], ci: ["ci pulse", "CI's gate is running"], factory: ["factory pulse", "The factory is working"] }[n.waitingOn] || ["", n.stage];
       chips.push(`<span class="chip ${w[0]}"><i></i>${w[1]}</span>`);
       if (n.since) chips.push(`<span class="chip">for&nbsp;<span data-since="${esc(n.since)}"></span></span>`);
       // The step's checks as they run: TLC checking a draft, or the gate
       // checking the code.
-      const owner = (s.repos || []).find((r) => r.name === (n.repo || s.repo))?.factory;
+      const owner = !many && (s.repos || []).find((r) => r.name === (n.repo || s.repo))?.factory;
       const fw = owner && owner.issue === n.issue ? owner : {};
       for (const r of fw.runs || []) {
         const what = fw.runsKind === "check" ? "TLC check" : "gate run";
@@ -1667,14 +1671,21 @@
   });
   document.querySelector('meta[name="theme-color"]').setAttribute("content", V.light ? "#f4f6f8" : "#090c11");
 
-  // ---------- the running step, live (#97) ----------
+  // ---------- the running steps, live (#97) ----------
   // /api/live.json is read from the watcher's work directory, every few
   // seconds while a step runs. It holds counts, times and file paths only,
-  // never the agent's code, words or thinking (D-0051).
+  // never the agent's code, words or thinking (D-0051). Each step the
+  // watcher is running has a card of its own (D-0113).
   const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["edit", "editing"], ["gate", "gate runs"], ["check", "draft checks"], ["test", "test runs"], ["other", "other tools"]];
   const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
   const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
-  let live = null, liveKey = "", liveMarks = 0, liveRuns = 0, liveLit = "";
+  let live = null;
+  // The cards shown, by their step's repository, issue and since, so each
+  // one is kept across reads and its dial and strip never start over. A
+  // card holds its step, its elements, and what it last showed: how many
+  // marks and checks, and the file it lit.
+  const cards = new Map();
+  const cardKey = (l) => `${l.repo}#${l.issue}@${l.since}`;
   const kilo = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
@@ -1693,11 +1704,12 @@
     setTimeout(loadLive, wait);
   }
 
-  // The step to show: the one running in the chosen repositories, or the
-  // last one that ended.
-  function liveStep() {
+  // The steps to show: the ones running in the chosen repositories, or else
+  // the ones that ended, in the live view's order.
+  function liveSteps() {
     const steps = (live?.steps || []).filter((l) => inScope(l.repo));
-    return steps.find((l) => !l.ended) || steps[0];
+    const running = steps.filter((l) => !l.ended);
+    return running.length ? running : steps;
   }
 
   // put replaces what el shows only when it changed, so its times don't
@@ -1709,22 +1721,39 @@
     fillTimes(el);
   }
 
+  // renderLive keeps a card for each step to show, in the live view's
+  // order. A new step's card is made from the template and arrives, and a
+  // card leaves when its step leaves the list.
   function renderLive() {
-    const sec = $("#live"), l = liveStep();
-    sec.hidden = !l;
-    if (!l) return;
-    const key = `${l.repo}#${l.issue}@${l.since}`;
-    if (key !== liveKey) {
-      liveKey = key;
-      liveMarks = liveRuns = 0;
-      liveLit = "";
-      sec.classList.remove("arrive");
-      void sec.offsetWidth;
-      sec.classList.add("arrive");
+    const steps = liveSteps(), keys = steps.map(cardKey), box = $("#live-cards");
+    $("#live").hidden = !steps.length;
+    for (const [key, c] of cards) {
+      if (keys.includes(key)) continue;
+      stripSize.unobserve(c.strip);
+      c.el.remove();
+      cards.delete(key);
     }
-    sec.classList.toggle("ended", !!l.ended);
+    steps.forEach((l, i) => {
+      let c = cards.get(keys[i]);
+      if (!c) {
+        const el = $("#live-card").content.firstElementChild.cloneNode(true);
+        el.classList.add("arrive");
+        c = { key: keys[i], el, strip: $(".strip", el), marks: 0, runs: 0, lit: "" };
+        cards.set(c.key, c);
+        stripSize.observe(c.strip);
+      }
+      if (box.children[i] !== c.el) box.insertBefore(c.el, box.children[i] || null);
+      c.l = l;
+      renderCard(c);
+    });
+  }
+
+  // renderCard shows a step on its card.
+  function renderCard(c) {
+    const { el, l } = c;
+    el.classList.toggle("ended", !!l.ended);
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
-    put($("#live-title"), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}`);
+    put($(".live-title", el), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}`);
 
     // What the agent is doing now, or how its run ended.
     let now;
@@ -1737,43 +1766,48 @@
       now = `<b>${esc(LIVE_NOW[l.now] || "Working")}</b>${at ? ` for <span data-since="${esc(at.at)}"></span>` : ""}`;
       if (l.last) now += ` · last activity <span data-ago="${esc(l.last)}"></span>`;
     }
-    put($("#live-now"), now);
+    put($(".live-now", el), now);
 
     const calls = Object.values(l.tools || {}).reduce((a, b) => a + b, 0);
     const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", `≈${kilo(l.thinking)}`, "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
     if (l.output) stats.push(["Wrote", kilo(l.output), "output tokens"]);
-    put($("#live-stats"), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
+    put($(".live-stats", el), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
 
-    put($("#live-legend"), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
+    put($(".legend", el), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
       + (l.thinking ? `<span class="lg think"><i></i>thinking ≈${kilo(l.thinking)} tokens</span>` : ""));
 
-    put($("#live-runs"), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
+    put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
-    put($("#live-files"), !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
+    put($(".live-files", el), !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
       const cut = f.path.lastIndexOf("/") + 1;
-      const fresh = f.lit && f.path !== liveLit && !REDUCED;
+      const fresh = f.lit && f.path !== c.lit && !REDUCED;
       return `<div class="file${f.lit ? " lit" : ""}${fresh ? " fresh" : ""}"><code><span class="dir">${esc(f.path.slice(0, cut))}</span>${esc(f.path.slice(cut))}</code>`
         + `<span class="counts">${f.reads ? `<span class="r">read ${f.reads}</span>` : ""}${f.edits ? `<span class="e">edited ${f.edits}</span>` : ""}</span><span class="size">${f.size > 0 ? esc(bytes(f.size)) : ""}</span></div>`;
     }).join("") + (files.length > shown.length ? `<div class="more">and ${files.length - shown.length} more</div>` : ""));
-    liveLit = files.find((f) => f.lit)?.path || "";
+    c.lit = files.find((f) => f.lit)?.path || "";
 
-    liveTick(true);
-    liveMarks = (l.marks || []).length;
-    liveRuns = (l.runs || []).length;
+    tickCard(c, true);
+    c.marks = (l.marks || []).length;
+    c.runs = (l.runs || []).length;
   }
 
-  // liveTick moves the dial and the strip's clock. Only a render with new
-  // data lands new marks. The dial is drawn once for each step and then
+  // liveTick moves every card's dial and strip's clock.
+  function liveTick() {
+    if ($("#live").hidden) return;
+    for (const c of cards.values()) tickCard(c, false);
+  }
+
+  // tickCard moves a card's dial and its strip's clock. Only a render with
+  // new data lands new marks. The dial is drawn once for each step and then
   // moved, so its motion never starts over: with a limit, its ring fills
   // toward it; without one, a hand sweeps the ring once a minute.
-  function liveTick(landing) {
-    const l = liveStep();
-    if (!l || $("#live").hidden) return;
+  function tickCard(c, landing) {
+    const l = c.l;
     const end = l.ended ? T(l.ended) : Date.now();
     const elapsed = Math.max(0, (end - T(l.since)) / 1000);
     const C = 2 * Math.PI * 52;
-    const dial = $("#live-dial"), key = `${liveKey}|${l.limit || 0}|${!!l.ended}`;
+    const dial = $(".dial", c.el), key = `${c.key}|${l.limit || 0}|${!!l.ended}`;
     if (dial.dataset.key !== key) {
       dial.dataset.key = key;
       dial.innerHTML = `<svg viewBox="0 0 128 128" role="img"><circle cx="64" cy="64" r="52" class="track"/>`
@@ -1795,14 +1829,14 @@
     }
     $(".big", dial).textContent = clock(elapsed);
     $("svg", dial).setAttribute("aria-label", `${clock(elapsed)}${l.limit ? ` of ${dur(l.limit)}` : ""}`);
-    drawStrip(l, end, landing);
+    drawStrip(c, end, landing);
   }
 
   // The heartbeat: the step's whole run in time. A tick per tool call,
   // colored by kind, a band per stretch of thinking, brighter the faster it
   // thought, and a diamond per check, green when it passed.
-  function drawStrip(l, end, landing) {
-    const box = $("#live-strip");
+  function drawStrip(c, end, landing) {
+    const l = c.l, box = c.strip;
     const W = Math.max(280, box.clientWidth), H = 100, top = 16, bottom = 70;
     const marks = l.marks || [];
     const t0 = T(l.since) || (marks[0] ? T(marks[0].at) : end);
@@ -1835,13 +1869,13 @@
     marks.forEach((m, i) => {
       if (m.kind === "think") return;
       const mx = x(m.at).toFixed(1);
-      const land = landing && i >= liveMarks && !REDUCED ? ` new" style="animation-delay:${Math.min(i - liveMarks, 60) * 14}ms` : "";
+      const land = landing && i >= c.marks && !REDUCED ? ` new" style="animation-delay:${Math.min(i - c.marks, 60) * 14}ms` : "";
       parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(clockOf(m.at))}</title></line>`);
     });
     (l.runs || []).forEach((r, i) => {
       if (!r.at) return;
       const label = `${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? ": " + r.failed.join(", ") : ""}`;
-      const flash = landing && i >= liveRuns && !REDUCED ? " new" : "";
+      const flash = landing && i >= c.runs && !REDUCED ? " new" : "";
       parts.push(`<g transform="translate(${x(r.at).toFixed(1)} ${bottom + 12})"><path d="M0 -7L7 0L0 7L-7 0Z" class="checkpoint ${r.passed ? "pass" : "fail"}${flash}"><title>${esc(label)}</title></path></g>`);
     });
     if (!l.ended) {
@@ -1851,7 +1885,13 @@
     const said = `${marks.filter((m) => m.kind !== "think").length} tool calls and ${marks.filter((m) => m.kind === "think").length} stretches of thinking over ${clock(span / 1000)}`;
     box.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(said)}">${parts.join("")}</svg>`;
   }
-  new ResizeObserver(() => liveTick(false)).observe($("#live-strip"));
+  // A card's strip is drawn again when its width changes.
+  const stripSize = new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const c = [...cards.values()].find((c) => c.strip === e.target);
+      if (c) tickCard(c, false);
+    }
+  });
 
   cosmos.init();
   dgraph.init();

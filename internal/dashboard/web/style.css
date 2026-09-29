@@ -774,9 +774,13 @@ footer p { margin: 0; max-width: 60em; }
 .composer textarea { resize: vertical; min-height: 120px; }
 .composer input:focus, .composer select:focus, .composer textarea:focus { outline: none; border-color: var(--people); box-shadow: 0 0 0 3px rgba(var(--people-rgb), 0.18); }
 
-/* ---------- Live: the running step (#97) ---------- */
+/* ---------- Live: the running steps, a card for each (#97) ---------- */
 :root { --search: #b48cff; }
 :root[data-theme="light"] { --search: #7c4dff; }
+.live-cards { display: grid; gap: 18px; }
+.live-cards > .livestep { margin: 0; }
+/* The fine print says it once, under the last card. */
+.live-cards > .livestep:not(:last-child) .fineprint { display: none; }
 .livestep {
   position: relative; padding: clamp(18px, 3vw, 28px); border: 1px solid var(--line2); border-radius: var(--radius);
   background: var(--card); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); overflow: hidden;

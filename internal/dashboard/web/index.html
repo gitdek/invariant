@@ -58,23 +58,28 @@
     <div class="orbit" id="orbit" role="img" aria-label="The factory's pipeline as an orbit: issue, ask, ratify, build, gate, merge"></div>
   </section>
 
-  <section class="block livestep" id="live" hidden aria-label="The step the factory is running, live">
-    <header>
-      <div>
-        <p class="eyebrow">Live <span class="livedot" aria-hidden="true"></span></p>
-        <h2 id="live-title"></h2>
-        <p class="lede" id="live-now"></p>
-      </div>
-    </header>
-    <div class="live-top">
-      <div class="dial" id="live-dial"></div>
-      <div class="live-stats" id="live-stats"></div>
-    </div>
-    <div class="strip" id="live-strip"></div>
-    <div class="legend" id="live-legend"></div>
-    <div class="live-runs" id="live-runs"></div>
-    <div class="live-files" id="live-files"></div>
-    <p class="fineprint">Counts, times and file paths from the agent's transcript, read every few seconds while it works. Never its code, its words or its thinking.</p>
+  <section class="block" id="live" hidden aria-label="The steps the factory is running, live">
+    <div class="live-cards" id="live-cards"></div>
+    <template id="live-card">
+      <article class="block livestep">
+        <header>
+          <div>
+            <p class="eyebrow">Live <span class="livedot" aria-hidden="true"></span></p>
+            <h2 class="live-title"></h2>
+            <p class="lede live-now"></p>
+          </div>
+        </header>
+        <div class="live-top">
+          <div class="dial"></div>
+          <div class="live-stats"></div>
+        </div>
+        <div class="strip"></div>
+        <div class="legend"></div>
+        <div class="live-runs"></div>
+        <div class="live-files"></div>
+        <p class="fineprint">Counts, times and file paths from the agent's transcript, read every few seconds while it works. Never its code, its words or its thinking.</p>
+      </article>
+    </template>
   </section>
 
   <section class="block" id="inbox-block">
