@@ -168,7 +168,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 9 | The factory survives crashes and concurrent work, proved, which brings liveness to the gate (3.8, 4.3, 4.4) | Done `D-0048` `D-0058` `D-0069` |
 | 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Done `D-0007` `D-0033` `D-0048` `D-0075` |
 | 11 | A driver can't skip a step (3.11) | Done `D-0059` `D-0082` `D-0090` |
-| 12 | One decision graph for every project (3.12) | In progress `D-0096` |
+| 12 | One decision graph for every project (3.12) | Done `D-0096` |
 | 13 | The factory takes every change, and a whole PRD (2.8) | In progress `D-0105` |
 | 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | Next `D-0129` |
 | Later | Type checking, a TypeScript proof path, a hosted factory | Later |
