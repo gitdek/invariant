@@ -1490,7 +1490,7 @@
   let live = null, liveKey = "", liveMarks = 0, liveRuns = 0, liveLit = "";
   const kilo = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
-  const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
+  const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
 
   async function loadLive() {
@@ -1556,7 +1556,7 @@
       const cut = f.path.lastIndexOf("/") + 1;
       const fresh = f.lit && f.path !== liveLit && !REDUCED;
       return `<div class="file${f.lit ? " lit" : ""}${fresh ? " fresh" : ""}"><code><span class="dir">${esc(f.path.slice(0, cut))}</span>${esc(f.path.slice(cut))}</code>`
-        + `<span class="counts">${f.reads ? `<span class="r">read ${f.reads}</span>` : ""}${f.edits ? `<span class="e">edited ${f.edits}</span>` : ""}</span><span class="size">${esc(bytes(f.size))}</span></div>`;
+        + `<span class="counts">${f.reads ? `<span class="r">read ${f.reads}</span>` : ""}${f.edits ? `<span class="e">edited ${f.edits}</span>` : ""}</span><span class="size">${f.size > 0 ? esc(bytes(f.size)) : ""}</span></div>`;
     }).join("") + (files.length > shown.length ? `<div class="more">and ${files.length - shown.length} more</div>` : "");
     liveLit = files.find((f) => f.lit)?.path || "";
 
@@ -1566,20 +1566,37 @@
   }
 
   // liveTick moves the dial and the strip's clock. Only a render with new
-  // data lands new marks.
+  // data lands new marks. The dial is drawn once for each step and then
+  // moved, so its motion never starts over: with a limit, its ring fills
+  // toward it; without one, a hand sweeps the ring once a minute.
   function liveTick(landing) {
     const l = liveStep();
     if (!l || $("#live").hidden) return;
     const end = l.ended ? T(l.ended) : Date.now();
     const elapsed = Math.max(0, (end - T(l.since)) / 1000);
-    const frac = l.limit ? Math.min(1, elapsed / l.limit) : 0;
     const C = 2 * Math.PI * 52;
-    const tone = frac > 0.95 ? "bug" : frac > 0.8 ? "people" : "accent";
-    const arc = l.limit
-      ? `<circle cx="64" cy="64" r="52" class="arc ${tone}" stroke-dasharray="${(C * frac).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 64 64)"/>`
-      : `<circle cx="64" cy="64" r="52" class="arc spin${l.ended ? " still" : ""}" stroke-dasharray="46 ${C.toFixed(1)}"/>`;
-    $("#live-dial").innerHTML = `<svg viewBox="0 0 128 128" role="img" aria-label="${esc(`${clock(elapsed)}${l.limit ? ` of ${dur(l.limit)}` : ""}`)}"><circle cx="64" cy="64" r="52" class="track"/>${arc}`
-      + `<text x="64" y="62" class="big">${esc(clock(elapsed))}</text><text x="64" y="84" class="small">${l.limit ? `of ${esc(dur(l.limit))}` : l.ended ? "ran" : "no limit set"}</text></svg>`;
+    const dial = $("#live-dial"), key = `${liveKey}|${l.limit || 0}|${!!l.ended}`;
+    if (dial.dataset.key !== key) {
+      dial.dataset.key = key;
+      dial.innerHTML = `<svg viewBox="0 0 128 128" role="img"><circle cx="64" cy="64" r="52" class="track"/>`
+        + `<circle cx="64" cy="64" r="52" class="arc"/><text x="64" y="62" class="big"></text><text x="64" y="84" class="small"></text></svg>`;
+    }
+    const arc = $(".arc", dial);
+    if (l.limit) {
+      const frac = Math.min(1, elapsed / l.limit);
+      arc.setAttribute("class", `arc fill ${frac > 0.95 ? "bug" : frac > 0.8 ? "people" : "accent"}`);
+      arc.setAttribute("stroke-dasharray", `${(C * frac).toFixed(1)} ${C.toFixed(1)}`);
+      arc.style.transform = "rotate(-90deg)";
+      $(".small", dial).textContent = `of ${dur(l.limit)}`;
+    } else {
+      // The angle only grows, so the hand never turns back at the top.
+      arc.setAttribute("class", `arc hand${l.ended ? " still" : ""}`);
+      arc.setAttribute("stroke-dasharray", `26 ${C.toFixed(1)}`);
+      arc.style.transform = `rotate(${(elapsed * 6 - 90).toFixed(1)}deg)`;
+      $(".small", dial).textContent = l.ended ? "it ran" : "running";
+    }
+    $(".big", dial).textContent = clock(elapsed);
+    $("svg", dial).setAttribute("aria-label", `${clock(elapsed)}${l.limit ? ` of ${dur(l.limit)}` : ""}`);
     drawStrip(l, end, landing);
   }
 
