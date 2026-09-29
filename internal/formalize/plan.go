@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/synth"
 )
 
@@ -61,7 +62,7 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	r.CheckRuns, _ = readRuns(checkLog)
 	defer func() {
 		for _, name := range []string{"plan.json", "proposal.json"} {
-			if b, err := os.ReadFile(filepath.Join(ws, name)); err == nil {
+			if b, err := regular.ReadFile(ws, name); err == nil {
 				os.WriteFile(filepath.Join(out, name), b, 0o644)
 			}
 		}

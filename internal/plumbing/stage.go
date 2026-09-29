@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+
+	"github.com/gitdek/invariant/internal/regular"
 )
 
 // Stage lays out what a build made, for a test run or a commit: the
@@ -20,27 +22,31 @@ func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
 		return err
 	}
 	for _, f := range plan.Files {
-		from, to := filepath.Join(ws, filepath.FromSlash(f)), filepath.Join(dst, filepath.FromSlash(f))
-		info, err := os.Lstat(from)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			if err := os.Remove(to); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			continue
-		case err != nil:
-			return err
-		case !info.Mode().IsRegular():
-			return fmt.Errorf("%s isn't a regular file", f)
-		}
-		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
-			return err
-		}
-		if err := copyFile(from, to, 0o644); err != nil {
+		if err := take(ws, f, filepath.Join(dst, filepath.FromSlash(f))); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// take copies a file the plan names from the build's workspace to to, or
+// removes to when the build removed it. It takes a regular file only, and
+// refuses a link by name, never following it (#153).
+func take(ws, f, to string) error {
+	text, err := regular.ReadFile(ws, f)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.Remove(to); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	case err != nil:
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(to, text, 0o644)
 }
 
 // Changes is what a build did in its workspace, set against the checkout
