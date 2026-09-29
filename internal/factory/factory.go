@@ -67,6 +67,7 @@ type Repo interface {
 	Dirs(ctx context.Context, ref, under string) ([]string, error)
 	Worktree(ctx context.Context, branch, from string) (string, error)
 	RemoveWorktree(ctx context.Context, dir string) error
+	ClearWorktrees(ctx context.Context) error
 	Commit(ctx context.Context, worktree, dir, message string) (string, error)
 	Push(ctx context.Context, worktree, branch string) error
 	RevParse(ctx context.Context, ref string) (string, error)
@@ -163,7 +164,11 @@ func (f *Factory) Prepare(ctx context.Context) error {
 }
 
 // Watch polls until ctx ends. With a lease, it polls only while it holds
-// the lease, and checks it before each effect.
+// the lease, and checks it before each effect. Before each poll, it clears
+// the clone's worktrees: the clone is the watcher's own, and its polls run
+// one at a time, so any worktree there is left over from a watcher that
+// stopped mid-build. A one-off run doesn't clear them, since it may share
+// the clone with a running watcher.
 func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 	if f.LeaseFor > 0 {
 		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
@@ -181,6 +186,8 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 	for {
 		if !f.holds() {
 			// Another watcher holds the lease. Wait for it to run out.
+		} else if err := f.Repo.ClearWorktrees(ctx); err != nil {
+			f.logf("worktrees: %v", err)
 		} else if err := f.Poll(ctx); err != nil {
 			f.logf("poll: %v", err)
 		}
