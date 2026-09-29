@@ -170,7 +170,8 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 11 | A driver can't skip a step (3.11) | Done `D-0059` `D-0082` `D-0090` |
 | 12 | One decision graph for every project (3.12) | In progress `D-0096` |
 | 13 | The factory takes every change, and a whole PRD (2.8) | In progress `D-0105` |
-| Later | Codex, type checking, a TypeScript proof path, a hosted factory | Later |
+| 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | Next `D-0129` |
+| Later | Type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
 - **Slice 7 is done when** the issue protocol is ratified on an issue, built by the factory and proved with Gobra, the watcher runs on it, and one issue changes it through the factory. `D-0045` `D-0053` The protocol core runs inside the real watcher, so its model has to be finite without counters that cap its behavior. Otherwise the cap would end up in the code the watcher runs. Slice 8 makes that true for every project.
