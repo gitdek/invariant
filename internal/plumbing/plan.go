@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/regular"
 )
 
 // Plan is a plumbing change's proposal.
@@ -56,7 +58,7 @@ var TrustedBase = []string{
 	".claude/", ".codex/", ".mcp.json",
 	"internal/conformance/", "internal/decisions/", "internal/factory/", "internal/formalize/",
 	"internal/github/", "internal/gobra/", "internal/mcp/", "internal/plumbing/", "internal/project/",
-	"internal/receipt/", "internal/scope/", "internal/setup/", "internal/synth/", "internal/tla/",
+	"internal/receipt/", "internal/regular/", "internal/scope/", "internal/setup/", "internal/synth/", "internal/tla/",
 	"internal/tlc/", "internal/toolchain/", "internal/verify/",
 	"internal/dashboard/act.go", "internal/dashboard/http.go",
 }
@@ -256,7 +258,7 @@ func declares(file, src string, tests []Test) error {
 // ReadDraft reads the plan an agent left in its workspace: plan.json, and
 // each acceptance test file under tests/, at its path in the repository.
 func ReadDraft(ws string) (*Plan, error) {
-	b, err := os.ReadFile(filepath.Join(ws, "plan.json"))
+	b, err := regular.ReadFile(ws, "plan.json")
 	if err != nil {
 		return nil, fmt.Errorf("the draft has no plan.json: %w", err)
 	}
@@ -278,7 +280,7 @@ func ReadDraft(ws string) (*Plan, error) {
 		if _, done := p.Sources[c]; done {
 			continue
 		}
-		src, err := os.ReadFile(filepath.Join(ws, "tests", filepath.FromSlash(c)))
+		src, err := regular.ReadFile(ws, "tests/"+c)
 		if err != nil {
 			return nil, fmt.Errorf("acceptance test %s is in %s, but tests/%s can't be read: %w", t.Name, c, c, err)
 		}

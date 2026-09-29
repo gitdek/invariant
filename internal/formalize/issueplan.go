@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/synth"
 )
 
@@ -198,7 +199,7 @@ func badProject(dir string) string {
 // ReadIssues reads the plan of issues an agent left in its workspace, in
 // issues.json, and checks it.
 func ReadIssues(ws string) (*IssuePlan, error) {
-	b, err := os.ReadFile(filepath.Join(ws, "issues.json"))
+	b, err := regular.ReadFile(ws, "issues.json")
 	if err != nil {
 		return nil, fmt.Errorf("the draft has no issues.json: %w", err)
 	}
@@ -259,7 +260,7 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 	r.CheckRuns, _ = readRuns(checkLog)
 	defer func() {
 		for _, name := range []string{"issues.json", "proposal.json"} {
-			if b, err := os.ReadFile(filepath.Join(ws, name)); err == nil {
+			if b, err := regular.ReadFile(ws, name); err == nil {
 				os.WriteFile(filepath.Join(out, name), b, 0o644)
 			}
 		}
