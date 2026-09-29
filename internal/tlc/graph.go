@@ -5,8 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Dump model-checks module like Check, and returns the state graph TLC
@@ -18,7 +19,7 @@ func (r Runner) Dump(ctx context.Context, dir, module string, cfg Config) (strin
 		return "", err
 	}
 	jarDir, jar := filepath.Split(r.Jar)
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none",
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none",
 		"-v", dir+":/work", "-v", filepath.Clean(jarDir)+":/opt/tla:ro", "-w", "/work",
 		r.Image, "java", "-XX:+UseParallelGC", "-cp", "/opt/tla/"+jar, "tlc2.TLC",
 		"-tool", "-workers", "1", "-metadir", "/tmp/states", "-dump", "dot,actionlabels", "/work/states",

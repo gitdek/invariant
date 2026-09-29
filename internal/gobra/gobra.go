@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Result is what one Gobra run established.
@@ -77,7 +79,7 @@ func Run(ctx context.Context, image, dir string, overflow bool) (Result, error) 
 		args = append(args, "/work/"+f)
 	}
 	var out bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &out, &out
 	code := 0
 	if err := cmd.Run(); err != nil {

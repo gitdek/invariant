@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Runner runs TLC inside a pinned Java image, from a jar whose checksum the
@@ -56,7 +58,7 @@ func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Resu
 		return Result{}, err
 	}
 	jarDir, jar := filepath.Split(r.Jar)
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none",
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none",
 		"-v", dir+":/work", "-v", filepath.Clean(jarDir)+":/opt/tla:ro", "-w", "/work",
 		r.Image, "java", "-XX:+UseParallelGC", "-cp", "/opt/tla/"+jar, "tlc2.TLC",
 		"-tool", "-workers", "1", "-metadir", "/tmp/states", "-config", "Invariant.cfg", module+".tla")

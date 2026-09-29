@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // NaginiHeader marks a Python file for Nagini. Files without it are plain
@@ -82,7 +84,7 @@ func runNagini(ctx context.Context, image, pkg string, proved, plain []string) (
 		code.Contracts = append(code.Contracts, contracts...)
 
 		var out bytes.Buffer
-		cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", "none", "--platform", "linux/amd64",
+		cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--platform", "linux/amd64",
 			"-v", work+":/work", "-w", "/work", image, f)
 		cmd.Stdout, cmd.Stderr = &out, &out
 		exit := 0
