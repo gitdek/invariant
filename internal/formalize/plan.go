@@ -141,7 +141,9 @@ Don't ask about names or code structure: choose those yourself. If the issue isn
 # Check your plan
 
 The `+"`check`"+` tool reads plan.json and tests/, checks that the plan holds together, and runs the acceptance tests on the code in repo/, where they must fail. You have %d checks, so reread your files before each. When the check passes, you're done. Then reply with a two-sentence summary.
-`, req.Issue, checks)
+
+%s
+`, req.Issue, checks, synth.WriteAsYouGo("", "checks"))
 	if req.Previous != nil && req.Previous.Plan != nil {
 		b.WriteString("\n# The plan people asked to revise\n\nprevious/plan.json is the plan before. Keep what the discussion didn't ask to change.\n")
 	}
