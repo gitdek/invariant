@@ -13,6 +13,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/synth"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
@@ -225,7 +226,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		}
 	}
 	for _, name := range []string{"proposal.json"} {
-		if b, err := os.ReadFile(filepath.Join(ws, name)); err == nil {
+		if b, err := regular.ReadFile(ws, name); err == nil {
 			os.WriteFile(filepath.Join(out, name), b, 0o644)
 		}
 	}

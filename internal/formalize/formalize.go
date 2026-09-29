@@ -16,6 +16,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
@@ -126,7 +127,7 @@ var (
 // Read loads the draft an agent left in its workspace, validates it, and
 // pins its statements.
 func Read(ws string) (*Proposal, error) {
-	b, err := os.ReadFile(filepath.Join(ws, "proposal.json"))
+	b, err := regular.ReadFile(ws, "proposal.json")
 	if err != nil {
 		return nil, fmt.Errorf("the draft has no proposal.json: %w", err)
 	}
@@ -144,7 +145,7 @@ func Read(ws string) (*Proposal, error) {
 	if err := d.validateNames(); err != nil {
 		return nil, err
 	}
-	text, err := os.ReadFile(filepath.Join(ws, d.Module+".tla"))
+	text, err := regular.ReadFile(ws, d.Module+".tla")
 	if err != nil {
 		return nil, fmt.Errorf("proposal.json names module %s, but %s.tla can't be read: %w", d.Module, d.Module, err)
 	}

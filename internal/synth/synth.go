@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
@@ -299,7 +300,7 @@ const manifestFile = ".invariant/invariant.json"
 // copy of the manifest (D-0082, D-0085). It counts only when the rest of
 // that copy is the people's manifest exactly.
 func agentParameters(p *project.Project, ws string) ([]string, bool) {
-	b, err := os.ReadFile(filepath.Join(ws, manifestFile))
+	b, err := regular.ReadFile(ws, manifestFile)
 	if err != nil {
 		return nil, false
 	}
@@ -420,21 +421,22 @@ func Assemble(p *project.Project, ws, dst string) error {
 			return err
 		}
 	}
-	if err := copyFile(filepath.Join(ws, p.Manifest.Module), filepath.Join(dst, p.Manifest.Module)); err != nil {
+	// The factory takes only regular files from the agent's workspace, and
+	// refuses a link by name (#153).
+	module, err := regular.ReadFile(ws, p.Manifest.Module)
+	if err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(dst, p.Manifest.Module), string(module)); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(dst, p.Manifest.Code), 0o755); err != nil {
 		return err
 	}
-	return filepath.WalkDir(ws, func(file string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !d.Type().IsRegular() {
-			return err
-		}
-		rel, _ := filepath.Rel(ws, file)
-		if rel = filepath.ToSlash(rel); rel == p.Manifest.Module || !owned(p.Manifest, rel) {
-			return nil
-		}
-		return copyFile(file, filepath.Join(dst, filepath.FromSlash(rel)))
+	return regular.Walk(ws, func(rel string) bool {
+		return rel != p.Manifest.Module && owned(p.Manifest, rel)
+	}, func(rel string, text []byte) error {
+		return writeFile(filepath.Join(dst, filepath.FromSlash(rel)), string(text))
 	})
 }
 
@@ -477,7 +479,7 @@ func Tampered(p *project.Project, ws string) ([]string, error) {
 	var changed []string
 	for _, rel := range protected(p.Manifest.Language) {
 		want, errWant := os.ReadFile(filepath.Join(p.Dir, rel))
-		got, errGot := os.ReadFile(filepath.Join(ws, rel))
+		got, errGot := regular.ReadFile(ws, rel)
 		if os.IsNotExist(errWant) && os.IsNotExist(errGot) {
 			continue
 		}
