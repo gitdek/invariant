@@ -32,6 +32,9 @@ type Agent struct {
 	SignedIn func(out []byte, err error) bool
 	Install  string // the fix for a CLI that doesn't run
 	SignIn   string // the fix for one that isn't signed in
+	// Probe, if there is one, checks the place the agent runs is ready,
+	// such as Codex's sandbox (D-0138). Its error is the fix.
+	Probe func(ctx context.Context) error
 }
 
 // ClaudeCode is how the watcher checks Claude Code, at binary.
@@ -51,15 +54,17 @@ func ClaudeCode(binary string) Agent {
 }
 
 // Codex is how the watcher checks Codex, at binary, signed in to the home
-// of its own that its runs use.
-func Codex(binary, home string) Agent {
+// of its own that its runs use, and with probe checking its sandbox holds
+// (D-0138).
+func Codex(binary, home string, probe func(ctx context.Context) error) Agent {
 	return Agent{
+		Probe:    probe,
 		Version:  []string{binary, "--version"},
 		Status:   []string{binary, "login", "status"},
 		Env:      []string{"CODEX_HOME=" + home},
 		SignedIn: func(_ []byte, err error) bool { return err == nil },
 		Install:  fmt.Sprintf("Codex's CLI doesn't run as %s. Install it, or name it with -codex.", binary),
-		SignIn:   fmt.Sprintf("Codex isn't signed in to its own home, %s. Sign it in with your own account:\n  CODEX_HOME=%q %s login", home, home, binary),
+		SignIn:   fmt.Sprintf("Codex isn't signed in to its own home, %s. Sign it in there with your own account:\n  mkdir -p %q && CODEX_HOME=%q %s login", home, home, home, binary),
 	}
 }
 
@@ -96,12 +101,18 @@ func CheckAgents(ctx context.Context, need []string, can map[string]Agent) error
 		out, err := run(ctx, a.Status, a.Env)
 		if !a.SignedIn(out, err) {
 			fixes = append(fixes, a.SignIn)
+			continue
+		}
+		if a.Probe != nil {
+			if err := a.Probe(ctx); err != nil {
+				fixes = append(fixes, fmt.Sprintf("%s can't run where the factory runs it: %v", name, err))
+			}
 		}
 	}
 	if len(fixes) == 0 {
 		return nil
 	}
-	return fmt.Errorf("this watcher can't run every coding agent it may be asked for:\n- %s", strings.Join(fixes, "\n- "))
+	return fmt.Errorf("Invariant can't run every coding agent it needs here:\n- %s", strings.Join(fixes, "\n- "))
 }
 
 // run runs a check's command, and returns what it wrote to its output, for
