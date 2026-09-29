@@ -461,7 +461,10 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		return f.watch(ctx, t, state)
 	case KindRatified:
 		// A build that stopped partway, when the factory stopped. Pick it up.
-		return f.build(ctx, t, state)
+		// A ratified plan of issues builds nothing itself (#112).
+		if !isIssuePlan(state.Marker) {
+			return f.build(ctx, t, state)
+		}
 	case KindFailed:
 		// A person can merge or close the pull request of a build that
 		// failed, and the protocol has both steps. Record them as watch does
@@ -488,6 +491,14 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			return f.note(ctx, t, c, "I'm already working on this issue.")
 		}
 		return f.formalize(ctx, t, c, nil, nil, []int64{c.Comment})
+	case Plan:
+		// A writer asks for a plan of issues, which is drafted afresh wherever
+		// a writer's command can draft (#112).
+		switch {
+		case !started, kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
+			return f.formalize(ctx, t, c, nil, nil, []int64{c.Comment})
+		}
+		return f.note(ctx, t, c, "I'm already working on this issue.")
 	case Revise:
 		switch {
 		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
@@ -626,11 +637,23 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	f.doing(n, "formalizing")
 	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
 	req := f.request(t, answers, previous)
+	// Once a writer asks for a plan of issues, the issue is a PRD: its draft
+	// is a plan of issues, read against the base branch as it is, whatever
+	// its own Kind:, Project: and Code: lines say (#112).
+	prd := isPRD(t)
+	if prd {
+		root, err := f.planBase(ctx)
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(root)
+		req.PRD = root
+	}
 	// A plumbing issue gets a plan instead of statements, checked against
 	// the base branch as it is (D-0105). Only on Invariant's own repository,
 	// for now: anywhere else, it gets an answer and is left for a person,
 	// with nothing drafted (#103).
-	if kindLine(t.Issue.Body) == "plumbing" {
+	if !prd && kindLine(t.Issue.Body) == "plumbing" {
 		if !f.plansPlumbing() {
 			m := Marker{Kind: KindUnsupported, ReplyTo: replyTo}
 			return f.drafted(ctx, t, cause, base, m, plumbingElsewhereComment(m), LabelHumanReview)
@@ -648,7 +671,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// A Project: line names the project the issue changes, or where a new
 	// one goes (D-0045).
 	var newDir string
-	if dir := projectLine(t.Issue.Body); dir != "" {
+	if dir := projectLine(t.Issue.Body); !prd && dir != "" {
 		if problem := badDir(dir); problem != "" {
 			return stuck("The issue names the project `" + dir + "`, but " + problem + ".")
 		}
@@ -665,7 +688,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	}
 	// Code: lines name existing code for the factory to check as it is
 	// (D-0054). The formalizer reads it as it is on the base branch.
-	if paths := codeLines(t.Issue.Body); len(paths) > 0 {
+	if paths := codeLines(t.Issue.Body); !prd && len(paths) > 0 {
 		for _, p := range paths {
 			if problem := badDir(p); problem != "" {
 				return stuck("The issue names the code `" + p + "`, but " + problem + ".")
@@ -720,6 +743,9 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	case len(p.Forks) > 0:
 		m.Kind, m.Forks, m.Proposal = KindForks, p.Forks, p
 		return f.drafted(ctx, t, cause, base, m, forksComment(p.Forks, m), LabelAsking)
+	case p.IssuePlan != nil:
+		m.Kind, m.Proposal = KindProposal, p
+		return f.drafted(ctx, t, cause, base, m, issuePlanComment(p, m), LabelProposal)
 	case p.Plan != nil:
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, planComment(p, m), LabelProposal)
@@ -968,9 +994,13 @@ func withoutCommands(body string) string {
 }
 
 // ratify commits the ratified proposal as a new project on the issue's
-// branch, then builds it.
+// branch, then builds it. A plan of issues is recorded on the issue instead,
+// and builds nothing.
 func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) error {
 	f.doing(t.Issue.Number, "ratifying")
+	if isIssuePlan(state.Marker) {
+		return f.ratifyIssuePlan(ctx, t, state, c)
+	}
 	posted, err := f.commitRatification(ctx, t, state, c)
 	if errors.Is(err, errStale) {
 		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything. Comment `/invariant revise` and I'll draft it again from the project as it is now.")

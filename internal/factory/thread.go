@@ -28,6 +28,7 @@ const (
 	Revise = "revise" // /invariant revise: draft again, reading the comments
 	Ratify = "ratify" // /invariant ratify <hash>: ratify the current proposal
 	Retry  = "retry"  // /invariant retry: look at a failed pull request again, once people have fixed what failed
+	Plan   = "plan"   // /invariant plan: draft a plan of issues for the PRD this issue holds or links
 )
 
 // Command is one instruction from a person with write access.
@@ -72,7 +73,7 @@ func ParseCommands(body string) []Command {
 			continue
 		}
 		switch verb := strings.ToLower(f[1]); verb {
-		case Solve, Choose, Revise, Ratify, Retry:
+		case Solve, Choose, Revise, Ratify, Retry, Plan:
 			out = append(out, Command{Verb: verb, Args: f[2:]})
 		}
 	}
@@ -85,7 +86,7 @@ const (
 	KindProposal    = "proposal"    // proposed statements for ratification
 	KindStuck       = "stuck"       // couldn't draft statements that check out
 	KindUnsupported = "unsupported" // the issue isn't one the factory can take
-	KindRatified    = "ratified"    // committed the ratified statements; building
+	KindRatified    = "ratified"    // committed the ratified statements; building. A plan of issues is only recorded
 	KindPR          = "pr"          // opened a pull request; waiting for CI's gate
 	KindFailed      = "failed"      // the build or CI's gate failed; people need to look
 	KindMerged      = "merged"      // merged
