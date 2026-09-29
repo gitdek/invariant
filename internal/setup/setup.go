@@ -1,6 +1,7 @@
 // Package setup prepares another repository for the factory (D-0054): it
 // writes the gate workflow that CI runs there, pinned to one commit of
-// Invariant.
+// Invariant, and checks, before the factory starts, that the repository can
+// merge the factory's pull requests.
 package setup
 
 import (

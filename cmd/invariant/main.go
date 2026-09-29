@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -646,6 +647,12 @@ func watchCmd(ctx context.Context, args []string) int {
 			clone.Name = me.Login
 		}
 	}
+	// The factory merges only once invariant/gate passes, and with a merge
+	// commit, so it doesn't start on a repository where its pull requests
+	// never could merge.
+	if err := setup.Check(ctx, gh, *repo, *base); err != nil {
+		return fail(err)
+	}
 	if err := clone.Ensure(ctx); err != nil {
 		return fail(err)
 	}
@@ -885,10 +892,10 @@ func dashboardCmd(ctx context.Context, args []string) int {
 
 // initCmd sets up another repository for the factory (D-0054): it writes the
 // gate workflow, pinned to one commit of Invariant, and prints the steps only
-// a person can take.
+// a person can take, filled in for the repository.
 func initCmd(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	repo := fs.String("repo", "OWNER/NAME", "the repository, for the steps this prints")
+	repo := fs.String("repo", "", "the repository, as owner/name, for the steps this prints (default: the one its origin remote names on GitHub)")
 	ref := fs.String("invariant", buildCommit(), "the full commit of Invariant the repository's gate builds")
 	force := fs.Bool("force", false, "replace a different gate workflow")
 	fs.Parse(args)
@@ -901,6 +908,12 @@ func initCmd(args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
+	if *ref == "" {
+		fmt.Fprintln(os.Stderr, "invariant: this binary doesn't know which commit of Invariant it was built from, so there's no commit to pin the gate to, and it wrote nothing. "+
+			"go run records none, and neither does a build from a checkout with changes. "+
+			"Build invariant from a clean checkout of a commit that's on GitHub, or pass -invariant with a full commit hash.")
+		return 2
+	}
 	path, err := setup.Write(dir, *ref, *force)
 	if err != nil {
 		if path != "" {
@@ -909,15 +922,64 @@ func initCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
+	if *repo == "" {
+		*repo = originRepo(dir)
+	}
+	if *repo == "" {
+		*repo = "OWNER/NAME"
+	}
+	language := ""
+	for _, f := range projectFiles {
+		if _, err := os.Stat(filepath.Join(dir, f.name)); err == nil {
+			language = " -language " + f.language
+			break
+		}
+	}
+	// The commands aren't indented, so the heredoc still ends when it's
+	// pasted.
 	fmt.Printf(`Wrote %s. CI will build Invariant at %s and run its gate on every pull request.
 
 Next:
-1. Commit the workflow. The factory's App can't change CI, so a person does.
-2. Add %s to the factory's App installation, under Repository access.
-3. Run the factory there:
-     invariant watch -repo %s -app-id APP_ID -projects invariant -language typescript
-`, setup.WorkflowPath, (*ref)[:12], *repo, *repo)
+
+1. Commit the workflow and push it, with an invariant/ directory for new projects, empty but for a .gitkeep. The factory can't change CI, so a person does.
+
+2. Require invariant/gate on main, and allow merge commits. GitHub then refuses any merge the gate didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
+
+gh api -X PUT repos/%[3]s/branches/main/protection --input - <<'EOF'
+{"required_status_checks":{"strict":false,"checks":[{"context":"invariant/gate","app_id":15368}]},"enforce_admins":true,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null}
+EOF
+gh api -X PATCH repos/%[3]s -F allow_merge_commit=true
+
+3. Run the factory. It acts as you, through gh:
+
+invariant watch -repo %[3]s -projects invariant%[4]s
+
+4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
+`, setup.WorkflowPath, (*ref)[:12], *repo, language)
 	return 0
+}
+
+// projectFiles tell a repository's language by the file at its root. The
+// first one there decides.
+var projectFiles = []struct{ name, language string }{
+	{"go.mod", "go"}, {"package.json", "typescript"}, {"pyproject.toml", "python"},
+}
+
+// githubRemote is a GitHub repository's remote, over https or ssh.
+var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$`)
+
+// originRepo is the repository on GitHub that dir's origin remote names, as
+// owner/name, or "" when it names none there.
+func originRepo(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	m := githubRemote.FindStringSubmatch(strings.TrimSpace(string(out)))
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }
 
 // buildCommit is the commit this binary was built from, when go build

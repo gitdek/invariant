@@ -278,6 +278,63 @@ func (c Client) DeleteBranch(ctx context.Context, branch string) error {
 	return err
 }
 
+// Workflows reads the text of each workflow file under .github/workflows at
+// ref, by path, through the contents API. A ref with no such directory has
+// none.
+func (c Client) Workflows(ctx context.Context, ref string) (map[string]string, error) {
+	var entries []struct {
+		Path string `json:"path"`
+		Type string `json:"type"` // file, dir, symlink or submodule
+	}
+	err := c.call(ctx, "GET", c.path("contents/.github/workflows?ref="+url.QueryEscape(ref)), nil, &entries)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	workflows := map[string]string{}
+	for _, e := range entries {
+		// GitHub Actions runs the .yml and .yaml files there, and nothing else.
+		if e.Type != "file" || !(strings.HasSuffix(e.Path, ".yml") || strings.HasSuffix(e.Path, ".yaml")) {
+			continue
+		}
+		text, err := c.File(ctx, e.Path, ref)
+		if err != nil {
+			return nil, fmt.Errorf("%s at %s: %w", e.Path, ref, err)
+		}
+		workflows[e.Path] = string(text)
+	}
+	return workflows, nil
+}
+
+// MergeCommits says whether the repository allows merge commits, from
+// GraphQL's mergeCommitAllowed, which anyone who can read the repository
+// sees.
+func (c Client) MergeCommits(ctx context.Context) (bool, error) {
+	owner, name, _ := strings.Cut(c.Repo, "/")
+	stdout, err := c.run(ctx, nil, "api", "graphql",
+		"-f", "query=query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { mergeCommitAllowed } }",
+		"-f", "owner="+owner, "-f", "name="+name)
+	if err != nil {
+		return false, fmt.Errorf("POST graphql: %w", err)
+	}
+	var out struct {
+		Data struct {
+			Repository *struct {
+				MergeCommitAllowed bool `json:"mergeCommitAllowed"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout, &out); err != nil {
+		return false, err
+	}
+	if out.Data.Repository == nil {
+		return false, fmt.Errorf("GitHub didn't find %s", c.Repo)
+	}
+	return out.Data.Repository.MergeCommitAllowed, nil
+}
+
 func (c Client) path(rest string) string { return "repos/" + c.Repo + "/" + rest }
 
 func (c Client) gh() string {
