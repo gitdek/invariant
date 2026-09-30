@@ -1,0 +1,9 @@
+{
+  "name": "decision state",
+  "module": ".invariant/specs/DecisionState.tla",
+  "code": "state",
+  "language": "go",
+  "parameters": [
+    "MaxLines"
+  ]
+}

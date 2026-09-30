@@ -1,0 +1,104 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-29T21:21:59Z",
+    "issue": 193,
+    "comment": "https://github.com/gitdek/invariant/issues/193#issuecomment-5899178020",
+    "proposal": "sha256:6fc5f6e592d635c2ced457a906950fb66e7cdfce32ce395d97ca0c46e45c52bb"
+  },
+  "bounds": {
+    "Agents": "{agent}",
+    "MaxLines": "3",
+    "People": "{alice}"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "A decision's journal starts empty, and every step appends a line: its first records the decision, and later ones ratify or supersede it.",
+      "sha256": "sha256:973a62f1f7fcc38ec7f63297f27bad0b2aa1f38b27683fcc4aa44eee081c82d4"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "The journal is a list of lines, and the decision's status, door and who have the kinds of values they should.",
+      "sha256": "sha256:0bea51417cd049d19562f1e0f4578649983261be75a10c113c1b157060a01d0c"
+    },
+    {
+      "name": "OnlyPeopleRatify",
+      "kind": "invariant",
+      "says": "Only a person ratifies: a ratified decision was ratified by a person.",
+      "sha256": "sha256:0b1250af07f220a2f4de940f8d23ccb4f53eaa3fa91bcb28443b232e1242ec28"
+    },
+    {
+      "name": "OneWayNeverDecided",
+      "kind": "invariant",
+      "says": "A one-way door is never decided: it's proposed until a person ratifies it.",
+      "sha256": "sha256:2c8a9ca951b0b299988271287d0f6b97c4324b143bdd70b965e80d446a38c84d"
+    },
+    {
+      "name": "FirstLineOnly",
+      "kind": "invariant",
+      "says": "A journal's first line records its decision, and no later line does.",
+      "sha256": "sha256:0427e79ef58491b3833481e37b1de1cd7cc8afc4b2f554ce8f411cecb94cf559"
+    },
+    {
+      "name": "RatifiedOnce",
+      "kind": "invariant",
+      "says": "A decision that's ratified or superseded isn't ratified again.",
+      "sha256": "sha256:e3e95f6d716f2b1dd3b6eacbea74e35fbf3b9efd6cf20ee7b5805f9d23e5deee"
+    },
+    {
+      "name": "Agreed",
+      "kind": "invariant",
+      "says": "The decision's state is the fold of its lines, in order, so every checkout that holds the same lines agrees on it.",
+      "sha256": "sha256:962250683ee2763efb4c227d10770d6208efabecf094108ca87e371b7311895f"
+    },
+    {
+      "name": "AgentProposedPersonRatified",
+      "kind": "witness",
+      "says": "An agent can propose a one-way door, and a person can ratify it.",
+      "sha256": "sha256:81defc92c9ae926a42405a5780db5df959fbb895f146212eb2d4d1ca83deae55"
+    },
+    {
+      "name": "TwoWayDecidedByAgent",
+      "kind": "witness",
+      "says": "An agent can decide a two-way door.",
+      "sha256": "sha256:20026305a4533d0b751ad1a334ae9c09b971b7a5663dbbe63a1769b88876e81b"
+    },
+    {
+      "name": "Superseded",
+      "kind": "witness",
+      "says": "A decision can be superseded.",
+      "sha256": "sha256:5691c39228b856275c567b219c7a29ce11cf844405d9f034e651e241a3a668f1"
+    },
+    {
+      "name": "AgentRatifies",
+      "kind": "bug",
+      "says": "An agent's ratify line is taken.",
+      "expect": "OnlyPeopleRatify",
+      "sha256": "sha256:8e40f131da4f1ce8366db6cc9bfffef9cc314e0a98d969e53311e772f990f6f7"
+    },
+    {
+      "name": "AgentDecidesOneWay",
+      "kind": "bug",
+      "says": "An agent decides a one-way door, where it may only propose one.",
+      "expect": "OneWayNeverDecided",
+      "sha256": "sha256:6e5edeb7bf471e4ff384a4161e1746d878db10c9445a59e12a6ffe4cede6d46b"
+    },
+    {
+      "name": "RatifyAgain",
+      "kind": "bug",
+      "says": "A ratified or superseded decision is ratified again.",
+      "expect": "RatifiedOnce",
+      "sha256": "sha256:36fd7a58c12ae26d35596da5ec9ce4b23abf28b9d775a58d79c65d08d9d677ad"
+    },
+    {
+      "name": "DecideAgain",
+      "kind": "bug",
+      "says": "A later line records the decision again, and replaces it.",
+      "expect": "FirstLineOnly",
+      "sha256": "sha256:3574fa04f5f2aa14d12cdd23dbfb784a334527bac02147d561fea88a895f9d32"
+    }
+  ]
+}
