@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	idcore "github.com/gitdek/invariant/factory/ids/ids"
+	"github.com/gitdek/invariant/factory/store-journal/storejournal"
 	_ "modernc.org/sqlite" // a pure-Go SQLite, so Invariant needs no cgo (D-0096)
 )
 
@@ -48,8 +50,9 @@ CREATE TABLE IF NOT EXISTS journal (
 	seq     INTEGER PRIMARY KEY AUTOINCREMENT,
 	project TEXT NOT NULL,
 	id      TEXT NOT NULL,
-	hash    TEXT NOT NULL UNIQUE,
-	line    TEXT NOT NULL
+	hash    TEXT NOT NULL,
+	line    TEXT NOT NULL,
+	UNIQUE (project, hash) -- a line's hash doesn't cover its project, so two projects can write the same line
 );
 CREATE INDEX IF NOT EXISTS journal_id ON journal (project, id);
 CREATE TRIGGER IF NOT EXISTS journal_no_update BEFORE UPDATE ON journal
@@ -78,7 +81,7 @@ CREATE TABLE IF NOT EXISTS repo (
 // schemaVersion is the schema's version. A store with another has its
 // nodes, edges and checkouts dropped, since a rebuild brings them back, and
 // keeps its journal, which only grows.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // Store is the decision graph in one SQLite file. Every process that needs
 // it opens it directly: SQLite in WAL mode lets many read while one writes,
@@ -133,6 +136,9 @@ func migrate(db *sql.DB) error {
 	if _, err := tx.Exec(`DROP TABLE IF EXISTS edge; DROP TABLE IF EXISTS node; DROP TABLE IF EXISTS repo`); err != nil {
 		return err
 	}
+	if err := perProject(tx); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
@@ -140,6 +146,34 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// perProject moves a journal whose lines were unique by hash alone, as
+// schema versions 1 and 2 had it, to lines unique within their project,
+// copying every line it holds, in order. Under the old key, a project's line
+// that another project had written word for word was never journaled (#195).
+func perProject(tx *sql.Tx) error {
+	var table string
+	err := tx.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'journal'`).Scan(&table)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && strings.Contains(table, "UNIQUE (project, hash)") {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
+CREATE TABLE journal_by_project (
+	seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+	project TEXT NOT NULL,
+	id      TEXT NOT NULL,
+	hash    TEXT NOT NULL,
+	line    TEXT NOT NULL,
+	UNIQUE (project, hash)
+);
+INSERT INTO journal_by_project (seq, project, id, hash, line) SELECT seq, project, id, hash, line FROM journal ORDER BY seq;
+DROP TABLE journal;
+ALTER TABLE journal_by_project RENAME TO journal;`)
+	return err
 }
 
 // OpenReadOnly opens the store for queries only: nothing written through it
@@ -162,14 +196,8 @@ func (s *Store) Close() error { return s.db.Close() }
 // replaces what the graph had for the decision, so putting it again after a
 // new line is the same as rebuilding.
 func put(tx *sql.Tx, project string, events []Event, d Decision) error {
-	for _, e := range events {
-		line, err := jsonLine(e)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO journal (project, id, hash, line) VALUES (?, ?, ?, ?)`, project, d.ID, e.Hash, string(line)); err != nil {
-			return err
-		}
+	if err := journalLines(tx, project, d.ID, events); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record`,
@@ -194,6 +222,21 @@ func put(tx *sql.Tx, project string, events []Event, d Decision) error {
 		return err
 	}
 	return citeFrom(tx, d.ID, project, d.Text)
+}
+
+// journalLines has the store journal a decision's lines, keeping every line
+// it holds already.
+func journalLines(tx *sql.Tx, project, id string, events []Event) error {
+	for _, e := range events {
+		line, err := jsonLine(e)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO journal (project, id, hash, line) VALUES (?, ?, ?, ?)`, project, id, e.Hash, string(line)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addEdge records an edge a journal holds, in place of a citation that was
@@ -243,6 +286,13 @@ func (s *Store) Rebuild(repos []Repo) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, l := range all {
 		name := l.repo.Name
+		// The store's journal only grows, which factory/store-journal proves
+		// (#195): what the store must hold after the rebuild is the core's
+		// Rebuild step from what it holds now and what the checkout holds.
+		floor, err := journalFloor(tx, name, l.journals)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM edge WHERE project = ?1; DELETE FROM node WHERE project = ?1`, name); err != nil {
 			return err
 		}
@@ -250,6 +300,9 @@ func (s *Store) Rebuild(repos []Repo) error {
 			if err := put(tx, name, l.journals[id], l.decisions[id]); err != nil {
 				return err
 			}
+		}
+		if err := holdsFloor(tx, name, floor); err != nil {
+			return err
 		}
 		if err := deriveCitations(tx, l.repo); err != nil {
 			return err
@@ -264,6 +317,84 @@ func (s *Store) Rebuild(repos []Repo) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// journalFloor is how many lines of each of a project's decision files the
+// store must hold once it's rebuilt from a checkout, by factory/store-journal,
+// its proved core (#195). Each decision file is one of the core's origins,
+// whose lines the store and the checkout hold as far as a count: the core's
+// Rebuild takes the larger of the two, so the store never holds fewer lines
+// than it did, or than the checkout does.
+func journalFloor(tx *sql.Tx, project string, journals map[string][]Event) (map[string]int, error) {
+	counts, err := journalCounts(tx, project)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	seen := map[string]bool{}
+	for id := range counts {
+		seen[id] = true
+		files = append(files, id)
+	}
+	for id := range journals {
+		if full := project + "/" + id; !seen[full] {
+			seen[full] = true
+			files = append(files, full)
+		}
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	sort.Strings(files)
+	capacity := 0
+	for _, f := range files {
+		capacity = max(capacity, counts[f], len(journals[f[len(project)+1:]]))
+	}
+	j := storejournal.New(len(files), capacity)
+	for p, f := range files {
+		j.Store[p], j.Files[0][p] = counts[f], len(journals[f[len(project)+1:]])
+	}
+	j.Rebuild(0)
+	floor := map[string]int{}
+	for p, f := range files {
+		floor[f] = j.Store[p]
+	}
+	return floor, nil
+}
+
+// holdsFloor refuses a rebuild after which the store holds fewer lines of a
+// decision file than journalFloor says it must.
+func holdsFloor(tx *sql.Tx, project string, floor map[string]int) error {
+	counts, err := journalCounts(tx, project)
+	if err != nil {
+		return err
+	}
+	for f, least := range floor {
+		if counts[f] < least {
+			return fmt.Errorf("the rebuild would leave the store with %d of %s's journal lines, fewer than the %d factory/store-journal says it keeps", counts[f], f, least)
+		}
+	}
+	return nil
+}
+
+// journalCounts is how many lines of each of a project's decision files the
+// store's journal holds.
+func journalCounts(tx *sql.Tx, project string) (map[string]int, error) {
+	rows, err := tx.Query(`SELECT id, COUNT(*) FROM journal WHERE project = ? GROUP BY id`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		counts[id] = n
+	}
+	return counts, rows.Err()
 }
 
 // Count is how many decisions a project has in the store, and how many
@@ -308,12 +439,14 @@ type NewDecision struct {
 var slug = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // Decide writes a new decision, in the order factory/ids proves (#192):
-// holding the store's decide lock from start to finish, it takes one more
+// holding the store's write lock from start to finish, it takes one more
 // than the highest ID the store has taken or journaled for the project, or
 // the checkout holds, has the store record it, writes the decision's journal
 // in the checkout, and puts it in the graph. So processes and checkouts on
 // one machine never take the same ID: a decide that stops after the store
-// records its ID leaves a gap, and so does a branch that's abandoned.
+// records its ID leaves a gap, and so does a branch that's abandoned. The
+// store journals the decision's first line before the checkout writes it,
+// as factory/store-journal proves (#195).
 func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 	text := strings.Join(strings.Fields(d.Text), " ")
 	switch {
@@ -346,7 +479,7 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 	if _, err := fold(repo.Name, []Event{e}); err != nil {
 		return "", err
 	}
-	unlock, err := s.lockDecides()
+	unlock, err := s.lockWrites()
 	if err != nil {
 		return "", err
 	}
@@ -359,10 +492,16 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 	if d.Record != "" {
 		e.Record = id + "-" + d.Record + ".md"
 	}
+	if err := e.chain(nil); err != nil {
+		return "", err
+	}
+	if err := s.journalFirst(repo.Name, nil, e); err != nil {
+		return "", err
+	}
 	if !c.core.Write(c.checkout, idcore.Decision{By: 1, Number: 1}) {
 		return "", errOffCore("write the journal file of " + id)
 	}
-	if err := appendLine(repo, &e, true); err != nil {
+	if err := writeLine(repo, e, true); err != nil {
 		return "", err
 	}
 	tx, err := s.db.Begin()
@@ -455,10 +594,10 @@ func (s *Store) take(repo Repo) (string, onCore, error) {
 	return id, c, tx.Commit()
 }
 
-// lockDecides holds the store's decide lock, a lock on a file beside it, until
-// the function it returns is called. A decide that stops lets it go with
-// its process.
-func (s *Store) lockDecides() (func(), error) {
+// lockWrites holds the store's write lock, a lock on a file beside it, until
+// the function it returns is called, so one decide or change at a time
+// writes a journal line. A write that stops lets it go with its process.
+func (s *Store) lockWrites() (func(), error) {
 	f, err := os.OpenFile(s.Path+".decide.lock", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
@@ -536,6 +675,8 @@ func (s *Store) Link(repo Repo, id string, edge Edge, by string) error {
 // update appends one line to a decision's journal in the checkout, and puts
 // the decision in the graph again, under the store's write lock. What the
 // line may say depends on the decision as the checkout's journal has it.
+// The store journals the line before the checkout writes it, as
+// factory/store-journal proves (#195).
 func (s *Store) update(repo Repo, id, by string, next func(Decision) (Event, error)) error {
 	full, err := Qualify(repo.Name, id)
 	if err != nil {
@@ -545,11 +686,11 @@ func (s *Store) update(repo Repo, id, by string, next func(Decision) (Event, err
 	if full != repo.Name+"/"+short {
 		return fmt.Errorf("%s belongs to another project, so it's changed in that project's repository", full)
 	}
-	tx, err := s.db.Begin()
+	unlock, err := s.lockWrites()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer unlock()
 	events, err := ReadJournal(filepath.Join(repo.JournalDir(), short+".jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("there's no decision %s in %s", short, repo.Dir)
@@ -569,11 +710,56 @@ func (s *Store) update(repo Repo, id, by string, next func(Decision) (Event, err
 	if _, err := fold(repo.Name, append(events, e)); err != nil {
 		return err
 	}
-	if err := appendLine(repo, &e, false); err != nil {
+	if err := e.chain(events); err != nil {
 		return err
 	}
+	if err := s.journalFirst(repo.Name, events, e); err != nil {
+		return err
+	}
+	if err := writeLine(repo, e, false); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if err := putFile(tx, repo, short); err != nil {
 		return err
+	}
+	return tx.Commit()
+}
+
+// journalFirst has the store journal a decision's next line, and every line
+// before it the checkout holds, before the checkout writes it: the Write
+// step of factory/store-journal, its proved core (#195), taken first. So a
+// checkout never holds a line the store doesn't. A write that stops before
+// the checkout's file has its line leaves the line in the store alone,
+// which keeps it, as it keeps the lines of a branch that's abandoned.
+func (s *Store) journalFirst(project string, held []Event, next Event) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	id := project + "/" + next.ID
+	counts, err := journalCounts(tx, project)
+	if err != nil {
+		return err
+	}
+	j := storejournal.New(1, max(counts[id], len(held)+1))
+	j.Store[0], j.Files[0][0] = counts[id], len(held)
+	if !j.Write(0) {
+		return fmt.Errorf("the decision store can't journal %s's next line: factory/store-journal, its proved core, refuses the step", id)
+	}
+	if err := journalLines(tx, project, id, append(held[:len(held):len(held)], next)); err != nil {
+		return err
+	}
+	if counts, err = journalCounts(tx, project); err != nil {
+		return err
+	}
+	if counts[id] < j.Store[0] {
+		return fmt.Errorf("the store would hold %d of %s's journal lines, fewer than the %d factory/store-journal says it journals", counts[id], id, j.Store[0])
 	}
 	return tx.Commit()
 }
