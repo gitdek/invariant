@@ -7,7 +7,8 @@
 
 <p align="center">
   <strong>A code factory that doesn't guess.</strong><br>
-  You ratify what must be true. Invariant proves every pull request against it before merging.
+  You ratify what must be true. Invariant proves every pull request against it before merging.<br>
+  <a href="https://invariant.puglisij.com/"><strong>See the live dashboard →</strong></a>
 </p>
 
 <p align="center">
@@ -289,6 +290,6 @@ This repository runs on its own rule: **a decision that isn't written down didn'
 <br>
 
 <p align="center">
-  <sub>Built by <a href="https://github.com/gitdek">@gitdek</a> · <a href="https://puglisij.com">puglisij.com</a><br>
+  <sub>Built by <a href="https://github.com/gitdek">@gitdek</a> · <a href="https://puglisij.com">puglisij.com</a> · <a href="https://invariant.puglisij.com/">live dashboard</a><br>
   Every graphic above is generated from real <code>invariant verify</code> and test output by <a href="docs/assets/generate.py"><code>docs/assets/generate.py</code></a>.</sub>
 </p>
