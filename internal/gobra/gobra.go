@@ -54,9 +54,26 @@ func Parse(out string, exitCode int) Result {
 	}
 	r.Passed = exitCode == 0 && found == 0
 	if !r.Passed && len(r.Errors) == 0 {
-		r.Errors = []string{"Gobra did not report a result:\n" + lastLines(out, 15)}
+		r.Errors = []string{"Gobra did not report a result:\n" + lastLines(withoutFrames(out), 15)}
 	}
 	return r
+}
+
+// withoutFrames is Gobra's output without the frames of a Java stack
+// trace. When Gobra stops on an exception, what it says is in the
+// exception's own lines and its log lines, and the frames that follow them
+// say nothing about the code under proof, but they fill the end of its
+// output: the last lines alone were frames, and an agent saw no cause.
+func withoutFrames(out string) string {
+	var kept []string
+	for _, l := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "at ") || strings.HasPrefix(t, "... ") && (strings.HasSuffix(t, " more") || strings.HasSuffix(t, "frames omitted")) {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // Header marks a file for Gobra. When any file in a package carries it,
