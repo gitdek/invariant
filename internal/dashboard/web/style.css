@@ -771,6 +771,12 @@ footer p { margin: 0; max-width: 60em; }
 
 /* a new issue, from /act */
 #compose { margin: 0 0 16px; }
+
+/* open issues the factory hasn't taken, which /act can plan (#201) */
+.untaken { display: grid; gap: 12px; margin: 0 0 22px; }
+.untaken h3 { margin: 0; font: 600 12px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); }
+.untaken .lede { margin: -4px 0 2px; font-size: 14.5px; }
+.need.plan { border-style: dashed; }
 .newissue { font-size: 14px; }
 .composer { display: grid; gap: 12px; padding: 18px; border-radius: 16px; border: 1px solid rgba(var(--people-rgb), 0.45); background: var(--card); animation: needin 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .composer .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
