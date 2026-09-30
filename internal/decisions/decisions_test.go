@@ -526,6 +526,35 @@ func TestTheJournalOnlyGrowsSinceBase(t *testing.T) {
 	}
 }
 
+// A line whose old text is the start of its new text has still changed: a
+// file at base whose last line had no newline after it can't have that line
+// extended, which a check of the files' bytes let through (#194).
+func TestAJournalLineExtendedHasChanged(t *testing.T) {
+	_, repo := fixture(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo.Dir, "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	one := filepath.Join(repo.JournalDir(), "D-0001.jsonl")
+	write(t, one, "one\ntwo")
+	git("add", "-A")
+	git("commit", "-q", "-m", "base")
+	git("tag", "base")
+	write(t, one, "one\ntwofold\n")
+	problems, err := Grown(context.Background(), repo, "base")
+	if err != nil || len(problems) != 1 || !strings.Contains(problems[0], "demo/D-0001's journal changed") {
+		t.Errorf("problems = %v, %v; want D-0001's changed line", problems, err)
+	}
+	write(t, one, "one\ntwo\nthree\n")
+	if problems, err := Grown(context.Background(), repo, "base"); err != nil || len(problems) != 0 {
+		t.Errorf("a line added after the last one: %v, %v", problems, err)
+	}
+}
+
 // The graph check finds a citation of a decision that doesn't exist, a
 // SPEC line resting on a superseded decision, a missing record and a log
 // that isn't the journal's view, and passes once they're fixed.

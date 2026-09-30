@@ -11,13 +11,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/gitdek/invariant/factory/journal-merges/merges"
 )
 
 // Grown checks that a repository's journal only grew since base, a git ref:
 // every line base has is still in the checkout, in its place. A pull request
 // adds lines and files to the journal and never changes or removes one. Each
 // file's hash chain can't show a file rewritten whole, or removed, and this
-// can.
+// can. Each file is checked with StartsWith, the rule factory/journal-merges
+// proves a merge must meet (#194): base's lines are the start of the
+// checkout's.
 func Grown(ctx context.Context, repo Repo, base string) ([]string, error) {
 	list, err := exec.CommandContext(ctx, "git", "-C", repo.Dir, "ls-tree", "-r", "-z", "--name-only", base, "--", "decisions/journal/").Output()
 	if err != nil {
@@ -70,9 +74,19 @@ func Grown(ctx context.Context, repo Repo, base string) ([]string, error) {
 			problems = append(problems, fmt.Sprintf("%s/%s's journal is gone, but it only grows", repo.Name, id))
 		case err != nil:
 			return nil, err
-		case !bytes.HasPrefix(now, was):
+		case !merges.StartsWith(journalLines(was), journalLines(now)):
 			problems = append(problems, fmt.Sprintf("%s/%s's journal changed a line it had at %s, but it only grows", repo.Name, id, base))
 		}
 	}
 	return problems, nil
+}
+
+// journalLines is a journal file's lines, without their newlines. A last
+// line with no newline after it is a line too.
+func journalLines(b []byte) []string {
+	s := strings.TrimSuffix(string(b), "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
 }
