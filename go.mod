@@ -7,6 +7,7 @@ replace github.com/gitdek/invariant/factory/protocol => ./factory/protocol
 require (
 	// A ratified plan of issues is worked only as its own core allows, which
 	// the factory wrote and Gobra proves (#94, #126).
+	github.com/gitdek/invariant/factory/decision-state v0.0.0
 	github.com/gitdek/invariant/factory/ids v0.0.0
 	github.com/gitdek/invariant/factory/plans v0.0.0
 	// The factory runs on its own protocol, which the factory wrote and Gobra
@@ -35,6 +36,8 @@ require (
 replace github.com/gitdek/invariant/factory/recovery => ./factory/recovery
 
 replace github.com/gitdek/invariant/factory/plans => ./factory/plans
+
+replace github.com/gitdek/invariant/factory/decision-state => ./factory/decision-state
 
 replace github.com/gitdek/invariant/factory/ids => ./factory/ids
 

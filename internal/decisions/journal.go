@@ -185,12 +185,16 @@ type Decision struct {
 	SupersededBy string
 }
 
-// fold reads one decision's journal lines into the decision, and refuses a
-// journal that breaks the rules: it starts by recording the decision and
-// never records it again, an agent never decides a one-way door, and only a
-// person ratifies.
+// fold reads one decision's journal lines into the decision, on
+// factory/decision-state, its proved core (#193), and refuses a journal that
+// breaks the rules: it starts by recording the decision and never records
+// it again, only a person ratifies, a one-way door is proposed until a
+// person ratifies it, and a decision that's ratified or superseded isn't
+// ratified again. Each line is the core's step, taken first, and after each
+// line the fold's state is the core's.
 func fold(project string, events []Event) (Decision, error) {
 	var d Decision
+	core := newStateCore(len(events))
 	for n, e := range events {
 		where := fmt.Sprintf("%s/%s, line %d", project, e.ID, n+1)
 		if (e.Op == OpImport || e.Op == OpDecide) != (n == 0) {
@@ -206,13 +210,20 @@ func fold(project string, events []Event) (Decision, error) {
 			}
 			d.Edges = append(d.Edges, Edge{Type: edge.Type, To: to})
 		}
+		took := core.take(e)
 		switch e.Op {
 		case OpImport, OpDecide:
 			if !statuses[e.Status] {
 				return d, fmt.Errorf("%s: %q isn't a status", where, e.Status)
 			}
-			if e.Op == OpDecide && ((e.Door != "one-way" && e.Door != "two-way") || (e.Door == "one-way" && e.Status == "decided")) {
+			if e.Op == OpDecide && e.Status != "proposed" && e.Status != "decided" && e.Status != "ratified" {
+				return d, fmt.Errorf("%s: a decision is recorded as proposed, decided or ratified, not %s", where, e.Status)
+			}
+			if (e.Op == OpDecide && e.Door != "one-way" && e.Door != "two-way") || (e.Door == "one-way" && e.Status == "decided") {
 				return d, fmt.Errorf("%s: a decision's door is one-way or two-way, and a one-way door is proposed until it's ratified", where)
+			}
+			if e.Status == "ratified" && !strings.HasPrefix(e.Who, "@") {
+				return d, fmt.Errorf("%s: only a person ratifies, so a ratified decision's who is a person, not %q", where, e.Who)
 			}
 			d.Node = Node{ID: project + "/" + e.ID, Kind: "decision", Project: project, Date: e.Date, Door: e.Door,
 				Status: e.Status, Who: e.Who, Text: e.Text, Record: e.Record}
@@ -239,6 +250,12 @@ func fold(project string, events []Event) (Decision, error) {
 			}
 		default:
 			return d, fmt.Errorf("%s: unknown op %q", where, e.Op)
+		}
+		if !took {
+			return d, fmt.Errorf("%s: factory/decision-state, the fold's proved core, refuses the line", where)
+		}
+		if !core.agrees(d) {
+			return d, fmt.Errorf("%s: the fold's state isn't factory/decision-state's", where)
 		}
 	}
 	return d, nil
