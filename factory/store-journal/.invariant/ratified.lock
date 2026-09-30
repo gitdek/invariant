@@ -1,0 +1,72 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-29T21:33:12Z",
+    "issue": 195,
+    "comment": "https://github.com/gitdek/invariant/issues/195#issuecomment-5899380865",
+    "proposal": "sha256:da5f411edee8e9a33955af3da547bd7638b795072f8e0d5afd01880ee3c38334"
+  },
+  "bounds": {
+    "Checkouts": "{c1, c2}",
+    "MaxLines": "2"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "Checkouts start with no lines, and the store's journal starts empty. Checkouts write lines, which the store journals, take each other's lines in through main, and can be abandoned; the store's project can be rebuilt from any checkout.",
+      "sha256": "sha256:560d1a79c0f75f36efd436587d23f8f3e5ddb5dddd20b745580ea80830ec8412"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "The store's journal and each checkout hold lines, each checkout has written a bounded number, and some checkouts may be abandoned.",
+      "sha256": "sha256:eec8c4db980918df444f384b8eb66399df907a87bb53e32e30caf2ab7a2a66ea"
+    },
+    {
+      "name": "StoreOnlyGrows",
+      "kind": "invariant",
+      "says": "The store's journal only grows: every line it ever held, it holds now.",
+      "sha256": "sha256:def95178da44767652fe3b2b4a769b933a1557c2be3dac12f713337fe777d7d1"
+    },
+    {
+      "name": "KeepsEveryLine",
+      "kind": "invariant",
+      "says": "The store keeps every line any checkout wrote, including the lines of branches that were never merged.",
+      "sha256": "sha256:aa875d3a022e4c467a570dc1479e2ad425dafaa4d04999b5cdf4d809ac54a185"
+    },
+    {
+      "name": "KeptAbandoned",
+      "kind": "witness",
+      "says": "The store can keep the lines of a branch that was abandoned.",
+      "sha256": "sha256:10dc5fd1a7353f6aee30081f39065bb5d682885ad6d11c8b7a70af17a5ad7ca3"
+    },
+    {
+      "name": "RebuiltFromOther",
+      "kind": "witness",
+      "says": "Both checkouts can write lines, and one can take in the other's, as a merge through main brings them.",
+      "sha256": "sha256:ab1cd6552970d766c786eb7a7c31bfff316fac09219211cca2a5a029d35b4524"
+    },
+    {
+      "name": "RebuildReplaces",
+      "kind": "bug",
+      "says": "A rebuild replaces the store's journal with what one checkout holds, dropping the lines only other branches have.",
+      "expect": "StoreOnlyGrows",
+      "sha256": "sha256:4abab341797e49afe37bfe40258c1a65d8cb8b773fa89090d8ece359e5354ce3"
+    },
+    {
+      "name": "AbandonDrops",
+      "kind": "bug",
+      "says": "Abandoning a branch drops its lines from the store.",
+      "expect": "StoreOnlyGrows",
+      "sha256": "sha256:16224da10ce8eeeac83316ac6bfbe33067869a750a0e41a401a94b0910de180c"
+    },
+    {
+      "name": "WriteNotJournaled",
+      "kind": "bug",
+      "says": "A checkout writes a line the store never journals.",
+      "expect": "KeepsEveryLine",
+      "sha256": "sha256:ecc2f0f813e172dd440523ae40ff8a598200d9c6935cb2bd338895abaa2335b3"
+    }
+  ]
+}

@@ -17,6 +17,7 @@ require (
 	// It takes each effect only as its recovery core allows, which the factory
 	// also wrote and Gobra proves (D-0069).
 	github.com/gitdek/invariant/factory/recovery v0.0.0
+	github.com/gitdek/invariant/factory/store-journal v0.0.0
 	modernc.org/sqlite v1.60.0
 )
 
@@ -39,3 +40,5 @@ replace github.com/gitdek/invariant/factory/plans => ./factory/plans
 replace github.com/gitdek/invariant/factory/decision-state => ./factory/decision-state
 
 replace github.com/gitdek/invariant/factory/ids => ./factory/ids
+
+replace github.com/gitdek/invariant/factory/store-journal => ./factory/store-journal
