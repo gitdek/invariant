@@ -145,7 +145,7 @@ The first slice of [#229](https://github.com/gitdek/invariant/issues/229) correc
 
 Component discovery is Go-only for now; explicit Python or TypeScript configurations are rejected. Later slices must attribute separate proof, bounded or sampled conformance, runtime checks and trusted assumptions to components; correct partial-proof claims about unchecked neighbors; bind source and contract identities into fingerprints; add component receipts and dashboard views; and discover Python and TypeScript components. Execution must be connected before the explicit-components refusal can be removed. Ratified statements and model-only checking remain unchanged.
 
-Under [#229's ratified plan](.invariant/plans/issue-229.json), the merger must record the new assurance policy in the decision journal and open follow-up issues for this remaining work until [#224](https://github.com/gitdek/invariant/issues/224) is fixed. This follows the component direction in [D-0152](decisions/journal/D-0152.jsonl) and the duty to keep the docs current in [D-0122](decisions/journal/D-0122.jsonl). The plumbing build cannot write `decisions/`.
+The assurance policy is [D-0161](decisions/journal/D-0161.jsonl), which follows the component direction in [D-0152](decisions/journal/D-0152.jsonl). The remaining component work is [#234](https://github.com/gitdek/invariant/issues/234).
 
 ## One model, three languages
 
