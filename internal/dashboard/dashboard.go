@@ -304,7 +304,7 @@ type Project struct {
 	Dir         string            `json:"dir"`
 	Name        string            `json:"name"`
 	Language    string            `json:"language"`
-	Assurance   string            `json:"assurance"` // proved, tested in every state, or tested
+	Assurance   string            `json:"assurance"` // proved, tested in every state, tested, or unchecked; empty for model-only
 	Passed      bool              `json:"passed"`
 	States      int64             `json:"states"`
 	Depth       int               `json:"depth"`
@@ -1200,13 +1200,13 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 	for _, b := range r.Bugs {
 		p.Bugs = append(p.Bugs, Bug{Name: b.Name, Label: b.Label, Says: b.Says, Violated: b.Violated, Steps: b.Steps, Caught: b.Caught})
 	}
-	switch {
-	case r.Assurance == "proved":
-		p.Assurance = "proved"
-	case r.Conformance != nil && r.Conformance.Exhaustive && int64(r.Conformance.States) == r.Conformance.ModelStates:
-		p.Assurance = "tested in every state"
-	default:
+	p.Assurance = r.CodeAssurance()
+	if p.Assurance == "tested against the model" {
 		p.Assurance = "tested"
+		if c := r.Conformance; c != nil && c.Passed && c.Exhaustive && c.States > 0 &&
+			int64(c.States) == c.ModelStates && (c.Tried == nil || c.Tried.Passed) {
+			p.Assurance = "tested in every state"
+		}
 	}
 	if a := r.Agreement; a != nil {
 		p.Visited = a.States
@@ -1216,7 +1216,7 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 	}
 	if c := r.Code; c != nil {
 		p.Verifier, p.Unverified = c.Verifier, c.Unverified
-		if c.Passed {
+		if p.Assurance == "proved" {
 			p.Verified = len(c.Functions)
 		}
 	}

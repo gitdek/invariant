@@ -282,6 +282,9 @@ func agreementEvidence(a verify.Agreement) string {
 
 func codeResult(c verify.Code) string {
 	if c.Passed {
+		if len(c.Functions) == 0 {
+			return "no functions verified"
+		}
 		return fmt.Sprintf("proved: %d of %d functions verified", len(c.Functions), len(c.Functions))
 	}
 	if len(c.Errors) == 1 {
@@ -292,7 +295,7 @@ func codeResult(c verify.Code) string {
 
 func conformanceResult(c conformance.Result) string {
 	switch {
-	case c.Passed && c.Exhaustive:
+	case c.Passed && c.Exhaustive && c.States > 0 && int64(c.States) == c.ModelStates && (c.Tried == nil || c.Tried.Passed):
 		return "tested against the model: every reachable state, no step outside it"
 	case c.Passed:
 		return "tested against the model: no step outside it"

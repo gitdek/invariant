@@ -41,16 +41,16 @@ type Larger struct {
 // EverySize says whether a receipt may claim the code at every size: it's
 // proved, and it agrees with the model one size past the bounds too.
 func (r *Report) EverySize() bool {
-	return r.Code != nil && r.Code.Passed && r.Larger != nil && r.Larger.Passed
+	return r.CodeAssurance() == "proved" && r.Larger != nil && r.Larger.Passed
 }
 
 // Claim is what the report says of the code, in the receipt's words:
-// "proved", "proved at every size", or "tested against the model".
+// "proved", "proved at every size", "tested against the model", or "unchecked".
 func (r *Report) Claim() string {
 	if r.EverySize() {
-		return r.Assurance + " at every size"
+		return "proved at every size"
 	}
-	return r.Assurance
+	return r.CodeAssurance()
 }
 
 var (
