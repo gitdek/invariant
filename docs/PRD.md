@@ -131,7 +131,7 @@ Each requirement serves one goal.
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
 - **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Built. `D-0048`
 - **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Built: an issue picks its coding agent with an `Agent:` line, else its project's manifest does, and the draft settles it (#173). Codex runs under its own permission profile, and its first build passed the gate with proof (#189). Next, the factory's first Codex issue. `D-0028` `D-0052` `D-0130` `D-0138`
-- **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. Built: copythis-ad's lease protocol is checked on every pull request, and the check caught a real bug. `D-0053` `D-0054` `D-0059`
+- **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. Built: copythis-ad's lease protocol was checked on every pull request, and the check caught a real bug, until that repository started over and left Invariant on 2026-10-02. `D-0053` `D-0054` `D-0059`
 - **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
 
 ## How we'll know it works
