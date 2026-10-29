@@ -124,6 +124,10 @@ func shellWords(command string) ([]shellPart, bool) {
 	return append(parts, shellPart{args: args}), true
 }
 
+// systemShells are the shells at their system paths, where they are the
+// shells they say.
+var systemShells = map[string]bool{"/bin/sh": true, "/bin/bash": true, "/bin/zsh": true}
+
 func shellInvocation(command, root, cwd string, depth int) (string, []string) {
 	if depth > 8 {
 		return "other", nil
@@ -136,6 +140,12 @@ func shellInvocation(command, root, cwd string, depth int) (string, []string) {
 	var paths []string
 	for i, part := range parts {
 		args := part.args
+		// Codex runs every command in a system shell named by its path, as
+		// /bin/zsh -lc '…', so the whole command may be one, by name
+		// (D-0160). Inside it, a path still names an unknown program.
+		if depth == 0 && len(parts) == 1 && systemShells[args[0]] {
+			args = append([]string{filepath.Base(args[0])}, args[1:]...)
+		}
 		// A basename cannot establish which executable a path names.
 		// Assignment prefixes and env are deliberately not unwrapped.
 		if strings.ContainsAny(args[0], "/=") {
