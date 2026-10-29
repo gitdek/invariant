@@ -275,7 +275,8 @@ func shellOptions(args []string, flags, values string) ([]string, map[string][]s
 var shellSedPrint = regexp.MustCompile(`^[0-9]+(,[0-9]+)?p$`)
 
 // shellSimple is a bounded vocabulary, not an attempt to infer arbitrary
-// programs' behavior. An unmodeled form rejects the whole invocation.
+// programs' behavior. An unmodeled form rejects the whole invocation
+// (D-0159).
 func shellSimple(args []string) (string, []string) {
 	name, args := args[0], args[1:]
 	var kind, flags, values string
@@ -291,12 +292,13 @@ func shellSimple(args []string) (string, []string) {
 		}
 		return "read", files[1:]
 	case "rg", "grep":
-		flags, values = "-n -i -l -c -v -w -F -H -h", "-e --regexp"
+		flags, values = "-n -i -l -c -v -w -F -H", "-e --regexp"
 		if name == "rg" {
 			flags += " -s --files --hidden"
 			values += " -g --glob"
 		} else {
-			flags += " -E"
+			// -h hides file names in grep, where ripgrep prints its help.
+			flags += " -E -h"
 		}
 		files, opts, ok := shellOptions(args, flags, values)
 		if !ok {
