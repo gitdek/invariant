@@ -13,7 +13,11 @@ import (
 )
 
 // The watcher reads every project's manifest on the base branch, and
-// doesn't start while one names a coding agent it can't run (#153).
+// doesn't start while one names a coding agent it may run but can't, or one
+// Invariant doesn't know (#153). A manifest that names an agent the watcher
+// wasn't told to run, such as Claude Code beside Codex alone, doesn't stop
+// it, and that agent's CLI never runs: each of that project's issues is
+// answered instead (#207).
 func TestTheWatcherNeedsEveryAgentAManifestNames(t *testing.T) {
 	origin := t.TempDir()
 	git := func(dir string, args ...string) {
@@ -45,20 +49,36 @@ func TestTheWatcherNeedsEveryAgentAManifestNames(t *testing.T) {
 	if err := clone.Ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
-	stand := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(stand, []byte("#!/bin/sh\n[ \"$1\" = --version ] && exit 0\necho '{\"loggedIn\":true}'\n"), 0o755); err != nil {
+	bin := t.TempDir()
+	ran := filepath.Join(bin, "claude-ran")
+	claude := filepath.Join(bin, "claude")
+	if err := os.WriteFile(claude, []byte("#!/bin/sh\ntouch "+ran+"\n[ \"$1\" = --version ] && exit 0\necho '{\"loggedIn\":false}'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	can := map[string]setup.Agent{"claude-code": setup.ClaudeCode(stand)}
-	if err := checkAgents(ctx, clone, "main", "claude-code", can); err != nil {
-		t.Fatalf("every manifest names an agent the watcher can run: %v", err)
+	codex := filepath.Join(bin, "codex")
+	if err := os.WriteFile(codex, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ready := func(context.Context) error { return nil }
+	alone := map[string]setup.Agent{"codex": setup.Codex(codex, t.TempDir(), ready)}
+	if err := checkAgents(ctx, clone, "main", "codex", alone); err != nil {
+		t.Fatalf("a watcher on codex alone shouldn't be stopped by a project that names claude-code: %v", err)
+	}
+	if _, err := os.Stat(ran); err == nil {
+		t.Error("a watcher on codex alone ran Claude Code's CLI")
 	}
 
-	write("factory/c/.invariant/invariant.json", `{"name":"c","module":"C.tla","code":"c","language":"go","agent":"codex"}`)
+	both := map[string]setup.Agent{"codex": alone["codex"], "claude-code": setup.ClaudeCode(claude)}
+	err := checkAgents(ctx, clone, "main", "codex", both)
+	if err == nil || !strings.Contains(err.Error(), "Claude Code isn't signed in") {
+		t.Errorf("a watcher told to run claude-code, which a manifest names, should need it signed in: %v", err)
+	}
+
+	write("factory/c/.invariant/invariant.json", `{"name":"c","module":"C.tla","code":"c","language":"go","agent":"gemini"}`)
 	git(origin, "add", "-A")
-	git(origin, "commit", "--quiet", "-m", "a project on codex")
-	err := checkAgents(ctx, clone, "main", "claude-code", can)
-	if err == nil || !strings.Contains(err.Error(), "names codex") {
-		t.Errorf("a manifest names codex, which the watcher can't run: %v", err)
+	git(origin, "commit", "--quiet", "-m", "a project on an agent Invariant doesn't know")
+	err = checkAgents(ctx, clone, "main", "codex", alone)
+	if err == nil || !strings.Contains(err.Error(), "names gemini") {
+		t.Errorf("a manifest names gemini, which Invariant doesn't know: %v", err)
 	}
 }
