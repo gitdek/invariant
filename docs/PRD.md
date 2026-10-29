@@ -34,6 +34,7 @@ Invariant is a code factory that turns GitHub issues into merged pull requests. 
 3. **Every claim is backed by tool output, and states its limits.** A receipt says what kind of evidence it is and the bounds it holds within, and nothing claims more.
 4. **Invariant maintains its own rules.** The rules that make Invariant trustworthy are proved by Invariant, and they change only through amendments a person ratifies.
 5. **Fast and cheap enough to use every day.** An issue goes from opened to merged in minutes of factory time, for a few dollars at most.
+6. **Verification fits the code people already have.** "Invariant should let developers mix idiomatic Go and Python with formal verification without forcing entire applications into a restricted dialect. Keep ordinary code natural, prove critical components, and check how the surrounding code interacts with them. Support incremental adoption, clearly distinguishing proved guarantees from tested behavior." `D-0152`
 
 ## Non-goals, for now
 
@@ -169,7 +170,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 10 | Ready to go public: GitHub enforces the gate (1.9), and a review of what outside contributors could do. @gitdek chooses when. | Done `D-0007` `D-0033` `D-0048` `D-0075` |
 | 11 | A driver can't skip a step (3.11) | Done `D-0059` `D-0082` `D-0090` |
 | 12 | One decision graph for every project (3.12) | Done `D-0096` |
-| 13 | The factory takes every change, and a whole PRD (2.8) | Paused `D-0105` `D-0131` |
+| 13 | The factory takes every change, and a whole PRD (2.8) | In progress `D-0105` `D-0153` |
 | 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | In progress `D-0129` |
 | Later | Type checking, a TypeScript proof path, a hosted factory | Later |
 
