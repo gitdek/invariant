@@ -124,6 +124,12 @@ func verifyCmd(ctx context.Context, args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
+	// What needs no tools comes first, so a project the gate refuses says
+	// why without Docker or TLC.
+	if err := verify.Check(fs.Arg(0)); err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
 	tc, err := toolchain.Ensure(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
