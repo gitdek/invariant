@@ -192,9 +192,13 @@ func TestShellCallsHaveKindsAndTimes(t *testing.T) {
 		{`zsh -lc 'cat internal/app.go'`, "read"},
 		{`bash -c 'rg -n PRIVATE_PATTERN internal/app.go'`, "search"},
 		{`sh -c 'go test ./...'`, "test"},
-		{`/bin/zsh -lc 'cat internal/app.go'`, "other"},
-		{`/bin/bash -c 'rg -n PRIVATE_PATTERN internal/app.go'`, "other"},
-		{`/bin/sh -c 'go test ./...'`, "other"},
+		// The whole command may be a system shell, by its path, as Codex
+		// runs every command (D-0160).
+		{`/bin/zsh -lc 'cat internal/app.go'`, "read"},
+		{`/bin/bash -c 'rg -n PRIVATE_PATTERN internal/app.go'`, "search"},
+		{`/bin/sh -c 'go test ./...'`, "test"},
+		{`/usr/local/bin/bash -c 'cat internal/app.go'`, "other"},
+		{`/bin/zsh -lc 'cat internal/app.go' && cat internal/app.go`, "other"},
 		{`env LC_ALL=C go test ./...`, "other"},
 		{`CGO_ENABLED=0 go build ./...`, "other"},
 		{`cd internal && cat app.go`, "read"},

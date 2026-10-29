@@ -107,7 +107,13 @@ func TestShellPathNamedCommandsMakeWholeInvocationOther(t *testing.T) {
 		{"absolute-reader", `/usr/bin/cat app.go`, "other", nil},
 		{"relative-reader", `./cat app.go`, "other", nil},
 		{"absolute-searcher", `/usr/bin/grep -n -e PATTERN -- app.go`, "other", nil},
-		{"absolute-shell", `/bin/sh -c 'cat app.go'`, "other", nil},
+		// The whole command may be a system shell by its path, as Codex runs
+		// every command, but nothing inside it may name a path (D-0160).
+		{"system-shell", `/bin/sh -c 'cat app.go'`, "read", []string{"app.go"}},
+		{"codex-wrapper", `/bin/zsh -lc 'cd internal && cat app.go'`, "read", []string{"internal/app.go"}},
+		{"other-shell-path", `/opt/homebrew/bin/bash -c 'cat app.go'`, "other", nil},
+		{"absolute-shell-in-wrapper", `sh -c '/bin/sh -c "cat app.go"'`, "other", nil},
+		{"external-cd-in-codex-wrapper", `/bin/zsh -lc '/usr/bin/cd internal && cat app.go'`, "other", nil},
 		{"external-cd-in-wrapper", `sh -c '/usr/bin/cd internal && cat app.go'`, "other", nil},
 		{"certain-read-first", `cat safe.go && /usr/bin/cd internal && cat app.go`, "other", nil},
 	})
