@@ -95,6 +95,11 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 	for _, want := range [][]string{
 		{"exec", "--json"}, {"--ignore-user-config"}, {"--ephemeral"}, {"--skip-git-repo-check"},
 		{"--disable", "apps"}, {"--disable", "plugins"}, {"-c", `web_search="disabled"`}, {"-C", ws}, {"-m", "gpt-stand-in"},
+		// Nothing that browses, acts on the desktop, calls out to a
+		// service or runs more agents (#221).
+		{"--disable", "browser_use"}, {"--disable", "browser_use_external"}, {"--disable", "in_app_browser"},
+		{"--disable", "computer_use"}, {"--disable", "image_generation"}, {"--disable", "tool_suggest"},
+		{"--disable", "skill_mcp_dependency_install"}, {"--disable", "multi_agent"},
 		{"-c", `shell_environment_policy.inherit="core"`},
 		// Its commands run under Codex's own permission profile: the
 		// workspace, the system's own files and the toolchains, and nothing
@@ -312,6 +317,39 @@ func TestCodexGivesItsTurnBackWhenCalledOff(t *testing.T) {
 	defer cancel()
 	if _, err := c.Run(ctx, job); err != nil {
 		t.Fatalf("the next run didn't get its turn: %v", err)
+	}
+}
+
+// featureStandIn is a codex that knows the features named in known, and,
+// as Codex does, refuses to turn off one it doesn't know.
+func featureStandIn(t *testing.T, known ...string) Codex {
+	t.Helper()
+	dir := t.TempDir()
+	script := `#!/bin/sh
+known=" ` + strings.Join(known, " ") + ` "
+while [ "$1" = --disable ]; do
+  case "$known" in *" $2 "*) ;; *) echo "Error: Unknown feature flag: $2" >&2; exit 1 ;; esac
+  shift 2
+done
+[ "$1 $2" = "features list" ] || { echo "unexpected: $*" >&2; exit 2; }
+`
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return Codex{Binary: filepath.Join(dir, "codex"), Home: t.TempDir()}
+}
+
+// Codex refuses to turn off a feature it doesn't know, which would fail
+// every run, so the check before Codex runs says which one this Codex
+// doesn't know (#221).
+func TestCodexKnowsEveryFeatureARunTurnsOff(t *testing.T) {
+	if err := featureStandIn(t, codexOff...).knowsFeatures(context.Background()); err != nil {
+		t.Fatalf("a codex that knows every feature: %v", err)
+	}
+	older := slices.DeleteFunc(slices.Clone(codexOff), func(f string) bool { return f == "multi_agent" })
+	err := featureStandIn(t, older...).knowsFeatures(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "multi_agent") {
+		t.Fatalf("a codex that doesn't know multi_agent: %v", err)
 	}
 }
 

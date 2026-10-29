@@ -178,20 +178,39 @@ func (c Codex) Name() string { return "codex" }
 // codexServer is Invariant's MCP server's name in Codex's configuration.
 const codexServer = "invariant"
 
+// codexOff are the Codex features no run gets (D-0037, D-0157): its
+// apps and plugins, which reach the services connected to the account;
+// browsing, computer use and image generation, which reach the network or
+// the desktop from outside the sandbox; tool suggestions and skill
+// installs, which fetch; and more agents, which would run outside the turn
+// (D-0138) and the cap on steps.
+var codexOff = []string{"apps", "plugins", "browser_use", "browser_use_external", "in_app_browser", "computer_use",
+	"image_generation", "tool_suggest", "skill_mcp_dependency_install", "multi_agent"}
+
+// disabling is codexOff as codex's flags.
+func disabling() []string {
+	var args []string
+	for _, f := range codexOff {
+		args = append(args, "--disable", f)
+	}
+	return args
+}
+
 func (c Codex) args(job Job, tmp string) ([]string, error) {
 	args := []string{"exec", "--json",
 		// Nothing in the Codex home's own configuration applies, and the
 		// run keeps no session to resume.
 		"--ignore-user-config", "--ephemeral",
 		"--skip-git-repo-check",
-		"--disable", "apps", "--disable", "plugins",
+	}
+	args = append(append(args, disabling()...),
 		// Codex's own web search runs on its service, outside the sandbox,
 		// and Claude Code's agents get no web either (D-0037).
 		"-c", `web_search="disabled"`,
 		"-C", job.Workspace,
 		"-c", `shell_environment_policy.inherit="core"`,
 		"-c", c.commandEnv(tmp),
-	}
+	)
 	args = append(args, c.profile(job.ReadOnly)...)
 	if !job.ReadOnly {
 		if len(job.GateServer) == 0 {
@@ -330,6 +349,9 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 // the temporary directory where other runs' workspaces are. It runs no
 // agent and spends nothing.
 func (c Codex) Probe(ctx context.Context) error {
+	if err := c.knowsFeatures(ctx); err != nil {
+		return err
+	}
 	ws, err := os.MkdirTemp("", "invariant-codex-probe-")
 	if err != nil {
 		return err
@@ -370,6 +392,19 @@ func (c Codex) Probe(ctx context.Context) error {
 	}
 	if sandbox("/bin/cat", filepath.Join(other, "probe")) == nil {
 		return errors.New("a command in codex's sandbox read a file in the temporary directory, where other runs' workspaces are")
+	}
+	return nil
+}
+
+// knowsFeatures checks that this Codex knows every feature a run turns
+// off. Codex refuses one it doesn't know, so after an update that drops
+// one, every run would fail before it starts (#221). Listing the features
+// runs no agent and spends nothing.
+func (c Codex) knowsFeatures(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, c.Binary, append(disabling(), "features", "list")...)
+	cmd.Env = c.codexEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("codex won't turn off the features the factory's runs turn off, so every run would fail. Update codexOff in internal/synth/codex.go: %s", lastLines(strings.TrimSpace(string(out)), 3))
 	}
 	return nil
 }
