@@ -1789,8 +1789,8 @@
   // seconds while a step runs. It holds counts, times and file paths only,
   // never the agent's code, words or thinking (D-0051). Each step the
   // watcher is running has a card of its own (D-0113).
-  const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["edit", "editing"], ["gate", "gate runs"], ["check", "draft checks"], ["test", "test runs"], ["other", "other tools"]];
-  const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
+  const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["list", "listing"], ["edit", "editing"], ["build", "builds"], ["gate", "gate runs"], ["check", "draft checks"], ["test", "test runs"], ["git", "git commands"], ["other", "other tools"]];
+  const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", list: "Listing files", edit: "Writing code", build: "Building the code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", git: "Running a git command", other: "Using a tool" };
   const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
   let live = null;
   // The cards shown, by their step's repository, issue and since, so each
@@ -1968,14 +1968,13 @@
       const rate = Math.min(1, (m.tokens || 0) / Math.max(0.2, (stop - T(m.at)) / 60000) / 9000);
       parts.push(`<rect x="${a.toFixed(1)}" y="${top + 9}" width="${Math.max(2, b - a).toFixed(1)}" height="${bottom - top - 18}" rx="4" class="think${m.until ? "" : " on"}" fill-opacity="${(0.22 + 0.6 * rate).toFixed(2)}"><title>Thinking, ≈${kilo(m.tokens)} tokens</title></rect>`);
     }
-    // A tool call that ran a while, or is still running, is a band in its
-    // color from its start to its end, or to now.
-    const running = !l.ended ? [...marks].reverse().find((m) => m.kind !== "think") : null;
+    // Each call has its own band from start to result, or to now while
+    // pending, including calls that overlap.
     for (const m of marks) {
       if (m.kind === "think") continue;
-      const open = !m.until && m === running;
+      const open = !m.until && !l.ended;
       const stop = m.until ? T(m.until) : open ? end : 0;
-      if (stop - T(m.at) < 8000) continue;
+      if (stop <= T(m.at)) continue;
       const a = x(m.at);
       parts.push(`<rect x="${a.toFixed(1)}" y="${top + 9}" width="${Math.max(2, x(stop) - a).toFixed(1)}" height="${bottom - top - 18}" rx="4" class="span ${esc(m.kind)}${open ? " on" : ""}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} for ${esc(clock((stop - T(m.at)) / 1000))}</title></rect>`);
     }
@@ -1983,7 +1982,9 @@
       if (m.kind === "think") return;
       const mx = x(m.at).toFixed(1);
       const land = landing && i >= c.marks && !REDUCED ? ` new" style="animation-delay:${Math.min(i - c.marks, 60) * 14}ms` : "";
-      parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(clockOf(m.at))}</title></line>`);
+      const stop = m.until ? T(m.until) : !l.ended ? end : 0;
+      const duration = stop ? ` · ${clock(Math.max(0, stop - T(m.at)) / 1000)}${m.until ? "" : " so far"}` : "";
+      parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(clockOf(m.at))}${esc(duration)}</title></line>`);
     });
     (l.runs || []).forEach((r, i) => {
       if (!r.at) return;

@@ -12,7 +12,7 @@ import (
 // A Codex run shows in the live view as a Claude Code run does (#153). The
 // watcher's status names the step's agent, and the view reads the
 // transcript as Codex's backend writes it: its steps, each tool call in
-// time by kind, a shell command as other and a file change as an edit, the
+// time by kind, a shell read as a read and a file change as an edit, the
 // files it changed inside its copy, its reasoning as stretches of thinking
 // with their estimated tokens, its output tokens and how its run ended. The
 // page names the agent. Nothing private reaches it: no command or its
@@ -50,14 +50,14 @@ func TestTheLiveViewReadsACodexRun(t *testing.T) {
 	if l.By != "codex" || l.Turns != 3 || l.Now != "gate" || l.Agent != "" {
 		t.Errorf("by %q, %d turns, now %q, agent %q; want codex, 3 steps, the gate it's running, and still running", l.By, l.Turns, l.Now, l.Agent)
 	}
-	if want := map[string]int{"other": 1, "edit": 1, "gate": 2}; !reflect.DeepEqual(l.Tools, want) {
+	if want := map[string]int{"read": 1, "edit": 1, "gate": 2}; !reflect.DeepEqual(l.Tools, want) {
 		t.Errorf("tool calls %v, want %v", l.Tools, want)
 	}
 	var kinds []string
 	for _, m := range l.Marks {
 		kinds = append(kinds, m.Kind)
 	}
-	if want := []string{"think", "other", "edit", "gate", "gate"}; !reflect.DeepEqual(kinds, want) {
+	if want := []string{"think", "read", "edit", "gate", "gate"}; !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("marks %v, want %v", kinds, want)
 	}
 	think, shell, edit, gate, going := l.Marks[0], l.Marks[1], l.Marks[2], l.Marks[3], l.Marks[4]

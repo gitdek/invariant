@@ -787,8 +787,8 @@ footer p { margin: 0; max-width: 60em; }
 .composer input:focus, .composer select:focus, .composer textarea:focus { outline: none; border-color: var(--people); box-shadow: 0 0 0 3px rgba(var(--people-rgb), 0.18); }
 
 /* ---------- Live: the running steps, a card for each (#97) ---------- */
-:root { --search: #b48cff; }
-:root[data-theme="light"] { --search: #7c4dff; }
+:root { --search: #b48cff; --list: #62c6d6; --build: #f29e62; --git: #ed8fb9; }
+:root[data-theme="light"] { --search: #7c4dff; --list: #137f91; --build: #b05e15; --git: #b83f7b; }
 .live-cards { display: grid; gap: 18px; }
 .live-cards > .livestep { margin: 0; }
 /* The fine print says it once, under the last card. */
@@ -836,15 +836,21 @@ footer p { margin: 0; max-width: 60em; }
 .strip .span { fill-opacity: 0.2; }
 .strip .span.read { fill: var(--ci); }
 .strip .span.search { fill: var(--search); }
+.strip .span.list { fill: var(--list); }
 .strip .span.edit { fill: var(--people); }
+.strip .span.build { fill: var(--build); }
 .strip .span.gate, .strip .span.check, .strip .span.test { fill: var(--accent); }
+.strip .span.git { fill: var(--git); }
 .strip .span.other { fill: var(--ink3); }
 @keyframes breathe { 50% { fill-opacity: 0.85; } }
 .strip .tool { stroke-width: 2.5; stroke-linecap: round; transform-box: fill-box; transform-origin: center; }
 .strip .tool.read { stroke: var(--ci); }
 .strip .tool.search { stroke: var(--search); }
+.strip .tool.list { stroke: var(--list); }
 .strip .tool.edit { stroke: var(--people); }
+.strip .tool.build { stroke: var(--build); }
 .strip .tool.gate, .strip .tool.check, .strip .tool.test { stroke: var(--accent); stroke-width: 3.5; }
+.strip .tool.git { stroke: var(--git); }
 .strip .tool.other { stroke: var(--ink3); }
 .strip .tool.new { animation: land 0.7s cubic-bezier(0.2, 0.9, 0.3, 1.3) both; }
 @keyframes land { from { transform: scaleY(0); opacity: 0; } 60% { opacity: 1; } }
@@ -860,8 +866,11 @@ footer p { margin: 0; max-width: 60em; }
 .legend .lg i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 .legend .read i { background: var(--ci); }
 .legend .search i { background: var(--search); }
+.legend .list i { background: var(--list); }
 .legend .edit i { background: var(--people); }
+.legend .build i { background: var(--build); }
 .legend .gate i, .legend .check i, .legend .test i { background: var(--accent); }
+.legend .git i { background: var(--git); }
 .legend .other i { background: var(--ink3); }
 .legend .think i { background: var(--agent); }
 .live-runs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }

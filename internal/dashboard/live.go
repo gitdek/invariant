@@ -46,7 +46,7 @@ type Live struct {
 // Mark is one tool call, or one stretch of thinking between tool calls.
 type Mark struct {
 	At     time.Time  `json:"at"`
-	Kind   string     `json:"kind"`             // read, search, edit, gate, check, test, other or think
+	Kind   string     `json:"kind"`             // read, search, list, build, test, git, edit, gate, check, other or think
 	Until  *time.Time `json:"until,omitempty"`  // when it ended: nil while it goes on, as a tool call waiting for its result
 	Tokens int        `json:"tokens,omitempty"` // a stretch of thinking: its estimated tokens
 }
@@ -89,8 +89,8 @@ type transcript struct {
 	touches  int
 	last     time.Time // the newest time an event carried
 	now      string
-	// codex reads the transcript as Codex writes it, and items are its tool
-	// calls waiting to end, by their ids, as indexes into marks (#153).
+	// codex reads the transcript as Codex writes it. For either agent,
+	// items are calls waiting to end, by id, as indexes into marks.
 	codex bool
 	items map[string]int
 }
@@ -155,6 +155,7 @@ type event struct {
 	Timestamp string `json:"timestamp"`
 	Delta     int    `json:"estimated_tokens_delta"`
 	ToolName  string `json:"tool_name"`
+	ToolUseID string `json:"tool_use_id"`
 	IsError   bool   `json:"is_error"`
 	Usage     struct {
 		Output int `json:"output_tokens"`
@@ -173,11 +174,14 @@ type event struct {
 // block is the part of a message's content the live view reads: which
 // tool was called, and on which file.
 type block struct {
-	Type  string `json:"type"`
-	Name  string `json:"name"`
-	Input struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	ToolUseID string `json:"tool_use_id"`
+	Name      string `json:"name"`
+	Input     struct {
 		FilePath     string `json:"file_path"`
 		NotebookPath string `json:"notebook_path"`
+		Command      string `json:"command"`
 	} `json:"input"`
 }
 
@@ -221,28 +225,45 @@ func (t *transcript) line(b []byte) {
 			if bl.Type != "tool_use" {
 				continue
 			}
+			if _, ok := t.items[bl.ID]; bl.ID != "" && ok {
+				continue
+			}
 			kind := toolKind(bl.Name)
+			if bl.Name == "Bash" {
+				kind = t.shell(bl.Input.Command)
+			}
 			t.tools[kind]++
-			t.marks = append(t.marks, Mark{At: t.last, Kind: kind})
+			t.marks = append(t.marks, Mark{At: t.eventTime(e.Timestamp), Kind: kind})
 			t.open = append(t.open, len(t.marks)-1)
+			if bl.ID != "" {
+				t.items[bl.ID] = len(t.marks) - 1
+			}
 			t.now = kind
 			p := bl.Input.FilePath
 			if p == "" {
 				p = bl.Input.NotebookPath
 			}
-			t.touch(p, kind)
+			if bl.Name != "Bash" {
+				t.touch(p, kind)
+			}
 		}
 	case e.Type == "user":
 		t.stamp(e.Timestamp)
-		t.now = ""
-		// A result ends the oldest call still waiting for one.
-		if len(t.open) > 0 {
-			until := t.last
-			t.marks[t.open[0]].Until = &until
-			t.open = t.open[1:]
+		var blocks []block
+		if bytes.HasPrefix(bytes.TrimSpace(e.Message.Content), []byte("[")) {
+			json.Unmarshal(e.Message.Content, &blocks)
+		}
+		for _, bl := range blocks {
+			if bl.Type == "tool_result" && t.finish(bl.ToolUseID, t.eventTime(e.Timestamp)) {
+				t.running("")
+			}
 		}
 	case e.Type == "tool_progress":
-		t.now = toolKind(e.ToolName)
+		if i, ok := t.items[e.ToolUseID]; ok && i >= 0 {
+			t.now = t.marks[i].Kind
+		} else if e.ToolName != "Bash" {
+			t.now = toolKind(e.ToolName)
+		}
 	case e.Type == "result":
 		t.endThinking()
 		t.output = e.Usage.Output
@@ -250,6 +271,41 @@ func (t *transcript) line(b []byte) {
 		t.now = ""
 	}
 	t.trim()
+}
+
+// finish matches a result to its call. Older transcripts without result
+// ids end the oldest pending call, but an unknown id ends nothing.
+func (t *transcript) finish(id string, at time.Time) bool {
+	i, ok := t.items[id]
+	if id == "" && len(t.open) > 0 {
+		i, ok = t.open[0], true
+	}
+	if !ok {
+		return false
+	}
+	if i >= 0 {
+		t.marks[i].Until = &at
+	}
+	delete(t.items, id)
+	for key, index := range t.items {
+		if i >= 0 && index == i {
+			delete(t.items, key)
+		}
+	}
+	for j, index := range t.open {
+		if index == i {
+			t.open = append(t.open[:j], t.open[j+1:]...)
+			break
+		}
+	}
+	return true
+}
+
+func (t *transcript) running(idle string) {
+	t.now = idle
+	if len(t.open) > 0 {
+		t.now = t.marks[t.open[len(t.open)-1]].Kind
+	}
 }
 
 // trim keeps the newest marks, up to maxMarks.
@@ -269,7 +325,7 @@ func (t *transcript) trim() {
 		t.open = open
 		for id, i := range t.items {
 			if i < drop {
-				delete(t.items, id)
+				t.items[id] = -1 // remember the call even after its mark is dropped
 			} else {
 				t.items[id] = i - drop
 			}
@@ -279,8 +335,9 @@ func (t *transcript) trim() {
 
 // codexEvent is the part of a line of Codex's transcript the live view
 // reads (#153). Everything else, such as what the agent wrote, its
-// reasoning, its commands and what they and its tools returned, is never
-// decoded. A reasoning's text is measured, raw, to estimate its tokens.
+// reasoning and what its tools returned, is never decoded. Commands are
+// classified, then discarded. A reasoning's text is measured, raw, to
+// estimate its tokens.
 type codexEvent struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
@@ -293,6 +350,7 @@ type codexEvent struct {
 		Type    string          `json:"type"`
 		Server  string          `json:"server"`
 		Tool    string          `json:"tool"`
+		Command string          `json:"command"`
 		Text    json.RawMessage `json:"text"`
 		Changes []struct {
 			Path string `json:"path"`
@@ -310,17 +368,18 @@ func codexStart(line []byte) bool {
 }
 
 // codexLine reads one line of Codex's transcript: its tool calls in time,
-// by kind, as Claude Code's are, the files it changed, its reasoning as
-// stretches of thinking, and how its run ended. Codex doesn't say what
-// files it reads, or how much it holds, so the view doesn't either.
+// by kind, as Claude Code's are, explicit shell reads and file changes,
+// its reasoning as stretches of thinking, and how its run ended. Codex
+// doesn't say how much it holds, so the view doesn't either.
 func (t *transcript) codexLine(b []byte) {
 	var e codexEvent
 	if json.Unmarshal(b, &e) != nil {
 		return // not an event: skip it
 	}
 	before := t.last
-	if at, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil && at.After(t.last) {
-		t.last = at.UTC()
+	at := t.eventTime(e.Timestamp)
+	if at.After(t.last) {
+		t.last = at
 	}
 	switch e.Type {
 	case "invariant.workspace":
@@ -328,12 +387,19 @@ func (t *transcript) codexLine(b []byte) {
 			t.cwd = filepath.Clean(e.Cwd)
 		}
 	case "turn.started":
-		t.now = "thinking"
+		t.running("thinking")
 	case "item.started":
+		if _, ok := t.items[e.Item.ID]; e.Item.ID != "" && (ok || t.ids[e.Item.ID]) {
+			return
+		}
 		if kind := codexKind(e.Item.Type, e.Item.Server, e.Item.Tool); kind != "" {
+			if e.Item.Type == "command_execution" {
+				kind = t.shell(e.Item.Command)
+			}
 			t.tools[kind]++
-			t.marks = append(t.marks, Mark{At: t.last, Kind: kind})
+			t.marks = append(t.marks, Mark{At: at, Kind: kind})
 			t.items[e.Item.ID] = len(t.marks) - 1
+			t.open = append(t.open, len(t.marks)-1)
 			t.now = kind
 		}
 	case "item.completed":
@@ -347,19 +413,23 @@ func (t *transcript) codexLine(b []byte) {
 		case "todo_list", "error":
 			return
 		}
+		if e.Item.ID != "" && t.ids[e.Item.ID] {
+			return
+		}
 		t.ids[e.Item.ID] = true // a step, as the backend counts its turns
-		until := t.last
-		if i, ok := t.items[e.Item.ID]; ok {
-			t.marks[i].Until = &until
-			delete(t.items, e.Item.ID)
-		} else if kind := codexKind(e.Item.Type, e.Item.Server, e.Item.Tool); kind != "" {
-			t.tools[kind]++
-			t.marks = append(t.marks, Mark{At: t.last, Kind: kind, Until: &until})
+		if kind := codexKind(e.Item.Type, e.Item.Server, e.Item.Tool); kind != "" {
+			if !t.finish(e.Item.ID, at) {
+				if e.Item.Type == "command_execution" {
+					kind = t.shell(e.Item.Command)
+				}
+				t.tools[kind]++
+				t.marks = append(t.marks, Mark{At: at, Kind: kind, Until: &at})
+			}
 		}
 		for _, c := range e.Item.Changes {
 			t.touch(c.Path, "edit")
 		}
-		t.now = "thinking"
+		t.running("thinking")
 	case "turn.completed":
 		t.output, t.agent, t.now = e.Usage.Output, "finished", ""
 	case "turn.failed":
@@ -369,8 +439,8 @@ func (t *transcript) codexLine(b []byte) {
 
 // codexKind sorts one of Codex's items into what the page colors it by: a
 // file change is an edit, Invariant's gate, check and test are themselves,
-// and anything else, a shell command included, is other. A message is no
-// tool call.
+// and anything else is other. Shell commands are classified separately.
+// A message is no tool call.
 func codexKind(item, server, tool string) string {
 	switch item {
 	case "agent_message", "reasoning", "todo_list", "error", "":
@@ -392,6 +462,21 @@ func (t *transcript) stamp(ts string) {
 	t.endThinking()
 }
 
+func (t *transcript) eventTime(ts string) time.Time {
+	if at, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+		return at.UTC()
+	}
+	return t.last
+}
+
+func (t *transcript) shell(command string) string {
+	kind, paths := shellActivity(command, t.cwd)
+	for _, p := range paths {
+		t.touch(p, "read")
+	}
+	return kind
+}
+
 func (t *transcript) endThinking() {
 	if t.think >= 0 && t.think < len(t.marks) {
 		until := t.last
@@ -407,7 +492,21 @@ func (t *transcript) touch(p, kind string) {
 	if kind != "read" && kind != "edit" {
 		return
 	}
-	rel, ok := inside(t.cwd, p)
+	if t.cwd == "" || p == "" {
+		return
+	}
+	dir, err := touchedPath(t.cwd)
+	if err != nil {
+		return
+	}
+	if !filepath.IsAbs(p) {
+		p = t.cwd + string(filepath.Separator) + p
+	}
+	p, err = touchedPath(p)
+	if err != nil {
+		return
+	}
+	rel, ok := inside(dir, p)
 	if !ok {
 		return
 	}
@@ -425,23 +524,33 @@ func (t *transcript) touch(p, kind string) {
 	f.at = t.touches
 }
 
-// inside is p's path inside dir, if it's there.
+// touchedPath resolves aliases, including an existing parent of a file
+// an editing tool is about to create. A dangling link is not a new file.
+func touchedPath(p string) (string, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err == nil || !os.IsNotExist(err) {
+		return real, err
+	}
+	if _, statErr := os.Lstat(p); !os.IsNotExist(statErr) {
+		return "", err
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return "", err
+	}
+	real, err = touchedPath(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(real, filepath.Base(p)), nil
+}
+
+// inside compares canonical paths. Callers resolve filesystem aliases.
 func inside(dir, p string) (string, bool) {
 	if dir == "" || p == "" {
 		return "", false
 	}
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(dir, p)
-	}
-	// On macOS the temporary directory is reached through /private too.
-	unprivate := func(s string) string {
-		s = filepath.Clean(s)
-		if strings.HasPrefix(s, "/private/") {
-			return s[len("/private"):]
-		}
-		return s
-	}
-	rel, err := filepath.Rel(unprivate(dir), unprivate(p))
+	rel, err := filepath.Rel(dir, p)
 	if err != nil || !filepath.IsLocal(rel) {
 		return "", false
 	}

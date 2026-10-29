@@ -193,14 +193,14 @@ func TestLiveReadsARunningStep(t *testing.T) {
 	if l.Turns != 7 || l.Thinking != 550 || l.Context != 2101 {
 		t.Errorf("%d turns, %d thinking tokens, %d in context; want 7, 550 and 2,101", l.Turns, l.Thinking, l.Context)
 	}
-	if want := map[string]int{"read": 2, "search": 1, "edit": 2, "other": 1, "gate": 1}; !reflect.DeepEqual(l.Tools, want) {
+	if want := map[string]int{"read": 3, "search": 1, "edit": 2, "gate": 1}; !reflect.DeepEqual(l.Tools, want) {
 		t.Errorf("tool calls %v, want %v", l.Tools, want)
 	}
 	var kinds []string
 	for _, m := range l.Marks {
 		kinds = append(kinds, m.Kind)
 	}
-	if want := []string{"think", "read", "search", "read", "think", "edit", "edit", "other", "gate"}; !reflect.DeepEqual(kinds, want) {
+	if want := []string{"think", "read", "search", "read", "think", "edit", "edit", "read", "gate"}; !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("marks %v, want %v", kinds, want)
 	}
 	first, second := l.Marks[0], l.Marks[4]
@@ -257,14 +257,61 @@ func TestLiveReadsOnlyWhatsNew(t *testing.T) {
 	}
 	f.write(t, true)
 	l := f.one(t)
-	if l.Turns != 8 || l.Tools["read"] != 3 || len(l.Marks) != 10 || l.Now != "read" {
-		t.Errorf("after the last line landed: %d turns, tools %v, %d marks, now %q; want 8, 3 reads, 10 marks and a read", l.Turns, l.Tools, len(l.Marks), l.Now)
+	if l.Turns != 8 || l.Tools["read"] != 4 || len(l.Marks) != 10 || l.Now != "read" {
+		t.Errorf("after the last line landed: %d turns, tools %v, %d marks, now %q; want 8, 4 reads, 10 marks and a read", l.Turns, l.Tools, len(l.Marks), l.Now)
 	}
 	if app := fileAt(l, "internal/app/app.go"); app == nil || app.Reads != 2 || !app.Lit {
 		t.Errorf("app.go %+v, want 2 reads, and lit again", app)
 	}
-	if again := f.one(t); again.Turns != 8 || again.Tools["read"] != 3 || len(again.Marks) != 10 {
+	if again := f.one(t); again.Turns != 8 || again.Tools["read"] != 4 || len(again.Marks) != 10 {
 		t.Errorf("a read with nothing new changed the counts: %d turns, tools %v, %d marks", again.Turns, again.Tools, len(again.Marks))
+	}
+}
+
+// A first read after workspace cleanup still keeps non-shell file activity.
+// Shell operands, which need an existing regular file, add no file then.
+func TestLiveKeepsNonShellFilesAfterWorkspaceRemoval(t *testing.T) {
+	f := newLiveStepFixture(t)
+	f.write(t, true)
+	if err := os.RemoveAll(f.ws); err != nil {
+		t.Fatal(err)
+	}
+	l := f.one(t)
+	app, newTest := fileAt(l, "internal/app/app.go"), fileAt(l, "internal/app/new_test.go")
+	if len(l.Files) != 2 || app == nil || newTest == nil {
+		t.Fatalf("files after cleanup = %+v; want the non-shell reads and edits", l.Files)
+	}
+	if app.Reads != 2 || app.Edits != 1 || newTest.Reads != 0 || newTest.Edits != 1 {
+		t.Errorf("files after cleanup = %+v; want the recorded non-shell counts", l.Files)
+	}
+	if l.Tools["read"] != 4 {
+		t.Errorf("tools after cleanup = %v; want the shell read counted too", l.Tools)
+	}
+}
+
+// Some search options consume values for one program but are flags for
+// the other. Their arguments must never turn a pattern into a file read.
+func TestShellSearchOptionsKeepPatternsPrivate(t *testing.T) {
+	workspace := t.TempDir()
+	for _, name := range []string{"app.go", "PATTERN", "replacement", "utf-8"} {
+		if err := os.WriteFile(filepath.Join(workspace, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app, err := filepath.EvalSymlinks(filepath.Join(workspace, "app.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"rg -r replacement PATTERN app.go",
+		"rg -E utf-8 PATTERN app.go",
+		"rg --replace=replacement --encoding=utf-8 PATTERN app.go",
+		"grep -r -E PATTERN app.go",
+	} {
+		kind, paths := shellActivity(command, workspace)
+		if kind != "search" || !reflect.DeepEqual(paths, []string{app}) {
+			t.Errorf("%q: %s, %v; want search of app.go only", command, kind, paths)
+		}
 	}
 }
 
