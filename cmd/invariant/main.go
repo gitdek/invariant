@@ -233,9 +233,9 @@ func traceCmd(args []string) int {
 func synthesizeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("synthesize", flag.ExitOnError)
 	out := fs.String("out", "out/synthesis", "where the result, its receipt and the logs go")
-	agent := fs.String("agent", "claude-code", "the coding agent that writes the model and code: claude-code or codex")
-	model := fs.String("model", "opus", "the model the agent uses")
-	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
+	agent := fs.String("agent", "codex", "the coding agent that writes the model and code: codex, or claude-code to run Claude Code")
+	model := fs.String("model", "opus", "the model Claude Code uses")
+	effort := fs.String("effort", "max", "how hard Claude Code thinks: low, medium, high, xhigh or max")
 	fallback := fs.String("fallback-effort", "xhigh", "the effort the agent runs at once more when the loop guard stops its first run, if it's below -effort; empty never runs it again")
 	budget := fs.Float64("budget", 5, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
 	turns := fs.Int("max-turns", 80, "cap on the agent's turns")
@@ -246,11 +246,15 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 	draft := fs.Bool("draft", false, "start from the module's drafted model instead of a skeleton of the pinned definitions")
 	fs.Parse(args)
 	if !validAgent(*agent) {
-		fmt.Fprintf(os.Stderr, "invariant: -agent is claude-code or codex, the coding agents Invariant can run, not %q\n", *agent)
+		fmt.Fprintf(os.Stderr, "invariant: -agent is codex or claude-code, the coding agents Invariant can run, not %q\n", *agent)
 		return 2
 	}
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
+	if err := cx.valid(); err != nil {
+		fmt.Fprintf(os.Stderr, "invariant: %v\n", err)
 		return 2
 	}
 	if *fallback != "" && !validEffort(*fallback) {
@@ -272,16 +276,18 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	var backend synth.Backend = synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort}
+	top := *effort
 	if *agent == "codex" {
-		if backend, err = cx.ready(ctx, *effort); err != nil {
+		if backend, err = cx.ready(ctx, *cx.effort); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
 		}
+		top = *cx.effort
 	}
 	r, err := synth.Synthesize(ctx, synth.Options{
 		Project: fs.Arg(0), Out: *out, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc, KeepModel: *draft,
 		Backend:        backend,
-		FallbackEffort: fallbackEffort(*effort, *fallback),
+		FallbackEffort: fallbackEffort(top, *fallback),
 	})
 	if r != nil && r.Final != nil {
 		md := receipt.Markdown(r.Final)
@@ -585,9 +591,9 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) m
 func formalizeCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("formalize", flag.ExitOnError)
 	out := fs.String("out", "out/formalize", "where the draft, the transcript and the check log go")
-	agent := fs.String("agent", "claude-code", "the coding agent that drafts the statements: claude-code or codex")
-	model := fs.String("model", "opus", "the model the agent uses")
-	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
+	agent := fs.String("agent", "codex", "the coding agent that drafts the statements: codex, or claude-code to run Claude Code")
+	model := fs.String("model", "opus", "the model Claude Code uses")
+	effort := fs.String("effort", "max", "how hard Claude Code thinks: low, medium, high, xhigh or max")
 	budget := fs.Float64("budget", 3, "cap on the agent's estimated cost for the run, in USD (claude --max-budget-usd)")
 	turns := fs.Int("max-turns", 60, "cap on the agent's turns")
 	checks := fs.Int("checks", 4, "the most model checks the agent gets")
@@ -596,11 +602,15 @@ func formalizeCmd(ctx context.Context, args []string) int {
 	cx := addCodexFlags(fs)
 	fs.Parse(args)
 	if !validAgent(*agent) {
-		fmt.Fprintf(os.Stderr, "invariant: -agent is claude-code or codex, the coding agents Invariant can run, not %q\n", *agent)
+		fmt.Fprintf(os.Stderr, "invariant: -agent is codex or claude-code, the coding agents Invariant can run, not %q\n", *agent)
 		return 2
 	}
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
+	if err := cx.valid(); err != nil {
+		fmt.Fprintf(os.Stderr, "invariant: %v\n", err)
 		return 2
 	}
 	if fs.NArg() != 1 {
@@ -626,7 +636,7 @@ func formalizeCmd(ctx context.Context, args []string) int {
 	}
 	var backend synth.Backend = synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: *budget, MaxTurns: *turns, Effort: *effort}
 	if *agent == "codex" {
-		if backend, err = cx.ready(ctx, *effort); err != nil {
+		if backend, err = cx.ready(ctx, *cx.effort); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
 		}
@@ -671,9 +681,10 @@ func watchCmd(ctx context.Context, args []string) int {
 	language := fs.String("language", "go", "the code's language when an issue has no language label: go, typescript or python")
 	cache, _ := os.UserCacheDir()
 	work := fs.String("work", filepath.Join(cache, "invariant", "watch"), "where the clone, transcripts and logs go")
-	agent := fs.String("agent", "claude-code", "the coding agent that drafts and builds an issue when neither it nor its project picks one: claude-code or codex")
-	model := fs.String("model", "opus", "the model the agents use")
-	effort := fs.String("effort", "max", "how hard the agents think: low, medium, high, xhigh or max")
+	agent := fs.String("agent", "codex", "the coding agent that drafts and builds an issue when neither it nor its project picks one: codex or claude-code")
+	allowed := fs.String("agents", "codex", "the coding agents this watcher may run, comma-separated. It never runs Claude Code's CLI unless it's named here, as codex,claude-code")
+	model := fs.String("model", "opus", "the model Claude Code uses")
+	effort := fs.String("effort", "max", "how hard Claude Code thinks: low, medium, high, xhigh or max")
 	fallback := fs.String("fallback-effort", "xhigh", "the effort a build's agent runs at once more when the loop guard stops its first run, if it's below -effort; empty never runs it again")
 	fbudget := fs.Float64("formalize-budget", 3, "cap on a formalization's estimated cost, in USD")
 	budget := fs.Float64("budget", 5, "cap on a synthesis's estimated cost, in USD")
@@ -689,11 +700,20 @@ func watchCmd(ctx context.Context, args []string) int {
 	parallel := fs.Int("parallel", 3, "how many issues the watcher takes steps on at once, one step per issue; 1 takes one step at a time")
 	fs.Parse(args)
 	if !validAgent(*agent) {
-		fmt.Fprintf(os.Stderr, "invariant: -agent is claude-code or codex, the coding agents Invariant can run, not %q\n", *agent)
+		fmt.Fprintf(os.Stderr, "invariant: -agent is codex or claude-code, the coding agents Invariant can run, not %q\n", *agent)
+		return 2
+	}
+	may, err := mayRun(*allowed, *agent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invariant: %v\n", err)
 		return 2
 	}
 	if !validEffort(*effort) {
 		fmt.Fprintf(os.Stderr, "invariant: -effort is low, medium, high, xhigh or max, not %q\n", *effort)
+		return 2
+	}
+	if err := cx.valid(); err != nil {
+		fmt.Fprintf(os.Stderr, "invariant: %v\n", err)
 		return 2
 	}
 	if *fallback != "" && !validEffort(*fallback) {
@@ -746,20 +766,35 @@ func watchCmd(ctx context.Context, args []string) int {
 	if err := clone.Ensure(ctx); err != nil {
 		return fail(err)
 	}
-	// It runs whichever coding agent an issue or its project picks, so it
-	// doesn't start unless it can run each one it may be asked for: its own,
-	// and every one a project's manifest names on the base branch (#153).
-	codex := cx.backend(*effort)
-	checks := map[string]setup.Agent{"claude-code": setup.ClaudeCode(*claude), "codex": setup.Codex(*cx.binary, *cx.home, codex.Probe)}
+	// It runs whichever coding agent an issue or its project picks, among
+	// the ones it may run, so it doesn't start unless it can run each one it
+	// may be asked for: its own, and every one it may run that a project's
+	// manifest names on the base branch (#153). It checks only the agents it
+	// may run, so it never starts Claude Code's CLI unless -agents names it
+	// (#207).
+	codex := cx.backend(*cx.effort)
+	known := map[string]setup.Agent{"claude-code": setup.ClaudeCode(*claude), "codex": setup.Codex(*cx.binary, *cx.home, codex.Probe)}
+	checks := map[string]setup.Agent{}
+	for _, name := range may {
+		checks[name] = known[name]
+	}
 	if err := checkAgents(ctx, clone, *base, *agent, checks); err != nil {
 		return fail(err)
 	}
-	// Codex runs for an issue only where it's set up and its sandbox holds
-	// (D-0138). Otherwise an issue that picks it is answered, as one that
-	// picks an agent the watcher can't run is (#173).
-	codexReady := setup.CheckAgents(ctx, []string{"codex"}, checks)
-	if codexReady != nil {
-		logger.Printf("codex isn't ready, so issues that pick it are answered: %v", codexReady)
+	// Another agent it may run runs for an issue only where it's ready:
+	// Codex only where it's set up and its sandbox holds (D-0138). Otherwise
+	// an issue that picks it is answered, as one that picks an agent the
+	// watcher can't run is (#173).
+	ready := []string{*agent}
+	for _, name := range may {
+		if name == *agent {
+			continue
+		}
+		if err := setup.CheckAgents(ctx, []string{name}, checks); err != nil {
+			logger.Printf("%s isn't ready, so issues that pick it are answered: %v", name, err)
+			continue
+		}
+		ready = append(ready, name)
 	}
 	tc, err := toolchain.Ensure(ctx)
 	if err != nil {
@@ -780,18 +815,17 @@ func watchCmd(ctx context.Context, args []string) int {
 	claudeCode := func(budget float64) synth.ClaudeCode {
 		return synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: budget, MaxTurns: *turns, Effort: *effort}
 	}
+	backends := map[string][2]synth.Backend{"claude-code": {claudeCode(*fbudget), claudeCode(*budget)}, "codex": {codex, codex}}
+	top := map[string]string{"claude-code": *effort, "codex": *cx.effort}
 	runners := map[string]factory.Runners{}
-	for name, b := range map[string][2]synth.Backend{"claude-code": {claudeCode(*fbudget), claudeCode(*budget)}, "codex": {codex, codex}} {
-		if name == "codex" && codexReady != nil {
-			continue
-		}
-		drafts, builds := b[0], b[1]
+	for _, name := range ready {
+		drafts, builds := backends[name][0], backends[name][1]
 		runners[name] = factory.Runners{
 			Formalizer: formalize.Formalizer{Backend: drafts, Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 			Builder: factory.Synthesis{Options: synth.Options{Backend: builds, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc,
-				FallbackEffort: fallbackEffort(*effort, *fallback)}},
+				FallbackEffort: fallbackEffort(top[name], *fallback)}},
 			Plumbing: plumbing.Builder{Backend: builds, Reviewer: drafts, Binary: self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb,
-				FallbackEffort: fallbackEffort(*effort, *fallback)},
+				FallbackEffort: fallbackEffort(top[name], *fallback)},
 		}
 	}
 	own, others := runners[*agent], map[string]factory.Runners{}
@@ -1217,6 +1251,10 @@ func clock(secs int) string {
 // efforts are the efforts Claude Code takes, from the least to the most.
 var efforts = []string{"low", "medium", "high", "xhigh", "max"}
 
+// codexEfforts are the efforts Codex takes, lowest first: Claude Code's, and
+// ultra, gpt-6-astra's highest (#207).
+var codexEfforts = append(slices.Clone(efforts), "ultra")
+
 // validEffort says whether e is an effort Claude Code takes.
 func validEffort(e string) bool { return slices.Contains(efforts, e) }
 
@@ -1239,7 +1277,14 @@ func checkAgents(ctx context.Context, clone factory.Clone, base, own string, can
 			return err
 		}
 		var m project.Manifest
-		if json.Unmarshal(b, &m) == nil && m.Agent != "" {
+		if json.Unmarshal(b, &m) != nil || m.Agent == "" {
+			continue
+		}
+		// An agent Invariant knows but this watcher wasn't told to run, such
+		// as Claude Code beside Codex alone, isn't checked or run: each issue
+		// of that project is answered (#207). One it doesn't know still
+		// stops it.
+		if _, ok := can[m.Agent]; ok || !validAgent(m.Agent) {
 			need = append(need, m.Agent)
 		}
 	}
@@ -1247,13 +1292,36 @@ func checkAgents(ctx context.Context, clone factory.Clone, base, own string, can
 }
 
 // agents are the coding agents Invariant can run, by the names -agent
-// takes (#153).
-var agents = []string{"claude-code", "codex"}
+// takes (#153). Codex is every command's default, and Claude Code runs only
+// where it's asked for (#207).
+var agents = []string{"codex", "claude-code"}
 
-// codexFlags are the flags a command runs Codex with (#153, D-0138).
+// mayRun reads -agents, the coding agents a watcher may run, which must
+// include its own (#207). A watcher never runs one that isn't named.
+func mayRun(list, own string) ([]string, error) {
+	var may []string
+	for _, name := range strings.Split(list, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" || slices.Contains(may, name) {
+			continue
+		}
+		if !validAgent(name) {
+			return nil, fmt.Errorf("-agents names %q, but the coding agents Invariant can run are codex and claude-code", name)
+		}
+		may = append(may, name)
+	}
+	if !slices.Contains(may, own) {
+		return nil, fmt.Errorf("-agent is %s, which -agents doesn't name, so this watcher may not run it: add it, as -agents %s", own, strings.Join(append(may, own), ","))
+	}
+	return may, nil
+}
+
+// codexFlags are the flags a command runs Codex with (#153, D-0138): on
+// gpt-6-astra at ultra, its highest reasoning, unless told otherwise
+// (#207).
 type codexFlags struct {
-	binary, home, model *string
-	steps               *int
+	binary, home, model, effort *string
+	steps                       *int
 }
 
 func addCodexFlags(fs *flag.FlagSet) codexFlags {
@@ -1261,9 +1329,18 @@ func addCodexFlags(fs *flag.FlagSet) codexFlags {
 	return codexFlags{
 		binary: fs.String("codex", "codex", "the Codex CLI, for an issue or project that picks Codex"),
 		home:   fs.String("codex-home", filepath.Join(config, "invariant", "codex"), "Codex's own home, where the factory's Codex signs in; keep it in your home directory, which its commands can't read"),
-		model:  fs.String("codex-model", "", "the model Codex uses; empty leaves Codex's own"),
+		model:  fs.String("codex-model", "gpt-6-astra", "the model Codex uses; empty leaves Codex's own"),
+		effort: fs.String("codex-effort", "ultra", "how hard Codex thinks: low, medium, high, xhigh, max or ultra, its highest"),
 		steps:  fs.Int("codex-steps", 400, "cap on a Codex run's steps: its messages, commands, file changes and tool calls"),
 	}
+}
+
+// valid refuses a Codex effort Codex doesn't take.
+func (f codexFlags) valid() error {
+	if !slices.Contains(codexEfforts, *f.effort) {
+		return fmt.Errorf("-codex-effort is low, medium, high, xhigh, max or ultra, not %q", *f.effort)
+	}
+	return nil
 }
 
 // backend is Codex's backend at effort. Its commands may read Go's own
@@ -1292,7 +1369,7 @@ func validAgent(a string) bool { return slices.Contains(agents, a) }
 // loop guard stops its first run, at effort (D-0125): fallback, when it's
 // below effort, and otherwise none.
 func fallbackEffort(effort, fallback string) string {
-	if fallback == "" || slices.Index(efforts, fallback) >= slices.Index(efforts, effort) {
+	if fallback == "" || slices.Index(codexEfforts, fallback) >= slices.Index(codexEfforts, effort) {
 		return ""
 	}
 	return fallback
