@@ -108,7 +108,7 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := within(ctx, job)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace

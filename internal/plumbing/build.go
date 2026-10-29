@@ -179,9 +179,7 @@ func (b Builder) review(ctx context.Context, root string, n int, plan *Plan, r *
 		return "", false, err
 	}
 	defer transcript.Close()
-	runCtx, cancel := context.WithTimeout(ctx, b.Timeout)
-	defer cancel()
-	usage, err := b.Reviewer.Run(runCtx, synth.Job{Workspace: ws, Prompt: ReviewPrompt(plan, n), ReadOnly: true, Transcript: transcript})
+	usage, err := b.Reviewer.Run(ctx, synth.Job{Workspace: ws, Prompt: ReviewPrompt(plan, n), ReadOnly: true, Transcript: transcript, Timeout: b.Timeout})
 	r.Spend += usage.CostUSD
 	if err != nil {
 		return "", false, err
