@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -63,7 +64,11 @@ type Server struct {
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
 	pending chan graphJob
 	live    live
-	acted   acted // the snapshot as last read, and the commands posted since, which it's served with
+	acted   acted     // the snapshot as last read, and the commands posted since, which it's served with
+	untaken []Untaken // what /act offers to plan, as the latest refresh read it
+	// planned is each issue /act planned, by repo#n, and when: a refresh
+	// that read GitHub before the post leaves it out for a while (#201).
+	planned map[string]time.Time
 }
 
 // Repo is one repository the page shows.
@@ -81,6 +86,7 @@ func (r *Repo) Short() string { return path.Base(r.Name) }
 // so one source failing leaves the rest fresh.
 type sources struct {
 	issues   []github.Issue
+	untaken  []github.Issue // open issues a writer opened that the factory hasn't taken (#201)
 	comments map[int]cachedComments
 	commits  []github.Commit
 	runs     []github.Run
@@ -425,14 +431,16 @@ func (s *Server) refresh(ctx context.Context) error {
 		if all, err := r.GitHub.Issues(ctx, ""); err != nil {
 			fail("issues", err)
 		} else {
-			var issues []github.Issue
+			var issues, others []github.Issue
 			for _, is := range all {
 				if factory.Takes(is) {
 					issues = append(issues, is)
+				} else if is.State == "open" && writer(is.AuthorAssociation) {
+					others = append(others, is)
 				}
 			}
-			r.src.issues = issues
-			for _, is := range issues {
+			r.src.issues, r.src.untaken = issues, nil
+			for _, is := range append(issues, others...) {
 				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt {
 					continue
 				}
@@ -442,6 +450,11 @@ func (s *Server) refresh(ctx context.Context) error {
 					continue
 				}
 				r.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
+			}
+			for _, is := range others {
+				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt && !commanded(c.comments) {
+					r.src.untaken = append(r.src.untaken, is)
+				}
 			}
 		}
 		// Only Invariant's own commits are shown. Another repository's
@@ -487,6 +500,24 @@ func (s *Server) refresh(ctx context.Context) error {
 		}
 	}
 
+	var untaken []Untaken
+	for _, r := range s.Repos {
+		for _, is := range r.src.untaken {
+			opened, _ := time.Parse(time.RFC3339, is.CreatedAt)
+			untaken = append(untaken, Untaken{Repo: r.Name, Number: is.Number, Title: is.Title, Opened: opened, URL: is.URL})
+		}
+	}
+	s.mu.Lock()
+	for k, at := range s.planned {
+		if time.Since(at) > 2*time.Minute {
+			delete(s.planned, k)
+		}
+	}
+	s.untaken = slices.DeleteFunc(untaken, func(u Untaken) bool {
+		_, ok := s.planned[fmt.Sprintf("%s#%d", u.Repo, u.Number)]
+		return ok
+	})
+	s.mu.Unlock()
 	snap := s.assemble(time.Now().UTC())
 	snap.Stale = stale
 	gz, err := s.publish(snap)

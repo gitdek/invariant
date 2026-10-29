@@ -389,11 +389,25 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 			t.Posts = append(t.Posts, Post{Comment: c, Marker: m})
 		}
 	}
+	// A writer's issue that opens with /invariant plan is a PRD, as one a
+	// writer commented it on is (#201). Its command stays in the thread,
+	// answered by the factory's first post, so every step knows the issue
+	// is a PRD.
+	planned := false
+	if hasVerb(ParseCommands(issue.Body), Plan) {
+		ok, err := f.writer(ctx, issue.User.Login)
+		if err != nil {
+			return t, err
+		}
+		if planned = ok; planned {
+			t.Commands = append(t.Commands, Command{Verb: Plan, By: issue.User.Login, URL: issue.URL, At: issue.CreatedAt})
+		}
+	}
 	// A new issue is the factory's if a writer opened it with /invariant solve,
 	// or a writer gave it the invariant label. One the factory opened for a
 	// ratified plan is solved as if the plan's ratifier had opened it with
 	// /invariant solve (#126).
-	if len(t.Posts) == 0 {
+	if len(t.Posts) == 0 && !planned {
 		if ok, err := f.writer(ctx, issue.User.Login); err != nil {
 			return t, err
 		} else if ok && hasVerb(ParseCommands(issue.Body), Solve) {
