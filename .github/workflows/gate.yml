@@ -195,7 +195,7 @@ jobs:
     # Each project's gate on a runner of its own, so verifying takes as long
     # as the slowest project rather than their sum, and a new project adds
     # no time to it (D-0155). factory/protocol, the slowest, takes about
-    # 13 minutes.
+    # 10 minutes, and the rest 1 to 4.
     name: ${{ matrix.project.dir }}
     needs: projects
     if: ${{ !cancelled() && needs.projects.result == 'success' && needs.projects.outputs.projects != '[]' }}
