@@ -48,6 +48,11 @@ type Job struct {
 	// a build's fallback run names one (D-0125); every first run leaves it
 	// empty, and thinks at the backend's own effort.
 	Effort string
+	// Timeout cuts the run off, counted from when it starts rather than
+	// from when it's asked for: a Codex run waits for its turn first
+	// (D-0138, D-0154), and the wait isn't the agent's time. Zero leaves
+	// the run uncut.
+	Timeout time.Duration
 }
 
 // Usage is how the agent's run went, by the agent's own account.
@@ -136,21 +141,23 @@ type Fallback struct {
 // build's, and there's never a third. RunAgent returns the fallback it took,
 // or nil.
 func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Duration, fallback string) (Usage, *Fallback, error) {
-	usage, err := runWithin(ctx, backend, job, timeout)
+	job.Timeout = timeout
+	usage, err := backend.Run(ctx, job)
 	if fallback == "" || !errors.Is(err, ErrThinkingLoop) {
 		return usage, nil, err
 	}
 	fb := &Fallback{Effort: fallback, Why: err.Error()}
 	job.Effort = fallback
-	usage, err = runWithin(ctx, backend, job, timeout)
+	usage, err = backend.Run(ctx, job)
 	return usage, fb, err
 }
 
-// runWithin runs backend on job, cut off after timeout.
-func runWithin(ctx context.Context, backend Backend, job Job, timeout time.Duration) (Usage, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return backend.Run(ctx, job)
+// within cuts ctx off once job's timeout has passed, from now.
+func within(ctx context.Context, job Job) (context.Context, context.CancelFunc) {
+	if job.Timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, job.Timeout)
 }
 
 // Synthesize runs one synthesis. The result lands in Out/result as a
