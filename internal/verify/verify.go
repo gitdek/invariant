@@ -58,8 +58,8 @@ type Report struct {
 	// Existing is the code an existing-code project checked, as it was
 	// (D-0054). The fingerprint covers it, so a receipt names that code.
 	Existing []ExistingCode `json:"existing,omitempty"`
-	// Assurance says how the code was checked: "proved", or "tested against
-	// the model". A receipt never blurs the two (D-0024).
+	// Assurance records what successful code checks established: "proved",
+	// "tested against the model", or "unchecked" (D-0024).
 	Assurance string    `json:"assurance"`
 	Build     Build     `json:"build"`
 	Toolchain Toolchain `json:"toolchain"`
@@ -581,10 +581,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		}
 		r.Conformance = &c
 	}
-	r.Assurance = "tested against the model"
-	if r.Code != nil {
-		r.Assurance = "proved"
-	}
+	r.Assurance = r.CodeAssurance()
 	r.Passed = r.Design.Passed && r.Build.Passed && (r.Agreement != nil || r.Conformance != nil)
 	if r.Agreement != nil {
 		r.Passed = r.Passed && r.Agreement.Passed
@@ -610,6 +607,21 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	return r, nil
+}
+
+// CodeAssurance derives assurance from successful results, even when an older
+// report's recorded label is stale. Other gate failures don't erase evidence.
+func (r *Report) CodeAssurance() string {
+	switch {
+	case r.ModelOnly:
+		return ""
+	case r.Code != nil && r.Code.Passed && len(r.Code.Functions) > 0:
+		return "proved"
+	case r.Agreement != nil && r.Agreement.Passed, r.Conformance != nil && r.Conformance.Passed:
+		return "tested against the model"
+	default:
+		return "unchecked"
+	}
 }
 
 // modelPassed says whether the checks every run makes, code or not, passed:

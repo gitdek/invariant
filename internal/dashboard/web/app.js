@@ -907,12 +907,12 @@
     if (pview === "table") return renderTable(s, ps);
     $("#projects").className = "cards";
     $("#projects").innerHTML = ps.map((p) => {
-      const assure = p.assurance === "proved" ? "proved" : p.assurance === "tested in every state" ? "every" : "tested";
+      const assure = p.assurance === "proved" ? "proved" : p.assurance === "tested in every state" ? "every" : p.assurance === "tested" ? "tested" : "unchecked";
       const caught = p.bugs.filter((b) => b.caught).length;
-      let evidence;
+      let evidence = ["unchecked", "Code evidence"];
       if (p.assurance === "proved") evidence = [`${p.verified}`, "Functions proved"];
-      else if ((p.visited || 0) >= p.states) evidence = ["every state", "Code reached"];
-      else evidence = [`${nf.format(p.visited || 0)}/${nf.format(p.states)}`, "States the code ran"];
+      else if (p.assurance === "tested in every state") evidence = ["every state", "Code reached"];
+      else if (p.assurance === "tested") evidence = [`${nf.format(p.visited || 0)}/${nf.format(p.states)}`, "States the code ran"];
       let prov = "Hand-built, before the factory";
       if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
       else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
