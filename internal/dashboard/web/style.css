@@ -787,8 +787,8 @@ footer p { margin: 0; max-width: 60em; }
 .composer input:focus, .composer select:focus, .composer textarea:focus { outline: none; border-color: var(--people); box-shadow: 0 0 0 3px rgba(var(--people-rgb), 0.18); }
 
 /* ---------- Live: the running steps, a card for each (#97) ---------- */
-:root { --search: #b48cff; }
-:root[data-theme="light"] { --search: #7c4dff; }
+:root { --search: #b48cff; --list: #55c8dc; --build: #e2bd69; --git: #e994ca; }
+:root[data-theme="light"] { --search: #7c4dff; --list: #007f91; --build: #986600; --git: #b34387; }
 .live-cards { display: grid; gap: 18px; }
 .live-cards > .livestep { margin: 0; }
 /* The fine print says it once, under the last card. */
@@ -836,6 +836,9 @@ footer p { margin: 0; max-width: 60em; }
 .strip .span { fill-opacity: 0.2; }
 .strip .span.read { fill: var(--ci); }
 .strip .span.search { fill: var(--search); }
+.strip .span.list { fill: var(--list); }
+.strip .span.build { fill: var(--build); }
+.strip .span.git { fill: var(--git); }
 .strip .span.edit { fill: var(--people); }
 .strip .span.gate, .strip .span.check, .strip .span.test { fill: var(--accent); }
 .strip .span.other { fill: var(--ink3); }
@@ -843,6 +846,9 @@ footer p { margin: 0; max-width: 60em; }
 .strip .tool { stroke-width: 2.5; stroke-linecap: round; transform-box: fill-box; transform-origin: center; }
 .strip .tool.read { stroke: var(--ci); }
 .strip .tool.search { stroke: var(--search); }
+.strip .tool.list { stroke: var(--list); }
+.strip .tool.build { stroke: var(--build); }
+.strip .tool.git { stroke: var(--git); }
 .strip .tool.edit { stroke: var(--people); }
 .strip .tool.gate, .strip .tool.check, .strip .tool.test { stroke: var(--accent); stroke-width: 3.5; }
 .strip .tool.other { stroke: var(--ink3); }
@@ -860,6 +866,9 @@ footer p { margin: 0; max-width: 60em; }
 .legend .lg i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 .legend .read i { background: var(--ci); }
 .legend .search i { background: var(--search); }
+.legend .list i { background: var(--list); }
+.legend .build i { background: var(--build); }
+.legend .git i { background: var(--git); }
 .legend .edit i { background: var(--people); }
 .legend .gate i, .legend .check i, .legend .test i { background: var(--accent); }
 .legend .other i { background: var(--ink3); }

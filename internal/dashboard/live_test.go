@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -193,14 +194,14 @@ func TestLiveReadsARunningStep(t *testing.T) {
 	if l.Turns != 7 || l.Thinking != 550 || l.Context != 2101 {
 		t.Errorf("%d turns, %d thinking tokens, %d in context; want 7, 550 and 2,101", l.Turns, l.Thinking, l.Context)
 	}
-	if want := map[string]int{"read": 2, "search": 1, "edit": 2, "other": 1, "gate": 1}; !reflect.DeepEqual(l.Tools, want) {
+	if want := map[string]int{"read": 3, "search": 1, "edit": 2, "gate": 1}; !reflect.DeepEqual(l.Tools, want) {
 		t.Errorf("tool calls %v, want %v", l.Tools, want)
 	}
 	var kinds []string
 	for _, m := range l.Marks {
 		kinds = append(kinds, m.Kind)
 	}
-	if want := []string{"think", "read", "search", "read", "think", "edit", "edit", "other", "gate"}; !reflect.DeepEqual(kinds, want) {
+	if want := []string{"think", "read", "search", "read", "think", "edit", "edit", "read", "gate"}; !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("marks %v, want %v", kinds, want)
 	}
 	first, second := l.Marks[0], l.Marks[4]
@@ -257,14 +258,72 @@ func TestLiveReadsOnlyWhatsNew(t *testing.T) {
 	}
 	f.write(t, true)
 	l := f.one(t)
-	if l.Turns != 8 || l.Tools["read"] != 3 || len(l.Marks) != 10 || l.Now != "read" {
-		t.Errorf("after the last line landed: %d turns, tools %v, %d marks, now %q; want 8, 3 reads, 10 marks and a read", l.Turns, l.Tools, len(l.Marks), l.Now)
+	if l.Turns != 8 || l.Tools["read"] != 4 || len(l.Marks) != 10 || l.Now != "read" {
+		t.Errorf("after the last line landed: %d turns, tools %v, %d marks, now %q; want 8, 4 reads, 10 marks and a read", l.Turns, l.Tools, len(l.Marks), l.Now)
 	}
 	if app := fileAt(l, "internal/app/app.go"); app == nil || app.Reads != 2 || !app.Lit {
 		t.Errorf("app.go %+v, want 2 reads, and lit again", app)
 	}
-	if again := f.one(t); again.Turns != 8 || again.Tools["read"] != 3 || len(again.Marks) != 10 {
+	if again := f.one(t); again.Turns != 8 || again.Tools["read"] != 4 || len(again.Marks) != 10 {
 		t.Errorf("a read with nothing new changed the counts: %d turns, tools %v, %d marks", again.Turns, again.Tools, len(again.Marks))
+	}
+}
+
+// A late result still belongs to its call after a long transcript has
+// pushed the start off the strip. It must not close or recount a new call.
+func TestLiveKeepsPendingShellCallsWhenMarksAreTrimmed(t *testing.T) {
+	for _, provider := range []string{"codex", "claude-code"} {
+		t.Run(provider, func(t *testing.T) {
+			tr := newTranscript()
+			tr.codex = provider == "codex"
+			emit := func(id, command string, done bool) {
+				t.Helper()
+				var e map[string]any
+				if tr.codex {
+					kind := "item.started"
+					if done {
+						kind = "item.completed"
+					}
+					e = map[string]any{"type": kind, "item": map[string]any{"type": "command_execution", "id": id, "command": command}}
+				} else {
+					kind := "assistant"
+					bl := map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": command}}
+					if done {
+						kind = "user"
+						bl = map[string]any{"type": "tool_result", "tool_use_id": id}
+					}
+					e = map[string]any{"type": kind, "message": map[string]any{"content": []map[string]any{bl}}}
+				}
+				tr.line([]byte(ev(t, e)))
+			}
+			emit("slow", "go build ./...", false)
+			for i := 0; i < maxMarks; i++ {
+				id := strconv.Itoa(i)
+				emit(id, "ls", false)
+				emit(id, "ls", true)
+			}
+			emit("new", "go test ./...", false)
+			// A message with no tool id is not a legacy tool result.
+			if tr.codex {
+				tr.line([]byte(`{"type":"item.completed","item":{"type":"agent_message"}}`))
+			} else {
+				tr.line([]byte(`{"type":"user","message":{"content":"words"}}`))
+			}
+			id := "slow"
+			if !tr.codex {
+				id = "" // an older result consumes the trimmed oldest call
+			}
+			emit(id, "go build ./...", true)
+			l := tr.view()
+			want := map[string]int{"build": 1, "list": maxMarks, "test": 1}
+			if !reflect.DeepEqual(l.Tools, want) || len(l.Marks) != maxMarks || l.Marks[len(l.Marks)-1].Until != nil || l.Now != "test" {
+				t.Fatalf("late result: tools %v, %d marks, last %+v, now %q", l.Tools, len(l.Marks), l.Marks[len(l.Marks)-1], l.Now)
+			}
+			emit("new", "go test ./...", true)
+			if l := tr.view(); l.Marks[len(l.Marks)-1].Until == nil {
+				t.Error("the new call's own result did not end it")
+			}
+		})
 	}
 }
 
