@@ -1792,8 +1792,8 @@
   // seconds while a step runs. It holds counts, times and file paths only,
   // never the agent's code, words or thinking (D-0051). Each step the
   // watcher is running has a card of its own (D-0113).
-  const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["edit", "editing"], ["gate", "gate runs"], ["check", "draft checks"], ["test", "test runs"], ["other", "other tools"]];
-  const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
+  const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["list", "listing"], ["build", "building"], ["test", "test runs"], ["git", "version control"], ["edit", "editing"], ["gate", "gate runs"], ["check", "draft checks"], ["other", "other tools"]];
+  const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", list: "Listing files", build: "Building", git: "Using version control", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
   const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
   let live = null;
   // The cards shown, by their step's repository, issue and since, so each
@@ -1973,10 +1973,9 @@
     }
     // A tool call that ran a while, or is still running, is a band in its
     // color from its start to its end, or to now.
-    const running = !l.ended ? [...marks].reverse().find((m) => m.kind !== "think") : null;
     for (const m of marks) {
       if (m.kind === "think") continue;
-      const open = !m.until && m === running;
+      const open = !m.until && !l.ended;
       const stop = m.until ? T(m.until) : open ? end : 0;
       if (stop - T(m.at) < 8000) continue;
       const a = x(m.at);
@@ -1986,7 +1985,8 @@
       if (m.kind === "think") return;
       const mx = x(m.at).toFixed(1);
       const land = landing && i >= c.marks && !REDUCED ? ` new" style="animation-delay:${Math.min(i - c.marks, 60) * 14}ms` : "";
-      parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(clockOf(m.at))}</title></line>`);
+      const times = m.until ? `${clockOf(m.at)}–${clockOf(m.until)} · ${clock(Math.max(0, (T(m.until) - T(m.at)) / 1000))}` : `${clockOf(m.at)}${!l.ended ? " · running" : ""}`;
+      parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(times)}</title></line>`);
     });
     (l.runs || []).forEach((r, i) => {
       if (!r.at) return;
