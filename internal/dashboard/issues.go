@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -101,6 +102,11 @@ type Waiting struct {
 	ActURL string    `json:"actURL,omitempty"`
 	PR     int       `json:"pr,omitempty"` // the pull request that failed, or was closed
 	Since  time.Time `json:"since"`
+	// Takes is what the factory takes now, as /invariant's verbs, the
+	// card's main action first. The card offers only these, and /act posts
+	// only these, so neither offers a command the factory refuses (#218,
+	// D-0156).
+	Takes []string `json:"takes"`
 }
 
 // PlanView is what a plumbing plan says: the change, the files it may
@@ -328,17 +334,12 @@ func answered(w *Waiting, cmds []factory.Command) bool {
 	chosen := map[string]bool{}
 	for _, c := range cmds {
 		switch c.Verb {
-		case factory.Revise:
-			// After a failure, only a build that stopped drafts again (#13).
-			if w.Kind != factory.KindFailed || w.Failure == factory.FailStopped || w.Failure == factory.FailLimit {
+		case factory.Revise, factory.Retry:
+			if slices.Contains(w.Takes, c.Verb) {
 				return true
 			}
 		case factory.Solve:
 			if w.Kind == factory.KindStuck || w.Kind == factory.KindClosed {
-				return true
-			}
-		case factory.Retry:
-			if w.Kind == factory.KindFailed {
 				return true
 			}
 		case factory.Ratify:
@@ -390,6 +391,7 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 			}
 		}
 		w.Forks = open
+		w.Takes = []string{factory.Choose, factory.Revise}
 	case factory.KindProposal:
 		p := m.Proposal
 		if p == nil {
@@ -421,12 +423,25 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 		// A plan, of either kind, pins no statement, and a rebuild at its
 		// lock's hash changes none.
 		w.Together = w.Unchanged || (len(p.Statements) == 0 && (p.Plan != nil || p.IssuePlan != nil))
-	case factory.KindFailed, factory.KindStuck:
+		w.Takes = []string{factory.Ratify, factory.Revise}
+	case factory.KindFailed:
 		w.PR, w.Failure = m.PR, m.Why()
+		// A build that stopped before it made a pull request builds or
+		// drafts again (#13). One whose pull request is open only builds
+		// again: the factory drafts again once that pull request is closed,
+		// which makes its card a closed one.
+		w.Takes = []string{factory.Retry}
+		if w.Failure == factory.FailStopped || w.Failure == factory.FailLimit {
+			w.Takes = append(w.Takes, factory.Revise)
+		}
+	case factory.KindStuck:
+		// There's no draft to build, so it only drafts again.
+		w.Takes = []string{factory.Revise}
 	case factory.KindClosed:
 		// Its pull request was closed without merging, and the issue is
 		// still open: the factory waits for a person to draft again.
 		w.PR = m.PR
+		w.Takes = []string{factory.Revise}
 	default:
 		return nil
 	}

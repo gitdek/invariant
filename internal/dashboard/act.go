@@ -261,9 +261,9 @@ var (
 )
 
 // check says whether a command is one the issue is waiting for: answers to
-// its open questions, a ratification of its proposal, a retry of its failed
-// pull request, or a revise; or /invariant plan, on an issue the factory
-// hasn't taken (#201). The page offers only those.
+// its open questions, a ratification of its proposal, or a retry or a
+// revise where the factory takes one (#218); or /invariant plan, on an issue
+// the factory hasn't taken (#201). The page offers only those.
 func (c act) check(issues []Issue, untaken []Untaken) error {
 	if strings.TrimSpace(c.Body) == "/invariant plan" {
 		for _, u := range untaken {
@@ -290,8 +290,8 @@ func (c act) check(issues []Issue, untaken []Untaken) error {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		switch m := chooseLine.FindStringSubmatch(line); {
-		case line == "/invariant revise" && (w.Kind == "forks" || w.Kind == "proposal" || w.Failure == factory.FailStopped || w.Failure == factory.FailLimit):
-		case line == "/invariant retry" && w.Kind == "failed":
+		case line == "/invariant revise" && slices.Contains(w.Takes, factory.Revise):
+		case line == "/invariant retry" && slices.Contains(w.Takes, factory.Retry):
 		case m != nil && w.Kind == "forks":
 			if !offered(w.Forks, m[1], m[2]) {
 				return fmt.Errorf("%s has no option %s", m[1], m[2])
