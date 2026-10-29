@@ -116,6 +116,21 @@ func Markdown(r *verify.Report) string {
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
 	}
+	if deps := t.PythonDependencies; deps != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | base `%s`, platform `%s`, recipe `%s` |\n", shortImage(deps.Base), deps.Platform, short(deps.Recipe))
+		b.WriteString("\n| Dependency input | SHA-256 |\n| :-- | :-- |\n")
+		for _, input := range deps.Inputs {
+			fmt.Fprintf(&b, "| `%s` | `%s` |\n", strings.ReplaceAll(input.Path, "|", "\\|"), short(input.SHA256))
+		}
+		if len(deps.Artifacts) == 0 {
+			b.WriteString("\nPython dependency resolution installed no application wheels.\n")
+		} else {
+			b.WriteString("\n| Python wheel | Version | Filename | SHA-256 |\n| :-- | :-- | :-- | :-- |\n")
+			for _, artifact := range deps.Artifacts {
+				fmt.Fprintf(&b, "| `%s` | `%s` | `%s` | `%s` |\n", artifact.Name, artifact.Version, artifact.Filename, short(artifact.SHA256))
+			}
+		}
+	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()
 }

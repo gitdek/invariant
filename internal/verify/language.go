@@ -495,9 +495,24 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with the project's wheel dependencies when it has requirements.
+// Files marked # +nagini are proved separately with Nagini (D-0031).
+type Python struct {
+	Image                string
+	dependenciesSelected bool
+}
+
+func (py Python) withDependencies(ctx context.Context, root string) (Python, *toolchain.PythonDependencies, error) {
+	deps, err := toolchain.PythonDepsImage(ctx, root)
+	if err != nil {
+		return py, nil, err
+	}
+	if deps != nil {
+		py.Image = deps.Image
+	}
+	py.dependenciesSelected = true
+	return py, deps, nil
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,6 +527,12 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	if !py.dependenciesSelected {
+		var err error
+		if py, _, err = py.withDependencies(ctx, p.Dir); err != nil {
+			return Build{}, Evidence{}, err
+		}
+	}
 	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
 python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"

@@ -107,6 +107,38 @@ The factory owns both the model and the code, and each Go method's contract rest
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
 
+### Python application dependencies
+
+A Python project can declare application packages in `requirements.txt` at its project root. Invariant builds a reusable application image from the existing digest-pinned Python base on `linux/amd64`. Tests, conformance and the run one size larger share the image selected for that gate run. Nagini keeps its separate pinned verifier image. Projects without `requirements.txt` keep the plain Python image.
+
+Requirements are UTF-8 pip files. They support package names, versions and ranges, extras, environment markers, pip `--hash` options, comments, blank lines and backslash continuations. Local `-r`/`--requirement` and `-c`/`--constraint` references are followed recursively relative to the file containing them; short options may attach the path, and long options accept a space or `=`. For example:
+
+```text
+# requirements.txt
+-r deps/application.txt
+
+# deps/application.txt
+packaging>=24,<25
+-c constraints.txt
+
+# deps/constraints.txt
+packaging==24.2
+```
+
+Only wheels from public PyPI are installed. Source-only packages fail installation. URLs, VCS, editable and local packages, environment substitutions, index overrides and other pip option overrides are rejected. Referenced files must stay within the project, with no symlinks or reference cycles; missing files fail before any installation. Invariant preserves the input files and uses no host pip configuration. Pip validates requirement syntax and its hash-checking rules.
+
+Building the image needs network access; execution and reading the image's installation report are offline, with no host environment or credentials passed into the container. A failed installation or missing or malformed wheel evidence stops the checks without a fallback. Reuse depends on the complete recipe, pinned base, platform and every referenced input's relative path and bytes, independent of checkout location and unrelated source files.
+
+JSON and Markdown receipts record that base, platform, recipe, canonical input hashes and each resolved wheel's name, version, filename and SHA-256 hash, including transitive dependencies. The image retains pip's installation report, so reuse records the wheels actually installed. A fresh build of unpinned requirements can resolve differently; local and CI fingerprints agree only for the same commit, results and effective environment. Local Docker tags and build timestamps are not dependency evidence.
+
+Acceptance tests cover a referenced requirements/constraints fixture with a Docker CLI double. To run the same small `packaging` dependency against real Docker and PyPI, opt in with:
+
+```sh
+INVARIANT_PYTHON_DEPS_REAL=1 go test ./internal/verify -run '^TestPythonDependencyImagesBuildReuseAndRunOffline$' -count=1 -timeout 15m
+```
+
+Attaching this environment evidence to component receipts remains later work: components currently carry inventory only. Python existing-code discovery and contract checks remain subsequent issues on [#210](https://github.com/gitdek/invariant/issues/210).
+
 ### Component configuration in ordinary Go
 
 The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. **Code verification with explicit components is not supported yet:** `invariant verify` rejects it before running any tool. Model-only checking through `verify.RunModel` remains available. Omitting `components` keeps the existing verification path, with no inferred component inventory and no change to ratified locks.
