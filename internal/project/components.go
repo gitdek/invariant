@@ -1,0 +1,465 @@
+package project
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// ComponentsConfig declares package directories and the checks intended for
+// their code. It says nothing about what a verifier or test has established.
+type ComponentsConfig struct {
+	Scope  []string         `json:"scope"`
+	Checks []ComponentCheck `json:"checks,omitempty"`
+}
+
+// ComponentRef selects one declaration in a project-relative source file.
+type ComponentRef struct {
+	Source string `json:"source"`
+	Symbol string `json:"symbol"`
+}
+
+type ComponentCheck struct {
+	Target      ComponentRef    `json:"target"`
+	Proof       *ComponentProof `json:"proof,omitempty"`
+	Tests       []ComponentRef  `json:"tests,omitempty"`
+	Conformance []ComponentRef  `json:"conformance,omitempty"`
+}
+
+type ComponentProof struct {
+	Contracts []ComponentRef `json:"contracts"`
+}
+
+// ComponentInventory keeps source identity separate from intended checks.
+// Legacy projects have no inferred scope, components or checks.
+type ComponentInventory struct {
+	Mode       string                   `json:"mode"`
+	Scope      []string                 `json:"scope,omitempty"`
+	Files      []ComponentFile          `json:"files,omitempty"`
+	Components []Component              `json:"components,omitempty"`
+	Checks     []ResolvedComponentCheck `json:"checks,omitempty"`
+}
+
+type ComponentFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+type Component struct {
+	ID             string `json:"id"`
+	Language       string `json:"language"`
+	Package        string `json:"package"`
+	Symbol         string `json:"symbol"`
+	Source         string `json:"source"`
+	SourceSHA256   string `json:"source_sha256"`
+	ContractSHA256 string `json:"contract_sha256"`
+}
+
+type ResolvedComponentCheck struct {
+	Target      string                  `json:"target"`
+	Proof       *ResolvedComponentProof `json:"proof,omitempty"`
+	Tests       []string                `json:"tests,omitempty"`
+	Conformance []string                `json:"conformance,omitempty"`
+}
+
+type ResolvedComponentProof struct {
+	Contracts []string `json:"contracts"`
+}
+
+// ResolveComponents inventories all non-test Go declarations in each scoped
+// directory, regardless of build tags, and resolves every selected reference.
+// It runs no tools and supplies no assurance or verification evidence.
+func ResolveComponents(p *Project) (*ComponentInventory, error) {
+	cfg := p.Manifest.Components
+	if cfg == nil {
+		return &ComponentInventory{Mode: "legacy"}, nil
+	}
+	if lang := p.Manifest.Language; lang != "" && lang != "go" {
+		return nil, fmt.Errorf("components: language %q is not supported; component discovery is Go-only", lang)
+	}
+	if len(cfg.Scope) == 0 {
+		return nil, fmt.Errorf("components: scope must name at least one Go package directory")
+	}
+	inv := &ComponentInventory{Mode: "explicit", Scope: append([]string(nil), cfg.Scope...)}
+	sort.Strings(inv.Scope)
+	r := componentResolver{root: p.Dir, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{}}
+	for i, dir := range inv.Scope {
+		if i > 0 && dir == inv.Scope[i-1] {
+			return nil, fmt.Errorf("components: duplicate scope %q", dir)
+		}
+		full, err := componentPath(p.Dir, dir, true)
+		if err != nil {
+			return nil, fmt.Errorf("components scope %q: %w", dir, err)
+		}
+		entries, err := os.ReadDir(full)
+		if err != nil {
+			return nil, fmt.Errorf("components scope %q: %w", dir, err)
+		}
+		count := 0
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			source := path.Join(dir, name)
+			f, err := r.read(source)
+			if err != nil {
+				return nil, err
+			}
+			count++
+			inv.Files = append(inv.Files, f.file)
+			inv.Components = append(inv.Components, f.components...)
+			for _, c := range f.components {
+				r.scoped[ComponentRef{Source: c.Source, Symbol: c.Symbol}] = c
+			}
+		}
+		if count == 0 {
+			return nil, fmt.Errorf("components scope %q: no non-test Go source files", dir)
+		}
+	}
+	targets := map[string]bool{}
+	for _, check := range cfg.Checks {
+		target, err := r.resolve(check.Target, "target")
+		if err != nil {
+			return nil, err
+		}
+		if targets[target.ID] {
+			return nil, fmt.Errorf("components: duplicate target %s", target.ID)
+		}
+		targets[target.ID] = true
+		if check.Proof == nil && len(check.Tests) == 0 && len(check.Conformance) == 0 {
+			return nil, fmt.Errorf("components target %s: check must select proof, tests or conformance", target.ID)
+		}
+		resolved := ResolvedComponentCheck{Target: target.ID}
+		if check.Proof != nil {
+			if len(check.Proof.Contracts) == 0 {
+				return nil, fmt.Errorf("components target %s: proof must select at least one contract", target.ID)
+			}
+			contracts, err := r.associations(check.Proof.Contracts, "contract")
+			if err != nil {
+				return nil, err
+			}
+			resolved.Proof = &ResolvedComponentProof{Contracts: contracts}
+		}
+		if resolved.Tests, err = r.associations(check.Tests, "test"); err != nil {
+			return nil, err
+		}
+		if resolved.Conformance, err = r.associations(check.Conformance, "conformance"); err != nil {
+			return nil, err
+		}
+		inv.Checks = append(inv.Checks, resolved)
+	}
+	sort.Slice(inv.Files, func(i, j int) bool { return inv.Files[i].Path < inv.Files[j].Path })
+	sort.Slice(inv.Components, func(i, j int) bool { return inv.Components[i].ID < inv.Components[j].ID })
+	sort.Slice(inv.Checks, func(i, j int) bool { return inv.Checks[i].Target < inv.Checks[j].Target })
+	return inv, nil
+}
+
+type componentSource struct {
+	file       ComponentFile
+	components []Component
+}
+
+type componentResolver struct {
+	root   string
+	files  map[string]componentSource
+	scoped map[ComponentRef]Component
+}
+
+func (r *componentResolver) associations(refs []ComponentRef, kind string) ([]string, error) {
+	var ids []string
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		c, err := r.resolve(ref, kind)
+		if err != nil {
+			return nil, err
+		}
+		if seen[c.ID] {
+			return nil, fmt.Errorf("components: duplicate %s selection %s", kind, c.ID)
+		}
+		seen[c.ID] = true
+		ids = append(ids, c.ID)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func (r *componentResolver) resolve(ref ComponentRef, kind string) (Component, error) {
+	fail := func(why string) (Component, error) {
+		return Component{}, fmt.Errorf("components %s %q in %q: %s", kind, ref.Symbol, ref.Source, why)
+	}
+	if ref.Symbol == "" {
+		return fail("symbol is required")
+	}
+	if !strings.HasSuffix(ref.Source, ".go") {
+		return fail("source must be a Go file")
+	}
+	if kind == "test" && !strings.HasSuffix(ref.Source, "_test.go") {
+		return fail("test references must name a _test.go file")
+	}
+	if kind == "target" || kind == "contract" {
+		c, ok := r.scoped[ref]
+		if !ok {
+			return fail("selection must resolve to exactly one declaration in scope")
+		}
+		if kind == "contract" && c.ContractSHA256 == "" {
+			return fail("declaration has no inline Gobra contract")
+		}
+		return c, nil
+	}
+	f, err := r.read(ref.Source)
+	if err != nil {
+		return fail(err.Error())
+	}
+	for _, c := range f.components {
+		if c.Symbol == ref.Symbol {
+			return c, nil
+		}
+	}
+	return fail("selection must resolve to exactly one declaration")
+}
+
+func (r *componentResolver) read(source string) (componentSource, error) {
+	if f, ok := r.files[source]; ok {
+		return f, nil
+	}
+	full, err := componentPath(r.root, source, false)
+	if err != nil {
+		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
+	}
+	b, err := os.ReadFile(full)
+	if err != nil {
+		return componentSource{}, err
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, source, b, parser.ParseComments)
+	if err != nil {
+		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
+	}
+	pkg, err := componentPackage(r.root, path.Dir(source))
+	if err != nil {
+		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
+	}
+	out := componentSource{file: ComponentFile{Path: source, SHA256: componentHash(b)}}
+	ordinals, seen := map[string]int{}, map[string]bool{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		symbol := fn.Name.Name
+		if fn.Recv != nil {
+			if len(fn.Recv.List) != 1 {
+				return componentSource{}, fmt.Errorf("components source %q: invalid receiver for %s", source, symbol)
+			}
+			receiver := componentReceiver(fn.Recv.List[0].Type)
+			if receiver == "" {
+				return componentSource{}, fmt.Errorf("components source %q: unsupported receiver for %s", source, symbol)
+			}
+			symbol = receiver + "." + symbol
+		}
+		if fn.Name.Name == "_" || fn.Name.Name == "init" && fn.Recv == nil {
+			ordinals[symbol]++
+			symbol += "[" + strconv.Itoa(ordinals[symbol]) + "]"
+		}
+		if seen[symbol] {
+			return componentSource{}, fmt.Errorf("components source %q: duplicate declaration %s", source, symbol)
+		}
+		seen[symbol] = true
+		out.components = append(out.components, Component{
+			ID:       "go:" + pkg + "#" + symbol + "@" + source,
+			Language: "go", Package: pkg, Symbol: symbol, Source: source,
+			SourceSHA256: out.file.SHA256, ContractSHA256: componentContract(fset, fn.Doc, b),
+		})
+	}
+	r.files[source] = out
+	return out, nil
+}
+
+func componentReceiver(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		if name := componentReceiver(t.X); name != "" {
+			return "(*" + name + ")"
+		}
+	case *ast.IndexExpr:
+		return componentReceiver(t.X)
+	case *ast.IndexListExpr:
+		return componentReceiver(t.X)
+	case *ast.ParenExpr:
+		return componentReceiver(t.X)
+	}
+	return ""
+}
+
+func componentHash(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func componentContract(fset *token.FileSet, doc *ast.CommentGroup, src []byte) string {
+	if doc == nil {
+		return ""
+	}
+	annotated := false
+	for _, c := range doc.List {
+		if strings.HasPrefix(c.Text, "//@") || strings.HasPrefix(c.Text, "// @") || strings.HasPrefix(c.Text, "/*@") {
+			annotated = true
+		}
+	}
+	if !annotated {
+		return ""
+	}
+	start := fset.Position(doc.Pos()).Offset
+	last := doc.List[len(doc.List)-1]
+	end := fset.Position(last.Pos()).Offset
+	// Read the original bytes: ast.Comment.Text drops carriage returns.
+	if strings.HasPrefix(last.Text, "//") {
+		if n := bytes.IndexByte(src[end:], '\n'); n >= 0 {
+			end += n + 1
+		} else {
+			end = len(src)
+		}
+	} else {
+		end += bytes.Index(src[end:], []byte("*/")) + 2
+		newline := end
+		for newline < len(src) && (src[newline] == ' ' || src[newline] == '\t' || src[newline] == '\r') {
+			newline++
+		}
+		if newline < len(src) && src[newline] == '\n' {
+			end = newline + 1
+		}
+	}
+	return componentHash(src[start:end])
+}
+
+// componentPath rejects aliases at every step below the project root, before
+// opening any source, association or module file.
+func componentPath(root, rel string, directory bool) (string, error) {
+	if rel == "" || path.Clean(rel) != rel || path.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") || strings.Contains(rel, `\`) {
+		return "", fmt.Errorf("%q must be a clean project-relative path", rel)
+	}
+	full := root
+	parts := strings.Split(rel, "/")
+	for i, part := range parts {
+		full = filepath.Join(full, part)
+		info, err := os.Lstat(full)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%q must not contain symbolic links", rel)
+		}
+		if i < len(parts)-1 || directory {
+			if !info.IsDir() {
+				return "", fmt.Errorf("%q must name a directory", rel)
+			}
+		} else if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("%q must name a regular file", rel)
+		}
+	}
+	return full, nil
+}
+
+// componentPackage uses the nearest module inside the project, including a
+// nested module. Package clauses alone cannot distinguish import identities.
+func componentPackage(root, dir string) (string, error) {
+	for parent := dir; ; parent = path.Dir(parent) {
+		name := path.Join(parent, "go.mod")
+		full, err := componentPath(root, name, false)
+		if err == nil {
+			b, err := os.ReadFile(full)
+			if err != nil {
+				return "", err
+			}
+			module, err := componentModule(b)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", name, err)
+			}
+			rel, err := filepath.Rel(filepath.FromSlash(parent), filepath.FromSlash(dir))
+			if err != nil {
+				return "", err
+			}
+			if rel == "." {
+				return module, nil
+			}
+			return module + "/" + filepath.ToSlash(rel), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		if parent == "." {
+			return "", fmt.Errorf("no enclosing go.mod inside the project for %q", dir)
+		}
+	}
+}
+
+func componentModule(src []byte) (string, error) {
+	module, block := "", ""
+	found := false
+	for _, line := range strings.Split(string(src), "\n") {
+		// A module import path cannot contain //, even inside quotes.
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		value := line
+		if block != "" {
+			if line == ")" {
+				block = ""
+				continue
+			}
+			if block != "module" {
+				continue
+			}
+		} else {
+			end := strings.IndexAny(line, " \t(")
+			if end < 0 {
+				end = len(line)
+			}
+			directive := line[:end]
+			value = strings.TrimSpace(line[end:])
+			if value == "(" {
+				block = directive
+				continue
+			}
+			if directive != "module" {
+				continue
+			}
+		}
+		if found || value == "" {
+			return "", fmt.Errorf("want exactly one module import path")
+		}
+		found = true
+		module = value
+		if value[0] == '"' || value[0] == '`' {
+			var err error
+			module, err = strconv.Unquote(value)
+			if err != nil {
+				return "", fmt.Errorf("invalid module import path: %w", err)
+			}
+		}
+	}
+	if block != "" {
+		return "", fmt.Errorf("unterminated %s block", block)
+	}
+	if module == "" || path.IsAbs(module) || path.Clean(module) != module || module == "." || module == ".." || strings.HasPrefix(module, "../") || strings.ContainsAny(module, "\\ \t\r\n#@()") {
+		return "", fmt.Errorf("missing or invalid module import path %q", module)
+	}
+	return module, nil
+}

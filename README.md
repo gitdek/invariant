@@ -107,6 +107,38 @@ The factory owns both the model and the code, and each Go method's contract rest
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
 
+### Component configuration in ordinary Go
+
+The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. **Code verification with explicit components is not supported yet:** `invariant verify` rejects it before running any tool. Model-only checking through `verify.RunModel` remains available. Omitting `components` keeps the existing verification path, with no inferred component inventory and no change to ratified locks.
+
+For example, a Go manifest can include:
+
+```json
+{
+  "components": {
+    "scope": ["core"],
+    "checks": [
+      {
+        "target": {"source": "core/ops.go", "symbol": "(*Counter).Step"},
+        "proof": {
+          "contracts": [{"source": "core/ops.go", "symbol": "(*Counter).Step"}]
+        },
+        "tests": [{"source": "core/ops_test.go", "symbol": "TestStep"}],
+        "conformance": [{"source": "drivers/explore.go", "symbol": "Drive"}]
+      }
+    ]
+  }
+}
+```
+
+`scope` names a nonempty list of package directories relative to the project (`.` names its root), each read without descending into subdirectories. The inventory includes every non-test Go source file, regardless of build tags, and every function and method declared there, including unselected neighbors and files with no functions. `checks` may be empty. Each target and its selected contracts must be in scope; test and conformance references may name files elsewhere inside the project. Tests must refer to declarations in `_test.go` files. A `proof` requires at least one contract. Loading validates every reference, requires selected contracts to have attached Gobra annotations, and rejects duplicate scopes, targets or associations, missing or ambiguous declarations, malformed source and paths that escape the project. Paths must be clean, relative and use `/` separators.
+
+Each component has an ID such as `go:example.com/app/core#(*Counter).Step@core/ops.go`: language, the import path from the nearest enclosing `go.mod` within the project, the symbol and its project-relative source path. Functions use `Func`; methods use `Type.Method` or `(*Type).Method`. Every initializer uses `init[1]`, `init[2]`, and so on. Blank-named declarations use `_[1]`, `Type._[1]` or `(*Type)._[1]`. Ordinals start at 1 for each receiver-qualified symbol in each file, in declaration order, even for a single declaration, and selections use those numbered symbols too. IDs survive checkout relocation and body or line-number edits; reordering declarations with the same ordinal base can change which declaration an ordinal selects.
+
+`project.ResolveComponents` returns a canonical inventory: sorted scope, files, component IDs, checks and association IDs. Each file and component carries the SHA-256 of its complete source file; a component separately hashes the exact attached doc-comment block, including its final newline, when it contains Gobra annotations. A component without such a contract has an empty contract hash. Hashes use `sha256:<lowercase hex>`. The inventory and selections carry no assurance or verification evidence.
+
+Component discovery is Go-only for now; explicit Python or TypeScript configurations are rejected. Connecting successful tool results to components, correcting project-wide assurance, evidence fingerprints, component receipts and dashboard summaries remain later slices, along with Python and TypeScript discovery.
+
 ## One model, three languages
 
 The same ratified two-phase commit, pinned by the same hashes, checked in each of the languages Invariant targets:
@@ -268,7 +300,7 @@ Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory t
 - [x] **Slice 12 · One decision graph for every project.** Every project's decisions move into one embedded store, SQLite used as a graph, with a journal in each repository and traversal tools agents call over MCP, so a decision can be traced to what rests on it and what implements it ([D-0096](decisions/D-0096-decision-graph.md)). This repository's decisions are in it. copythis-ad's were too, from a journal of its own ([copythis-ad#41](https://github.com/gitdek/copythis-ad/pull/41)), so a question crossed projects: what in copythis-ad rested on one of Invariant's decisions. That repository has since started over and left Invariant. `invariant decisions` records and answers, coding agents ask it over MCP, CI checks it on every change, and the dashboard draws it ([#135](https://github.com/gitdek/invariant/pull/135)). Now [#177](https://github.com/gitdek/invariant/issues/177) proves the journal in four parts, and three are in. Decision IDs are proved unique, and `decide` runs on the proof ([#192](https://github.com/gitdek/invariant/issues/192)). A decision's state is proved to be the fold of its lines, and every fold runs on the proof ([#193](https://github.com/gitdek/invariant/issues/193)). The store's journal is proved only to grow, and every write and rebuild runs on the proof ([#195](https://github.com/gitdek/invariant/issues/195)).
 - [ ] **Slice 13 · The factory takes every change, and a whole PRD.** Plumbing goes through the factory too, with a plan and tests where a model doesn't fit, and a PRD becomes a plan of issues a person ratifies, which the factory works one at a time ([D-0105](decisions/D-0105-factory-takes-every-change.md)). In progress: the factory built eleven of its own plumbing changes on 2026-09-29, and since [#134](https://github.com/gitdek/invariant/pull/134) it works on three issues at once. `/invariant plan` turns a PRD into a plan of issues to ratify ([#139](https://github.com/gitdek/invariant/pull/139)), and the factory now works each plan a writer ratifies, one issue at a time ([#144](https://github.com/gitdek/invariant/pull/144), [#148](https://github.com/gitdek/invariant/issues/148)). It planned [#153](https://github.com/gitdek/invariant/issues/153), the first real PRD, then opened and built its first issue itself. The dashboard's `/act` plans too: it opens a PRD with `/invariant plan`, or plans an open issue a writer opened that the factory hasn't taken ([#201](https://github.com/gitdek/invariant/issues/201)). Paused from 2026-09-29 to 2026-10-29, while coding agents built changes by hand; it runs again since, on Codex.
 - [ ] **Slice 14 · Codex on chosen projects.** A project picks its coding agent, Codex or Claude Code, and the factory runs Codex under the same rules, limits, view and records as Claude Code ([#153](https://github.com/gitdek/invariant/issues/153)). In progress: an issue picks its agent with an `Agent:` line, else its project's manifest does, that agent drafts and builds it ([#173](https://github.com/gitdek/invariant/issues/173)), and every record of its work names it ([#179](https://github.com/gitdek/invariant/issues/179)). Built by hand while the factory is paused: the factory takes back only regular files from an agent's workspace, Codex has a backend that runs it headless under a permission profile of its own, where its commands see nothing outside the workspace, the watcher checks its agents at start, the live view shows a Codex run, and Codex gets the decision graph's tools. Its first run built the two-phase commit and passed the final gate with proof ([#189](https://github.com/gitdek/invariant/pull/189)). Next: the factory's first Codex issue, once it resumes. Since 2026-10-29, Codex is the default everywhere, on `gpt-6-astra` at its highest reasoning, and Claude Code runs only where it's turned on ([#207](https://github.com/gitdek/invariant/issues/207)).
-- [ ] **Slice 15 · Verification inside ordinary code.** Ordinary Go and Python stay as they are, the critical components get proved in place, and Invariant checks how the code around them uses them, one component at a time, with every receipt saying what's proved and what's only tested. Planned.
+- [ ] **Slice 15 · Verification inside ordinary code.** Ordinary Go and Python stay as they are, the critical components get proved in place, and Invariant checks how the code around them uses them, one component at a time, with every receipt saying what's proved and what's only tested. In progress: [#212](https://github.com/gitdek/invariant/issues/212)'s first slice inventories Go components and validates intended checks. Explicit component code verification remains unavailable until tool evidence is connected.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md). Slice 4's are in [D-0036](decisions/D-0036-slice-4-plan.md).
 

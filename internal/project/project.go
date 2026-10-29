@@ -46,6 +46,9 @@ type Manifest struct {
 	// it to the watcher's own. A factory pull request never changes it, as
 	// it changes nothing here but the parameters (D-0086).
 	Agent string `json:"agent,omitempty"`
+	// Components selects checks in an explicit source inventory. Omitting
+	// it keeps the legacy project-wide gate and requires no source discovery.
+	Components *ComponentsConfig `json:"components,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,
@@ -89,7 +92,8 @@ func ProposalHash(bounds map[string]string, statements []Statement) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Validate checks a lock and manifest together, as Load does.
+// Validate checks a lock and manifest together. Load also resolves explicit
+// component selections against the project's source files.
 func Validate(m Manifest, l Lock) error {
 	return (&Project{Manifest: m, Lock: l}).validate()
 }
@@ -144,7 +148,11 @@ func Load(dir string) (*Project, error) {
 	if err := readJSON(filepath.Join(dir, lockFile), &p.Lock); err != nil {
 		return nil, err
 	}
-	return p, p.validate()
+	if err := p.validate(); err != nil {
+		return p, err
+	}
+	_, err := ResolveComponents(p)
+	return p, err
 }
 
 func (p *Project) validate() error {
