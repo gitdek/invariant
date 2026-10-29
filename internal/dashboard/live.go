@@ -490,9 +490,7 @@ func (t *transcript) touch(p, kind string) {
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(t.cwd, p)
 		}
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			p = real
-		}
+		p = canonical(p)
 	}
 	rel, ok := inside(t.cwd, p)
 	if !ok {
@@ -513,9 +511,28 @@ func (t *transcript) touch(p, kind string) {
 }
 
 func (t *transcript) workspace(dir string) {
-	t.cwd = filepath.Clean(dir)
-	if real, err := filepath.EvalSymlinks(t.cwd); err == nil {
-		t.cwd = real
+	t.cwd = canonical(dir)
+}
+
+// canonical resolves p's symbolic links as far as p exists, so a file that
+// doesn't, as one an agent made and removed, still compares with the
+// workspace it was in. On macOS, temporary directories are under /var, a
+// link to /private/var.
+func canonical(p string) string {
+	if p == "" {
+		return ""
+	}
+	p = filepath.Clean(p)
+	for dir, rest := p, ""; ; {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(real, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
 	}
 }
 
