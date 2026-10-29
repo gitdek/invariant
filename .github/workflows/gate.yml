@@ -76,17 +76,16 @@ jobs:
           go run ./cmd/invariant decisions check $base
 
   verify:
-    # Everything but the gate's own tests. invariant/gate, below, is the
-    # check the factory merges on, and it passes when this does.
+    # Everything but verifying the projects, which their own jobs do, and the
+    # gate's own tests. invariant/gate, below, is the check the factory
+    # merges on, and it needs this.
     name: invariant/verify
     needs: changes
     # Skipped only when the step above says the change is docs alone. If that
     # step fails, the gate runs.
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
-    # Verifying every project takes about 13 minutes, three at a time and
-    # the heaviest first (D-0100, D-0118).
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -115,6 +114,42 @@ jobs:
           if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
           "$RUNNER_TEMP/invariant" decisions check $base
 
+      # The branch names the issue: invariant/issue-<n>-<slug>. Only that
+      # issue's ratification may amend an existing project (D-0045).
+      - name: Keep a factory pull request in scope
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          issue=$(printf '%s' "$HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
+          "$RUNNER_TEMP/invariant" scope -base "origin/$BASE" -issue "${issue:-0}" HEAD
+
+      - name: Check who ratified each project
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          projects=$(git ls-files '*/.invariant/invariant.json' | sed 's#/.invariant/invariant.json$##')
+          plans=$(git ls-files '.invariant/plans/*.json')
+          "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects $plans
+
+  projects:
+    # Every project in the repository, found rather than listed, so a factory
+    # pull request is gated without touching this file. A factory pull
+    # request changes one project and nothing else, as invariant/verify's
+    # scope check makes sure, so it verifies that project alone (D-0079).
+    name: Find the projects
+    needs: changes
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      projects: ${{ steps.find.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       # A factory pull request that adds its issue's ratified plan builds
       # plumbing, not a project (D-0105). It gets the whole gate, as a
       # person's pull request does, since it can change the gate itself.
@@ -131,22 +166,11 @@ jobs:
             echo "It builds a project."
           fi
 
-      # The branch names the issue: invariant/issue-<n>-<slug>. Only that
-      # issue's ratification may amend an existing project (D-0045).
-      - name: Keep a factory pull request in scope
-        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
-        env:
-          BASE: ${{ github.base_ref }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          issue=$(printf '%s' "$HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
-          "$RUNNER_TEMP/invariant" scope -base "origin/$BASE" -issue "${issue:-0}" HEAD
-
-      # Every project in the repository, found rather than listed, so a
-      # factory pull request is gated without touching this file. A factory
-      # pull request changes one project and nothing else, as the step above
-      # checks, so it verifies that project alone (D-0079).
-      - name: Verify every project
+      # Each project is a directory and a name, its last element, which names
+      # its receipts. The factory's own projects, the heaviest, come first, so
+      # they start first when GitHub has fewer runners free than projects.
+      - name: Find the projects
+        id: find
         env:
           BASE: ${{ github.base_ref }}
           FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') && steps.kind.outputs.plumbing != 'true' }}
@@ -162,50 +186,73 @@ jobs:
             done | sort -u)
             if [ -z "$manifests" ]; then echo "The pull request changes no project."; exit 1; fi
           fi
-          # Each project's checks run mostly on one core, so three run at a
-          # time on the runner's four. The first runs alone, so it pulls and
-          # builds the toolchain's images once. The rest start in reverse
-          # order, so the factory's own projects, the heaviest, start first:
-          # factory/protocol alone takes about 13 minutes, which bounds the
-          # step. Each log is shown whole, in order, once they're all done.
-          status=0
-          mkdir -p out/logs
-          verify() {
-            name=$(basename "$1")
-            start=$(date +%s)
-            if "$RUNNER_TEMP/invariant" verify -out "out/$name" "$1" > "out/logs/$name.log" 2>&1; then echo 0; else echo 1; fi > "out/logs/$name.exit"
-            echo $(( $(date +%s) - start )) > "out/logs/$name.secs"
-          }
-          export -f verify
-          projects=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##')
-          verify "$(printf '%s\n' $projects | head -1)"
-          printf '%s\n' $projects | tail -n +2 | sort -r | xargs -r -P 3 -I{} bash -c 'verify "{}"'
-          for project in $projects; do
-            name=$(basename "$project")
-            echo "::group::$project, $(cat "out/logs/$name.secs")s"
-            cat "out/logs/$name.log"
-            echo "::endgroup::"
-            [ "$(cat "out/logs/$name.exit")" = "0" ] || status=1
-          done
-          exit $status
+          projects=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##' | sort -r |
+            jq -Rnc '[inputs | select(length > 0) | {dir: ., name: (split("/") | last)}]')
+          echo "projects=$projects" >> "$GITHUB_OUTPUT"
+          echo "$projects" | jq -r '.[].dir'
 
-      - name: Check who ratified each project
+  project:
+    # Each project's gate on a runner of its own, so verifying takes as long
+    # as the slowest project rather than their sum, and a new project adds
+    # no time to it (D-0155). factory/protocol, the slowest, takes about
+    # 13 minutes.
+    name: ${{ matrix.project.dir }}
+    needs: projects
+    if: ${{ !cancelled() && needs.projects.result == 'success' && needs.projects.outputs.projects != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.projects.outputs.projects) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the gate
+        run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
+
+      - name: Verify ${{ matrix.project.dir }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          DIR: ${{ matrix.project.dir }}
+          NAME: ${{ matrix.project.name }}
         run: |
-          projects=$(git ls-files '*/.invariant/invariant.json' | sed 's#/.invariant/invariant.json$##')
-          plans=$(git ls-files '.invariant/plans/*.json')
-          "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects $plans
+          "$RUNNER_TEMP/invariant" verify -out "out/$NAME" "$DIR"
+
+      - name: Upload its receipt and traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: project-${{ matrix.project.name }}
+          path: out
+          if-no-files-found: ignore
+
+  receipts:
+    # Every project's receipt and traces, gathered into the one artifact the
+    # dashboard reads, laid out as <project>/receipt.json and
+    # <project>/traces/, as when one job verified them all.
+    name: Gather the receipts
+    needs: project
+    if: ${{ !cancelled() && needs.project.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: project-*
+          merge-multiple: true
+          path: out
 
       - name: Publish the receipt
-        if: always()
         run: |
           if [ -f out/02-twophase-commit/receipt.md ]; then
             cat out/02-twophase-commit/receipt.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload the receipts and traces
-        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: receipts
@@ -249,10 +296,11 @@ jobs:
 
   gate:
     # The check the factory merges its pull requests on (D-0004, D-0033). It
-    # passes when the projects' verification did, and the gate's own tests
-    # did or had nothing to run. Skipped only when the change is docs alone.
+    # passes when the checks, every project's verification and the gathering
+    # of their receipts did, and the gate's own tests did or had nothing to
+    # run. Skipped only when the change is docs alone.
     name: invariant/gate
-    needs: [changes, verify, integration]
+    needs: [changes, verify, projects, project, receipts, integration]
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -260,7 +308,14 @@ jobs:
       - name: Verification and the gate's own tests
         env:
           VERIFY: ${{ needs.verify.result }}
+          PROJECTS: ${{ needs.projects.result }}
+          FOUND: ${{ needs.projects.outputs.projects }}
+          PROJECT: ${{ needs.project.result }}
+          RECEIPTS: ${{ needs.receipts.result }}
           INTEGRATION: ${{ needs.integration.result }}
         run: |
-          echo "Verification: $VERIFY. The gate's own tests: $INTEGRATION."
-          [ "$VERIFY" = success ] && { [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ]; }
+          echo "Checks: $VERIFY. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION."
+          [ "$VERIFY" = success ] && [ "$PROJECTS" = success ] || exit 1
+          # A repository with no projects has nothing to verify or gather.
+          if [ "$FOUND" != "[]" ]; then [ "$PROJECT" = success ] && [ "$RECEIPTS" = success ] || exit 1; fi
+          [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ]
