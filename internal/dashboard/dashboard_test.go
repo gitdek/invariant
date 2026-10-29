@@ -513,13 +513,13 @@ func TestFailuresSayWhy(t *testing.T) {
 	}
 	c := act{Repo: "o/r", Issue: 20, Body: "/invariant revise"}
 	l.Repo, l.Open = "o/r", true
-	if err := c.check([]Issue{l}); err != nil {
+	if err := c.check([]Issue{l}, nil); err != nil {
 		t.Errorf("a stopped build can be drafted again: %v", err)
 	}
 	ci := factory.Marker{Kind: factory.KindFailed, Failure: factory.FailCI, PR: 7}
 	l = Lane(issue, []github.Comment{{User: github.User{Login: "bot"}, CreatedAt: at, Body: marker(t, ci)}}, "", now)
 	l.Repo, l.Open = "o/r", true
-	if err := c.check([]Issue{l}); err == nil {
+	if err := c.check([]Issue{l}, nil); err == nil {
 		t.Error("a pull request that failed CI can't be drafted again, only retried")
 	}
 }

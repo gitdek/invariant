@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -211,6 +212,42 @@ func (a audience) has(want string) bool {
 	return false
 }
 
+// Untaken is an open issue a writer opened that the factory hasn't taken:
+// it has no label of the factory's, and neither its text nor a writer's
+// comment holds /invariant solve or /invariant plan. /act offers to plan it
+// (#201), and serves the list only behind Cloudflare Access, since a
+// private repository's issues are in it.
+type Untaken struct {
+	Repo   string    `json:"repo"`
+	Number int       `json:"number"`
+	Title  string    `json:"title"`
+	Opened time.Time `json:"opened"`
+	URL    string    `json:"url"`
+}
+
+// writer says whether GitHub's author association is one that can write to
+// the repository, as the page can know it without asking GitHub for each
+// person's permission. The factory asks, before it takes any command.
+func writer(association string) bool {
+	return association == "OWNER" || association == "MEMBER" || association == "COLLABORATOR"
+}
+
+// commanded says whether a writer's comment holds /invariant solve or
+// /invariant plan, which makes the issue the factory's.
+func commanded(comments []github.Comment) bool {
+	for _, c := range comments {
+		if !writer(c.AuthorAssociation) || c.User.Type == "Bot" {
+			continue
+		}
+		for _, cmd := range factory.ParseCommands(c.Body) {
+			if cmd.Verb == factory.Solve || cmd.Verb == factory.Plan {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // act is a command the page asks to post on an issue.
 type act struct {
 	Repo  string `json:"repo"`
@@ -225,8 +262,17 @@ var (
 
 // check says whether a command is one the issue is waiting for: answers to
 // its open questions, a ratification of its proposal, a retry of its failed
-// pull request, or a revise. The page offers only those.
-func (c act) check(issues []Issue) error {
+// pull request, or a revise; or /invariant plan, on an issue the factory
+// hasn't taken (#201). The page offers only those.
+func (c act) check(issues []Issue, untaken []Untaken) error {
+	if strings.TrimSpace(c.Body) == "/invariant plan" {
+		for _, u := range untaken {
+			if u.Repo == c.Repo && u.Number == c.Issue {
+				return nil
+			}
+		}
+		return fmt.Errorf("#%d isn't an open issue of a writer's that the factory hasn't taken, so it can't be planned from here", c.Issue)
+	}
 	var is *Issue
 	for i := range issues {
 		if issues[i].Repo == c.Repo && issues[i].Number == c.Issue {
@@ -293,7 +339,7 @@ func (b batch) check(issues []Issue) ([]act, error) {
 	seen := map[string]bool{}
 	for _, one := range b.Ratify {
 		c := act{Repo: one.Repo, Issue: one.Issue, Body: "/invariant ratify " + one.Hash}
-		if err := c.check(issues); err != nil {
+		if err := c.check(issues, nil); err != nil {
 			return nil, err
 		}
 		key := fmt.Sprintf("%s#%d", c.Repo, c.Issue)
@@ -361,6 +407,8 @@ func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 		w.Write(actPage(email, s.shows(r.URL.Query().Get("issue"))))
 	case r.URL.Path == "/act/api/comment" && r.Method == http.MethodPost:
 		s.postAct(w, r, email)
+	case r.URL.Path == "/act/api/untaken.json" && r.Method == http.MethodGet:
+		s.serveUntaken(w)
 	case r.URL.Path == "/act/api/ratify" && r.Method == http.MethodPost:
 		if !fromPage(r) {
 			http.Error(w, "only the page can post", http.StatusForbidden)
@@ -486,9 +534,9 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 		return
 	}
 	s.mu.RLock()
-	issues := s.issues
+	issues, untaken := s.issues, s.untaken
 	s.mu.RUnlock()
-	if err := c.check(issues); err != nil {
+	if err := c.check(issues, untaken); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -500,9 +548,37 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 	}
 	s.logf("act: %s posted %q on %s#%d", who, c.Body, c.Repo, c.Issue)
 	s.took(c, url)
+	s.plan(c)
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"url": url})
+}
+
+// plan drops an issue that was just planned from what /act offers to plan,
+// and keeps it out until a refresh has had time to read its comment.
+func (s *Server) plan(c act) {
+	if strings.TrimSpace(c.Body) != "/invariant plan" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.planned == nil {
+		s.planned = map[string]time.Time{}
+	}
+	s.planned[fmt.Sprintf("%s#%d", c.Repo, c.Issue)] = time.Now()
+	s.untaken = slices.DeleteFunc(slices.Clone(s.untaken), func(u Untaken) bool { return u.Repo == c.Repo && u.Number == c.Issue })
+}
+
+// serveUntaken answers /act/api/untaken.json: the issues /act offers to plan.
+func (s *Server) serveUntaken(w http.ResponseWriter) {
+	s.mu.RLock()
+	untaken := s.untaken
+	s.mu.RUnlock()
+	if untaken == nil {
+		untaken = []Untaken{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(untaken)
 }
 
 // poster is how a command reaches GitHub: Post, or else gh's login.
@@ -516,7 +592,8 @@ func (s *Server) poster() func(ctx context.Context, repo string, issue int, body
 	}
 }
 
-// newIssue is an issue the page asks to open, for the factory to solve.
+// newIssue is an issue the page asks to open, for the factory to solve, or,
+// as a PRD, to plan (#201).
 type newIssue struct {
 	Repo     string   `json:"repo"`
 	Title    string   `json:"title"`
@@ -524,13 +601,15 @@ type newIssue struct {
 	Project  string   `json:"project"`  // where the project goes, or the one it changes
 	Code     []string `json:"code"`     // existing code for the project to check as it is
 	Language string   `json:"language"` // go, typescript or python; empty for the repository's default
+	Plan     bool     `json:"plan"`     // a PRD, for a plan of issues, each of which names its own project, code and language
 }
 
 var issuePath = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
 
 // compose writes the issue the factory reads: what must be true, the
 // Project: and Code: lines, and the /invariant solve line that hands it to
-// the factory.
+// the factory; or a PRD, what its plan must carry out, and the
+// /invariant plan line.
 func (n newIssue) compose(repos []*Repo) (github.NewIssue, error) {
 	known := false
 	for _, r := range repos {
@@ -546,6 +625,11 @@ func (n newIssue) compose(repos []*Repo) (github.NewIssue, error) {
 		return github.NewIssue{}, errors.New("say what must be true, in under 20,000 characters")
 	case len(n.Code) > 10:
 		return github.NewIssue{}, errors.New("name at most ten paths of code")
+	case n.Plan && (strings.TrimSpace(n.Project) != "" || len(n.Code) > 0 || n.Language != ""):
+		return github.NewIssue{}, errors.New("a PRD names no project, code or language: each issue its plan opens names its own")
+	}
+	if n.Plan {
+		return github.NewIssue{Title: title, Body: body + "\n\n/invariant plan\n"}, nil
 	}
 	var b strings.Builder
 	b.WriteString(body + "\n\n")
@@ -574,8 +658,8 @@ func (n newIssue) compose(repos []*Repo) (github.NewIssue, error) {
 	return is, nil
 }
 
-// openIssue opens an issue as @gitdek, with /invariant solve, so the
-// factory takes it, followed by note.
+// openIssue opens an issue as @gitdek, with /invariant solve, or
+// /invariant plan for a PRD, so the factory takes it, followed by note.
 func (s *Server) openIssue(w http.ResponseWriter, r *http.Request, who, note string) {
 	var n newIssue
 	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<10)).Decode(&n); err != nil {

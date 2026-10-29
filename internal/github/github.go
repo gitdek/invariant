@@ -49,6 +49,9 @@ type Issue struct {
 	UpdatedAt   string    `json:"updated_at"`
 	ClosedAt    string    `json:"closed_at,omitempty"`
 	PullRequest *struct{} `json:"pull_request,omitempty"` // set when the issue is a pull request
+	// AuthorAssociation is who its author is to the repository, as GitHub
+	// says: OWNER, MEMBER, COLLABORATOR, or someone else.
+	AuthorAssociation string `json:"author_association,omitempty"`
 }
 
 // HasLabel says whether the issue carries the label.
@@ -68,6 +71,9 @@ type Comment struct {
 	URL       string `json:"html_url"`
 	IssueURL  string `json:"issue_url"`
 	CreatedAt string `json:"created_at"`
+	// AuthorAssociation is who its author is to the repository, as the
+	// issue's is.
+	AuthorAssociation string `json:"author_association,omitempty"`
 }
 
 // Issue is the number of the issue the comment is on.
