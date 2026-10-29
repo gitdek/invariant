@@ -46,6 +46,9 @@ type Manifest struct {
 	// it to the watcher's own. A factory pull request never changes it, as
 	// it changes nothing here but the parameters (D-0086).
 	Agent string `json:"agent,omitempty"`
+	// Components selects checks on a Go source inventory. Omitted keeps the
+	// legacy gate; selections alone establish no verification evidence.
+	Components *ComponentsConfig `json:"components,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,
@@ -144,7 +147,13 @@ func Load(dir string) (*Project, error) {
 	if err := readJSON(filepath.Join(dir, lockFile), &p.Lock); err != nil {
 		return nil, err
 	}
-	return p, p.validate()
+	if err := p.validate(); err != nil {
+		return p, err
+	}
+	if _, err := ResolveComponents(p); err != nil {
+		return p, fmt.Errorf("%s: %w", manifestFile, err)
+	}
+	return p, nil
 }
 
 func (p *Project) validate() error {

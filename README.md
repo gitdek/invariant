@@ -107,6 +107,42 @@ The factory owns both the model and the code, and each Go method's contract rest
 
 Every pull request carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
 
+## Component configuration
+
+The first slice of verification inside ordinary code inventories Go functions and records which checks are intended for each one. A project's `.invariant/invariant.json` can include this optional member:
+
+```json
+{
+  "components": {
+    "scope": ["core"],
+    "checks": [
+      {
+        "target": {"source": "core/counter.go", "symbol": "(*Counter).Step"},
+        "proof": {
+          "contracts": [
+            {"source": "core/counter.go", "symbol": "(*Counter).Step"}
+          ]
+        },
+        "tests": [
+          {"source": "core/counter_test.go", "symbol": "TestStep"}
+        ],
+        "conformance": [
+          {"source": "drivers/explore.go", "symbol": "Drive"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+`scope` is a nonempty list of package directories relative to the project. Each directory is read without descending into subdirectories. Every non-test `.go` file is included, regardless of build tags, including files with no functions. Every function and method in those files appears in the inventory, including ones with no selected check. `checks` may be omitted.
+
+References name a source file and an exact symbol: `Function`, `Type.Method`, or `(*Type).Method`. Initializers are `init[1]`, `init[2]`, and so on, in declaration order within each file, even when there is only one. Targets and their selected contracts must be in scope; `proof` requires a nonempty list of contracts with attached Gobra annotations. Tests must name functions in `_test.go` files. Tests and conformance functions may live outside scope, within the project. Loading rejects duplicate scope entries or selections, unresolved references, malformed source, non-clean paths, and symbolic links in scope or referenced paths.
+
+The inventory identifies a component as `go:<package>#<symbol>@<source>`, for example `go:example.com/app/core#(*Counter).Step@core/counter.go`. The package comes from the nearest enclosing `go.mod` and the source directory; module lookup stops at the project root. Each component records a SHA-256 hash of its whole source file and, separately, of its exact attached Gobra doc-comment block, including its final newline. A component without a contract has an empty contract hash. Scope, files, component IDs, checks and association IDs are sorted, so moving an unchanged checkout or reordering the manifest preserves the inventory.
+
+These declarations produce no proof, assurance or execution evidence. Full code verification with `components` currently stops with `component verification is not supported yet` before starting any tools; model-only checking remains available. Selective verification, evidence reconciliation and component receipts are later slices. Omitting `components` keeps the existing Go, Python and TypeScript checks, with no inferred inventory or new source requirements at load time. Explicit component configuration currently supports Go only.
+
 ## One model, three languages
 
 The same ratified two-phase commit, pinned by the same hashes, checked in each of the languages Invariant targets:
@@ -268,7 +304,7 @@ Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory t
 - [x] **Slice 12 · One decision graph for every project.** Every project's decisions move into one embedded store, SQLite used as a graph, with a journal in each repository and traversal tools agents call over MCP, so a decision can be traced to what rests on it and what implements it ([D-0096](decisions/D-0096-decision-graph.md)). This repository's decisions are in it. copythis-ad's were too, from a journal of its own ([copythis-ad#41](https://github.com/gitdek/copythis-ad/pull/41)), so a question crossed projects: what in copythis-ad rested on one of Invariant's decisions. That repository has since started over and left Invariant. `invariant decisions` records and answers, coding agents ask it over MCP, CI checks it on every change, and the dashboard draws it ([#135](https://github.com/gitdek/invariant/pull/135)). Now [#177](https://github.com/gitdek/invariant/issues/177) proves the journal in four parts, and three are in. Decision IDs are proved unique, and `decide` runs on the proof ([#192](https://github.com/gitdek/invariant/issues/192)). A decision's state is proved to be the fold of its lines, and every fold runs on the proof ([#193](https://github.com/gitdek/invariant/issues/193)). The store's journal is proved only to grow, and every write and rebuild runs on the proof ([#195](https://github.com/gitdek/invariant/issues/195)).
 - [ ] **Slice 13 · The factory takes every change, and a whole PRD.** Plumbing goes through the factory too, with a plan and tests where a model doesn't fit, and a PRD becomes a plan of issues a person ratifies, which the factory works one at a time ([D-0105](decisions/D-0105-factory-takes-every-change.md)). In progress: the factory built eleven of its own plumbing changes on 2026-09-29, and since [#134](https://github.com/gitdek/invariant/pull/134) it works on three issues at once. `/invariant plan` turns a PRD into a plan of issues to ratify ([#139](https://github.com/gitdek/invariant/pull/139)), and the factory now works each plan a writer ratifies, one issue at a time ([#144](https://github.com/gitdek/invariant/pull/144), [#148](https://github.com/gitdek/invariant/issues/148)). It planned [#153](https://github.com/gitdek/invariant/issues/153), the first real PRD, then opened and built its first issue itself. The dashboard's `/act` plans too: it opens a PRD with `/invariant plan`, or plans an open issue a writer opened that the factory hasn't taken ([#201](https://github.com/gitdek/invariant/issues/201)). Paused from 2026-09-29 to 2026-10-29, while coding agents built changes by hand; it runs again since, on Codex.
 - [ ] **Slice 14 · Codex on chosen projects.** A project picks its coding agent, Codex or Claude Code, and the factory runs Codex under the same rules, limits, view and records as Claude Code ([#153](https://github.com/gitdek/invariant/issues/153)). In progress: an issue picks its agent with an `Agent:` line, else its project's manifest does, that agent drafts and builds it ([#173](https://github.com/gitdek/invariant/issues/173)), and every record of its work names it ([#179](https://github.com/gitdek/invariant/issues/179)). Built by hand while the factory is paused: the factory takes back only regular files from an agent's workspace, Codex has a backend that runs it headless under a permission profile of its own, where its commands see nothing outside the workspace, the watcher checks its agents at start, the live view shows a Codex run, and Codex gets the decision graph's tools. Its first run built the two-phase commit and passed the final gate with proof ([#189](https://github.com/gitdek/invariant/pull/189)). Next: the factory's first Codex issue, once it resumes. Since 2026-10-29, Codex is the default everywhere, on `gpt-6-astra` at its highest reasoning, and Claude Code runs only where it's turned on ([#207](https://github.com/gitdek/invariant/issues/207)).
-- [ ] **Slice 15 · Verification inside ordinary code.** Ordinary Go and Python stay as they are, the critical components get proved in place, and Invariant checks how the code around them uses them, one component at a time, with every receipt saying what's proved and what's only tested. Planned.
+- [ ] **Slice 15 · Verification inside ordinary code.** Ordinary Go and Python stay as they are, the critical components get proved in place, and Invariant checks how the code around them uses them, one component at a time, with every receipt saying what's proved and what's only tested. In progress: [#212](https://github.com/gitdek/invariant/issues/212) adds optional Go component scope, stable source identities and intended check associations. This first slice resolves configuration only; explicit component verification and evidence are still to come.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md). Slice 4's are in [D-0036](decisions/D-0036-slice-4-plan.md).
 

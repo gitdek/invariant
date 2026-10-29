@@ -198,6 +198,9 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	if err != nil {
 		return nil, err
 	}
+	if !model && p.Manifest.Components != nil {
+		return nil, fmt.Errorf("component verification is not supported yet; explicit components require component evidence")
+	}
 	raw, err := os.ReadFile(p.ModulePath())
 	if err != nil {
 		return nil, err
