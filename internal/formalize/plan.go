@@ -48,15 +48,14 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	}
 	defer transcript.Close()
 	checkLog := filepath.Join(out, "check-runs.jsonl")
-	runCtx, cancel := context.WithTimeout(ctx, f.Timeout)
-	usage, runErr := f.Backend.Run(runCtx, synth.Job{
+	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     PlanPrompt(req, f.CheckRuns),
 		GateServer: []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", filepath.Join(out, "gocache"), ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
+		Timeout:    f.Timeout,
 	})
-	cancel()
 	usage.Backend = f.Backend.Name()
 	r := &Result{Usage: usage}
 	r.CheckRuns, _ = readRuns(checkLog)

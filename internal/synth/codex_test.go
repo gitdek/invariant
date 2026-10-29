@@ -254,6 +254,67 @@ func TestCodexRunsOneAtATime(t *testing.T) {
 	}
 }
 
+// lockCodexHome holds the lock on Codex's home through a file of its own,
+// as another process would, until the test closes it.
+func lockCodexHome(t *testing.T, c Codex) *os.File {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(c.Home, "invariant.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// Runs that share a sign-in take turns across processes too, as a second
+// watcher's or a synthesize run by hand would (D-0138): a run waits while
+// another process holds Codex's home. Its time starts when its turn comes,
+// so the wait doesn't count against it.
+func TestCodexWaitsForAnotherProcesssTurn(t *testing.T) {
+	c, dir, ws := codexRig(t, codexRun)
+	other := lockCodexHome(t, c)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Run(context.Background(), Job{Workspace: ws, Prompt: "build", GateServer: []string{"/bin/invariant"}, Timeout: time.Second})
+		done <- err
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(dir, "args")); err == nil {
+		t.Fatal("codex ran while another process held its turn")
+	}
+	other.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the run lost the time it waited for its turn: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run didn't start once its turn came")
+	}
+}
+
+// A run called off while it waits for its turn gives the turn back, so the
+// process's next run can take it.
+func TestCodexGivesItsTurnBackWhenCalledOff(t *testing.T) {
+	c, _, ws := codexRig(t, codexRun)
+	other := lockCodexHome(t, c)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	job := Job{Workspace: ws, Prompt: "build", GateServer: []string{"/bin/invariant"}}
+	if _, err := c.Run(ctx, job); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a run called off while it waited: %v", err)
+	}
+	other.Close()
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.Run(ctx, job); err != nil {
+		t.Fatalf("the next run didn't get its turn: %v", err)
+	}
+}
+
 // codex exec keeps no cap on steps, so the backend stops the run at its
 // own, and doesn't wait for codex to finish.
 func TestCodexStopsAtItsCapOnSteps(t *testing.T) {

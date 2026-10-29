@@ -38,8 +38,8 @@ import (
 // denied, the home directory included, and Codex's home with its sign-in
 // is kept there. Codex's own connection to its service, and Invariant's
 // server, aren't sandboxed, so the agent still thinks and checks its work.
-// Codex runs go one at a time, since runs that share a sign-in can break
-// each other's token refresh.
+// Codex runs that share a sign-in go one at a time, whichever process runs
+// them, since they can break each other's token refresh.
 type Codex struct {
 	Binary string // the codex CLI
 	Home   string // CODEX_HOME: its sign-in, and nothing of the user's own configuration
@@ -63,8 +63,55 @@ type Codex struct {
 	GoModCache string
 }
 
-// codexTurn lets one Codex run go at a time (D-0138).
+// codexTurn lets one of this process's Codex runs go at a time (D-0138).
 var codexTurn = make(chan struct{}, 1)
+
+// turn waits for a run's turn (D-0138, D-0154): this process's first, then
+// a lock on a file in Codex's home, which every process whose runs share
+// that sign-in takes, a second watcher's or a synthesize run by hand. The
+// lock goes with the file, so a process that dies gives it up. release
+// gives the turn back.
+func (c Codex) turn(ctx context.Context) (release func(), err error) {
+	select {
+	case codexTurn <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	f, err := c.lockHome(ctx)
+	if err != nil {
+		<-codexTurn
+		return nil, err
+	}
+	return func() { f.Close(); <-codexTurn }, nil
+}
+
+// lockHome takes the lock on Codex's home. It tries once a second, since a
+// lock that blocks can't be called off.
+func (c Codex) lockHome(ctx context.Context) (*os.File, error) {
+	if err := os.MkdirAll(c.Home, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(c.Home, "invariant.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			f.Close()
+			return nil, fmt.Errorf("codex's turn: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
 
 // profile is the permission profile Codex's commands run under (D-0138):
 // Codex's workspace profile, or its read-only one for a reviewer, with
@@ -211,12 +258,11 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if c.Home == "" {
 		return Usage{}, errors.New("codex needs a home of its own, where its sign-in lives")
 	}
-	select {
-	case codexTurn <- struct{}{}:
-		defer func() { <-codexTurn }()
-	case <-ctx.Done():
-		return Usage{}, ctx.Err()
+	release, err := c.turn(ctx)
+	if err != nil {
+		return Usage{}, err
 	}
+	defer release()
 	// The agent's commands get a temporary directory of the run's own, which
 	// holds their Go build cache, where the profile lets them write. In the
 	// workspace, it would count as the agent's work.
@@ -229,7 +275,8 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	// The run's time starts now that its turn has come.
+	ctx, cancel := within(ctx, job)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace

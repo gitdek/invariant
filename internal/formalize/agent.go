@@ -189,14 +189,13 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	defer transcript.Close()
 	checkLog := filepath.Join(out, "check-runs.jsonl")
 
-	runCtx, cancel := context.WithTimeout(ctx, f.Timeout)
-	defer cancel()
-	usage, runErr := f.Backend.Run(runCtx, synth.Job{
+	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     Prompt(req, f.CheckRuns),
 		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
+		Timeout:    f.Timeout,
 	})
 	usage.Backend = f.Backend.Name()
 	r := &Result{Usage: usage}
