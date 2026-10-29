@@ -1310,21 +1310,25 @@
   }
   // why says, in words, why a failed issue needs a person.
   function why(w, repo) {
-    const pr = w.pr ? `<strong>${esc(ref(repo, w.pr))}</strong>` : "the pull request";
+    if (w.kind === "stuck") return "The factory couldn't make a draft that checks out. Say what to change in a comment on the issue, then have it draft again.";
+    const pr = w.pr ? `<a href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener"><strong>${esc(ref(repo, w.pr))}</strong></a>` : "the pull request";
     switch (w.failure) {
       case "stopped": return "The build stopped before it made a pull request. Try again, or draft again from the comments.";
       case "limit": return "Two builds stopped before they made a pull request, so the factory won't start another on its own. Try again, or draft again.";
-      case "gate": return `The code didn't pass the gate in the factory's own run. Its last attempt is in draft ${pr}. If the code needs fixing, fix it, then have the factory try again. If what must be true should change instead, close ${pr}, then have it draft again.`;
+      case "gate": return `The code didn't pass the factory's own checks, or the second agent's review asked for changes. Its last attempt is in draft ${pr}. If the code needs fixing, fix it, then have the factory try again. If what must be true should change instead, close ${pr} first: the factory drafts again only once it's closed, and then this card offers that.`;
       case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified. Once it's fixed, have the factory try again.`;
       case "ci": return `CI's gate didn't pass on ${pr}. Once the cause is fixed, have the factory try again.`;
       case "trusted": return `${pr} passed CI's gate and the review, and it changes the trusted base, so a person merges it. Review it and merge it on GitHub.`;
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look. Once the cause is fixed, have the factory try again.`;
   }
-  const stoppedBuild = (w) => w.failure === "stopped" || w.failure === "limit";
-  // A failure with a pull request can also be drafted again, once the pull
-  // request is closed.
-  const redraftable = (w) => stoppedBuild(w) || Boolean(w.pr);
+  // takes says whether the factory takes a command now, as the server works
+  // it out, so a card never offers one the factory refuses (#218).
+  const takes = (w, verb) => (w.takes || []).includes(verb);
+  // fixes is what a failed build's card, or a draft's the factory couldn't
+  // make, offers: a retry, a draft again, or both, the main one first.
+  const fixes = (w) => (w.takes || []).filter((v) => v === "retry" || v === "revise")
+    .map((v) => (v === "retry" ? ["Retry", "/invariant retry"] : ["Draft again", "/invariant revise"]));
   const closedText = (w, repo) => `${w.pr ? `<strong>${esc(ref(repo, w.pr))}</strong>` : "The pull request"} was closed without merging, so the factory stopped. To go on, have it draft again from the comments on the issue.`;
   // said is what a proposal's statements, or a plan's tests, say. A plan of
   // issues has none: its card lists the issues.
@@ -1346,17 +1350,17 @@
       body = (w.forks || []).map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const c = `/invariant choose ${q.id} ${o.id}`;
         return `<button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>`;
-      }).join("")}</div>`).join("") + `<div class="cmds">${cmd("/invariant revise")}${open}</div>`;
+      }).join("")}</div>`).join("") + `<div class="cmds">${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "proposal") {
       body = `${proposalText(w, repo, "a person")}${said(w)}
-        <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${cmd("/invariant revise")}${open}</div>`;
+        <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>
-        <div class="cmds">${cmd("/invariant revise", true)}${open}</div>`;
+        <div class="cmds">${takes(w, "revise") ? cmd("/invariant revise", true) : ""}${open}</div>`;
     } else {
       cls = "failed";
       body = `<p class="ask">${why(w, repo)}</p>
-        <div class="cmds">${cmd("/invariant retry", true)}${redraftable(w) ? cmd("/invariant revise") : ""}${open}</div>`;
+        <div class="cmds">${fixes(w).map(([, c], i) => cmd(c, i === 0)).join("")}${open}</div>`;
     }
     return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)}><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
@@ -1435,23 +1439,22 @@
       actions = picked.length === forks.length && forks.length
         ? post(forks.length === 1 ? "Post my answer" : `Post my ${forks.length} answers`, lines, true)
         : `<button class="cmd act primary" type="button" disabled>Choose ${forks.length === 1 ? "an answer" : `all ${forks.length}`} to post</button>`;
-      actions += ask("Draft again instead", "/invariant revise");
+      if (takes(w, "revise")) actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
       body = `${proposalText(w, repo, "you")}${said(w)}`;
-      actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + ask("Draft again", "/invariant revise");
+      actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>`;
-      actions = ask("Draft again", "/invariant revise", true);
+      actions = takes(w, "revise") ? ask("Draft again", "/invariant revise", true) : "";
     } else {
       cls = "failed";
       body = `<p class="ask">${why(w, repo)}</p>`;
-      actions = ask("Retry", "/invariant retry", true) + (redraftable(w) ? ask("Draft again", "/invariant revise") : "");
+      actions = fixes(w).map(([label, c], i) => ask(label, c, i === 0)).join("");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
     if (a.confirm) {
       const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins these statements, and the factory starts building.`
         : a.confirm === "/invariant retry" ? "Have the factory try again, as you?"
-        : w.kind === "failed" && w.pr && !stoppedBuild(w) ? `Have the factory draft again from the comments, as you? Close <b>${esc(ref(repo, w.pr))}</b> first, or it will ask you to.`
         : "Have the factory draft again from the comments, as you?";
       row = `<div class="confirm"><span>${what}</span>${post("Yes, post it", a.confirm, true)}<button class="cmd" type="button" data-act-key="${esc(key)}" data-act-cancel>Cancel</button></div>`;
     }

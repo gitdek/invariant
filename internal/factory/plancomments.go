@@ -99,10 +99,13 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	if res != nil && res.Fallback != nil {
 		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
-	if pr != nil {
-		fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
+	if pr == nil {
+		b.WriteString("\n\nA person needs to look at this. Comment `/invariant retry` to build again, or say what to change and comment `/invariant revise`.")
+		return post("needs a person", b.String(), m)
 	}
-	b.WriteString("\n\nA person needs to look at this. Comment `/invariant retry` to build again, or say what to change and comment `/invariant revise`.")
+	// The factory drafts again only once the pull request is closed (#218).
+	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.\n\nA person needs to look at this. Comment `/invariant retry` to build again. "+
+		"To change the plan instead, close #%d, say what to change, and comment `/invariant revise`.", pr.Number, pr.Number)
 	return post("needs a person", b.String(), m)
 }
 
