@@ -41,6 +41,9 @@ type Live struct {
 	Agent    string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
 	By       string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
 	Ended    *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
+
+	// The transcript to consult only for the private command view.
+	path string
 }
 
 // Mark is one tool call, or one stretch of thinking between tool calls.
@@ -83,8 +86,10 @@ type transcript struct {
 	agent    string
 	tools    map[string]int
 	marks    []Mark
-	think    int   // the stretch of thinking going on, as an index into marks, or -1
-	open     []int // tool calls waiting for their results, oldest first, as indexes into marks
+	commands map[int]string  // shell text only, indexed by its retained mark; never part of Live
+	calls    map[string]bool // shell events already counted, by message and tool id
+	think    int             // the stretch of thinking going on, as an index into marks, or -1
+	open     []int           // tool calls waiting for their results, oldest first, as indexes into marks
 	files    map[string]*touched
 	touches  int
 	last     time.Time // the newest time an event carried
@@ -102,7 +107,7 @@ type touched struct {
 }
 
 func newTranscript() *transcript {
-	return &transcript{ids: map[string]bool{}, tools: map[string]int{}, files: map[string]*touched{}, think: -1, items: map[string]int{}}
+	return &transcript{ids: map[string]bool{}, tools: map[string]int{}, files: map[string]*touched{}, think: -1, items: map[string]int{}, commands: map[int]string{}, calls: map[string]bool{}}
 }
 
 // read takes in whatever whole lines were added since the last read.
@@ -230,9 +235,19 @@ func (t *transcript) line(b []byte) {
 			}
 			kind := toolKind(bl.Name)
 			if bl.Name == "Bash" {
+				if bl.ID != "" {
+					id := e.Message.ID + "\x00" + bl.ID
+					if t.calls[id] {
+						continue
+					}
+					t.calls[id] = true
+				}
 				kind = t.shell(bl.Input.Command)
 			}
 			t.begin(bl.ID, kind, eventTime(e.Timestamp, t.last))
+			if bl.Name == "Bash" {
+				t.commands[len(t.marks)-1] = bl.Input.Command
+			}
 			p := bl.Input.FilePath
 			if p == "" {
 				p = bl.Input.NotebookPath
@@ -330,6 +345,13 @@ func (t *transcript) trim() {
 	if len(t.marks) > maxMarks {
 		drop := len(t.marks) - maxMarks
 		t.marks = append([]Mark(nil), t.marks[drop:]...)
+		commands := map[int]string{}
+		for i, command := range t.commands {
+			if i >= drop {
+				commands[i-drop] = command
+			}
+		}
+		t.commands = commands
 		if t.think >= 0 {
 			t.think -= drop
 		}
@@ -351,8 +373,9 @@ func (t *transcript) trim() {
 }
 
 // codexEvent is the part of a line of Codex's transcript the live view
-// reads (#153). Commands are classified locally, never retained. What the
-// tools returned is never decoded. Reasoning is measured raw for tokens.
+// reads (#153). Commands are classified locally and retained only with
+// recent marks for /act. What the tools returned is never decoded.
+// Reasoning is measured raw for tokens.
 type codexEvent struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
@@ -412,6 +435,9 @@ func (t *transcript) codexLine(b []byte) {
 				kind = t.shell(e.Item.Command)
 			}
 			t.begin(e.Item.ID, kind, at)
+			if e.Item.Type == "command_execution" {
+				t.commands[len(t.marks)-1] = e.Item.Command
+			}
 		}
 	case "item.completed":
 		switch e.Item.Type {
@@ -433,6 +459,9 @@ func (t *transcript) codexLine(b []byte) {
 				kind = t.shell(e.Item.Command)
 			}
 			t.begin(e.Item.ID, kind, at)
+			if e.Item.Type == "command_execution" {
+				t.commands[len(t.marks)-1] = e.Item.Command
+			}
 			t.finish(e.Item.ID, at)
 		}
 		for _, c := range e.Item.Changes {
@@ -618,6 +647,7 @@ type live struct {
 	mu    sync.Mutex
 	reads map[string]*transcript // by transcript path
 	last  map[string][]*Live     // each repository's steps, as last read
+	steps []Live                 // the public view, in strip order
 	at    time.Time
 	body  []byte
 }
@@ -629,10 +659,49 @@ const liveEvery = 2 * time.Second
 // LiveJSON is every step each repository's watcher is running, or the ones
 // it last ran, longest-running first, as the page's live view reads it.
 func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
+	return s.liveJSON(now, false)
+}
+
+// liveJSON adds shell invocations only for the opted-in Access route.
+// The cached body and Live values always remain free of command text.
+func (s *Server) liveJSON(now time.Time, commands bool) ([]byte, error) {
 	s.live.mu.Lock()
 	defer s.live.mu.Unlock()
-	if s.live.body != nil && now.Sub(s.live.at) < liveEvery {
+	if err := s.readLive(now); err != nil {
+		return nil, err
+	}
+	if !commands {
 		return s.live.body, nil
+	}
+	type command struct {
+		Command string     `json:"command"`
+		Kind    string     `json:"kind"`
+		At      time.Time  `json:"at"`
+		Until   *time.Time `json:"until,omitempty"`
+	}
+	type step struct {
+		Live
+		Commands []command `json:"commands,omitempty"`
+	}
+	steps := make([]step, 0, len(s.live.steps))
+	for _, v := range s.live.steps {
+		one := step{Live: v}
+		if t := s.live.reads[v.path]; t != nil && v.Ended == nil {
+			for i, mark := range v.Marks {
+				if text, ok := t.commands[i]; ok {
+					one.Commands = append(one.Commands, command{Command: text, Kind: mark.Kind, At: mark.At, Until: mark.Until})
+				}
+			}
+		}
+		steps = append(steps, one)
+	}
+	return json.Marshal(map[string]any{"at": s.live.at.UTC(), "steps": steps})
+}
+
+// readLive refreshes both views together, while live.mu is held.
+func (s *Server) readLive(now time.Time) error {
+	if s.live.body != nil && now.Sub(s.live.at) < liveEvery {
+		return nil
 	}
 	if s.live.reads == nil {
 		s.live.reads, s.live.last = map[string]*transcript{}, map[string][]*Live{}
@@ -655,10 +724,10 @@ func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	})
 	body, err := json.Marshal(map[string]any{"at": now.UTC(), "steps": steps})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	s.live.at, s.live.body = now, body
-	return body, nil
+	s.live.at, s.live.body, s.live.steps = now, body, steps
+	return nil
 }
 
 // liveSteps reads every step repo's watcher is running with an agent at
@@ -720,6 +789,7 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 		s.logf("live: %v", err)
 	}
 	v := t.view()
+	v.path = path
 	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, st.Limit, step.Agent
 	if !step.Since.IsZero() {
 		since := step.Since

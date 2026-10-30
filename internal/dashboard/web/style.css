@@ -790,6 +790,13 @@ footer p { margin: 0; max-width: 60em; }
 :root { --search: #b48cff; --list: #56c6d9; --git: #ef8cbb; }
 :root[data-theme="light"] { --search: #7c4dff; --list: #007f91; --git: #b53b78; }
 .live-cards { display: grid; gap: 18px; }
+.shell-toggle { margin-bottom: 14px; font-size: 14px; color: var(--ink2); }
+.shell-toggle input { accent-color: var(--accent); }
+.shell-commands { margin-top: 16px; max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.shell-command { padding: 12px; }
+.shell-command + .shell-command { border-top: 1px solid var(--line); }
+.shell-meta { font: 500 11px/1.6 var(--mono); color: var(--ink3); overflow-wrap: anywhere; }
+.shell-command pre { margin: 6px 0 0; font: 13px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .live-cards > .livestep { margin: 0; }
 /* The fine print says it once, under the last card. */
 .live-cards > .livestep:not(:last-child) .fineprint { display: none; }

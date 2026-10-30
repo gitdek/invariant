@@ -1477,7 +1477,7 @@
         batch.busy = true;
         renderInbox(state);
         try {
-          const r = await fetch("/act/api/ratify", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await fetchAct("/act/api/ratify", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify({ ratify: sent.map(({ repo, issue, hash }) => ({ repo, issue, hash })) }) });
           // A refusal is words, and a batch GitHub stopped partway through
           // still says which went.
@@ -1513,7 +1513,7 @@
         a.busy = true;
         if (state) renderInbox(state);
         try {
-          const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await fetchAct("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify({ repo, issue: Number(n), body: b.dataset.actBody }) });
           if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
           a.posted = (await r.json()).url || `https://github.com/${repo}/issues/${n}`;
@@ -1590,7 +1590,7 @@
         busy = true; paint();
         const repo = draft.repo || repos()[0];
         try {
-          const r = await fetch("/act/api/issue", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await fetchAct("/act/api/issue", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify(draft.plan ? { repo, title: draft.title, body: draft.body, plan: true }
               : { repo, title: draft.title, body: draft.body, project: draft.project.trim(), language: draft.language,
                 code: draft.code.split(/[,\n]/).map((c) => c.trim()).filter(Boolean) }) });
@@ -1621,7 +1621,7 @@
     async function refresh() {
       if (!box || !ACT) return;
       try {
-        const r = await fetch("/act/api/untaken.json", { cache: "no-store" });
+        const r = await fetchAct("/act/api/untaken.json", { cache: "no-store" });
         if (!r.ok) return;
         const next = await r.json(), js = JSON.stringify(next);
         if (js === seen) return;
@@ -1663,7 +1663,7 @@
         busy = k;
         paint();
         try {
-          const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await fetchAct("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify({ repo: u.repo, issue: u.number, body: "/invariant plan" }) });
           if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
           posted[k] = { u, url: (await r.json()).url || u.url };
@@ -1806,18 +1806,80 @@
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
+  const shellControl = ACT && $("#show-shell-commands");
+  let showCommands = false, liveReads = 0, liveAgain = 0, liveRequest = null;
+
+  function clearCardCommands(c) {
+    const box = $(".shell-commands", c.el);
+    box.replaceChildren();
+    box.hidden = true;
+    c.commands = null;
+    if (c.l) delete c.l.commands;
+  }
+
+  function clearShellCommands() {
+    for (const l of live?.steps || []) delete l.commands;
+    for (const c of cards.values()) clearCardCommands(c);
+  }
+
+  function resetShellCommands() {
+    showCommands = false;
+    if (shellControl) shellControl.checked = false;
+    clearShellCommands();
+  }
+
+  // Any private response can be the first to report lost Access. Starting
+  // a public read also invalidates and aborts the pending command read.
+  async function fetchAct(url, options) {
+    const r = await fetch(url, options);
+    if (showCommands && (r.status === 401 || r.status === 403 || r.status === 404 || r.redirected)) {
+      resetShellCommands();
+      loadLive();
+    }
+    return r;
+  }
+
+  if (shellControl) {
+    shellControl.checked = false;
+    shellControl.addEventListener("change", () => {
+      showCommands = shellControl.checked;
+      clearShellCommands();
+      loadLive();
+    });
+    window.addEventListener("pagehide", () => {
+      resetShellCommands();
+      ++liveReads;
+      liveRequest?.abort();
+      clearTimeout(liveAgain);
+    });
+    window.addEventListener("pageshow", (e) => {
+      resetShellCommands();
+      if (e.persisted) loadLive();
+    });
+  }
 
   async function loadLive() {
+    const read = ++liveReads, commands = showCommands;
+    clearTimeout(liveAgain);
+    liveRequest?.abort();
+    liveRequest = new AbortController();
     let wait = 12000;
     try {
-      const r = await fetch("/api/live.json", { cache: "no-store" });
-      if (r.ok) {
-        live = await r.json();
-        renderLive();
-        if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
-      }
-    } catch (e) {}
-    setTimeout(loadLive, wait);
+      const url = commands ? "/act/api/live.json?commands=1" : "/api/live.json";
+      const r = await (commands ? fetchAct : fetch)(url, { cache: "no-store", signal: liveRequest.signal });
+      if (!r.ok || (commands && r.redirected)) throw new Error(`HTTP ${r.status}`);
+      const next = await r.json();
+      // A toggle or newer read invalidates this response, even if abort
+      // came after its body arrived. No old step can restore its commands.
+      if (read !== liveReads || commands !== showCommands) return;
+      live = next;
+      renderLive();
+      if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+    } catch (e) {
+      if (read !== liveReads) return;
+      if (commands) resetShellCommands();
+    }
+    if (read === liveReads) liveAgain = setTimeout(loadLive, wait);
   }
 
   // The steps to show: the ones running in the chosen repositories, or else
@@ -1845,6 +1907,7 @@
     $("#live").hidden = !steps.length;
     for (const [key, c] of cards) {
       if (keys.includes(key)) continue;
+      clearCardCommands(c);
       stripSize.unobserve(c.strip);
       c.el.remove();
       cards.delete(key);
@@ -1892,6 +1955,8 @@
     put($(".legend", el), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
       + (l.thinking ? `<span class="lg think"><i></i>thinking ≈${kilo(l.thinking)} tokens</span>` : ""));
 
+    renderCommands(c);
+
     put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
@@ -1906,6 +1971,33 @@
     tickCard(c, true);
     c.marks = (l.marks || []).length;
     c.runs = (l.runs || []).length;
+  }
+
+  // Shell text goes only into text nodes, preserving quoting and newlines.
+  function renderCommands(c) {
+    const commands = c.l.commands || [];
+    if (!showCommands || c.l.ended || !commands.length) {
+      clearCardCommands(c);
+      return;
+    }
+    if (c.commands?.length === commands.length && commands.every((cmd, i) => {
+      const old = c.commands[i];
+      return cmd.command === old.command && cmd.kind === old.kind && cmd.at === old.at && cmd.until === old.until;
+    })) return;
+    const rows = document.createDocumentFragment();
+    for (const cmd of commands) {
+      const row = document.createElement("div"), meta = document.createElement("div"), text = document.createElement("pre");
+      row.className = "shell-command";
+      meta.className = "shell-meta";
+      meta.textContent = `${cmd.kind} · start ${cmd.at} · ${cmd.until ? `end ${cmd.until}` : "pending"}`;
+      text.textContent = cmd.command;
+      row.append(meta, text);
+      rows.append(row);
+    }
+    const box = $(".shell-commands", c.el);
+    box.replaceChildren(rows);
+    box.hidden = false;
+    c.commands = commands;
   }
 
   // liveTick moves every card's dial and strip's clock.

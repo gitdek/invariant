@@ -297,6 +297,10 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
 `Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).
 
+The live dashboard shows each running step's activity strip, counts, times and files. On `/act`, behind Cloudflare Access, **Show shell commands** adds each shell invocation verbatim beside its strip, with its kind and start and end times. The toggle starts off on every page load and is never saved. Turning it off, losing Access or ending or replacing a step clears its commands, and late responses cannot bring them back. Both agent transcript formats are read incrementally, and command text is kept only for calls among the strip's most recent 2,000 marks.
+
+Only `GET /act/api/live.json?commands=1` returns those commands, after checking the owner's signed Access token on every request, with `no-store` responses. The default private response, all public responses and the agent listener stay free of command text even after a private read. Commands appear as inert text; tool output and reasoning are never included. The public view still exposes no command text, search patterns, output or paths outside the workspace.
+
 ## Status
 
 Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory turns an issue into a merged pull request, with the code written in any of the three and checked against statements a person ratified on the issue.

@@ -367,6 +367,9 @@ func actURL(repo string, n int) string {
 // opening at the card of the issue open names, if any.
 func actPage(email, open string) []byte {
 	page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
+	cards := `<div class="live-cards" id="live-cards">`
+	page = strings.Replace(page, cards, `<div class="shell-toggle"><input type="checkbox" id="show-shell-commands" aria-controls="live-cards" autocomplete="off"> <label for="show-shell-commands">Show shell commands</label></div>`+"\n    "+cards, 1)
+	page = strings.Replace(page, "Never its code, its words or its thinking.", "Shell commands appear only when you turn them on. Never tool output or reasoning.", 1)
 	body := `<body data-act="` + html.EscapeString(email) + `"`
 	if open != "" {
 		body += ` data-open="` + html.EscapeString(open) + `"`
@@ -409,6 +412,14 @@ func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 		s.postAct(w, r, email)
 	case r.URL.Path == "/act/api/untaken.json" && r.Method == http.MethodGet:
 		s.serveUntaken(w)
+	case r.URL.Path == "/act/api/live.json" && r.Method == http.MethodGet:
+		body, err := s.liveJSON(time.Now(), r.URL.Query().Get("commands") == "1")
+		if err != nil {
+			http.Error(w, "couldn't read the running step", http.StatusInternalServerError)
+			return
+		}
+		h.Set("Content-Type", "application/json")
+		w.Write(body)
 	case r.URL.Path == "/act/api/ratify" && r.Method == http.MethodPost:
 		if !fromPage(r) {
 			http.Error(w, "only the page can post", http.StatusForbidden)
