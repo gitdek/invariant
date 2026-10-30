@@ -210,10 +210,14 @@ func RunModel(ctx context.Context, dir string, tc toolchain.Toolchain) (*Report,
 // declares components: execution adapters aren't connected yet (D-0158).
 var ErrComponents = errors.New("component verification is not supported yet")
 
+// ErrPythonApplication keeps existing Python declarations out of the legacy
+// code gate until an application execution adapter is available.
+var ErrPythonApplication = errors.New("existing Python application execution is not supported yet")
+
 // Check loads the project at dir and says whether the gate can verify its
-// code, before anything runs: a project that doesn't load, or that declares
-// components, fails here. Neither needs Docker or TLC, so the CLI checks
-// before it sets them up.
+// code, before anything runs: invalid projects, explicit components and
+// existing Python applications fail here. None needs Docker or TLC, so the
+// CLI checks before it sets them up.
 func Check(dir string) error {
 	p, err := project.Load(dir)
 	if err != nil {
@@ -221,6 +225,9 @@ func Check(dir string) error {
 	}
 	if p.Manifest.Components != nil {
 		return ErrComponents
+	}
+	if p.Manifest.Language == "python" && len(p.Manifest.Existing) > 0 {
+		return ErrPythonApplication
 	}
 	return nil
 }
@@ -245,6 +252,9 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 	if !model && p.Manifest.Components != nil {
 		return nil, ErrComponents
+	}
+	if !model && p.Manifest.Language == "python" && len(p.Manifest.Existing) > 0 {
+		return nil, ErrPythonApplication
 	}
 	raw, err := os.ReadFile(p.ModulePath())
 	if err != nil {

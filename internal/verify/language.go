@@ -515,6 +515,12 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	if len(p.Manifest.Existing) > 0 {
+		if p.Manifest.Components != nil {
+			return Build{}, Evidence{}, ErrComponents
+		}
+		return Build{}, Evidence{}, ErrPythonApplication
+	}
 	if !py.prepared {
 		deps, err := toolchain.PythonDepsImage(ctx, p.Dir)
 		if err != nil {
