@@ -123,6 +123,22 @@ func Markdown(r *verify.Report) string {
 	if t.NaginiRecipe != "" {
 		fmt.Fprintf(&b, "| Nagini sandbox | recipe %s |\n", render.literal(short(t.NaginiRecipe)))
 	}
+	if deps := t.PythonDependencies; deps != nil {
+		// Application paths and wheel metadata are supplied values. Escape
+		// them even in a legacy receipt, without changing older tool rows.
+		fmt.Fprintf(&b, "| Python application dependencies | base %s · platform %s · recipe %s |\n",
+			componentLiteral(shortImage(deps.Base)), componentLiteral(deps.Platform), componentLiteral(short(deps.Recipe)))
+		for _, input := range deps.Inputs {
+			fmt.Fprintf(&b, "| Python dependency input | %s · %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		for _, input := range deps.CanonicalInputs {
+			fmt.Fprintf(&b, "| Python canonical installation input | %s · %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		for _, artifact := range deps.Artifacts {
+			fmt.Fprintf(&b, "| Python dependency wheel | %s · version %s · %s · %s |\n",
+				componentLiteral(artifact.Name), componentLiteral(artifact.Version), componentLiteral(artifact.Filename), componentLiteral(short(artifact.SHA256)))
+		}
+	}
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | %s, with the package's locked dependencies: recipe %s |\n", render.literal(shortImage(t.DepsBase)), render.literal(short(t.DepsRecipe)))
 	}

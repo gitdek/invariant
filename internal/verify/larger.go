@@ -244,6 +244,11 @@ cd /src
 timeout %d %s "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
 `
 
+const pythonCountScript = `exec 2>&1
+cd /src
+/usr/bin/timeout %d /usr/local/bin/python -I -S /runtime/invariant_python.py driver "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
+`
+
 // countTimeout caps a driver's count one size larger. A driver explores
 // more slowly than TLC, so it gets twice TLC's time. One that runs out
 // claims nothing and fails nothing, as TLC doesn't when it runs out.
@@ -287,6 +292,11 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 	if err := writeHarness(src, runtime, p); err != nil {
 		return Exploration{}, err
 	}
+	if runner == "python" {
+		if err := writePythonRuntime(runtime); err != nil {
+			return Exploration{}, err
+		}
+	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
 		return Exploration{}, err
 	}
@@ -294,10 +304,19 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 		return Exploration{}, err
 	}
 	var buf bytes.Buffer
-	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
+	shell, pythonPath := "sh", "/runtime"
+	script := fmt.Sprintf(countScript, int(countTimeout.Seconds()), runner)
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512"}
+	if runner == "python" {
+		shell, pythonPath = "/bin/sh", ""
+		script = fmt.Sprintf(pythonCountScript, int(countTimeout.Seconds()))
+		args = append(args, "--platform", "linux/amd64")
+	}
+	args = append(args,
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH="+pythonPath, "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance), "-e", "INVARIANT_COUNT=/out/count.json",
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", fmt.Sprintf(countScript, int(countTimeout.Seconds()), runner))
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, shell, "-c", script)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

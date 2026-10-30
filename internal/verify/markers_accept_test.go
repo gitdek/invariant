@@ -60,7 +60,10 @@ for a in "$@"; do
 	prev=$a
 done
 cd "$FAKE_DOCKER_WORK" || exit 1
-sh -c "$prev" 2>stderr
+# Map the pinned container interpreter to this fixture's output generator.
+# Production uses the trusted absolute path, which is outside this fake PATH.
+script=$(printf '%s\n' "$prev" | sed "s|/usr/local/bin/python|$FAKE_DOCKER_BIN/python|g")
+sh -c "$script" 2>stderr
 code=$?
 cat stderr >&2
 exit $code
@@ -71,6 +74,7 @@ exit $code
 		}
 	}
 	t.Setenv("FAKE_DOCKER_WORK", t.TempDir())
+	t.Setenv("FAKE_DOCKER_BIN", bin)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 

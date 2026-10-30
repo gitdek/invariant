@@ -168,18 +168,19 @@ type BuildStep struct {
 
 // Toolchain records exactly what did the checking.
 type Toolchain struct {
-	TLC          string `json:"tlc"`
-	TLCRelease   string `json:"tlc_release"`
-	TLCJarSHA256 string `json:"tlc_jar_sha256"`
-	JavaImage    string `json:"java_image"`
-	GobraImage   string `json:"gobra_image,omitempty"`
-	GoImage      string `json:"go_image,omitempty"`
-	NodeImage    string `json:"node_image,omitempty"`
-	PythonImage  string `json:"python_image,omitempty"`
-	NaginiRecipe string `json:"nagini_recipe,omitempty"`
-	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
-	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
-	Go           string `json:"go,omitempty"`
+	TLC                string                        `json:"tlc"`
+	TLCRelease         string                        `json:"tlc_release"`
+	TLCJarSHA256       string                        `json:"tlc_jar_sha256"`
+	JavaImage          string                        `json:"java_image"`
+	GobraImage         string                        `json:"gobra_image,omitempty"`
+	GoImage            string                        `json:"go_image,omitempty"`
+	NodeImage          string                        `json:"node_image,omitempty"`
+	PythonImage        string                        `json:"python_image,omitempty"`
+	PythonDependencies *toolchain.PythonDependencies `json:"python_dependencies,omitempty"`
+	NaginiRecipe       string                        `json:"nagini_recipe,omitempty"`
+	DepsBase           string                        `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
+	DepsRecipe         string                        `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
+	Go                 string                        `json:"go,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -215,6 +216,18 @@ func Check(dir string) error {
 }
 
 func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool) (*Report, error) {
+	return gateSelectedPython(ctx, dir, outDir, tc, model, nil)
+}
+
+// gateWithPythonDependencies runs the same gate with an already-selected
+// environment. The dependency resolver ordinarily supplies it; keeping the
+// execution boundary separate also permits checking immutable fixture images
+// without admitting their wheels as public-PyPI application requirements.
+func gateWithPythonDependencies(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, dependencies *toolchain.PythonDependencies) (*Report, error) {
+	return gateSelectedPython(ctx, dir, outDir, tc, false, dependencies)
+}
+
+func gateSelectedPython(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, dependencies *toolchain.PythonDependencies) (*Report, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -281,6 +294,15 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
 		r.Toolchain.PythonImage = tc.PythonImage
+		if dependencies == nil {
+			if dependencies, err = toolchain.PythonDepsImage(ctx, p.Dir); err != nil {
+				return nil, err
+			}
+		}
+		r.Toolchain.PythonDependencies = dependencies
+		if dependencies != nil {
+			lang = Python{Image: dependencies.Image}
+		}
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 		}
@@ -464,7 +486,11 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 			return err
 		})
 		spawn(func() (err error) {
-			r.Build, evidence, err = lang.Check(ctx, p)
+			if py, ok := lang.(Python); ok {
+				r.Build, evidence, err = checkPythonImage(ctx, py.Image, p)
+			} else {
+				r.Build, evidence, err = lang.Check(ctx, p)
+			}
 			return err
 		})
 	}
@@ -682,8 +708,8 @@ func agree(d Design, e Exploration) Agreement {
 // detached copy; invocation arguments, observations and diagnostics stay ordered.
 // It leaves out timestamps, test timings, the Go
 // toolchain's patch version, where traces were written and the coding agent
-// that wrote the code, so a local run and a CI run of the same commit have
-// the same fingerprint.
+// that wrote the code, so local and CI runs with the same checked inputs and
+// dependency resolution have the same fingerprint.
 func Fingerprint(r Report) string {
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go, r.Agent = "", "", "", "", ""
 	if r.Components != nil {

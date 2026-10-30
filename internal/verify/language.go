@@ -495,8 +495,9 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
+// container, using the application's wheel environment when requirements.txt
+// exists. Files marked # +nagini are proved independently with Nagini
+// (D-0031); the rest are tested against the model.
 type Python struct{ Image string }
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
@@ -512,12 +513,97 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
+	dependencies, err := toolchain.PythonDepsImage(ctx, p.Dir)
+	if err != nil {
+		return Build{}, Evidence{}, err
+	}
+	image := py.Image
+	if dependencies != nil {
+		image = dependencies.Image
+	}
+	return checkPythonImage(ctx, image, p)
+}
+
+// checkPythonImage executes an already-selected immutable application image.
+// Selection belongs to the caller so ordinary and larger checks cannot see
+// different resolutions if another build replaces the recipe's cache tag.
+func checkPythonImage(ctx context.Context, image string, p *project.Project) (Build, Evidence, error) {
+	return runConformance(ctx, image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
-python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
-python -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
-python "$DRIVER" ; echo "@@invariant conform=$?"
+/usr/local/bin/python -I -S /runtime/invariant_python.py compileall > /dev/null ; echo "@@invariant compile=$?"
+/usr/local/bin/python -I -S /runtime/invariant_python.py unittest ; echo "@@invariant test=$?"
+/usr/local/bin/python -I -S /runtime/invariant_python.py driver "$DRIVER" ; echo "@@invariant conform=$?"
 `)
+}
+
+// Python's -I ignores PYTHONHASHSEED. Start isolated, then re-exec the same
+// trusted interpreter with an allowlisted environment and explicit startup
+// protections, so seed 0 takes effect before any application code runs.
+// Library directories are ordinary import paths, never site directories:
+// installed scripts and startup hooks have no role in running the gate.
+const pythonRuntime = `import os
+import sys
+
+if sys.argv[1] != "--seeded":
+    environment = {"HOME": "/tmp", "PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONHASHSEED": "0"}
+    for name in ("DRIVER", "INVARIANT_TRACES", "INVARIANT_COUNT", "INVARIANT_RUNS", "INVARIANT_STEPS", "INVARIANT_SEED"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    os.chdir("/tmp")
+    os.execve("/usr/local/bin/python", ["/usr/local/bin/python", "-S", "-s", "-P", __file__, "--seeded", *sys.argv[1:]], environment)
+
+from importlib.machinery import PathFinder
+import runpy
+
+operation = sys.argv[2]
+arguments = sys.argv[3:]
+trusted = list(sys.path) + ["/runtime"]
+application = ["/src"]
+if operation == "driver":
+    directory = os.path.dirname(os.path.abspath(os.path.join("/src", arguments[0])))
+    if directory not in application:
+        application.append(directory)
+library = "` + toolchain.PythonLibraryDir + `"
+sys.path[:] = trusted + application + ([library] if os.path.isdir(library) else [])
+
+class ApplicationImports:
+    # PathFinder normally lets a later regular package replace an earlier
+    # namespace package. Resolve each trust tier separately, preserving an
+    # application's namespace spec before looking at installed libraries.
+    def find_spec(self, fullname, path=None, target=None):
+        paths = sys.path if path is None else path
+        groups = ([], [], [])
+        for entry in paths:
+            absolute = os.path.abspath(entry)
+            if any(absolute == root or absolute.startswith(root + "/") for root in trusted):
+                groups[0].append(entry)
+            elif absolute == "/src" or absolute.startswith("/src/"):
+                groups[1].append(entry)
+            else:
+                groups[2].append(entry)
+        for group in groups:
+            spec = PathFinder.find_spec(fullname, group, target)
+            if spec is not None:
+                return spec
+        return None
+
+sys.meta_path.insert(sys.meta_path.index(PathFinder), ApplicationImports())
+os.chdir("/src")
+if operation == "compileall":
+    sys.argv = ["compileall", "-q", "."]
+    runpy.run_module("compileall", run_name="__main__", alter_sys=True)
+elif operation == "unittest":
+    sys.argv = ["unittest", "discover", "-s", ".", "-p", "test_*.py"]
+    runpy.run_module("unittest", run_name="__main__", alter_sys=True)
+elif operation == "driver":
+    sys.argv = arguments
+    runpy.run_path(arguments[0], run_name="__main__")
+else:
+    raise ValueError("unknown Python check: " + operation)
+`
+
+func writePythonRuntime(runtime string) error {
+	return os.WriteFile(filepath.Join(runtime, "invariant_python.py"), []byte(pythonRuntime), 0o644)
 }
 
 // runConformance runs a project's build steps and then its conformance
@@ -541,6 +627,11 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	if err := writeHarness(src, runtime, p); err != nil {
 		return Build{}, Evidence{}, err
 	}
+	if p.Manifest.Language == "python" {
+		if err := writePythonRuntime(runtime); err != nil {
+			return Build{}, Evidence{}, err
+		}
+	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
 		return Build{}, Evidence{}, err
 	}
@@ -548,13 +639,20 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	var buf bytes.Buffer
-	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
+	shell, pythonPath := "sh", "/runtime"
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512"}
+	if p.Manifest.Language == "python" {
+		shell, pythonPath = "/bin/sh", ""
+		args = append(args, "--platform", "linux/amd64")
+	}
+	args = append(args,
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH="+pythonPath, "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", script)
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, shell, "-c", script)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
