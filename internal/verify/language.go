@@ -495,9 +495,32 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with application dependencies when requirements.txt is present.
+// Files marked # +nagini are proved independently with Nagini (D-0031);
+// the rest are tested against the model.
+type Python struct {
+	Image                string
+	dependencies         *toolchain.PythonDependencies
+	dependenciesSelected bool
+}
+
+// withDependencies selects the application environment once. A gate shares
+// this immutable image with its ordinary and larger-bound checks, even if
+// another build replaces the recipe's cache tag while those checks run.
+func (py Python) withDependencies(ctx context.Context, root string) (Python, error) {
+	if py.dependenciesSelected {
+		return py, nil
+	}
+	dependencies, err := toolchain.PythonDepsImage(ctx, root)
+	if err != nil {
+		return Python{}, err
+	}
+	py.dependencies, py.dependenciesSelected = dependencies, true
+	if dependencies != nil {
+		py.Image = dependencies.Image
+	}
+	return py, nil
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,6 +535,10 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	py, err := py.withDependencies(ctx, p.Dir)
+	if err != nil {
+		return Build{}, Evidence{}, err
+	}
 	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
 python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
@@ -554,7 +581,7 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", script)
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "/bin/sh", "-c", script)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

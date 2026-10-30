@@ -137,8 +137,28 @@ func Markdown(r *verify.Report) string {
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | `%s`, with the package's locked dependencies: recipe `%s` |\n", display(shortImage(t.DepsBase)), display(short(t.DepsRecipe)))
 	}
+	if deps := t.PythonDependencies; deps != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | base %s, recipe %s, platform %s |\n",
+			componentLiteral(shortImage(deps.Base)), componentLiteral(short(deps.Recipe)), componentLiteral(deps.Platform))
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", display(t.Go))
+	}
+	if deps := t.PythonDependencies; deps != nil {
+		b.WriteString("\nPython application dependency inputs:\n\n| Input | SHA-256 |\n| :-- | :-- |\n")
+		for _, input := range deps.Inputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		b.WriteString("\nResolved Python application wheels:\n")
+		if len(deps.Artifacts) == 0 {
+			b.WriteString("\nNo application wheels were installed.\n")
+		} else {
+			b.WriteString("\n| Package | Version | Wheel | SHA-256 |\n| :-- | :-- | :-- | :-- |\n")
+			for _, artifact := range deps.Artifacts {
+				fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", componentLiteral(artifact.Name), componentLiteral(artifact.Version),
+					componentLiteral(artifact.Filename), componentLiteral(short(artifact.SHA256)))
+			}
+		}
 	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", display(r.GeneratedAt), display(r.Fingerprint))
 	return b.String()

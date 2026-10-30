@@ -155,6 +155,34 @@ The first slice of [#229](https://github.com/gitdek/invariant/issues/229) correc
 
 This API attributes proof evidence only. Remaining work is [#244](https://github.com/gitdek/invariant/issues/244): bounded or sampled conformance, runtime checks and trusted assumptions as separate component evidence kinds; component dashboard views; Python and TypeScript discovery; and execution of explicit checks, followed by removal of `verify.ErrComponents`. Explicit Python or TypeScript configurations remain rejected. The attribution policy is [D-0163](decisions/journal/D-0163.jsonl). Keeping this description current is required by [D-0122](decisions/journal/D-0122.jsonl).
 
+### Python application dependencies
+
+A Python project's root `requirements.txt` supplies the application dependencies for its tests, conformance driver and check one size larger. Invariant builds and caches an application image from the existing digest-pinned Python base on `linux/amd64`. Projects without that file keep the standard-library environment. Nagini uses its own pinned verifier image and recipe independently.
+
+The supported inputs are PyPI wheel requirements: package names, version specifiers, extras, environment markers and `--hash=sha256:...`, with comments, blank lines and backslash continuations. Recursive local `-r` / `--requirement` and `-c` / `--constraint` references resolve relative to their containing file. For example:
+
+```text
+# requirements.txt
+-r deps/application.txt
+-c deps/constraints.txt
+```
+
+Every root and referenced file must be UTF-8, optionally starting with a UTF-8 BOM, with LF or CRLF line endings. Before interpreting comments or continuations, Invariant rejects invalid UTF-8, every bare CR, every encoding declaration anywhere in a file (including declarations of UTF-8), and all other separators recognized by Python's `splitlines`: VT, FF, FS, GS, RS, NEL, LS and PS. Inputs are copied and hashed as their exact original bytes.
+
+References must stay inside the project at every path step, with no symlinks, missing paths or cycles. The build copies a dedicated inputs directory literally, preserving filenames such as `[a].txt` and every directory a reference traverses, including an empty directory canceled by `..`. URLs, VCS, editable or local packages, environment substitutions, index overrides and other pip options are unsupported. Installation uses wheels from public PyPI only; a package without a suitable wheel fails instead of running a source build. Pip validates requirement syntax and hash-checking rules, without host pip configuration.
+
+Every Python invocation during the image build runs with `-I` from a clean directory outside the staged inputs. After installation, evidence reads and all application checks run offline, without the host's environment. The gate selects one immutable Docker image ID and uses it for evidence, ordinary checks and larger-bound checks even if another build replaces the cache tag. Its evidence reader, shell launchers and every external helper in the check scripts, including `timeout`, use trusted absolute paths outside the application's dependency environment. Shell builtins and application Python retain their normal roles and application imports work normally.
+
+The cache key covers the pinned base, platform, full installation recipe, and canonical relative paths and exact bytes of every referenced input. Cached images retain the wheels actually installed; a fresh build of unpinned requirements may resolve different versions. Installation failures and missing or malformed wheel evidence stop the gate with an error. The gate never falls back to a standard-library environment after such a failure.
+
+JSON and Markdown receipts record the application base, recipe, platform, canonical input hashes, and every resolved wheel's name, version, filename and SHA-256, including transitive dependencies. This evidence is separate from Nagini's recipe and enters the receipt fingerprint. Local cache tags and image IDs are execution details. Local and CI fingerprints agree only when the other checked inputs and the effective dependency environment agree; the same commit alone does not guarantee that a fresh resolution matches.
+
+This is [#227's ratified dependency slice](.invariant/plans/issue-227.json). Attaching this reusable environment evidence to component receipts awaits component execution; Python existing-code discovery and contract checks remain subsequent issues on [#210](https://github.com/gitdek/invariant/issues/210). Under [D-0122](decisions/journal/D-0122.jsonl), the merger must record the dependency-policy decision and cite it alongside the existing grounding decisions in the changed SPEC bullets. Before merging #227, the merger must run the real Docker/PyPI acceptance suite on the final pull request head and post its passing output:
+
+```bash
+INVARIANT_PYTHON_DEPS_REAL=1 go test ./internal/verify -run '^TestPythonDependenc' -count=1 -timeout 30m
+```
+
 ## One model, three languages
 
 The same ratified two-phase commit, pinned by the same hashes, checked in each of the languages Invariant targets:
