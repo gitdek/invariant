@@ -470,7 +470,7 @@ def observe_file(self, filename, constraint):
         row = {"path": source, "constraint": constraint}
         original_files[json.dumps(row, sort_keys=True)] = row
     for line in parse_file(self, filename, constraint):
-        if original and not line.is_requirement:
+        if original and line.requirement is None:
             for values, role in [(line.opts.requirements, False), (line.opts.constraints, True)]:
                 for value in values or []:
                     target = os.path.relpath(os.path.normpath(os.path.join(os.path.dirname(filename), value)), "/original")

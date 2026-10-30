@@ -874,7 +874,7 @@ def observe_file(self, filename, constraint):
         for line in parse_file(self, filename, constraint):
             lineno = line.lineno
             opts = options(line, source)
-            if not line.is_requirement:
+            if line.requirement is None:
                 report["options"].extend(opts)
                 for values, role in [(line.opts.requirements, False), (line.opts.constraints, True)]:
                     for value in values or []:
