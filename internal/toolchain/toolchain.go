@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -56,7 +55,7 @@ type Toolchain struct {
 // Ensure checks that Docker is running and fetches the TLC jar into the user
 // cache if it isn't there, verifying its checksum either way.
 func Ensure(ctx context.Context) (Toolchain, error) {
-	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
+	if err := Docker(ctx, "info").Run(); err != nil {
 		return Toolchain{}, fmt.Errorf("docker isn't available (is the daemon running?): %w", err)
 	}
 	cache, err := os.UserCacheDir()
@@ -133,10 +132,10 @@ var PlumbingDockerfile []byte
 func PlumbingImage(ctx context.Context) (string, error) {
 	sum := sha256.Sum256(PlumbingDockerfile)
 	tag := "invariant-plumbing:" + hex.EncodeToString(sum[:])[:12]
-	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
+	if Docker(ctx, "image", "inspect", tag).Run() == nil {
 		return tag, nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, "-")
+	cmd := Docker(ctx, "build", "-t", tag, "-")
 	cmd.Stdin = bytes.NewReader(PlumbingDockerfile)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -165,10 +164,10 @@ func NaginiRecipe() string {
 // the first time. Building needs the network; verifying never does.
 func NaginiImage(ctx context.Context) (string, error) {
 	tag := "invariant-nagini:" + NaginiRecipe()[len("sha256:"):][:12]
-	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
+	if Docker(ctx, "image", "inspect", tag).Run() == nil {
 		return tag, nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "--platform", "linux/amd64", "-t", tag, "-")
+	cmd := Docker(ctx, "build", "--platform", "linux/amd64", "-t", tag, "-")
 	cmd.Stdin = bytes.NewReader(NaginiDockerfile)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

@@ -19,8 +19,21 @@ var (
 // Docker returns a command for the docker client. A run is named, and when
 // its context ends the container is removed before the client is killed:
 // killing the client alone leaves the container running. A run that finishes
-// by itself is left alone, and every other command is passed as it was given.
+// by itself is left alone. Runs and builds explicitly clear Docker's proxy
+// defaults: client configuration can otherwise inject credentials without any
+// environment being passed by the gate. Daemon selection stays untouched.
 func Docker(ctx context.Context, args ...string) *exec.Cmd {
+	if len(args) > 0 && (args[0] == "run" || args[0] == "build") {
+		option := "-e"
+		if args[0] == "build" {
+			option = "--build-arg"
+		}
+		clean := []string{args[0]}
+		for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "FTP_PROXY", "ftp_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+			clean = append(clean, option, key+"=")
+		}
+		args = append(clean, args[1:]...)
+	}
 	if len(args) == 0 || args[0] != "run" {
 		return exec.CommandContext(ctx, "docker", args...)
 	}

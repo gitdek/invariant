@@ -60,7 +60,10 @@ for a in "$@"; do
 	prev=$a
 done
 cd "$FAKE_DOCKER_WORK" || exit 1
-sh -c "$prev" 2>stderr
+# Production uses the base interpreter's absolute path. Map that container
+# executable to this fixture's output-only stand-in when running on the host.
+script=$(printf '%s' "$prev" | sed 's|/usr/local/bin/python|python|g')
+sh -c "$script" 2>stderr
 code=$?
 cat stderr >&2
 exit $code

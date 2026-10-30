@@ -495,9 +495,31 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with the project's wheel dependencies when requirements.txt is
+// present. Files marked # +nagini are proved separately with Nagini (D-0031).
+type Python struct {
+	Image        string
+	Dependencies *toolchain.PythonDependencies
+	prepared     bool
+}
+
+// prepare selects one immutable application image before any checks begin.
+// Keeping that selection on the language also binds larger-bound checks and
+// receipt evidence to it, even if another build replaces the cache tag.
+func (py Python) prepare(ctx context.Context, root string) (Python, error) {
+	if py.prepared {
+		return py, nil
+	}
+	dependencies, err := toolchain.PythonDepsImage(ctx, root)
+	if err != nil {
+		return Python{}, err
+	}
+	py.Dependencies, py.prepared = dependencies, true
+	if dependencies != nil {
+		py.Image = dependencies.Image
+	}
+	return py, nil
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,12 +534,47 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	py, err := py.prepare(ctx, p.Dir)
+	if err != nil {
+		return Build{}, Evidence{}, err
+	}
 	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
-python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
-python -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
-python "$DRIVER" ; echo "@@invariant conform=$?"
+`+pythonRunner+` module compileall -q . > /dev/null ; echo "@@invariant compile=$?"
+`+pythonRunner+` module unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
+`+pythonRunner+` driver "$DRIVER" ; echo "@@invariant conform=$?"
 `)
+}
+
+// -I would discard PYTHONHASHSEED. Under the gate's explicit environment,
+// -S -s -P retains the fixed seed while disabling site hooks, user sites and
+// implicit source paths. Only the trusted bootstrap adds application paths.
+const pythonRunner = "/usr/local/bin/python -S -s -P /runtime/invariant_check.py"
+
+const pythonBootstrap = `import os, runpy, sys
+for directory in ["/runtime", "/src", os.path.dirname(os.path.abspath(os.environ["DRIVER"])), %s]:
+    if directory not in sys.path:
+        sys.path.append(directory)
+action = sys.argv[1]
+sys.argv = sys.argv[2:]
+if action == "module":
+    runpy.run_module(sys.argv[0], run_name="__main__", alter_sys=True)
+elif action == "driver":
+    runpy.run_path(os.path.abspath(sys.argv[0]), run_name="__main__")
+else:
+    raise ValueError("unknown gate check: " + action)
+`
+
+func writePythonBootstrap(runtime string) error {
+	return os.WriteFile(filepath.Join(runtime, "invariant_check.py"),
+		[]byte(fmt.Sprintf(pythonBootstrap, strconv.Quote(toolchain.PythonLibraryDir))), 0o644)
+}
+
+// No host Python variables enter Docker; explicitly clear startup paths as
+// well, so the base image cannot add a site or application directory early.
+func pythonCheckEnvironment() []string {
+	return []string{"-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=", "-e", "PYTHONHOME=",
+		"-e", "PYTHONUSERBASE=", "-e", "PYTHONSTARTUP="}
 }
 
 // runConformance runs a project's build steps and then its conformance
@@ -541,6 +598,11 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	if err := writeHarness(src, runtime, p); err != nil {
 		return Build{}, Evidence{}, err
 	}
+	if p.Manifest.Language == "python" {
+		if err := writePythonBootstrap(runtime); err != nil {
+			return Build{}, Evidence{}, err
+		}
+	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
 		return Build{}, Evidence{}, err
 	}
@@ -548,13 +610,18 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	var buf bytes.Buffer
-	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
-		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+		"-e", "HOME=/tmp", "-v", runtime + ":/runtime:ro",
+		"-e", "DRIVER=" + filepath.ToSlash(p.Manifest.Conformance),
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
-		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", script)
+		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed)}
+	if p.Manifest.Language == "python" {
+		args = append(args, "--platform", "linux/amd64")
+		args = append(args, pythonCheckEnvironment()...)
+	}
+	args = append(args, "-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "/bin/sh", "-c", script)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

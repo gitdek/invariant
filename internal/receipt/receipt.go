@@ -126,8 +126,28 @@ func Markdown(r *verify.Report) string {
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | %s, with the package's locked dependencies: recipe %s |\n", render.literal(shortImage(t.DepsBase)), render.literal(short(t.DepsRecipe)))
 	}
+	if d := t.PythonDependencies; d != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | %s · %s · recipe %s |\n", componentLiteral(shortImage(d.Base)), componentLiteral(d.Platform), componentLiteral(short(d.Recipe)))
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
+	}
+	if d := t.PythonDependencies; d != nil {
+		b.WriteString("\nPython application dependency inputs:\n\n| Original input | SHA-256 |\n| :-- | :-- |\n")
+		for _, input := range d.Inputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		b.WriteString("\nCanonical installation inputs (relative to canonical/):\n\n| Canonical input | SHA-256 |\n| :-- | :-- |\n")
+		for _, input := range d.CanonicalInputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		b.WriteString("\nResolved Python application wheels:\n\n| Distribution | Version | Wheel | SHA-256 |\n| :-- | :-- | :-- | :-- |\n")
+		for _, artifact := range d.Artifacts {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", componentLiteral(artifact.Name), componentLiteral(artifact.Version), componentLiteral(artifact.Filename), componentLiteral(short(artifact.SHA256)))
+		}
+		if len(d.Artifacts) == 0 {
+			b.WriteString("\nThe recorded resolution contains no application wheels.\n")
+		}
 	}
 	sources := "tool output only"
 	if explicit {

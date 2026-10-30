@@ -30,7 +30,11 @@ func runName(t *testing.T, args []string) string {
 func TestDockerRunIsNamedAndKeepsItsArguments(t *testing.T) {
 	cmd := Docker(context.Background(), "run", "--rm", "--network", "none", "-v", "/a:/b", "img", "sh", "-c", "echo hi")
 	runName(t, cmd.Args)
-	want := []string{"--rm", "--network", "none", "-v", "/a:/b", "img", "sh", "-c", "echo hi"}
+	var want []string
+	for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "FTP_PROXY", "ftp_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+		want = append(want, "-e", key+"=")
+	}
+	want = append(want, "--rm", "--network", "none", "-v", "/a:/b", "img", "sh", "-c", "echo hi")
 	if got := cmd.Args[4:]; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("run's other arguments = %q, want %q", got, want)
 	}
@@ -45,6 +49,13 @@ func TestDockerLeavesOtherCommandsAsTheyWere(t *testing.T) {
 	} {
 		cmd := Docker(context.Background(), args...)
 		want := append([]string{"docker"}, args...)
+		if args[0] == "build" {
+			want = []string{"docker", "build"}
+			for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "FTP_PROXY", "ftp_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+				want = append(want, "--build-arg", key+"=")
+			}
+			want = append(want, args[1:]...)
+		}
 		if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
 			t.Errorf("Docker(%q).Args = %q, want %q", args, cmd.Args, want)
 		}
