@@ -15,71 +15,92 @@ import (
 // Markdown renders the report as a receipt.
 func Markdown(r *verify.Report) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", r.Project)
-	if r.Passed {
+	explicit := hasComponentEvidence(r)
+	display := func(s string) string {
+		if explicit {
+			return componentText(s)
+		}
+		return s
+	}
+	writeRow := func(check string, ok bool, result, evidence string) {
+		row(&b, display(check), ok, display(result), display(evidence))
+	}
+	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", display(r.Project))
+	if r.Passed && explicit {
+		fmt.Fprintf(&b, "**✅ Pass.** Gate passed. Assurance: **component evidence**. Fingerprint `%s`\n\n", display(short(r.Fingerprint)))
+	} else if r.Passed {
 		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", r.Claim(), short(r.Fingerprint))
 	} else {
-		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", short(r.Fingerprint))
+		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", display(short(r.Fingerprint)))
 	}
 	// The gate checks the code whoever wrote it, so the receipt names the
 	// agent but the fingerprint leaves it out (#179).
 	if r.Agent != "" {
-		fmt.Fprintf(&b, "Coding agent: `%s`. The fingerprint leaves it out.\n\n", r.Agent)
+		if explicit {
+			fmt.Fprintf(&b, "Coding agent: %s. The fingerprint leaves it out.\n\n", componentLiteral(r.Agent))
+		} else {
+			fmt.Fprintf(&b, "Coding agent: `%s`. The fingerprint leaves it out.\n\n", r.Agent)
+		}
 	}
 
 	b.WriteString("| Check | Result | Evidence |\n| :-- | :-- | :-- |\n")
-	row(&b, "Pinned statements", pinsOK(r) && r.RatificationMatches(), pinsResult(r), provenance(r))
-	row(&b, "Design · TLC", r.Design.Passed, designResult(r.Design), designEvidence(r.Design))
-	row(&b, "Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), witnessEvidence(r))
+	writeRow("Pinned statements", pinsOK(r) && r.RatificationMatches(), pinsResult(r), provenance(r))
+	writeRow("Design · TLC", r.Design.Passed, designResult(r.Design), designEvidence(r.Design))
+	writeRow("Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), witnessEvidence(r))
 	if len(r.Properties) > 0 {
-		row(&b, "Liveness · TLC", propertiesOK(r), fmt.Sprintf("%d of %d properties hold", count(r.Properties, func(p verify.Property) bool { return p.Holds }), len(r.Properties)), propertyEvidence(r))
+		writeRow("Liveness · TLC", propertiesOK(r), fmt.Sprintf("%d of %d properties hold", count(r.Properties, func(p verify.Property) bool { return p.Holds }), len(r.Properties)), propertyEvidence(r))
 	}
 	if len(r.Fairness) > 0 {
-		row(&b, "Fairness", fairnessOK(r), fmt.Sprintf("%d of %d on steps the model takes", count(r.Fairness, func(f verify.Fair) bool { return f.InNext }), len(r.Fairness)), fairnessEvidence(r))
+		writeRow("Fairness", fairnessOK(r), fmt.Sprintf("%d of %d on steps the model takes", count(r.Fairness, func(f verify.Fair) bool { return f.InNext }), len(r.Fairness)), fairnessEvidence(r))
 	}
-	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
-	if a := r.Agreement; a != nil {
-		row(&b, "Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
+	writeRow("Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
+	if a := r.Agreement; a != nil && !explicit {
+		writeRow("Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
 		// A Go explorer with Successors and no Try says where it went, not
 		// what it tried (D-0090).
 		if r.Conformance == nil {
 			b.WriteString("| Every step tried | ➖ not checked | the explorer reports the states it reaches, not its attempts (D-0082) |\n")
 		}
 	}
-	if l := r.Larger; l != nil {
+	if l := r.Larger; l != nil && !explicit {
 		// It adds to a claim and never fails a pass, so it isn't marked as a
 		// failure when it doesn't hold.
 		if l.Passed {
-			row(&b, "One size larger", true, "code reaches the model's states", fmt.Sprintf("%s states, depth %d, within %s", thousands(l.States), l.Depth, bounds(l.Bounds)))
+			writeRow("One size larger", true, "code reaches the model's states", fmt.Sprintf("%s states, depth %d, within %s", thousands(l.States), l.Depth, bounds(l.Bounds)))
 		} else if l.Required {
-			row(&b, "One size larger", false, "code and model differ, so the code carries a bound", fmt.Sprintf("%s states, depth %d, where the model has %s, depth %d, within %s", thousands(l.States), l.Depth, thousands(l.WantStates), l.WantDepth, bounds(l.Bounds)))
+			writeRow("One size larger", false, "code and model differ, so the code carries a bound", fmt.Sprintf("%s states, depth %d, where the model has %s, depth %d, within %s", thousands(l.States), l.Depth, thousands(l.WantStates), l.WantDepth, bounds(l.Bounds)))
 		} else {
 			fmt.Fprintf(&b, "| One size larger | ➖ not claimed | %s |\n", strings.ReplaceAll(firstLine(l.Message), "|", "\\|"))
 		}
 	}
-	if c := r.Code; c != nil {
-		row(&b, "Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
+	if c := r.Code; c != nil && !explicit {
+		writeRow("Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
 	}
-	if c := r.Conformance; c != nil {
-		row(&b, "Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
+	if c := r.Conformance; c != nil && !explicit {
+		writeRow("Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
 		switch t := c.Tried; {
 		case t != nil && t.Passed:
-			row(&b, "Every step tried", true, "in every state reached, but where only the environment's bounds rule a step out",
+			writeRow("Every step tried", true, "in every state reached, but where only the environment's bounds rule a step out",
 				fmt.Sprintf("%s attempts in %s states, refusals included", thousands(int64(t.Attempts)), thousands(int64(t.States))))
 		case t != nil:
-			row(&b, "Every step tried", false, "a step never tried", triedEvidence(*t))
+			writeRow("Every step tried", false, "a step never tried", triedEvidence(*t))
 		case c.Exhaustive:
 			b.WriteString("| Every step tried | ➖ not checked | the driver records its runs, not its attempts (D-0082) |\n")
 		}
 	}
 	if len(r.Existing) > 0 {
-		row(&b, "Existing code", r.Build.Passed, "run as it is, by the factory's driver", existingEvidence(r.Existing))
+		writeRow("Existing code", r.Build.Passed, "run as it is, by the factory's driver", existingEvidence(r.Existing))
 	}
 	if !r.ModelOnly {
-		row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
+		writeRow("Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
+	}
+	if explicit {
+		componentEvidence(&b, r.Components)
 	}
 
-	if r.EverySize() {
+	if explicit {
+		fmt.Fprintf(&b, "\nDesign checked within %s. Within these bounds TLC's search is exhaustive. Component proof coverage is listed above.\n", display(bounds(r.Bounds)))
+	} else if r.EverySize() {
 		fmt.Fprintf(&b, "\nChecked within %s, and again one size larger, within %s. Within each, TLC's search is exhaustive. %s proves the code against its contracts at every size, and the design's rules are claimed only within the sizes checked.\n", bounds(r.Bounds), bounds(r.Larger.Bounds), r.Code.Verifier)
 	} else {
 		fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
@@ -88,6 +109,9 @@ func Markdown(r *verify.Report) string {
 	if problems := failures(r); len(problems) > 0 {
 		b.WriteString("\n**What failed**\n\n")
 		for _, p := range problems {
+			if explicit {
+				p = componentText(p)
+			}
 			fmt.Fprintf(&b, "- %s\n", p)
 		}
 	}
@@ -95,29 +119,117 @@ func Markdown(r *verify.Report) string {
 	b.WriteString("\n<details>\n<summary>Ratified statements</summary>\n\n")
 	b.WriteString("| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n")
 	for _, p := range r.Pins {
-		fmt.Fprintf(&b, "| `%s` | %s | %s | %s `%s` |\n", p.Name, p.Kind, p.Says, mark(p.Match), short(p.Want))
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s `%s` |\n", display(p.Name), display(p.Kind), display(p.Says), mark(p.Match), display(short(p.Want)))
 	}
 	b.WriteString("\n</details>\n\n<details>\n<summary>Toolchain</summary>\n\n")
 	b.WriteString("| Tool | Pinned at |\n| :-- | :-- |\n")
 	t := r.Toolchain
-	fmt.Fprintf(&b, "| TLC | %s · tla2tools.jar %s `%s` |\n", t.TLC, t.TLCRelease, short("sha256:"+t.TLCJarSHA256))
-	fmt.Fprintf(&b, "| Java | `%s` |\n", shortImage(t.JavaImage))
+	fmt.Fprintf(&b, "| TLC | %s · tla2tools.jar %s `%s` |\n", display(t.TLC), display(t.TLCRelease), display(short("sha256:"+t.TLCJarSHA256)))
+	fmt.Fprintf(&b, "| Java | `%s` |\n", display(shortImage(t.JavaImage)))
 	for _, img := range [][2]string{{"Gobra", t.GobraImage}, {"Go sandbox", t.GoImage}, {"Node sandbox", t.NodeImage}, {"Python sandbox", t.PythonImage}} {
 		if img[1] != "" {
-			fmt.Fprintf(&b, "| %s | `%s` |\n", img[0], shortImage(img[1]))
+			fmt.Fprintf(&b, "| %s | `%s` |\n", img[0], display(shortImage(img[1])))
 		}
 	}
 	if t.NaginiRecipe != "" {
-		fmt.Fprintf(&b, "| Nagini sandbox | recipe `%s` |\n", short(t.NaginiRecipe))
+		fmt.Fprintf(&b, "| Nagini sandbox | recipe `%s` |\n", display(short(t.NaginiRecipe)))
 	}
 	if t.DepsRecipe != "" {
-		fmt.Fprintf(&b, "| Dependencies sandbox | `%s`, with the package's locked dependencies: recipe `%s` |\n", shortImage(t.DepsBase), short(t.DepsRecipe))
+		fmt.Fprintf(&b, "| Dependencies sandbox | `%s`, with the package's locked dependencies: recipe `%s` |\n", display(shortImage(t.DepsBase)), display(short(t.DepsRecipe)))
 	}
 	if t.Go != "" {
-		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
+		fmt.Fprintf(&b, "| Go | %s |\n", display(t.Go))
 	}
-	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
+	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", display(r.GeneratedAt), display(r.Fingerprint))
 	return b.String()
+}
+
+func hasComponentEvidence(r *verify.Report) bool {
+	return r.Components != nil && r.Components.Inventory.Mode == "explicit"
+}
+
+// componentEvidence reports every scoped declaration, even when it was only
+// a contract input or had no selected check. Package-wide results cannot
+// supply a component's proof status.
+func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
+	proofs := make(map[string]verify.ComponentProof, len(evidence.Proofs))
+	for _, p := range evidence.Proofs {
+		proofs[p.Target] = p
+	}
+	contracts := make(map[string][]string)
+	for _, check := range evidence.Inventory.Checks {
+		if check.Proof != nil {
+			contracts[check.Target] = check.Proof.Contracts
+		}
+	}
+	proved := 0
+	for _, c := range evidence.Inventory.Components {
+		if proofs[c.ID].Status == "proved" {
+			proved++
+		}
+	}
+	fmt.Fprintf(b, "\nComponent proofs: **%d proved; %d unchecked**.\n\n", proved, len(evidence.Inventory.Components)-proved)
+	b.WriteString("| Component | Proof | Source | Contract | Evidence |\n| :-- | :-- | :-- | :-- | :-- |\n")
+	for _, c := range evidence.Inventory.Components {
+		proof := proofs[c.ID]
+		status := "unchecked"
+		if proof.Status == "proved" {
+			status = "proved"
+		}
+		contract := "none"
+		if c.ContractSHA256 != "" {
+			contract = componentLiteral(short(c.ContractSHA256))
+		}
+		var details []string
+		if selected, ok := contracts[c.ID]; ok {
+			ids := make([]string, len(selected))
+			for i, id := range selected {
+				ids[i] = componentLiteral(id)
+			}
+			details = append(details, "selected contracts: "+strings.Join(ids, ", "))
+		} else {
+			details = append(details, "no proof selected")
+		}
+		if result := proof.Result; result != nil {
+			if result.Verifier != "" {
+				details = append(details, "verifier: "+componentText(result.Verifier))
+			}
+			for _, diagnostic := range result.Errors {
+				details = append(details, componentText(diagnostic))
+			}
+		} else if _, ok := contracts[c.ID]; ok {
+			details = append(details, "no verifier result")
+		}
+		fmt.Fprintf(b, "| %s | %s | %s · %s | %s | %s |\n", componentLiteral(c.ID), status,
+			componentLiteral(c.Source), componentLiteral(short(c.SourceSHA256)), contract, strings.Join(details, "; "))
+	}
+	b.WriteString("\nScope: ")
+	for i, scope := range evidence.Inventory.Scope {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(componentLiteral(scope))
+	}
+	b.WriteString(".\n\n| Source file | Identity |\n| :-- | :-- |\n")
+	for _, file := range evidence.Inventory.Files {
+		fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(file.Path), componentLiteral(short(file.SHA256)))
+	}
+}
+
+func componentLiteral(s string) string {
+	return "<code>" + componentText(s) + "</code>"
+}
+
+// componentText keeps source-derived text literal in both prose and GFM
+// tables. Entities cannot delimit table cells, Markdown spans or HTML tags.
+// Encode line endings too: even a filename or diagnostic containing a newline
+// must stay within its own row. JSON retains the original, unescaped values.
+func componentText(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;", "<", "&lt;", ">", "&gt;", "\\", "&#92;",
+		"`", "&#96;", "*", "&#42;", "_", "&#95;", "[", "&#91;", "]", "&#93;",
+		"~", "&#126;", "|", "&#124;", "\r", "&#13;", "\n", "&#10;",
+	).Replace(s)
 }
 
 // existingEvidence names the existing code a project ran, and its hashes.
@@ -387,7 +499,11 @@ func failures(r *verify.Report) []string {
 		}
 	}
 	if l := r.Larger; l != nil && l.Required && !l.Passed {
-		out = append(out, "One size larger: "+l.Message+". The explorer names its bounds, so the code must hold at every size, and something in it stops at the bounds.")
+		message := "One size larger: " + l.Message
+		if !hasComponentEvidence(r) {
+			message += ". The explorer names its bounds, so the code must hold at every size, and something in it stops at the bounds."
+		}
+		out = append(out, message)
 	}
 	if a := r.Agreement; a != nil && !a.Passed {
 		out = append(out, "Agreement: "+a.Message)
