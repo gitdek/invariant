@@ -297,6 +297,10 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
 `Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).
 
+The live dashboard gives each running step its own card, with its activity, tool calls and stretches of thinking. A Codex card's thinking total sums the `usage.reasoning_output_tokens` reported by completed turns, counting each whole transcript line once. Until a turn reports that count, the card uses estimates from reasoning length, as it does for older transcripts without reasoning usage. The first reported count, including zero, replaces those estimates. The thinking statistic and total legend then show full integers without an approximation sign (`thinkingExact` in the live JSON). During later turns the total stays at the last reported sum while the card shows the current activity; refreshes and the end of the step retain that sum.
+
+Reasoning items still appear as timed thinking stretches with their own estimated tokens, and later items don't inflate a reported total. Claude Code keeps accumulating its streamed estimates. Each card keeps its own counts, and a replaced transcript starts fresh. The view publishes counts, times and paths inside the agent's copy only, never agent words or reasoning text ([D-0051](decisions/journal/D-0051.jsonl), [D-0116](decisions/journal/D-0116.jsonl), [D-0136](decisions/journal/D-0136.jsonl)).
+
 ## Status
 
 Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory turns an issue into a merged pull request, with the code written in any of the three and checked against statements a person ratified on the issue.

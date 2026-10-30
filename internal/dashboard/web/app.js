@@ -1885,12 +1885,13 @@
     put($(".live-now", el), now);
 
     const calls = Object.values(l.tools || {}).reduce((a, b) => a + b, 0);
-    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", `≈${kilo(l.thinking)}`, "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
+    const thinking = l.thinkingExact ? nf.format(l.thinking) : `≈${kilo(l.thinking)}`;
+    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", thinking, "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
     if (l.output) stats.push(["Wrote", kilo(l.output), "output tokens"]);
     put($(".live-stats", el), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
 
     put($(".legend", el), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
-      + (l.thinking ? `<span class="lg think"><i></i>thinking ≈${kilo(l.thinking)} tokens</span>` : ""));
+      + (l.thinking || l.thinkingExact ? `<span class="lg think"><i></i>thinking ${thinking} tokens</span>` : ""));
 
     put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
