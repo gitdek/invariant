@@ -449,13 +449,14 @@ func sandbox(ctx context.Context, cache string) (plumbing.Sandbox, error) {
 }
 
 // planTool checks the plan an agent drafts for a plumbing issue (D-0105):
-// it holds together, and its acceptance tests fail on the code as it is.
+// it holds together, and its acceptance tests fail on the code as it is,
+// or its plan of issues holds together.
 func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
 	runs := 0
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Check the plan in plan.json and its acceptance tests under tests/ against the repository in repo/: "+
-			"the plan holds together, and every acceptance test fails on the code as it is. You have %d checks in total.", maxRuns),
+			"the plan holds together, and every acceptance test fails on the code as it is. Or check the plan of issues in issues.json against the plan-of-issues rules. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			if runs >= maxRuns {
@@ -463,8 +464,11 @@ func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.T
 			}
 			runs++
 			if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
+				if _, err := os.Stat(filepath.Join(ws, "issues.json")); err == nil {
+					return checkIssues(ws, runs, maxRuns, logPath), false
+				}
 				if _, err := os.Stat(filepath.Join(ws, "proposal.json")); err == nil {
-					return fmt.Sprintf("There's no plan.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
+					return fmt.Sprintf("There's no plan.json or issues.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
 						"If that's what you mean to send, you're done.\n\n(Check %d of %d.)", runs, maxRuns), false
 				}
 			}
@@ -504,21 +508,25 @@ func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
 						"If that's what you mean to send, you're done.\n\n(Check %d of %d.)", runs, maxRuns), false
 				}
 			}
-			plan, err := formalize.ReadIssues(ws)
-			if logPath != "" {
-				run := synth.GateRun{Run: runs, Passed: err == nil, At: time.Now().UTC().Format(time.RFC3339)}
-				if err != nil {
-					run.Failed = []string{err.Error()}
-				}
-				synth.LogGateRun(logPath, run)
-			}
-			if err != nil {
-				return fmt.Sprintf("The plan can't be proposed yet: %v.\n\n(Check %d of %d.)", err, runs, maxRuns), false
-			}
-			return fmt.Sprintf("The plan holds together: each of its %d issues has a title and a body that's modeled or plumbing, and none carries a command.\n\n(Check %d of %d.)",
-				len(plan.Issues), runs, maxRuns), false
+			return checkIssues(ws, runs, maxRuns, logPath), false
 		},
 	}
+}
+
+func checkIssues(ws string, run, maxRuns int, logPath string) string {
+	plan, err := formalize.ReadIssues(ws)
+	if logPath != "" {
+		r := synth.GateRun{Run: run, Passed: err == nil, At: time.Now().UTC().Format(time.RFC3339)}
+		if err != nil {
+			r.Failed = []string{err.Error()}
+		}
+		synth.LogGateRun(logPath, r)
+	}
+	if err != nil {
+		return fmt.Sprintf("The plan can't be proposed yet: %v.\n\n(Check %d of %d.)", err, run, maxRuns)
+	}
+	return fmt.Sprintf("The plan holds together: each of its %d issues has a title and a body that's modeled or plumbing, and none carries a command.\n\n(Check %d of %d.)",
+		len(plan.Issues), run, maxRuns)
 }
 
 // testTool runs a plumbing build's checks for its agent: the ratified plan
