@@ -249,9 +249,11 @@ func (f *Factory) openedFor(ctx context.Context, plan PlanOfIssues, run planRun,
 	return 0, nil
 }
 
-// planStatus is issue n's status in the core's terms. It has merged once
-// the factory's latest post on it says so, or the pull request that post
-// names has merged, as when a person merged it and so closed the issue.
+// planStatus is issue n's status in the core's terms. A ratified plan of
+// issues counts as merged only once a factory completion post names its
+// hash. Otherwise, it has merged once the factory's latest state says so,
+// or the pull request that post names has merged, as when a person merged
+// it and so closed the issue.
 func (f *Factory) planStatus(ctx context.Context, n int) (int, error) {
 	posts, err := f.postsOn(ctx, n)
 	if err != nil {
@@ -259,6 +261,14 @@ func (f *Factory) planStatus(ctx context.Context, n int) (int, error) {
 	}
 	state, _ := Thread{Posts: posts}.State()
 	m := state.Marker
+	if m.Kind == KindRatified && isIssuePlan(m) {
+		for _, p := range posts {
+			if p.Marker.Kind == KindPlanDone && p.Marker.Hash == m.Proposal.Hash {
+				return plans.Merged, nil
+			}
+		}
+		return plans.Open, nil
+	}
 	if m.Kind == KindMerged {
 		return plans.Merged, nil
 	}

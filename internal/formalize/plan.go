@@ -15,9 +15,9 @@ import (
 
 // Plan drafts a plumbing issue's plan with the agent (D-0105): what
 // changes, the files the build may write, and the acceptance tests that
-// show it works, or the forks it can't settle. repo is a checkout of the
-// base branch, which the agent reads and the factory checks the plan
-// against. Its transcript and draft land in out.
+// show it works, a plan of issues, or the forks it can't settle. repo is a
+// checkout of the base branch, which the agent reads and the factory checks
+// the plan against. Its transcript and draft land in out.
 func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*Result, error) {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
@@ -41,6 +41,14 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 		if err := writeFile(filepath.Join(ws, "previous", "plan.json"), string(b)+"\n"); err != nil {
 			return nil, err
 		}
+	} else if p != nil && p.IssuePlan != nil {
+		b, err := json.MarshalIndent(p.IssuePlan, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := writeFile(filepath.Join(ws, "previous", "issues.json"), string(b)+"\n"); err != nil {
+			return nil, err
+		}
 	}
 	transcript, err := os.Create(filepath.Join(out, "transcript.jsonl"))
 	if err != nil {
@@ -60,7 +68,7 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	r := &Result{Usage: usage}
 	r.CheckRuns, _ = readRuns(checkLog)
 	defer func() {
-		for _, name := range []string{"plan.json", "proposal.json"} {
+		for _, name := range []string{"plan.json", "issues.json", "proposal.json"} {
 			if b, err := regular.ReadFile(ws, name); err == nil {
 				os.WriteFile(filepath.Join(out, name), b, 0o644)
 			}
@@ -76,13 +84,21 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 		return r, nil
 	}
 	if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
+		if _, err := os.Stat(filepath.Join(ws, "issues.json")); err == nil {
+			plan, err := ReadIssues(ws)
+			if err != nil {
+				return fail(err.Error())
+			}
+			r.Proposal = &Proposal{Draft: Draft{Name: plan.Name}, IssuePlan: plan, Hash: plan.Hash()}
+			return r, nil
+		}
 		// No plan: forks to ask, or why the factory can't take the issue.
 		p, err := Read(ws)
 		switch {
 		case err != nil:
 			return fail(err.Error())
 		case p.Unsupported == "" && len(p.Forks) == 0:
-			return fail("a plumbing draft is plan.json, or proposal.json with forks to ask")
+			return fail("a plumbing draft is plan.json, issues.json, or proposal.json with forks to ask")
 		}
 		r.Proposal = p
 		return r, nil
@@ -109,6 +125,8 @@ request.md holds the issue, what's been decided, and the discussion. repo/ is th
 
 # Write the plan
 
+Cover the whole issue. If all the work fits in one reviewable pull request, write plan.json and its acceptance tests. Otherwise write issues.json, a plan of issues that together cover all the work, as described below. Write only one kind of plan.
+
 plan.json:
 
 `+"```json"+`
@@ -128,7 +146,28 @@ plan.json:
 
 SPEC.md and the README describe Invariant as it is, and a change that makes either one wrong fixes it in the same change (D-0122). When yours does, name that file among the plan's files, and say in the summary what changes there. A new or changed SPEC bullet cites the decisions it rests on, as `+"`decisions check`"+` requires. A plumbing build can't write decisions/, so when the change needs a decision no one has recorded yet, say so in the summary, and whoever merges it records the decision.
 
-Keep the change small enough to review. If the issue needs several independent changes, plan the first, and say in the summary what's left.
+# When the work needs several pull requests
+
+Write issues.json instead of plan.json and tests/:
+
+`+"```json"+`
+{
+  "name": "the whole change, in a few plain words",
+  "summary": "What the issues do together, and why.",
+  "issues": [
+    {"title": "Serve the decision graph as JSON", "body": "The dashboard serves every decision and its edges at /api/graph.json, for the page to draw.\n\nKind: plumbing"},
+    {"title": "Draw the decision graph", "body": "The page draws every decision and edge served at /api/graph.json.\n\nKind: plumbing"}
+  ]
+}
+`+"```"+`
+
+- **issues** are 1 to %d, in the order they're taken. Each is opened once the one before it has merged, so it can build on the ones before it, and never on one after. Together they cover the whole issue; don't leave work for an unplanned follow-up. Each plumbing issue will get its own plan, and can itself become a plan of issues if needed.
+- Each **title** is one line. Each **body** is the whole issue: what changes and why, complete enough that someone who hasn't read this issue can take it on, with the decisions it rests on.
+- Each body has either a `+"`Kind: plumbing`"+` line for tested code, with no `+"`Code:`"+` line, or a `+"`Project: <directory>`"+` line for a state machine whose rules are worth proving, never both. A project directory is a clean path inside the repository, outside .git/ and .github/.
+- No body has an `+"`/invariant`"+` command on a line of its own. The factory takes each issue itself.
+- The name, summary, titles and bodies together come to at most %d bytes, so the proposal fits in one comment. None has an HTML comment, which the proposal wouldn't show.
+
+A person ratifies this plan's hash before any issue opens. A nested plan counts as complete for its parent only when the factory posts completion for its ratified hash; an unfinished or stopped plan holds its parent.
 
 # Ask when you must
 
@@ -142,12 +181,14 @@ Don't ask about names or code structure: choose those yourself. If the issue isn
 
 # Check your plan
 
-The `+"`check`"+` tool reads plan.json and tests/, checks that the plan holds together, and runs the acceptance tests on the code in repo/, where they must fail. You have %d checks, so reread your files before each. When the check passes, you're done. Then reply with a two-sentence summary.
+The `+"`check`"+` tool reads plan.json and tests/, checks that the plan holds together, and runs the acceptance tests on the code in repo/, where they must fail. For issues.json, it checks the existing plan-of-issues format and rules, without running acceptance tests. You have %d checks in total across both kinds of plan, so reread your files before each. When the check passes, you're done. Then reply with a two-sentence summary.
 
 %s
-`, req.Issue, checks, synth.WriteAsYouGo("", "checks"))
+`, req.Issue, MaxIssues, MaxPlanText, checks, synth.WriteAsYouGo("", "checks"))
 	if req.Previous != nil && req.Previous.Plan != nil {
 		b.WriteString("\n# The plan people asked to revise\n\nprevious/plan.json is the plan before. Keep what the discussion didn't ask to change.\n")
+	} else if req.Previous != nil && req.Previous.IssuePlan != nil {
+		b.WriteString("\n# The plan people asked to revise\n\nprevious/issues.json is the plan before. Keep what the discussion didn't ask to change.\n")
 	}
 	return b.String()
 }

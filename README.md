@@ -62,15 +62,17 @@ People steer the factory with comments on the issue, and only people with write 
 | `/invariant solve`, or the `invariant` label | The factory takes the issue |
 | `/invariant choose F1 A` | Decides a question the factory asked |
 | `/invariant revise` | The factory drafts again, reading the comments |
-| `/invariant ratify <hash>` | Ratifies exactly the proposal with that hash, and the factory builds it |
+| `/invariant ratify <hash>` | Ratifies exactly the proposal with that hash, and the factory carries it out |
 | The `invariant:go`, `invariant:typescript` or `invariant:python` label | The factory writes the code in that language. Without one, the repository's default applies: Go here |
 | A `Project: <dir>` line in the issue | Changes that existing project. The factory proposes a diff of its statements, and calls out anything removed or loosened |
 | An `Agent: codex` or `Agent: claude-code` line in the issue | Picks the coding agent that drafts the issue and builds it, as the line reads when the issue is drafted. A new project's manifest records it, so the project's later issues get it unless they pick another. Without either, the factory's own agent, `-agent`, does. The factory runs Claude Code and Codex, and answers an issue that picks an agent it can't run, or Codex where it isn't set up, instead of drafting it |
 | `Code: <path>` lines in the issue | Checks existing TypeScript code as it is, without changing a line. The factory writes only the model and a driver that runs the real code |
-| A `Kind: plumbing` line in the issue | For a change that isn't a state machine. The factory proposes a plan: what changes, the files it may touch, and acceptance tests. Once a writer ratifies it, the build must pass those tests unchanged, and a person merges anything in the trusted base. On this repository only, for now |
+| A `Kind: plumbing` line in the issue | For a change that isn't a state machine. The factory proposes a plan covering the whole issue: what changes, the files it may touch, and acceptance tests. If the work cannot fit one reviewable pull request, it proposes a plan of at most 10 issues covering all the work instead. A writer ratifies either plan by its hash. Each build must pass its acceptance tests unchanged, and a person merges anything in the trusted base. On this repository only, for now |
 | `/invariant retry` | Looks again at a pull request that failed, once someone has fixed the cause |
 | `/invariant plan` | On an issue that holds or links a PRD, the factory proposes a plan of at most 10 issues in place of statements. Once a writer ratifies it, the factory opens the plan's issues one at a time, each once the one before has merged, and takes each on that writer's authority |
 | `/invariant stop` | On a ratified plan's issue, the factory opens no more of the plan's issues. One already open goes on as it is |
+
+Plans of issues can nest. A planned issue may itself become a ratified plan of issues, with no build or pull request of its own. Its parent waits until the factory records that child's whole plan as complete under its ratified hash; an unfinished or stopped child plan holds its parent. Completion carries upward through nested plans on later polls, opening each step and recording each plan's completion once, including after a watcher restarts.
 
 Anyone can open an issue, but the factory takes one only when a writer labels it, or says `/invariant solve` or `/invariant plan`. That hands the issue's text to a coding agent, so read someone else's issue before you do. The agent that drafts statements has no network and no GitHub access, and nothing it drafts is built until a person ratifies it.
 
