@@ -37,7 +37,7 @@ func TestPythonDependenciesSuppressDockerClientProxies(t *testing.T) {
 		t.Setenv("INVARIANT_PYTHON_DEPS_REAL", "")
 		pyDepsFakeDocker(t)
 		config := pyDepsProxyConfig(t, false)
-		before := pyDepsFiles(t, config)
+		before := pyDepsProxyClientFiles(t, config)
 		log := pyDepsProxyObserver(t, false)
 		out, err := exec.Command("docker", "run", "--rm", "--network", "none", toolchain.PythonImage, "/usr/bin/env").CombinedOutput()
 		if err == nil || !bytes.Contains(out, []byte("Docker client configuration leaked")) {
@@ -50,7 +50,7 @@ func TestPythonDependenciesSuppressDockerClientProxies(t *testing.T) {
 		pyDepsRequireGateChecks(t, r, err)
 		pyDepsProxyRequireCalls(t, log, first.Image, false)
 		pyDepsProxyRequireReceipt(t, r, first)
-		if !reflect.DeepEqual(before, pyDepsFiles(t, config)) {
+		if !reflect.DeepEqual(before, pyDepsProxyClientFiles(t, config)) {
 			t.Fatal("gate rewrote the user's Docker client configuration")
 		}
 	})
@@ -66,7 +66,7 @@ func TestPythonDependenciesSuppressDockerClientProxies(t *testing.T) {
 				t.Fatal(err)
 			}
 			config := pyDepsProxyConfig(t, true)
-			before := pyDepsFiles(t, config)
+			before := pyDepsProxyClientFiles(t, config)
 			log := pyDepsProxyObserver(t, true)
 			root := pyDepsProxyFixture(t)
 			originals := pyDepsFiles(t, root)
@@ -99,7 +99,7 @@ func TestPythonDependenciesSuppressDockerClientProxies(t *testing.T) {
 			pyDepsRequireGateChecks(t, r, err)
 			pyDepsProxyRequireReceipt(t, r, first)
 			pyDepsProxyRequireCalls(t, log, first.Image, true)
-			if !reflect.DeepEqual(originals, pyDepsFiles(t, root)) || !reflect.DeepEqual(before, pyDepsFiles(t, config)) {
+			if !reflect.DeepEqual(originals, pyDepsFiles(t, root)) || !reflect.DeepEqual(before, pyDepsProxyClientFiles(t, config)) {
 				t.Fatal("proxy suppression changed application inputs or the user's Docker client configuration")
 			}
 		})
@@ -205,6 +205,21 @@ func pyDepsProxyConfig(t *testing.T, preserveContext bool) string {
 	}
 	t.Setenv("DOCKER_CONFIG", dir)
 	return dir
+}
+
+// pyDepsProxyClientFiles is the client configuration the fixture wrote:
+// config.json and its contexts. The Docker CLI and buildx keep their own
+// state beside them, such as a registry token seed after a pull, which is
+// not configuration the gate could change.
+func pyDepsProxyClientFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := pyDepsFiles(t, dir)
+	for name := range files {
+		if name != "config.json" && !strings.HasPrefix(name, "contexts/") {
+			delete(files, name)
+		}
+	}
+	return files
 }
 
 func pyDepsIsDir(path string) bool {
