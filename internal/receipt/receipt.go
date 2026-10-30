@@ -129,6 +129,25 @@ func Markdown(r *verify.Report) string {
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
 	}
+	if deps := t.PythonDependencies; deps != nil {
+		// Dependency paths and artifact names are source-derived evidence.
+		// Keep them literal in legacy and component receipts alike.
+		fmt.Fprintf(&b, "| Python application dependencies | base %s, platform %s, recipe %s |\n",
+			componentLiteral(shortImage(deps.Base)), componentLiteral(deps.Platform), componentLiteral(short(deps.Recipe)))
+		b.WriteString("\nPython application dependency inputs:\n\n| Input | SHA256 |\n| :-- | :-- |\n")
+		for _, input := range deps.Inputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		b.WriteString("\nCanonical Python installation inputs:\n\n| Input | SHA256 |\n| :-- | :-- |\n")
+		for _, input := range deps.CanonicalInputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", componentLiteral(input.Path), componentLiteral(short(input.SHA256)))
+		}
+		b.WriteString("\nResolved Python application artifacts:\n\n| Package | Version | Artifact | SHA256 |\n| :-- | :-- | :-- | :-- |\n")
+		for _, artifact := range deps.Artifacts {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", componentLiteral(artifact.Name), componentLiteral(artifact.Version),
+				componentLiteral(artifact.Filename), componentLiteral(short(artifact.SHA256)))
+		}
+	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint %s</sub>\n", render.text(r.GeneratedAt), render.literal(r.Fingerprint))
 	return b.String()
 }

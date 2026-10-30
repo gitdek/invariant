@@ -178,6 +178,9 @@ type Toolchain struct {
 	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
 	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
 	Go           string `json:"go,omitempty"`
+
+	// Application packages are separate from the pinned Nagini verifier.
+	PythonDependencies *toolchain.PythonDependencies `json:"python_dependencies,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -258,7 +261,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	if l := p.Lock; l.Ratified != nil {
 		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
 	}
-	switch lang.(type) {
+	switch l := lang.(type) {
 	case Go:
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
 	case TypeScript:
@@ -279,6 +282,16 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
 		r.Toolchain.PythonImage = tc.PythonImage
+		dependencies, err := toolchain.PythonDepsImage(ctx, p.Dir)
+		if err != nil {
+			return nil, err
+		}
+		r.Toolchain.PythonDependencies = dependencies
+		if dependencies != nil {
+			l.Image = dependencies.Image
+		}
+		l.dependenciesSelected = true
+		lang = l
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 		}
