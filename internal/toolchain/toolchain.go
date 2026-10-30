@@ -123,7 +123,8 @@ func fileSHA256(path string) (string, error) {
 }
 
 // PlumbingDockerfile is the recipe for the plumbing sandbox: GoImage with
-// git added, since the repository's tests build git repositories (D-0108).
+// git added, since the repository's tests build git repositories, and
+// Python 3, which Python component discovery parses source with (D-0108).
 //
 //go:embed plumbing.Dockerfile
 var PlumbingDockerfile []byte

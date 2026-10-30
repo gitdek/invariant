@@ -81,24 +81,29 @@ type ResolvedComponentProof struct {
 	Contracts []string `json:"contracts"`
 }
 
-// ResolveComponents inventories all non-test Go declarations in each scoped
-// directory, regardless of build tags, and resolves every selected reference.
-// It runs no tools and supplies no assurance or verification evidence.
+// ResolveComponents inventories non-test Go or Python sources in each scoped
+// directory and resolves every selected reference. Python uses an isolated
+// syntax parser; no project code runs and no verification evidence is supplied.
 func ResolveComponents(p *Project) (*ComponentInventory, error) {
 	cfg := p.Manifest.Components
 	if cfg == nil {
 		return &ComponentInventory{Mode: "legacy"}, nil
 	}
-	if lang := p.Manifest.Language; lang != "" && lang != "go" {
-		return nil, fmt.Errorf("components: language %q is not supported; component discovery is Go-only", lang)
+	language := p.Manifest.Language
+	if language == "" {
+		language = "go"
+	}
+	if language != "go" && language != "python" {
+		return nil, fmt.Errorf("components: language %q is not supported; component discovery supports Go and Python", language)
 	}
 	if len(cfg.Scope) == 0 {
-		return nil, fmt.Errorf("components: scope must name at least one Go package directory")
+		return nil, fmt.Errorf("components: scope must name at least one %s source directory", language)
 	}
 	inv := &ComponentInventory{Mode: "explicit", Scope: append([]string(nil), cfg.Scope...)}
 	sort.Strings(inv.Scope)
 	r := componentResolver{
-		root: p.Dir, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{},
+		language: language,
+		root:     p.Dir, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{},
 		inputs: map[string]componentInput{}, declarations: map[string]Component{},
 		provenanceFiles: map[string]ComponentFile{}, modules: map[string]ComponentFile{},
 	}
@@ -117,7 +122,7 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 		count := 0
 		for _, entry := range entries {
 			name := entry.Name()
-			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			if entry.IsDir() || !r.sourceFile(name) || r.testFile(name) {
 				continue
 			}
 			source := path.Join(dir, name)
@@ -133,7 +138,7 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 			}
 		}
 		if count == 0 {
-			return nil, fmt.Errorf("components scope %q: no non-test Go source files", dir)
+			return nil, fmt.Errorf("components scope %q: no non-test %s source files", dir, language)
 		}
 	}
 	targets := map[string]bool{}
@@ -187,6 +192,7 @@ type componentSource struct {
 }
 
 type componentResolver struct {
+	language        string
 	root            string
 	files           map[string]componentSource
 	scoped          map[ComponentRef]Component
@@ -225,11 +231,11 @@ func (r *componentResolver) resolve(ref ComponentRef, kind string) (Component, e
 	if ref.Symbol == "" {
 		return fail("symbol is required")
 	}
-	if !strings.HasSuffix(ref.Source, ".go") {
-		return fail("source must be a Go file")
+	if !r.sourceFile(ref.Source) {
+		return fail("source must be a " + r.language + " file")
 	}
-	if kind == "test" && !strings.HasSuffix(ref.Source, "_test.go") {
-		return fail("test references must name a _test.go file")
+	if kind == "test" && !r.testFile(ref.Source) {
+		return fail("test references must name a test source file")
 	}
 	if kind == "target" || kind == "contract" {
 		c, ok := r.scoped[ref]
@@ -237,6 +243,9 @@ func (r *componentResolver) resolve(ref ComponentRef, kind string) (Component, e
 			return fail("selection must resolve to exactly one declaration in scope")
 		}
 		if kind == "contract" && c.ContractSHA256 == "" {
+			if r.language == "python" {
+				return fail("declaration has no supported inline Nagini contract")
+			}
 			return fail("declaration has no inline Gobra contract")
 		}
 		return c, nil
@@ -260,6 +269,14 @@ func (r *componentResolver) read(source string) (componentSource, error) {
 	input, err := r.input(source)
 	if err != nil {
 		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
+	}
+	if r.language == "python" {
+		out, err := componentPython(source, input)
+		if err != nil {
+			return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
+		}
+		r.files[source] = out
+		return out, nil
 	}
 	b := input.bytes
 	fset := token.NewFileSet()
@@ -305,6 +322,21 @@ func (r *componentResolver) read(source string) (componentSource, error) {
 	}
 	r.files[source] = out
 	return out, nil
+}
+
+func (r *componentResolver) sourceFile(name string) bool {
+	if r.language == "python" {
+		return strings.HasSuffix(name, ".py")
+	}
+	return strings.HasSuffix(name, ".go")
+}
+
+func (r *componentResolver) testFile(name string) bool {
+	if r.language == "python" {
+		name = path.Base(name)
+		return strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") || strings.HasSuffix(name, "_test.py")
+	}
+	return strings.HasSuffix(name, "_test.go")
 }
 
 func componentReceiver(expr ast.Expr) string {
