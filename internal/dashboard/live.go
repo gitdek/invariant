@@ -22,25 +22,26 @@ import (
 // of the repository only: never code, the agent's words or thinking, a
 // command, a tool's output or the model (D-0051, D-0052).
 type Live struct {
-	Repo     string         `json:"repo"`
-	Issue    int            `json:"issue"`
-	Doing    string         `json:"doing"`
-	Since    *time.Time     `json:"since,omitempty"`
-	Limit    float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
-	Turns    int            `json:"turns"`
-	Thinking int            `json:"thinking"`         // estimated thinking tokens so far
-	Context  int            `json:"context"`          // tokens the agent holds now
-	Output   int            `json:"output,omitempty"` // output tokens, once the agent's run has ended
-	Tools    map[string]int `json:"tools"`            // tool calls by kind
-	Now      string         `json:"now,omitempty"`    // thinking, or the kind of tool it's running
-	Last     *time.Time     `json:"last,omitempty"`   // when the transcript last grew
-	Marks    []Mark         `json:"marks"`
-	Files    []LiveFile     `json:"files"`
-	Runs     []RunMark      `json:"runs,omitempty"`
-	RunsKind string         `json:"runsKind,omitempty"` // check, gate or test
-	Agent    string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
-	By       string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
-	Ended    *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
+	Repo          string         `json:"repo"`
+	Issue         int            `json:"issue"`
+	Doing         string         `json:"doing"`
+	Since         *time.Time     `json:"since,omitempty"`
+	Limit         float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
+	Turns         int            `json:"turns"`
+	Thinking      int            `json:"thinking"`         // reported thinking tokens of completed turns, or estimates so far
+	ThinkingExact bool           `json:"thinkingExact"`    // the thinking total comes from reported usage
+	Context       int            `json:"context"`          // tokens the agent holds now
+	Output        int            `json:"output,omitempty"` // output tokens, once the agent's run has ended
+	Tools         map[string]int `json:"tools"`            // tool calls by kind
+	Now           string         `json:"now,omitempty"`    // thinking, or the kind of tool it's running
+	Last          *time.Time     `json:"last,omitempty"`   // when the transcript last grew
+	Marks         []Mark         `json:"marks"`
+	Files         []LiveFile     `json:"files"`
+	Runs          []RunMark      `json:"runs,omitempty"`
+	RunsKind      string         `json:"runsKind,omitempty"` // check, gate or test
+	Agent         string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
+	By            string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
+	Ended         *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
 }
 
 // Mark is one tool call, or one stretch of thinking between tool calls.
@@ -74,21 +75,22 @@ const (
 // a line still being written counts once it's whole, and nothing counts
 // twice.
 type transcript struct {
-	offset   int64
-	cwd      string // the agent's copy of the repository, from the transcript's first event
-	ids      map[string]bool
-	thinking int
-	context  int
-	output   int
-	agent    string
-	tools    map[string]int
-	marks    []Mark
-	think    int   // the stretch of thinking going on, as an index into marks, or -1
-	open     []int // tool calls waiting for their results, oldest first, as indexes into marks
-	files    map[string]*touched
-	touches  int
-	last     time.Time // the newest time an event carried
-	now      string
+	offset        int64
+	cwd           string // the agent's copy of the repository, from the transcript's first event
+	ids           map[string]bool
+	thinking      int
+	thinkingExact bool
+	context       int
+	output        int
+	agent         string
+	tools         map[string]int
+	marks         []Mark
+	think         int   // the stretch of thinking going on, as an index into marks, or -1
+	open          []int // tool calls waiting for their results, oldest first, as indexes into marks
+	files         map[string]*touched
+	touches       int
+	last          time.Time // the newest time an event carried
+	now           string
 	// codex reads the transcript as Codex writes it. Both agents' pending
 	// tools are indexed by id; -1 means their mark was trimmed.
 	codex bool
@@ -358,7 +360,8 @@ type codexEvent struct {
 	Timestamp string `json:"timestamp"`
 	Cwd       string `json:"cwd"`
 	Usage     struct {
-		Output int `json:"output_tokens"`
+		Output    int  `json:"output_tokens"`
+		Reasoning *int `json:"reasoning_output_tokens"`
 	} `json:"usage"`
 	Item struct {
 		ID      string          `json:"id"`
@@ -402,7 +405,7 @@ func (t *transcript) codexLine(b []byte) {
 			t.workspace(e.Cwd)
 		}
 	case "turn.started":
-		t.now = "thinking"
+		t.agent, t.now = "", "thinking"
 	case "item.started":
 		if _, pending := t.items[e.Item.ID]; e.Item.ID != "" && (pending || t.ids[e.Item.ID]) {
 			return
@@ -418,7 +421,9 @@ func (t *transcript) codexLine(b []byte) {
 		case "reasoning":
 			// Its thinking came between the event before and this one.
 			until, tokens := t.last, len(e.Item.Text)/4
-			t.thinking += tokens
+			if !t.thinkingExact {
+				t.thinking += tokens
+			}
 			t.marks = append(t.marks, Mark{At: before, Kind: "think", Until: &until, Tokens: tokens})
 			return
 		case "todo_list", "error":
@@ -440,6 +445,13 @@ func (t *transcript) codexLine(b []byte) {
 		}
 		t.now = t.pendingKind("thinking")
 	case "turn.completed":
+		if e.Usage.Reasoning != nil {
+			if !t.thinkingExact {
+				t.thinking = 0 // the first reported count replaces estimates
+				t.thinkingExact = true
+			}
+			t.thinking += *e.Usage.Reasoning
+		}
 		t.output, t.agent, t.now = e.Usage.Output, "finished", ""
 	case "turn.failed":
 		t.agent, t.now = "stopped", ""
@@ -588,7 +600,7 @@ func agentEnded(subtype string, isError bool) string {
 // now, in the agent's copy, and keeps the last size it read once the copy
 // is gone.
 func (t *transcript) view() Live {
-	v := Live{Turns: len(t.ids), Thinking: t.thinking, Context: t.context, Output: t.output, Now: t.now, Agent: t.agent,
+	v := Live{Turns: len(t.ids), Thinking: t.thinking, ThinkingExact: t.thinkingExact, Context: t.context, Output: t.output, Now: t.now, Agent: t.agent,
 		Tools: map[string]int{}, Marks: append([]Mark{}, t.marks...), Files: []LiveFile{}}
 	for k, n := range t.tools {
 		v.Tools[k] = n
