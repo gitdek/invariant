@@ -85,9 +85,9 @@ func issuePlanComment(p *formalize.Proposal, m Marker) string {
 			fmt.Fprintf(&b, "- %s. %s **%s.** %s (@%s)\n", a.Fork, a.Question, a.Option, a.Says, a.By)
 		}
 	}
-	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
+	closing := fmt.Sprintf("\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
-	return post("plan of issues for ratification", b.String(), m)
+	return post("plan of issues for ratification", b.String(), m, closing)
 }
 
 func issuePlanRatifiedComment(by string, p *formalize.Proposal, m Marker) string {

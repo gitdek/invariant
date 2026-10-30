@@ -462,12 +462,12 @@ func plannedBody(plan PlanOfIssues, k int) string {
 // planOpenedComment records on the plan's issue the issue n, opened for its
 // step k, counting from 0.
 func planOpenedComment(plan PlanOfIssues, k, n int, m Marker) string {
-	then := "I'll open the next step's issue once it merges, unless a writer comments `/invariant stop` here."
+	body := fmt.Sprintf("I opened #%d for step %d of %d of this plan: **%s**. I'll solve it on the authority of @%s, who ratified the plan.",
+		n, k+1, len(plan.Issues), plan.Issues[k].Title, plan.By)
 	if k == len(plan.Issues)-1 {
-		then = "It's the plan's last issue."
+		return post("issue opened", body+" It's the plan's last issue.", m)
 	}
-	return post("issue opened", fmt.Sprintf("I opened #%d for step %d of %d of this plan: **%s**. I'll solve it on the authority of @%s, who ratified the plan. %s",
-		n, k+1, len(plan.Issues), plan.Issues[k].Title, plan.By, then), m)
+	return post("issue opened", body, m, " I'll open the next step's issue once it merges, unless a writer comments `/invariant stop` here.")
 }
 
 // planDoneComment says on the plan's issue that every one of its issues has
