@@ -25,6 +25,7 @@ type Live struct {
 	Repo          string         `json:"repo"`
 	Issue         int            `json:"issue"`
 	Doing         string         `json:"doing"`
+	Run           string         `json:"run,omitempty"`
 	Since         *time.Time     `json:"since,omitempty"`
 	Limit         float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
 	Turns         int            `json:"turns"`
@@ -50,6 +51,20 @@ type Mark struct {
 	Kind   string     `json:"kind"`             // read, search, list, build, test, git, edit, gate, check, other or think
 	Until  *time.Time `json:"until,omitempty"`  // when it ended: nil while it goes on, as a tool call waiting for its result
 	Tokens int        `json:"tokens,omitempty"` // a stretch of thinking: its estimated tokens
+}
+
+// shellCommand is retained only alongside a recent mark, and serialized
+// only by the opted-in, Access-protected live route.
+type shellCommand struct {
+	Command string     `json:"command"`
+	Kind    string     `json:"kind"`
+	At      time.Time  `json:"at"`
+	Until   *time.Time `json:"until,omitempty"`
+}
+
+type privateLive struct {
+	Live
+	Commands []shellCommand `json:"commands,omitempty"`
 }
 
 // LiveFile is a file the agent read or changed, by its path inside its copy
@@ -85,6 +100,7 @@ type transcript struct {
 	agent         string
 	tools         map[string]int
 	marks         []Mark
+	commands      map[int]string
 	think         int   // the stretch of thinking going on, as an index into marks, or -1
 	open          []int // tool calls waiting for their results, oldest first, as indexes into marks
 	files         map[string]*touched
@@ -104,7 +120,7 @@ type touched struct {
 }
 
 func newTranscript() *transcript {
-	return &transcript{ids: map[string]bool{}, tools: map[string]int{}, files: map[string]*touched{}, think: -1, items: map[string]int{}}
+	return &transcript{ids: map[string]bool{}, tools: map[string]int{}, files: map[string]*touched{}, think: -1, items: map[string]int{}, commands: map[int]string{}}
 }
 
 // read takes in whatever whole lines were added since the last read.
@@ -235,6 +251,9 @@ func (t *transcript) line(b []byte) {
 				kind = t.shell(bl.Input.Command)
 			}
 			t.begin(bl.ID, kind, eventTime(e.Timestamp, t.last))
+			if bl.Name == "Bash" {
+				t.commands[len(t.marks)-1] = bl.Input.Command
+			}
 			p := bl.Input.FilePath
 			if p == "" {
 				p = bl.Input.NotebookPath
@@ -332,6 +351,13 @@ func (t *transcript) trim() {
 	if len(t.marks) > maxMarks {
 		drop := len(t.marks) - maxMarks
 		t.marks = append([]Mark(nil), t.marks[drop:]...)
+		commands := map[int]string{}
+		for i, command := range t.commands {
+			if i >= drop {
+				commands[i-drop] = command
+			}
+		}
+		t.commands = commands
 		if t.think >= 0 {
 			t.think -= drop
 		}
@@ -353,8 +379,8 @@ func (t *transcript) trim() {
 }
 
 // codexEvent is the part of a line of Codex's transcript the live view
-// reads (#153). Commands are classified locally, never retained. What the
-// tools returned is never decoded. Reasoning is measured raw for tokens.
+// reads (#153). Shell text is kept only for the private view's recent
+// marks. Tool output is never decoded; reasoning is measured raw for tokens.
 type codexEvent struct {
 	Type      string `json:"type"`
 	Timestamp string `json:"timestamp"`
@@ -415,6 +441,9 @@ func (t *transcript) codexLine(b []byte) {
 				kind = t.shell(e.Item.Command)
 			}
 			t.begin(e.Item.ID, kind, at)
+			if e.Item.Type == "command_execution" {
+				t.commands[len(t.marks)-1] = e.Item.Command
+			}
 		}
 	case "item.completed":
 		switch e.Item.Type {
@@ -438,6 +467,9 @@ func (t *transcript) codexLine(b []byte) {
 				kind = t.shell(e.Item.Command)
 			}
 			t.begin(e.Item.ID, kind, at)
+			if e.Item.Type == "command_execution" {
+				t.commands[len(t.marks)-1] = e.Item.Command
+			}
 			t.finish(e.Item.ID, at)
 		}
 		for _, c := range e.Item.Changes {
@@ -632,6 +664,7 @@ type live struct {
 	last  map[string][]*Live     // each repository's steps, as last read
 	at    time.Time
 	body  []byte
+	steps []privateLive
 }
 
 // liveEvery is how long a read of the running steps is served before the
@@ -643,13 +676,31 @@ const liveEvery = 2 * time.Second
 func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	s.live.mu.Lock()
 	defer s.live.mu.Unlock()
+	if err := s.refreshLive(now); err != nil {
+		return nil, err
+	}
+	return s.live.body, nil
+}
+
+// privateLiveJSON adds shell invocations to the same snapshot. Its caller
+// must check Access and explicit opt-in; the shared JSON cache stays public.
+func (s *Server) privateLiveJSON(now time.Time) ([]byte, error) {
+	s.live.mu.Lock()
+	defer s.live.mu.Unlock()
+	if err := s.refreshLive(now); err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"at": s.live.at.UTC(), "steps": s.live.steps})
+}
+
+func (s *Server) refreshLive(now time.Time) error {
 	if s.live.body != nil && now.Sub(s.live.at) < liveEvery {
-		return s.live.body, nil
+		return nil
 	}
 	if s.live.reads == nil {
 		s.live.reads, s.live.last = map[string]*transcript{}, map[string][]*Live{}
 	}
-	steps := []Live{}
+	steps := []privateLive{}
 	read := map[string]bool{}
 	for _, r := range s.Repos {
 		st, work := s.watcherOf(r)
@@ -665,31 +716,40 @@ func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 		a, b := steps[i].Since, steps[j].Since
 		return a != nil && (b == nil || a.Before(*b))
 	})
-	body, err := json.Marshal(map[string]any{"at": now.UTC(), "steps": steps})
-	if err != nil {
-		return nil, err
+	public := make([]Live, len(steps))
+	for i, step := range steps {
+		public[i] = step.Live
 	}
-	s.live.at, s.live.body = now, body
-	return body, nil
+	body, err := json.Marshal(map[string]any{"at": now.UTC(), "steps": public})
+	if err != nil {
+		return err
+	}
+	s.live.at, s.live.body, s.live.steps = now, body, steps
+	return nil
 }
 
 // liveSteps reads every step repo's watcher is running with an agent at
 // work, and notes each transcript it reads in read. Once none of them is
 // running, it shows the steps it last read, marked ended, until one runs
 // again.
-func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, read map[string]bool) []Live {
-	var running []*Live
+func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, read map[string]bool) []privateLive {
+	var running []privateLive
 	if st.Running() && work != "" {
 		for _, step := range st.steps() {
 			if v := s.liveStep(repo, st, step, work, read); v != nil {
-				running = append(running, v)
+				running = append(running, *v)
 			}
 		}
 	}
 	if len(running) > 0 {
-		s.live.last[repo] = running
+		s.live.last[repo] = nil
+		for i := range running {
+			last := running[i].Live
+			s.live.last[repo] = append(s.live.last[repo], &last)
+		}
+		return running
 	}
-	var out []Live
+	var out []privateLive
 	for _, last := range s.live.last[repo] {
 		if last.Ended == nil && len(running) == 0 {
 			ended := now.UTC()
@@ -700,26 +760,23 @@ func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, r
 				}
 			}
 		}
-		out = append(out, *last)
+		out = append(out, privateLive{Live: *last})
 	}
 	return out
 }
 
-// liveStep reads one step from its own issue's newest step directory: its
-// transcript, only as far as it's new, and its checks' log. It's nil for a
-// step with no agent at work, doing nothing yet or ratifying, and for one
-// whose directory isn't there yet.
-func (s *Server) liveStep(repo string, st Status, step Step, work string, read map[string]bool) *Live {
+// liveStep reads only the run the watcher named for this step. A missing
+// run or transcript waits for publication; another run is never a fallback.
+func (s *Server) liveStep(repo string, st Status, step Step, work string, read map[string]bool) *privateLive {
 	prefix, _ := stepFiles(step.Doing)
 	if step.Issue == 0 || prefix == "" {
 		return nil
 	}
-	dir := newestStep(work, repo, step.Issue, prefix)
-	if dir == "" {
+	if step.Run == "" || !filepath.IsLocal(step.Run) || filepath.Base(step.Run) != step.Run || step.Run == "." {
 		return nil
 	}
+	dir := filepath.Join(work, filepath.FromSlash(repo), "issues", fmt.Sprintf("issue-%d", step.Issue), step.Run)
 	path := filepath.Join(dir, "transcript.jsonl")
-	read[path] = true
 	t := s.live.reads[path]
 	if t == nil {
 		t = newTranscript()
@@ -728,11 +785,17 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 		t.codex = step.Agent == "codex"
 		s.live.reads[path] = t
 	}
-	if err := t.read(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		s.logf("live: %v", err)
+	if err := t.read(path); err != nil {
+		delete(s.live.reads, path)
+		if !errors.Is(err, os.ErrNotExist) {
+			s.logf("live: %v", err)
+		}
+		return nil
 	}
+	read[path] = true
 	v := t.view()
 	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, st.Limit, step.Agent
+	v.Run = step.Run
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
@@ -747,7 +810,13 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 			v.Marks[i].At = *v.Since // thinking before the first tool call
 		}
 	}
-	return &v
+	private := &privateLive{Live: v}
+	for i, mark := range v.Marks {
+		if command, ok := t.commands[i]; ok {
+			private.Commands = append(private.Commands, shellCommand{Command: command, Kind: mark.Kind, At: mark.At, Until: mark.Until})
+		}
+	}
+	return private
 }
 
 // stepFiles is the prefix of a step's directory in the work directory, and
@@ -765,7 +834,7 @@ func stepFiles(doing string) (prefix string, runs []string) {
 }
 
 // newestStep is the directory of issue n's newest step with the prefix,
-// under a watcher's work directory.
+// for the dashboard's check summary. The live view uses only Step.Run.
 func newestStep(work, repo string, n int, prefix string) string {
 	dirs, _ := filepath.Glob(filepath.Join(work, filepath.FromSlash(repo), "issues", fmt.Sprintf("issue-%d", n), prefix+"*"))
 	if len(dirs) == 0 {

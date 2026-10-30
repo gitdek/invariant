@@ -42,7 +42,7 @@ func newShell211Fixture(t *testing.T, provider string) *shell211Fixture {
 		since: time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC), now: time.Now()}
 	status := StatusPath(work, "owner/app")
 	if err := WriteStatus(status, Status{PID: os.Getpid(), Repo: "owner/app", Started: f.since, Heartbeat: f.since,
-		Every: 30, Steps: []Step{{Issue: 211, Doing: "building", Since: f.since, Agent: provider}}}); err != nil {
+		Every: 30, Steps: []Step{{Issue: 211, Doing: "building", Since: f.since, Agent: provider, Run: "build-20261029-100000"}}}); err != nil {
 		t.Fatal(err)
 	}
 	f.transcript = filepath.Join(work, "owner", "app", "issues", "issue-211", "build-20261029-100000", "transcript.jsonl")

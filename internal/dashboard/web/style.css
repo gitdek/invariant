@@ -790,6 +790,16 @@ footer p { margin: 0; max-width: 60em; }
 :root { --search: #b48cff; --list: #56c6d9; --git: #ef8cbb; }
 :root[data-theme="light"] { --search: #7c4dff; --list: #007f91; --git: #b53b78; }
 .live-cards { display: grid; gap: 18px; }
+.live-options { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--ink2); font-size: 14px; }
+.live-options input { accent-color: var(--people); width: 16px; height: 16px; }
+.live-options label { cursor: pointer; }
+.shell-commands { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.shell-commands[hidden] { display: none; }
+.shell-commands h3 { margin: 0 0 10px; font: 600 13px var(--sans); color: var(--ink2); }
+.shell-commands ol { display: grid; gap: 14px; margin: 0; padding-left: 24px; max-height: 360px; overflow: auto; }
+.shell-commands li { min-width: 0; padding-right: 8px; color: var(--ink3); }
+.shell-times { font: 500 11px/1.6 var(--mono); color: var(--ink3); overflow-wrap: anywhere; }
+.shell-commands pre { margin: 4px 0 0; font: 400 12.5px/1.6 var(--mono); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .live-cards > .livestep { margin: 0; }
 /* The fine print says it once, under the last card. */
 .live-cards > .livestep:not(:last-child) .fineprint { display: none; }

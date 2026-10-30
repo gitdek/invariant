@@ -25,6 +25,7 @@ func newLiveStepFixture(t *testing.T) *liveStepFixture {
 	t.Helper()
 	f := &liveStepFixture{work: t.TempDir(), ws: t.TempDir(), since: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC), now: time.Now()}
 	f.status = StatusPath(f.work, "gitdek/app")
+	f.transcript = filepath.Join(f.work, "gitdek", "app", "issues", "issue-7", "build-20260928-120000", "transcript.jsonl")
 	f.setDoing(t, "building")
 	for p, text := range map[string]string{"internal/app/app.go": "package app\n\nfunc New() {}\n", "internal/app/new_test.go": "package app\n"} {
 		full := filepath.Join(f.ws, filepath.FromSlash(p))
@@ -35,7 +36,7 @@ func newLiveStepFixture(t *testing.T) *liveStepFixture {
 			t.Fatal(err)
 		}
 	}
-	step := filepath.Join(f.work, "gitdek", "app", "issues", "issue-7", "build-20260928-120000")
+	step := filepath.Dir(f.transcript)
 	if err := os.MkdirAll(step, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,6 @@ func newLiveStepFixture(t *testing.T) *liveStepFixture {
 	if err := os.WriteFile(filepath.Join(step, "gate-runs.jsonl"), []byte(runs), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f.transcript = filepath.Join(step, "transcript.jsonl")
 	f.s = &Server{Work: f.work, Repos: []*Repo{{Name: "gitdek/app", Status: f.status}}}
 	return f
 }
@@ -54,6 +54,7 @@ func (f *liveStepFixture) setDoing(t *testing.T, doing string) {
 	if doing != "" {
 		since := f.since
 		st.Issue, st.Doing, st.Since = 7, doing, &since
+		st.Steps = []Step{{Issue: 7, Doing: doing, Since: since, Run: filepath.Base(filepath.Dir(f.transcript))}}
 	}
 	if err := WriteStatus(f.status, st); err != nil {
 		t.Fatal(err)
@@ -331,8 +332,8 @@ func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	build := Step{Issue: 7, Doing: "building", Since: f.since}
-	drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute)}
+	build := Step{Issue: 7, Doing: "building", Since: f.since, Run: filepath.Base(filepath.Dir(f.transcript))}
+	drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute), Run: filepath.Base(draft)}
 	idle := Step{Issue: 11, Since: f.since}
 
 	running(drafting, idle, build)
@@ -366,7 +367,8 @@ func TestLiveFollowsTheLeaseHolder(t *testing.T) {
 	f := newLiveStepFixture(t)
 	f.write(t, true)
 	since := f.since
-	if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Holder: "watcher-a", Started: f.since, Heartbeat: f.since, Issue: 7, Doing: "building", Since: &since}); err != nil {
+	if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Holder: "watcher-a", Started: f.since, Heartbeat: f.since, Issue: 7, Doing: "building", Since: &since,
+		Steps: []Step{{Issue: 7, Doing: "building", Since: since, Run: filepath.Base(filepath.Dir(f.transcript))}}}); err != nil {
 		t.Fatal(err)
 	}
 	other := t.TempDir()

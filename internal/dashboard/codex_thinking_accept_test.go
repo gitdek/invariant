@@ -47,6 +47,7 @@ func (f *thinking239Fixture) setSteps(t *testing.T, steps ...dashboard.Step) {
 	t.Helper()
 	for i := range steps {
 		steps[i].Since = f.since
+		steps[i].Run = filepath.Base(filepath.Dir(f.path(steps[i].Issue)))
 	}
 	if err := dashboard.WriteStatus(f.status, dashboard.Status{
 		PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since,

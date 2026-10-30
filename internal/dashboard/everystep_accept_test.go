@@ -276,9 +276,9 @@ func TestTheLiveViewListsEveryRunningStep(t *testing.T) {
 	ws := map[int]string{99: t.TempDir(), 148: t.TempDir(), 150: t.TempDir(), 152: t.TempDir()}
 	in := func(n int, p string) string { return filepath.Join(ws[n], filepath.FromSlash(p)) }
 	esWatcher(t, work, repo, "",
-		Step{Issue: 148, Doing: "building", Since: esAt(10, 0)},
-		Step{Issue: 150, Doing: "building", Since: esAt(10, 5)},
-		Step{Issue: 152, Doing: "formalizing", Since: esAt(9, 50)},
+		Step{Issue: 148, Doing: "building", Since: esAt(10, 0), Run: "build-20260929-100000"},
+		Step{Issue: 150, Doing: "building", Since: esAt(10, 5), Run: "build-20260929-100500"},
+		Step{Issue: 152, Doing: "formalizing", Since: esAt(9, 50), Run: "formalize-20260929-095000"},
 		Step{Issue: 154, Doing: "ratifying", Since: esAt(10, 8)},
 		Step{Issue: 155, Since: esAt(10, 9)})
 	at := func(from time.Time, sec int) time.Time { return from.Add(time.Duration(sec) * time.Second) }
@@ -368,10 +368,10 @@ func TestTheLiveViewShowsTheLeaseHoldersWatcher(t *testing.T) {
 	const repo = "gitdek/app"
 	a, b := t.TempDir(), t.TempDir()
 	esWatcher(t, a, repo, "watcher-aaaaaaaaaaaa",
-		Step{Issue: 5, Doing: "building", Since: esAt(9, 0)},
-		Step{Issue: 6, Doing: "formalizing", Since: esAt(9, 10)})
+		Step{Issue: 5, Doing: "building", Since: esAt(9, 0), Run: "build-20260929-090000"},
+		Step{Issue: 6, Doing: "formalizing", Since: esAt(9, 10), Run: "formalize-20260929-091000"})
 	esWatcher(t, b, repo, "watcher-bbbbbbbbbbbb",
-		Step{Issue: 7, Doing: "building", Since: esAt(9, 30)})
+		Step{Issue: 7, Doing: "building", Since: esAt(9, 30), Run: "build-20260929-093000"})
 	// Each step's agent has read a file in as many turns as its issue says.
 	turns := map[int]int{5: 2, 6: 1, 7: 4}
 	for _, st := range []struct {

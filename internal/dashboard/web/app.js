@@ -1796,28 +1796,92 @@
   const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", list: "Listing files", build: "Building", git: "Using version control", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
   const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
   let live = null;
-  // The cards shown, by their step's repository, issue and since, so each
+  // The cards shown, by their step's repository, issue and run, so each
   // one is kept across reads and its dial and strip never start over. A
   // card holds its step, its elements, and what it last showed: how many
   // marks and checks, and the file it lit.
   const cards = new Map();
-  const cardKey = (l) => `${l.repo}#${l.issue}@${l.since}`;
+  const cardKey = (l) => JSON.stringify([l.repo, l.issue, l.doing, l.since, l.run]);
   const kilo = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
 
+  // Opting in lasts only for this page. Abort and supersede old reads on
+  // each change, including a response still waiting for its JSON body.
+  const shellControl = ACT ? $("#show-shell-commands") : null;
+  let liveReads = 0, liveAgain = 0, liveRequest = null;
+  const showShellCommands = () => !!shellControl?.checked;
+
+  function clearCardCommands(c) {
+    const box = $(".shell-commands", c.el);
+    if (box) {
+      box.replaceChildren();
+      box.hidden = true;
+    }
+    if (c.l) delete c.l.commands;
+  }
+
+  function clearShellCommands() {
+    for (const l of live?.steps || []) delete l.commands;
+    for (const c of cards.values()) clearCardCommands(c);
+  }
+
+  function stopLiveRead() {
+    ++liveReads;
+    clearTimeout(liveAgain);
+    liveRequest?.abort();
+    liveRequest = null;
+  }
+
+  if (shellControl) {
+    shellControl.checked = false;
+    shellControl.addEventListener("change", () => {
+      stopLiveRead();
+      clearShellCommands();
+      loadLive();
+    });
+    // Browsers may restore a page and its form controls from their back
+    // cache. Neither a restored checkbox nor a late read is a new opt-in.
+    window.addEventListener("pagehide", () => {
+      shellControl.checked = false;
+      stopLiveRead();
+      clearShellCommands();
+    });
+    window.addEventListener("pageshow", () => {
+      shellControl.checked = false;
+      stopLiveRead();
+      clearShellCommands();
+      loadLive();
+    });
+  }
+
   async function loadLive() {
+    stopLiveRead();
+    const read = liveReads, commands = showShellCommands();
+    const request = new AbortController();
+    liveRequest = request;
     let wait = 12000;
     try {
-      const r = await fetch("/api/live.json", { cache: "no-store" });
-      if (r.ok) {
-        live = await r.json();
-        renderLive();
-        if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+      const path = ACT ? `/act/api/live.json${commands ? "?commands=1" : ""}` : "/api/live.json";
+      const r = await fetch(path, { cache: "no-store", redirect: "error", signal: request.signal });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const next = await r.json();
+      if (read !== liveReads || commands !== showShellCommands()) return;
+      live = next;
+      renderLive();
+      if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+    } catch (e) {
+      if (read !== liveReads) return;
+      if (shellControl) {
+        shellControl.checked = false;
+        clearShellCommands();
       }
-    } catch (e) {}
-    setTimeout(loadLive, wait);
+    }
+    if (read === liveReads) {
+      liveRequest = null;
+      liveAgain = setTimeout(loadLive, wait);
+    }
   }
 
   // The steps to show: the ones running in the chosen repositories, or else
@@ -1845,6 +1909,7 @@
     $("#live").hidden = !steps.length;
     for (const [key, c] of cards) {
       if (keys.includes(key)) continue;
+      clearCardCommands(c);
       stripSize.unobserve(c.strip);
       c.el.remove();
       cards.delete(key);
@@ -1868,6 +1933,7 @@
   function renderCard(c) {
     const { el, l } = c;
     el.classList.toggle("ended", !!l.ended);
+    renderShellCommands(c);
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
     put($(".live-title", el), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}${l.by ? ` <span class="by">by ${esc(l.by)}</span>` : ""}`);
 
@@ -1907,6 +1973,34 @@
     tickCard(c, true);
     c.marks = (l.marks || []).length;
     c.runs = (l.runs || []).length;
+  }
+
+  // Shell text is never HTML, a link or an action. Keep its exact spacing
+  // and line breaks, alongside the same kind and timestamps as its mark.
+  function renderShellCommands(c) {
+    const box = $(".shell-commands", c.el);
+    if (!box) return;
+    if (!showShellCommands() || c.l.ended || !c.l.commands?.length) {
+      clearCardCommands(c);
+      return;
+    }
+    const scroll = $("ol", box)?.scrollTop || 0;
+    const title = document.createElement("h3");
+    title.textContent = "Shell commands";
+    const list = document.createElement("ol");
+    for (const command of c.l.commands) {
+      const item = document.createElement("li");
+      const times = document.createElement("div");
+      times.className = "shell-times";
+      times.textContent = `${command.kind} · started ${command.at} · ${command.until ? `ended ${command.until}` : "running"}`;
+      const text = document.createElement("pre");
+      text.textContent = command.command;
+      item.append(times, text);
+      list.append(item);
+    }
+    box.replaceChildren(title, list);
+    box.hidden = false;
+    list.scrollTop = scroll;
   }
 
   // liveTick moves every card's dial and strip's clock.
