@@ -32,6 +32,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitdek/invariant/internal/dashboard"
@@ -393,17 +394,20 @@ func mcpCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	runs := 0
+	allowance := toolAllowance(*maxRuns)
 	gate := mcp.Tool{
 		Name: "gate",
 		Description: fmt.Sprintf("Run every check of Invariant's gate on your model and code. It reports what failed, "+
 			"with TLC counterexamples and verifier errors. You have %d runs in total.", *maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= *maxRuns {
+			runs, err := allowance(ctx)
+			if err != nil {
+				return "The tool allowance couldn't be checked: " + err.Error(), true
+			}
+			if runs == 0 {
 				return fmt.Sprintf("No gate runs left: you've used all %d.", *maxRuns), true
 			}
-			runs++
 			dir, err := os.MkdirTemp("", "invariant-gate-")
 			if err != nil {
 				return "The gate couldn't start: " + err.Error(), true
@@ -448,21 +452,64 @@ func sandbox(ctx context.Context, cache string) (plumbing.Sandbox, error) {
 	return plumbing.Sandbox{Image: image, ModCache: strings.TrimSpace(string(out)), Cache: cache}, nil
 }
 
+// toolAllowance counts before work, in the parent agent run when there is
+// one. A restarted MCP server cannot renew that allowance. Standalone MCP
+// servers keep their own count, and a missing parent fails closed.
+func toolAllowance(maxRuns int) func(context.Context) (int, error) {
+	address := os.Getenv("INVARIANT_TOOL_ALLOWANCE")
+	var mu sync.Mutex
+	runs := 0
+	return func(ctx context.Context) (int, error) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if address == "" {
+			mu.Lock()
+			defer mu.Unlock()
+			if runs >= maxRuns {
+				return 0, nil
+			}
+			runs++
+			return runs, nil
+		}
+		dialer := net.Dialer{Timeout: 5 * time.Second}
+		conn, err := dialer.DialContext(ctx, "tcp", address)
+		if err != nil {
+			return 0, err
+		}
+		defer conn.Close()
+		stop := context.AfterFunc(ctx, func() { conn.Close() })
+		defer stop()
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var run int
+		if err := json.NewDecoder(conn).Decode(&run); err != nil {
+			return 0, err
+		}
+		if run < 0 || run > maxRuns {
+			return 0, fmt.Errorf("invalid tool allowance: %d", run)
+		}
+		return run, nil
+	}
+}
+
 // planTool checks the plan an agent drafts for a plumbing issue (D-0105):
 // it holds together, and its acceptance tests fail on the code as it is,
 // or its plan of issues holds together.
 func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+	allowance := toolAllowance(maxRuns)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Check the plan in plan.json and its acceptance tests under tests/ against the repository in repo/: "+
 			"the plan holds together, and every acceptance test fails on the code as it is. Or check the plan of issues in issues.json against the plan-of-issues rules. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := allowance(ctx)
+			if err != nil {
+				return "The tool allowance couldn't be checked: " + err.Error(), true
+			}
+			if runs == 0 {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
-			runs++
 			if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
 				if _, err := os.Stat(filepath.Join(ws, "issues.json")); err == nil {
 					return checkIssues(ws, runs, maxRuns, logPath), false
@@ -491,17 +538,20 @@ func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.T
 // issuesTool checks the plan of issues an agent drafts for a PRD (#112): it
 // holds together as a plan a person can ratify.
 func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+	allowance := toolAllowance(maxRuns)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Check the plan of issues in issues.json: it has a name, a summary and 1 to %d issues, each with a title and a whole body that's "+
 			"modeled, with a Project: line, or plumbing, with a Kind: plumbing line, and carries no /invariant command. You have %d checks in total.", formalize.MaxIssues, maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
-		Call: func(_ context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
+			runs, err := allowance(ctx)
+			if err != nil {
+				return "The tool allowance couldn't be checked: " + err.Error(), true
+			}
+			if runs == 0 {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
-			runs++
 			if _, err := os.Stat(filepath.Join(ws, "issues.json")); err != nil {
 				if _, err := os.Stat(filepath.Join(ws, "proposal.json")); err == nil {
 					return fmt.Sprintf("There's no issues.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
@@ -533,17 +583,20 @@ func checkIssues(ws string, run, maxRuns int, logPath string) string {
 // and its acceptance tests from the checkout at root, and the agent's
 // changes to the files the plan names, in the sandbox.
 func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+	allowance := toolAllowance(maxRuns)
 	return mcp.Tool{
 		Name: "test",
 		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, "+
 			"in a sandbox with no network. You have %d runs in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := allowance(ctx)
+			if err != nil {
+				return "The tool allowance couldn't be checked: " + err.Error(), true
+			}
+			if runs == 0 {
 				return fmt.Sprintf("No test runs left: you've used all %d.", maxRuns), true
 			}
-			runs++
 			lock, err := plumbing.ReadLockFile(root, n)
 			if err != nil {
 				return "The ratified plan can't be read: " + err.Error(), true
@@ -570,17 +623,20 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 
 // checkTool runs the gate's model checks on a formalizing agent's draft.
 func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+	allowance := toolAllowance(maxRuns)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
 			"the witnesses and the known bugs. It reports what failed, with counterexamples. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := allowance(ctx)
+			if err != nil {
+				return "The tool allowance couldn't be checked: " + err.Error(), true
+			}
+			if runs == 0 {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
-			runs++
 			record := func(passed bool, failed ...string) {
 				if logPath != "" {
 					synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: passed, Failed: failed, At: time.Now().UTC().Format(time.RFC3339)})

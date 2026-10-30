@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ClaudeCode runs the official Claude Code CLI headlessly (claude -p), on the
@@ -31,7 +32,15 @@ type ClaudeCode struct {
 	// agent spend every turn's whole output on thinking, and never act. A job
 	// that names its own effort, as a build's fallback run does, thinks at
 	// that instead (D-0125).
-	Effort string
+	Effort       string
+	providerWait func(context.Context, time.Duration) error
+}
+
+// WithProviderWait replaces this backend's retry timer. Nil restores the
+// cancellable one-, two- and four-minute waits.
+func (c ClaudeCode) WithProviderWait(wait func(context.Context, time.Duration) error) Backend {
+	c.providerWait = wait
+	return c
 }
 
 func (c ClaudeCode) Name() string { return "claude-code" }
@@ -48,7 +57,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"-p", job.Prompt,
 			"--output-format", "stream-json", "--verbose",
 			"--model", c.Model,
-			"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
+			"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', -1, 64),
 			"--max-turns", strconv.Itoa(c.MaxTurns),
 			"--strict-mcp-config",
 			"--tools", readTools,
@@ -58,9 +67,14 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"--no-session-persistence",
 		}, c.effort(job)...), nil
 	}
-	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		"invariant": map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]},
-	}})
+	if len(job.GateServer) == 0 {
+		return nil, fmt.Errorf("claude needs Invariant's MCP server for this job")
+	}
+	server := map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]}
+	if len(job.GateEnv) > 0 {
+		server["env"] = job.GateEnv
+	}
+	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"invariant": server}})
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +90,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 		"-p", job.Prompt,
 		"--output-format", "stream-json", "--verbose",
 		"--model", c.Model,
-		"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
+		"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', -1, 64),
 		"--max-turns", strconv.Itoa(c.MaxTurns),
 		"--mcp-config", string(config), "--strict-mcp-config",
 		// --tools sets which built-in tools exist at all; --allowedTools only
@@ -104,11 +118,42 @@ func (c ClaudeCode) effort(job Job) []string {
 }
 
 func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
+	ctx, cancel := within(ctx, job)
+	defer cancel()
+	job, cleanup, err := prepareProviderJob(job)
+	if err != nil {
+		return Usage{}, err
+	}
+	defer cleanup()
+	return runProvider(ctx, c.Name(), c.providerWait, func(used Usage) (Usage, error) {
+		remaining := c
+		if c.BudgetUSD > 0 {
+			remaining.BudgetUSD -= used.CostUSD
+		}
+		if c.MaxTurns > 0 {
+			remaining.MaxTurns -= used.Turns
+		}
+		return remaining.attempt(ctx, job)
+	}, func(used Usage) error {
+		if used.CostIncomplete {
+			return fmt.Errorf("final cost is incomplete; the remaining dollar budget is reserved as a conservative estimate")
+		}
+		if c.BudgetUSD > 0 && used.CostUSD >= c.BudgetUSD {
+			return fmt.Errorf("the run exhausted its dollar budget")
+		}
+		if c.MaxTurns > 0 && used.Turns >= c.MaxTurns {
+			return fmt.Errorf("the run exhausted its turn limit")
+		}
+		return job.toolLimit()
+	}, nil)
+}
+
+func (c ClaudeCode) attempt(ctx context.Context, job Job) (Usage, error) {
 	args, err := c.args(job)
 	if err != nil {
 		return Usage{}, err
 	}
-	ctx, cancel := within(ctx, job)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace
@@ -123,18 +168,32 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	if err := cmd.Start(); err != nil {
 		return Usage{}, err
 	}
-	usage, readErr := ReadStream(stdout, job.Transcript)
+	usage, diagnostic, readErr := readClaudeStream(stdout, job.Transcript)
 	if readErr != nil {
 		cancel() // stop the agent, rather than wait for it
 	}
 	waitErr := cmd.Wait()
+	usage.Backend = c.Name()
+	if usage.Model == "" {
+		usage.Model = c.Model
+	}
+	if usage.CostIncomplete {
+		// Tokens are evidence of paid work, not a price quote. Without the
+		// closing dollar result, none of this attempt's allowance can safely
+		// fund another paid attempt, even for an unknown model.
+		usage.CostUSD = c.BudgetUSD
+		if usage.Outcome == "" || usage.Outcome == "success" {
+			usage.Outcome = "error_incomplete_cost"
+		}
+		return usage, fmt.Errorf("claude stopped: %s\n%s; final cost is incomplete, so the remaining dollar budget is reserved as a conservative estimate", diagnostic, stderr.String())
+	}
 	switch {
 	case readErr != nil:
 		return usage, readErr
 	case usage.Outcome == "":
-		return usage, fmt.Errorf("claude ended without a result: %v\n%s", waitErr, lastLines(stderr.String(), 20))
+		return usage, providerAttemptError(ctx, waitErr, fmt.Errorf("claude ended without a result: %v\n%s\n%s", waitErr, diagnostic, stderr.String()))
 	case usage.Outcome != "success":
-		return usage, fmt.Errorf("claude stopped: %s", usage.Outcome)
+		return usage, fmt.Errorf("claude stopped: %s: %s\n%s", usage.Outcome, diagnostic, stderr.String())
 	}
 	return usage, nil
 }
@@ -154,7 +213,15 @@ const maxThinkingOnly = 2
 // early, with ErrThinkingLoop, once the agent's replies keep ending with
 // nothing but thinking.
 func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
+	u, _, err := readClaudeStream(r, transcript)
+	return u, err
+}
+
+func readClaudeStream(r io.Reader, transcript io.Writer) (Usage, string, error) {
 	u := Usage{ToolCalls: map[string]int{}}
+	var diagnostic string
+	var paid, finalCost bool
+	seenReplies, seenTools := map[string]bool{}, map[string]bool{}
 	// A reply is one message, whose blocks can come in several events. It
 	// ran out of room if it held only thinking when the next turn began.
 	var reply string
@@ -168,12 +235,14 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 			transcript.Write(append(append([]byte{}, line...), '\n'))
 		}
 		var ev struct {
-			Type    string  `json:"type"`
-			Subtype string  `json:"subtype"`
-			Model   string  `json:"model"`
-			Result  string  `json:"result"`
-			Cost    float64 `json:"total_cost_usd"`
-			Turns   int     `json:"num_turns"`
+			Type    string          `json:"type"`
+			Subtype string          `json:"subtype"`
+			Model   string          `json:"model"`
+			Result  string          `json:"result"`
+			Cost    *float64        `json:"total_cost_usd"`
+			Turns   int             `json:"num_turns"`
+			Error   json.RawMessage `json:"error"`
+			Errors  []string        `json:"errors"`
 			Servers []struct {
 				Name   string `json:"name"`
 				Status string `json:"status"`
@@ -181,14 +250,22 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 			Message struct {
 				ID      string          `json:"id"`
 				Content json.RawMessage `json:"content"`
+				Usage   struct {
+					Input         int `json:"input_tokens"`
+					Output        int `json:"output_tokens"`
+					CacheCreation int `json:"cache_creation_input_tokens"`
+					CacheRead     int `json:"cache_read_input_tokens"`
+				} `json:"usage"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(line, &ev) != nil {
 			continue
 		}
 		var content []struct {
+			ID   string `json:"id"`
 			Type string `json:"type"`
 			Name string `json:"name"`
+			Text string `json:"text"`
 		}
 		if bytes.HasPrefix(bytes.TrimSpace(ev.Message.Content), []byte("[")) {
 			json.Unmarshal(ev.Message.Content, &content)
@@ -204,12 +281,35 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 				}
 			}
 		case "assistant":
+			if len(ev.Error) > 0 && string(ev.Error) != "null" {
+				var kind string
+				if json.Unmarshal(ev.Error, &kind) != nil {
+					kind = string(ev.Error)
+				}
+				diagnostic = kind
+				for _, block := range content {
+					if block.Text != "" {
+						diagnostic += ": " + block.Text
+					}
+				}
+				u.Summary = diagnostic
+				break
+			}
+			if ev.Message.ID == "" || !seenReplies[ev.Message.ID] {
+				u.Turns++
+				seenReplies[ev.Message.ID] = true
+			}
+			tokens := ev.Message.Usage
+			paid = paid || tokens.Input > 0 || tokens.Output > 0 || tokens.CacheCreation > 0 || tokens.CacheRead > 0
 			if ev.Message.ID != reply {
 				reply, thinkingOnly = ev.Message.ID, true
 			}
 			for _, c := range content {
 				if c.Type == "tool_use" {
-					u.ToolCalls[c.Name]++
+					if c.ID == "" || !seenTools[c.ID] {
+						u.ToolCalls[c.Name]++
+						seenTools[c.ID] = true
+					}
 				}
 				if c.Type != "thinking" && c.Type != "redacted_thinking" {
 					thinkingOnly = false
@@ -226,13 +326,24 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 			}
 			reply = ""
 			if cutOff >= maxThinkingOnly {
-				return u, ErrThinkingLoop
+				return u, diagnostic, ErrThinkingLoop
 			}
 		case "result":
-			u.Outcome, u.Summary, u.CostUSD, u.Turns = ev.Subtype, ev.Result, ev.Cost, ev.Turns
+			u.Outcome, u.Summary, u.Turns = ev.Subtype, ev.Result, ev.Turns
+			finalCost = ev.Cost != nil
+			if finalCost {
+				u.CostUSD = *ev.Cost
+			}
+			if ev.Result != "" || len(ev.Errors) > 0 {
+				diagnostic = strings.TrimSpace(ev.Result + "\n" + strings.Join(ev.Errors, "\n"))
+			}
+			if u.Summary == "" && ev.Subtype != "success" {
+				u.Summary = diagnostic
+			}
 		}
 	}
-	return u, scanner.Err()
+	u.CostIncomplete = paid && !finalCost && u.Outcome != "success"
+	return u, diagnostic, scanner.Err()
 }
 
 func lastLines(s string, n int) string {

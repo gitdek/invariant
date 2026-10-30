@@ -1423,6 +1423,31 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if res != nil && res.Review != nil {
 		res.Review.Text = localPaths(res.Review.Text, f.Work)
 	}
+	if res != nil {
+		res.ProviderError = localPaths(res.ProviderError, f.Work)
+		if runErr == nil && res.ProviderError != "" {
+			runErr = errors.New(res.ProviderError)
+		}
+	}
+	if synth.IsProviderUnavailable(runErr) {
+		if res == nil {
+			res = &synth.Result{}
+		}
+		res.ProviderError = runErr.Error()
+		code, err := f.Repo.RevParse(ctx, m.Branch)
+		if err != nil {
+			return "", "", nil, nil, err
+		}
+		// Keep the failure on the ratified branch without copying the
+		// unfinished run's files or requiring a final gate report.
+		kept := *res
+		kept.Dir = f.workRelative(res.Dir)
+		result, err := f.finishBuild(ctx, n, step, code, builtResult{Result: &kept, Agent: agent, Error: runErr.Error()})
+		if err != nil {
+			return "", "", nil, nil, err
+		}
+		return result, agent, res, runErr, nil
+	}
 	if res == nil || res.Final == nil {
 		return "", agent, res, runErr, nil
 	}
@@ -1467,17 +1492,27 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
-	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
+	result, err := f.finishBuild(ctx, n, step, code, saved)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
+	return result, agent, res, runErr, nil
+}
+
+// finishBuild saves a complete build or its failure diagnostics and makes
+// that result recoverable without another agent run after a watcher restart.
+func (f *Factory) finishBuild(ctx context.Context, n int, step, parent string, saved builtResult) (string, error) {
+	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, saved.Agent), parent)
+	if err != nil {
+		return "", err
+	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
-		return "", "", nil, nil, err
+		return "", err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
-		return "", "", nil, nil, err
+		return "", err
 	}
-	return result, agent, res, runErr, nil
+	return result, nil
 }
 
 // workRelative names dir by where it is under the factory's work directory,
@@ -1551,15 +1586,24 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return f.publishPlan(ctx, t, ratified, result, built, next, stops)
 	}
 	res := built.Result
-	if res == nil || res.Final == nil {
+	if res == nil {
 		return fmt.Errorf("the build's record at %s holds no result", result)
 	}
 	var runErr error
 	if built.Error != "" {
 		runErr = errors.New(built.Error)
+	} else if res.ProviderError != "" {
+		runErr = errors.New(res.ProviderError)
 	}
 	// The post and the pull request name the agent the record names (#179).
 	next.Spend, next.GateRuns, next.Agent = res.Spend(), len(res.GateRuns), built.Agent
+	if synth.IsProviderUnavailable(runErr) {
+		next.Failure = FailStopped
+		return f.providerBuildFailed(ctx, t, ratified, stops, buildFailedComment(nil, res, runErr, next))
+	}
+	if res.Final == nil {
+		return fmt.Errorf("the build's record at %s holds no final report", result)
+	}
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err
 	}
@@ -1630,6 +1674,23 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	}
 	next.Kind = KindPR
 	return f.say(ctx, n, prComment(pr, res, next), LabelPR)
+}
+
+// providerBuildFailed reports an unfinished agent run through the existing
+// no-pull-request path. Its saved result is a diagnostic record, so recovery
+// sees the agent run as stopped, even though that record is ready to read.
+// A writer's retry builds and reviews the same ratified proposal again.
+func (f *Factory) providerBuildFailed(ctx context.Context, t Thread, ratified Post, stops int, body string) error {
+	n := t.Issue.Number
+	from, to := buildStep(ratified, stops, pullRequest{})
+	to.kind, to.failure, to.stops = protocol.KindFailed, FailStopped, stops+1
+	if err := f.allowed(ctx, n, "say the provider could not finish the build", from, to); err != nil {
+		return err
+	}
+	if err := f.recovers(ctx, n, "say the provider run stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
+		return err
+	}
+	return f.say(ctx, n, body, LabelHumanReview)
 }
 
 // removeOwned deletes the files in a project that the agent owns, before

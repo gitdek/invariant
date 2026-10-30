@@ -26,7 +26,7 @@ type Builder struct {
 	Sandbox  Sandbox
 	// FallbackEffort is the effort the agent runs at once more when the loop
 	// guard stops its first run (D-0125). Empty never runs it again. The
-	// review never runs again.
+	// review has no effort fallback. Provider retries apply to both agents.
 	FallbackEffort string
 }
 
@@ -45,6 +45,9 @@ type BuildResult struct {
 	// Fallback says the agent ran once more, when the loop guard stopped its
 	// first run (D-0125). Usage is the second run's.
 	Fallback *synth.Fallback `json:"fallback,omitempty"`
+	// ProviderError records an unfinished build or review even when the
+	// files left behind pass the checks. Such a build publishes no PR.
+	ProviderError string `json:"provider_error,omitempty"`
 }
 
 // Build implements issue n's ratified plan in the checkout at root, which
@@ -88,6 +91,16 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 	usage.Backend = b.Backend.Name()
 	r := &BuildResult{Usage: usage, Spend: usage.CostUSD, Tests: len(plan.Tests), Fallback: fallback}
 	r.TestRuns, _ = readRuns(testLog)
+	save := func() {
+		data, _ := json.MarshalIndent(r, "", "  ")
+		os.WriteFile(filepath.Join(out, "build.json"), append(data, '\n'), 0o644)
+	}
+	if synth.IsProviderUnavailable(runErr) {
+		r.Summary = fmt.Sprintf("The agent's run ended with an error: %v", runErr)
+		r.ProviderError = fmt.Sprintf("the agent's run failed: %v", runErr)
+		save()
+		return r, nil
+	}
 	if r.Changes, err = Diff(ctx, root, ws, plan); err != nil {
 		return nil, err
 	}
@@ -121,10 +134,12 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 		r.Review, r.Approved, err = b.review(ctx, root, n, plan, r, out)
 		if err != nil {
 			r.Review = "The review didn't run: " + err.Error()
+			if synth.IsProviderUnavailable(err) {
+				r.ProviderError = fmt.Sprintf("the review's run failed: %v", err)
+			}
 		}
 	}
-	b2, _ := json.MarshalIndent(r, "", "  ")
-	os.WriteFile(filepath.Join(out, "build.json"), append(b2, '\n'), 0o644)
+	save()
 	return r, nil
 }
 

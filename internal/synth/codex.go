@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -60,7 +61,15 @@ type Codex struct {
 	Reads []string
 	// GoModCache is Go's module cache, which its commands read to build Go
 	// without the network.
-	GoModCache string
+	GoModCache   string
+	providerWait func(context.Context, time.Duration) error
+}
+
+// WithProviderWait replaces this backend's retry timer. Nil restores the
+// cancellable one-, two- and four-minute waits.
+func (c Codex) WithProviderWait(wait func(context.Context, time.Duration) error) Backend {
+	c.providerWait = wait
+	return c
 }
 
 // codexTurn lets one of this process's Codex runs go at a time (D-0138).
@@ -230,6 +239,16 @@ func (c Codex) args(job Job, tmp string) ([]string, error) {
 		server := fmt.Sprintf(`mcp_servers.%s={command=%s, args=%s, required=true, default_tools_approval_mode="approve", enabled_tools=%s, startup_timeout_sec=60, tool_timeout_sec=%d}`,
 			codexServer, tomlString(job.GateServer[0]), tomlStrings(job.GateServer[1:]), tomlStrings(tools), timeout)
 		args = append(args, "-c", server)
+		if len(job.GateEnv) > 0 {
+			var env []string
+			for key, value := range job.GateEnv {
+				env = append(env, tomlString(key)+"="+tomlString(value))
+			}
+			sort.Strings(env)
+			// Codex filters its servers' inherited environment. The shared
+			// tool allowance must be explicitly forwarded to every restart.
+			args = append(args, "-c", "mcp_servers."+codexServer+".env={"+strings.Join(env, ", ")+"}")
+		}
 	}
 	if c.Model != "" {
 		args = append(args, "-m", c.Model)
@@ -281,7 +300,20 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	defer release()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	// Only the initial turn wait is outside the timeout. Backoff and every
+	// subsequent turn wait spend this same run's time allowance.
+	ctx, cancel := within(ctx, job)
+	defer cancel()
+	job, cleanup, err := prepareProviderJob(job)
+	if err != nil {
+		return Usage{}, err
+	}
+	defer cleanup()
 	// The agent's commands get a temporary directory of the run's own, which
 	// holds their Go build cache, where the profile lets them write. In the
 	// workspace, it would count as the agent's work.
@@ -294,8 +326,31 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	// The run's time starts now that its turn has come.
-	ctx, cancel := within(ctx, job)
+	return runProvider(ctx, c.Name(), c.providerWait, func(used Usage) (Usage, error) {
+		remaining := c.MaxTurns
+		if remaining > 0 {
+			remaining -= used.Turns
+		}
+		u, err := c.attempt(ctx, job, args, remaining)
+		// Both the process turn and home file lock are released before any
+		// provider wait, so another job on the same sign-in can proceed.
+		release()
+		release = nil
+		return u, err
+	}, func(used Usage) error {
+		if c.MaxTurns > 0 && used.Turns >= c.MaxTurns {
+			return ErrTooManyTurns
+		}
+		return job.toolLimit()
+	}, func() error {
+		var err error
+		release, err = c.turn(ctx)
+		return err
+	})
+}
+
+func (c Codex) attempt(ctx context.Context, job Job, args []string, maxTurns int) (Usage, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace
@@ -322,7 +377,7 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 		start, _ := json.Marshal(map[string]string{"type": "invariant.workspace", "cwd": job.Workspace})
 		job.Transcript.Write(append(stamped(start, time.Now()), '\n'))
 	}
-	usage, readErr := ReadCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
+	usage, readErr := ReadCodexStream(stdout, job.Transcript, maxTurns, !job.ReadOnly)
 	if readErr != nil {
 		cancel() // stop the agent, rather than wait for it
 	}
@@ -336,9 +391,9 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	case readErr != nil:
 		return usage, readErr
 	case usage.Outcome == "":
-		return usage, fmt.Errorf("codex ended without finishing its turn: %v\n%s", waitErr, lastLines(stderr.String(), 20))
+		return usage, providerAttemptError(ctx, waitErr, fmt.Errorf("codex ended without finishing its turn: %v\n%s\n%s", waitErr, usage.Summary, stderr.String()))
 	case usage.Outcome != "success":
-		return usage, fmt.Errorf("codex stopped: %s", usage.Summary)
+		return usage, fmt.Errorf("codex stopped: %s\n%s", usage.Summary, stderr.String())
 	}
 	return usage, nil
 }

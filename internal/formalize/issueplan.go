@@ -266,6 +266,10 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 		b, _ := json.MarshalIndent(r, "", "  ")
 		os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
 	}()
+	if synth.IsProviderUnavailable(runErr) {
+		r.Problem = fmt.Sprintf("the agent's run failed: %v", runErr)
+		return r, nil
+	}
 	fail := func(problem string) (*Result, error) {
 		if runErr != nil {
 			problem = fmt.Sprintf("the agent's run failed (%v), and it left no usable plan: %s", runErr, problem)

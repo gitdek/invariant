@@ -7,6 +7,7 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/synth"
 )
 
 // planComment proposes a plumbing plan for ratification (D-0105): what
@@ -84,6 +85,9 @@ func retriedComment(pr int, trusted []string, m Marker) string {
 }
 
 func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr error, m Marker) string {
+	if synth.IsProviderUnavailable(runErr) {
+		return providerFailedComment(runErr, m)
+	}
 	var b strings.Builder
 	switch {
 	case res == nil:

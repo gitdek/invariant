@@ -13,6 +13,7 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/synth"
 )
 
 // Plumbing issues (D-0105). An issue marked Kind: plumbing gets a plan in
@@ -238,8 +239,14 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		return "", agent, nil, runErr, nil
 	}
 	res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
+	res.ProviderError = localPaths(res.ProviderError, f.Work)
+	if runErr == nil && res.ProviderError != "" {
+		runErr = errors.New(res.ProviderError)
+	}
 	verdict := "It passed every test, and the review approves it."
 	switch {
+	case synth.IsProviderUnavailable(runErr):
+		verdict = "Its provider was unavailable, so the build or review did not finish."
 	case !res.Passed:
 		verdict = "It didn't pass every test."
 	case !res.Approved:
@@ -257,14 +264,8 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
-	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
+	result, err := f.finishBuild(ctx, n, step, code, saved)
 	if err != nil {
-		return "", "", nil, nil, err
-	}
-	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
-		return "", "", nil, nil, err
-	}
-	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
 		return "", "", nil, nil, err
 	}
 	return result, agent, res, runErr, nil
@@ -278,8 +279,14 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	var runErr error
 	if built.Error != "" {
 		runErr = errors.New(built.Error)
+	} else if res.ProviderError != "" {
+		runErr = errors.New(res.ProviderError)
 	}
 	next.Spend, next.GateRuns, next.Agent = res.Spend, len(res.TestRuns), built.Agent
+	if synth.IsProviderUnavailable(runErr) {
+		next.Failure = FailStopped
+		return f.providerBuildFailed(ctx, t, ratified, stops, planFailedComment(nil, res, runErr, next))
+	}
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return err
 	}

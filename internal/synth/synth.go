@@ -13,12 +13,15 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gitdek/invariant/internal/project"
@@ -41,6 +44,10 @@ type Job struct {
 	GateServer []string  // the command that starts Invariant's MCP server
 	Tools      []string  // the server's tools the agent may call; just the gate when empty
 	Transcript io.Writer // where the backend records the agent's events
+	// GateEnv is forwarded explicitly to the MCP server.
+	GateEnv map[string]string
+	// toolLimit checks the parent run's allowance before a provider retry.
+	toolLimit func() error
 	// ReadOnly gives the agent only the tools that read files, and no gate:
 	// a reviewer's job (D-0086).
 	ReadOnly bool
@@ -48,10 +55,9 @@ type Job struct {
 	// a build's fallback run names one (D-0125); every first run leaves it
 	// empty, and thinks at the backend's own effort.
 	Effort string
-	// Timeout cuts the run off, counted from when it starts rather than
-	// from when it's asked for: a Codex run waits for its turn first
-	// (D-0138, D-0154), and the wait isn't the agent's time. Zero leaves
-	// the run uncut.
+	// Timeout starts with the first attempt's turn (D-0138, D-0154).
+	// Provider waits and reacquiring the turn share that deadline; only
+	// the initial turn wait is excluded. Zero leaves the run uncut.
 	Timeout time.Duration
 }
 
@@ -68,6 +74,8 @@ type Usage struct {
 	// Tokens is what the run used, where the agent reports tokens rather
 	// than a cost, as Codex does on an account (#153).
 	Tokens *Tokens `json:"tokens,omitempty"`
+	// CostIncomplete reserves unreported paid work conservatively.
+	CostIncomplete bool `json:"cost_incomplete,omitempty"`
 }
 
 // GateRun is one call to the gate tool during synthesis.
@@ -115,6 +123,8 @@ type Result struct {
 	// Fallback says the agent ran once more, when the loop guard stopped its
 	// first run (D-0125). Usage is the second run's.
 	Fallback *Fallback `json:"fallback,omitempty"`
+	// ProviderError survives saving a run whose provider never finished.
+	ProviderError string `json:"provider_error,omitempty"`
 }
 
 // Spend is the agents' estimated cost for the build: synthesis, and the
@@ -158,6 +168,71 @@ func within(ctx context.Context, job Job) (context.Context, context.CancelFunc) 
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, job.Timeout)
+}
+
+// prepareProviderJob keeps the tool allowance in the parent run, beyond the
+// agent's reach and the lifetime of any one MCP server. Each connection
+// consumes a call before its work begins, even if neither the tool nor the
+// agent lives long enough to log it. The local listener admits calls; it
+// cannot reset or enlarge the allowance, and has no file the agent can replace.
+func prepareProviderJob(job Job) (Job, func(), error) {
+	job.toolLimit = func() error { return nil }
+	if job.ReadOnly || len(job.GateServer) == 0 {
+		return job, func() {}, nil
+	}
+	maxRuns := 4
+	for i, arg := range job.GateServer {
+		flag, value, found := strings.Cut(arg, "=")
+		if flag != "-max-runs" && flag != "--max-runs" {
+			continue
+		}
+		if !found && i+1 < len(job.GateServer) {
+			value = job.GateServer[i+1]
+		}
+		var err error
+		maxRuns, err = strconv.Atoi(value)
+		if err != nil {
+			return job, nil, fmt.Errorf("the tool allowance: %w", err)
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return job, nil, err
+	}
+	done := make(chan struct{})
+	var runs atomic.Int64
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			granted := 0
+			if runs.Load() < int64(maxRuns) {
+				granted = int(runs.Add(1))
+			}
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			json.NewEncoder(conn).Encode(granted)
+			conn.Close()
+		}
+	}()
+	env := make(map[string]string, len(job.GateEnv)+1)
+	for name, value := range job.GateEnv {
+		env[name] = value
+	}
+	env["INVARIANT_TOOL_ALLOWANCE"] = listener.Addr().String()
+	job.GateEnv = env
+	job.toolLimit = func() error {
+		if runs.Load() >= int64(maxRuns) {
+			return errors.New("the run exhausted its tool call allowance")
+		}
+		return nil
+	}
+	return job, func() {
+		listener.Close()
+		<-done
+	}, nil
 }
 
 // Synthesize runs one synthesis. The result lands in Out/result as a
@@ -235,6 +310,15 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	usage.Backend = o.Backend.Name()
 
 	r := &Result{Project: p.Manifest.Name, Usage: usage, Fallback: fallback}
+	if IsProviderUnavailable(runErr) {
+		r.ProviderError = fmt.Sprintf("the agent's run failed: %v", runErr)
+		r.GateRuns, _ = readGateRuns(gateLog)
+		r.Seconds = time.Since(start).Seconds()
+		if err := writeJSON(filepath.Join(out, "synthesis.json"), r); err != nil {
+			return r, fmt.Errorf("%w; saving the failed run: %w", runErr, err)
+		}
+		return r, fmt.Errorf("the agent's run failed: %w", runErr)
+	}
 	if r.Tampered, err = Tampered(p, ws); err != nil {
 		return nil, err
 	}
@@ -564,8 +648,17 @@ func Summary(r *Result) string {
 	if r.Final != nil && r.Final.Passed {
 		verdict = "✅ The final gate passed."
 	}
+	if r.ProviderError != "" {
+		verdict = "❌ The provider did not finish the run."
+	}
 	fmt.Fprintf(&b, "**%s** %s, model %s, %d turns, about $%.2f by the agent's own estimate, %.0f seconds.\n\n",
 		verdict, r.Usage.Backend, r.Usage.Model, r.Usage.Turns, r.Usage.CostUSD, r.Seconds)
+	if r.Usage.CostIncomplete {
+		b.WriteString("The cost is an incomplete estimate: the disconnected attempt reserved its remaining dollar allowance.\n\n")
+	}
+	if r.ProviderError != "" {
+		fmt.Fprintf(&b, "%s\n\n", r.ProviderError)
+	}
 	if fb := r.Fallback; fb != nil {
 		fmt.Fprintf(&b, "The loop guard stopped the agent's first run, so it ran once more, at %s effort (D-0125). The first run's error: %s\n\n", fb.Effort, fb.Why)
 	}
