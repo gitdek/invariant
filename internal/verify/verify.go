@@ -52,6 +52,9 @@ type Report struct {
 	Agreement   *Agreement          `json:"agreement,omitempty"`
 	Conformance *conformance.Result `json:"conformance,omitempty"`
 	Code        *Code               `json:"code,omitempty"`
+	// Components attributes proof only to exact selected declarations. Legacy
+	// checks above don't establish coverage of this explicit inventory.
+	Components *ComponentEvidence `json:"components,omitempty"`
 	// Larger is agreement again, one size past the bounds, for code whose
 	// explorer names its bounds (D-0068).
 	Larger *Larger `json:"larger,omitempty"`
@@ -59,7 +62,8 @@ type Report struct {
 	// (D-0054). The fingerprint covers it, so a receipt names that code.
 	Existing []ExistingCode `json:"existing,omitempty"`
 	// Assurance records what successful code checks established: "proved",
-	// "tested against the model", or "unchecked" (D-0024).
+	// "tested against the model", or "unchecked" (D-0024). Explicit reports
+	// say "component evidence" and record each component's proof separately.
 	Assurance string    `json:"assurance"`
 	Build     Build     `json:"build"`
 	Toolchain Toolchain `json:"toolchain"`
@@ -190,7 +194,7 @@ func RunModel(ctx context.Context, dir string, tc toolchain.Toolchain) (*Report,
 }
 
 // ErrComponents is why the gate won't verify the code of a project that
-// declares components: their checks aren't tied to evidence yet (D-0158).
+// declares components: execution adapters aren't connected yet (D-0158).
 var ErrComponents = errors.New("component verification is not supported yet")
 
 // Check loads the project at dir and says whether the gate can verify its
@@ -613,6 +617,8 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 // report's recorded label is stale. Other gate failures don't erase evidence.
 func (r *Report) CodeAssurance() string {
 	switch {
+	case r.Components != nil && r.Components.Inventory.Mode == "explicit":
+		return "component evidence"
 	case r.ModelOnly:
 		return ""
 	case r.Code != nil && r.Code.Passed && len(r.Code.Functions) > 0:
@@ -676,6 +682,10 @@ func agree(d Design, e Exploration) Agreement {
 // the same fingerprint.
 func Fingerprint(r Report) string {
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go, r.Agent = "", "", "", "", ""
+	if r.Components != nil {
+		evidence := canonicalComponentEvidence(*r.Components)
+		r.Components = &evidence
+	}
 	r.Bugs = append([]Bug(nil), r.Bugs...)
 	for i := range r.Bugs {
 		r.Bugs[i].Trace = ""

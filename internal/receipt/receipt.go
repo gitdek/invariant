@@ -15,8 +15,15 @@ import (
 // Markdown renders the report as a receipt.
 func Markdown(r *verify.Report) string {
 	var b strings.Builder
+	components := r.Components != nil && r.Components.Inventory.Mode == "explicit"
 	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", r.Project)
-	if r.Passed {
+	if components {
+		outcome := "Fail"
+		if r.Passed {
+			outcome = "Pass"
+		}
+		fmt.Fprintf(&b, "**%s %s.** Recorded gate outcome. Fingerprint `%s`\n\n", mark(r.Passed), outcome, short(r.Fingerprint))
+	} else if r.Passed {
 		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", r.Claim(), short(r.Fingerprint))
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint `%s`\n\n", short(r.Fingerprint))
@@ -25,6 +32,9 @@ func Markdown(r *verify.Report) string {
 	// agent but the fingerprint leaves it out (#179).
 	if r.Agent != "" {
 		fmt.Fprintf(&b, "Coding agent: `%s`. The fingerprint leaves it out.\n\n", r.Agent)
+	}
+	if components {
+		componentProofs(&b, r.Components)
 	}
 
 	b.WriteString("| Check | Result | Evidence |\n| :-- | :-- | :-- |\n")
@@ -38,7 +48,7 @@ func Markdown(r *verify.Report) string {
 		row(&b, "Fairness", fairnessOK(r), fmt.Sprintf("%d of %d on steps the model takes", count(r.Fairness, func(f verify.Fair) bool { return f.InNext }), len(r.Fairness)), fairnessEvidence(r))
 	}
 	row(&b, "Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), bugEvidence(r))
-	if a := r.Agreement; a != nil {
+	if a := r.Agreement; a != nil && !components {
 		row(&b, "Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
 		// A Go explorer with Successors and no Try says where it went, not
 		// what it tried (D-0090).
@@ -46,7 +56,7 @@ func Markdown(r *verify.Report) string {
 			b.WriteString("| Every step tried | ➖ not checked | the explorer reports the states it reaches, not its attempts (D-0082) |\n")
 		}
 	}
-	if l := r.Larger; l != nil {
+	if l := r.Larger; l != nil && !components {
 		// It adds to a claim and never fails a pass, so it isn't marked as a
 		// failure when it doesn't hold.
 		if l.Passed {
@@ -57,10 +67,10 @@ func Markdown(r *verify.Report) string {
 			fmt.Fprintf(&b, "| One size larger | ➖ not claimed | %s |\n", strings.ReplaceAll(firstLine(l.Message), "|", "\\|"))
 		}
 	}
-	if c := r.Code; c != nil {
+	if c := r.Code; c != nil && !components {
 		row(&b, "Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
 	}
-	if c := r.Conformance; c != nil {
+	if c := r.Conformance; c != nil && !components {
 		row(&b, "Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
 		switch t := c.Tried; {
 		case t != nil && t.Passed:
@@ -72,14 +82,16 @@ func Markdown(r *verify.Report) string {
 			b.WriteString("| Every step tried | ➖ not checked | the driver records its runs, not its attempts (D-0082) |\n")
 		}
 	}
-	if len(r.Existing) > 0 {
+	if len(r.Existing) > 0 && !components {
 		row(&b, "Existing code", r.Build.Passed, "run as it is, by the factory's driver", existingEvidence(r.Existing))
 	}
 	if !r.ModelOnly {
 		row(&b, "Build", r.Build.Passed, buildResult(r.Build), "sandboxed, no network")
 	}
 
-	if r.EverySize() {
+	if components {
+		fmt.Fprintf(&b, "\nModel checks use %s. Component proof coverage is listed separately above; model checks and builds establish no component proof.\n", bounds(r.Bounds))
+	} else if r.EverySize() {
 		fmt.Fprintf(&b, "\nChecked within %s, and again one size larger, within %s. Within each, TLC's search is exhaustive. %s proves the code against its contracts at every size, and the design's rules are claimed only within the sizes checked.\n", bounds(r.Bounds), bounds(r.Larger.Bounds), r.Code.Verifier)
 	} else {
 		fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", bounds(r.Bounds))
@@ -118,6 +130,68 @@ func Markdown(r *verify.Report) string {
 	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()
+}
+
+func componentProofs(b *strings.Builder, evidence *verify.ComponentEvidence) {
+	proved := count(evidence.Proofs, func(p verify.ComponentProof) bool { return p.Status == "proved" })
+	fmt.Fprintf(b, "Component proofs: **%d proved; %d unchecked**.\n\n", proved, len(evidence.Inventory.Components)-proved)
+	b.WriteString("Proof is attributed only to each result's target. Attribution leaves the recorded gate outcome unchanged; legacy code checks remain in JSON and confer no component coverage.\n\n")
+	fmt.Fprintf(b, "Scope: %s.\n\n", componentNames(evidence.Inventory.Scope))
+	checks := make(map[string][]string)
+	for _, c := range evidence.Inventory.Checks {
+		if c.Proof != nil {
+			checks[c.Target] = c.Proof.Contracts
+		}
+	}
+	proofs := make(map[string]verify.ComponentProof)
+	for _, p := range evidence.Proofs {
+		proofs[p.Target] = p
+	}
+	b.WriteString("| Component | Proof | Source / contract | Evidence |\n| :-- | :-- | :-- | :-- |\n")
+	for _, c := range evidence.Inventory.Components {
+		p, ok := proofs[c.ID]
+		if !ok {
+			p.Status = "unchecked"
+		}
+		hashes := "source `" + short(c.SourceSHA256) + "`"
+		if c.ContractSHA256 != "" {
+			hashes += "; contract `" + short(c.ContractSHA256) + "`"
+		}
+		var details []string
+		if contracts := checks[c.ID]; len(contracts) > 0 {
+			details = append(details, "selected contracts: "+componentNames(contracts))
+		}
+		if result := p.Result; result != nil {
+			outcome := "failed"
+			if result.Passed {
+				outcome = "passed"
+			}
+			details = append(details, fmt.Sprintf("%s: tool result %s", result.Verifier, outcome))
+			details = append(details, "verified IDs: "+componentNames(result.Verified), "checked contracts: "+componentNames(result.Contracts))
+		} else {
+			details = append(details, "no proof result")
+		}
+		fmt.Fprintf(b, "| `%s` | %s | %s | %s |\n", c.ID, p.Status, hashes, strings.ReplaceAll(strings.Join(details, "; "), "|", "\\|"))
+	}
+	b.WriteString("\nScoped files:\n\n")
+	for _, f := range evidence.Inventory.Files {
+		fmt.Fprintf(b, "- `%s` · `%s`\n", f.Path, short(f.SHA256))
+	}
+	for _, p := range evidence.Proofs {
+		if p.Result != nil {
+			for _, failure := range p.Result.Errors {
+				fmt.Fprintf(b, "\n- `%s` · %s: %s\n", p.Target, p.Result.Verifier, failure)
+			}
+		}
+	}
+	b.WriteString("\n")
+}
+
+func componentNames(ids []string) string {
+	if len(ids) == 0 {
+		return "none"
+	}
+	return "`" + strings.Join(ids, "`, `") + "`"
 }
 
 // existingEvidence names the existing code a project ran, and its hashes.
@@ -387,7 +461,11 @@ func failures(r *verify.Report) []string {
 		}
 	}
 	if l := r.Larger; l != nil && l.Required && !l.Passed {
-		out = append(out, "One size larger: "+l.Message+". The explorer names its bounds, so the code must hold at every size, and something in it stops at the bounds.")
+		message := "One size larger: " + l.Message
+		if r.Components == nil || r.Components.Inventory.Mode != "explicit" {
+			message += ". The explorer names its bounds, so the code must hold at every size, and something in it stops at the bounds."
+		}
+		out = append(out, message)
 	}
 	if a := r.Agreement; a != nil && !a.Passed {
 		out = append(out, "Agreement: "+a.Message)
