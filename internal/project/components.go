@@ -30,10 +30,12 @@ type ComponentRef struct {
 }
 
 type ComponentCheck struct {
-	Target      ComponentRef    `json:"target"`
-	Proof       *ComponentProof `json:"proof,omitempty"`
-	Tests       []ComponentRef  `json:"tests,omitempty"`
-	Conformance []ComponentRef  `json:"conformance,omitempty"`
+	Target      ComponentRef          `json:"target"`
+	Proof       *ComponentProof       `json:"proof,omitempty"`
+	Tests       []ComponentRef        `json:"tests,omitempty"`
+	Conformance []ComponentRef        `json:"conformance,omitempty"`
+	Assumptions []ComponentAssumption `json:"assumptions,omitempty"`
+	Invocations []ComponentInvocation `json:"invocations,omitempty"`
 }
 
 type ComponentProof struct {
@@ -48,6 +50,7 @@ type ComponentInventory struct {
 	Files      []ComponentFile          `json:"files,omitempty"`
 	Components []Component              `json:"components,omitempty"`
 	Checks     []ResolvedComponentCheck `json:"checks,omitempty"`
+	Provenance *ComponentProvenance     `json:"provenance,omitempty"`
 }
 
 type ComponentFile struct {
@@ -66,10 +69,12 @@ type Component struct {
 }
 
 type ResolvedComponentCheck struct {
-	Target      string                  `json:"target"`
-	Proof       *ResolvedComponentProof `json:"proof,omitempty"`
-	Tests       []string                `json:"tests,omitempty"`
-	Conformance []string                `json:"conformance,omitempty"`
+	Target      string                        `json:"target"`
+	Proof       *ResolvedComponentProof       `json:"proof,omitempty"`
+	Tests       []string                      `json:"tests,omitempty"`
+	Conformance []string                      `json:"conformance,omitempty"`
+	Assumptions []ResolvedComponentAssumption `json:"assumptions,omitempty"`
+	Invocations []ResolvedComponentInvocation `json:"invocations,omitempty"`
 }
 
 type ResolvedComponentProof struct {
@@ -92,7 +97,11 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 	}
 	inv := &ComponentInventory{Mode: "explicit", Scope: append([]string(nil), cfg.Scope...)}
 	sort.Strings(inv.Scope)
-	r := componentResolver{root: p.Dir, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{}}
+	r := componentResolver{
+		root: p.Dir, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{},
+		inputs: map[string]componentInput{}, declarations: map[string]Component{},
+		provenanceFiles: map[string]ComponentFile{}, modules: map[string]ComponentFile{},
+	}
 	for i, dir := range inv.Scope {
 		if i > 0 && dir == inv.Scope[i-1] {
 			return nil, fmt.Errorf("components: duplicate scope %q", dir)
@@ -137,8 +146,8 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 			return nil, fmt.Errorf("components: duplicate target %s", target.ID)
 		}
 		targets[target.ID] = true
-		if check.Proof == nil && len(check.Tests) == 0 && len(check.Conformance) == 0 {
-			return nil, fmt.Errorf("components target %s: check must select proof, tests or conformance", target.ID)
+		if check.Proof == nil && len(check.Tests) == 0 && len(check.Conformance) == 0 && len(check.Assumptions) == 0 {
+			return nil, fmt.Errorf("components target %s: check must select proof, tests, conformance or assumptions", target.ID)
 		}
 		resolved := ResolvedComponentCheck{Target: target.ID}
 		if check.Proof != nil {
@@ -157,8 +166,15 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 		if resolved.Conformance, err = r.associations(check.Conformance, "conformance"); err != nil {
 			return nil, err
 		}
+		if resolved.Assumptions, err = r.assumptions(check.Assumptions); err != nil {
+			return nil, fmt.Errorf("components target %s: %w", target.ID, err)
+		}
+		if resolved.Invocations, err = r.invocations(check.Invocations, resolved); err != nil {
+			return nil, fmt.Errorf("components target %s: %w", target.ID, err)
+		}
 		inv.Checks = append(inv.Checks, resolved)
 	}
+	inv.Provenance = r.provenance()
 	sort.Slice(inv.Files, func(i, j int) bool { return inv.Files[i].Path < inv.Files[j].Path })
 	sort.Slice(inv.Components, func(i, j int) bool { return inv.Components[i].ID < inv.Components[j].ID })
 	sort.Slice(inv.Checks, func(i, j int) bool { return inv.Checks[i].Target < inv.Checks[j].Target })
@@ -171,9 +187,13 @@ type componentSource struct {
 }
 
 type componentResolver struct {
-	root   string
-	files  map[string]componentSource
-	scoped map[ComponentRef]Component
+	root            string
+	files           map[string]componentSource
+	scoped          map[ComponentRef]Component
+	inputs          map[string]componentInput
+	declarations    map[string]Component
+	provenanceFiles map[string]ComponentFile
+	modules         map[string]ComponentFile
 }
 
 func (r *componentResolver) associations(refs []ComponentRef, kind string) ([]string, error) {
@@ -189,6 +209,10 @@ func (r *componentResolver) associations(refs []ComponentRef, kind string) ([]st
 		}
 		seen[c.ID] = true
 		ids = append(ids, c.ID)
+		if kind == "test" || kind == "conformance" {
+			r.declarations[c.ID] = c
+			r.provenanceFiles[c.Source] = ComponentFile{Path: c.Source, SHA256: c.SourceSHA256}
+		}
 	}
 	sort.Strings(ids)
 	return ids, nil
@@ -233,24 +257,21 @@ func (r *componentResolver) read(source string) (componentSource, error) {
 	if f, ok := r.files[source]; ok {
 		return f, nil
 	}
-	full, err := componentPath(r.root, source, false)
+	input, err := r.input(source)
 	if err != nil {
 		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
 	}
-	b, err := os.ReadFile(full)
-	if err != nil {
-		return componentSource{}, err
-	}
+	b := input.bytes
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, source, b, parser.ParseComments)
 	if err != nil {
 		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
 	}
-	pkg, err := componentPackage(r.root, path.Dir(source))
+	pkg, err := r.componentPackage(path.Dir(source))
 	if err != nil {
 		return componentSource{}, fmt.Errorf("components source %q: %w", source, err)
 	}
-	out := componentSource{file: ComponentFile{Path: source, SHA256: componentHash(b)}}
+	out := componentSource{file: input.file}
 	ordinals, seen := map[string]int{}, map[string]bool{}
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -375,19 +396,16 @@ func componentPath(root, rel string, directory bool) (string, error) {
 
 // componentPackage uses the nearest module inside the project, including a
 // nested module. Package clauses alone cannot distinguish import identities.
-func componentPackage(root, dir string) (string, error) {
+func (r *componentResolver) componentPackage(dir string) (string, error) {
 	for parent := dir; ; parent = path.Dir(parent) {
 		name := path.Join(parent, "go.mod")
-		full, err := componentPath(root, name, false)
+		input, err := r.input(name)
 		if err == nil {
-			b, err := os.ReadFile(full)
-			if err != nil {
-				return "", err
-			}
-			module, err := componentModule(b)
+			module, err := componentModule(input.bytes)
 			if err != nil {
 				return "", fmt.Errorf("%s: %w", name, err)
 			}
+			r.modules[name] = input.file
 			rel, err := filepath.Rel(filepath.FromSlash(parent), filepath.FromSlash(dir))
 			if err != nil {
 				return "", err
