@@ -30,21 +30,28 @@ const maxComment = 60000
 // changes. The marker and the proposal's hash already pin what they show.
 var details = regexp.MustCompile(`(?s)\n*<details>.*?</details>\n*`)
 
-func post(title, body string, m Marker) string {
+// closing includes its separator from the body and is kept whole when a
+// post is shortened. Only the caller supplies instructions; the body may
+// quote commands without asking anyone to run them.
+func post(title, body string, m Marker, closing ...string) string {
 	marker, by := m.encode(), byline(m)
+	end := strings.Join(closing, "")
 	compose := func(body string) string {
-		return header + title + "\n\n" + strings.TrimSpace(body) + by + "\n\n" + marker + "\n"
+		return header + title + "\n\n" + body + by + "\n\n" + marker + "\n"
 	}
-	out := compose(body)
+	out := compose(strings.TrimSpace(body + end))
 	if len(out) <= maxComment {
 		return out
 	}
 	const short = "\n\n_Some detail is left out, because GitHub limits how long a comment can be._"
 	body = details.ReplaceAllString(body, "\n\n")
-	if room := maxComment - len(compose("")) - len(short); len(body) > room {
+	if room := maxComment - len(compose("")) - len(end) - len(short); len(body) > room {
 		body = strings.ToValidUTF8(body[:max(room, 0)], "")
 	}
-	return compose(strings.TrimSpace(body) + short)
+	if end == "" {
+		return compose(strings.TrimSpace(strings.TrimSpace(body) + short))
+	}
+	return compose(strings.TrimSpace(body) + end + short)
 }
 
 // byline names the coding agent behind a post, as its marker records it
@@ -74,9 +81,9 @@ func forksComment(forks []formalize.Fork, m Marker) string {
 		}
 	}
 	example := forks[0].ID + " " + forks[0].Options[0].ID
-	fmt.Fprintf(&b, "\nAnswer each one with a comment like `/invariant choose %s`, one line per question. "+
+	closing := fmt.Sprintf("\n\nAnswer each one with a comment like `/invariant choose %s`, one line per question. "+
 		"Or say what you want in your own words, then comment `/invariant revise`.", example)
-	return post("a decision for you", b.String(), m)
+	return post("a decision for you", strings.TrimSuffix(b.String(), "\n"), m, closing)
 }
 
 // thenWhat says what the factory does once people ratify: write or change
@@ -113,9 +120,9 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	if pinned, err := p.Pinned(); err == nil {
 		fmt.Fprintf(&b, "\n<details>\n<summary>The statements in TLA+</summary>\n\n```tla\n%s```\n\n</details>\n", pinned)
 	}
-	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
+	closing := fmt.Sprintf("\n\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
-	return post("proposal for ratification", b.String(), m)
+	return post("proposal for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
 }
 
 // amendmentComment proposes changes to an existing project: what's
@@ -242,9 +249,9 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if tla.Len() > 0 {
 		fmt.Fprintf(&b, "\n<details>\n<summary>What changes, in TLA+</summary>\n\n%s</details>\n", tla.String())
 	}
-	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
+	closing := fmt.Sprintf("\n\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
-	return post("amendment for ratification", b.String(), m)
+	return post("amendment for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
 }
 
 // list writes names in code and joins them: `a`, `a` and `b`, or
@@ -300,16 +307,18 @@ func checked(r *verify.Report) string {
 	return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1] + "."
 }
 
-func stuckComment(problem string, m Marker) string {
+func stuckComment(problem string, m Marker, closing ...string) string {
 	return post("I couldn't draft this", "I couldn't draft statements for this issue that check out. What went wrong:\n\n"+
-		quote(problem, 40)+"\n\nSay what you'd like in a comment, then comment `/invariant revise` to try again.", m)
+		quote(problem, 40), m, strings.Join(closing, ""), "\n\nSay what you'd like in a comment, then comment `/invariant revise` to try again.")
 }
 
 func unsupportedComment(reason string, m Marker) string {
-	return post("not one I can take", reason+"\n\nIf I've misread the issue, say how in a comment, then comment `/invariant revise`.", m)
+	return post("not one I can take", reason, m, "\n\nIf I've misread the issue, say how in a comment, then comment `/invariant revise`.")
 }
 
-func noteComment(text string, m Marker) string { return post("note", text, m) }
+func noteComment(text string, m Marker, closing ...string) string {
+	return post("note", text, m, closing...)
+}
 
 func ratifiedComment(by, dir, branch, hash string, statements int, m Marker) string {
 	return post("ratified", fmt.Sprintf("Ratified by @%s. I pinned %d statements in `%s` on branch `%s` (proposal `%s`). Writing the code now.",
@@ -333,7 +342,7 @@ func fellBack(fb *synth.Fallback) string {
 		fb.Effort, quote(fb.Why, 20))
 }
 
-func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error, m Marker) string {
+func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error, m Marker, closing ...string) string {
 	var b strings.Builder
 	switch {
 	case res == nil || res.Final == nil:
@@ -353,8 +362,14 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 	if res != nil && res.Fallback != nil {
 		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
-	b.WriteString("\n\nA person needs to look at this.")
-	return post("needs a person", b.String(), m)
+	end := strings.Join(closing, "")
+	const footer = "\n\nA person needs to look at this."
+	if end == "" {
+		b.WriteString(footer)
+	} else {
+		end += footer
+	}
+	return post("needs a person", b.String(), m, end)
 }
 
 // ciFailedComment says why CI's gate didn't pass. A gate GitHub never
@@ -372,12 +387,11 @@ const (
 func ciFailedComment(pr github.PullRequest, run github.CheckRun, started gateStart, m Marker) string {
 	switch started {
 	case gateNeverStarted:
-		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment `/invariant retry`.",
-			pr.Number, run.URL), m)
+		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it.",
+			pr.Number, run.URL), m, " Once CI can run, re-run the job, then comment `/invariant retry`.")
 	case gateUnknown:
-		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here: "+
-			"give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.",
-			pr.Number, run.URL), m)
+		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here:",
+			pr.Number, run.URL), m, " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.")
 	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` %s on #%d ([run](%s)), so I won't merge it. A person needs to look at this.",
 		gateWords(run.Conclusion), pr.Number, run.URL), m)
@@ -413,8 +427,8 @@ func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Ma
 	if unready {
 		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
 	}
-	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s\n\n"+
-		"A person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.", pr.Number, what, quote(answer.Error(), 20)), m)
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
+		"\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.")
 }
 
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
@@ -426,7 +440,8 @@ func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Ma
 }
 
 func closedComment(pr github.PullRequest, m Marker) string {
-	return post("closed", fmt.Sprintf("#%d was closed without merging, so I've stopped. Comment `/invariant revise` to start again from a new proposal.", pr.Number), m)
+	return post("closed", fmt.Sprintf("#%d was closed without merging, so I've stopped.", pr.Number), m,
+		" Comment `/invariant revise` to start again from a new proposal.")
 }
 
 // pullRequestBody is a project's pull request. m is the marker of the

@@ -37,9 +37,9 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	for _, f := range plan.TestFiles() {
 		fmt.Fprintf(&b, "\n<details>\n<summary><code>%s</code></summary>\n\n```go\n%s```\n\n</details>\n", f, plan.Sources[f])
 	}
-	fmt.Fprintf(&b, "\nTo ratify exactly this, comment `/invariant ratify %s`. "+
+	closing := fmt.Sprintf("\n\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
-	return post("plan for ratification", b.String(), m)
+	return post("plan for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
 }
 
 // plumbingElsewhereComment answers a plumbing issue on a repository that
@@ -100,13 +100,14 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
 	if pr == nil {
-		b.WriteString("\n\nA person needs to look at this. Comment `/invariant retry` to build again, or say what to change and comment `/invariant revise`.")
-		return post("needs a person", b.String(), m)
+		return post("needs a person", b.String(), m,
+			"\n\nA person needs to look at this. Comment `/invariant retry` to build again, or say what to change and comment `/invariant revise`.")
 	}
 	// The factory drafts again only once the pull request is closed (#218).
-	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.\n\nA person needs to look at this. Comment `/invariant retry` to build again. "+
-		"To change the plan instead, close #%d, say what to change, and comment `/invariant revise`.", pr.Number, pr.Number)
-	return post("needs a person", b.String(), m)
+	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
+	closing := fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to build again. "+
+		"To change the plan instead, close #%d, say what to change, and comment `/invariant revise`.", pr.Number)
+	return post("needs a person", b.String(), m, closing)
 }
 
 func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
