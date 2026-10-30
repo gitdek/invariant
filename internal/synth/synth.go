@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitdek/invariant/internal/project"
@@ -68,6 +69,169 @@ type Usage struct {
 	// Tokens is what the run used, where the agent reports tokens rather
 	// than a cost, as Codex does on an account (#153).
 	Tokens *Tokens `json:"tokens,omitempty"`
+}
+
+// AddUsage adds every counter in next to total, keeping next's description of
+// how the last run ended. Neither input's maps or token counts are modified.
+func AddUsage(total, next Usage) Usage {
+	combined := next
+	combined.Turns += total.Turns
+	combined.CostUSD += total.CostUSD
+	if total.ToolCalls != nil || next.ToolCalls != nil {
+		combined.ToolCalls = make(map[string]int, len(total.ToolCalls)+len(next.ToolCalls))
+		for tool, count := range total.ToolCalls {
+			combined.ToolCalls[tool] = count
+		}
+		for tool, count := range next.ToolCalls {
+			combined.ToolCalls[tool] += count
+		}
+	}
+	if total.Tokens != nil || next.Tokens != nil {
+		combined.Tokens = &Tokens{}
+		for _, tokens := range []*Tokens{total.Tokens, next.Tokens} {
+			if tokens != nil {
+				combined.Tokens.Input += tokens.Input
+				combined.Tokens.CachedInput += tokens.CachedInput
+				combined.Tokens.Output += tokens.Output
+				combined.Tokens.Reasoning += tokens.Reasoning
+			}
+		}
+	}
+	return combined
+}
+
+type executionBudgetKey struct{}
+
+// executionBudget is a context whose clock can stop while Codex waits for its
+// account. Checks and all the build's agent runs otherwise share one deadline.
+// Its parent supplies Deadline: the allowance cannot supply a fixed wall-clock
+// deadline because account waits extend it. Done still cuts active work off.
+type executionBudget struct {
+	context.Context
+	mu        sync.Mutex
+	done      chan struct{}
+	err       error
+	limited   bool
+	remaining time.Duration
+	started   time.Time
+	timer     *time.Timer
+	epoch     uint64
+}
+
+// WithExecutionBudget gives a sequence of checks and RunAgent calls one time
+// allowance. RunAgent also accounts for both attempts when a fallback runs.
+// Codex's wait for its account is excluded, as with an ordinary Job.Timeout.
+// A nonpositive timeout leaves the sequence uncut, but still totals fallback
+// usage. The caller must cancel the context when the sequence is finished.
+func WithExecutionBudget(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	b := &executionBudget{Context: ctx, done: make(chan struct{}), limited: timeout > 0, remaining: timeout}
+	stopParent := context.AfterFunc(ctx, func() { b.finish(ctx.Err()) })
+	if err := ctx.Err(); err != nil {
+		b.finish(err)
+	}
+	b.resume()
+	return b, func() {
+		stopParent()
+		b.finish(context.Canceled)
+	}
+}
+
+func (b *executionBudget) Value(key any) any {
+	if _, ok := key.(executionBudgetKey); ok {
+		return b
+	}
+	// This context owns its cancellation. Do not expose the parent's
+	// internal cancellation state to context.Cause or derived contexts.
+	return context.WithoutCancel(b.Context).Value(key)
+}
+
+func (b *executionBudget) Done() <-chan struct{} { return b.done }
+
+func (b *executionBudget) Err() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.Context.Err(); err != nil {
+		b.finishLocked(err)
+	}
+	if b.err == nil && b.limited && !b.started.IsZero() && b.leftLocked() <= 0 {
+		b.finishLocked(context.DeadlineExceeded)
+	}
+	return b.err
+}
+
+func (b *executionBudget) leftLocked() time.Duration {
+	left := b.remaining
+	if !b.started.IsZero() {
+		left -= time.Since(b.started)
+	}
+	return left
+}
+
+func (b *executionBudget) limit(timeout time.Duration) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.limited {
+		left := b.leftLocked()
+		if left <= 0 {
+			b.finishLocked(context.DeadlineExceeded)
+		}
+		if timeout <= 0 || left < timeout {
+			return left
+		}
+	}
+	return timeout
+}
+
+func (b *executionBudget) finish(err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.finishLocked(err)
+}
+
+func (b *executionBudget) finishLocked(err error) {
+	if b.err != nil {
+		return
+	}
+	b.err = err
+	b.epoch++
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	close(b.done)
+}
+
+func (b *executionBudget) pause() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.err != nil || !b.limited || b.started.IsZero() {
+		return
+	}
+	b.remaining = b.leftLocked()
+	if b.remaining <= 0 {
+		b.finishLocked(context.DeadlineExceeded)
+		return
+	}
+	b.started = time.Time{}
+	b.epoch++
+	b.timer.Stop()
+}
+
+func (b *executionBudget) resume() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.err != nil || !b.limited || !b.started.IsZero() {
+		return
+	}
+	b.started = time.Now()
+	b.epoch++
+	epoch := b.epoch
+	b.timer = time.AfterFunc(b.remaining, func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.epoch == epoch {
+			b.finishLocked(context.DeadlineExceeded)
+		}
+	})
 }
 
 // GateRun is one call to the gate tool during synthesis.
@@ -139,21 +303,56 @@ type Fallback struct {
 // more at that effort, its timeout starting again, in the same workspace, so
 // the agent keeps what it wrote (D-0125). That run's usage and error are the
 // build's, and there's never a third. RunAgent returns the fallback it took,
-// or nil.
+// or nil. WithExecutionBudget instead shares the timeout with the whole build
+// and includes the interrupted attempt in the returned usage.
 func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Duration, fallback string) (Usage, *Fallback, error) {
 	job.Timeout = timeout
-	usage, err := backend.Run(ctx, job)
+	budget, _ := ctx.Value(executionBudgetKey{}).(*executionBudget)
+	run := func() (Usage, error) {
+		if budget == nil {
+			return backend.Run(ctx, job)
+		}
+		if err := ctx.Err(); err != nil {
+			return Usage{}, err
+		}
+		job.Timeout = budget.limit(timeout)
+		// Only Codex waits for an account turn. Its existing within call
+		// resumes the clock after that wait; other backends and stand-ins
+		// spend their allowance from entry, even if they never call within.
+		switch backend.(type) {
+		case Codex, *Codex:
+			budget.pause()
+			defer budget.resume()
+		}
+		if err := ctx.Err(); err != nil {
+			return Usage{}, err
+		}
+		usage, err := backend.Run(ctx, job)
+		if timeoutErr := ctx.Err(); timeoutErr != nil {
+			return usage, timeoutErr
+		}
+		return usage, err
+	}
+	usage, err := run()
 	if fallback == "" || !errors.Is(err, ErrThinkingLoop) {
 		return usage, nil, err
 	}
 	fb := &Fallback{Effort: fallback, Why: err.Error()}
 	job.Effort = fallback
-	usage, err = backend.Run(ctx, job)
+	first := usage
+	usage, err = run()
+	if budget != nil {
+		usage = AddUsage(first, usage)
+	}
 	return usage, fb, err
 }
 
 // within cuts ctx off once job's timeout has passed, from now.
 func within(ctx context.Context, job Job) (context.Context, context.CancelFunc) {
+	if budget, _ := ctx.Value(executionBudgetKey{}).(*executionBudget); budget != nil {
+		budget.resume()
+		job.Timeout = budget.limit(job.Timeout)
+	}
 	if job.Timeout <= 0 {
 		return context.WithCancel(ctx)
 	}

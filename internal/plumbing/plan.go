@@ -30,7 +30,7 @@ import (
 type Plan struct {
 	Name    string   `json:"name"`    // the change, in a few plain words
 	Summary string   `json:"summary"` // what changes and why, in plain words
-	Files   []string `json:"files"`   // every file the build may write, from the repository's root
+	Files   []string `json:"files"`   // named writable files; new regression tests may also be added in their packages
 	Tests   []Test   `json:"tests"`   // the acceptance tests
 	// Sources is each acceptance test file's text, by path. The tests are
 	// new files the ratification adds, which the build can't change.
@@ -137,6 +137,81 @@ func (p *Plan) Touches(n int) map[string]bool {
 	for _, f := range p.TestFiles() {
 		out[f] = true
 	}
+	return out
+}
+
+// GoPackages finds the packages the plan touches using the original
+// checkout's Go files and the Go files the plan names. An embedded asset
+// belongs to its nearest enclosing package; new unnamed files cannot
+// introduce another package into the plan's scope.
+func (p *Plan) GoPackages(baseFiles []string) []string {
+	have := map[string]bool{}
+	for _, f := range baseFiles {
+		if strings.HasSuffix(f, ".go") {
+			have[path.Dir(f)] = true
+		}
+	}
+	touches := append(append([]string(nil), p.Files...), p.TestFiles()...)
+	for _, f := range touches {
+		if strings.HasSuffix(f, ".go") {
+			have[path.Dir(f)] = true
+		}
+	}
+	seen := map[string]bool{}
+	for _, f := range touches {
+		for dir := path.Dir(f); ; dir = path.Dir(dir) {
+			if have[dir] {
+				seen[dir] = true
+				break
+			}
+			if dir == "." || dir == "/" {
+				break
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for dir := range seen {
+		out = append(out, dir)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RegressionFiles selects new Go test paths within the plan's packages.
+// baseFiles must remain the original checkout's inventory throughout a
+// build, including repairs. Callers also enforce regular files: a path's
+// allowance never permits reading a symbolic or hard link from a workspace.
+func (p *Plan) RegressionFiles(baseFiles, candidates []string) []string {
+	existing := map[string]bool{}
+	for _, f := range baseFiles {
+		existing[f] = true
+	}
+	for _, f := range p.TestFiles() {
+		existing[f] = true
+	}
+	for _, f := range p.Files {
+		existing[f] = true // named files already have their explicit allowance
+	}
+	packages := map[string]bool{}
+	for _, dir := range p.GoPackages(baseFiles) {
+		packages[dir] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range candidates {
+		if existing[f] || seen[f] || !strings.HasSuffix(f, "_test.go") || !packages[path.Dir(f)] {
+			continue
+		}
+		if c, err := clean(f); err != nil || c != f {
+			continue
+		}
+		if strings.HasPrefix(f, "decisions/") || strings.HasPrefix(f, ".invariant/") {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	sort.Strings(out)
 	return out
 }
 
