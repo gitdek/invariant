@@ -1802,22 +1802,98 @@
   // marks and checks, and the file it lit.
   const cards = new Map();
   const cardKey = (l) => `${l.repo}#${l.issue}@${l.since}`;
+  const shellToggle = ACT ? $("#show-shell-commands") : null;
+  let showShellCommands = false, liveReads = 0, liveAgain = 0, liveRequest = null;
+
+  // The main snapshot can learn that a run ended before the live poll
+  // returns. Its newer watcher status can withdraw that run's commands
+  // without changing the strip, including when an older reply arrives late.
+  function currentShellStep(l, at) {
+    if (l.ended) return false;
+    if (!state || T(state.generatedAt) <= T(at)) return true;
+    const watcher = (state.repos || []).find((r) => r.name === l.repo)?.factory
+      || (state.repo === l.repo ? state.factory : null);
+    if (!watcher) return true;
+    const steps = !watcher.running ? [] : watcher.steps?.length ? watcher.steps
+      : watcher.issue && watcher.doing ? [watcher] : [];
+    return steps.some((step) => step.issue === l.issue && step.doing === l.doing && step.since === l.since);
+  }
+
+  // The opt-in belongs only to this page. Clearing it also erases the
+  // private fields and nodes, rather than just concealing them with CSS.
+  function clearShellCommands() {
+    for (const l of live?.steps || []) delete l.commands;
+    for (const c of cards.values()) {
+      if (c.l) delete c.l.commands;
+      c.commands = null;
+      const area = $(".shell-commands", c.el);
+      area.replaceChildren();
+      area.hidden = true;
+    }
+  }
+
+  function resetShellCommands() {
+    showShellCommands = false;
+    if (shellToggle) shellToggle.checked = false;
+    ++liveReads;
+    clearTimeout(liveAgain);
+    liveRequest?.abort();
+    clearShellCommands();
+  }
+
+  if (shellToggle) {
+    shellToggle.checked = false;
+    shellToggle.addEventListener("change", () => {
+      showShellCommands = shellToggle.checked;
+      clearShellCommands();
+      loadLive();
+    });
+    // A history-cache restore is another page visit, not a renewed opt-in.
+    window.addEventListener("pagehide", resetShellCommands);
+    window.addEventListener("pageshow", (event) => {
+      shellToggle.checked = showShellCommands;
+      if (event.persisted) {
+        resetShellCommands();
+        loadLive();
+      }
+    });
+  }
   const kilo = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
 
   async function loadLive() {
+    const read = ++liveReads, commands = !!ACT && showShellCommands;
+    clearTimeout(liveAgain);
+    liveRequest?.abort();
+    const controller = new AbortController();
+    liveRequest = controller;
     let wait = 12000;
     try {
-      const r = await fetch("/api/live.json", { cache: "no-store" });
-      if (r.ok) {
-        live = await r.json();
-        renderLive();
-        if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+      const url = commands ? "/act/api/live.json?commands=1" : "/api/live.json";
+      const r = await fetch(url, { cache: "no-store", signal: controller.signal, redirect: commands ? "error" : "follow" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const next = await r.json();
+      if (read !== liveReads || commands !== showShellCommands) return;
+      if (!Array.isArray(next.steps)) throw new Error("Invalid live response");
+      for (const l of next.steps) {
+        if (!commands || !currentShellStep(l, next.at)) delete l.commands;
       }
-    } catch (e) {}
-    setTimeout(loadLive, wait);
+      live = next;
+      renderLive();
+      if (next.steps.some((l) => !l.ended)) wait = 3000;
+    } catch (e) {
+      if (read !== liveReads) return;
+      if (commands) {
+        // A denied, redirected or failed read withdraws the opt-in. The
+        // ordinary strip keeps polling, and commands need a fresh choice.
+        resetShellCommands();
+        loadLive();
+        return;
+      }
+    }
+    if (read === liveReads) liveAgain = setTimeout(loadLive, wait);
   }
 
   // The steps to show: the ones running in the chosen repositories, or else
@@ -1841,10 +1917,16 @@
   // order. A new step's card is made from the template and arrives, and a
   // card leaves when its step leaves the list.
   function renderLive() {
+    for (const l of live?.steps || []) {
+      if (!currentShellStep(l, live.at)) delete l.commands;
+    }
     const steps = liveSteps(), keys = steps.map(cardKey), box = $("#live-cards");
     $("#live").hidden = !steps.length;
     for (const [key, c] of cards) {
       if (keys.includes(key)) continue;
+      if (c.l) delete c.l.commands;
+      c.commands = null;
+      $(".shell-commands", c.el).replaceChildren();
       stripSize.unobserve(c.strip);
       c.el.remove();
       cards.delete(key);
@@ -1893,6 +1975,9 @@
     put($(".legend", el), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
       + (l.thinking || l.thinkingExact ? `<span class="lg think"><i></i>thinking ${thinking} tokens</span>` : ""));
 
+    renderShellCommands(c);
+    if (ACT) $(".fineprint", el).textContent = "Counts, times and file paths from the agent's transcript, read every few seconds while it works. Shell commands appear only when you choose to show them; never tool output or thinking.";
+
     put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
@@ -1907,6 +1992,50 @@
     tickCard(c, true);
     c.marks = (l.marks || []).length;
     c.runs = (l.runs || []).length;
+  }
+
+  function renderShellCommands(c) {
+    const area = $(".shell-commands", c.el);
+    const commands = ACT && showShellCommands && !c.l.ended && Array.isArray(c.l.commands) ? c.l.commands : [];
+    if (!commands.length) {
+      c.commands = null;
+      area.replaceChildren();
+      area.hidden = true;
+      return;
+    }
+    if (c.commands?.length === commands.length && commands.every((command, i) => {
+      const prior = c.commands[i];
+      return command.command === prior.command && command.kind === prior.kind && command.at === prior.at && command.until === prior.until;
+    })) return;
+
+    const heading = document.createElement("h3"), list = document.createElement("ol");
+    heading.textContent = "Shell commands";
+    for (const command of commands) {
+      const row = document.createElement("li"), meta = document.createElement("div"), text = document.createElement("pre");
+      meta.className = "shell-command-meta";
+      const kind = document.createElement("span");
+      kind.textContent = command.kind;
+      meta.append(kind);
+      for (const [label, at] of [["Started", command.at], ["Ended", command.until]]) {
+        if (!at) continue;
+        const time = document.createElement("time");
+        time.dateTime = at;
+        time.textContent = `${label} ${at}`;
+        meta.append(time);
+      }
+      if (!command.until) {
+        const pending = document.createElement("span");
+        pending.textContent = "Running";
+        meta.append(pending);
+      }
+      // Shell syntax, markup and newlines are all literal display text.
+      text.textContent = command.command;
+      row.append(meta, text);
+      list.append(row);
+    }
+    area.replaceChildren(heading, list);
+    area.hidden = false;
+    c.commands = commands;
   }
 
   // liveTick moves every card's dial and strip's clock.
