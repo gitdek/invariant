@@ -363,6 +363,9 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
 	end := strings.Join(closing, "")
+	if pr != nil {
+		end += "\n\n" + retryGuidance(pr.Number, m)
+	}
 	const footer = "\n\nA person needs to look at this."
 	if end == "" {
 		b.WriteString(footer)
@@ -388,13 +391,13 @@ func ciFailedComment(pr github.PullRequest, run github.CheckRun, started gateSta
 	switch started {
 	case gateNeverStarted:
 		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it.",
-			pr.Number, run.URL), m, " Once CI can run, re-run the job, then comment `/invariant retry`.")
+			pr.Number, run.URL), m, " Once CI can run, re-run the job. "+retryGuidance(pr.Number, m))
 	case gateUnknown:
 		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here:",
-			pr.Number, run.URL), m, " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.")
+			pr.Number, run.URL), m, " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can. Otherwise, a person needs to look at this. "+retryGuidance(pr.Number, m))
 	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` %s on #%d ([run](%s)), so I won't merge it. A person needs to look at this.",
-		gateWords(run.Conclusion), pr.Number, run.URL), m)
+		gateWords(run.Conclusion), pr.Number, run.URL), m, " Fix the cause first. "+retryGuidance(pr.Number, m))
 }
 
 // gateWords says how a check run that didn't pass ended.
@@ -416,7 +419,7 @@ func gateWords(conclusion string) string {
 
 func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) string {
 	return post("needs a person", fmt.Sprintf("#%d is out of scope, so I won't merge it:\n\n- %s\n\nA person needs to look at this.",
-		pr.Number, strings.Join(problems, "\n- ")), m)
+		pr.Number, strings.Join(problems, "\n- ")), m, " Fix the cause first. "+retryGuidance(pr.Number, m))
 }
 
 // mergeRefusedComment says GitHub refused to merge a pull request whose gate
@@ -428,7 +431,7 @@ func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Ma
 		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
 	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
-		"\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.")
+		"\n\nA person needs to look at this. Fix the cause first. "+retryGuidance(pr.Number, m))
 }
 
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {

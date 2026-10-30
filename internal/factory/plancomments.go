@@ -76,11 +76,46 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 // promises a merge only when the factory will make one: a plan's pull
 // request that changes the trusted base waits for a person (D-0105).
 func retriedComment(pr int, trusted []string, m Marker) string {
-	merge := "I'll merge it once CI's `invariant/gate` passes on its current head."
-	if len(trusted) > 0 {
-		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on its current head, a person merges it.", codeList(trusted))
+	return post("pull request", fmt.Sprintf("Watching #%d again. %s", pr, retryMergeGuidance(trusted, len(trusted) > 0)), m)
+}
+
+// retryGuidance describes watching an existing PR, using the failure and
+// ratified plan as evidence of a trusted-base change. The retry answer itself
+// uses the current scope read by trustedAt instead.
+func retryGuidance(pr int, m Marker) string {
+	var trusted []string
+	if p := m.Proposal; p != nil && p.Plan != nil {
+		trusted = p.Plan.Trusted
+		if len(trusted) == 0 {
+			for _, file := range p.Plan.Files {
+				if plumbing.Trusted(file) {
+					trusted = append(trusted, file)
+				}
+			}
+		}
 	}
-	return post("pull request", fmt.Sprintf("Watching #%d again. %s", pr, merge), m)
+	return fmt.Sprintf("Comment `/invariant retry` to watch #%d again. %s", pr,
+		retryMergeGuidance(trusted, len(trusted) > 0 || m.Failure == FailTrusted))
+}
+
+func retryMergeGuidance(trusted []string, knownTrusted bool) string {
+	merge := "I'll merge it once CI's `invariant/gate` passes on its current head. If it's a draft, I'll mark it ready first. " +
+		"If it changes the trusted base, a person merges it instead, and I leave its draft for that person."
+	if knownTrusted {
+		files := ""
+		if len(trusted) > 0 {
+			files = " (" + codeList(trusted) + ")"
+		}
+		merge = "It changes the trusted base" + files + ", so once CI's `invariant/gate` passes on its current head, a person merges it. " +
+			"I leave its draft for that person, without marking it ready."
+	}
+	return merge + " The existing scope and ratification safeguards still apply. I won't review it again. " +
+		"It can merge as-is even if the earlier review asked for changes, unless you push the requested changes before retrying."
+}
+
+func planRedraftGuidance(pr int) string {
+	return fmt.Sprintf("To build again, close #%d, say 'draft the same plan again', then comment `/invariant revise` and ratify the resulting draft before building. "+
+		"To change the plan, say what to change with that request.", pr)
 }
 
 func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr error, m Marker) string {
@@ -105,14 +140,14 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	}
 	// The factory drafts again only once the pull request is closed (#218).
 	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
-	closing := fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to build again. "+
-		"To change the plan instead, close #%d, say what to change, and comment `/invariant revise`.", pr.Number)
+	closing := "\n\nA person needs to look at this. " + retryGuidance(pr.Number, m) + " " + planRedraftGuidance(pr.Number)
 	return post("needs a person", b.String(), m, closing)
 }
 
 func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
-	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` and the review passed on #%d, but it changes the trusted base: %s. Only a person merges that (D-0105), "+
-		"so #%d is waiting for you to review and merge it.", pr.Number, codeList(trusted), pr.Number), m)
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d's current head, but it changes the trusted base: %s. Only a person merges that (D-0105), "+
+		"so #%d is waiting for you to review and merge it. I leave its draft for you, without marking it ready. I won't review it again. "+
+		"If the earlier review asked for changes, push those changes before merging; CI does not answer that review.", pr.Number, codeList(trusted), pr.Number), m)
 }
 
 // planPullRequestBody is a plan's pull request: the plan, how the build

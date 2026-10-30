@@ -142,6 +142,12 @@ func TestClippedPlanKeepsRatificationInstructions(t *testing.T) {
 func TestClippedPostsKeepClosingCommands(t *testing.T) {
 	long := strings.Repeat("Evidence with café and 界. ", 4000)
 	pr := github.PullRequest{Number: 251}
+	const retry = "Comment `/invariant retry` to watch #251 again. I'll merge it once CI's `invariant/gate` passes on its current head. If it's a draft, I'll mark it ready first. " +
+		"If it changes the trusted base, a person merges it instead, and I leave its draft for that person. " +
+		"The existing scope and ratification safeguards still apply. I won't review it again. " +
+		"It can merge as-is even if the earlier review asked for changes, unless you push the requested changes before retrying."
+	const redraft = "To build again, close #251, say 'draft the same plan again', then comment `/invariant revise` and ratify the resulting draft before building. " +
+		"To change the plan, say what to change with that request."
 	for _, tc := range []struct {
 		name string
 		kind string
@@ -173,26 +179,26 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			name: "retry and revise with a draft PR", kind: KindFailed,
 			make: func(m Marker) string { return planFailedComment(&pr, nil, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Comment `/invariant retry` to build again. To change the plan instead, close #251, say what to change, and comment `/invariant revise`.",
+			want: "\n\nA person needs to look at this. " + retry + " " + redraft,
 		},
 		{
 			name: "retry refused merge", kind: KindFailed,
 			make: func(m Marker) string { return mergeRefusedComment(pr, false, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.",
+			want: "\n\nA person needs to look at this. Fix the cause first. " + retry,
 		},
 		{
 			name: "CI never started", kind: KindFailed,
 			make: func(m Marker) string {
 				return ciFailedComment(pr, github.CheckRun{URL: "https://example.test/" + strings.Repeat("x", 2*maxComment)}, gateNeverStarted, m)
 			},
-			want: " Once CI can run, re-run the job, then comment `/invariant retry`.",
+			want: " Once CI can run, re-run the job. " + retry,
 		},
 		{
 			name: "CI start unknown", kind: KindFailed,
 			make: func(m Marker) string {
 				return ciFailedComment(pr, github.CheckRun{URL: "https://example.test/" + strings.Repeat("x", 2*maxComment)}, gateUnknown, m)
 			},
-			want: " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.",
+			want: " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can. Otherwise, a person needs to look at this. " + retry,
 		},
 		{
 			name: "unavailable coding agent", kind: KindUnsupported,
@@ -334,8 +340,8 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		}
 	}
 
-	// These instructions were inline before the API change. Supplying them
-	// separately must not introduce a paragraph break or change their words.
+	// These instructions are supplied separately. Their separators and
+	// complete short-post output must remain intact.
 	for _, tc := range []struct {
 		got   string
 		title string
@@ -344,7 +350,7 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			got:   ciFailedComment(pr, github.CheckRun{URL: "https://example.test/run"}, gateNeverStarted, Marker{Kind: KindNote}),
 			title: "needs a person",
-			body:  "CI couldn't start `invariant/gate` on #251 ([run](https://example.test/run)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment `/invariant retry`.",
+			body:  "CI couldn't start `invariant/gate` on #251 ([run](https://example.test/run)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job. " + retry,
 		},
 		{
 			got:   planOpenedComment(PlanOfIssues{By: "gitdek", Issues: []PlannedIssue{{Title: "First step"}, {Title: "Next step"}}}, 0, 251, Marker{Kind: KindNote}),

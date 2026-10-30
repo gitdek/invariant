@@ -547,9 +547,12 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
 		case kind == KindFailed && state.Marker.PR != 0:
 			n := state.Marker.PR
+			redraft := fmt.Sprintf("To change the statements or build from a new proposal, close #%d and comment `/invariant revise` again, then ratify the resulting proposal before building.", n)
+			if p := state.Marker.Proposal; p != nil && p.Plan != nil {
+				redraft = planRedraftGuidance(n)
+			}
 			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
-				fmt.Sprintf(" To change what must be true, close #%d and comment `/invariant revise` again. "+
-					"To build the same statements again, once the cause is fixed, comment `/invariant retry`.", n))
+				" "+retryGuidance(n, state.Marker)+" "+redraft)
 		case kind == KindPR:
 			n := state.Marker.PR
 			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),

@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -81,9 +82,19 @@ func actedText(w *Waiting, verb string) string {
 	case factory.Choose:
 		return "Answered. The factory drafts again next."
 	case factory.Retry:
-		return "Asked for a retry. The factory tries again next."
+		return "Asked for a retry. " + retryEffect(w)
 	}
 	return "Asked for a new draft. The factory drafts again next."
+}
+
+func retryEffect(w *Waiting) string {
+	if w.PR == 0 {
+		return "The factory builds the ratified proposal again next."
+	}
+	if retryTrusted(w) {
+		return fmt.Sprintf("The factory watches #%d again until CI's gate passes on its current head, then waits for a person to merge it. It won't review #%d again.", w.PR, w.PR)
+	}
+	return fmt.Sprintf("The factory watches #%d again, then marks it ready and merges it once CI's gate passes on its current head. It won't review #%d again.", w.PR, w.PR) + retryException
 }
 
 // publish keeps snap as what a refresh read, forgets every command whose
