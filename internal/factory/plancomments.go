@@ -16,7 +16,8 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	plan := p.Plan
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's my plan for **%s**. It's plumbing, so it's tested, not proved. Once you ratify it, the plan and its acceptance tests are pinned by hash: "+
-		"the build writes only the files it names, and it has to make every acceptance test pass without changing them.\n\n", plan.Name)
+		"the build writes the files it names and may add new regular Go `*_test.go` regression files in the packages it touches, including a planned embedded asset's nearest owning Go package and new packages the plan names. It has to make every acceptance test pass without changing them.\n\n"+
+		"Existing unnamed tests, the ratified plan and acceptance tests, other production files and unrelated packages stay protected. The original checkout stays the baseline, so a repair may correct or remove a regression test the build added. Review findings return to the same builder and workspace for at most two repairs, each checked and reviewed afresh. Only final passing checks and approval make the pull request ready; otherwise it stays a draft with unresolved findings for a person.\n\n", plan.Name)
 	fmt.Fprintf(&b, "**What changes.** %s\n\n", strings.TrimSpace(plan.Summary))
 	b.WriteString("**The files the build may write:** " + codeList(plan.Files) + "\n\n")
 	b.WriteString("**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n")
@@ -92,6 +93,9 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 		b.WriteString("The change passes its checks, but the second agent's review asks for changes:\n\n" + quote(clip(res.Review, accountLimit), 120))
 	default:
 		fmt.Fprintf(&b, "I couldn't build a change that passes every check in %d test runs. What the factory's own run found:\n\n%s", max(len(res.TestRuns), 1), quote(res.Summary, 60))
+		if res.Review != "" {
+			b.WriteString("\n\nUnresolved review findings:\n\n" + quote(clip(res.Review, accountLimit), 120))
+		}
 		if account := strings.TrimSpace(res.Usage.Summary); account != "" {
 			b.WriteString("\n\nThe agent's own account, which nothing checks:\n\n" + quote(clip(account, accountLimit), 120))
 		}
@@ -129,7 +133,7 @@ func planPullRequestBody(t Thread, m Marker, res *plumbing.BuildResult, trusted 
 		fmt.Fprintf(&b, "- **Written:** %s\n", codeList(res.Changes.Written))
 	}
 	if len(res.Changes.Outside) > 0 {
-		fmt.Fprintf(&b, "- **Thrown away:** the agent also changed %s, which the plan doesn't name\n", codeList(res.Changes.Outside))
+		fmt.Fprintf(&b, "- **Thrown away:** the agent also changed %s, outside the plan and its regression-test allowance\n", codeList(res.Changes.Outside))
 	}
 	if len(trusted) > 0 {
 		fmt.Fprintf(&b, "- **Trusted base:** it changes %s, so a person merges it\n", codeList(trusted))

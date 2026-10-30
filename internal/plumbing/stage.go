@@ -9,24 +9,46 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/gitdek/invariant/internal/regular"
 )
 
 // Stage lays out what a build made, for a test run or a commit: the
 // checkout at root as it is, the plan's record and acceptance tests
-// included, with each file the plan lets the build write taken from the
-// build's workspace instead. Nothing else the build wrote counts.
+// included, with named writable files and new regression tests in the
+// plan's packages taken from the workspace. root remains the original
+// checkout throughout repairs. Nothing else the build wrote counts.
 func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
+	writable, err := writableFiles(ctx, root, ws, plan)
+	if err != nil {
+		return err
+	}
 	if err := copyCheckout(ctx, root, dst); err != nil {
 		return err
 	}
-	for _, f := range plan.Files {
+	for _, f := range writable {
 		if err := take(ws, f, filepath.Join(dst, filepath.FromSlash(f))); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func writableFiles(ctx context.Context, root, ws string, plan *Plan) ([]string, error) {
+	base, err := checkoutNames(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	now, err := walk(ws)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]string, 0, len(now))
+	for f := range now {
+		candidates = append(candidates, f)
+	}
+	return append(append([]string(nil), plan.Files...), plan.RegressionFiles(base, candidates)...), nil
 }
 
 // take copies a file the plan names from the build's workspace to to, or
@@ -59,8 +81,12 @@ type Changes struct {
 // Diff compares the build's workspace with the checkout it was copied from.
 func Diff(ctx context.Context, root, ws string, plan *Plan) (Changes, error) {
 	var c Changes
+	writable, err := writableFiles(ctx, root, ws, plan)
+	if err != nil {
+		return c, err
+	}
 	allowed := map[string]bool{}
-	for _, f := range plan.Files {
+	for _, f := range writable {
 		allowed[f] = true
 	}
 	was, err := files(ctx, root)
@@ -103,21 +129,50 @@ func read(p string) []byte {
 // files is every file in a checkout that git tracks or would add, by path
 // from its root.
 func files(ctx context.Context, root string) (map[string]string, error) {
+	names, err := checkoutNames(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]string{}
+	for _, f := range names {
+		p := filepath.Join(root, filepath.FromSlash(f))
+		if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
+			m[f] = p
+		}
+	}
+	return m, nil
+}
+
+// checkoutNames also works for an immutable baseline copied outside git.
+// Git's inventory includes non-regular paths, so replacing an existing
+// link cannot turn it into an allowed new regression test.
+func checkoutNames(ctx context.Context, root string) ([]string, error) {
+	if !isTop(ctx, root) {
+		var names []string
+		err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == ".git" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, _ := filepath.Rel(root, p)
+			names = append(names, filepath.ToSlash(rel))
+			return nil
+		})
+		return names, err
+	}
 	out, err := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "-c", "-o", "--exclude-standard").Output()
 	if err != nil {
 		return nil, fmt.Errorf("listing the checkout's files: %w", err)
 	}
-	m := map[string]string{}
-	for _, f := range bytes.Split(bytes.TrimRight(out, "\x00"), []byte{0}) {
-		if len(f) == 0 {
-			continue
-		}
-		p := filepath.Join(root, filepath.FromSlash(string(f)))
-		if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
-			m[string(f)] = p
-		}
+	if len(out) == 0 {
+		return nil, nil
 	}
-	return m, nil
+	return strings.Split(strings.TrimRight(string(out), "\x00"), "\x00"), nil
 }
 
 // walk is every regular file under dir, by its slash path from dir.

@@ -119,7 +119,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
-		"-e", "GOFMT_FILES=" + strings.Join(goFiles(plan), " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
+		"-e", "GOFMT_FILES=" + strings.Join(goFiles(src, plan), " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
 	// The code runs as the user who runs the sandbox, not as root, so what
 	// it leaves in the build cache stays that user's to remove.
@@ -150,32 +150,43 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 // embeds tests that package. CI runs every test before anything merges;
 // the sandbox runs these, which is quick enough to build against.
 func packages(src string, plan *Plan) []string {
-	seen := map[string]bool{}
-	var out []string
-	for f := range plan.Touches(0) {
-		for dir := path.Dir(f); ; dir = path.Dir(dir) {
-			if matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(dir), "*.go")); len(matches) > 0 {
-				if !seen[dir] {
-					seen[dir] = true
-					out = append(out, "./"+dir)
-				}
-				break
-			}
-			if dir == "." || dir == "/" {
-				break
-			}
-		}
+	files, _ := walk(src)
+	var names []string
+	for f := range files {
+		names = append(names, f)
 	}
-	sort.Strings(out)
+	var out []string
+	for _, dir := range plan.GoPackages(names) {
+		out = append(out, "./"+dir)
+	}
 	return out
 }
 
-// goFiles is every Go file the change touches, which gofmt checks.
-func goFiles(plan *Plan) []string {
+// goFiles checks named Go files and tests in every touched package. The
+// staged checkout includes allowed regression tests without adding them
+// to the ratified plan.
+func goFiles(src string, plan *Plan) []string {
+	seen := map[string]bool{}
 	var out []string
 	for f := range plan.Touches(0) {
 		if strings.HasSuffix(f, ".go") {
+			seen[f] = true
 			out = append(out, f)
+		}
+	}
+	for _, pkg := range packages(src, plan) {
+		matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(pkg), "*_test.go"))
+		for _, name := range matches {
+			info, err := os.Lstat(name)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			rel, _ := filepath.Rel(src, name)
+			f := filepath.ToSlash(rel)
+			if !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
 		}
 	}
 	sort.Strings(out)

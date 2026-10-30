@@ -320,8 +320,9 @@ func sorted(m map[string]bool) []string {
 }
 
 // plan checks a plumbing pull request: it adds its own issue's ratified
-// plan and no other, the plan is the one ratified, and it changes only the
-// files the plan names. It notes what it changes in the trusted base.
+// plan and no other, the plan is the one ratified, and changes stay within
+// its named files and new regular regression tests in its packages. It
+// notes what it changes in the trusted base.
 func plan(g git, base, head string, issue int, r Result) Result {
 	r.Plumbing, r.Project, r.New = true, plumbing.LockPath(issue), true
 	for _, f := range r.Files {
@@ -347,6 +348,28 @@ func plan(g git, base, head string, issue int, r Result) Result {
 		r.Problems = append(r.Problems, fmt.Sprintf("its plan was ratified on #%d, not #%d", lock.Ratified.Issue, issue))
 	}
 	touches := lock.Plan.Touches(issue)
+	before, err := g.treeModes(base)
+	if err != nil {
+		r.Problems = append(r.Problems, "the original file inventory can't be read: "+err.Error())
+		return r
+	}
+	after, err := g.treeModes(head)
+	if err != nil {
+		r.Problems = append(r.Problems, "the candidate file inventory can't be read: "+err.Error())
+		return r
+	}
+	var baseFiles, candidates []string
+	for f := range before {
+		baseFiles = append(baseFiles, f)
+	}
+	for _, f := range r.Files {
+		if after[f] == "100644" || after[f] == "100755" {
+			candidates = append(candidates, f)
+		}
+	}
+	for _, f := range lock.Plan.RegressionFiles(baseFiles, candidates) {
+		touches[f] = true
+	}
 	for _, f := range r.Files {
 		switch {
 		case f == ".github" || strings.HasPrefix(f, ".github/"):
@@ -360,9 +383,31 @@ func plan(g git, base, head string, issue int, r Result) Result {
 	}
 	// The acceptance tests are the plan's, as ratified.
 	for f, src := range lock.Plan.Sources {
-		if got, err := g.show(head, f); err != nil || got != src {
+		if got, err := g.show(head, f); err != nil || got != src || (after[f] != "100644" && after[f] != "100755") {
 			r.Problems = append(r.Problems, "its acceptance test "+f+" isn't the one ratified")
 		}
 	}
 	return r
+}
+
+// treeModes reads committed paths and modes, never the working tree. A
+// symbolic link is a blob too, so checking its mode is essential before
+// admitting a newly added test.
+func (g git) treeModes(ref string) (map[string]string, error) {
+	out, err := g.run("ls-tree", "-r", "-z", "--full-tree", ref)
+	if err != nil {
+		return nil, err
+	}
+	modes := map[string]string{}
+	for _, entry := range strings.Split(out, "\x00") {
+		meta, file, ok := strings.Cut(entry, "\t")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(meta)
+		if len(fields) == 3 {
+			modes[file] = fields[0]
+		}
+	}
+	return modes, nil
 }

@@ -140,9 +140,12 @@ plan.json:
 }
 `+"```"+`
 
-- **files** is every file the build may write: the ones it changes and the ones it adds. The build can't write anything else, so name everything the change needs, and nothing it doesn't. Paths are from the repository's root. Nothing under .github/.
+- **files** names the files the build may change or add. Name every production file and existing test the change needs, and nothing it doesn't. Paths are from the repository's root. Nothing under .github/.
+- The build may also add new regular Go `+"`*_test.go`"+` regression files in packages the plan touches, including the nearest Go package owning a planned embedded asset and new packages the plan names. These need not be listed in **files**. The original checkout stays the baseline across repairs, so the builder may correct or remove its own new tests. This allowance never permits changes to existing unnamed tests, the ratified acceptance tests or plan, other production files or unrelated packages.
 - **tests** are the acceptance tests: Go test functions that show the change works, each in a new file that isn't in repo/ yet, named like `+"`*_accept_test.go`"+`. Write each file under tests/, at its path in the repository: tests/internal/dashboard/graph_accept_test.go. The build can't change them, so write them against the change's intended API, and test what it does, not how.
 - Each test must fail on the code as it is. A test that already passes can't show anything.
+
+After the build passes factory checks, a second agent reviews the whole candidate against the original checkout. Findings return to the same builder in its existing workspace under this unchanged plan for at most two repair attempts, each followed by fresh checks and, if they pass, a fresh review. Only final passing checks and approval produce a ready pull request; unresolved findings, failed checks or an exhausted time allowance leave a draft for a person. Decision recording and checks requiring unavailable Docker or network access belong under Merger work in the review, and do not by themselves require a repair.
 
 SPEC.md and the README describe Invariant as it is, and a change that makes either one wrong fixes it in the same change (D-0122). When yours does, name that file among the plan's files, and say in the summary what changes there. A new or changed SPEC bullet cites the decisions it rests on, as `+"`decisions check`"+` requires. A plumbing build can't write decisions/, so when the change needs a decision no one has recorded yet, say so in the summary, and whoever merges it records the decision.
 

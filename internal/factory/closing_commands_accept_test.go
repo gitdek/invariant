@@ -111,7 +111,8 @@ func TestClippedPlanKeepsRatificationInstructions(t *testing.T) {
 			p := &formalize.Proposal{Draft: formalize.Draft{Name: plan.Name}, Plan: plan, Hash: plan.Hash()}
 			m := Marker{Kind: KindProposal, Proposal: p, Agent: "codex"}
 			intro := "Here's my plan for **Check results**. It's plumbing, so it's tested, not proved. Once you ratify it, the plan and its acceptance tests are pinned by hash: " +
-				"the build writes only the files it names, and it has to make every acceptance test pass without changing them.\n\n" +
+				"the build writes the files it names and may add new regular Go `*_test.go` regression files in the packages it touches, including a planned embedded asset's nearest owning Go package and new packages the plan names. It has to make every acceptance test pass without changing them.\n\n" +
+				"Existing unnamed tests, the ratified plan and acceptance tests, other production files and unrelated packages stay protected. The original checkout stays the baseline, so a repair may correct or remove a regression test the build added. Review findings return to the same builder and workspace for at most two repairs, each checked and reviewed afresh. Only final passing checks and approval make the pull request ready; otherwise it stays a draft with unresolved findings for a person.\n\n" +
 				"**What changes.** Show the result.\n\n**The files the build may write:** `example/result.go`\n\n" +
 				"**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n" +
 				"| `TestResult` in `example/result_accept_test.go` | The result is shown. |\n\n" + merge
