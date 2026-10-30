@@ -495,9 +495,16 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with its application dependencies when requirements.txt is
+// present. Files marked # +nagini are proved separately with Nagini
+// (D-0031); the rest are tested against the model.
+type Python struct {
+	Image        string
+	Dependencies *toolchain.PythonDependencies
+	// The gate selects the environment before starting its independent
+	// checks, including the no-requirements case.
+	dependenciesChecked bool
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,12 +519,30 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
+	if !py.dependenciesChecked && py.Dependencies == nil {
+		var err error
+		py.Dependencies, err = toolchain.PythonDepsImage(ctx, p.Dir)
+		if err != nil {
+			return Build{}, Evidence{}, err
+		}
+	}
+	if py.Dependencies != nil {
+		py.Image = py.Dependencies.Image
+	}
+	python := py.executable()
+	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, fmt.Sprintf(`exec 2>&1
 cd /src
-python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
-python -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
-python "$DRIVER" ; echo "@@invariant conform=$?"
-`)
+%s -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
+%s -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
+%s "$DRIVER" ; echo "@@invariant conform=$?"
+`, python, python, python))
+}
+
+func (py Python) executable() string {
+	if py.Dependencies != nil {
+		return toolchain.PythonDepsPython
+	}
+	return "python"
 }
 
 // runConformance runs a project's build steps and then its conformance
@@ -554,7 +579,7 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", script)
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "/bin/sh", "-c", script)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

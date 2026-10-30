@@ -113,6 +113,30 @@ For projects without explicit components, code assurance comes from successful r
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](decisions/D-0024-checking-typescript-and-python.md) and [D-0031](decisions/journal/D-0031.jsonl), and the larger check in [D-0070](decisions/journal/D-0070.jsonl).
 
+### Python application dependencies
+
+A Python project's root `requirements.txt` supplies the dependencies for its tests and conformance driver, including the check one size larger. Invariant builds and reuses an application image from the existing digest-pinned `python:3.13-alpine` base for `linux/amd64`. Installation downloads wheels from public PyPI; packages available only as source distributions fail. Projects without `requirements.txt` keep the standard-library environment. Nagini keeps its own separately pinned verifier dependencies.
+
+Requirements files support a strict subset of pip syntax:
+
+- Named packages with extras, version specifiers, environment markers and `--hash=sha256:...`. Pip enforces its full installation hash rules. Only ASCII spaces may separate a requirement from its hash options.
+- Recursive local `-r` / `--requirement` and `-c` / `--constraint` references, resolved relative to the file containing them. Referenced files and every traversed directory must stay inside the project and must not be symlinks, including directories canceled by `..`. Missing files and reference cycles fail.
+- UTF-8 with an optional leading BOM, LF or CRLF endings, comments, blank lines and a single trailing backslash continuation. Continuations join without inserting characters.
+
+URLs, VCS sources, local packages, bare wheel or archive filenames, editable installs, environment interpolation, index overrides and other pip options are rejected. Invalid UTF-8, bare CR, other line separators, encoding declarations in comments and other backslash uses are rejected too. Marker literals containing `#` or option-like text are outside the supported subset. Inputs are never rewritten.
+
+Before returning a recipe or selecting an image, Invariant applies strict preflight checks and runs the pinned base's own pip parser offline. It invokes an absolute Python executable with `-I`, from a clean directory, with the project mounted read-only and no host environment, pip configuration or credentials. Pip's complete report determines acceptance: missing, malformed or failed reports stop the check, as do unsupported source forms or options. Canonical `requirements.txt` and `constraints.txt` come solely from that report's names, extras, specifiers, unevaluated markers, hashes and requirement or constraint roles. Each entry occupies one line; comments, includes and continuations do not reach installation.
+
+Only the generated `canonical/` directory enters the installation context, copied literally so input filenames cannot act as Docker patterns. Build-side Python also uses isolated mode from a clean directory. Only image construction has network access; evidence reads, tests and conformance run offline without host credentials. The gate uses trusted absolute commands and one immutable image ID for evidence and all application runs, including larger bounds. Installation or missing or invalid wheel evidence fails the check without a standard-library fallback.
+
+JSON and Markdown receipts record the base, platform, recipe, hashes of every original requirement and constraint file and both canonical files, and every resolved wheel's name, version, filename and SHA-256, including transitive dependencies. These enter the fingerprint and survive component evidence attribution. Recipe and cache identity cover the complete recipe, base, platform, original relative paths and bytes, and canonical filenames and bytes. A cached image retains its actual resolution; a fresh build from unpinned requirements can resolve different wheels and produce different evidence. Local cache tags and execution-only image IDs do not enter the fingerprint. Component execution adapters, Python existing-code discovery and checks of surrounding code against contracts remain subsequent work.
+
+Changes to this dependency path require the merger to run the real Docker and PyPI suite on the final pull request head and post its passing output before merge:
+
+```bash
+INVARIANT_PYTHON_DEPS_REAL=1 go test ./internal/verify -run '^TestPythonDependenc' -count=1 -timeout 30m
+```
+
 ### Component configuration and proof evidence in ordinary Go
 
 The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. [#234](https://github.com/gitdek/invariant/issues/234) adds an API to attribute supplied proof results to those components and render their evidence. [#257](https://github.com/gitdek/invariant/issues/257) retains target assumptions, inert invocation declarations and exact input provenance in that inventory. **Code verification with explicit components is not supported yet:** `invariant verify`, `verify.Check` and `verify.Run` reject it with `verify.ErrComponents` before running any tool. Model-only checking through `verify.RunModel` remains available. Omitting `components` keeps the existing verification path, with no inferred component inventory and no change to ratified locks.
