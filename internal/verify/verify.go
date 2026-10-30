@@ -53,9 +53,9 @@ type Report struct {
 	Agreement   *Agreement          `json:"agreement,omitempty"`
 	Conformance *conformance.Result `json:"conformance,omitempty"`
 	Code        *Code               `json:"code,omitempty"`
-	// Components attributes proofs and assumptions independently to exact
-	// declarations in an explicit inventory. Legacy checks and assumptions
-	// cannot establish proof coverage for these components.
+	// Components attributes supplied proofs, assumptions and conformance
+	// independently to exact declarations in an explicit inventory. Legacy
+	// checks and other evidence kinds cannot establish component proof coverage.
 	Components *ComponentEvidence `json:"components,omitempty"`
 	// Larger is agreement again, one size past the bounds, for code whose
 	// explorer names its bounds (D-0068).
@@ -678,7 +678,9 @@ func agree(d Design, e Exploration) Agreement {
 }
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
-// results and verifier pins. It leaves out timestamps, test timings, the Go
+// results and verifier pins. Component reference sets are canonicalized on a
+// detached copy; invocation arguments, observations and diagnostics stay ordered.
+// It leaves out timestamps, test timings, the Go
 // toolchain's patch version, where traces were written and the coding agent
 // that wrote the code, so a local run and a CI run of the same commit have
 // the same fingerprint.

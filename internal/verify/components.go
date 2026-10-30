@@ -49,12 +49,13 @@ type ComponentAssumptionEvidence struct {
 	Record   ComponentAssumptionRecord `json:"record"`
 }
 
-// ComponentEvidence keeps complete proof coverage and supplied assumptions
-// independent. Declarations alone create no evidence records.
+// ComponentEvidence keeps complete proof coverage, supplied assumptions and
+// conformance independent. Declarations alone create no evidence records.
 type ComponentEvidence struct {
-	Inventory   project.ComponentInventory    `json:"inventory"`
-	Proofs      []ComponentProof              `json:"proofs"`
-	Assumptions []ComponentAssumptionEvidence `json:"assumptions,omitempty"`
+	Inventory   project.ComponentInventory     `json:"inventory"`
+	Proofs      []ComponentProof               `json:"proofs"`
+	Assumptions []ComponentAssumptionEvidence  `json:"assumptions,omitempty"`
+	Conformance []ComponentConformanceEvidence `json:"conformance,omitempty"`
 }
 
 // ComponentProof is one component's proof status, including an unsuccessful
@@ -66,9 +67,9 @@ type ComponentProof struct {
 }
 
 // AttributeComponentProofs replaces or clears only proof evidence, revalidating
-// retained assumptions against inv. It runs no tools and changes no gate outcome
-// or legacy check. Invalid attribution leaves the report untouched; valid but
-// incomplete evidence proves nothing.
+// retained assumptions and conformance against inv and the report's bounds. It
+// runs no tools and changes no gate outcome or legacy check. Invalid attribution
+// leaves the report untouched; valid but incomplete evidence proves nothing.
 func (r *Report) AttributeComponentProofs(inv *project.ComponentInventory, results []ComponentProofResult) error {
 	evidence, index, err := r.componentReplacement(inv)
 	if err != nil {
@@ -77,28 +78,21 @@ func (r *Report) AttributeComponentProofs(inv *project.ComponentInventory, resul
 	if evidence.Proofs, err = index.proofs(evidence.Inventory, results); err != nil {
 		return err
 	}
-	if r.Components != nil {
-		for _, row := range r.Components.Assumptions {
-			if row.Target != row.Record.Target || row.Status != "assumed" || row.Verified {
-				return fmt.Errorf("component assumptions: invalid retained record for %q", row.Target)
-			}
-		}
-		var records []ComponentAssumptionRecord
-		for _, row := range r.Components.Assumptions {
-			records = append(records, row.Record)
-		}
-		if evidence.Assumptions, err = index.assumptions(records); err != nil {
-			return err
-		}
+	if evidence.Assumptions, err = index.retainedAssumptions(r.Components); err != nil {
+		return err
+	}
+	if evidence.Conformance, err = index.retainedConformance(r.Components, r.Bounds); err != nil {
+		return err
 	}
 	r.commitComponentEvidence(evidence)
 	return nil
 }
 
 // AttributeComponentAssumptions replaces or clears only supplied assumptions,
-// revalidating retained proof attempts against inv, including their original
-// target and selected contracts even when the attempt supplied no snapshots.
-// Records remain assumed and unverified and never change proof or gate outcomes.
+// revalidating retained proof and conformance attempts against inv and the report's
+// bounds, including their original targets and selected contracts even when the
+// attempt supplied no snapshots. Records remain assumed and unverified and never
+// change proof or gate outcomes.
 func (r *Report) AttributeComponentAssumptions(inv *project.ComponentInventory, records []ComponentAssumptionRecord) error {
 	evidence, index, err := r.componentReplacement(inv)
 	if err != nil {
@@ -107,20 +101,10 @@ func (r *Report) AttributeComponentAssumptions(inv *project.ComponentInventory, 
 	if evidence.Assumptions, err = index.assumptions(records); err != nil {
 		return err
 	}
-	var results []ComponentProofResult
-	if r.Components != nil {
-		old := copyComponentEvidence(*r.Components)
-		for _, row := range old.Proofs {
-			if row.Result == nil {
-				continue
-			}
-			if err := index.retainProof(old.Inventory, row); err != nil {
-				return err
-			}
-			results = append(results, *row.Result)
-		}
+	if evidence.Proofs, err = index.retainedProofs(evidence.Inventory, r.Components); err != nil {
+		return err
 	}
-	if evidence.Proofs, err = index.proofs(evidence.Inventory, results); err != nil {
+	if evidence.Conformance, err = index.retainedConformance(r.Components, r.Bounds); err != nil {
 		return err
 	}
 	r.commitComponentEvidence(evidence)
@@ -375,6 +359,68 @@ func (index *componentIndex) assumptions(records []ComponentAssumptionRecord) ([
 	return copyComponentAssumptions(rows), nil
 }
 
+// Retained evidence is copied and replayed through the same validation as new
+// evidence. The prior inventory additionally anchors incomplete attempts, and
+// requalification must preserve their existing claims before a commit is allowed.
+func (index *componentIndex) retainedProofs(inv project.ComponentInventory, old *ComponentEvidence) ([]ComponentProof, error) {
+	var results []ComponentProofResult
+	if old != nil {
+		prior := copyComponentEvidence(*old)
+		for _, row := range prior.Proofs {
+			if row.Result == nil {
+				if row.Status != "unchecked" {
+					return nil, fmt.Errorf("component proofs: invalid retained coverage for %q", row.Target)
+				}
+				continue
+			}
+			if err := index.retainProof(prior.Inventory, row); err != nil {
+				return nil, err
+			}
+			results = append(results, *row.Result)
+		}
+	}
+	return index.proofs(inv, results)
+}
+
+func (index *componentIndex) retainedAssumptions(old *ComponentEvidence) ([]ComponentAssumptionEvidence, error) {
+	var records []ComponentAssumptionRecord
+	if old != nil {
+		for _, row := range old.Assumptions {
+			if row.Target != row.Record.Target || row.Status != "assumed" || row.Verified {
+				return nil, fmt.Errorf("component assumptions: invalid retained record for %q", row.Target)
+			}
+			records = append(records, row.Record)
+		}
+	}
+	return index.assumptions(records)
+}
+
+func (index *componentIndex) retainedConformance(old *ComponentEvidence, bounds map[string]string) ([]ComponentConformanceEvidence, error) {
+	if old == nil {
+		return nil, nil
+	}
+	prior := copyComponentEvidence(*old)
+	var results []ComponentConformanceResult
+	for _, row := range prior.Conformance {
+		if err := index.retainConformance(prior.Inventory, row); err != nil {
+			return nil, err
+		}
+		results = append(results, row.Result)
+	}
+	rows, err := index.conformance(results, bounds)
+	if err != nil {
+		return nil, err
+	}
+	for i, row := range rows {
+		was := prior.Conformance[i]
+		if row.Target != was.Target || row.Check != was.Check || row.Status != was.Status ||
+			row.TransitionsChecked != was.TransitionsChecked || row.ExhaustiveStates != was.ExhaustiveStates || row.EveryStep != was.EveryStep {
+			return nil, fmt.Errorf("component conformance: retained qualification changed for %q/%q", was.Target, was.Check)
+		}
+	}
+	return rows, nil
+}
+
 func (index *componentIndex) retainProof(old project.ComponentInventory, row ComponentProof) error {
 	check, ok := index.checks[row.Target]
 	prior := slices.IndexFunc(old.Checks, func(c project.ResolvedComponentCheck) bool { return c.Target == row.Target })
@@ -551,5 +597,6 @@ func copyComponentEvidence(e ComponentEvidence) *ComponentEvidence {
 	}
 	sort.Slice(e.Proofs, func(i, j int) bool { return e.Proofs[i].Target < e.Proofs[j].Target })
 	e.Assumptions = copyComponentAssumptions(e.Assumptions)
+	e.Conformance = copyComponentConformance(e.Conformance)
 	return &e
 }
