@@ -454,7 +454,7 @@ func TestComponentRuntimeAttributionNeverExecutesAndModelOnlyRejectsIt(t *testin
 	}
 }
 
-func TestComponentRuntimeMarkdownRemainsAProofViewAndLegacyCompatible(t *testing.T) {
+func TestComponentRuntimeMarkdownPreservesProofViewAndLegacyCompatibility(t *testing.T) {
 	f := cr287Fixture(t)
 	cr287RequireAPI(t, f)
 	r := cri287All(t, f)
@@ -484,14 +484,14 @@ func TestComponentRuntimeMarkdownRemainsAProofViewAndLegacyCompatible(t *testing
 		if proofTable(after) != proofTable(before) {
 			t.Fatal("runtime tests/assertions changed Markdown proof coverage")
 		}
-		for _, want := range []string{"Assurance: **component evidence**", "recorded checks, supplied data and declared assumptions"} {
+		for _, want := range []string{"Assurance: **component evidence**", "recorded checks, supplied data and declared assumptions", "SUPPLIED-RUNTIME-ONLY", "SUPPLIED-TEST-ONLY", "SUPPLIED-ASSERTION-ONLY", "### Component runtime"} {
 			if !strings.Contains(after, want) {
 				t.Fatalf("component receipt lacks %q", want)
 			}
 		}
-		for _, unwanted := range []string{"SUPPLIED-RUNTIME-ONLY", "SUPPLIED-TEST-ONLY", "SUPPLIED-ASSERTION-ONLY", "Every step tried |", "Code · conformance |"} {
+		for _, unwanted := range []string{"Every step tried |", "Code · conformance |", "`**forged**`", "<script>"} {
 			if strings.Contains(after, unwanted) {
-				t.Fatalf("proof-only Markdown contains %q", unwanted)
+				t.Fatalf("component Markdown contains aggregate evidence or active markup %q", unwanted)
 			}
 		}
 		if string(cpJSON(t, report)) != encoded || verify.Fingerprint(report) != report.Fingerprint {
