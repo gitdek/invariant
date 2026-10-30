@@ -128,7 +128,8 @@ type Factory struct {
 	// lists them, each time they change and at the end of each poll. It
 	// hears one change at a time, in order, and the steps wait while it
 	// runs, so it mustn't call the factory. The watcher writes them down for
-	// the dashboard (D-0049).
+	// the dashboard (D-0049). An agent-backed step publishes its Ended time
+	// once, immediately before the snapshot that removes it (#269).
 	Activity func(steps []Step)
 	// Holder names this watcher, and LeaseFor is how long its lease on the
 	// repository lasts (D-0069). A watcher acts only while it holds the
@@ -295,12 +296,15 @@ func (f *Factory) Poll(ctx context.Context) error {
 // one of those, and since when. Agent is the coding agent it runs, from
 // when its run starts (#179). Run is its output directory's opaque basename,
 // published after the directory exists and before its agent starts (#236).
+// Ended records an agent-backed step's actual completion, including errors,
+// cancellation and recovered panics, immediately before removal (#269).
 type Step struct {
 	Issue int
 	Doing string
 	Since time.Time
 	Agent string
 	Run   string
+	Ended *time.Time
 }
 
 // running is the steps a watcher is running, one per issue (D-0113).
@@ -368,10 +372,17 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 	}
 }
 
-// end ends the step on issue n.
+// end records an agent-backed step's completion before removing it. Both
+// scheduling paths reach it after safeStep, including a recovered panic.
 func (f *Factory) end(n int) {
+	ended := f.now()
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
+	if s, ok := f.running.steps[n]; ok && s.Run != "" {
+		s.Ended = &ended
+		f.running.steps[n] = s
+		f.tell()
+	}
 	delete(f.running.steps, n)
 	f.tell()
 	close(f.running.ended)

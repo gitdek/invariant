@@ -25,6 +25,7 @@ type Live struct {
 	Repo          string         `json:"repo"`
 	Issue         int            `json:"issue"`
 	Doing         string         `json:"doing"`
+	Title         string         `json:"title"`
 	Run           string         `json:"run,omitempty"` // the watcher's opaque run directory basename
 	Since         *time.Time     `json:"since,omitempty"`
 	Limit         float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
@@ -648,12 +649,10 @@ func (t *transcript) view() Live {
 }
 
 // live keeps what the dashboard has read of each repository's running
-// steps, and the steps it last read for each, which the page shows until
-// one runs again.
+// steps and recorded latest finishers.
 type live struct {
 	mu    sync.Mutex
 	reads map[string]*transcript // by transcript path
-	last  map[string][]*Live     // each repository's steps, as last read
 	at    time.Time
 	body  []byte
 	steps []Live
@@ -663,8 +662,8 @@ type live struct {
 // dashboard reads again, however many pages ask.
 const liveEvery = 2 * time.Second
 
-// LiveJSON is every step each repository's watcher is running, or the ones
-// it last ran, longest-running first, as the page's live view reads it.
+// LiveJSON is every step each repository's watcher is running, or its
+// recorded latest finishers, in start order, as the page's live view reads it.
 func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	return s.liveJSON(now, false)
 }
@@ -711,15 +710,15 @@ type privateLive struct {
 
 func (s *Server) refreshLive(now time.Time) error {
 	if s.live.reads == nil {
-		s.live.reads, s.live.last = map[string]*transcript{}, map[string][]*Live{}
+		s.live.reads = map[string]*transcript{}
 	}
 	steps := []Live{}
 	read := map[string]bool{}
 	for _, r := range s.Repos {
 		st, work := s.watcherOf(r)
-		steps = append(steps, s.liveSteps(r.Name, st, work, now, read)...)
+		steps = append(steps, s.liveSteps(r.Name, st, work, read)...)
 	}
-	// A transcript no running step is on anymore is forgotten.
+	// A transcript no displayed step names anymore is forgotten.
 	for path := range s.live.reads {
 		if !read[path] {
 			delete(s.live.reads, path)
@@ -738,33 +737,34 @@ func (s *Server) refreshLive(now time.Time) error {
 }
 
 // liveSteps reads every step repo's watcher is running with an agent at
-// work, and notes each transcript it reads in read. Once none of them is
-// running, it shows the steps it last read, marked ended, until one runs
-// again.
-func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, read map[string]bool) []Live {
-	var running []*Live
+// work, or its recorded latest finishers when none is running. A missing
+// step supplies no end time, even if a page previously saw it running.
+func (s *Server) liveSteps(repo string, st Status, work string, read map[string]bool) []Live {
+	var out []Live
+	running := false
 	if st.Running() && work != "" {
 		for _, step := range st.steps() {
+			if step.Ended != nil {
+				continue
+			}
+			if prefix, _ := stepFiles(step.Doing); step.Issue != 0 && prefix != "" && step.Run != "" {
+				running = true
+			}
 			if v := s.liveStep(repo, st, step, work, read); v != nil {
-				running = append(running, v)
+				out = append(out, *v)
 			}
 		}
 	}
-	if len(running) > 0 {
-		s.live.last[repo] = running
+	if running {
+		return out
 	}
-	var out []Live
-	for _, last := range s.live.last[repo] {
-		if last.Ended == nil && len(running) == 0 {
-			ended := now.UTC()
-			last.Ended, last.Now = &ended, ""
-			for i := range last.Marks {
-				if last.Marks[i].Kind == "think" && last.Marks[i].Until == nil {
-					last.Marks[i].Until = last.Last
-				}
-			}
+	for _, step := range st.Finished {
+		if step.Ended == nil || step.Ended.IsZero() {
+			continue
 		}
-		out = append(out, *last)
+		if v := s.liveStep(repo, st, step, work, read); v != nil {
+			out = append(out, *v)
+		}
 	}
 	return out
 }
@@ -799,8 +799,16 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 	}
 	read[path] = true
 	v := t.view()
-	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, st.Limit, step.Agent
+	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, step.Limit, step.Agent
+	if v.Limit == 0 && step.Ended == nil {
+		v.Limit = st.Limit
+	}
 	v.Run, v.path = step.Run, path
+	v.Title = liveTitle(step.Doing, step.Ended != nil)
+	v.Ended = step.Ended
+	if v.Ended != nil {
+		v.Now = ""
+	}
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
@@ -814,8 +822,32 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 		if v.Marks[i].At.IsZero() && v.Since != nil {
 			v.Marks[i].At = *v.Since // thinking before the first tool call
 		}
+		if v.Marks[i].Until == nil && v.Ended != nil {
+			v.Marks[i].Until = v.Ended
+		}
 	}
 	return &v
+}
+
+func liveTitle(doing string, ended bool) string {
+	switch doing {
+	case "formalizing":
+		if ended {
+			return "Draft step ended"
+		}
+		return "Drafting"
+	case "answering":
+		if ended {
+			return "Answer step ended"
+		}
+		return "Answering"
+	case "building":
+		if ended {
+			return "Build step ended"
+		}
+		return "Building"
+	}
+	return doing
 }
 
 // stepFiles is the prefix of a step's directory in the work directory, and
@@ -875,7 +907,8 @@ func runsKindOf(doing string) string {
 // watcherOf is the watcher to show for r, with its work directory. With
 // several watchers, it's the running one whose status names the holder of
 // r's lease. When the lease is unknown or names none of them, it's the one
-// working on something, or else the first that's running.
+// working on something, or else the first that's running. A stopped
+// watcher's persisted status is still readable for its finished steps.
 func (s *Server) watcherOf(r *Repo) (Status, string) {
 	works := s.Works
 	if len(works) == 0 {
@@ -890,7 +923,7 @@ func (s *Server) watcherOf(r *Repo) (Status, string) {
 	var working, running, first *watcher
 	for _, w := range works {
 		st, err := ReadStatus(StatusPath(w, r.Name))
-		if err != nil || st.PID == 0 {
+		if err != nil || st.PID == 0 && len(st.Finished) == 0 {
 			continue
 		}
 		on := st.Running()

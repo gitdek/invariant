@@ -295,9 +295,15 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 	if l.Agent != "stopped at its spend cap" || l.Output != 4321 || l.Now != "" || l.Ended != nil {
 		t.Errorf("agent %q, %d output tokens, now %q, ended %v; want stopped at its spend cap, 4,321, nothing, and the step still running", l.Agent, l.Output, l.Now, l.Ended)
 	}
-	f.setDoing(t, "")
+	endedAt := f.since.Add(3 * time.Minute)
+	if err := WriteStatus(f.status, Status{
+		PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: endedAt, Limit: 9000,
+		Finished: []Step{{Issue: 7, Doing: "building", Since: f.since, Run: "build-20260928-120000", Ended: &endedAt, Limit: 9000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	l = f.one(t)
-	if l.Ended == nil || l.Issue != 7 || l.Turns != 8 || l.Agent != "stopped at its spend cap" {
+	if l.Ended == nil || !l.Ended.Equal(endedAt) || l.Issue != 7 || l.Turns != 8 || l.Agent != "stopped at its spend cap" {
 		t.Errorf("after the step ended: ended %v, #%d, %d turns, agent %q; want the last step, marked ended", l.Ended, l.Issue, l.Turns, l.Agent)
 	}
 	for _, m := range l.Marks {
@@ -309,53 +315,80 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 
 // Every step with an agent at work is listed, each read from its own step's
 // directory, and a step doing nothing yet isn't. Once none of them runs,
-// the page keeps them all, marked ended, until one runs again, and then
-// shows that one alone, read again from the start.
-func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
-	f := newLiveStepFixture(t)
-	f.write(t, true)
-	draft := filepath.Join(f.work, "gitdek", "app", "issues", "issue-9", "formalize-20260928-120500")
-	if err := os.MkdirAll(draft, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lines := []string{
-		ev(t, map[string]any{"type": "system", "subtype": "init", "cwd": f.ws}),
-		ev(t, map[string]any{"type": "assistant", "timestamp": "2026-09-28T12:05:10Z", "message": map[string]any{"id": "d1",
-			"content": []map[string]any{{"type": "tool_use", "id": "t-check", "name": "mcp__invariant__check", "input": map[string]any{}}}}}),
-	}
-	if err := os.WriteFile(filepath.Join(draft, "transcript.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	running := func(steps ...Step) {
-		t.Helper()
-		if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since, Limit: 9000, Steps: steps}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	build := Step{Issue: 7, Doing: "building", Since: f.since, Run: "build-20260928-120000"}
-	drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute), Run: "formalize-20260928-120500"}
-	idle := Step{Issue: 11, Since: f.since}
+// the page shows the latest recorded finishers, including exact ties. A
+// running step takes precedence over the retained completions.
+func TestLiveKeepsLatestFinishersUntilOneRunsAgain(t *testing.T) {
+	for _, name := range []string{"latest", "tied"} {
+		t.Run(name, func(t *testing.T) {
+			f := newLiveStepFixture(t)
+			f.write(t, true)
+			draft := filepath.Join(f.work, "gitdek", "app", "issues", "issue-9", "formalize-20260928-120500")
+			if err := os.MkdirAll(draft, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			lines := []string{
+				ev(t, map[string]any{"type": "system", "subtype": "init", "cwd": f.ws}),
+				ev(t, map[string]any{"type": "assistant", "timestamp": "2026-09-28T12:05:10Z", "message": map[string]any{"id": "d1",
+					"content": []map[string]any{{"type": "tool_use", "id": "t-check", "name": "mcp__invariant__check", "input": map[string]any{}}}}}),
+			}
+			if err := os.WriteFile(filepath.Join(draft, "transcript.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			publish := func(steps, finished []Step) {
+				t.Helper()
+				if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since, Limit: 9000, Steps: steps, Finished: finished}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			build := Step{Issue: 7, Doing: "building", Since: f.since, Run: "build-20260928-120000"}
+			drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute), Run: "formalize-20260928-120500"}
+			idle := Step{Issue: 11, Since: f.since}
 
-	running(drafting, idle, build)
-	steps, _ := f.read(t)
-	if len(steps) != 2 || steps[0].Issue != 7 || steps[1].Issue != 9 {
-		t.Fatalf("%d steps %+v; want #7's build, then #9's draft", len(steps), steps)
-	}
-	if b, d := steps[0], steps[1]; b.Turns != 8 || b.RunsKind != "gate" || d.Turns != 1 || d.Tools["check"] != 1 || d.RunsKind != "check" || d.Limit != 9000 || d.Since == nil || !d.Since.Equal(drafting.Since) {
-		t.Errorf("the build has %d turns and %s runs, the draft %d turns, tools %v, %s runs, a limit of %v and since %v; want each read from its own directory",
-			b.Turns, b.RunsKind, d.Turns, d.Tools, d.RunsKind, d.Limit, d.Since)
-	}
+			publish([]Step{drafting, idle, build}, nil)
+			steps, _ := f.read(t)
+			if len(steps) != 2 || steps[0].Issue != 7 || steps[1].Issue != 9 {
+				t.Fatalf("%d steps %+v; want #7's build, then #9's draft", len(steps), steps)
+			}
+			if b, d := steps[0], steps[1]; b.Turns != 8 || b.RunsKind != "gate" || d.Turns != 1 || d.Tools["check"] != 1 || d.RunsKind != "check" || d.Limit != 9000 || d.Since == nil || !d.Since.Equal(drafting.Since) {
+				t.Errorf("the build has %d turns and %s runs, the draft %d turns, tools %v, %s runs, a limit of %v and since %v; want each read from its own directory",
+					b.Turns, b.RunsKind, d.Turns, d.Tools, d.RunsKind, d.Limit, d.Since)
+			}
 
-	running(idle)
-	steps, _ = f.read(t)
-	if len(steps) != 2 || steps[0].Ended == nil || steps[1].Ended == nil || steps[0].Turns != 8 || steps[1].Turns != 1 {
-		t.Fatalf("after every step ended: %+v; want both last steps, marked ended", steps)
-	}
+			endedAt := f.since.Add(10 * time.Minute)
+			endedDraft := drafting
+			endedDraft.Ended, endedDraft.Limit = &endedAt, 9000
+			finished := []Step{endedDraft}
+			wantTurns := []int{1}
+			if name == "tied" {
+				endedBuild := build
+				endedBuild.Ended, endedBuild.Limit = &endedAt, 9000
+				finished = []Step{endedBuild, endedDraft}
+				wantTurns = []int{8, 1}
+			}
+			publish([]Step{idle}, finished)
+			steps, _ = f.read(t)
+			if len(steps) != len(finished) {
+				t.Fatalf("after every step ended: %+v; want the latest recorded finishers %+v", steps, finished)
+			}
+			for i, step := range steps {
+				if step.Issue != finished[i].Issue || step.Ended == nil || !step.Ended.Equal(endedAt) || step.Turns != wantTurns[i] || step.Limit != 9000 {
+					t.Errorf("finished step %+v; want #%d ended at %v with %d turns and its original limit", step, finished[i].Issue, endedAt, wantTurns[i])
+				}
+			}
 
-	running(drafting)
-	steps, _ = f.read(t)
-	if len(steps) != 1 || steps[0].Issue != 9 || steps[0].Ended != nil || steps[0].Turns != 1 {
-		t.Errorf("once #9's draft runs again: %+v; want it alone, running, with its one turn", steps)
+			starting := drafting
+			starting.Run = "formalize-pending-transcript"
+			publish([]Step{starting}, finished)
+			if steps, _ := f.read(t); len(steps) != 0 {
+				t.Errorf("while the new run has no transcript: %+v; want no earlier run's cards", steps)
+			}
+
+			publish([]Step{drafting}, finished)
+			steps, _ = f.read(t)
+			if len(steps) != 1 || steps[0].Issue != 9 || steps[0].Ended != nil || steps[0].Turns != 1 {
+				t.Errorf("once #9's draft runs again: %+v; want it alone, running, with its one turn", steps)
+			}
+		})
 	}
 }
 

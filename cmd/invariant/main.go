@@ -862,25 +862,32 @@ func watchCmd(ctx context.Context, args []string) int {
 	// watcher's name on its lease, which the page follows, and the steps in
 	// hand, each of which the page shows (D-0113), with the coding agent it
 	// runs (#179) and the run's directory (#236). Issue, doing and since name
-	// the longest-running step that's doing something.
+	// the longest-running step that's doing something. Recorded completions
+	// survive later snapshots and watcher restarts (#269).
 	statusPath := dashboard.StatusPath(*work, *repo)
 	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
+	if previous, err := dashboard.ReadStatus(statusPath); err != nil {
+		logger.Printf("status: %v", err)
+	} else if previous.Repo == *repo {
+		status.Finished = previous.Finished
+	}
 	f.Activity = func(steps []factory.Step) {
-		status.Heartbeat = time.Now().UTC()
-		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
+		snapshot := make([]dashboard.Step, 0, len(steps))
 		for _, s := range steps {
-			since := s.Since.UTC()
-			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since, Agent: s.Agent, Run: s.Run})
-			if s.Doing != "" && (status.Since == nil || since.Before(*status.Since)) {
-				status.Issue, status.Doing, status.Since = s.Issue, s.Doing, &since
-			}
+			snapshot = append(snapshot, dashboard.Step{
+				Issue: s.Issue, Doing: s.Doing, Since: s.Since.UTC(), Agent: s.Agent, Run: s.Run, Ended: s.Ended, Limit: timeout.Seconds(),
+			})
 		}
+		status.Update(snapshot, time.Now().UTC())
 		if err := dashboard.WriteStatus(statusPath, status); err != nil {
 			logger.Printf("status: %v", err)
 		}
 	}
 	f.Activity(nil)
-	defer os.Remove(statusPath)
+	defer func() {
+		status.PID = 0
+		f.Activity(nil)
+	}()
 	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
 		// The poll's steps can run on after it returns, so it waits for them.
