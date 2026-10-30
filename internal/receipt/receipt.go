@@ -126,8 +126,27 @@ func Markdown(r *verify.Report) string {
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | %s, with the package's locked dependencies: recipe %s |\n", render.literal(shortImage(t.DepsBase)), render.literal(short(t.DepsRecipe)))
 	}
+	if d := t.PythonDependencies; d != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | base %s, platform %s, recipe %s |\n",
+			render.literal(shortImage(d.Base)), render.literal(d.Platform), render.literal(short(d.Recipe)))
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
+	}
+	if d := t.PythonDependencies; d != nil {
+		b.WriteString("\nOriginal Python dependency inputs:\n\n| File | Identity |\n| :-- | :-- |\n")
+		for _, input := range d.Inputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", render.literal(input.Path), render.literal(short(input.SHA256)))
+		}
+		b.WriteString("\nCanonical Python installation inputs:\n\n| File | Identity |\n| :-- | :-- |\n")
+		for _, input := range d.CanonicalInputs {
+			fmt.Fprintf(&b, "| %s | %s |\n", render.literal(input.Path), render.literal(short(input.SHA256)))
+		}
+		b.WriteString("\nResolved Python application wheels:\n\n| Package | Version | Wheel | Identity |\n| :-- | :-- | :-- | :-- |\n")
+		for _, artifact := range d.Artifacts {
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", render.literal(artifact.Name), render.literal(artifact.Version),
+				render.literal(artifact.Filename), render.literal(short(artifact.SHA256)))
+		}
 	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint %s</sub>\n", render.text(r.GeneratedAt), render.literal(r.Fingerprint))
 	return b.String()

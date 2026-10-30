@@ -178,6 +178,10 @@ type Toolchain struct {
 	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
 	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
 	Go           string `json:"go,omitempty"`
+
+	// PythonDependencies describes the application environment separately
+	// from Nagini's proof environment. Its local image ID is execution-only.
+	PythonDependencies *toolchain.PythonDependencies `json:"python_dependencies,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -258,7 +262,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	if l := p.Lock; l.Ratified != nil {
 		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
 	}
-	switch lang.(type) {
+	switch l := lang.(type) {
 	case Go:
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
 	case TypeScript:
@@ -279,6 +283,12 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
 		r.Toolchain.PythonImage = tc.PythonImage
+		// Select once, before the ordinary and larger-bound checks start.
+		// The recorded wheel evidence and both runs belong to this image ID.
+		if l, err = l.prepare(ctx, p); err != nil {
+			return nil, err
+		}
+		lang, r.Toolchain.PythonDependencies = l, l.dependencies
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 		}
@@ -678,8 +688,8 @@ func agree(d Design, e Exploration) Agreement {
 // Fingerprint hashes what a report certifies: the statements, bounds,
 // results and verifier pins. It leaves out timestamps, test timings, the Go
 // toolchain's patch version, where traces were written and the coding agent
-// that wrote the code, so a local run and a CI run of the same commit have
-// the same fingerprint.
+// that wrote the code. Runs agree only when their effective environments
+// agree, including the resolved wheels for application dependencies.
 func Fingerprint(r Report) string {
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go, r.Agent = "", "", "", "", ""
 	if r.Components != nil {
