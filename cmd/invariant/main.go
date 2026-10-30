@@ -32,6 +32,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitdek/invariant/internal/dashboard"
@@ -833,7 +834,8 @@ func watchCmd(ctx context.Context, args []string) int {
 	top := map[string]string{"claude-code": *effort, "codex": *cx.effort}
 	runners := map[string]factory.Runners{}
 	for _, name := range ready {
-		drafts, builds := backends[name][0], backends[name][1]
+		drafts := dashboard.RecordActivity(backends[name][0], logger.Printf)
+		builds := dashboard.RecordActivity(backends[name][1], logger.Printf)
 		runners[name] = factory.Runners{
 			Formalizer: formalize.Formalizer{Backend: drafts, Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 			Builder: factory.Synthesis{Options: synth.Options{Backend: builds, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc,
@@ -861,26 +863,54 @@ func watchCmd(ctx context.Context, args []string) int {
 	// (D-0049). It holds no secrets: the process, the repository, the
 	// watcher's name on its lease, which the page follows, and the steps in
 	// hand, each of which the page shows (D-0113), with the coding agent it
-	// runs (#179) and the run's directory (#236). Issue, doing and since name
-	// the longest-running step that's doing something.
+	// runs (#179) and the run's directory (#236). Completed steps retain their
+	// actual ends and original limits across heartbeats and restarts (#269).
 	statusPath := dashboard.StatusPath(*work, *repo)
 	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
-	f.Activity = func(steps []factory.Step) {
-		status.Heartbeat = time.Now().UTC()
-		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
-		for _, s := range steps {
-			since := s.Since.UTC()
-			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since, Agent: s.Agent, Run: s.Run})
-			if s.Doing != "" && (status.Since == nil || since.Before(*status.Since)) {
-				status.Issue, status.Doing, status.Since = s.Issue, s.Doing, &since
-			}
-		}
+	if previous, err := dashboard.ReadStatus(statusPath); err != nil {
+		logger.Printf("status: %v", err)
+	} else if previous.Repo == *repo {
+		status.Finished = previous.Finished
+	}
+	var statusMu sync.Mutex
+	writeStatus := func(steps []dashboard.Step) {
+		status.Update(steps, time.Now().UTC())
 		if err := dashboard.WriteStatus(statusPath, status); err != nil {
 			logger.Printf("status: %v", err)
 		}
 	}
+	f.Activity = func(steps []factory.Step) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		current := make([]dashboard.Step, 0, len(steps))
+		for _, s := range steps {
+			current = append(current, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: s.Since.UTC(), Agent: s.Agent, Run: s.Run})
+		}
+		writeStatus(current)
+	}
+	f.Finished = func(s factory.Step) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		// The callback runs under the factory's running lock, so retain the
+		// last published siblings without asking the factory for them again.
+		current := make([]dashboard.Step, 0, len(status.Steps)+1)
+		ended := dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: s.Since.UTC(), Agent: s.Agent, Run: s.Run, Ended: s.Ended}
+		for _, step := range status.Steps {
+			if step.Issue == s.Issue && step.Run == s.Run && step.Since.Equal(s.Since) {
+				ended.Limit = step.Limit
+				continue
+			}
+			current = append(current, step)
+		}
+		writeStatus(append(current, ended))
+	}
 	f.Activity(nil)
-	defer os.Remove(statusPath)
+	defer func() {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		status.PID = 0
+		writeStatus(nil)
+	}()
 	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
 		// The poll's steps can run on after it returns, so it waits for them.

@@ -295,7 +295,17 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 	if l.Agent != "stopped at its spend cap" || l.Output != 4321 || l.Now != "" || l.Ended != nil {
 		t.Errorf("agent %q, %d output tokens, now %q, ended %v; want stopped at its spend cap, 4,321, nothing, and the step still running", l.Agent, l.Output, l.Now, l.Ended)
 	}
-	f.setDoing(t, "")
+	ended := f.since.Add(3 * time.Minute)
+	st, err := ReadStatus(f.status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := st.Steps[0]
+	step.Ended = &ended
+	st.Update([]Step{step}, ended)
+	if err := WriteStatus(f.status, st); err != nil {
+		t.Fatal(err)
+	}
 	l = f.one(t)
 	if l.Ended == nil || l.Issue != 7 || l.Turns != 8 || l.Agent != "stopped at its spend cap" {
 		t.Errorf("after the step ended: ended %v, #%d, %d turns, agent %q; want the last step, marked ended", l.Ended, l.Issue, l.Turns, l.Agent)
@@ -308,9 +318,8 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 }
 
 // Every step with an agent at work is listed, each read from its own step's
-// directory, and a step doing nothing yet isn't. Once none of them runs,
-// the page keeps them all, marked ended, until one runs again, and then
-// shows that one alone, read again from the start.
+// directory, and a step doing nothing yet isn't. Completions recorded at
+// exactly the same time are retained together until one runs again.
 func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 	f := newLiveStepFixture(t)
 	f.write(t, true)
@@ -328,7 +337,9 @@ func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 	}
 	running := func(steps ...Step) {
 		t.Helper()
-		if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since, Limit: 9000, Steps: steps}); err != nil {
+		st := Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Limit: 9000}
+		st.Update(steps, f.now)
+		if err := WriteStatus(f.status, st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -346,7 +357,10 @@ func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 			b.Turns, b.RunsKind, d.Turns, d.Tools, d.RunsKind, d.Limit, d.Since)
 	}
 
-	running(idle)
+	ended := f.since.Add(10 * time.Minute)
+	finishedBuild, finishedDraft := build, drafting
+	finishedBuild.Ended, finishedDraft.Ended = &ended, &ended
+	running(idle, finishedBuild, finishedDraft)
 	steps, _ = f.read(t)
 	if len(steps) != 2 || steps[0].Ended == nil || steps[1].Ended == nil || steps[0].Turns != 8 || steps[1].Turns != 1 {
 		t.Fatalf("after every step ended: %+v; want both last steps, marked ended", steps)

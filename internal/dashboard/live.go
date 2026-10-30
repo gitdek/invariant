@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,8 @@ type Live struct {
 	Repo          string         `json:"repo"`
 	Issue         int            `json:"issue"`
 	Doing         string         `json:"doing"`
+	Title         string         `json:"title"`         // explicitly distinguishes a running step from an ended attempt
+	Watcher       string         `json:"watcher"`       // opaque identity of its work directory, never the directory path
 	Run           string         `json:"run,omitempty"` // the watcher's opaque run directory basename
 	Since         *time.Time     `json:"since,omitempty"`
 	Limit         float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
@@ -647,13 +650,11 @@ func (t *transcript) view() Live {
 	return v
 }
 
-// live keeps what the dashboard has read of each repository's running
-// steps, and the steps it last read for each, which the page shows until
-// one runs again.
+// live keeps incremental transcript readers and a short-lived response
+// cache. A card's completion always comes from persisted watcher status.
 type live struct {
 	mu    sync.Mutex
 	reads map[string]*transcript // by transcript path
-	last  map[string][]*Live     // each repository's steps, as last read
 	at    time.Time
 	body  []byte
 	steps []Live
@@ -663,8 +664,8 @@ type live struct {
 // dashboard reads again, however many pages ask.
 const liveEvery = 2 * time.Second
 
-// LiveJSON is every step each repository's watcher is running, or the ones
-// it last ran, longest-running first, as the page's live view reads it.
+// LiveJSON is every step each repository's selected watcher is running, or
+// its latest recorded completions across watchers, in original start order.
 func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	return s.liveJSON(now, false)
 }
@@ -711,15 +712,24 @@ type privateLive struct {
 
 func (s *Server) refreshLive(now time.Time) error {
 	if s.live.reads == nil {
-		s.live.reads, s.live.last = map[string]*transcript{}, map[string][]*Live{}
+		s.live.reads = map[string]*transcript{}
 	}
 	steps := []Live{}
 	read := map[string]bool{}
 	for _, r := range s.Repos {
 		st, work := s.watcherOf(r)
-		steps = append(steps, s.liveSteps(r.Name, st, work, now, read)...)
+		running := s.liveSteps(r.Name, st, work, read)
+		if len(running) > 0 {
+			steps = append(steps, running...)
+		} else {
+			for _, done := range s.finishedOf(r) {
+				if v := s.liveStep(r.Name, done.st, done.step, done.work, read); v != nil {
+					steps = append(steps, *v)
+				}
+			}
+		}
 	}
-	// A transcript no running step is on anymore is forgotten.
+	// Forget readers no displayed running or finished step uses anymore.
 	for path := range s.live.reads {
 		if !read[path] {
 			delete(s.live.reads, path)
@@ -727,6 +737,15 @@ func (s *Server) refreshLive(now time.Time) error {
 	}
 	sort.SliceStable(steps, func(i, j int) bool {
 		a, b := steps[i].Since, steps[j].Since
+		if a != nil && b != nil && a.Equal(*b) || a == nil && b == nil {
+			if steps[i].Watcher != steps[j].Watcher {
+				return steps[i].Watcher < steps[j].Watcher
+			}
+			if steps[i].Issue != steps[j].Issue {
+				return steps[i].Issue < steps[j].Issue
+			}
+			return steps[i].Run < steps[j].Run
+		}
 		return a != nil && (b == nil || a.Before(*b))
 	})
 	body, err := json.Marshal(map[string]any{"at": now.UTC(), "steps": steps})
@@ -737,36 +756,20 @@ func (s *Server) refreshLive(now time.Time) error {
 	return nil
 }
 
-// liveSteps reads every step repo's watcher is running with an agent at
-// work, and notes each transcript it reads in read. Once none of them is
-// running, it shows the steps it last read, marked ended, until one runs
-// again.
-func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, read map[string]bool) []Live {
-	var running []*Live
+// liveSteps reads running agent steps from the selected watcher only.
+func (s *Server) liveSteps(repo string, st Status, work string, read map[string]bool) []Live {
+	var running []Live
 	if st.Running() && work != "" {
 		for _, step := range st.steps() {
+			if step.Ended != nil {
+				continue
+			}
 			if v := s.liveStep(repo, st, step, work, read); v != nil {
-				running = append(running, v)
+				running = append(running, *v)
 			}
 		}
 	}
-	if len(running) > 0 {
-		s.live.last[repo] = running
-	}
-	var out []Live
-	for _, last := range s.live.last[repo] {
-		if last.Ended == nil && len(running) == 0 {
-			ended := now.UTC()
-			last.Ended, last.Now = &ended, ""
-			for i := range last.Marks {
-				if last.Marks[i].Kind == "think" && last.Marks[i].Until == nil {
-					last.Marks[i].Until = last.Last
-				}
-			}
-		}
-		out = append(out, *last)
-	}
-	return out
+	return running
 }
 
 // liveStep reads one step from its own issue's named run directory: its
@@ -783,39 +786,115 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 		return nil
 	}
 	path := filepath.Join(dir, "transcript.jsonl")
-	t := s.live.reads[path]
-	if t == nil {
-		t = newTranscript()
-		// Each agent writes its own transcript, so the view reads it as the
-		// step's agent writes it (#153).
-		t.codex = step.Agent == "codex"
-		s.live.reads[path] = t
+	var v Live
+	saved := false
+	if step.Ended != nil {
+		v, saved = readFinishedActivity(dir)
 	}
-	if err := t.read(path); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			s.logf("live: %v", err)
+	if !saved {
+		t := s.live.reads[path]
+		if t == nil {
+			t = newTranscript()
+			// Each agent writes its own transcript (#153).
+			t.codex = step.Agent == "codex"
+			s.live.reads[path] = t
 		}
-		return nil
+		for {
+			offset := t.offset
+			if err := t.read(path); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					s.logf("live: %v", err)
+				}
+				return nil
+			}
+			// A finished card must include the final transcript even when
+			// no page read its backlog while the step ran.
+			if step.Ended == nil || t.offset == offset {
+				break
+			}
+		}
+		read[path] = true
+		v = t.view()
+		if info, err := os.Stat(path); err == nil {
+			m := info.ModTime().UTC()
+			v.Last = &m
+		}
 	}
-	read[path] = true
-	v := t.view()
-	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, st.Limit, step.Agent
+	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, step.Limit, step.Agent
+	if v.Limit == 0 && step.Ended == nil {
+		v.Limit = st.Limit
+	}
+	v.Title = liveTitle(step)
+	v.Watcher = fmt.Sprintf("%x", sha256.Sum256([]byte(canonical(work))))
 	v.Run, v.path = step.Run, path
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
 	}
-	if info, err := os.Stat(path); err == nil {
-		m := info.ModTime().UTC()
-		v.Last = &m
-	}
 	v.Runs, v.RunsKind = readRuns(dir, step.Doing)
+	if step.Ended != nil {
+		ended := *step.Ended
+		v.Ended, v.Now = &ended, ""
+	}
 	for i := range v.Marks {
 		if v.Marks[i].At.IsZero() && v.Since != nil {
 			v.Marks[i].At = *v.Since // thinking before the first tool call
 		}
+		if v.Ended != nil && v.Marks[i].Until == nil {
+			v.Marks[i].Until = v.Ended
+		}
 	}
 	return &v
+}
+
+func liveTitle(step Step) string {
+	if step.Ended != nil {
+		return map[string]string{"formalizing": "Draft step ended", "answering": "Answer step ended", "building": "Build step ended"}[step.Doing]
+	}
+	return map[string]string{"formalizing": "Drafting", "answering": "Answering", "building": "Building"}[step.Doing]
+}
+
+type finishedStep struct {
+	st   Status
+	step Step
+	work string
+}
+
+// finishedOf selects the greatest recorded completion across every watcher,
+// including stopped watchers, and keeps each tie with its own work directory.
+// Running-watcher selection and directory order cannot choose the finisher.
+func (s *Server) finishedOf(r *Repo) []finishedStep {
+	works := s.Works
+	if len(works) == 0 {
+		works = []string{s.Work}
+	}
+	var out []finishedStep
+	var latest time.Time
+	seen := map[string]bool{}
+	for _, work := range works {
+		path := StatusPath(work, r.Name)
+		if len(s.Works) == 0 {
+			path = r.Status
+		}
+		st, err := ReadStatus(path)
+		if err != nil {
+			continue
+		}
+		for _, step := range st.Finished {
+			if !step.finished() || step.Ended.Before(latest) {
+				continue
+			}
+			if step.Ended.After(latest) {
+				latest, out, seen = *step.Ended, nil, map[string]bool{}
+			}
+			key := stepDir(canonical(work), r.Name, step)
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, finishedStep{st: st, step: step, work: work})
+			}
+		}
+	}
+	return out
 }
 
 // stepFiles is the prefix of a step's directory in the work directory, and
@@ -835,7 +914,7 @@ func stepFiles(doing string) (prefix string, runs []string) {
 // stepDir selects only the basename the watcher published for this step.
 // Run names are opaque: neither their spelling nor their times select a run.
 func stepDir(work, repo string, step Step) string {
-	if work == "" || step.Issue == 0 || step.Run == "" || step.Run == "." || step.Run == ".." || filepath.Base(step.Run) != step.Run {
+	if work == "" || step.Issue == 0 || !validRun(step.Run) {
 		return ""
 	}
 	return filepath.Join(work, filepath.FromSlash(repo), "issues", fmt.Sprintf("issue-%d", step.Issue), step.Run)

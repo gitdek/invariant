@@ -9,33 +9,105 @@ import (
 	"time"
 )
 
-// Status is what the watcher is doing right now. The watcher writes it to a
-// file each time it starts or finishes something, and the dashboard reads
-// it (D-0049). Issue, Doing and Since are its longest-running step that's
-// doing something, and a status that lists no steps counts as that one.
+// Status records the watcher's running steps and latest actual completions.
+// The watcher atomically writes it on activity changes and heartbeats, and
+// the dashboard reads it (D-0049). Issue, Doing and Since describe only its
+// longest-running active step, with a legacy fallback for statuses without Steps.
 type Status struct {
 	PID       int        `json:"pid"`
 	Repo      string     `json:"repo"`
 	Holder    string     `json:"holder,omitempty"` // its name on the repository's lease, whose holder the page follows
 	Started   time.Time  `json:"started"`
 	Heartbeat time.Time  `json:"heartbeat"`
-	Every     float64    `json:"every"`           // seconds between polls
-	Issue     int        `json:"issue,omitempty"` // the issue it's working on, if any
-	Doing     string     `json:"doing,omitempty"` // formalizing, answering, ratifying or building
-	Since     *time.Time `json:"since,omitempty"` // when it started doing it
-	Steps     []Step     `json:"steps,omitempty"` // every step it's running, one per issue (D-0113)
-	Limit     float64    `json:"limit,omitempty"` // seconds an agent's run may take, from the watcher's -timeout
+	Every     float64    `json:"every"`              // seconds between polls
+	Issue     int        `json:"issue,omitempty"`    // the issue it's working on, if any
+	Doing     string     `json:"doing,omitempty"`    // formalizing, answering, ratifying or building
+	Since     *time.Time `json:"since,omitempty"`    // when it started doing it
+	Steps     []Step     `json:"steps,omitempty"`    // every step it's running, one per issue (D-0113)
+	Finished  []Step     `json:"finished,omitempty"` // latest recorded completion, including every exact tie
+	Limit     float64    `json:"limit,omitempty"`    // seconds an agent's run may take, from the watcher's -timeout
 }
 
-// Step is one step the watcher is running: its issue, what it's doing,
-// formalizing, answering, ratifying or building, or nothing yet, since
-// when, and the coding agent and output directory of its current run.
+// Step identifies an issue's activity, original start, agent and named run.
+// Ended is set only on a recorded completion, kept separately from running steps.
 type Step struct {
-	Issue int       `json:"issue"`
-	Doing string    `json:"doing,omitempty"`
-	Since time.Time `json:"since"`
-	Agent string    `json:"agent,omitempty"`
-	Run   string    `json:"run,omitempty"` // opaque directory basename under the issue's work directory
+	Issue int        `json:"issue"`
+	Doing string     `json:"doing,omitempty"`
+	Since time.Time  `json:"since"`
+	Agent string     `json:"agent,omitempty"`
+	Run   string     `json:"run,omitempty"`   // opaque directory basename under the issue's work directory
+	Ended *time.Time `json:"ended,omitempty"` // actual completion reported by the watcher, never inferred
+	Limit float64    `json:"limit,omitempty"` // the limit for this run, retained after the watcher changes its timeout
+}
+
+// Update replaces the running snapshot and retains only the latest actual
+// agent-step completions, including distinct runs that ended at the same time.
+// Heartbeats and empty snapshots cannot create or discard a completion.
+// The watcher serializes Update and WriteStatus with its status lock.
+func (s *Status) Update(steps []Step, at time.Time) {
+	previous := s.Steps
+	finished := s.Finished
+	s.Finished = nil
+	for _, step := range finished {
+		s.keepFinished(step)
+	}
+	s.Steps = nil
+	s.Issue, s.Doing, s.Since = 0, "", nil
+	s.Heartbeat = at
+	for _, step := range steps {
+		if step.Limit == 0 {
+			for _, prior := range previous {
+				if prior.Issue == step.Issue && prior.Doing == step.Doing && prior.Since.Equal(step.Since) && (prior.Run == step.Run || prior.Run == "") {
+					step.Limit = prior.Limit
+					break
+				}
+			}
+			if step.Limit == 0 {
+				step.Limit = s.Limit
+			}
+		}
+		if step.Ended != nil {
+			s.keepFinished(step)
+			continue
+		}
+		s.Steps = append(s.Steps, step)
+		if step.Doing != "" && (s.Since == nil || step.Since.Before(*s.Since)) {
+			since := step.Since
+			s.Issue, s.Doing, s.Since = step.Issue, step.Doing, &since
+		}
+	}
+}
+
+func (s *Status) keepFinished(step Step) {
+	if !step.finished() {
+		return
+	}
+	for _, prior := range s.Finished {
+		if prior.Issue == step.Issue && prior.Run == step.Run {
+			return // an already recorded run keeps its original metadata
+		}
+	}
+	if len(s.Finished) > 0 {
+		latest := s.Finished[0].Ended
+		if step.Ended.Before(*latest) {
+			return
+		}
+		if step.Ended.After(*latest) {
+			s.Finished = nil
+		}
+	}
+	ended := *step.Ended
+	step.Ended = &ended
+	s.Finished = append(s.Finished, step)
+}
+
+func (s Step) finished() bool {
+	prefix, _ := stepFiles(s.Doing)
+	return s.Ended != nil && !s.Ended.IsZero() && prefix != "" && s.Issue > 0 && validRun(s.Run)
+}
+
+func validRun(run string) bool {
+	return run != "" && run != "." && run != ".." && filepath.Base(run) == run
 }
 
 // steps is every step the status lists, or, from a watcher that lists none,

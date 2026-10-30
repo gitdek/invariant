@@ -130,6 +130,11 @@ type Factory struct {
 	// runs, so it mustn't call the factory. The watcher writes them down for
 	// the dashboard (D-0049).
 	Activity func(steps []Step)
+	// Finished hears each agent-backed step's completion before Activity
+	// removes it, with its original identity and the actual time it ended.
+	// It runs under the same lock as Activity and mustn't call the factory.
+	// Finished records never appear in Activity or Steps (#269).
+	Finished func(Step)
 	// Holder names this watcher, and LeaseFor is how long its lease on the
 	// repository lasts (D-0069). A watcher acts only while it holds the
 	// lease. Zero means no lease, as in a one-off run.
@@ -270,14 +275,15 @@ func (f *Factory) Poll(ctx context.Context) error {
 			// Its last step is still running.
 		case most == 1:
 			err := f.safeStep(ctx, n)
-			f.end(n)
+			f.end(n, f.now())
 			if err != nil {
 				errs = append(errs, fmt.Errorf("#%d: %w", n, err))
 			}
 		default:
 			go func() {
-				defer f.end(n)
-				if err := f.safeStep(ctx, n); err != nil {
+				err := f.safeStep(ctx, n)
+				defer f.end(n, f.now())
+				if err != nil {
 					f.logf("#%d: %v", n, err)
 				}
 			}()
@@ -290,17 +296,19 @@ func (f *Factory) Poll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// Step is a step the watcher is running on an issue: what it's doing,
+// Step is a step the watcher runs on an issue: what it's doing,
 // formalizing, answering, ratifying or building, or "" before it starts
 // one of those, and since when. Agent is the coding agent it runs, from
 // when its run starts (#179). Run is its output directory's opaque basename,
 // published after the directory exists and before its agent starts (#236).
+// Ended is set only on a completion sent through Finished (#269).
 type Step struct {
 	Issue int
 	Doing string
 	Since time.Time
 	Agent string
 	Run   string
+	Ended *time.Time `json:",omitempty"`
 }
 
 // running is the steps a watcher is running, one per issue (D-0113).
@@ -368,10 +376,18 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 	}
 }
 
-// end ends the step on issue n.
-func (f *Factory) end(n int) {
+// end records an agent-backed step's end before removing it from the
+// running steps. Both scheduling paths reach it after safeStep returns,
+// including errors, cancellation and recovered panics. The caller captures
+// ended immediately, before error logging or another step's status write
+// under the lock can delay publication.
+func (f *Factory) end(n int, ended time.Time) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
+	if s, ok := f.running.steps[n]; ok && s.Run != "" && f.Finished != nil {
+		s.Ended = &ended
+		f.Finished(s)
+	}
 	delete(f.running.steps, n)
 	f.tell()
 	close(f.running.ended)
