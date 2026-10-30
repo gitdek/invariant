@@ -495,9 +495,32 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with application dependencies when requirements.txt is present.
+// Files marked # +nagini are proved in Nagini's separate environment (D-0031);
+// the rest are tested against the model.
+type Python struct {
+	Image        string
+	dependencies *toolchain.PythonDependencies
+	selected     bool
+}
+
+// withDependencies selects one immutable application image before checks run.
+// A gate shares this selection between its ordinary and larger-bound checks;
+// callers of Check alone select it there instead.
+func (py Python) withDependencies(ctx context.Context, p *project.Project) (Python, error) {
+	if py.selected {
+		return py, nil
+	}
+	dependencies, err := toolchain.PythonDepsImage(ctx, p.Dir)
+	if err != nil {
+		return Python{}, err
+	}
+	py.dependencies, py.selected = dependencies, true
+	if dependencies != nil {
+		py.Image = dependencies.Image
+	}
+	return py, nil
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,13 +535,46 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
+	py, err := py.withDependencies(ctx, p)
+	if err != nil {
+		return Build{}, Evidence{}, err
+	}
+	script := `exec 2>&1
 cd /src
-python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
-python -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
-python "$DRIVER" ; echo "@@invariant conform=$?"
-`)
+/usr/local/bin/python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
+/usr/local/bin/python -m unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
+/usr/local/bin/python "$DRIVER" ; echo "@@invariant conform=$?"
+`
+	if py.dependencies != nil {
+		script = `exec 2>&1
+cd /src
+` + pythonModuleCommand + ` compileall -q . > /dev/null ; echo "@@invariant compile=$?"
+` + pythonModuleCommand + ` unittest discover -s . -p "test_*.py" ; echo "@@invariant test=$?"
+` + pythonDriverCommand + ` "$DRIVER" ; echo "@@invariant conform=$?"
+`
+	}
+	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, script)
 }
+
+// Isolated startup excludes application paths and startup hooks. Append the
+// libraries only afterward, preserving the base's standard library and the
+// gate's own runner ahead of installed modules. A plain path append does not
+// process .pth files or import sitecustomize/usercustomize. Installed programs
+// never enter PATH; dependencies execute only through application imports.
+const pythonBootstrap = `import os, runpy, sys
+sys.path.extend(("/runtime", "` + toolchain.PythonLibraryDir + `", "/src"))
+`
+
+const pythonModuleCommand = `/usr/local/bin/python -I -c '` + pythonBootstrap + `module = sys.argv[1]
+sys.argv = sys.argv[1:]
+runpy.run_module(module, run_name="__main__", alter_sys=True)
+'`
+
+const pythonDriverCommand = `/usr/local/bin/python -I -c '` + pythonBootstrap + `driver = os.path.abspath(sys.argv[1])
+sys.path.append(os.path.dirname(driver))
+sys.argv = sys.argv[1:]
+runpy.run_path(driver, run_name="__main__")
+'`
 
 // runConformance runs a project's build steps and then its conformance
 // driver, in image, on a throwaway copy, with no network and none of the
@@ -548,13 +604,22 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	var buf bytes.Buffer
-	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512"}
+	// Dependency images are selected by their immutable linux/amd64 ID.
+	// The standard-library base keeps its existing native-platform behavior.
+	if p.Manifest.Language == "python" && strings.HasPrefix(image, "sha256:") {
+		args = append(args, "--platform", "linux/amd64")
+	} else {
+		args = append(args, "-e", "PYTHONPATH=/runtime")
+	}
+	args = append(args,
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
 		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", script)
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "/bin/sh", "-c", script)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

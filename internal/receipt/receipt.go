@@ -126,6 +126,21 @@ func Markdown(r *verify.Report) string {
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | %s, with the package's locked dependencies: recipe %s |\n", render.literal(shortImage(t.DepsBase)), render.literal(short(t.DepsRecipe)))
 	}
+	if deps := t.PythonDependencies; deps != nil {
+		// Original input paths and wheel metadata are application-controlled.
+		// Escape them in legacy receipts as well as component receipts.
+		depRender := renderer{explicit: true}
+		fmt.Fprintf(&b, "| Python application dependencies | %s · recipe %s · %s |\n", depRender.literal(shortImage(deps.Base)), depRender.literal(short(deps.Recipe)), depRender.literal(deps.Platform))
+		for _, input := range deps.Inputs {
+			fmt.Fprintf(&b, "| Python dependency input | %s · %s |\n", depRender.literal(input.Path), depRender.literal(short(input.SHA256)))
+		}
+		for _, input := range deps.CanonicalInputs {
+			fmt.Fprintf(&b, "| Python canonical installation input | %s · %s |\n", depRender.literal(input.Path), depRender.literal(short(input.SHA256)))
+		}
+		for _, artifact := range deps.Artifacts {
+			fmt.Fprintf(&b, "| Python dependency wheel | %s %s · %s · %s |\n", depRender.literal(artifact.Name), depRender.literal(artifact.Version), depRender.literal(artifact.Filename), depRender.literal(short(artifact.SHA256)))
+		}
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
 	}

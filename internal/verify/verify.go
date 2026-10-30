@@ -166,18 +166,19 @@ type BuildStep struct {
 
 // Toolchain records exactly what did the checking.
 type Toolchain struct {
-	TLC          string `json:"tlc"`
-	TLCRelease   string `json:"tlc_release"`
-	TLCJarSHA256 string `json:"tlc_jar_sha256"`
-	JavaImage    string `json:"java_image"`
-	GobraImage   string `json:"gobra_image,omitempty"`
-	GoImage      string `json:"go_image,omitempty"`
-	NodeImage    string `json:"node_image,omitempty"`
-	PythonImage  string `json:"python_image,omitempty"`
-	NaginiRecipe string `json:"nagini_recipe,omitempty"`
-	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
-	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
-	Go           string `json:"go,omitempty"`
+	TLC                string                        `json:"tlc"`
+	TLCRelease         string                        `json:"tlc_release"`
+	TLCJarSHA256       string                        `json:"tlc_jar_sha256"`
+	JavaImage          string                        `json:"java_image"`
+	GobraImage         string                        `json:"gobra_image,omitempty"`
+	GoImage            string                        `json:"go_image,omitempty"`
+	NodeImage          string                        `json:"node_image,omitempty"`
+	PythonImage        string                        `json:"python_image,omitempty"`
+	PythonDependencies *toolchain.PythonDependencies `json:"python_dependencies,omitempty"`
+	NaginiRecipe       string                        `json:"nagini_recipe,omitempty"`
+	DepsBase           string                        `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
+	DepsRecipe         string                        `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
+	Go                 string                        `json:"go,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -258,7 +259,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	if l := p.Lock; l.Ratified != nil {
 		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
 	}
-	switch lang.(type) {
+	switch l := lang.(type) {
 	case Go:
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
 	case TypeScript:
@@ -278,7 +279,13 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		}
 		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
+		l, err = l.withDependencies(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		lang = l
 		r.Toolchain.PythonImage = tc.PythonImage
+		r.Toolchain.PythonDependencies = l.dependencies
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 		}
@@ -676,7 +683,8 @@ func agree(d Design, e Exploration) Agreement {
 }
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
-// results and verifier pins. It leaves out timestamps, test timings, the Go
+// results, verifier pins and resolved application dependencies. It leaves
+// out execution-only image IDs, timestamps, test timings, the Go
 // toolchain's patch version, where traces were written and the coding agent
 // that wrote the code, so a local run and a CI run of the same commit have
 // the same fingerprint.

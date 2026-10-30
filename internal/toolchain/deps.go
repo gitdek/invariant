@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -52,7 +51,7 @@ func DepsImage(ctx context.Context, root string) (tag, recipe string, err error)
 	}
 	recipe = DepsRecipe(pkg, lock)
 	tag = "invariant-deps:" + recipe[len("sha256:"):][:16]
-	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
+	if Docker(ctx, "image", "inspect", tag).Run() == nil {
 		return tag, recipe, nil
 	}
 	dir, err := os.MkdirTemp("", "invariant-deps-")
@@ -65,7 +64,7 @@ func DepsImage(ctx context.Context, root string) (tag, recipe string, err error)
 			return "", "", err
 		}
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "-q", "-t", tag, dir)
+	cmd := Docker(ctx, "build", "-q", "-t", tag, dir)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {

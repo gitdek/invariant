@@ -60,6 +60,9 @@ for a in "$@"; do
 	prev=$a
 done
 cd "$FAKE_DOCKER_WORK" || exit 1
+# The production launcher names the pinned interpreter absolutely. Translate
+# only that container path to this fixture's Python double on the host.
+prev=$(printf '%s' "$prev" | sed 's@/usr/local/bin/python@python@g')
 sh -c "$prev" 2>stderr
 code=$?
 cat stderr >&2
