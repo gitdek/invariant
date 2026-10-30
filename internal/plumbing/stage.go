@@ -18,10 +18,14 @@ import (
 // included, with each file the plan lets the build write taken from the
 // build's workspace instead. Nothing else the build wrote counts.
 func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
+	names, err := buildFiles(root, ws, plan)
+	if err != nil {
+		return err
+	}
 	if err := copyCheckout(ctx, root, dst); err != nil {
 		return err
 	}
-	for _, f := range plan.Files {
+	for _, f := range names {
 		if err := take(ws, f, filepath.Join(dst, filepath.FromSlash(f))); err != nil {
 			return err
 		}
@@ -29,7 +33,51 @@ func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
 	return nil
 }
 
-// take copies a file the plan names from the build's workspace to to, or
+// buildFiles adds safe new regression tests to the plan's named files.
+// root stays the original checkout across repairs, so a test added in one
+// attempt can be edited or removed in the next without enlarging scope.
+func buildFiles(root, ws string, plan *Plan) ([]string, error) {
+	was, err := walk(root)
+	if err != nil {
+		return nil, err
+	}
+	baseline := map[string]bool{}
+	var original []string
+	for f := range was {
+		baseline[f] = true
+		original = append(original, f)
+	}
+	pkgs := plan.GoPackages(original)
+	names := append([]string(nil), plan.Files...)
+	named := map[string]bool{}
+	for _, f := range names {
+		named[f] = true
+	}
+	now, err := walk(ws)
+	if err != nil {
+		return nil, err
+	}
+	for f := range now {
+		if named[f] || !plan.AllowsRegression(f, baseline, pkgs) {
+			continue
+		}
+		// A baseline link or directory is an existing path too, even though
+		// walk deliberately does not list it as a regular file.
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f))); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		if _, err := regular.ReadFile(ws, f); err != nil {
+			return nil, err
+		}
+		names = append(names, f)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// take copies an allowed file from the build's workspace to to, or
 // removes to when the build removed it. It takes a regular file only, and
 // refuses a link by name, never following it (#153).
 func take(ws, f, to string) error {
@@ -59,8 +107,12 @@ type Changes struct {
 // Diff compares the build's workspace with the checkout it was copied from.
 func Diff(ctx context.Context, root, ws string, plan *Plan) (Changes, error) {
 	var c Changes
+	names, err := buildFiles(root, ws, plan)
+	if err != nil {
+		return c, err
+	}
 	allowed := map[string]bool{}
-	for _, f := range plan.Files {
+	for _, f := range names {
 		allowed[f] = true
 	}
 	was, err := files(ctx, root)

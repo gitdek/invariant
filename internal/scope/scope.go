@@ -321,7 +321,8 @@ func sorted(m map[string]bool) []string {
 
 // plan checks a plumbing pull request: it adds its own issue's ratified
 // plan and no other, the plan is the one ratified, and it changes only the
-// files the plan names. It notes what it changes in the trusted base.
+// files the plan names, plus new regular regression tests in its packages.
+// It notes what it changes in the trusted base.
 func plan(g git, base, head string, issue int, r Result) Result {
 	r.Plumbing, r.Project, r.New = true, plumbing.LockPath(issue), true
 	for _, f := range r.Files {
@@ -347,11 +348,37 @@ func plan(g git, base, head string, issue int, r Result) Result {
 		r.Problems = append(r.Problems, fmt.Sprintf("its plan was ratified on #%d, not #%d", lock.Ratified.Issue, issue))
 	}
 	touches := lock.Plan.Touches(issue)
+	// Use the same original tree as the pull request diff. Files added by
+	// the candidate cannot define new packages for this allowance.
+	ancestor, err := g.run("merge-base", base, head)
+	if err != nil {
+		r.Problems = append(r.Problems, "its original checkout can't be read: "+err.Error())
+		return r
+	}
+	before, err := g.tree(strings.TrimSpace(ancestor))
+	if err != nil {
+		r.Problems = append(r.Problems, "its original files can't be read: "+err.Error())
+		return r
+	}
+	after, err := g.tree(head)
+	if err != nil {
+		r.Problems = append(r.Problems, "its candidate files can't be read: "+err.Error())
+		return r
+	}
+	baseline := map[string]bool{}
+	var original []string
+	for f, mode := range before {
+		baseline[f] = true
+		if regularMode(mode) {
+			original = append(original, f)
+		}
+	}
+	pkgs := lock.Plan.GoPackages(original)
 	for _, f := range r.Files {
 		switch {
 		case f == ".github" || strings.HasPrefix(f, ".github/"):
 			r.Problems = append(r.Problems, "it edits CI configuration: "+f)
-		case !touches[f]:
+		case !touches[f] && !(regularMode(after[f]) && lock.Plan.AllowsRegression(f, baseline, pkgs)):
 			r.Problems = append(r.Problems, "it changes "+f+", which its plan doesn't name")
 		}
 		if plumbing.Trusted(f) {
@@ -366,3 +393,26 @@ func plan(g git, base, head string, issue int, r Result) Result {
 	}
 	return r
 }
+
+// tree preserves Git's modes so the regression exception never admits a
+// symbolic link, a submodule, or a deleted file as a new regular test.
+func (g git) tree(ref string) (map[string]string, error) {
+	out, err := g.run("ls-tree", "-r", "-t", "-z", "--full-tree", ref)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]string{}
+	for _, entry := range strings.Split(out, "\x00") {
+		meta, file, ok := strings.Cut(entry, "\t")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(meta)
+		if len(fields) == 3 {
+			files[file] = fields[0]
+		}
+	}
+	return files, nil
+}
+
+func regularMode(mode string) bool { return mode == "100644" || mode == "100755" }

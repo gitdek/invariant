@@ -30,7 +30,7 @@ import (
 type Plan struct {
 	Name    string   `json:"name"`    // the change, in a few plain words
 	Summary string   `json:"summary"` // what changes and why, in plain words
-	Files   []string `json:"files"`   // every file the build may write, from the repository's root
+	Files   []string `json:"files"`   // named files the build may write, from the repository's root
 	Tests   []Test   `json:"tests"`   // the acceptance tests
 	// Sources is each acceptance test file's text, by path. The tests are
 	// new files the ratification adds, which the build can't change.
@@ -127,8 +127,9 @@ func (p *Plan) TestFiles() []string {
 	return out
 }
 
-// Touches is every file the change may add or change: the files the build
-// writes, the tests the ratification adds, and the plan's record.
+// Touches is every file the plan names: the files the build writes, the
+// tests the ratification adds, and the plan's record. New regression tests
+// are checked separately, without changing the ratified plan.
 func (p *Plan) Touches(n int) map[string]bool {
 	out := map[string]bool{LockPath(n): true}
 	for _, f := range p.Files {
@@ -138,6 +139,56 @@ func (p *Plan) Touches(n int) map[string]bool {
 		out[f] = true
 	}
 	return out
+}
+
+// GoPackages is the set of Go package directories the plan touches. files
+// lists regular files in the original checkout. Named Go files also define
+// packages, including ones the plan creates. Other named files, such as
+// embedded assets, belong to their nearest enclosing Go package.
+func (p *Plan) GoPackages(files []string) map[string]bool {
+	goDirs := map[string]bool{}
+	for _, f := range files {
+		if strings.HasSuffix(f, ".go") {
+			goDirs[path.Dir(f)] = true
+		}
+	}
+	named := append(append([]string(nil), p.Files...), p.TestFiles()...)
+	for _, f := range named {
+		if strings.HasSuffix(f, ".go") {
+			goDirs[path.Dir(f)] = true
+		}
+	}
+	pkgs := map[string]bool{}
+	for _, f := range named {
+		for dir := path.Dir(f); ; dir = path.Dir(dir) {
+			if goDirs[dir] {
+				pkgs[dir] = true
+				break
+			}
+			if dir == "." || dir == "/" {
+				break
+			}
+		}
+	}
+	return pkgs
+}
+
+// AllowsRegression permits only a new Go test in a package the plan
+// touches. baseline and packages must come from the original checkout,
+// never a previous repair. The caller also checks that the new file is
+// regular and has no symbolic or hard links.
+func (p *Plan) AllowsRegression(file string, baseline, packages map[string]bool) bool {
+	if baseline[file] || !strings.HasSuffix(file, "_test.go") || !packages[path.Dir(file)] {
+		return false
+	}
+	if _, acceptance := p.Sources[file]; acceptance {
+		return false
+	}
+	if file == "decisions" || strings.HasPrefix(file, "decisions/") {
+		return false
+	}
+	c, err := clean(file)
+	return err == nil && c == file
 }
 
 // clean checks a path from the repository's root: relative, inside it, and

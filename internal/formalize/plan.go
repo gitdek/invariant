@@ -140,7 +140,7 @@ plan.json:
 }
 `+"```"+`
 
-- **files** is every file the build may write: the ones it changes and the ones it adds. The build can't write anything else, so name everything the change needs, and nothing it doesn't. Paths are from the repository's root. Nothing under .github/.
+- **files** names the files the build may change or add. The build may also add regular Go `+"`*_test.go`"+` regression files in packages the plan touches: the nearest Go package owning a planned embedded asset counts, as does a new package named by the plan. This allowance doesn't permit changes to existing unnamed tests, the acceptance tests, the plan's record, other production files or unrelated packages. Name everything else the change needs, and nothing it doesn't. Paths are from the repository's root. Nothing under .github/.
 - **tests** are the acceptance tests: Go test functions that show the change works, each in a new file that isn't in repo/ yet, named like `+"`*_accept_test.go`"+`. Write each file under tests/, at its path in the repository: tests/internal/dashboard/graph_accept_test.go. The build can't change them, so write them against the change's intended API, and test what it does, not how.
 - Each test must fail on the code as it is. A test that already passes can't show anything.
 

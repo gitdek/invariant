@@ -99,6 +99,10 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 	if err := copyCheckout(ctx, root, src); err != nil {
 		return Result{}, err
 	}
+	formatFiles, err := goFilesIn(src, plan)
+	if err != nil {
+		return Result{}, err
+	}
 	var pkgs, names []string
 	seen := map[string]bool{}
 	for _, t := range plan.Tests {
@@ -119,7 +123,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
-		"-e", "GOFMT_FILES=" + strings.Join(goFiles(plan), " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
+		"-e", "GOFMT_FILES=" + strings.Join(formatFiles, " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
 	// The code runs as the user who runs the sandbox, not as root, so what
 	// it leaves in the build cache stays that user's to remove.
@@ -150,24 +154,47 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 // embeds tests that package. CI runs every test before anything merges;
 // the sandbox runs these, which is quick enough to build against.
 func packages(src string, plan *Plan) []string {
-	seen := map[string]bool{}
+	files, _ := walk(src)
+	var names []string
+	for f := range files {
+		names = append(names, f)
+	}
 	var out []string
-	for f := range plan.Touches(0) {
-		for dir := path.Dir(f); ; dir = path.Dir(dir) {
-			if matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(dir), "*.go")); len(matches) > 0 {
-				if !seen[dir] {
-					seen[dir] = true
-					out = append(out, "./"+dir)
-				}
-				break
-			}
-			if dir == "." || dir == "/" {
-				break
-			}
-		}
+	for dir := range plan.GoPackages(names) {
+		out = append(out, "./"+dir)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// goFilesIn includes the staged regression tests. Staging has already
+// restored every unnamed existing test from the original checkout; these
+// tests are checked for formatting too, without rewriting their bytes.
+func goFilesIn(src string, plan *Plan) ([]string, error) {
+	files, err := walk(src)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for f := range files {
+		names = append(names, f)
+	}
+	pkgs := plan.GoPackages(names)
+	seen := map[string]bool{}
+	for _, f := range goFiles(plan) {
+		seen[f] = true
+	}
+	for f := range files {
+		if strings.HasSuffix(f, "_test.go") && pkgs[path.Dir(f)] {
+			seen[f] = true
+		}
+	}
+	var out []string
+	for f := range seen {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // goFiles is every Go file the change touches, which gofmt checks.

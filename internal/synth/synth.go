@@ -70,6 +70,45 @@ type Usage struct {
 	Tokens *Tokens `json:"tokens,omitempty"`
 }
 
+// Add includes another run's counters, keeping its nonempty descriptive
+// fields. Partial runs and reviews count as well as successful writing runs.
+func (u *Usage) Add(next Usage) {
+	u.Turns += next.Turns
+	u.CostUSD += next.CostUSD
+	if len(next.ToolCalls) > 0 {
+		if u.ToolCalls == nil {
+			u.ToolCalls = make(map[string]int)
+		}
+		for tool, count := range next.ToolCalls {
+			u.ToolCalls[tool] += count
+		}
+	}
+	if next.Tokens != nil {
+		if u.Tokens == nil {
+			u.Tokens = &Tokens{}
+		}
+		u.Tokens.Input += next.Tokens.Input
+		u.Tokens.CachedInput += next.Tokens.CachedInput
+		u.Tokens.Output += next.Tokens.Output
+		u.Tokens.Reasoning += next.Tokens.Reasoning
+	}
+	if next.Backend != "" {
+		u.Backend = next.Backend
+	}
+	if next.Model != "" {
+		u.Model = next.Model
+	}
+	if next.Outcome != "" {
+		u.Outcome = next.Outcome
+	}
+	if next.Summary != "" {
+		u.Summary = next.Summary
+	}
+	if next.GateTool != "" {
+		u.GateTool = next.GateTool
+	}
+}
+
 // GateRun is one call to the gate tool during synthesis.
 type GateRun struct {
 	Run    int      `json:"run"`
@@ -152,8 +191,92 @@ func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Durati
 	return usage, fb, err
 }
 
+// ExecutionBudget shares one time limit across a sequence of agent runs and
+// checks, including the work between them. A backend's wait for its account
+// turn is excluded. Use one budget sequentially; a nonpositive limit is uncut.
+type ExecutionBudget struct {
+	timeout time.Duration
+	start   time.Time
+	waited  time.Duration
+}
+
+// NewExecutionBudget starts a build's shared time limit.
+func NewExecutionBudget(timeout time.Duration) *ExecutionBudget {
+	return &ExecutionBudget{timeout: timeout, start: time.Now()}
+}
+
+func (b *ExecutionBudget) remaining() time.Duration {
+	if b.timeout <= 0 {
+		return 0
+	}
+	return b.timeout - time.Since(b.start) + b.waited
+}
+
+// Err reports whether the shared time limit has expired.
+func (b *ExecutionBudget) Err() error {
+	if b.timeout > 0 && b.remaining() <= 0 {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// Context bounds a check by the build's remaining time. Cancel the returned
+// context when the check ends. Agent runs use Run so account waits stay uncut.
+func (b *ExecutionBudget) Context(ctx context.Context) (context.Context, context.CancelFunc) {
+	if b.timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, b.remaining())
+}
+
+type executionRunKey struct{}
+
+type executionRun struct {
+	budget    *ExecutionBudget
+	requested time.Time
+	started   bool
+	ctx       context.Context
+}
+
+// Run gives one agent run the remaining budget through Job.Timeout. Native
+// backends start that timeout in within, after waiting for their account turn;
+// other backends honor Job.Timeout through the same Backend contract.
+func (b *ExecutionBudget) Run(ctx context.Context, backend Backend, job Job) (Usage, error) {
+	if err := ctx.Err(); err != nil {
+		return Usage{}, err
+	}
+	if err := b.Err(); err != nil {
+		return Usage{}, err
+	}
+	job.Timeout = b.remaining()
+	if b.timeout > 0 && job.Timeout <= 0 {
+		return Usage{}, context.DeadlineExceeded
+	}
+	run := &executionRun{budget: b, requested: time.Now()}
+	usage, err := backend.Run(context.WithValue(ctx, executionRunKey{}, run), job)
+	switch {
+	case ctx.Err() != nil:
+		return usage, ctx.Err()
+	case run.ctx != nil && errors.Is(run.ctx.Err(), context.DeadlineExceeded):
+		return usage, context.DeadlineExceeded
+	case b.Err() != nil:
+		return usage, context.DeadlineExceeded
+	default:
+		return usage, err
+	}
+}
+
 // within cuts ctx off once job's timeout has passed, from now.
 func within(ctx context.Context, job Job) (context.Context, context.CancelFunc) {
+	if run, ok := ctx.Value(executionRunKey{}).(*executionRun); ok {
+		if !run.started {
+			run.budget.waited += time.Since(run.requested)
+			run.started = true
+		}
+		runCtx, cancel := run.budget.Context(ctx)
+		run.ctx = runCtx
+		return runCtx, cancel
+	}
 	if job.Timeout <= 0 {
 		return context.WithCancel(ctx)
 	}
