@@ -25,8 +25,8 @@ type Builder struct {
 	Timeout  time.Duration
 	Sandbox  Sandbox
 	// FallbackEffort is the effort the agent runs at once more when the loop
-	// guard stops its first run (D-0125). Empty never runs it again. The
-	// review never runs again.
+	// guard stops its first run (D-0125). Empty disables this fallback. The
+	// review never takes a thinking-loop fallback.
 	FallbackEffort string
 }
 
@@ -88,6 +88,15 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 	usage.Backend = b.Backend.Name()
 	r := &BuildResult{Usage: usage, Spend: usage.CostUSD, Tests: len(plan.Tests), Fallback: fallback}
 	r.TestRuns, _ = readRuns(testLog)
+	save := func() {
+		b2, _ := json.MarshalIndent(r, "", "  ")
+		os.WriteFile(filepath.Join(out, "build.json"), append(b2, '\n'), 0o644)
+	}
+	if synth.IsProviderUnavailable(runErr) {
+		r.Summary = fmt.Sprintf("The agent's run ended with an error: %v", runErr)
+		save()
+		return r, nil
+	}
 	if r.Changes, err = Diff(ctx, root, ws, plan); err != nil {
 		return nil, err
 	}
@@ -123,8 +132,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 			r.Review = "The review didn't run: " + err.Error()
 		}
 	}
-	b2, _ := json.MarshalIndent(r, "", "  ")
-	os.WriteFile(filepath.Join(out, "build.json"), append(b2, '\n'), 0o644)
+	save()
 	return r, nil
 }
 

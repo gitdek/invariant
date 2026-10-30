@@ -324,6 +324,10 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
    Codex's commands then run under a permission profile of Codex's own: they see only the workspace, the system and Go's toolchain, reach no network, and can't read your home directory. The watcher checks that before it runs Codex, and runs one Codex run at a time.
 
+   Every Codex and Claude Code run for drafting statements, planning, building or reviewing retries terminal provider capacity, rate-limit, overload and dropped-connection errors: at most four attempts, waiting one, two and four minutes. Each attempt keeps the same workspace, job, agent, model, effort, permissions, tools and transcript. Both Codex turns, the process turn and the home file lock, are released during each wait so another step can run. Cancellation stops a wait at once. One deadline starts when the first attempt takes its turn and includes all attempts, waits and time spent reacquiring the turn; retries never renew it. Tests can supply a wait function that observes the real schedule without sleeping for minutes.
+
+   If the provider remains unavailable until the attempts or time run out, the step fails even when an interrupted attempt left usable files or passing checks. The failure post preserves the last provider error, including after a saved build is loaded again, and explains how to retry once the provider recovers. Ordinary errors, successful output, tool failures and the existing thinking-loop fallback keep their behavior.
+
 5. **Open an issue** that describes a component and what must always be true of it, and label it `invariant` or comment `/invariant solve`. [#18](https://github.com/gitdek/invariant/issues/18) is a good model. The factory asks about anything it can't settle, proposes statements, and builds once a writer ratifies them.
 
 `Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).

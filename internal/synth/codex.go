@@ -60,7 +60,15 @@ type Codex struct {
 	Reads []string
 	// GoModCache is Go's module cache, which its commands read to build Go
 	// without the network.
-	GoModCache string
+	GoModCache   string
+	providerWait providerWait
+}
+
+// WithProviderWait configures this backend's retry waits. Nil restores the
+// cancellable timer; copying the value leaves other backend instances alone.
+func (c Codex) WithProviderWait(wait func(context.Context, time.Duration) error) Backend {
+	c.providerWait = wait
+	return c
 }
 
 // codexTurn lets one of this process's Codex runs go at a time (D-0138).
@@ -277,11 +285,12 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if c.Home == "" {
 		return Usage{}, errors.New("codex needs a home of its own, where its sign-in lives")
 	}
-	release, err := c.turn(ctx)
-	if err != nil {
-		return Usage{}, err
-	}
-	defer release()
+	return retryProvider(ctx, job, c.providerWait, c.turn, func(ctx context.Context) (Usage, error) {
+		return c.runAttempt(ctx, job)
+	})
+}
+
+func (c Codex) runAttempt(ctx context.Context, job Job) (Usage, error) {
 	// The agent's commands get a temporary directory of the run's own, which
 	// holds their Go build cache, where the profile lets them write. In the
 	// workspace, it would count as the agent's work.
@@ -294,10 +303,11 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	// The run's time starts now that its turn has come.
-	ctx, cancel := within(ctx, job)
+	// Stopping a malformed stream stops this attempt without replacing the
+	// deadline shared by the run's provider retries.
+	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Binary, args...)
+	cmd := exec.CommandContext(attemptCtx, c.Binary, args...)
 	cmd.Dir = job.Workspace
 	cmd.Env = c.codexEnv()
 	// Codex's agent has a shell, so stopping the run stops everything it
@@ -322,7 +332,7 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 		start, _ := json.Marshal(map[string]string{"type": "invariant.workspace", "cwd": job.Workspace})
 		job.Transcript.Write(append(stamped(start, time.Now()), '\n'))
 	}
-	usage, readErr := ReadCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
+	usage, terminalError, readErr := readCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
 	if readErr != nil {
 		cancel() // stop the agent, rather than wait for it
 	}
@@ -335,12 +345,25 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	switch {
 	case readErr != nil:
 		return usage, readErr
-	case usage.Outcome == "":
-		return usage, fmt.Errorf("codex ended without finishing its turn: %v\n%s", waitErr, lastLines(stderr.String(), 20))
-	case usage.Outcome != "success":
-		return usage, fmt.Errorf("codex stopped: %s", usage.Summary)
+	case usage.Outcome == "success":
+		return usage, nil
 	}
-	return usage, nil
+	message := terminalError
+	if message == "" {
+		message = lastLines(stderr.String(), 20)
+	}
+	if temporaryProviderMessage(message) {
+		return usage, &providerError{message: "codex: " + message}
+	}
+	if err := ctx.Err(); err != nil {
+		return usage, fmt.Errorf("codex stopped: %w", err)
+	}
+	switch {
+	case usage.Outcome == "":
+		return usage, fmt.Errorf("codex ended without finishing its turn: %v\n%s", waitErr, message)
+	default:
+		return usage, fmt.Errorf("codex stopped: %s", message)
+	}
 }
 
 // Probe checks, before the factory runs Codex, that its sandbox holds as
@@ -431,8 +454,13 @@ var ErrTooManyTurns = errors.New("the agent took more steps than its cap allows,
 // says the run has Invariant's server, which Codex must start before the
 // agent's turn does.
 func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, error) {
+	u, _, err := readCodexStream(r, transcript, maxTurns, gated)
+	return u, err
+}
+
+func readCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, string, error) {
 	u := Usage{ToolCalls: map[string]int{}}
-	var lastError string
+	var lastError, terminalError string
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 64<<20)
 	for scanner.Scan() {
@@ -441,13 +469,11 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 			transcript.Write(append(stamped(line, time.Now()), '\n'))
 		}
 		var ev struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-			Error   struct {
-				Message string `json:"message"`
-			} `json:"error"`
-			Usage *Tokens `json:"usage"`
-			Item  struct {
+			Type    string          `json:"type"`
+			Message string          `json:"message"`
+			Error   json.RawMessage `json:"error"`
+			Usage   *Tokens         `json:"usage"`
+			Item    struct {
 				Type   string `json:"type"`
 				Text   string `json:"text"`
 				Server string `json:"server"`
@@ -483,14 +509,18 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 			u.Turns++
 			if maxTurns > 0 && u.Turns > maxTurns {
 				u.Outcome = "error_max_turns"
-				return u, ErrTooManyTurns
+				return u, "", ErrTooManyTurns
 			}
 		case "turn.completed":
 			u.Outcome, u.Tokens = "success", ev.Usage
 		case "turn.failed":
-			u.Outcome, u.Summary = "failed", ev.Error.Message
+			terminalError = providerErrorText(ev.Error)
+			u.Outcome, u.Summary = "failed", terminalError
 		case "error":
 			lastError = ev.Message
+			if lastError == "" {
+				lastError = providerErrorText(ev.Error)
+			}
 		}
 	}
 	if u.Outcome == "failed" && u.Summary == "" {
@@ -499,7 +529,10 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 	if u.Outcome == "" && lastError != "" {
 		u.Summary = lastError
 	}
-	return u, scanner.Err()
+	if terminalError == "" && u.Outcome != "success" {
+		terminalError = lastError
+	}
+	return u, terminalError, scanner.Err()
 }
 
 // stamped is a JSON event with when it came, as its first field. Anything

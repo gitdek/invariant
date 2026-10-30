@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/verify"
@@ -25,8 +26,9 @@ type Review struct {
 // ReviewDriver has a second agent read project's conformance driver, or a Go
 // project's explorer, read only, and report what it skips, what it doesn't
 // read back, and whether the manifest's parameters are the sizes the code
-// takes. A project with neither gets no review.
-func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript string) (*Review, error) {
+// takes. A project with neither gets no review. The optional timeout applies
+// to the whole agent run, including provider retry waits.
+func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript string, timeout ...time.Duration) (*Review, error) {
 	p, err := project.Load(dir)
 	if err != nil {
 		return nil, err
@@ -69,7 +71,11 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 		return nil, err
 	}
 	defer f.Close()
-	u, err := backend.Run(ctx, Job{Workspace: ws, Prompt: reviewPrompt(p), ReadOnly: true, Transcript: f})
+	job := Job{Workspace: ws, Prompt: reviewPrompt(p), ReadOnly: true, Transcript: f}
+	if len(timeout) > 0 {
+		job.Timeout = timeout[0]
+	}
+	u, err := backend.Run(ctx, job)
 	if err != nil {
 		return nil, fmt.Errorf("the review: %w", err)
 	}

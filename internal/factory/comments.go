@@ -345,6 +345,11 @@ func fellBack(fb *synth.Fallback) string {
 func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error, m Marker, closing ...string) string {
 	var b strings.Builder
 	switch {
+	case synth.IsProviderUnavailable(runErr):
+		fmt.Fprintf(&b, "The agent's run couldn't finish: %v", runErr)
+		if pr != nil {
+			fmt.Fprintf(&b, "\n\nIts interrupted work is in draft pull request #%d.", pr.Number)
+		}
 	case res == nil || res.Final == nil:
 		fmt.Fprintf(&b, "I couldn't build the code: %v", runErr)
 	default:
@@ -363,6 +368,9 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
 	end := strings.Join(closing, "")
+	if synth.IsProviderUnavailable(runErr) {
+		end += "\n\nComment `/invariant retry` to try again when the provider is available."
+	}
 	const footer = "\n\nA person needs to look at this."
 	if end == "" {
 		b.WriteString(footer)

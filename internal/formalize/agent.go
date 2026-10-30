@@ -200,6 +200,21 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	usage.Backend = f.Backend.Name()
 	r := &Result{Usage: usage}
 	r.CheckRuns, _ = readRuns(checkLog)
+	var p *Proposal
+	defer func() {
+		if b, err := regular.ReadFile(ws, "proposal.json"); err == nil {
+			os.WriteFile(filepath.Join(out, "proposal.json"), b, 0o644)
+		}
+		if p != nil && p.ModuleText != "" {
+			os.WriteFile(filepath.Join(out, p.Module+".tla"), []byte(p.ModuleText), 0o644)
+		}
+		b, _ := json.MarshalIndent(r, "", "  ")
+		os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
+	}()
+	if synth.IsProviderUnavailable(runErr) {
+		r.Problem = fmt.Sprintf("the agent's run failed: %v", runErr)
+		return r, nil
+	}
 
 	p, report, err := Check(ctx, ws, f.Toolchain)
 	if p != nil {
@@ -224,16 +239,6 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			r.Problem = verify.Feedback(report)
 		}
 	}
-	for _, name := range []string{"proposal.json"} {
-		if b, err := regular.ReadFile(ws, name); err == nil {
-			os.WriteFile(filepath.Join(out, name), b, 0o644)
-		}
-	}
-	if p != nil && p.ModuleText != "" {
-		os.WriteFile(filepath.Join(out, p.Module+".tla"), []byte(p.ModuleText), 0o644)
-	}
-	b, _ := json.MarshalIndent(r, "", "  ")
-	os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
 	return r, nil
 }
 

@@ -1558,6 +1558,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if built.Error != "" {
 		runErr = errors.New(built.Error)
 	}
+	passed := res.Final.Passed && !synth.IsProviderUnavailable(runErr)
 	// The post and the pull request name the agent the record names (#179).
 	next.Spend, next.GateRuns, next.Agent = res.Spend(), len(res.GateRuns), built.Agent
 	if err := f.Repo.Fetch(ctx); err != nil {
@@ -1592,7 +1593,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	}
 	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
 	from, to := buildStep(ratified, stops, at)
-	if !res.Final.Passed {
+	if !passed {
 		to.kind, to.failure = protocol.KindFailed, FailGate
 	}
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
@@ -1607,12 +1608,12 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 			return err
 		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
-			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
+			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !passed,
 			Body: pullRequestBody(t, next, res, m.Proposal),
 		}); err != nil {
 			return err
 		}
-	} else if res.Final.Passed {
+	} else if passed {
 		if err := f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
@@ -1621,7 +1622,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
 		return err
 	}
-	if !res.Final.Passed {
+	if !passed {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
 			return err
 		}

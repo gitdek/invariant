@@ -48,9 +48,9 @@ type Job struct {
 	// a build's fallback run names one (D-0125); every first run leaves it
 	// empty, and thinks at the backend's own effort.
 	Effort string
-	// Timeout cuts the run off, counted from when it starts rather than
-	// from when it's asked for: a Codex run waits for its turn first
-	// (D-0138, D-0154), and the wait isn't the agent's time. Zero leaves
+	// Timeout cuts the run off from its first attempt. A Codex run's initial
+	// wait for its turn is excluded (D-0138, D-0154); provider retry waits
+	// and reacquiring the turn count against that same deadline. Zero leaves
 	// the run uncut.
 	Timeout time.Duration
 }
@@ -96,7 +96,7 @@ type Options struct {
 	Timeout   time.Duration
 	Toolchain toolchain.Toolchain
 	// FallbackEffort is the effort the agent runs at once more when the loop
-	// guard stops its first run (D-0125). Empty never runs it again.
+	// guard stops its first run (D-0125). Empty disables this fallback.
 	FallbackEffort string
 }
 
@@ -143,7 +143,7 @@ type Fallback struct {
 func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Duration, fallback string) (Usage, *Fallback, error) {
 	job.Timeout = timeout
 	usage, err := backend.Run(ctx, job)
-	if fallback == "" || !errors.Is(err, ErrThinkingLoop) {
+	if fallback == "" || IsProviderUnavailable(err) || !errors.Is(err, ErrThinkingLoop) {
 		return usage, nil, err
 	}
 	fb := &Fallback{Effort: fallback, Why: err.Error()}
@@ -235,6 +235,17 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	usage.Backend = o.Backend.Name()
 
 	r := &Result{Project: p.Manifest.Name, Usage: usage, Fallback: fallback}
+	if IsProviderUnavailable(runErr) {
+		// Files from an interrupted attempt are not a completed synthesis.
+		// Keep its run record and provider diagnostic without running a gate
+		// on those files or allowing a later staging error to hide the cause.
+		r.GateRuns, _ = readGateRuns(gateLog)
+		r.Seconds = time.Since(start).Seconds()
+		if err := writeJSON(filepath.Join(out, "synthesis.json"), r); err != nil {
+			return r, fmt.Errorf("the agent's run failed: %w; saving its result: %w", runErr, err)
+		}
+		return r, fmt.Errorf("the agent's run failed: %w", runErr)
+	}
 	if r.Tampered, err = Tampered(p, ws); err != nil {
 		return nil, err
 	}
