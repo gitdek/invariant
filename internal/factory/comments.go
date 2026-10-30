@@ -42,9 +42,39 @@ func post(title, body string, m Marker) string {
 	const short = "\n\n_Some detail is left out, because GitHub limits how long a comment can be._"
 	body = details.ReplaceAllString(body, "\n\n")
 	if room := maxComment - len(compose("")) - len(short); len(body) > room {
-		body = strings.ToValidUTF8(body[:max(room, 0)], "")
+		closing := closingInstructions(body, room)
+		if closing != "" {
+			body = strings.TrimSuffix(body, closing)
+			closing = "\n\n" + strings.TrimSpace(closing)
+		}
+		body = strings.ToValidUTF8(body[:min(len(body), max(room-len(closing), 0))], "")
+		body = strings.TrimSpace(body) + closing
 	}
 	return compose(strings.TrimSpace(body) + short)
+}
+
+// closingInstructions keeps the command lines and everything after them.
+// If their first line is too long, keep its command's whole sentence.
+func closingInstructions(body string, room int) string {
+	for rest := body; ; {
+		i := strings.Index(rest, "`/invariant ")
+		if i < 0 {
+			return ""
+		}
+		command := len(body) - len(rest) + i
+		rest = body[command+len("`/invariant "):]
+		start := strings.LastIndex(body[:command], "\n") + 1
+		if len(strings.TrimSpace(body[start:]))+2 > room {
+			for _, end := range []string{". ", "? ", "! "} {
+				if i := strings.LastIndex(body[:command], end); i >= start {
+					start = i + len(end)
+				}
+			}
+		}
+		if len(strings.TrimSpace(body[start:]))+2 <= room {
+			return body[start:]
+		}
+	}
 }
 
 // byline names the coding agent behind a post, as its marker records it
