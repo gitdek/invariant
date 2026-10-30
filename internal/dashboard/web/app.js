@@ -1404,6 +1404,13 @@
   // every post. Each card offers only what its issue is waiting for, and a
   // ratify or a retry asks first.
   const ACT = document.body.dataset.act || "";
+  // An Access refusal anywhere on the owner's page also removes its
+  // private live text, including a response still arriving from a poll.
+  async function actFetch(url, options) {
+    const r = await fetch(url, options);
+    if (r.status === 401 || r.status === 403) clearShellCommands(true);
+    return r;
+  }
   // A card on the public page links to the same card here, and the server
   // marks the page with its issue when it shows that issue. The page opens
   // scrolled to the card, highlighted, with its repository shown.
@@ -1477,7 +1484,7 @@
         batch.busy = true;
         renderInbox(state);
         try {
-          const r = await fetch("/act/api/ratify", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await actFetch("/act/api/ratify", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify({ ratify: sent.map(({ repo, issue, hash }) => ({ repo, issue, hash })) }) });
           // A refusal is words, and a batch GitHub stopped partway through
           // still says which went.
@@ -1513,7 +1520,7 @@
         a.busy = true;
         if (state) renderInbox(state);
         try {
-          const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await actFetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify({ repo, issue: Number(n), body: b.dataset.actBody }) });
           if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
           a.posted = (await r.json()).url || `https://github.com/${repo}/issues/${n}`;
@@ -1590,7 +1597,7 @@
         busy = true; paint();
         const repo = draft.repo || repos()[0];
         try {
-          const r = await fetch("/act/api/issue", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await actFetch("/act/api/issue", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify(draft.plan ? { repo, title: draft.title, body: draft.body, plan: true }
               : { repo, title: draft.title, body: draft.body, project: draft.project.trim(), language: draft.language,
                 code: draft.code.split(/[,\n]/).map((c) => c.trim()).filter(Boolean) }) });
@@ -1621,7 +1628,7 @@
     async function refresh() {
       if (!box || !ACT) return;
       try {
-        const r = await fetch("/act/api/untaken.json", { cache: "no-store" });
+        const r = await actFetch("/act/api/untaken.json", { cache: "no-store" });
         if (!r.ok) return;
         const next = await r.json(), js = JSON.stringify(next);
         if (js === seen) return;
@@ -1663,7 +1670,7 @@
         busy = k;
         paint();
         try {
-          const r = await fetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
+          const r = await actFetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
             body: JSON.stringify({ repo: u.repo, issue: u.number, body: "/invariant plan" }) });
           if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
           posted[k] = { u, url: (await r.json()).url || u.url };
@@ -1796,28 +1803,78 @@
   const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", list: "Listing files", build: "Building", git: "Using version control", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
   const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
   let live = null;
-  // The cards shown, by their step's repository, issue and since, so each
+  // The cards shown, by their step's repository, issue and run, so each
   // one is kept across reads and its dial and strip never start over. A
   // card holds its step, its elements, and what it last showed: how many
   // marks and checks, and the file it lit.
   const cards = new Map();
-  const cardKey = (l) => `${l.repo}#${l.issue}@${l.since}`;
+  const cardKey = (l) => JSON.stringify([l.repo, l.issue, l.since, l.doing, l.run || ""]);
   const kilo = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
 
+  // This choice belongs to this page alone. Reset even a checkbox a
+  // browser restores, and clear again before entering its back/forward cache.
+  const shellToggle = ACT ? $("#show-shell-commands") : null;
+  let shellEpoch = 0;
+  let liveReads = 0, liveAgain = 0, liveRequest = null;
+  if (shellToggle) {
+    shellToggle.checked = false;
+    shellToggle.addEventListener("change", () => {
+      clearShellCommands();
+      loadLive();
+    });
+    window.addEventListener("pagehide", () => clearShellCommands(true));
+    window.addEventListener("pageshow", (e) => {
+      if (e.persisted) {
+        clearShellCommands(true);
+        loadLive();
+      }
+    });
+  }
+
+  function clearShellCommands(turnOff = false) {
+    shellEpoch++;
+    if (turnOff && shellToggle) shellToggle.checked = false;
+    for (const l of live?.steps || []) delete l.commands;
+    for (const c of cards.values()) {
+      delete c.l?.commands;
+      const box = $(".shell-commands", c.el);
+      if (box) {
+        box.replaceChildren();
+        box.hidden = true;
+      }
+      c.commands = "";
+    }
+  }
+
   async function loadLive() {
+    const read = ++liveReads, epoch = shellEpoch;
+    const commands = !!shellToggle?.checked;
+    clearTimeout(liveAgain);
+    liveRequest?.abort();
+    liveRequest = new AbortController();
     let wait = 12000;
     try {
-      const r = await fetch("/api/live.json", { cache: "no-store" });
-      if (r.ok) {
-        live = await r.json();
-        renderLive();
-        if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+      const url = ACT ? `/act/api/live.json${commands ? "?commands=1" : ""}` : "/api/live.json";
+      const r = await (ACT ? actFetch : fetch)(url, { cache: "no-store", signal: liveRequest.signal });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const next = await r.json();
+      // Only the newest poll, under the current page-local choice, may
+      // replace the cards. Opting out invalidates even an already-read body.
+      if (read !== liveReads || epoch !== shellEpoch) return;
+      for (const l of next.steps || []) {
+        if (!commands || !shellToggle?.checked || l.ended) delete l.commands;
       }
-    } catch (e) {}
-    setTimeout(loadLive, wait);
+      live = next;
+      renderLive();
+      if ((live.steps || []).some((l) => !l.ended)) wait = 3000;
+    } catch (e) {
+      if (read === liveReads && ACT) clearShellCommands(true);
+    } finally {
+      if (read === liveReads) liveAgain = setTimeout(loadLive, wait);
+    }
   }
 
   // The steps to show: the ones running in the chosen repositories, or else
@@ -1846,6 +1903,8 @@
     for (const [key, c] of cards) {
       if (keys.includes(key)) continue;
       stripSize.unobserve(c.strip);
+      $(".shell-commands", c.el)?.replaceChildren();
+      delete c.l?.commands;
       c.el.remove();
       cards.delete(key);
     }
@@ -1854,6 +1913,7 @@
       if (!c) {
         const el = $("#live-card").content.firstElementChild.cloneNode(true);
         el.classList.add("arrive");
+        if (shellToggle) $(".fineprint", el).textContent = "Counts, times and file paths from the agent's transcript, read every few seconds while it works. Shell commands appear only when you enable them.";
         c = { key: keys[i], el, strip: $(".strip", el), marks: 0, runs: 0, lit: "" };
         cards.set(c.key, c);
         stripSize.observe(c.strip);
@@ -1893,6 +1953,8 @@
     put($(".legend", el), LIVE_KINDS.filter(([k]) => l.tools?.[k]).map(([k, word]) => `<span class="lg ${k}"><i></i>${word} ${nf.format(l.tools[k])}</span>`).join("")
       + (l.thinking || l.thinkingExact ? `<span class="lg think"><i></i>thinking ${thinking} tokens</span>` : ""));
 
+    renderShellCommands(c);
+
     put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
@@ -1907,6 +1969,41 @@
     tickCard(c, true);
     c.marks = (l.marks || []).length;
     c.runs = (l.runs || []).length;
+  }
+
+  function renderShellCommands(c) {
+    const box = $(".shell-commands", c.el);
+    if (!box) return;
+    if (!shellToggle?.checked || c.l.ended || !Array.isArray(c.l.commands)) {
+      box.replaceChildren();
+      box.hidden = true;
+      c.commands = "";
+      return;
+    }
+    const value = JSON.stringify(c.l.commands);
+    if (c.commands !== value) {
+      const fragment = document.createDocumentFragment();
+      for (const command of c.l.commands) {
+        const row = document.createElement("div"), meta = document.createElement("div"), text = document.createElement("pre");
+        row.className = "shell-command";
+        meta.className = "shell-command-meta";
+        meta.textContent = `${command.kind} · Started ${command.at}${command.until ? ` · Ended ${command.until}` : " · Running"}`;
+        // Commands are transcript data: preserve every character as inert
+        // text, without links, HTML, syntax interpretation or execution.
+        text.textContent = command.command;
+        row.append(meta, text);
+        fragment.append(row);
+      }
+      if (!c.l.commands.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "No shell commands in this step yet.";
+        fragment.append(empty);
+      }
+      box.replaceChildren(fragment);
+      c.commands = value;
+    }
+    box.hidden = false;
   }
 
   // liveTick moves every card's dial and strip's clock.

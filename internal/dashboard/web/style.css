@@ -829,6 +829,15 @@ footer p { margin: 0; max-width: 60em; }
 .stat .u { font-size: 12px; color: var(--ink3); }
 .strip { margin-top: 22px; width: 100%; overflow: hidden; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .strip svg { display: block; }
+.shell-command-control { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; font-size: 14px; color: var(--ink2); }
+.shell-command-control input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.shell-command-control label { cursor: pointer; }
+.shell-commands { margin-top: 14px; max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.shell-command { padding: 12px; }
+.shell-command + .shell-command { border-top: 1px solid var(--line); }
+.shell-command-meta { color: var(--ink2); font: 12px var(--sans); overflow-wrap: anywhere; }
+.shell-command pre { margin: 7px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.6 var(--mono); color: var(--ink); }
+.shell-commands .muted { margin: 0; padding: 12px; }
 .strip .grid { stroke: var(--line2); stroke-dasharray: 2 5; }
 .strip .tick { font: 500 10px var(--mono); fill: var(--ink3); text-anchor: middle; }
 .strip .think { fill: var(--agent); }

@@ -54,6 +54,7 @@ func (f *liveStepFixture) setDoing(t *testing.T, doing string) {
 	if doing != "" {
 		since := f.since
 		st.Issue, st.Doing, st.Since = 7, doing, &since
+		st.Steps = []Step{{Issue: 7, Doing: doing, Since: since, Run: "build-20260928-120000"}}
 	}
 	if err := WriteStatus(f.status, st); err != nil {
 		t.Fatal(err)
@@ -331,8 +332,8 @@ func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	build := Step{Issue: 7, Doing: "building", Since: f.since}
-	drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute)}
+	build := Step{Issue: 7, Doing: "building", Since: f.since, Run: "build-20260928-120000"}
+	drafting := Step{Issue: 9, Doing: "formalizing", Since: f.since.Add(5 * time.Minute), Run: "formalize-20260928-120500"}
 	idle := Step{Issue: 11, Since: f.since}
 
 	running(drafting, idle, build)

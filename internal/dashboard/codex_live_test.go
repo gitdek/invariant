@@ -20,7 +20,7 @@ import (
 func TestTheLiveViewReadsACodexRun(t *testing.T) {
 	f := newLiveStepFixture(t)
 	st := Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since, Every: 30, Limit: 9000,
-		Steps: []Step{{Issue: 7, Doing: "building", Since: f.since, Agent: "codex"}}}
+		Steps: []Step{{Issue: 7, Doing: "building", Since: f.since, Agent: "codex", Run: "build-20260928-120000"}}}
 	if err := WriteStatus(f.status, st); err != nil {
 		t.Fatal(err)
 	}

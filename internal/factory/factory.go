@@ -293,12 +293,14 @@ func (f *Factory) Poll(ctx context.Context) error {
 // Step is a step the watcher is running on an issue: what it's doing,
 // formalizing, answering, ratifying or building, or "" before it starts
 // one of those, and since when. Agent is the coding agent it runs, from
-// when its run starts (#179).
+// when its run starts (#179). Run is its output directory's opaque basename,
+// published after the directory exists and before its agent starts (#236).
 type Step struct {
 	Issue int
 	Doing string
 	Since time.Time
 	Agent string
+	Run   string
 }
 
 // running is the steps a watcher is running, one per issue (D-0113).
@@ -681,7 +683,6 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	}
 	f.logf("#%d: formalizing", n)
 	f.doing(n, "formalizing")
-	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "formalize-"+f.now().Format("20060102-150405"))
 	req := f.request(t, answers, previous)
 	// Once a writer asks for a plan of issues, the issue is a PRD: its draft
 	// is a plan of issues, read against the base branch as it is, whatever
@@ -772,7 +773,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// The draft's agent run is recorded before it starts, where every
 	// watcher sees it (D-0069). One recorded and never finished stopped
 	// partway, and only a writer's command starts another.
-	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req, out)
+	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req)
 	if err != nil {
 		return err
 	}
@@ -841,7 +842,7 @@ func draftStepName(cause Command) string {
 // recorded, or reading what a finished run left, whichever watcher ran it.
 // It returns nil for a run recorded and never finished. The run's record
 // and its result name the agent (#179).
-func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request, out string) (*formalize.Result, error) {
+func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request) (*formalize.Result, error) {
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -855,10 +856,14 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	if err := f.recovers(ctx, n, "start a draft's agent run", f.canStartRun(drafting(RunNone), recovery.Solve)); err != nil {
 		return nil, err
 	}
+	out, err := f.newRun(n, "formalize")
+	if err != nil {
+		return nil, err
+	}
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("a draft for #%d by %s", n, agent)); err != nil {
 		return nil, err
 	}
-	f.runsAgent(n, agent)
+	f.runsAgent(n, agent, out)
 	res, runErr := form.Formalize(ctx, req, out)
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped.
@@ -1387,8 +1392,8 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	}
 	defer f.Repo.RemoveWorktree(ctx, wt)
 	root := filepath.Join(wt, filepath.FromSlash(m.Project))
-	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "build-"+f.now().Format("20060102-150405"))
-	if err := os.MkdirAll(out, 0o755); err != nil {
+	out, err := f.newRun(n, "build")
+	if err != nil {
 		return "", "", nil, nil, err
 	}
 	// An agent run is an effect: only the lease's holder records and starts
@@ -1399,7 +1404,7 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of %s for #%d by %s", m.Project, n, agent)); err != nil {
 		return "", "", nil, nil, err
 	}
-	f.runsAgent(n, agent)
+	f.runsAgent(n, agent, out)
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := run.Builder.Build(ctx, root, out, amend)
 	// A watcher that lost the lease during the run drops it. The holder will
@@ -2009,25 +2014,36 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	return f.step(ctx, issue)
 }
 
-// doing records what the step on an issue starts doing, with no agent
-// running yet.
+// doing records what the step on an issue starts doing, with no agent or
+// run directory yet.
 func (f *Factory) doing(issue int, what string) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
-	if s, ok := f.running.steps[issue]; ok && s.Doing != what {
-		s.Doing, s.Since, s.Agent = what, f.now(), ""
+	if s, ok := f.running.steps[issue]; ok && (s.Doing != what || s.Run != "" || s.Agent != "") {
+		s.Doing, s.Since, s.Agent, s.Run = what, f.now(), "", ""
 		f.running.steps[issue] = s
 		f.tell()
 	}
 }
 
-// runsAgent records the coding agent the step on an issue runs, as its run
-// starts, so the watcher's status file names it (#179).
-func (f *Factory) runsAgent(issue int, agent string) {
+// newRun reserves a fresh output directory for one invocation, including
+// retries in the same second. Its basename has no timestamp semantics.
+func (f *Factory) newRun(issue int, kind string) (string, error) {
+	root := filepath.Join(f.Work, fmt.Sprintf("issue-%d", issue))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(root, kind+"-")
+}
+
+// runsAgent records the coding agent and its already-created output
+// directory before the run starts, so the watcher's status names both.
+func (f *Factory) runsAgent(issue int, agent, out string) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
-	if s, ok := f.running.steps[issue]; ok && s.Agent != agent {
-		s.Agent = agent
+	run := filepath.Base(out)
+	if s, ok := f.running.steps[issue]; ok && (s.Agent != agent || s.Run != run) {
+		s.Agent, s.Run = agent, run
 		f.running.steps[issue] = s
 		f.tell()
 	}
