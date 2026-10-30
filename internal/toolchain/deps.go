@@ -65,7 +65,7 @@ func DepsImage(ctx context.Context, root string) (tag, recipe string, err error)
 			return "", "", err
 		}
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "-q", "-t", tag, dir)
+	cmd := Docker(ctx, "build", "-q", "-t", tag, dir)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {

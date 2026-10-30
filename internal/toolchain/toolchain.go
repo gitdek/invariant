@@ -136,7 +136,7 @@ func PlumbingImage(ctx context.Context) (string, error) {
 	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
 		return tag, nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, "-")
+	cmd := Docker(ctx, "build", "-t", tag, "-")
 	cmd.Stdin = bytes.NewReader(PlumbingDockerfile)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -168,7 +168,7 @@ func NaginiImage(ctx context.Context) (string, error) {
 	if exec.CommandContext(ctx, "docker", "image", "inspect", tag).Run() == nil {
 		return tag, nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "build", "--platform", "linux/amd64", "-t", tag, "-")
+	cmd := Docker(ctx, "build", "--platform", "linux/amd64", "-t", tag, "-")
 	cmd.Stdin = bytes.NewReader(NaginiDockerfile)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
