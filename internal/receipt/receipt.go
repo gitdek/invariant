@@ -110,11 +110,24 @@ func Markdown(r *verify.Report) string {
 	if t.NaginiRecipe != "" {
 		fmt.Fprintf(&b, "| Nagini sandbox | recipe `%s` |\n", short(t.NaginiRecipe))
 	}
+	if d := t.PythonDependencies; d != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | `%s`, platform `%s`, recipe `%s` |\n", shortImage(d.Base), d.Platform, short(d.Recipe))
+	}
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | `%s`, with the package's locked dependencies: recipe `%s` |\n", shortImage(t.DepsBase), short(t.DepsRecipe))
 	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
+	}
+	if d := t.PythonDependencies; d != nil {
+		b.WriteString("\nPython application dependency inputs:\n\n| File | SHA-256 |\n| :-- | :-- |\n")
+		for _, input := range d.Inputs {
+			fmt.Fprintf(&b, "| `%s` | `%s` |\n", strings.ReplaceAll(input.Path, "|", "\\|"), short(input.SHA256))
+		}
+		b.WriteString("\nResolved Python application dependencies:\n\n| Package | Version | Artifact | SHA-256 |\n| :-- | :-- | :-- | :-- |\n")
+		for _, artifact := range d.Artifacts {
+			fmt.Fprintf(&b, "| `%s` | `%s` | `%s` | `%s` |\n", artifact.Name, artifact.Version, artifact.Filename, short(artifact.SHA256))
+		}
 	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()

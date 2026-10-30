@@ -495,9 +495,33 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with dependencies from requirements.txt when present. Files
+// marked # +nagini are proved separately with Nagini (D-0031); the rest are
+// tested against the model.
+type Python struct {
+	Image string
+
+	dependencies        *toolchain.PythonDependencies
+	environmentSelected bool
+}
+
+// withDependencies selects an application environment before checks start.
+// With requirements, Image holds the immutable ID used by both the ordinary
+// and larger-bound runs, and dependencies describes exactly that image.
+func (py Python) withDependencies(ctx context.Context, p *project.Project) (Python, error) {
+	if py.environmentSelected {
+		return py, nil
+	}
+	dependencies, err := toolchain.PythonDepsImage(ctx, p.Dir)
+	if err != nil {
+		return Python{}, fmt.Errorf("preparing Python application dependencies: %w", err)
+	}
+	py.dependencies, py.environmentSelected = dependencies, true
+	if dependencies != nil {
+		py.Image = dependencies.Image
+	}
+	return py, nil
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,6 +536,10 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	py, err := py.withDependencies(ctx, p)
+	if err != nil {
+		return Build{}, Evidence{}, err
+	}
 	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
 python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"

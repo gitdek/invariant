@@ -3,6 +3,7 @@
 package verify
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -174,6 +176,8 @@ type Toolchain struct {
 	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
 	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
 	Go           string `json:"go,omitempty"`
+
+	PythonDependencies *toolchain.PythonDependencies `json:"python_dependencies,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -254,7 +258,7 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 	if l := p.Lock; l.Ratified != nil {
 		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
 	}
-	switch lang.(type) {
+	switch l := lang.(type) {
 	case Go:
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
 	case TypeScript:
@@ -274,7 +278,13 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		}
 		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
+		l, err = l.withDependencies(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		lang = l
 		r.Toolchain.PythonImage = tc.PythonImage
+		r.Toolchain.PythonDependencies = l.dependencies
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 		}
@@ -670,12 +680,26 @@ func agree(d Design, e Exploration) Agreement {
 }
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
-// results and verifier pins. It leaves out timestamps, test timings, the Go
-// toolchain's patch version, where traces were written and the coding agent
-// that wrote the code, so a local run and a CI run of the same commit have
-// the same fingerprint.
+// results, verifier pins and resolved application dependencies. It leaves out
+// timestamps, test timings, the Go toolchain's patch version, local dependency
+// image IDs, where traces were written and the coding agent that wrote the
+// code. Local and CI runs agree for the same commit and effective environment.
 func Fingerprint(r Report) string {
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go, r.Agent = "", "", "", "", ""
+	if dependencies := r.Toolchain.PythonDependencies; dependencies != nil {
+		// Canonicalize a copy so hashing a receipt never changes its evidence.
+		canonical := *dependencies
+		canonical.Inputs = slices.Clone(dependencies.Inputs)
+		canonical.Artifacts = slices.Clone(dependencies.Artifacts)
+		slices.SortFunc(canonical.Inputs, func(a, b toolchain.PythonDependencyInput) int {
+			return cmp.Or(cmp.Compare(a.Path, b.Path), cmp.Compare(a.SHA256, b.SHA256))
+		})
+		slices.SortFunc(canonical.Artifacts, func(a, b toolchain.PythonDependencyArtifact) int {
+			return cmp.Or(cmp.Compare(a.Name, b.Name), cmp.Compare(a.Version, b.Version),
+				cmp.Compare(a.Filename, b.Filename), cmp.Compare(a.SHA256, b.SHA256))
+		})
+		r.Toolchain.PythonDependencies = &canonical
+	}
 	r.Bugs = append([]Bug(nil), r.Bugs...)
 	for i := range r.Bugs {
 		r.Bugs[i].Trace = ""
