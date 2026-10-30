@@ -23,8 +23,9 @@ import (
 	"github.com/gitdek/invariant/internal/toolchain"
 )
 
-// Report is everything one verification established. Receipts render it,
-// and every value in it comes from tool output or the lock file.
+// Report records checks, lock data and supplied component evidence, including
+// declared assumptions explicitly marked as unverified. Receipts render it;
+// supplied data does not attest that a tool ran or that an assumption holds.
 type Report struct {
 	Project  string `json:"project"`
 	Passed   bool   `json:"passed"`
@@ -52,8 +53,9 @@ type Report struct {
 	Agreement   *Agreement          `json:"agreement,omitempty"`
 	Conformance *conformance.Result `json:"conformance,omitempty"`
 	Code        *Code               `json:"code,omitempty"`
-	// Components attributes proofs to exact declarations in an explicit
-	// inventory. Legacy checks cannot establish coverage for these components.
+	// Components attributes proofs and assumptions independently to exact
+	// declarations in an explicit inventory. Legacy checks and assumptions
+	// cannot establish proof coverage for these components.
 	Components *ComponentEvidence `json:"components,omitempty"`
 	// Larger is agreement again, one size past the bounds, for code whose
 	// explorer names its bounds (D-0068).
