@@ -1368,10 +1368,30 @@ func buildStepName(ratified Post) string {
 // code it wrote: what synthesis reported, what went wrong, if anything, and
 // the agent that built it (#179).
 type builtResult struct {
-	Result   *synth.Result         `json:"result"`
-	Plumbing *plumbing.BuildResult `json:"plumbing,omitempty"` // a plan's build, in place of a project's (D-0105)
-	Error    string                `json:"error,omitempty"`
-	Agent    string                `json:"agent,omitempty"`
+	Result              *synth.Result         `json:"result"`
+	Plumbing            *plumbing.BuildResult `json:"plumbing,omitempty"` // a plan's build, in place of a project's (D-0105)
+	Error               string                `json:"error,omitempty"`
+	Agent               string                `json:"agent,omitempty"`
+	ProviderUnavailable bool                  `json:"provider_unavailable,omitempty"`
+}
+
+// providerUnavailable also recognizes the backend's diagnostic in a saved
+// error: records and localError retain its text, not its Go error type.
+func providerUnavailable(err error) bool {
+	return synth.IsProviderUnavailable(err) || err != nil && strings.Contains(err.Error(), "provider unavailable")
+}
+
+// finishBuild saves the outcome before posting it, including an exhausted
+// provider's failure, so a restarted watcher neither reruns nor publishes it.
+func (f *Factory) finishBuild(ctx context.Context, n int, step, code string, saved builtResult) (string, error) {
+	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, saved.Agent), code)
+	if err != nil {
+		return "", err
+	}
+	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
+		return "", err
+	}
+	return result, f.Repo.Finish(ctx, n, step, result)
 }
 
 // runBuild records the build's agent run, runs it, and commits the code it
@@ -1419,9 +1439,30 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	}
 	// Anyone can read the run's error and review, in a post or the record, so
 	// they name the paths on this machine as localPaths does.
+	providerFailed := providerUnavailable(runErr) || res != nil && res.ProviderFailure != ""
 	runErr = localError(runErr, f.Work)
 	if res != nil && res.Review != nil {
 		res.Review.Text = localPaths(res.Review.Text, f.Work)
+	}
+	if res != nil {
+		res.ProviderFailure = localPaths(res.ProviderFailure, f.Work)
+	}
+	if providerFailed {
+		if runErr == nil {
+			runErr = errors.New(res.ProviderFailure)
+		}
+		code, err := f.Repo.RevParse(ctx, m.Branch)
+		if err != nil {
+			return "", "", nil, nil, err
+		}
+		saved := builtResult{Agent: agent, Error: runErr.Error(), ProviderUnavailable: true}
+		if res != nil {
+			kept := *res
+			kept.Dir = f.workRelative(res.Dir)
+			saved.Result = &kept
+		}
+		result, err := f.finishBuild(ctx, n, step, code, saved)
+		return result, agent, res, runErr, err
 	}
 	if res == nil || res.Final == nil {
 		return "", agent, res, runErr, nil
@@ -1467,17 +1508,8 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
-	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
-	if err != nil {
-		return "", "", nil, nil, err
-	}
-	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
-		return "", "", nil, nil, err
-	}
-	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
-		return "", "", nil, nil, err
-	}
-	return result, agent, res, runErr, nil
+	result, err := f.finishBuild(ctx, n, step, code, saved)
+	return result, agent, res, runErr, err
 }
 
 // workRelative names dir by where it is under the factory's work directory,
@@ -1546,6 +1578,23 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	var built builtResult
 	if err := f.loadResult(ctx, result, &built); err != nil {
 		return err
+	}
+	if built.ProviderUnavailable || providerUnavailable(errors.New(built.Error)) {
+		// The provider never finished the build or review. Keep its saved
+		// diagnostic, and use the existing no-PR retry of the same ratification.
+		next.Kind, next.Failure, next.PR, next.Agent = KindFailed, FailStopped, 0, built.Agent
+		if res := built.Result; res != nil {
+			next.Spend, next.GateRuns = res.Spend(), len(res.GateRuns)
+		}
+		if res := built.Plumbing; res != nil {
+			next.Spend, next.GateRuns = res.Spend, len(res.TestRuns)
+		}
+		from, to := buildStep(ratified, stops, pullRequest{})
+		to.kind, to.failure, to.stops = protocol.KindFailed, FailStopped, stops+1
+		if err := f.allowed(ctx, n, "say the provider is unavailable", from, to); err != nil {
+			return err
+		}
+		return f.say(ctx, n, providerFailedComment(errors.New(built.Error), next), LabelHumanReview)
 	}
 	if built.Plumbing != nil {
 		return f.publishPlan(ctx, t, ratified, result, built, next, stops)

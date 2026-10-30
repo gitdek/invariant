@@ -104,11 +104,20 @@ func (s Synthesis) Build(ctx context.Context, dir, out string, amend bool) (*syn
 	}
 	// A second agent reads the driver, with fresh context, and the factory
 	// posts what it says with the pull request (D-0082, D-0086). A review
-	// that fails to run takes nothing away from the build.
-	if review, err := synth.ReviewDriver(ctx, o.Backend, res.Dir, synth.ReviewTranscript(out)); err == nil {
+	// that fails ordinarily takes nothing away from the build. Provider
+	// exhaustion leaves the build unfinished until a writer retries it.
+	if review, err := synth.ReviewDriver(ctx, o.Backend, res.Dir, synth.ReviewTranscript(out), o.Timeout); err == nil {
 		res.Review = review
 	} else {
-		res.Review = &synth.Review{Text: "The review didn't run: " + err.Error()}
+		res.Review = review
+		if res.Review == nil {
+			res.Review = &synth.Review{}
+		}
+		res.Review.Text = "The review didn't run: " + err.Error()
+		if synth.IsProviderUnavailable(err) {
+			res.ProviderFailure = err.Error()
+			return res, err
+		}
 	}
 	return res, nil
 }

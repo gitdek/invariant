@@ -327,6 +327,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 	ratified := fs.String("ratified", "", "the original project, whose protected files every gate run uses")
 	formal := fs.Bool("formalize", false, "serve the check tool to a formalizing agent, instead of the gate")
 	maxRuns := fs.Int("max-runs", 4, "the most gate runs to allow")
+	allowance := os.Getenv("INVARIANT_TOOL_ALLOWANCE")
 	logPath := fs.String("log", "", "append a line per gate run to this file")
 	graph := fs.Bool("decisions", false, "serve the decision graph's tools for the checkout at -C")
 	dir := fs.String("C", ".", "with -decisions: the checkout")
@@ -342,7 +343,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return decisionsMCP(ctx, *dir, *storePath, *write)
 	}
 	if *issues && fs.NArg() == 1 {
-		server := mcp.Server{Name: "invariant", Version: "0.6", Tools: []mcp.Tool{issuesTool(fs.Arg(0), *maxRuns, *logPath)}}
+		server := mcp.Server{Name: "invariant", Version: "0.6", Tools: []mcp.Tool{issuesTool(fs.Arg(0), *maxRuns, *logPath, allowance)}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 1
@@ -355,13 +356,13 @@ func mcpCmd(ctx context.Context, args []string) int {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
 		}
-		tool := planTool(fs.Arg(0), sb, *maxRuns, *logPath)
+		tool := planTool(fs.Arg(0), sb, *maxRuns, *logPath, allowance)
 		if *pipes {
 			if *ratified == "" || *issue == 0 {
 				fmt.Fprintln(os.Stderr, "usage: invariant mcp -plumbing -ratified CHECKOUT -issue N [-max-runs N] [-log FILE] [-cache DIR] WORKSPACE")
 				return 2
 			}
-			tool = testTool(*ratified, *issue, fs.Arg(0), sb, *maxRuns, *logPath)
+			tool = testTool(*ratified, *issue, fs.Arg(0), sb, *maxRuns, *logPath, allowance)
 		}
 		server := mcp.Server{Name: "invariant", Version: "0.5", Tools: []mcp.Tool{tool}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
@@ -381,7 +382,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	if *formal {
-		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath)}}
+		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath, allowance)}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 1
@@ -393,17 +394,20 @@ func mcpCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	runs := 0
+	next := toolRuns(*maxRuns, []string{allowance})
 	gate := mcp.Tool{
 		Name: "gate",
 		Description: fmt.Sprintf("Run every check of Invariant's gate on your model and code. It reports what failed, "+
 			"with TLC counterexamples and verifier errors. You have %d runs in total.", *maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= *maxRuns {
+			runs, err := next("gate")
+			if errors.Is(err, synth.ErrToolLimit) {
 				return fmt.Sprintf("No gate runs left: you've used all %d.", *maxRuns), true
 			}
-			runs++
+			if err != nil {
+				return "The gate couldn't count this call: " + err.Error(), true
+			}
 			dir, err := os.MkdirTemp("", "invariant-gate-")
 			if err != nil {
 				return "The gate couldn't start: " + err.Error(), true
@@ -451,18 +455,21 @@ func sandbox(ctx context.Context, cache string) (plumbing.Sandbox, error) {
 // planTool checks the plan an agent drafts for a plumbing issue (D-0105):
 // it holds together, and its acceptance tests fail on the code as it is,
 // or its plan of issues holds together.
-func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string, allowance ...string) mcp.Tool {
+	next := toolRuns(maxRuns, allowance)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Check the plan in plan.json and its acceptance tests under tests/ against the repository in repo/: "+
 			"the plan holds together, and every acceptance test fails on the code as it is. Or check the plan of issues in issues.json against the plan-of-issues rules. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := next("check")
+			if errors.Is(err, synth.ErrToolLimit) {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
-			runs++
+			if err != nil {
+				return "The check couldn't count this call: " + err.Error(), true
+			}
 			if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
 				if _, err := os.Stat(filepath.Join(ws, "issues.json")); err == nil {
 					return checkIssues(ws, runs, maxRuns, logPath), false
@@ -490,18 +497,21 @@ func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.T
 
 // issuesTool checks the plan of issues an agent drafts for a PRD (#112): it
 // holds together as a plan a person can ratify.
-func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+func issuesTool(ws string, maxRuns int, logPath string, allowance ...string) mcp.Tool {
+	next := toolRuns(maxRuns, allowance)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Check the plan of issues in issues.json: it has a name, a summary and 1 to %d issues, each with a title and a whole body that's "+
 			"modeled, with a Project: line, or plumbing, with a Kind: plumbing line, and carries no /invariant command. You have %d checks in total.", formalize.MaxIssues, maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(_ context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := next("check")
+			if errors.Is(err, synth.ErrToolLimit) {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
-			runs++
+			if err != nil {
+				return "The check couldn't count this call: " + err.Error(), true
+			}
 			if _, err := os.Stat(filepath.Join(ws, "issues.json")); err != nil {
 				if _, err := os.Stat(filepath.Join(ws, "proposal.json")); err == nil {
 					return fmt.Sprintf("There's no issues.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
@@ -532,18 +542,21 @@ func checkIssues(ws string, run, maxRuns int, logPath string) string {
 // testTool runs a plumbing build's checks for its agent: the ratified plan
 // and its acceptance tests from the checkout at root, and the agent's
 // changes to the files the plan names, in the sandbox.
-func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, logPath string, allowance ...string) mcp.Tool {
+	next := toolRuns(maxRuns, allowance)
 	return mcp.Tool{
 		Name: "test",
 		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, "+
 			"in a sandbox with no network. You have %d runs in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := next("test")
+			if errors.Is(err, synth.ErrToolLimit) {
 				return fmt.Sprintf("No test runs left: you've used all %d.", maxRuns), true
 			}
-			runs++
+			if err != nil {
+				return "The test couldn't count this call: " + err.Error(), true
+			}
 			lock, err := plumbing.ReadLockFile(root, n)
 			if err != nil {
 				return "The ratified plan can't be read: " + err.Error(), true
@@ -569,18 +582,21 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 }
 
 // checkTool runs the gate's model checks on a formalizing agent's draft.
-func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) mcp.Tool {
-	runs := 0
+func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, allowance ...string) mcp.Tool {
+	next := toolRuns(maxRuns, allowance)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
 			"the witnesses and the known bugs. It reports what failed, with counterexamples. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
-			if runs >= maxRuns {
+			runs, err := next("check")
+			if errors.Is(err, synth.ErrToolLimit) {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
-			runs++
+			if err != nil {
+				return "The check couldn't count this call: " + err.Error(), true
+			}
 			record := func(passed bool, failed ...string) {
 				if logPath != "" {
 					synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: passed, Failed: failed, At: time.Now().UTC().Format(time.RFC3339)})
@@ -599,6 +615,22 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) m
 			record(r.Passed, verify.Failed(r)...)
 			return verify.Feedback(r) + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
 		},
+	}
+}
+
+// toolRuns keeps manual MCP sessions bounded too. Agent runs pass the
+// trusted allowance file, so every replacement server draws from it.
+func toolRuns(maxRuns int, allowance []string) func(string) (int, error) {
+	runs := 0
+	return func(tool string) (int, error) {
+		if len(allowance) > 0 && allowance[0] != "" {
+			return synth.TakeToolRun(allowance[0], tool)
+		}
+		if runs >= maxRuns {
+			return runs, synth.ErrToolLimit
+		}
+		runs++
+		return runs, nil
 	}
 }
 

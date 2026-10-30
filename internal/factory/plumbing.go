@@ -233,11 +233,27 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	// As for a project, the run's error, summary and review name the paths on
 	// this machine as localPaths does. The summary quotes the agent run's
 	// error.
+	providerFailed := providerUnavailable(runErr) || res != nil && res.ProviderFailure != ""
 	runErr = localError(runErr, f.Work)
+	if res != nil {
+		res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
+		res.ProviderFailure = localPaths(res.ProviderFailure, f.Work)
+	}
+	if providerFailed {
+		if runErr == nil {
+			runErr = errors.New(res.ProviderFailure)
+		}
+		code, err := f.Repo.RevParse(ctx, m.Branch)
+		if err != nil {
+			return "", "", nil, nil, err
+		}
+		saved := builtResult{Plumbing: res, Agent: agent, Error: runErr.Error(), ProviderUnavailable: true}
+		result, err := f.finishBuild(ctx, n, step, code, saved)
+		return result, agent, res, runErr, err
+	}
 	if res == nil {
 		return "", agent, nil, runErr, nil
 	}
-	res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
 	verdict := "It passed every test, and the review approves it."
 	switch {
 	case !res.Passed:
@@ -257,17 +273,8 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if runErr != nil {
 		saved.Error = runErr.Error()
 	}
-	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
-	if err != nil {
-		return "", "", nil, nil, err
-	}
-	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
-		return "", "", nil, nil, err
-	}
-	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
-		return "", "", nil, nil, err
-	}
-	return result, agent, res, runErr, nil
+	result, err := f.finishBuild(ctx, n, step, code, saved)
+	return result, agent, res, runErr, err
 }
 
 // publishPlan takes a finished plan build to its post, as publish does for

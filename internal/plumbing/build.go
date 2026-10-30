@@ -45,6 +45,9 @@ type BuildResult struct {
 	// Fallback says the agent ran once more, when the loop guard stopped its
 	// first run (D-0125). Usage is the second run's.
 	Fallback *synth.Fallback `json:"fallback,omitempty"`
+	// ProviderFailure keeps an unfinished build or review distinct from
+	// failing checks, including after the factory reloads the result.
+	ProviderFailure string `json:"provider_failure,omitempty"`
 }
 
 // Build implements issue n's ratified plan in the checkout at root, which
@@ -88,6 +91,14 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 	usage.Backend = b.Backend.Name()
 	r := &BuildResult{Usage: usage, Spend: usage.CostUSD, Tests: len(plan.Tests), Fallback: fallback}
 	r.TestRuns, _ = readRuns(testLog)
+	defer func() {
+		b2, _ := json.MarshalIndent(r, "", "  ")
+		os.WriteFile(filepath.Join(out, "build.json"), append(b2, '\n'), 0o644)
+	}()
+	if synth.IsProviderUnavailable(runErr) {
+		r.ProviderFailure, r.Summary = runErr.Error(), runErr.Error()
+		return r, nil
+	}
 	if r.Changes, err = Diff(ctx, root, ws, plan); err != nil {
 		return nil, err
 	}
@@ -121,10 +132,11 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (*Bu
 		r.Review, r.Approved, err = b.review(ctx, root, n, plan, r, out)
 		if err != nil {
 			r.Review = "The review didn't run: " + err.Error()
+			if synth.IsProviderUnavailable(err) {
+				r.ProviderFailure = err.Error()
+			}
 		}
 	}
-	b2, _ := json.MarshalIndent(r, "", "  ")
-	os.WriteFile(filepath.Join(out, "build.json"), append(b2, '\n'), 0o644)
 	return r, nil
 }
 

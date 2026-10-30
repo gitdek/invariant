@@ -18,7 +18,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gitdek/invariant/internal/project"
@@ -48,11 +50,11 @@ type Job struct {
 	// a build's fallback run names one (D-0125); every first run leaves it
 	// empty, and thinks at the backend's own effort.
 	Effort string
-	// Timeout cuts the run off, counted from when it starts rather than
-	// from when it's asked for: a Codex run waits for its turn first
-	// (D-0138, D-0154), and the wait isn't the agent's time. Zero leaves
-	// the run uncut.
-	Timeout time.Duration
+	// Timeout starts at the first attempt's turn (D-0138, D-0154). Provider
+	// waits and subsequent turn acquisition spend that same deadline; only
+	// the initial turn wait is free. Zero leaves the run uncut.
+	Timeout      time.Duration
+	allowanceDir string
 }
 
 // Usage is how the agent's run went, by the agent's own account.
@@ -115,6 +117,9 @@ type Result struct {
 	// Fallback says the agent ran once more, when the loop guard stopped its
 	// first run (D-0125). Usage is the second run's.
 	Fallback *Fallback `json:"fallback,omitempty"`
+	// ProviderFailure records why synthesis did not finish, independently of
+	// any files or checks left by an interrupted attempt.
+	ProviderFailure string `json:"provider_failure,omitempty"`
 }
 
 // Spend is the agents' estimated cost for the build: synthesis, and the
@@ -158,6 +163,174 @@ func within(ctx context.Context, job Job) (context.Context, context.CancelFunc) 
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, job.Timeout)
+}
+
+// providerAllowance belongs to a Run, not an MCP process. Its file is outside
+// the workspace and denied to both agents. A server charges a call before
+// starting work, so neither a lost event nor a restarted server renews it.
+type providerAllowance struct {
+	dir     string
+	file    string
+	counted map[string]int
+}
+
+type toolAllowance struct {
+	Limit int            `json:"limit"`
+	Used  int            `json:"used"`
+	Calls map[string]int `json:"calls"`
+}
+
+func newProviderAllowance(job Job) (Job, *providerAllowance, error) {
+	if job.ReadOnly || len(job.GateServer) < 2 || job.GateServer[1] != "mcp" {
+		return job, nil, nil
+	}
+	limit := 4
+	for i, arg := range job.GateServer[2:] {
+		arg = strings.TrimLeft(arg, "-")
+		var value string
+		if arg == "max-runs" && i+3 < len(job.GateServer) {
+			value = job.GateServer[i+3]
+		} else if strings.HasPrefix(arg, "max-runs=") {
+			value = strings.TrimPrefix(arg, "max-runs=")
+		}
+		if value != "" {
+			var err error
+			limit, err = strconv.Atoi(value)
+			if err != nil {
+				return job, nil, fmt.Errorf("the tool call allowance: %w", err)
+			}
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return job, nil, err
+	}
+	dir, err := os.MkdirTemp(home, ".invariant-allowance-")
+	if err != nil {
+		return job, nil, err
+	}
+	a := &providerAllowance{dir: dir, file: filepath.Join(dir, "calls.json")}
+	if err := writeJSON(a.file, toolAllowance{Limit: limit, Calls: map[string]int{}}); err != nil {
+		a.Close()
+		return job, nil, err
+	}
+	job.allowanceDir = dir
+	return job, a, nil
+}
+
+// The launcher passes this only to the CLI and its MCP children. Codex's
+// commands inherit the core environment; Claude Code has no shell.
+func providerAllowanceEnv(job Job) string {
+	file := ""
+	if job.allowanceDir != "" {
+		file = filepath.Join(job.allowanceDir, "calls.json")
+	}
+	return "INVARIANT_TOOL_ALLOWANCE=" + file
+}
+
+func (a *providerAllowance) Close() {
+	if a != nil {
+		os.RemoveAll(a.dir)
+	}
+}
+
+func (a *providerAllowance) read() (toolAllowance, error) {
+	var state toolAllowance
+	f, err := os.Open(a.file)
+	if err != nil {
+		return state, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		return state, err
+	}
+	err = json.NewDecoder(f).Decode(&state)
+	return state, err
+}
+
+// ErrToolLimit means the run has spent its original gate, check or test
+// allowance, including calls whose result never reached the agent.
+var ErrToolLimit = errors.New("the tool call limit is exhausted")
+
+// TakeToolRun reserves one call in the run's trusted allowance. The update
+// reaches disk before the caller starts work, and a corrupt or missing file
+// fails closed. The lock also covers concurrent or overlapping MCP servers.
+func TakeToolRun(file, tool string) (int, error) {
+	f, err := os.OpenFile(file, os.O_RDWR, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return 0, err
+	}
+	var a toolAllowance
+	if err := json.NewDecoder(f).Decode(&a); err != nil {
+		return 0, err
+	}
+	if a.Calls == nil {
+		a.Calls = map[string]int{}
+	}
+	a.Calls[tool]++
+	allowed := a.Used < a.Limit
+	if allowed {
+		a.Used++
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	if err := f.Truncate(0); err != nil {
+		return 0, err
+	}
+	if err := json.NewEncoder(f).Encode(a); err != nil {
+		return 0, err
+	}
+	if err := f.Sync(); err != nil {
+		return 0, err
+	}
+	if !allowed {
+		return a.Used, ErrToolLimit
+	}
+	return a.Used, nil
+}
+
+func (a *providerAllowance) Limit() error {
+	if a == nil {
+		return nil
+	}
+	state, err := a.read()
+	if err != nil {
+		return fmt.Errorf("reading the tool call allowance: %w", err)
+	}
+	if state.Used >= state.Limit {
+		return ErrToolLimit
+	}
+	return nil
+}
+
+func (a *providerAllowance) Count(u Usage) Usage {
+	if a == nil {
+		return u
+	}
+	state, err := a.read()
+	if err != nil {
+		return u
+	}
+	if u.ToolCalls == nil {
+		u.ToolCalls = map[string]int{}
+	}
+	for tool, calls := range state.Calls {
+		name := "mcp__invariant__" + tool
+		delta := calls - a.counted[tool]
+		if delta > u.ToolCalls[name] {
+			if u.Backend == "codex" {
+				u.Turns += delta - u.ToolCalls[name]
+			}
+			u.ToolCalls[name] = delta
+		}
+	}
+	a.counted = state.Calls
+	return u
 }
 
 // Synthesize runs one synthesis. The result lands in Out/result as a
@@ -235,6 +408,15 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	usage.Backend = o.Backend.Name()
 
 	r := &Result{Project: p.Manifest.Name, Usage: usage, Fallback: fallback}
+	if IsProviderUnavailable(runErr) {
+		r.ProviderFailure = runErr.Error()
+		r.GateRuns, _ = readGateRuns(gateLog)
+		r.Seconds = time.Since(start).Seconds()
+		if err := writeJSON(filepath.Join(out, "synthesis.json"), r); err != nil {
+			return r, fmt.Errorf("the agent's run failed: %w; saving its result: %w", runErr, err)
+		}
+		return r, fmt.Errorf("the agent's run failed: %w", runErr)
+	}
 	if r.Tampered, err = Tampered(p, ws); err != nil {
 		return nil, err
 	}

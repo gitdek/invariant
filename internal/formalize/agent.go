@@ -200,6 +200,12 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	usage.Backend = f.Backend.Name()
 	r := &Result{Usage: usage}
 	r.CheckRuns, _ = readRuns(checkLog)
+	if synth.IsProviderUnavailable(runErr) {
+		r.Problem = runErr.Error()
+		b, _ := json.MarshalIndent(r, "", "  ")
+		os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
+		return r, nil
+	}
 
 	p, report, err := Check(ctx, ws, f.Toolchain)
 	if p != nil {

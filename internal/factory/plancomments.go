@@ -84,6 +84,9 @@ func retriedComment(pr int, trusted []string, m Marker) string {
 }
 
 func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr error, m Marker) string {
+	if providerUnavailable(runErr) {
+		return providerFailedComment(runErr, m)
+	}
 	var b strings.Builder
 	switch {
 	case res == nil:

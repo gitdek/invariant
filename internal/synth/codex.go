@@ -60,7 +60,15 @@ type Codex struct {
 	Reads []string
 	// GoModCache is Go's module cache, which its commands read to build Go
 	// without the network.
-	GoModCache string
+	GoModCache   string
+	providerWait func(context.Context, time.Duration) error
+}
+
+// WithProviderWait returns this backend with an instance-local retry waiter.
+// A nil waiter restores the cancellable one-, two- and four-minute waits.
+func (c Codex) WithProviderWait(wait func(context.Context, time.Duration) error) Backend {
+	c.providerWait = wait
+	return c
 }
 
 // codexTurn lets one of this process's Codex runs go at a time (D-0138).
@@ -120,7 +128,7 @@ func (c Codex) lockHome(ctx context.Context) (*os.File, error) {
 // agent's workspace is, is denied too, so a run reads no other's. Codex's
 // minimal files include the shared temporary directories, /tmp among them,
 // which its commands may also write.
-func (c Codex) profile(readOnly bool) []string {
+func (c Codex) profile(readOnly bool, denied ...string) []string {
 	base, fs := ":workspace", []string{`":root"="deny"`, `":minimal"="read"`, `":tmpdir"="deny"`}
 	if readOnly {
 		// The read-only profile reads everything, so once everything is
@@ -129,6 +137,11 @@ func (c Codex) profile(readOnly bool) []string {
 	}
 	for _, p := range c.reads() {
 		fs = append(fs, tomlString(p)+`="read"`)
+	}
+	for _, p := range denied {
+		if p != "" {
+			fs = append(fs, tomlString(p)+`="deny"`)
+		}
 	}
 	return []string{
 		"-c", `default_permissions="invariant"`,
@@ -211,7 +224,7 @@ func (c Codex) args(job Job, tmp string) ([]string, error) {
 		"-c", `shell_environment_policy.inherit="core"`,
 		"-c", c.commandEnv(tmp),
 	)
-	args = append(args, c.profile(job.ReadOnly)...)
+	args = append(args, c.profile(job.ReadOnly, job.allowanceDir)...)
 	if !job.ReadOnly {
 		if len(job.GateServer) == 0 {
 			return nil, errors.New("codex needs Invariant's MCP server for this job")
@@ -277,11 +290,34 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if c.Home == "" {
 		return Usage{}, errors.New("codex needs a home of its own, where its sign-in lives")
 	}
-	release, err := c.turn(ctx)
+	job, allowance, err := newProviderAllowance(job)
 	if err != nil {
 		return Usage{}, err
 	}
-	defer release()
+	defer allowance.Close()
+	usage, err := runProvider(ctx, job, c.providerWait, c.turn, func(ctx context.Context, used Usage) (Usage, error) {
+		remaining := c
+		if c.MaxTurns > 0 {
+			remaining.MaxTurns -= used.Turns
+		}
+		usage, err := remaining.run(ctx, job)
+		usage = allowance.Count(usage)
+		if err == nil && remaining.MaxTurns > 0 && usage.Turns > remaining.MaxTurns {
+			usage.Outcome = "error_max_turns"
+			err = ErrTooManyTurns
+		}
+		return usage, err
+	}, func(used Usage) error {
+		if c.MaxTurns > 0 && used.Turns >= c.MaxTurns {
+			return ErrTooManyTurns
+		}
+		return allowance.Limit()
+	})
+	return usage, err
+}
+
+// run is one CLI attempt. Its caller owns the turn and the original deadline.
+func (c Codex) run(ctx context.Context, job Job) (Usage, error) {
 	// The agent's commands get a temporary directory of the run's own, which
 	// holds their Go build cache, where the profile lets them write. In the
 	// workspace, it would count as the agent's work.
@@ -294,12 +330,11 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	// The run's time starts now that its turn has come.
-	ctx, cancel := within(ctx, job)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	cmd.Dir = job.Workspace
-	cmd.Env = c.codexEnv()
+	cmd.Env = append(c.codexEnv(), providerAllowanceEnv(job))
 	// Codex's agent has a shell, so stopping the run stops everything it
 	// started, not codex alone.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -322,7 +357,7 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 		start, _ := json.Marshal(map[string]string{"type": "invariant.workspace", "cwd": job.Workspace})
 		job.Transcript.Write(append(stamped(start, time.Now()), '\n'))
 	}
-	usage, readErr := ReadCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
+	usage, diagnostic, readErr := readCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
 	if readErr != nil {
 		cancel() // stop the agent, rather than wait for it
 	}
@@ -332,13 +367,17 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if !job.ReadOnly && usage.GateTool == "" && strings.Contains(stderr.String(), "MCP servers failed") {
 		usage.GateTool = "failed"
 	}
+	if diagnostic == "" {
+		diagnostic = lastLines(stderr.String(), 20)
+	}
 	switch {
 	case readErr != nil:
 		return usage, readErr
 	case usage.Outcome == "":
-		return usage, fmt.Errorf("codex ended without finishing its turn: %v\n%s", waitErr, lastLines(stderr.String(), 20))
+		err := fmt.Errorf("codex ended without finishing its turn: %v\n%s", waitErr, diagnostic)
+		return usage, providerError(err, diagnostic)
 	case usage.Outcome != "success":
-		return usage, fmt.Errorf("codex stopped: %s", usage.Summary)
+		return usage, providerError(fmt.Errorf("codex stopped: %s", diagnostic), diagnostic)
 	}
 	return usage, nil
 }
@@ -431,6 +470,13 @@ var ErrTooManyTurns = errors.New("the agent took more steps than its cap allows,
 // says the run has Invariant's server, which Codex must start before the
 // agent's turn does.
 func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, error) {
+	usage, _, err := readCodexStream(r, transcript, maxTurns, gated)
+	return usage, err
+}
+
+// The separate diagnostic prevents ordinary messages and tool output from
+// being interpreted as a provider failure when a CLI exits without a result.
+func readCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, string, error) {
 	u := Usage{ToolCalls: map[string]int{}}
 	var lastError string
 	scanner := bufio.NewScanner(r)
@@ -483,7 +529,7 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 			u.Turns++
 			if maxTurns > 0 && u.Turns > maxTurns {
 				u.Outcome = "error_max_turns"
-				return u, ErrTooManyTurns
+				return u, "", ErrTooManyTurns
 			}
 		case "turn.completed":
 			u.Outcome, u.Tokens = "success", ev.Usage
@@ -499,7 +545,13 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 	if u.Outcome == "" && lastError != "" {
 		u.Summary = lastError
 	}
-	return u, scanner.Err()
+	diagnostic := ""
+	if u.Outcome == "failed" {
+		diagnostic = u.Summary
+	} else if u.Outcome == "" {
+		diagnostic = lastError
+	}
+	return u, diagnostic, scanner.Err()
 }
 
 // stamped is a JSON event with when it came, as its first field. Anything

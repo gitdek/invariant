@@ -343,6 +343,9 @@ func fellBack(fb *synth.Fallback) string {
 }
 
 func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error, m Marker, closing ...string) string {
+	if providerUnavailable(runErr) {
+		return providerFailedComment(runErr, m)
+	}
 	var b strings.Builder
 	switch {
 	case res == nil || res.Final == nil:
@@ -370,6 +373,11 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		end += footer
 	}
 	return post("needs a person", b.String(), m, end)
+}
+
+func providerFailedComment(err error, m Marker) string {
+	return post("needs a person", "The agent provider is unavailable, so the build or review didn't finish:\n\n"+quote(err.Error(), 60), m,
+		"\n\nA writer can comment `/invariant retry` to build again from the same ratified work, including a new review.")
 }
 
 // ciFailedComment says why CI's gate didn't pass. A gate GitHub never
