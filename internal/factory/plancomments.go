@@ -76,11 +76,8 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 // promises a merge only when the factory will make one: a plan's pull
 // request that changes the trusted base waits for a person (D-0105).
 func retriedComment(pr int, trusted []string, m Marker) string {
-	merge := "I'll merge it once CI's `invariant/gate` passes on its current head."
-	if len(trusted) > 0 {
-		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on its current head, a person merges it.", codeList(trusted))
-	}
-	return post("pull request", fmt.Sprintf("Watching #%d again. %s", pr, merge), m)
+	return post("pull request", strings.TrimSpace(trustedFileDetails(trusted)), m,
+		fmt.Sprintf("\n\nWatching #%d again. %s", pr, retryOutcome(len(trusted) > 0)))
 }
 
 func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr error, m Marker) string {
@@ -105,14 +102,35 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	}
 	// The factory drafts again only once the pull request is closed (#218).
 	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
-	closing := fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to build again. "+
-		"To change the plan instead, close #%d, say what to change, and comment `/invariant revise`.", pr.Number)
+	trusted := planTrustedFiles(m)
+	b.WriteString(trustedFileDetails(trusted))
+	closing := "\n\nA person needs to look at this. " + retryGuidance(pr.Number, len(trusted) > 0) + " " + redraftGuidance(pr.Number, true)
 	return post("needs a person", b.String(), m, closing)
 }
 
 func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
-	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` and the review passed on #%d, but it changes the trusted base: %s. Only a person merges that (D-0105), "+
-		"so #%d is waiting for you to review and merge it.", pr.Number, codeList(trusted), pr.Number), m)
+	return post("needs a person", strings.TrimSpace(trustedFileDetails(trusted)), m,
+		fmt.Sprintf("\n\nCI's `invariant/gate` passed on #%d's current head. Only a person merges that change to the trusted base (D-0105), so #%d is waiting for you to review and merge it. "+
+			"The factory does not mark a draft ready or merge it. This watch proceeds without another review. "+
+			"If the review asked for changes, the pull request can be merged as-is unless someone pushes those fixes first.", pr.Number, pr.Number))
+}
+
+// planTrustedFiles is the trusted-base detail available in a plan's marker.
+// Retry answers use the branch's current scope instead, from trustedAt.
+func planTrustedFiles(m Marker) []string {
+	if m.Proposal != nil && m.Proposal.Plan != nil {
+		return m.Proposal.Plan.Trusted
+	}
+	return nil
+}
+
+// trustedFileDetails belongs to the clippable body, never to the closing
+// instructions: even a long file list must leave room for retry's effects.
+func trustedFileDetails(trusted []string) string {
+	if len(trusted) == 0 {
+		return ""
+	}
+	return "\n\n**Trusted base:** " + codeList(trusted) + "."
 }
 
 // planPullRequestBody is a plan's pull request: the plan, how the build

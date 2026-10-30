@@ -142,6 +142,12 @@ func TestClippedPlanKeepsRatificationInstructions(t *testing.T) {
 func TestClippedPostsKeepClosingCommands(t *testing.T) {
 	long := strings.Repeat("Evidence with café and 界. ", 4000)
 	pr := github.PullRequest{Number: 251}
+	const retry = "Comment `/invariant retry` to have me watch #251 again. I'll merge it once CI's `invariant/gate` passes on its current head. " +
+		"If it's a draft, I'll mark it ready first. It must still be in scope, keep its ratified lock, and be mergeable on GitHub. " +
+		"Push any requested fixes before retrying. Retry does not rebuild or rerun CI, and proceeds without another review. " +
+		"Even if the review asked for changes, the pull request can be merged as-is unless someone pushes those fixes first."
+	const redraftPlan = "To build again, close #251, say \"draft the same plan again\" or describe what to change, and comment `/invariant revise`. Ratify the new plan before I build it."
+	const redraftStatements = "To build again, close #251 and comment `/invariant revise` again, asking for a proposal with the same statements or describing what must change. Ratify the new proposal before I build it."
 	for _, tc := range []struct {
 		name string
 		kind string
@@ -173,26 +179,26 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			name: "retry and revise with a draft PR", kind: KindFailed,
 			make: func(m Marker) string { return planFailedComment(&pr, nil, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Comment `/invariant retry` to build again. To change the plan instead, close #251, say what to change, and comment `/invariant revise`.",
+			want: "\n\nA person needs to look at this. " + retry + " " + redraftPlan,
 		},
 		{
 			name: "retry refused merge", kind: KindFailed,
 			make: func(m Marker) string { return mergeRefusedComment(pr, false, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.",
+			want: "\n\nA person needs to look at this. Once the cause is fixed: " + retry + " " + redraftStatements,
 		},
 		{
 			name: "CI never started", kind: KindFailed,
 			make: func(m Marker) string {
 				return ciFailedComment(pr, github.CheckRun{URL: "https://example.test/" + strings.Repeat("x", 2*maxComment)}, gateNeverStarted, m)
 			},
-			want: " Once CI can run, re-run the job, then comment `/invariant retry`.",
+			want: " Once CI can run, re-run the job. " + retry + " " + redraftStatements,
 		},
 		{
 			name: "CI start unknown", kind: KindFailed,
 			make: func(m Marker) string {
 				return ciFailedComment(pr, github.CheckRun{URL: "https://example.test/" + strings.Repeat("x", 2*maxComment)}, gateUnknown, m)
 			},
-			want: " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.",
+			want: " Give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can. Otherwise, a person needs to look at this. " + retry + " " + redraftStatements,
 		},
 		{
 			name: "unavailable coding agent", kind: KindUnsupported,
@@ -334,8 +340,7 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		}
 	}
 
-	// These instructions were inline before the API change. Supplying them
-	// separately must not introduce a paragraph break or change their words.
+	// Inline closings keep their separator and complete current wording.
 	for _, tc := range []struct {
 		got   string
 		title string
@@ -344,7 +349,7 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			got:   ciFailedComment(pr, github.CheckRun{URL: "https://example.test/run"}, gateNeverStarted, Marker{Kind: KindNote}),
 			title: "needs a person",
-			body:  "CI couldn't start `invariant/gate` on #251 ([run](https://example.test/run)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment `/invariant retry`.",
+			body:  "CI couldn't start `invariant/gate` on #251 ([run](https://example.test/run)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job. " + retry + " " + redraftStatements,
 		},
 		{
 			got:   planOpenedComment(PlanOfIssues{By: "gitdek", Issues: []PlannedIssue{{Title: "First step"}, {Title: "Next step"}}}, 0, 251, Marker{Kind: KindNote}),

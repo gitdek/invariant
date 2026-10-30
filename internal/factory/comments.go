@@ -363,6 +363,9 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		b.WriteString("\n\n" + fellBack(res.Fallback))
 	}
 	end := strings.Join(closing, "")
+	if pr != nil {
+		end += "\n\n" + retryGuidance(pr.Number, false) + " " + redraftGuidance(pr.Number, false)
+	}
 	const footer = "\n\nA person needs to look at this."
 	if end == "" {
 		b.WriteString(footer)
@@ -370,6 +373,33 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		end += footer
 	}
 	return post("needs a person", b.String(), m, end)
+}
+
+// retryOutcome describes the existing watch path, including what a writer
+// authorizes after CI passes. Keep it with the closing instructions, away
+// from clippable evidence such as lists of trusted files.
+func retryOutcome(trusted bool) string {
+	merge := "I'll merge it once CI's `invariant/gate` passes on its current head. " +
+		"If it's a draft, I'll mark it ready first. It must still be in scope, keep its ratified lock, and be mergeable on GitHub."
+	if trusted {
+		merge = "It changes the trusted base, so once CI's `invariant/gate` passes on its current head, a person merges it. " +
+			"The factory does not mark a draft ready or merge it."
+	}
+	return merge + " Push any requested fixes before retrying. Retry does not rebuild or rerun CI, and proceeds without another review. " +
+		"Even if the review asked for changes, the pull request can be merged as-is unless someone pushes those fixes first."
+}
+
+func retryGuidance(pr int, trusted bool) string {
+	return fmt.Sprintf("Comment `/invariant retry` to have me watch #%d again. %s", pr, retryOutcome(trusted))
+}
+
+// redraftGuidance distinguishes a new build from retrying an open pull
+// request: only closing it, drafting and ratifying again starts that build.
+func redraftGuidance(pr int, plumbing bool) string {
+	if plumbing {
+		return fmt.Sprintf("To build again, close #%d, say \"draft the same plan again\" or describe what to change, and comment `/invariant revise`. Ratify the new plan before I build it.", pr)
+	}
+	return fmt.Sprintf("To build again, close #%d and comment `/invariant revise` again, asking for a proposal with the same statements or describing what must change. Ratify the new proposal before I build it.", pr)
 }
 
 // ciFailedComment says why CI's gate didn't pass. A gate GitHub never
@@ -385,16 +415,18 @@ const (
 )
 
 func ciFailedComment(pr github.PullRequest, run github.CheckRun, started gateStart, m Marker) string {
+	trusted := planTrustedFiles(m)
+	closing := " " + retryGuidance(pr.Number, len(trusted) > 0) + " " + redraftGuidance(pr.Number, isPlan(m.Project))
 	switch started {
 	case gateNeverStarted:
 		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it.",
-			pr.Number, run.URL), m, " Once CI can run, re-run the job, then comment `/invariant retry`.")
+			pr.Number, run.URL)+trustedFileDetails(trusted), m, " Once CI can run, re-run the job."+closing)
 	case gateUnknown:
-		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here:",
-			pr.Number, run.URL), m, " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.")
+		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here.",
+			pr.Number, run.URL)+trustedFileDetails(trusted), m, " Give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can. Otherwise, a person needs to look at this."+closing)
 	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` %s on #%d ([run](%s)), so I won't merge it. A person needs to look at this.",
-		gateWords(run.Conclusion), pr.Number, run.URL), m)
+		gateWords(run.Conclusion), pr.Number, run.URL)+trustedFileDetails(trusted), m, " Once the cause is fixed:"+closing)
 }
 
 // gateWords says how a check run that didn't pass ended.
@@ -415,8 +447,10 @@ func gateWords(conclusion string) string {
 }
 
 func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) string {
+	trusted := planTrustedFiles(m)
 	return post("needs a person", fmt.Sprintf("#%d is out of scope, so I won't merge it:\n\n- %s\n\nA person needs to look at this.",
-		pr.Number, strings.Join(problems, "\n- ")), m)
+		pr.Number, strings.Join(problems, "\n- "))+trustedFileDetails(trusted), m,
+		"\n\nOnce the cause is fixed: "+retryGuidance(pr.Number, len(trusted) > 0)+" "+redraftGuidance(pr.Number, isPlan(m.Project)))
 }
 
 // mergeRefusedComment says GitHub refused to merge a pull request whose gate
@@ -427,8 +461,9 @@ func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Ma
 	if unready {
 		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
 	}
-	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
-		"\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.")
+	trusted := planTrustedFiles(m)
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20))+trustedFileDetails(trusted), m,
+		"\n\nA person needs to look at this. Once the cause is fixed: "+retryGuidance(pr.Number, len(trusted) > 0)+" "+redraftGuidance(pr.Number, isPlan(m.Project)))
 }
 
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {

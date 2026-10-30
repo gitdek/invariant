@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +82,13 @@ func actedText(w *Waiting, verb string) string {
 	case factory.Choose:
 		return "Answered. The factory drafts again next."
 	case factory.Retry:
-		return "Asked for a retry. The factory tries again next."
+		if w.PR == 0 {
+			return "Asked for a retry. The factory builds the ratified proposal again next."
+		}
+		if retryTrusted(w) {
+			return fmt.Sprintf("Asked for a retry. The factory watches #%d again until CI's gate passes on its current head, then waits for a person to merge it. It won't review #%d again.", w.PR, w.PR)
+		}
+		return fmt.Sprintf("Asked for a retry. The factory watches #%d again, then marks it ready and merges it once CI's gate passes on its current head. It won't review #%d again. If it changes the trusted base, a person merges it.", w.PR, w.PR)
 	}
 	return "Asked for a new draft. The factory drafts again next."
 }

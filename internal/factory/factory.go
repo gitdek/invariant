@@ -546,14 +546,14 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
 		case kind == KindFailed && state.Marker.PR != 0:
-			n := state.Marker.PR
-			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
-				fmt.Sprintf(" To change what must be true, close #%d and comment `/invariant revise` again. "+
-					"To build the same statements again, once the cause is fixed, comment `/invariant retry`.", n))
+			m := state.Marker
+			trusted := planTrustedFiles(m)
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", m.PR)+trustedFileDetails(trusted),
+				"\n\n"+retryGuidance(m.PR, len(trusted) > 0)+" "+redraftGuidance(m.PR, isPlan(m.Project)))
 		case kind == KindPR:
-			n := state.Marker.PR
-			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
-				fmt.Sprintf(" To change what must be true, close #%d and comment `/invariant revise` again.", n))
+			m := state.Marker
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", m.PR),
+				"\n\n"+redraftGuidance(m.PR, isPlan(m.Project)))
 		}
 		return f.note(ctx, t, c, "There's no draft to revise right now.")
 	case Choose:

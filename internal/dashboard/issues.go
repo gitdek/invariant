@@ -87,8 +87,9 @@ type Waiting struct {
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
 	Unchanged bool `json:"unchanged,omitempty"`
-	// Plan is a plumbing plan to ratify (D-0105). Its acceptance tests are
-	// in Statements, each of kind test.
+	// Plan is a proposed or failed plumbing plan (D-0105). A proposal's
+	// acceptance tests are in Statements, each of kind test. A failure
+	// retains the plan's trusted files for its retry copy.
 	Plan *PlanView `json:"plan,omitempty"`
 	// IssuePlan is a plan of issues to ratify, in place of statements.
 	IssuePlan *IssuePlanView `json:"issuePlan,omitempty"`
@@ -107,6 +108,16 @@ type Waiting struct {
 	// only these, so neither offers a command the factory refuses (#218,
 	// D-0156).
 	Takes []string `json:"takes"`
+	// Retry describes the existing retry command, only when Takes offers
+	// it. Every field is plain text, escaped by both pages when rendered.
+	Retry *RetryView `json:"retry,omitempty"`
+}
+
+// RetryView is the consequence a person sees before posting a retry.
+type RetryView struct {
+	Label        string `json:"label"`
+	Confirmation string `json:"confirmation"`
+	Guidance     string `json:"guidance"`
 }
 
 // PlanView is what a plumbing plan says: the change, the files it may
@@ -239,7 +250,7 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 			}
 		}
 		said = append(said, saidAt{at, cmds})
-		l.Events = append(l.Events, Event{At: at, Issue: issue.Number, Who: WhoPerson, By: c.User.Login, Kind: cmds[0].Verb, Text: commandText(cmds)})
+		l.Events = append(l.Events, Event{At: at, Issue: issue.Number, Who: WhoPerson, By: c.User.Login, Kind: cmds[0].Verb, Text: commandText(cmds, latest)})
 	}
 	sort.SliceStable(l.Events, func(i, j int) bool { return l.Events[i].At.Before(l.Events[j].At) })
 
@@ -426,9 +437,12 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 		w.Takes = []string{factory.Ratify, factory.Revise}
 	case factory.KindFailed:
 		w.PR, w.Failure = m.PR, m.Why()
+		if p := m.Proposal; p != nil && p.Plan != nil {
+			w.Plan = &PlanView{Summary: p.Plan.Summary, Files: p.Plan.Files, Trusted: p.Plan.Trusted}
+		}
 		// A build that stopped before it made a pull request builds or
-		// drafts again (#13). One whose pull request is open only builds
-		// again: the factory drafts again once that pull request is closed,
+		// drafts again (#13). One whose pull request is open only resumes
+		// watching: the factory drafts again once that pull request is closed,
 		// which makes its card a closed one.
 		w.Takes = []string{factory.Retry}
 		if w.Failure == factory.FailStopped || w.Failure == factory.FailLimit {
@@ -445,7 +459,45 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 	default:
 		return nil
 	}
+	if slices.Contains(w.Takes, factory.Retry) {
+		w.Retry = retryView(w)
+	}
 	return w
+}
+
+func retryTrusted(w *Waiting) bool {
+	return w.Failure == factory.FailTrusted || (w.Plan != nil && len(w.Plan.Trusted) != 0)
+}
+
+// retryView explains watching or building without changing which commands
+// the factory accepts. A marker cannot establish the scope of a later head,
+// so ordinary copy also keeps the trusted-base exception.
+func retryView(w *Waiting) *RetryView {
+	if w.PR == 0 {
+		return &RetryView{
+			Label:        "Build ratified proposal again",
+			Confirmation: "Have the factory build the ratified proposal again, as you?",
+			Guidance:     "Have the factory build the ratified proposal again. It starts another build without drafting or ratifying again.",
+		}
+	}
+	pr := w.PR
+	r := &RetryView{}
+	if retryTrusted(w) {
+		r.Label = fmt.Sprintf("Have a person merge #%d once CI passes", pr)
+		r.Confirmation = fmt.Sprintf("Have the factory watch #%d again until CI's gate passes on its current head, as you? A person merges #%d because it changes the trusted base. It won't review #%d again.", pr, pr, pr)
+		r.Guidance = fmt.Sprintf("Have the factory watch #%d again until CI's gate passes on its current head. A person merges #%d because it changes the trusted base; the factory does not mark its draft ready or merge it.", pr, pr)
+	} else {
+		r.Label = fmt.Sprintf("Merge #%d once CI passes", pr)
+		r.Confirmation = fmt.Sprintf("Have the factory merge #%d once CI's gate passes on its current head, as you? It won't review #%d again. If it changes the trusted base, a person merges it.", pr, pr)
+		r.Guidance = fmt.Sprintf("Have the factory watch #%d again. Once CI's gate passes on its current head and the existing scope, ratification and merge checks allow it, the factory marks a draft ready and merges it. If it changes the trusted base, a person merges it; the factory does not mark that draft ready.", pr)
+	}
+	r.Guidance += fmt.Sprintf(" It won't review #%d again, even if the earlier review asked for changes. Push any requested fixes before retrying; otherwise it can be merged as-is. Retry watches CI; it does not restart CI jobs.", pr)
+	if w.Plan != nil {
+		r.Guidance += fmt.Sprintf(" To build again instead, close #%d, say \"draft the same plan again\" in a comment on the issue, then comment /invariant revise. Ratify the resulting draft before building again.", pr)
+	} else {
+		r.Guidance += fmt.Sprintf(" To build again instead, close #%d, say what the proposal should contain in a comment on the issue, then comment /invariant revise. Ratify the resulting proposal before building again.", pr)
+	}
+	return r
 }
 
 func postText(m factory.Marker, previous string) string {
@@ -484,7 +536,7 @@ func postText(m factory.Marker, previous string) string {
 	return m.Kind
 }
 
-func commandText(cmds []factory.Command) string {
+func commandText(cmds []factory.Command, previous *factory.Marker) string {
 	switch verb := cmds[0].Verb; verb {
 	case factory.Choose:
 		var picks []string
@@ -502,6 +554,13 @@ func commandText(cmds []factory.Command) string {
 	case factory.Revise:
 		return "asked for a revision"
 	case factory.Retry:
+		// Use the failure this command answered, before a later factory
+		// post can replace it with a different pull request or proposal.
+		if previous != nil {
+			if w := waitingFor(*previous, time.Time{}); w != nil && w.Retry != nil {
+				return "asked to " + strings.ToLower(w.Retry.Label[:1]) + w.Retry.Label[1:] + ". " + strings.TrimPrefix(actedText(w, factory.Retry), "Asked for a retry. ")
+			}
+		}
 		return "asked the factory to try again"
 	case factory.Solve:
 		return "asked the factory to take it"
