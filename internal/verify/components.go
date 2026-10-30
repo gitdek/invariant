@@ -2,6 +2,7 @@ package verify
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 
@@ -156,15 +157,25 @@ func (r *ComponentProofResult) covers(contracts []string) bool {
 	return true
 }
 
-// Copies own every nested slice and sort reference sets without changing the
-// caller's inventory or results. Diagnostics retain the tool's ordering.
+// Copies own every nested slice and map and sort reference sets without
+// changing the caller's inventory or results. Invocation arguments and tool
+// diagnostics retain their ordering; declarations do not establish evidence.
 func copyComponentInventory(inv project.ComponentInventory) project.ComponentInventory {
 	inv.Scope = slices.Clone(inv.Scope)
 	sort.Strings(inv.Scope)
-	inv.Files = slices.Clone(inv.Files)
-	sort.Slice(inv.Files, func(i, j int) bool { return inv.Files[i].Path < inv.Files[j].Path })
+	inv.Files = copyComponentFiles(inv.Files)
 	inv.Components = slices.Clone(inv.Components)
 	sort.Slice(inv.Components, func(i, j int) bool { return inv.Components[i].ID < inv.Components[j].ID })
+	if inv.Provenance != nil {
+		provenance := *inv.Provenance
+		provenance.Declarations = slices.Clone(provenance.Declarations)
+		sort.Slice(provenance.Declarations, func(i, j int) bool {
+			return provenance.Declarations[i].ID < provenance.Declarations[j].ID
+		})
+		provenance.Files = copyComponentFiles(provenance.Files)
+		provenance.Modules = copyComponentFiles(provenance.Modules)
+		inv.Provenance = &provenance
+	}
 	inv.Checks = slices.Clone(inv.Checks)
 	for i := range inv.Checks {
 		check := &inv.Checks[i]
@@ -176,9 +187,35 @@ func copyComponentInventory(inv project.ComponentInventory) project.ComponentInv
 		sort.Strings(check.Tests)
 		check.Conformance = slices.Clone(check.Conformance)
 		sort.Strings(check.Conformance)
+		check.Assumptions = slices.Clone(check.Assumptions)
+		sort.Slice(check.Assumptions, func(i, j int) bool { return check.Assumptions[i].ID < check.Assumptions[j].ID })
+		check.Invocations = slices.Clone(check.Invocations)
+		for j := range check.Invocations {
+			invocation := &check.Invocations[j]
+			invocation.Args = slices.Clone(invocation.Args)
+			invocation.Env = maps.Clone(invocation.Env)
+			invocation.Sampling = maps.Clone(invocation.Sampling)
+			invocation.Inputs = copyComponentFiles(invocation.Inputs)
+		}
+		sort.Slice(check.Invocations, func(i, j int) bool {
+			a, b := check.Invocations[i], check.Invocations[j]
+			if a.Kind != b.Kind {
+				return a.Kind < b.Kind
+			}
+			if a.Check != b.Check {
+				return a.Check < b.Check
+			}
+			return a.ID < b.ID
+		})
 	}
 	sort.Slice(inv.Checks, func(i, j int) bool { return inv.Checks[i].Target < inv.Checks[j].Target })
 	return inv
+}
+
+func copyComponentFiles(files []project.ComponentFile) []project.ComponentFile {
+	files = slices.Clone(files)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files
 }
 
 func copyComponentProofResult(result ComponentProofResult) ComponentProofResult {
