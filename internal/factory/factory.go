@@ -545,11 +545,13 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
 		case kind == KindFailed && state.Marker.PR != 0:
 			n := state.Marker.PR
-			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet. To change what must be true, close #%d and comment `/invariant revise` again. "+
-				"To build the same statements again, once the cause is fixed, comment `/invariant retry`.", n, n))
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
+				fmt.Sprintf(" To change what must be true, close #%d and comment `/invariant revise` again. "+
+					"To build the same statements again, once the cause is fixed, comment `/invariant retry`.", n))
 		case kind == KindPR:
 			n := state.Marker.PR
-			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet. To change what must be true, close #%d and comment `/invariant revise` again.", n, n))
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
+				fmt.Sprintf(" To change what must be true, close #%d and comment `/invariant revise` again.", n))
 		}
 		return f.note(ctx, t, c, "There's no draft to revise right now.")
 	case Choose:
@@ -603,8 +605,8 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		}
 		p := state.Marker.Proposal
 		if !matches(c.Args, p.Hash) {
-			return f.note(ctx, t, c, fmt.Sprintf("That doesn't name the current proposal, so I haven't ratified anything. "+
-				"To ratify it, comment `/invariant ratify %s`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars]))
+			return f.note(ctx, t, c, "That doesn't name the current proposal, so I haven't ratified anything.",
+				fmt.Sprintf(" To ratify it, comment `/invariant ratify %s`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars]))
 		}
 		return f.ratify(ctx, t, state, c)
 	}
@@ -634,9 +636,9 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 			continue
 		}
 		last = c
-		fork, option, problem := findChoice(forks, c.Args)
-		if problem != "" {
-			return f.note(ctx, t, c, problem)
+		fork, option, problem, closing := findChoice(forks, c.Args)
+		if problem != "" || closing != "" {
+			return f.note(ctx, t, c, problem, closing)
 		}
 		chosen[strings.ToUpper(fork.ID)] = formalize.Answer{Fork: fork.ID, Question: fork.Question, Option: option.ID, Says: option.Says, By: c.By, Comment: c.URL}
 		replyTo = append(replyTo, c.Comment)
@@ -653,19 +655,19 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 	return f.formalize(ctx, t, last, answers, nil, replyTo)
 }
 
-func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formalize.Option, string) {
+func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formalize.Option, string, string) {
 	if len(args) != 2 {
-		return formalize.Fork{}, formalize.Option{}, "To answer a question, comment `/invariant choose` with its number and an option, like `/invariant choose F1 A`."
+		return formalize.Fork{}, formalize.Option{}, "", "To answer a question, comment `/invariant choose` with its number and an option, like `/invariant choose F1 A`."
 	}
 	for _, fork := range forks {
 		if strings.EqualFold(fork.ID, args[0]) {
 			if o, ok := fork.Option(args[1]); ok {
-				return fork, o, ""
+				return fork, o, "", ""
 			}
-			return fork, formalize.Option{}, fmt.Sprintf("%s has no option %s.", fork.ID, args[1])
+			return fork, formalize.Option{}, fmt.Sprintf("%s has no option %s.", fork.ID, args[1]), ""
 		}
 	}
-	return formalize.Fork{}, formalize.Option{}, fmt.Sprintf("There's no open question %s.", args[0])
+	return formalize.Fork{}, formalize.Option{}, fmt.Sprintf("There's no open question %s.", args[0]), ""
 }
 
 // formalize drafts statements for the issue and posts what came of it:
@@ -783,7 +785,8 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// The issue's agent ran the draft that stopped, so its post names it
 		// (#179).
 		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Agent: agent}
-		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the factory stopped. Comment `/invariant revise` to draft again.", m), LabelHumanReview)
+		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the factory stopped.", m,
+			" Comment `/invariant revise` to draft again."), LabelHumanReview)
 	}
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
 		return err
@@ -1080,7 +1083,8 @@ func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) e
 	}
 	posted, err := f.commitRatification(ctx, t, state, c)
 	if errors.Is(err, errStale) {
-		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything. Comment `/invariant revise` and I'll draft it again from the project as it is now.")
+		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything.",
+			" Comment `/invariant revise` and I'll draft it again from the project as it is now.")
 	}
 	if err != nil {
 		return err
@@ -1311,7 +1315,8 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		// Each build costs an agent run, so after two stop, a writer decides
 		// whether to try again.
 		if stops >= maxStops {
-			return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another. Comment `/invariant retry` to try again", stops), withFailure(next, FailLimit)))
+			return failed(FailLimit, buildFailedComment(nil, nil, fmt.Errorf("%d builds stopped before they made a pull request, so I haven't started another.", stops), withFailure(next, FailLimit),
+				" Comment `/invariant retry` to try again"))
 		}
 		if isPlan(m.Project) {
 			built, agent, res, runErr, err := f.runPlanBuild(ctx, t, ratified, step)
@@ -1942,11 +1947,11 @@ func latest(runs []github.CheckRun) (github.CheckRun, bool) {
 }
 
 // note answers a command without changing anything.
-func (f *Factory) note(ctx context.Context, t Thread, c Command, text string) error {
+func (f *Factory) note(ctx context.Context, t Thread, c Command, text string, closing ...string) error {
 	if err := f.recovers(ctx, t.Issue.Number, "answer a command with a note", f.canPost(noting(), recovery.Note)); err != nil {
 		return err
 	}
-	_, err := f.GitHub.PostComment(ctx, t.Issue.Number, noteComment(text, Marker{Kind: KindNote, ReplyTo: []int64{c.Comment}}))
+	_, err := f.GitHub.PostComment(ctx, t.Issue.Number, noteComment(text, Marker{Kind: KindNote, ReplyTo: []int64{c.Comment}}, closing...))
 	return err
 }
 

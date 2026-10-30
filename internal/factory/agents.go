@@ -125,6 +125,6 @@ func cantRun(agent string) error {
 func unrunnableComment(agent string, can []string, m Marker) string {
 	return post("not one I can take", fmt.Sprintf("This issue's coding agent is `%s`, and this watcher can't run it. It can run %s. "+
 		"An issue's `Agent:` line picks its agent, else the manifest of the project it changes does, else it gets the watcher's own.\n\n"+
-		"So I haven't drafted anything, and I've left this issue for a person. To go on, name an agent this watcher can run in the issue's `Agent:` line, "+
-		"such as `Agent: %s`, then comment `/invariant revise`.", agent, list(can), can[0]), m)
+		"So I haven't drafted anything, and I've left this issue for a person.", agent, list(can)), m,
+		fmt.Sprintf(" To go on, name an agent this watcher can run in the issue's `Agent:` line, such as `Agent: %s`, then comment `/invariant revise`.", can[0]))
 }
