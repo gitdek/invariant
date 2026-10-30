@@ -49,13 +49,14 @@ type ComponentAssumptionEvidence struct {
 	Record   ComponentAssumptionRecord `json:"record"`
 }
 
-// ComponentEvidence keeps complete proof coverage, supplied assumptions and
-// conformance independent. Declarations alone create no evidence records.
+// ComponentEvidence keeps complete proof coverage, supplied assumptions,
+// conformance and runtime independent. Declarations alone create no records.
 type ComponentEvidence struct {
 	Inventory   project.ComponentInventory     `json:"inventory"`
 	Proofs      []ComponentProof               `json:"proofs"`
 	Assumptions []ComponentAssumptionEvidence  `json:"assumptions,omitempty"`
 	Conformance []ComponentConformanceEvidence `json:"conformance,omitempty"`
+	Runtime     []ComponentRuntimeEvidence     `json:"runtime,omitempty"`
 }
 
 // ComponentProof is one component's proof status, including an unsuccessful
@@ -67,9 +68,9 @@ type ComponentProof struct {
 }
 
 // AttributeComponentProofs replaces or clears only proof evidence, revalidating
-// retained assumptions and conformance against inv and the report's bounds. It
-// runs no tools and changes no gate outcome or legacy check. Invalid attribution
-// leaves the report untouched; valid but incomplete evidence proves nothing.
+// retained assumptions, conformance and runtime against inv and the report's
+// bounds. It runs no tools and changes no gate outcome or legacy check. Invalid
+// attribution leaves the report untouched; incomplete evidence proves nothing.
 func (r *Report) AttributeComponentProofs(inv *project.ComponentInventory, results []ComponentProofResult) error {
 	evidence, index, err := r.componentReplacement(inv)
 	if err != nil {
@@ -84,15 +85,18 @@ func (r *Report) AttributeComponentProofs(inv *project.ComponentInventory, resul
 	if evidence.Conformance, err = index.retainedConformance(r.Components, r.Bounds); err != nil {
 		return err
 	}
+	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
+		return err
+	}
 	r.commitComponentEvidence(evidence)
 	return nil
 }
 
 // AttributeComponentAssumptions replaces or clears only supplied assumptions,
-// revalidating retained proof and conformance attempts against inv and the report's
-// bounds, including their original targets and selected contracts even when the
-// attempt supplied no snapshots. Records remain assumed and unverified and never
-// change proof or gate outcomes.
+// revalidating retained proof, conformance and runtime attempts against inv and
+// the report's bounds, including their original targets and selected contracts
+// even when the attempt supplied no snapshots. Records remain assumed and
+// unverified and never change proof or gate outcomes.
 func (r *Report) AttributeComponentAssumptions(inv *project.ComponentInventory, records []ComponentAssumptionRecord) error {
 	evidence, index, err := r.componentReplacement(inv)
 	if err != nil {
@@ -105,6 +109,9 @@ func (r *Report) AttributeComponentAssumptions(inv *project.ComponentInventory, 
 		return err
 	}
 	if evidence.Conformance, err = index.retainedConformance(r.Components, r.Bounds); err != nil {
+		return err
+	}
+	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
 		return err
 	}
 	r.commitComponentEvidence(evidence)
@@ -598,5 +605,6 @@ func copyComponentEvidence(e ComponentEvidence) *ComponentEvidence {
 	sort.Slice(e.Proofs, func(i, j int) bool { return e.Proofs[i].Target < e.Proofs[j].Target })
 	e.Assumptions = copyComponentAssumptions(e.Assumptions)
 	e.Conformance = copyComponentConformance(e.Conformance)
+	e.Runtime = copyComponentRuntime(e.Runtime)
 	return &e
 }

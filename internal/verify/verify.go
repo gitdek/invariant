@@ -23,8 +23,18 @@ import (
 	"github.com/gitdek/invariant/internal/toolchain"
 )
 
-// Report records checks, lock data and supplied component evidence, including
-// declared assumptions explicitly marked as unverified. Receipts render it;
+// Report records checks, lock data and independently supplied component proofs,
+// conformance, runtime tests and assertions, and unverified declared assumptions.
+// AttributeComponentProofs, AttributeComponentConformance,
+// AttributeComponentRuntime and AttributeComponentAssumptions each replace or
+// clear only their own kind after validating incoming and retained evidence on a
+// detached inventory. Invalid or stale evidence leaves the report unchanged.
+// Attribution owns nested values and canonically fingerprints them, including
+// after JSON decoding, while preserving meaningful sequence order. Runtime
+// tests and assertions qualify independently from actual outcomes and matching
+// provenance; process success alone establishes neither. JSON retains all kinds;
+// Markdown renders component proof coverage with a declared-assumptions footer.
+// Attribution adds no discovery, instrumentation, execution or gate connection;
 // supplied data does not attest that a tool ran or that an assumption holds.
 type Report struct {
 	Project  string `json:"project"`
@@ -53,9 +63,9 @@ type Report struct {
 	Agreement   *Agreement          `json:"agreement,omitempty"`
 	Conformance *conformance.Result `json:"conformance,omitempty"`
 	Code        *Code               `json:"code,omitempty"`
-	// Components attributes supplied proofs, assumptions and conformance
-	// independently to exact declarations in an explicit inventory. Legacy
-	// checks and other evidence kinds cannot establish component proof coverage.
+	// Components attributes supplied proofs, assumptions, conformance and runtime
+	// tests and assertions independently in an explicit inventory. Legacy checks
+	// and other evidence kinds cannot establish component proof coverage.
 	Components *ComponentEvidence `json:"components,omitempty"`
 	// Larger is agreement again, one size past the bounds, for code whose
 	// explorer names its bounds (D-0068).

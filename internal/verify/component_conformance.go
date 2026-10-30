@@ -77,7 +77,8 @@ type ComponentConformanceEvidence struct {
 }
 
 // AttributeComponentConformance replaces or clears only supplied conformance,
-// revalidating retained proofs and assumptions against inv before committing.
+// revalidating retained proofs, assumptions and runtime against inv and the
+// report's bounds before committing.
 // Neither successful runs nor attempted steps establish proof or gate success.
 func (r *Report) AttributeComponentConformance(inv *project.ComponentInventory, results []ComponentConformanceResult) error {
 	evidence, index, err := r.componentReplacement(inv)
@@ -91,6 +92,9 @@ func (r *Report) AttributeComponentConformance(inv *project.ComponentInventory, 
 		return err
 	}
 	if evidence.Assumptions, err = index.retainedAssumptions(r.Components); err != nil {
+		return err
+	}
+	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
 		return err
 	}
 	r.commitComponentEvidence(evidence)
