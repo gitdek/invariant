@@ -85,7 +85,9 @@ func (f *act236Fixture) at(sec int) time.Time {
 
 func (f *act236Fixture) status(t *testing.T, steps ...Step) {
 	t.Helper()
-	if err := WriteStatus(StatusPath(f.work, "owner/app"), Status{PID: os.Getpid(), Repo: "owner/app", Started: f.since, Steps: steps}); err != nil {
+	st := Status{PID: os.Getpid(), Repo: "owner/app", Started: f.since}
+	st.Update(steps, f.since)
+	if err := WriteStatus(StatusPath(f.work, "owner/app"), st); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -408,7 +410,9 @@ func TestActShellCommandsFollowWholeEventsAndCurrentStep(t *testing.T) {
 				return len(e.Steps) == 1 && e.Steps[0].Since != nil && e.Steps[0].Since.Equal(f.at(20)) &&
 					len(e.Steps[0].Commands) == 1 && e.Steps[0].Commands[0].Command == "git diff --stat"
 			})
-			f.status(t)
+			at := f.at(30)
+			f.status(t, Step{Issue: 236, Doing: "building", Since: f.at(20), Agent: provider,
+				Run: filepath.Base(filepath.Dir(f.path)), Ended: &at})
 			ended := f.eventually(t, "step ending", func(e act236Envelope) bool {
 				return len(e.Steps) == 1 && e.Steps[0].Ended != nil
 			})

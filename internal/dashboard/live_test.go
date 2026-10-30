@@ -295,9 +295,18 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 	if l.Agent != "stopped at its spend cap" || l.Output != 4321 || l.Now != "" || l.Ended != nil {
 		t.Errorf("agent %q, %d output tokens, now %q, ended %v; want stopped at its spend cap, 4,321, nothing, and the step still running", l.Agent, l.Output, l.Now, l.Ended)
 	}
-	f.setDoing(t, "")
+	st, err := ReadStatus(f.status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := f.since.Add(3 * time.Minute)
+	st.Steps[0].Ended = &ended
+	st.Update(st.Steps, ended)
+	if err := WriteStatus(f.status, st); err != nil {
+		t.Fatal(err)
+	}
 	l = f.one(t)
-	if l.Ended == nil || l.Issue != 7 || l.Turns != 8 || l.Agent != "stopped at its spend cap" {
+	if l.Ended == nil || !l.Ended.Equal(ended) || l.Issue != 7 || l.Turns != 8 || l.Agent != "stopped at its spend cap" {
 		t.Errorf("after the step ended: ended %v, #%d, %d turns, agent %q; want the last step, marked ended", l.Ended, l.Issue, l.Turns, l.Agent)
 	}
 	for _, m := range l.Marks {
@@ -308,9 +317,9 @@ func TestLiveKeepsTheEndedStep(t *testing.T) {
 }
 
 // Every step with an agent at work is listed, each read from its own step's
-// directory, and a step doing nothing yet isn't. Once none of them runs,
-// the page keeps them all, marked ended, until one runs again, and then
-// shows that one alone, read again from the start.
+// directory, and a step doing nothing yet isn't. Once none runs, the page
+// shows the recorded latest finishers, including ties, until one runs
+// again, and then shows that one alone, read again from the start.
 func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 	f := newLiveStepFixture(t)
 	f.write(t, true)
@@ -328,7 +337,12 @@ func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 	}
 	running := func(steps ...Step) {
 		t.Helper()
-		if err := WriteStatus(f.status, Status{PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since, Limit: 9000, Steps: steps}); err != nil {
+		st, err := ReadStatus(f.status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Update(steps, f.now)
+		if err := WriteStatus(f.status, st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -346,12 +360,24 @@ func TestLiveKeepsEveryStepUntilOneRunsAgain(t *testing.T) {
 			b.Turns, b.RunsKind, d.Turns, d.Tools, d.RunsKind, d.Limit, d.Since)
 	}
 
-	running(idle)
+	ended := f.since.Add(10 * time.Minute)
+	finishedBuild, finishedDraft := build, drafting
+	finishedBuild.Ended, finishedDraft.Ended = &ended, &ended
+	running(idle, finishedBuild, finishedDraft)
 	steps, _ = f.read(t)
 	if len(steps) != 2 || steps[0].Ended == nil || steps[1].Ended == nil || steps[0].Turns != 8 || steps[1].Turns != 1 {
 		t.Fatalf("after every step ended: %+v; want both last steps, marked ended", steps)
 	}
 
+	drafting.Since = ended.Add(time.Minute)
+	drafting.Run = "formalize-retry"
+	retry := filepath.Join(filepath.Dir(draft), drafting.Run)
+	if err := os.MkdirAll(retry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(retry, "transcript.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	running(drafting)
 	steps, _ = f.read(t)
 	if len(steps) != 1 || steps[0].Issue != 9 || steps[0].Ended != nil || steps[0].Turns != 1 {
@@ -407,6 +433,27 @@ func TestLiveFollowsTheWorkingWatcher(t *testing.T) {
 	}
 	if l := f.one(t); l.Issue != 7 || l.Turns != 8 {
 		t.Errorf("step #%d with %d turns, want the working watcher's", l.Issue, l.Turns)
+	}
+}
+
+// With no watcher running, an old status without completions must not
+// hide another watcher's persisted latest finishers.
+func TestLiveFollowsTheStoppedWatcherWithFinishedSteps(t *testing.T) {
+	f := newLiveStepFixture(t)
+	f.write(t, true)
+	ended := f.since.Add(4 * time.Minute)
+	st := Status{Repo: "gitdek/app", Limit: 9000}
+	st.Update([]Step{{Issue: 7, Doing: "building", Since: f.since, Run: "build-20260928-120000", Ended: &ended}}, ended)
+	if err := WriteStatus(f.status, st); err != nil {
+		t.Fatal(err)
+	}
+	stale := t.TempDir()
+	if err := WriteStatus(StatusPath(stale, "gitdek/app"), Status{PID: -1, Repo: "gitdek/app"}); err != nil {
+		t.Fatal(err)
+	}
+	f.s.Works = []string{stale, f.work}
+	if l := f.one(t); l.Ended == nil || !l.Ended.Equal(ended) || l.Issue != 7 || l.Turns != 8 {
+		t.Errorf("step %+v; want the stopped watcher's recorded completion", l)
 	}
 }
 

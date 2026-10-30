@@ -130,6 +130,10 @@ type Factory struct {
 	// runs, so it mustn't call the factory. The watcher writes them down for
 	// the dashboard (D-0049).
 	Activity func(steps []Step)
+	// Finished hears each agent-backed step once, with its actual end time,
+	// before it leaves the running steps. It runs in order with Activity and
+	// mustn't call the factory. Activity and Steps remain running-only.
+	Finished func(step Step)
 	// Holder names this watcher, and LeaseFor is how long its lease on the
 	// repository lasts (D-0069). A watcher acts only while it holds the
 	// lease. Zero means no lease, as in a one-off run.
@@ -290,17 +294,19 @@ func (f *Factory) Poll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// Step is a step the watcher is running on an issue: what it's doing,
+// Step is a step the watcher takes on an issue: what it's doing,
 // formalizing, answering, ratifying or building, or "" before it starts
 // one of those, and since when. Agent is the coding agent it runs, from
 // when its run starts (#179). Run is its output directory's opaque basename,
 // published after the directory exists and before its agent starts (#236).
+// Ended is set only on the copy published through Finished as the step ends.
 type Step struct {
 	Issue int
 	Doing string
 	Since time.Time
 	Agent string
 	Run   string
+	Ended *time.Time
 }
 
 // running is the steps a watcher is running, one per issue (D-0113).
@@ -372,6 +378,11 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 func (f *Factory) end(n int) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
+	if s, ok := f.running.steps[n]; ok && s.Run != "" && f.Finished != nil {
+		ended := f.now()
+		s.Ended = &ended
+		f.Finished(s)
+	}
 	delete(f.running.steps, n)
 	f.tell()
 	close(f.running.ended)

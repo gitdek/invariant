@@ -32,6 +32,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitdek/invariant/internal/dashboard"
@@ -862,25 +863,58 @@ func watchCmd(ctx context.Context, args []string) int {
 	// watcher's name on its lease, which the page follows, and the steps in
 	// hand, each of which the page shows (D-0113), with the coding agent it
 	// runs (#179) and the run's directory (#236). Issue, doing and since name
-	// the longest-running step that's doing something.
+	// the longest-running step that's doing something. Actual completions
+	// are retained separately, across idle polls and watcher restarts (#269).
 	statusPath := dashboard.StatusPath(*work, *repo)
-	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
-	f.Activity = func(steps []factory.Step) {
-		status.Heartbeat = time.Now().UTC()
-		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
-		for _, s := range steps {
-			since := s.Since.UTC()
-			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since, Agent: s.Agent, Run: s.Run})
-			if s.Doing != "" && (status.Since == nil || since.Before(*status.Since)) {
-				status.Issue, status.Doing, status.Since = s.Issue, s.Doing, &since
-			}
-		}
+	previous, err := dashboard.ReadStatus(statusPath)
+	if err != nil {
+		return fail(fmt.Errorf("status: %w", err))
+	}
+	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds(), Finished: previous.Finished}
+	var statusMu sync.Mutex
+	writeStatus := func(steps []dashboard.Step) {
+		status.Update(steps, time.Now().UTC())
 		if err := dashboard.WriteStatus(statusPath, status); err != nil {
 			logger.Printf("status: %v", err)
 		}
 	}
+	statusStep := func(s factory.Step) dashboard.Step {
+		step := dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: s.Since.UTC(), Agent: s.Agent, Run: s.Run}
+		if s.Ended != nil {
+			ended := s.Ended.UTC()
+			step.Ended = &ended
+		}
+		return step
+	}
+	f.Activity = func(steps []factory.Step) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		running := make([]dashboard.Step, 0, len(steps))
+		for _, step := range steps {
+			running = append(running, statusStep(step))
+		}
+		writeStatus(running)
+	}
+	f.Finished = func(step factory.Step) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		// The completion arrives before the factory removes the step. Keep
+		// every other running step without calling back into the factory.
+		steps := make([]dashboard.Step, 0, len(status.Steps)+1)
+		for _, running := range status.Steps {
+			if running.Issue != step.Issue || running.Run != step.Run {
+				steps = append(steps, running)
+			}
+		}
+		writeStatus(append(steps, statusStep(step)))
+	}
 	f.Activity(nil)
-	defer os.Remove(statusPath)
+	defer func() {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		status.PID = 0
+		writeStatus(nil)
+	}()
 	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
 		// The poll's steps can run on after it returns, so it waits for them.
