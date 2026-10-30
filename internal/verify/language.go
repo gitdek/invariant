@@ -495,9 +495,30 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 }
 
 // Python runs a project's tests and its conformance driver in a Python
-// container, with the standard library only. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
-type Python struct{ Image string }
+// container, with the project's requirements when present. Files marked
+// # +nagini are proved in Nagini's separate image (D-0031).
+type Python struct {
+	Image        string
+	dependencies *toolchain.PythonDependencies
+	prepared     bool
+}
+
+// prepare selects one immutable environment for the whole gate, including
+// its larger-bound run. Standalone Check callers take the same path.
+func (py Python) prepare(ctx context.Context, p *project.Project) (Python, error) {
+	if py.prepared {
+		return py, nil
+	}
+	deps, err := toolchain.PythonDepsImage(ctx, p.Dir)
+	if err != nil {
+		return Python{}, err
+	}
+	py.dependencies, py.prepared = deps, true
+	if deps != nil {
+		py.Image = deps.Image
+	}
+	return py, nil
+}
 
 func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	proved, plain, err := naginiSources(pkg)
@@ -512,6 +533,10 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	py, err := py.prepare(ctx, p)
+	if err != nil {
+		return Build{}, Evidence{}, err
+	}
 	return runConformance(ctx, py.Image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
 python -m compileall -q . > /dev/null ; echo "@@invariant compile=$?"
@@ -548,13 +573,17 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 		return Build{}, Evidence{}, err
 	}
 	var buf bytes.Buffer
-	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
-		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance),
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime + ":/runtime:ro",
+		"-e", "DRIVER=" + filepath.ToSlash(p.Manifest.Conformance),
 		"-e", "INVARIANT_TRACES=/out/traces.json",
 		"-e", fmt.Sprintf("INVARIANT_RUNS=%d", conformanceRuns), "-e", fmt.Sprintf("INVARIANT_STEPS=%d", conformanceSteps),
-		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed),
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", script)
+		"-e", fmt.Sprintf("INVARIANT_SEED=%d", conformanceSeed)}
+	if p.Manifest.Language == "python" && strings.HasPrefix(image, "sha256:") {
+		args = append(args, "--platform", "linux/amd64")
+	}
+	args = append(args, "-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "/bin/sh", "-c", script)
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

@@ -113,6 +113,33 @@ For projects without explicit components, code assurance comes from successful r
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](decisions/D-0024-checking-typescript-and-python.md) and [D-0031](decisions/journal/D-0031.jsonl), and the larger check in [D-0070](decisions/journal/D-0070.jsonl).
 
+### Python application dependencies
+
+A Python project's root `requirements.txt` selects a reusable application image on the existing digest-pinned `python:3.13-alpine` base, for linux/amd64. Without that file, the gate keeps its standard-library path. Nagini's pinned proof image stays separate from application packages.
+
+Inputs support a strict subset of pip requirements syntax:
+
+- UTF-8, optionally starting with a BOM, with LF or CRLF endings; comments, blank lines and single trailing backslash continuations.
+- PyPI package names, comma-separated extras, PEP 440 version comparisons such as `packaging>=24,<25`, and `--hash=sha256:` followed by 64 hex digits. Pip enforces its full hash-checking rules at installation.
+- Safe PEP 508 markers, including comparisons, `in`, `not in`, `and`, `or` and parentheses. Marker strings cannot contain `#`, substitutions or option-like tokens, even `--hash`.
+- Recursive local `-r file`, `-rfile`, `--requirement file`, `--requirement=file` and corresponding `-c`/`--constraint` includes. Paths are relative to the containing file and use ASCII letters, digits, `_`, `.`, `-`, `/` and literal brackets. Every traversed directory must stay inside the project and avoid symlinks, including directories canceled by `..`; shared files are supported and cycles are rejected.
+
+Every input is validated before Docker runs, without rewriting the application's files. Invalid UTF-8, bare CR, encoding declarations anywhere, other Python line separators, runs of backslashes, other backslash positions, dangling continuations and unparsed syntax are rejected. URLs, VCS, editable or local packages, substitutions and installer option overrides are unsupported. Installation accepts only wheels from public PyPI; a package available only as source fails.
+
+Pip never reads the application dependency files. The gate flattens parsed requirements and hashes into `canonical/requirements.txt` and constraints into `canonical/constraints.txt`, preserving both roles when a file is shared. Each generated file has one requirement per LF-terminated line, without comments, includes, continuations or other options. Only the dedicated canonical directory is copied literally into the image. Build-side Python uses isolated mode (`-I`) from a clean directory outside those inputs, creates an application virtual environment, and saves pip's actual installation report.
+
+Only installation needs network access. Evidence reads, tests, conformance and checks one size larger all use one immutable image ID offline, without the host's environment, credentials or pip configuration. The evidence reader, shell and timeout use trusted absolute paths, so a dependency cannot replace those gate commands through `PATH`. Application imports use the application's environment. Installation failure or missing or malformed wheel evidence stops checking without a fallback.
+
+Reuse binds the complete recipe, base and platform, every original input's path and bytes, and the canonical filenames and bytes. JSON and Markdown receipts retain both sets of input hashes and every resolved wheel's name, version, filename and SHA-256, separately from Nagini. Cached images retain their actual resolution; fresh builds of unpinned inputs may differ. Fingerprints bind this evidence and agree between local and CI runs only for the same checked results and effective environment, excluding local tags and execution-only image IDs. Component receipt attribution preserves this reusable evidence without establishing component proof. Component execution adapters, Python existing-code discovery and contract checks remain later work.
+
+This implements [#227's ratified plan](.invariant/plans/issue-227.json), building on [D-0013](decisions/D-0013-slice-plan.md), [D-0030](decisions/journal/D-0030.jsonl), [D-0031](decisions/journal/D-0031.jsonl), [D-0032](decisions/journal/D-0032.jsonl) and [D-0054](decisions/D-0054-slice-6-part-b-plan.md), with these docs maintained under [D-0122](decisions/journal/D-0122.jsonl). Before merging this change, the merger records the new dependency-policy decision and cites it in every changed SPEC bullet, then runs the following on the final pull request head and posts the passing output:
+
+```bash
+INVARIANT_PYTHON_DEPS_REAL=1 go test ./internal/verify -run '^TestPythonDependenc' -count=1 -timeout 30m
+```
+
+The default acceptance suite checks the Docker command boundary and captured recipe. The real suite executes the generated recipes, checks canonical-only installation and actual wheel evidence, and runs successful and failing application checks offline, including with package-installed commands that try to replace gate helpers.
+
 ### Component configuration and proof evidence in ordinary Go
 
 The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. [#234](https://github.com/gitdek/invariant/issues/234) adds an API to attribute supplied proof results to those components and render their evidence. **Code verification with explicit components is not supported yet:** `invariant verify` rejects it before running any tool. Model-only checking through `verify.RunModel` remains available. Omitting `components` keeps the existing verification path, with no inferred component inventory and no change to ratified locks.
