@@ -241,7 +241,7 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 // how deep its search went, to $INVARIANT_COUNT.
 const countScript = `exec 2>&1
 cd /src
-timeout %d %s "$DRIVER" > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
+/usr/bin/timeout %d %s > /out/driver.log 2>&1 ; echo "@@invariant count=$?"
 `
 
 // countTimeout caps a driver's count one size larger. A driver explores
@@ -287,6 +287,9 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 	if err := writeHarness(src, runtime, p); err != nil {
 		return Exploration{}, err
 	}
+	if err := writePythonLauncher(runtime); err != nil {
+		return Exploration{}, err
+	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
 		return Exploration{}, err
 	}
@@ -294,10 +297,18 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 		return Exploration{}, err
 	}
 	var buf bytes.Buffer
-	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
-		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-e", "PYTHONPATH=/runtime", "-v", runtime+":/runtime:ro",
+	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512"}
+	if runner == "python" {
+		args = append(args, "--platform", "linux/amd64")
+		runner = "/usr/local/bin/python -S -s -P /runtime/invariant_python.py driver"
+	} else {
+		runner += ` "$DRIVER"`
+	}
+	args = append(args,
+		"-e", "HOME=/tmp", "-e", "PYTHONHASHSEED=0", "-v", runtime+":/runtime:ro",
 		"-e", "DRIVER="+filepath.ToSlash(p.Manifest.Conformance), "-e", "INVARIANT_COUNT=/out/count.json",
-		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "sh", "-c", fmt.Sprintf(countScript, int(countTimeout.Seconds()), runner))
+		"-v", src+":/src", "-v", out+":/out", "-w", "/src", image, "/bin/sh", "-c", fmt.Sprintf(countScript, int(countTimeout.Seconds()), runner))
+	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError

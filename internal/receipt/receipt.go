@@ -127,6 +127,18 @@ func Markdown(r *verify.Report) string {
 	if t.DepsRecipe != "" {
 		fmt.Fprintf(&b, "| Dependencies sandbox | %s, with the package's locked dependencies: recipe %s |\n", render.literal(shortImage(t.DepsBase)), render.literal(short(t.DepsRecipe)))
 	}
+	if deps := t.PythonDependencies; deps != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | %s, %s, recipe %s |\n", render.literal(shortImage(deps.Base)), render.literal(deps.Platform), render.literal(short(deps.Recipe)))
+		for _, input := range deps.Inputs {
+			fmt.Fprintf(&b, "| Python original input | %s · %s |\n", render.literal(input.Path), render.literal(short(input.SHA256)))
+		}
+		for _, input := range deps.CanonicalInputs {
+			fmt.Fprintf(&b, "| Python canonical input | %s · %s |\n", render.literal(input.Path), render.literal(short(input.SHA256)))
+		}
+		for _, artifact := range deps.Artifacts {
+			fmt.Fprintf(&b, "| Python wheel | %s %s · %s · %s |\n", render.literal(artifact.Name), render.literal(artifact.Version), render.literal(artifact.Filename), render.literal(short(artifact.SHA256)))
+		}
+	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
 	}

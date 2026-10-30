@@ -21,6 +21,19 @@ var (
 // killing the client alone leaves the container running. A run that finishes
 // by itself is left alone, and every other command is passed as it was given.
 func Docker(ctx context.Context, args ...string) *exec.Cmd {
+	// Explicit empty values override client config.json proxy defaults without
+	// changing the user's configuration, credentials or daemon selection.
+	if len(args) > 0 && (args[0] == "run" || args[0] == "build") {
+		flag := "--env"
+		if args[0] == "build" {
+			flag = "--build-arg"
+		}
+		clean := []string{args[0]}
+		for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "FTP_PROXY", "ftp_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
+			clean = append(clean, flag, key+"=")
+		}
+		args = append(clean, args[1:]...)
+	}
 	if len(args) == 0 || args[0] != "run" {
 		return exec.CommandContext(ctx, "docker", args...)
 	}

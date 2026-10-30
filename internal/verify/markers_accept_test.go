@@ -60,7 +60,9 @@ for a in "$@"; do
 	prev=$a
 done
 cd "$FAKE_DOCKER_WORK" || exit 1
-sh -c "$prev" 2>stderr
+# Translate container-owned absolute executables to this fixture's doubles.
+script=$(printf '%s' "$prev" | sed 's|/usr/local/bin/python|python|g; s|/usr/bin/timeout|timeout|g')
+sh -c "$script" 2>stderr
 code=$?
 cat stderr >&2
 exit $code

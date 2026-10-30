@@ -23,7 +23,7 @@ const NaginiHeader = "# +nagini"
 // naginiRuntime holds the stand-in for nagini_contracts that Python runs
 // with, so a proved core runs unchanged.
 //
-//go:embed naginiruntime
+//go:embed all:naginiruntime
 var naginiRuntime embed.FS
 
 // naginiSources splits a package's Python files into those Nagini proves and

@@ -178,18 +178,19 @@ type BuildStep struct {
 
 // Toolchain records exactly what did the checking.
 type Toolchain struct {
-	TLC          string `json:"tlc"`
-	TLCRelease   string `json:"tlc_release"`
-	TLCJarSHA256 string `json:"tlc_jar_sha256"`
-	JavaImage    string `json:"java_image"`
-	GobraImage   string `json:"gobra_image,omitempty"`
-	GoImage      string `json:"go_image,omitempty"`
-	NodeImage    string `json:"node_image,omitempty"`
-	PythonImage  string `json:"python_image,omitempty"`
-	NaginiRecipe string `json:"nagini_recipe,omitempty"`
-	DepsBase     string `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
-	DepsRecipe   string `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
-	Go           string `json:"go,omitempty"`
+	TLC                string                        `json:"tlc"`
+	TLCRelease         string                        `json:"tlc_release"`
+	TLCJarSHA256       string                        `json:"tlc_jar_sha256"`
+	JavaImage          string                        `json:"java_image"`
+	GobraImage         string                        `json:"gobra_image,omitempty"`
+	GoImage            string                        `json:"go_image,omitempty"`
+	NodeImage          string                        `json:"node_image,omitempty"`
+	PythonImage        string                        `json:"python_image,omitempty"`
+	PythonDependencies *toolchain.PythonDependencies `json:"python_dependencies,omitempty"`
+	NaginiRecipe       string                        `json:"nagini_recipe,omitempty"`
+	DepsBase           string                        `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
+	DepsRecipe         string                        `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
+	Go                 string                        `json:"go,omitempty"`
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -225,6 +226,15 @@ func Check(dir string) error {
 }
 
 func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool) (*Report, error) {
+	return gateSelected(ctx, dir, outDir, tc, model, nil, false)
+}
+
+// The gate retains one admitted immutable image for ordinary and larger runs.
+func gateWithPythonDependencies(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, deps *toolchain.PythonDependencies) (*Report, error) {
+	return gateSelected(ctx, dir, outDir, tc, false, deps, true)
+}
+
+func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, deps *toolchain.PythonDependencies, selected bool) (*Report, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -291,6 +301,18 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 		r.Toolchain.DepsBase, r.Toolchain.DepsRecipe = toolchain.NodeDepsBase, toolchain.DepsRecipe(pkg, lock)
 	case Python:
 		r.Toolchain.PythonImage = tc.PythonImage
+		if !selected {
+			deps, err = toolchain.PythonDepsImage(ctx, p.Dir)
+			if err != nil {
+				return nil, err
+			}
+		}
+		image := tc.PythonImage
+		if deps != nil {
+			image = deps.Image
+		}
+		lang = Python{Image: image, prepared: true}
+		r.Toolchain.PythonDependencies = deps
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 		}
