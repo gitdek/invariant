@@ -111,6 +111,26 @@ Code assurance comes from successful results: **proved** requires a successful p
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](decisions/D-0024-checking-typescript-and-python.md) and [D-0031](decisions/journal/D-0031.jsonl), and the larger check in [D-0070](decisions/journal/D-0070.jsonl).
 
+### Python application dependencies
+
+A Python project's root `requirements.txt` selects a reusable application image for its tests, conformance driver and check one size larger. The image starts from Invariant's digest-pinned `python:3.13-alpine` base on linux/amd64. Without that file, the existing standard-library path applies. Nagini keeps its separate pinned verifier image.
+
+The supported inputs are UTF-8 pip requirement files: PyPI wheel names, version specifiers, extras, environment markers, `--hash=sha256:...`, comments, blank lines and backslash continuations. Local `-r`/`--requirement` and `-c`/`--constraint` references are followed recursively, relative to their containing file; both attached and separate option values are accepted. References must stay inside the project. Missing files, symlinks and cycles are rejected before Docker runs. Source distributions, URLs, VCS, editable or local packages, environment substitutions, index overrides and other pip options are unsupported. CR, LF and CRLF line endings work; all other separators recognized by Python's `splitlines` are rejected before comments or continuations are parsed. Pip validates package syntax and its hash-checking rules, and fails if compatible wheels are unavailable.
+
+The build copies only the referenced input files, with their exact bytes and filenames, into a dedicated `inputs/` directory, then copies that directory literally into the image. Every build-side Python invocation uses `-I` from a clean directory outside those inputs, so files named `pip.py` or `venv.py` cannot become build tools. Installation uses public PyPI without host pip configuration. Only the image build needs network access; evidence reads, tests, conformance and the larger-bound driver run offline, without the host's environment, on throwaway application copies. Installation or missing or malformed artifact evidence stops the check, with no fallback.
+
+The gate selects one immutable Docker image ID for all those reads and runs, even when another build replaces the recipe's cache tag. The evidence reader, shell launchers and every external gate helper, including `timeout`, use trusted absolute paths outside the application dependency environment. Application Python uses the installed dependencies normally; a wheel that installs commands named `cat`, `sh` or `timeout` cannot replace the gate's commands.
+
+JSON and Markdown receipts include the application's base, platform, recipe, every input's relative path and SHA-256 hash, and the names, versions, filenames and SHA-256 hashes of resolved wheels, including transitive dependencies. These are separate from Nagini's recipe and enter the fingerprint; local image IDs and tags do not. Reuse is keyed by the full recipe and every referenced input, and reads the cached image's actual installation report. Fresh builds of unpinned requirements can resolve differently, so local and CI fingerprints agree only for the same results and effective environment.
+
+This is [#227's ratified plan](.invariant/plans/issue-227.json). Before merging it, run the real Docker and PyPI suite on the pull request head, including the generated-recipe and hostile-command-wheel regressions:
+
+```sh
+INVARIANT_PYTHON_DEPS_REAL=1 go test ./internal/verify -run '^TestPythonDependenc' -count=1 -timeout 30m
+```
+
+The default tests use a Docker CLI double and cannot replace that check. Under [D-0122](decisions/journal/D-0122.jsonl), the merger must record the dependency-policy decision and add its citation alongside the existing grounding decisions in the changed SPEC bullets. Attaching this reusable environment evidence to component receipts remains later work: the current component slice provides inventory only. Python existing-code discovery and contract checks remain subsequent issues on [#210](https://github.com/gitdek/invariant/issues/210).
+
 ### Component configuration in ordinary Go
 
 The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. **Code verification with explicit components is not supported yet:** `invariant verify` rejects it before running any tool. Model-only checking through `verify.RunModel` remains available. Omitting `components` keeps the existing verification path, with no inferred component inventory and no change to ratified locks.

@@ -116,6 +116,21 @@ func Markdown(r *verify.Report) string {
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", t.Go)
 	}
+	if d := t.PythonDependencies; d != nil {
+		fmt.Fprintf(&b, "| Python application dependencies | `%s`, %s, recipe `%s` |\n", shortImage(d.Base), d.Platform, short(d.Recipe))
+		b.WriteString("\n| Dependency input | SHA-256 |\n| :-- | :-- |\n")
+		for _, input := range d.Inputs {
+			name := strings.NewReplacer("`", "&#96;", "|", "\\|").Replace(input.Path)
+			fmt.Fprintf(&b, "| `%s` | `%s` |\n", name, short(input.SHA256))
+		}
+		b.WriteString("\n| Resolved wheel | Version | Filename | SHA-256 |\n| :-- | :-- | :-- | :-- |\n")
+		for _, artifact := range d.Artifacts {
+			fmt.Fprintf(&b, "| %s | %s | `%s` | `%s` |\n", artifact.Name, artifact.Version, artifact.Filename, short(artifact.SHA256))
+		}
+		if len(d.Artifacts) == 0 {
+			b.WriteString("\nThe dependency report records no application wheels installed.\n")
+		}
+	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint `%s`</sub>\n", r.GeneratedAt, r.Fingerprint)
 	return b.String()
 }
