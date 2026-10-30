@@ -129,7 +129,11 @@ func Markdown(r *verify.Report) string {
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
 	}
-	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from tool output only. Fingerprint %s</sub>\n", render.text(r.GeneratedAt), render.literal(r.Fingerprint))
+	sources := "tool output only"
+	if explicit {
+		sources = "recorded checks, supplied data and declared assumptions"
+	}
+	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from %s. Fingerprint %s</sub>\n", render.text(r.GeneratedAt), sources, render.literal(r.Fingerprint))
 	return b.String()
 }
 

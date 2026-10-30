@@ -189,7 +189,7 @@ func TestExplicitReceiptHostileLiteralsPreserveStructureAndLegacy(t *testing.T) 
 			if got := explicit247Visible(t, heading); got != payload {
 				t.Errorf("project heading displays %q, want %q", got, payload)
 			}
-			stamp, _, found := strings.Cut(strings.TrimPrefix(explicit247Line(t, md, "<sub>Generated "), "<sub>Generated "), " from tool output only. Fingerprint ")
+			stamp, _, found := strings.Cut(strings.TrimPrefix(explicit247Line(t, md, "<sub>Generated "), "<sub>Generated "), " from recorded checks, supplied data and declared assumptions. Fingerprint ")
 			if !found || explicit247Visible(t, stamp) != payload {
 				t.Errorf("timestamp lost its original visible text: %q", stamp)
 			}
