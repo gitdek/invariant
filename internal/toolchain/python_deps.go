@@ -823,12 +823,16 @@ import json, os, shlex
 import pip
 from pip._internal.network.session import PipSession
 from pip._internal.req import req_file
+from pip._internal.exceptions import RequirementsFileParseError
 from pip._internal.req.constructors import install_req_from_parsed_requirement
 from pip._vendor.packaging.utils import canonicalize_name
 
 report = dict(schema=1, pip_version=pip.__version__, root="requirements.txt",
               files=[], includes=[], requirements=[], options=[], errors=[])
 raw_options = {}
+# pip opens an included file only when it parses it, so a refusal to open one
+# belongs to the line that names it, which this records by pip's own path.
+included_by = {}
 line_parser = req_file.get_line_parser
 def observed_parser(*args, **kwargs):
     parse = line_parser(*args, **kwargs)
@@ -868,10 +872,13 @@ parse_file = req_file.RequirementsFileParser._parse_file
 def observe_file(self, filename, constraint):
     source = relative(filename)
     f = dict(path=source, constraint=constraint)
-    if f not in report["files"]: report["files"].append(f)
+    listed = f not in report["files"]
+    if listed: report["files"].append(f)
     lineno = 0
+    opened = False
     try:
         for line in parse_file(self, filename, constraint):
+            opened = True
             lineno = line.lineno
             opts = options(line, source)
             if line.requirement is None:
@@ -881,6 +888,7 @@ def observe_file(self, filename, constraint):
                         target = relative(os.path.normpath(os.path.join(os.path.dirname(filename), value)))
                         inc = dict(source=source, target=target, value=value, constraint=role)
                         if inc not in report["includes"]: report["includes"].append(inc)
+                        included_by[os.path.abspath(os.path.join(os.path.dirname(filename), value))] = (source, line.lineno)
             else:
                 try:
                     parsed = req_file.handle_requirement_line(line)
@@ -900,7 +908,12 @@ def observe_file(self, filename, constraint):
                     error(source, lineno, exc)
             yield line
     except Exception as exc:
-        error(source, lineno, exc)
+        parent = included_by.get(filename)
+        if not opened and parent and not isinstance(exc, RequirementsFileParseError):
+            if listed: report["files"].remove(f)
+            error(parent[0], parent[1], exc)
+        else:
+            error(source, lineno, exc)
         raise
 req_file.RequirementsFileParser._parse_file = observe_file
 def no_network(*args, **kwargs):

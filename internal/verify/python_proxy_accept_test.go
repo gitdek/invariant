@@ -187,6 +187,14 @@ func pyDepsProxyConfig(t *testing.T, preserveContext bool) string {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Keep the client's own CLI plugins, such as buildx, so the fixture
+		// changes its proxy defaults and not its builder.
+		if plugins := filepath.Join(old, "cli-plugins"); pyDepsIsDir(plugins) {
+			config["cliPluginsExtraDirs"] = []string{plugins}
+		}
+		// buildx keeps its own state beside the client configuration unless
+		// told otherwise; keep it out of the configuration this test checks.
+		t.Setenv("BUILDX_CONFIG", t.TempDir())
 	}
 	b, err := json.Marshal(config)
 	if err != nil {
@@ -197,6 +205,11 @@ func pyDepsProxyConfig(t *testing.T, preserveContext bool) string {
 	}
 	t.Setenv("DOCKER_CONFIG", dir)
 	return dir
+}
+
+func pyDepsIsDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 type pyDepsProxyCall struct {
