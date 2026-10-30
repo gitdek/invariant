@@ -395,11 +395,11 @@ func TestRunsOfTheCurrentStep(t *testing.T) {
 	write("build-20260926-230000", "gate-runs.jsonl", `{"run":1,"passed":false}`+"\n")
 	write("build-20260927-010000", "gate-runs.jsonl", `{"run":1,"passed":false,"at":"x"}`+"\n"+`{"run":2,"passed":true}`+"\n")
 	write("formalize-20260926-220000", "check-runs.jsonl", `{"run":1,"passed":true}`+"\n")
-	runs, kind := runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "building"})
+	runs, kind := runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "building", Steps: []Step{{Issue: 4, Doing: "building", Run: "build-20260927-010000"}}})
 	if kind != "gate" || len(runs) != 2 || runs[0].Passed || !runs[1].Passed {
-		t.Errorf("building: %s %+v; want the newest build's two gate runs", kind, runs)
+		t.Errorf("building: %s %+v; want the named build's two gate runs", kind, runs)
 	}
-	runs, kind = runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "formalizing"})
+	runs, kind = runsOf(work, "gitdek/app", Watcher{Running: true, Issue: 4, Doing: "formalizing", Steps: []Step{{Issue: 4, Doing: "formalizing", Run: "formalize-20260926-220000"}}})
 	if kind != "check" || len(runs) != 1 {
 		t.Errorf("formalizing: %s %+v", kind, runs)
 	}

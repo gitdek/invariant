@@ -231,8 +231,9 @@ type Watcher struct {
 	// longest-running first (D-0113).
 	Steps []Step `json:"steps,omitempty"`
 	// Runs are the checks the current step has run so far: TLC checks of a
-	// draft while formalizing, or gate runs while building.
-	Runs     []RunMark `json:"runs,omitempty"`
+	// draft while formalizing, or gate runs while building. Keep an empty
+	// value explicit so successive snapshots clear the previous run's checks.
+	Runs     []RunMark `json:"runs"`
 	RunsKind string    `json:"runsKind,omitempty"` // check, gate or test
 }
 
@@ -256,8 +257,8 @@ func (w Watcher) doing() []Step {
 type RunMark struct {
 	Run    int      `json:"run"`
 	Passed bool     `json:"passed"`
-	Failed []string `json:"failed,omitempty"` // the checks that failed
-	At     string   `json:"at,omitempty"`
+	Failed []string `json:"failed"` // explicit empty values clear previous snapshot entries
+	At     string   `json:"at"`
 }
 
 // Now is the one line at the top of the page: what the factory is doing,
@@ -1087,19 +1088,24 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	return snap
 }
 
-// runsOf reads the checks a watcher's current step has run, from its own
-// log in its work directory: the newest formalize or build directory for
-// the issue it's on.
+// runsOf reads checks only from the run named by the headline issue's step
+// in the selected watcher's status. An unpublished or unavailable run has
+// no checks; another step or an earlier directory cannot supply them.
 func runsOf(work, repo string, w Watcher) ([]RunMark, string) {
 	prefix, _ := stepFiles(w.Doing)
 	if work == "" || !w.Running || w.Issue == 0 || prefix == "" {
 		return nil, ""
 	}
-	dir := newestStep(work, repo, w.Issue, prefix)
-	if dir == "" {
-		return nil, runsKindOf(w.Doing)
+	for _, step := range w.Steps {
+		if step.Issue != w.Issue || step.Doing != w.Doing {
+			continue
+		}
+		if dir := stepDir(work, repo, step); dir != "" {
+			return readRuns(dir, step.Doing)
+		}
+		break
 	}
-	return readRuns(dir, w.Doing)
+	return nil, runsKindOf(w.Doing)
 }
 
 // namedWatcher is a repository's watcher.

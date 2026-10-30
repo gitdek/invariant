@@ -29,12 +29,13 @@ type Status struct {
 
 // Step is one step the watcher is running: its issue, what it's doing,
 // formalizing, answering, ratifying or building, or nothing yet, since
-// when, and the coding agent it runs, once its run starts (#179).
+// when, and the coding agent and output directory of its current run.
 type Step struct {
 	Issue int       `json:"issue"`
 	Doing string    `json:"doing,omitempty"`
 	Since time.Time `json:"since"`
 	Agent string    `json:"agent,omitempty"`
+	Run   string    `json:"run,omitempty"` // opaque directory basename under the issue's work directory
 }
 
 // steps is every step the status lists, or, from a watcher that lists none,

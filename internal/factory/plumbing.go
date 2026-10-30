@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -216,8 +215,8 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		return "", "", nil, nil, err
 	}
 	defer f.Repo.RemoveWorktree(ctx, wt)
-	out := filepath.Join(f.Work, fmt.Sprintf("issue-%d", n), "build-"+f.now().Format("20060102-150405"))
-	if err := os.MkdirAll(out, 0o755); err != nil {
+	out, err := f.newRun(n, "build")
+	if err != nil {
 		return "", "", nil, nil, err
 	}
 	if err := f.recovers(ctx, n, "start the build's agent run", f.canStartRun(building(RunNone, false, false), recovery.Build)); err != nil {
@@ -226,7 +225,7 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if err := f.Repo.Record(ctx, n, step, fmt.Sprintf("the build of #%d's plan by %s", n, agent)); err != nil {
 		return "", "", nil, nil, err
 	}
-	f.runsAgent(n, agent)
+	f.runsAgent(n, agent, out)
 	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
 	if !f.holds() {
 		return "", "", nil, nil, errLeaseLost
