@@ -314,7 +314,7 @@ func TestComponentConformanceAttributionNeverExecutesAndModelOnlyRejectsIt(t *te
 	}
 }
 
-func TestComponentConformanceMarkdownRemainsAProofView(t *testing.T) {
+func TestComponentConformanceMarkdownPreservesProofView(t *testing.T) {
 	f := cc279Fixture(t)
 	r := ce274Attach(t, f, true)
 	before := receipt.Markdown(&r)
@@ -326,8 +326,8 @@ func TestComponentConformanceMarkdownRemainsAProofView(t *testing.T) {
 		t.Fatal(err)
 	}
 	ce274Statuses(t, r, f.Target)
-	// The proof table remains independent of conformance; JSON carries the
-	// supplied conformance and attempt detail.
+	// The proof table remains independent of conformance; a separate view
+	// carries the supplied conformance and attempt detail alongside JSON.
 	after := receipt.Markdown(&r)
 	proofTable := func(markdown string) string {
 		_, rest, ok := strings.Cut(markdown, "| Component | Proof | Source | Contract | Evidence |\n")
@@ -343,14 +343,14 @@ func TestComponentConformanceMarkdownRemainsAProofView(t *testing.T) {
 	if proofTable(after) != proofTable(before) {
 		t.Fatal("supplied conformance changed Markdown's proof table")
 	}
-	for _, want := range []string{"Assurance: **component evidence**", "recorded checks, supplied data and declared assumptions"} {
+	for _, want := range []string{"Assurance: **component evidence**", "recorded checks, supplied data and declared assumptions", "SUPPLIED-CONFORMANCE-ONLY", "SUPPLIED-ATTEMPT-ONLY", "### Component conformance"} {
 		if !strings.Contains(after, want) {
 			t.Fatalf("explicit receipt lacks %q", want)
 		}
 	}
-	for _, unwanted := range []string{"SUPPLIED-CONFORMANCE-ONLY", "SUPPLIED-ATTEMPT-ONLY", "Every step tried |", "Code · conformance |"} {
+	for _, unwanted := range []string{"Every step tried |", "Code · conformance |"} {
 		if strings.Contains(after, unwanted) {
-			t.Fatalf("proof-only Markdown contains %q", unwanted)
+			t.Fatalf("component Markdown contains aggregate evidence %q", unwanted)
 		}
 	}
 	legacy := ce274Seed()

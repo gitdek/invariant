@@ -88,10 +88,11 @@ func Markdown(r *verify.Report) string {
 	}
 	if explicit {
 		componentEvidence(&b, r.Components)
+		componentViews(&b, r)
 	}
 
 	if explicit {
-		fmt.Fprintf(&b, "\nDesign checked within %s. Within these bounds TLC's search is exhaustive. Component proof coverage is listed above.\n", render.bounds(r.Bounds))
+		fmt.Fprintf(&b, "\nDesign checked within %s. Within these bounds TLC's search is exhaustive. Independent component evidence and input provenance are listed above; supplied results and declarations do not change the recorded gate outcome.\n", render.bounds(r.Bounds))
 	} else if r.EverySize() {
 		fmt.Fprintf(&b, "\nChecked within %s, and again one size larger, within %s. Within each, TLC's search is exhaustive. %s proves the code against its contracts at every size, and the design's rules are claimed only within the sizes checked.\n", render.bounds(r.Bounds), render.bounds(r.Larger.Bounds), r.Code.Verifier)
 	} else {
@@ -130,10 +131,12 @@ func Markdown(r *verify.Report) string {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
 	}
 	sources := "tool output only"
+	qualification := ""
 	if explicit {
 		sources = "recorded checks, supplied data and declared assumptions"
+		qualification = ". Assumptions are assumed / unverified; the component API runs no tools"
 	}
-	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from %s. Fingerprint %s</sub>\n", render.text(r.GeneratedAt), sources, render.literal(r.Fingerprint))
+	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from %s. Fingerprint %s%s</sub>\n", render.text(r.GeneratedAt), sources, render.literal(r.Fingerprint), qualification)
 	return b.String()
 }
 
@@ -218,6 +221,9 @@ func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
 			for _, diagnostic := range result.Errors {
 				details = append(details, componentText(diagnostic))
 			}
+			details = append(details, fmt.Sprintf("supplied proof passed: %t", result.Passed),
+				"verified IDs: "+componentStrings(result.Verified), "checked contracts: "+componentStrings(result.Contracts),
+				componentInputs(result.Inputs, result.FileInputs), componentInvocation(result.Invocation), componentTool(result.Tool))
 		} else if _, ok := contracts[c.ID]; ok {
 			details = append(details, "no verifier result")
 		}
