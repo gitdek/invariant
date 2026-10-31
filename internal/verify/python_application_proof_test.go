@@ -621,6 +621,247 @@ func TestPythonApplicationProofTheGateStillRefuses(t *testing.T) {
 	assertNoTools()
 }
 
+// ppContract adds a trusted contract on op, its abstraction and a backing
+// test, as #353's review did.
+func ppContract(t *testing.T, root string, p *project.Project, id string, op project.ComponentOperation, abstraction, symbol, test, body string) {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
+	pa310Write(t, root, ptcContracts, string(b)+abstraction)
+	b, _ = os.ReadFile(filepath.Join(root, ptcTests))
+	pa310Write(t, root, ptcTests, string(b)+body)
+	p.Manifest.Components.TrustedContracts = append(p.Manifest.Components.TrustedContracts, ptcContract(id, op, symbol, test))
+	pa310Save(t, p)
+}
+
+// Each hole #353's independent review found let an attempt pass, proved,
+// while the real function breaks its contract; the pinned Nagini confirmed
+// each. Each is refused now before any verifier runs.
+func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
+	recursive := `def admit(text: str, admitted: int) -> int:
+    Requires(admitted >= 0)
+    Ensures(Result() == admitted)
+    if admitted > 0:
+        return admit(text, admitted - 1) + 1
+    return 0
+`
+	replace := func(from, to string) func(string) string {
+		return func(m string) string { return strings.Replace(m, from, to, 1) }
+	}
+	dumps := func(t *testing.T, root string, p *project.Project) {
+		ppContract(t, root, p, "json.dumps", project.ComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"},
+			"\n\ndef dumps_of(value: object) -> str:\n    Ensures(len(Result()) >= 0)\n    ...\n", "dumps_of", "DumpsTests.test_dumps",
+			"\n\nclass DumpsTests(unittest.TestCase):\n    def test_dumps(self):\n        self.assertEqual(json.dumps(1), '1')\n")
+	}
+	application := func(symbol, abstraction string) func(*testing.T, string, *project.Project) {
+		return func(t *testing.T, root string, p *project.Project) {
+			ppContract(t, root, p, "admission."+symbol, project.ComponentOperation{Kind: "application", Source: ppSource, Symbol: symbol},
+				abstraction, symbol+"_of", "Of"+symbol+".test_of", "\n\nclass Of"+symbol+"(unittest.TestCase):\n    def test_of(self):\n        pass\n")
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		module   func(string) string
+		contract func(*testing.T, string, *project.Project)
+		other    map[string]string
+		want     string
+	}{
+		// The function's own name, which callers and its recursion reach.
+		{name: "the function rebound", module: func(m string) string {
+			return strings.Replace(m, ppTarget, recursive, 1) + "\n\ndef _fast(text: str, admitted: int) -> int:\n    return 42\n\n\nadmit = _fast\n"
+		}, want: "other than by its one def"},
+		{name: "the function rebound conditionally", module: func(m string) string { return m + "\n\nif LIMIT > 2:\n    admit = report\n" }, want: "other than by its one def"},
+		{name: "the function rebound by a global statement", module: func(m string) string {
+			return m + "\n\ndef swap() -> None:\n    global admit\n    admit = report\n"
+		}, want: "other than by its one def"},
+		{name: "the function wrapped by assignment", module: func(m string) string {
+			return m + "\n\ndef traced(f):\n    return f\n\n\nadmit = traced(admit)\n"
+		}, want: "other than by its one def"},
+		// Names Nagini reads as its own whatever the module binds them to.
+		{name: "Assume imported from json", module: func(m string) string {
+			m = strings.Replace(m, "import tinyver\n", "import tinyver\nfrom json import dumps as Assume\n", 1)
+			m = strings.Replace(m, "    Ensures(Result() >= admitted)\n", "    Ensures(Result() >= admitted)\n    Ensures(Result() == admitted + 100)\n", 1)
+			return strings.Replace(m, "    if len(text) > 0:\n", "    Assume(False)\n    if len(text) > 0:\n", 1)
+		}, contract: dumps, want: "reads Assume, which Nagini reads as its own"},
+		{name: "Assume imported from json beside Nagini's own names", module: func(string) string {
+			return "from nagini_contracts.contracts import Requires, Ensures, Result\nfrom json import dumps as Assume\n\n\n" +
+				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Ensures(Result() == admitted + 100)\n    Assume(False)\n    return admitted\n\n\n" +
+				"async def report(text: str) -> str:\n    return text\n"
+		}, contract: dumps, want: "reads Assume, which Nagini reads as its own"},
+		{name: "the module's own len", module: func(string) string {
+			return "from nagini_contracts.contracts import *\n\n\ndef len(s: str) -> int:\n    return 0\n\n\n" +
+				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Ensures(Result() == 5)\n    return len('hello')\n\n\n" +
+				"async def report(text: str) -> str:\n    return text\n"
+		}, contract: application("len", "\n\ndef len_of(s: str) -> int:\n    Ensures(Result() == 0)\n    ...\n"), want: "reads len, which Nagini reads as its own"},
+		{name: "the module's own range", module: func(m string) string {
+			m = strings.Replace(m, "LIMIT = 3\n", "LIMIT = 3\n\n\ndef range(n: int) -> int:\n    return n\n", 1)
+			return strings.Replace(m, "        return admitted + 1\n", "        return admitted + 1 + range(0)\n", 1)
+		}, contract: application("range", "\n\ndef range_of(n: int) -> int:\n    Ensures(Result() == n)\n    ...\n"), want: "reads range, which Nagini reads as its own"},
+		{name: "a parameter named len", module: replace("def admit(text: str, admitted: int)", "def admit(text: str, admitted: int, len: int = 0)"), want: "binds len, which Nagini reads as its own"},
+		{name: "Nagini's Requires imported under another name", module: func(m string) string {
+			m = strings.Replace(m, "from nagini_contracts.contracts import *\n", "from nagini_contracts.contracts import *\nfrom nagini_contracts.contracts import Requires as Pre\n", 1)
+			return strings.Replace(m, "    Requires(admitted >= 0)\n", "    Pre(admitted >= 0)\n", 1)
+		}, want: ""},
+		// What a trusted contract says its operation raises.
+		{name: "a bare except around a boundary call", module: func(string) string {
+			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
+				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
+				"    try:\n        json.loads(text)\n    except:\n        return admitted\n    return admitted + 1\n\n\n" +
+				"async def report(text: str) -> str:\n    return text\n"
+		}, want: "bare except"},
+		{name: "an except Exception the contract doesn't declare", module: func(string) string {
+			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
+				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
+				"    try:\n        json.loads(text)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
+				"async def report(text: str) -> str:\n    return text\n"
+		}, want: "doesn't declare with Exsures"},
+		{name: "an exception Nagini doesn't model", module: replace("    return admitted\n\n\nasync", "    raise ValueError('empty')\n\n\nasync"), want: "an exception class the pinned Nagini doesn't model"},
+		// Writes the module's bindings don't show.
+		{name: "globals()", module: replace("LIMIT = 3\n", "LIMIT = 3\nglobals()['LIMIT'] = 100\n"), want: "with globals"},
+		{name: "setattr on sys.modules", module: replace("LIMIT = 3\n", "import sys\nLIMIT = 3\nsetattr(sys.modules[__name__], 'LIMIT', 100)\n"), want: "writes the module's names with"},
+		{name: "another module writing a constant", module: func(m string) string { return m },
+			other: map[string]string{"tasks/config.py": "from tasks import admission\n\nadmission.LIMIT = 100\n"}, want: "tasks/config.py:3 writes tasks.admission.LIMIT"},
+		{name: "another module writing the function", module: func(m string) string { return m },
+			other: map[string]string{"tasks/config.py": "import tasks.admission as adm\n\nadm.admit = None\n"}, want: "writes tasks.admission.admit"},
+		{name: "another module writing through a relative import", module: func(m string) string { return m },
+			other: map[string]string{"tasks/config.py": "from . import admission\n\ndel admission.LIMIT\n"}, want: "writes tasks.admission.LIMIT"},
+		// Operations an abstraction can't stand for, and imports that fail.
+		{name: "an async application operation", module: func(m string) string {
+			m = strings.Replace(m, "        version = tinyver.parse(text)\n", "        version = tinyver.parse(text)\n        pending = fetch(text)\n", 1)
+			return m + "\n\nasync def fetch(text: str) -> int:\n    return len(text)\n"
+		}, contract: application("fetch", "\n\ndef fetch_of(text: str) -> int:\n    Ensures(Result() == len(text))\n    ...\n"), want: "async function, whose call returns a coroutine"},
+		{name: "a relative import above the top-level package", module: func(m string) string {
+			m = strings.Replace(m, "from .helper import next_state\n", "from ..toplevel import next_state\n", 1)
+			return strings.Replace(m, "        version = tinyver.parse(text)\n", "        version = next_state(text, text)\n", 1)
+		}, other: map[string]string{"toplevel.py": "def next_state(a, b):\n    return a\n"}, want: "above the top-level package"},
+		// Lines the input can't copy as they are.
+		{name: "an annotation the input can't bind", module: replace("LIMIT = 3\n", "LIMIT: Final = 3\n"), want: "annotation reads Final"},
+		{name: "a line continuation", module: replace("LIMIT = 3\n", "LIMIT = 3 \\\n\nHOOK = 1\n"), want: "line continuation"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, p := ppFixture(t, c.module(ppModule))
+			for name, body := range c.other {
+				pa310Write(t, root, name, body)
+			}
+			if c.contract != nil {
+				c.contract(t, root, p)
+			}
+			n := &ppNagini{output: ppVerified}
+			proof, err := ppSession(t, p, n).Prove(context.Background(), ppAdmitID())
+			if c.want == "" {
+				// Nagini reads Pre as nothing it knows, and the input
+				// refuses the alias rather than run.
+				c.want = "imports Nagini's Requires as Pre"
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, %+v; want an error naming %q", err, proof, c.want)
+			}
+			if n.calls != 0 {
+				t.Fatal("Nagini ran on an input that can't stand for the function")
+			}
+		})
+	}
+}
+
+// A trusted contract says what its operation raises with Exsures, with an
+// exception Nagini models, and a handler may catch only what the contract
+// declares.
+func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
+	module := "from nagini_contracts.contracts import *\nimport json\nfrom typing import Final\n\nLIMIT: Final = 3\n\n\n" +
+		"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Requires(len(text) > 0)\n" +
+		"    Ensures(Result() >= admitted)\n    Exsures(Exception, True)\n" +
+		"    try:\n        json.loads(text)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
+		"async def report(text: str) -> str:\n    return text\n"
+	root, p := ppFixture(t, module)
+	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
+	pa310Write(t, root, ptcContracts, strings.Replace(string(b), "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n",
+		"def loads(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(Exception, True)\n", 1))
+	in, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := ppFile(t, in, PythonApplicationProofMain)
+	for _, want := range []string{"from typing import Final\n", "LIMIT: Final = 3\n", "import invariant_boundary_0 as json\n"} {
+		if !strings.Contains(main, want) {
+			t.Fatalf("the input lacks %q:\n%s", want, main)
+		}
+	}
+	if got := ppFile(t, in, "invariant_boundary_0.py"); !strings.Contains(got, "    Exsures(Exception, True)\n") {
+		t.Fatalf("the contract's Exsures didn't reach its stub:\n%s", got)
+	}
+	if bs := ppBoundaries(in); bs["Exception"].Kind != "native" || bs["json"].Contract != "json.loads" {
+		t.Fatalf("boundaries: %+v", in.Boundaries)
+	}
+	// A contract may declare only exceptions Nagini models.
+	pa310Write(t, root, ptcContracts, strings.Replace(string(b), "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n",
+		"def loads(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(ValueError, True)\n", 1))
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil || !strings.Contains(err.Error(), "raises ValueError, which the pinned Nagini doesn't model") {
+		t.Fatalf("an unmodeled exception in a contract: %v", err)
+	}
+}
+
+func TestPythonApplicationProofSignatureRenamesOnlyTheFunction(t *testing.T) {
+	_, p := ppFixture(t, ppModule)
+	s := ppSession(t, p, &ppNagini{})
+	in, _, err := s.proofInput(context.Background(), ppAdmitID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := s.proofSource(in.Target)
+	abstraction, _ := s.proofSource(s.declarations[pa310ID(ptcContracts, "version_of")])
+	read := func(source string) ([]byte, error) {
+		if source == ppSource {
+			return original, nil
+		}
+		return abstraction, nil
+	}
+	contents := map[string][]byte{}
+	for _, f := range in.Files {
+		contents[f.Path] = []byte(f.Content)
+	}
+	// A boundary module whose header changes its parameters, even with its
+	// recorded hash to match, doesn't rename only the function.
+	i := slices.IndexFunc(in.Spans, func(s PythonApplicationProofSpan) bool { return s.Kind == "signature" })
+	s2 := in.Spans[i]
+	file := contents[s2.File]
+	changed := append(append(append([]byte{}, file[:s2.start]...), []byte("def parse(text: str, extra: int) -> object:\n")...), file[s2.end:]...)
+	contents[s2.File] = changed
+	in.Spans[i].end = s2.start + len("def parse(text: str, extra: int) -> object:\n")
+	in.Spans[i].SHA256 = pa310Hash([]byte("def parse(text: str, extra: int) -> object:\n"))
+	for j := range in.Spans {
+		if j != i && in.Spans[j].File == s2.File && in.Spans[j].start >= s2.end {
+			d := in.Spans[i].end - s2.end
+			in.Spans[j].start += d
+			in.Spans[j].end += d
+		}
+	}
+	if err := checkPythonProofSpans(in, contents, read); err == nil || !strings.Contains(err.Error(), "changes more than the function's name") {
+		t.Fatalf("a changed signature: %v", err)
+	}
+}
+
+func TestPythonApplicationProofReadsDistributionsFromRecords(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := ptcLibraries(t, ptcTinyver)
+	pa310Write(t, dir, "yaml/__init__.py", "")
+	pa310Write(t, dir, "_yaml/__init__.py", "")
+	pa310Write(t, dir, "PyYAML-6.0.2.dist-info/METADATA", "Metadata-Version: 2.1\nName: PyYAML\nVersion: 6.0.2\n")
+	pa310Write(t, dir, "PyYAML-6.0.2.dist-info/RECORD", "yaml/__init__.py,sha256=x,1\n_yaml/__init__.py,sha256=y,1\nPyYAML-6.0.2.dist-info/METADATA,,\nPyYAML-6.0.2.dist-info/RECORD,,\n")
+	out, err := exec.Command(python, "-I", "-S", "-c", pythonApplicationDistributionsScript, dir).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string][]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"_yaml": {"pyyaml"}, "tinyver": {"tinyver"}, "yaml": {"pyyaml"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("distributions %v, want %v", got, want)
+	}
+}
+
 // The standard library's and the builtins' names are the pinned runtime's,
 // so a missing contract is named the same on every host. Where python3 is
 // the pinned image's minor version (INVARIANT_PYTHON_PINNED=1, as in CI's
