@@ -1,13 +1,5 @@
 {
-  "ratified": {
-    "by": "gitdek",
-    "at": "2026-09-28T17:54:59Z",
-    "issue": 69,
-    "comment": "https://github.com/gitdek/invariant/issues/69#issuecomment-5875565342",
-    "proposal": "sha256:e61ba88fa372b1f24f0ac7d77017a2e8a15e7e7efd4048d4ca471f4f5aa399a3",
-    "amends": "sha256:e61ba88fa372b1f24f0ac7d77017a2e8a15e7e7efd4048d4ca471f4f5aa399a3",
-    "previous": "#13"
-  },
+  "decision": "D-0202",
   "bounds": {
     "Actors": "{alice, mallory, invbot}",
     "Bots": "{invbot}",
@@ -24,13 +16,13 @@
       "name": "Spec",
       "kind": "spec",
       "says": "The factory starts with no post on the issue, and every step is a Next step.",
-      "sha256": "sha256:ad521718dbe0c78c342f2b65d243f3ddddf65994ad0077bbda807b9765b62297"
+      "sha256": "sha256:1ad1e97165da087a07871554d0a03dcf90bb1f54cad26edd9d5647d288004f0d"
     },
     {
       "name": "TypeOK",
       "kind": "invariant",
       "says": "The issue's state is always one of the ten kinds of post, and everything else the factory knows has its expected type.",
-      "sha256": "sha256:bd56024cf0b74cdedebca4214d980932f8b2e7355ad9152e000d42620d14ba56"
+      "sha256": "sha256:ade8b428766cec26abe520e5ad93499676e91ff28173bce06d105b5f7b55581a"
     },
     {
       "name": "OnlyDirectorsDirect",
@@ -91,6 +83,18 @@
       "kind": "invariant",
       "says": "When a build stops, or the factory refuses to start one, there is no pull request.",
       "sha256": "sha256:7181be45875df8f30e772072af4a426e20bd3f179d3894d409864519a2dc7c46"
+    },
+    {
+      "name": "BuildStartsClean",
+      "kind": "invariant",
+      "says": "When a ratified proposal waits for its build, nothing is left of an earlier pull request: no head, CI result, lock, scope or merge.",
+      "sha256": "sha256:440198691feedfc480aa9a981d45144a5b98b977e87b2a3a9b9dff09a92b8d66"
+    },
+    {
+      "name": "RebuildsOwnFailures",
+      "kind": "invariant",
+      "says": "A retry retires a pull request to build its ratified proposal again only after the build failed its own gate in the factory's run, never after CI's gate failed or the pull request couldn't merge.",
+      "sha256": "sha256:215d1af1c0c45137f17505077f54903911d7f3db7c74fbf25a4ddf268b7d4191"
     },
     {
       "name": "QuestionsAsked",
@@ -165,53 +169,85 @@
       "sha256": "sha256:ebf58d856eb1bde5999e609cb62a702123d63ebad711c7ad830b0b85fd56cb11"
     },
     {
+      "name": "RebuiltAndMerged",
+      "kind": "witness",
+      "says": "A writer's retry can build a build that failed its own gate again, and the factory can merge the new build's pull request.",
+      "sha256": "sha256:cd5c302d15b841db2e4e20c6c2dfed3ccda74e855e96abe29117c4678ffe3f52"
+    },
+    {
+      "name": "RebuiltAndStopped",
+      "kind": "witness",
+      "says": "After a retry builds a failed build again, the new build can stop before it makes a pull request, and the factory posts that it failed.",
+      "sha256": "sha256:29abd130ea8e102ce047fe4b0218aaf13472a705c44d5da50c1991da74ff7c70"
+    },
+    {
+      "name": "RebuiltFailedAgain",
+      "kind": "witness",
+      "says": "The new build can fail its own gate again and leave another draft pull request, for another retry.",
+      "sha256": "sha256:32882d58096b91982c49abde4f956b15d1e6c724da3136fcce392fe90dae07d2"
+    },
+    {
       "name": "ObeyAnyone",
       "kind": "bug",
       "says": "A bot or someone without write access gets the factory to take the issue.",
       "expect": "OnlyDirectorsDirect",
-      "sha256": "sha256:705dc1fa390658d5f82c88b32113d4bd96e04b0a4822f5738965b461999c7667"
+      "sha256": "sha256:2df76ef0ad424dd26babb0d819117da2f26dcb1bb2249656de7151649646c6e4"
     },
     {
       "name": "RatifyEarlier",
       "kind": "bug",
       "says": "A ratify naming an earlier proposal's hash is accepted.",
       "expect": "RatifiesCurrentProposal",
-      "sha256": "sha256:630ac68ae465bd33f93aa390dcd26be7af390d501edce065c160c740266a791c"
+      "sha256": "sha256:e4f00b1645d32413b2185dd815789214d636019c1a0b484d4cbd209110d8851a"
     },
     {
       "name": "RatifyOverMovedLock",
       "kind": "bug",
       "says": "An amendment is ratified after the base branch's lock has moved.",
       "expect": "AmendsHeldLock",
-      "sha256": "sha256:afba7aa28960159203b79fe0e6f9e6a35771a80da66bb19b109fe960ad8f0f67"
+      "sha256": "sha256:3dcf9082bf41443e9cc0847936f56d1c47de8ded2ce3f369db18dc8ae2e1f12d"
     },
     {
       "name": "MergeOnAnyPass",
       "kind": "bug",
       "says": "The factory merges a commit that passed CI even though it is no longer the pull request's head.",
       "expect": "MergedCurrentHead",
-      "sha256": "sha256:5aea60f28baf74ff3c8a0cd7b4209ccde6752eaca53a2697340a9aaed5b582be"
+      "sha256": "sha256:3a128daece701d61560278a1cad2d2c578c01a15f4c1993f1bec595f680a078b"
     },
     {
       "name": "MergeIgnoringLock",
       "kind": "bug",
       "says": "The factory merges without checking that the project's lock is the ratified proposal.",
       "expect": "MergedLockRatified",
-      "sha256": "sha256:f6b099fb6336b2d73732d2f3d3f00f6e8a28df832a78ca97621224057a4243d2"
+      "sha256": "sha256:0b31e7bb8c13599934e77582091ff43ef164a51f9af57e692cd35cab884d3a1c"
     },
     {
       "name": "StartPastLimit",
       "kind": "bug",
       "says": "The factory starts a third build after two builds of the issue have stopped partway and no writer has said retry.",
       "expect": "StopLimit",
-      "sha256": "sha256:82c7895aaf34e9efacf6b5ecaff6ac96f9c76c47d5309444ce4987e946e2dc71"
+      "sha256": "sha256:de6a2ce18ca743b573f3850951700e4930f9aa3b3b1301ad89ac25359eb5e5fc"
     },
     {
       "name": "MergeFailedBuild",
       "kind": "bug",
       "says": "The factory merges a pull request whose build failed, before a writer says retry and CI's gate passes.",
       "expect": "MergedGatePassed",
-      "sha256": "sha256:c7d13fdf3a36e54a57693ff62e869c15fab2c3c7879ce3172a3d0a4d845d942c"
+      "sha256": "sha256:7fa5ad2bae7f3e00f2fa38145f8a4a2d5f6b2155b5760e2fa2c7e90df6cd39b5"
+    },
+    {
+      "name": "RebuildKeepsDraft",
+      "kind": "bug",
+      "says": "A retry builds a failed build again but keeps its draft's head, CI's result and lock for the next build.",
+      "expect": "BuildStartsClean",
+      "sha256": "sha256:5801d3d0e919fec59bcc76d45e4cf016fa926b18c1bfb192c6ea072de961bdae"
+    },
+    {
+      "name": "RebuildAfterCI",
+      "kind": "bug",
+      "says": "A retry builds a pull request that failed CI's gate again, instead of watching it again.",
+      "expect": "RebuildsOwnFailures",
+      "sha256": "sha256:7a14b85e19f0ec087988ecc972410e4611a019f10b0fc68deaa3cf885f068ea6"
     }
   ]
 }

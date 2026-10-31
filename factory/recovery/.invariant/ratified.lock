@@ -1,13 +1,5 @@
 {
-  "ratified": {
-    "by": "gitdek",
-    "at": "2026-09-28T17:54:58Z",
-    "issue": 68,
-    "comment": "https://github.com/gitdek/invariant/issues/68#issuecomment-5875564945",
-    "proposal": "sha256:85b44c9f1da81dc071bd946a6095d75267a92ef8601c5d17aff2163b0254b976",
-    "amends": "sha256:85b44c9f1da81dc071bd946a6095d75267a92ef8601c5d17aff2163b0254b976",
-    "previous": "#23"
-  },
+  "decision": "D-0203",
   "bounds": {
     "MaxCrashes": "2",
     "Watchers": "{w1, w2}"
@@ -17,13 +9,13 @@
       "name": "Spec",
       "kind": "spec",
       "says": "The factory starts with an issue that has no commands, posts, branch or pull request, and every step is a Next step.",
-      "sha256": "sha256:d5a4bd602a92989746b6cab842fa3dcda128da4274684a06900eff501e9f895c"
+      "sha256": "sha256:d423d34ec3dec317626f6598777146c6a855fec72a878e8cbd1ee105c7f479fb"
     },
     {
       "name": "NoDoubleAnswer",
       "kind": "invariant",
-      "says": "No command, build or merge is ever answered by more than one factory post.",
-      "sha256": "sha256:0e2c75197f67f88d4989e5df14f3566f3f6baa921565009ab7975f65e371d47e"
+      "says": "No command, retry, build or merge is ever answered by more than one factory post.",
+      "sha256": "sha256:0de164b46d13277e1ed606693328f1e17d89c06f01e62cb8dec399dec3970989"
     },
     {
       "name": "OnlyHolderActs",
@@ -34,14 +26,44 @@
     {
       "name": "NoRunTwice",
       "kind": "invariant",
-      "says": "No agent run is ever started twice for one command or build.",
-      "sha256": "sha256:2c9b6e21aa57239edd3f56d781e2c9379f5ebd44875927c0f5c47ebf5433c980"
+      "says": "No agent run is ever started twice for one draft or build.",
+      "sha256": "sha256:e44cb4a041e352a136e126a3d837aa8eab43ec0493ceefacb0e45187084aece8"
     },
     {
       "name": "OnePullRequest",
       "kind": "invariant",
-      "says": "At most one pull request is ever opened for the ratification.",
+      "says": "Each build opens at most one pull request, even once that pull request is closed or merged.",
       "sha256": "sha256:e10c5d99514a29e90e1ddc27cd31e83d6d9c238ce28f7cf2832c2db44939a922"
+    },
+    {
+      "name": "OneOpenPullRequest",
+      "kind": "invariant",
+      "says": "At most one of the ratified proposal's pull requests is open at a time: a retry's build opens its own only after the draft it replaces is closed.",
+      "sha256": "sha256:f32b0ff361324b6c1dfebdc1e0f48caf82f1f8e3b9956660f857d61437c51357"
+    },
+    {
+      "name": "RetiredOnlyByRecord",
+      "kind": "invariant",
+      "says": "The factory closes a draft only once a record every watcher can read says a retry replaces it.",
+      "sha256": "sha256:faa0341bc1af58e1ea5b929f6d98885b0441081f97fcf1bf58637d75445e8fc9"
+    },
+    {
+      "name": "NoReplacingMerged",
+      "kind": "invariant",
+      "says": "A retry whose draft someone merged starts no build and opens no pull request.",
+      "sha256": "sha256:25fc13eccb9b79e0ebe6e94cc1605ca6e17af0cc9b7a37aa21dd328585f01d0c"
+    },
+    {
+      "name": "OwnGate",
+      "kind": "invariant",
+      "says": "CI's gate counts only on the latest build's own pull request: it never stands passed before that pull request opens.",
+      "sha256": "sha256:e39b310a7b6f30a924b36536a2dcb062d03bf0f316dc374727107b0b64035043"
+    },
+    {
+      "name": "OwnRun",
+      "kind": "invariant",
+      "says": "The latest build's result comes only from its own agent run, never from an earlier build's.",
+      "sha256": "sha256:f562933a5c6851f42dcb9bdc7747a419a1af173abbc6f44cf2c36bef8bb7eade"
     },
     {
       "name": "OneMerge",
@@ -59,7 +81,7 @@
       "name": "TypeOK",
       "kind": "invariant",
       "says": "Every part of the state always has the expected kind of value.",
-      "sha256": "sha256:0344e043d021bbce9b371d02b396dd445ca7bdc7438b69c997e9e5685331c129"
+      "sha256": "sha256:0f09b7735dc803db5a0f7e82431a41768a62c87b8c782f1c6acdc8943be17973"
     },
     {
       "name": "Merged",
@@ -77,13 +99,13 @@
       "name": "StoppedRunReported",
       "kind": "witness",
       "says": "A build whose agent run stopped partway can be reported as stopped.",
-      "sha256": "sha256:fb4b57308d124ab3fb6fec04cd8cd86a3034399686ee18be2d84251ef4f98334"
+      "sha256": "sha256:bc6b9ba3478d2c66c2f54a3216caaca608e1de67914f0b132e9425a86b5a110c"
     },
     {
       "name": "RetryBuilt",
       "kind": "witness",
       "says": "A writer's retry of a stopped build can open the pull request and be answered.",
-      "sha256": "sha256:f2d78e33fc6b9b6ee46b5d88bbc2e8fed65c9ad16012d27ec3ae8ce3f40d0ad3"
+      "sha256": "sha256:e4259e4f8cbe41f5c842be042c1ca0c46414f009c0964ba055bee5ac7436a0fa"
     },
     {
       "name": "RecoveredAfterCrashes",
@@ -92,67 +114,158 @@
       "sha256": "sha256:50ddde7d38ea86d800ff0afc6da313444f006c09a6a1f070f5a03ddb13a1ee03"
     },
     {
+      "name": "Replaced",
+      "kind": "witness",
+      "says": "A writer's retry can replace a failed draft: the factory closes the draft, and the retry's build opens a new pull request and is answered.",
+      "sha256": "sha256:12ffe92a76a30fee37b1b64eda4065a4ec7503c5d09e993dd74e6a9835554feb"
+    },
+    {
+      "name": "ReplacedAndMerged",
+      "kind": "witness",
+      "says": "The pull request that replaced a failed draft can be merged and the merge reported.",
+      "sha256": "sha256:c9f11e8eef50cd491f18d145451a7d5031132e024bd014c8f4396255973d6712"
+    },
+    {
+      "name": "FailedAgain",
+      "kind": "witness",
+      "says": "A retry's build can leave a failed draft too, which a writer can retry in turn.",
+      "sha256": "sha256:bd29ce9f601843b53da6dd0014d63e09c869194d867a4c52a024ccbc9de377ba"
+    },
+    {
+      "name": "StoppedAfterRetiring",
+      "kind": "witness",
+      "says": "A retry's build can stop after the draft it replaces was closed, and be reported as stopped, keeping the record the next retry builds on.",
+      "sha256": "sha256:730ad109217f39211000e10c95b93b82ea01d1d3fd7e888edfe462df0bf1fe52"
+    },
+    {
+      "name": "MergedDraftKept",
+      "kind": "witness",
+      "says": "A retry whose draft someone merged is answered without replacing it.",
+      "sha256": "sha256:8648b4a0f4e6d0a02658c7329179d26b13737bebb20f374602ee81295445401f"
+    },
+    {
+      "name": "ClosedDraftNoted",
+      "kind": "witness",
+      "says": "A retry whose draft someone else closed before its record was stored is answered without a build.",
+      "sha256": "sha256:c09e4aa45fdba07d98d4877bd4f619c472c31cc80446169840b79a8e35fd62d6"
+    },
+    {
       "name": "CommandsAnswered",
       "kind": "property",
-      "says": "Every command a writer gives is eventually answered by a factory post.",
-      "sha256": "sha256:f92d54689937eb917a68b88b440cf2a01ccd54ef042d2c37038f22b1ff494cd9"
+      "says": "Every command and retry a writer gives is eventually answered by a factory post.",
+      "sha256": "sha256:90280239411b39436cafd7f3eb3919d4b49bb775890efab137708fca9e709adf"
+    },
+    {
+      "name": "BuildsAnswered",
+      "kind": "property",
+      "says": "Every build a ratification or a retry starts is eventually answered: by its pull request, or by a report that it stopped.",
+      "sha256": "sha256:4922b0023818bb32afcccdf1195721219343fde000f023a0a97bc151f9832649"
     },
     {
       "name": "GatedPullRequestsSettled",
       "kind": "property",
-      "says": "Once CI's gate passes on the pull request, it is eventually merged or reported as one that can't merge.",
-      "sha256": "sha256:6e4c52816975934bab47659af8a4e80c30f685f654355a36c0a12ef20fbb9d9b"
+      "says": "Once CI's gate passes on a pull request that isn't a failed draft, the factory eventually merges it or reports it: as one that can't merge, or as merged or closed by someone else.",
+      "sha256": "sha256:6e7ee9dcbb3b704905c1e455ee213bc2b78ecc7a1e1e5434487d245de7e49fdf"
     },
     {
       "name": "FairAcquire",
       "kind": "fairness",
       "says": "A running watcher eventually takes a lease that nobody holds.",
-      "sha256": "sha256:af39b5f88f01c142ed0db2ae34db6955c177c16172e6d40dda5111c90443680d"
+      "sha256": "sha256:147d44379b56b71c74ebc84891fe2fb52d69b4a072dc09f30824673dffc387f5"
     },
     {
       "name": "FairExpire",
       "kind": "fairness",
       "says": "A lease whose holder has crashed eventually runs out.",
-      "sha256": "sha256:b66a33e241a5305f2b8b2cfcfbc0a19eee0350b441146f8ea862b307d43f00d7"
+      "sha256": "sha256:8b18535763a3c8e3f76bfe9b53a7bd8445c0015406559f2d18727cc9a9abd07c"
     },
     {
       "name": "FairAct",
       "kind": "fairness",
       "says": "A watcher holding the lease eventually takes the next effect that's due.",
-      "sha256": "sha256:f1124d20a1c8f5a8c41726fbbcc5c0ed53681b727e02a0dadf0222c78993cce3"
+      "sha256": "sha256:9d2dd21529dea3df0ef48966438598ece3219a3fbdfed747f31c997d974fcabc"
     },
     {
       "name": "FairFinishRun",
       "kind": "fairness",
       "says": "An agent run held by the lease's holder eventually finishes and is recorded.",
-      "sha256": "sha256:9c87c08d7cc8c708dbc0dc59cf437e1ed076509677c55ac3f9f0754fce8f3f02"
+      "sha256": "sha256:2a35c3789c039ffeb3f888b4a599f164a9294d97c2bef351e02c2e1c2e530e2a"
     },
     {
       "name": "FairDropRun",
       "kind": "fairness",
       "says": "A watcher that has lost the lease eventually drops the agent run it was in.",
-      "sha256": "sha256:60726c5b5533e99ea007bcacbc401f39477499933101b372a1f3a1280a1eb642"
+      "sha256": "sha256:e7c48d0945d78ca90f9bcb80434c1c5cdb55a782557b6d370e5fd8309a1a1344"
     },
     {
       "name": "PostWithoutLooking",
       "kind": "bug",
       "says": "A watcher posts its answer without looking for an answer already there.",
       "expect": "NoDoubleAnswer",
-      "sha256": "sha256:7c0c0db1687591d763a913a7085fbed0e40c8acd949b574890c59c621f734a61"
+      "sha256": "sha256:44e6ea5c9143f087db10cb821498b7363a8c52eeb278b6b4bc07905116f0e77f"
     },
     {
       "name": "PostWithoutLease",
       "kind": "bug",
       "says": "A watcher that woke after its lease ran out posts without checking the lease.",
       "expect": "OnlyHolderActs",
-      "sha256": "sha256:277421dbd0bfb5576616eaa319c02323a0e6c5c091308fb374687381ca35d8f8"
+      "sha256": "sha256:78c9d620e3175c4b2304048170c361c6044afefa9a8b96d521d36e6839c3053c"
     },
     {
       "name": "RerunStoppedRun",
       "kind": "bug",
       "says": "A watcher that finds an agent run that stopped partway starts it again.",
       "expect": "NoRunTwice",
-      "sha256": "sha256:dd8254895f48a55d9312f3dba49cc3a7f6c8ab6a8bb869cbaa43d875ac118112"
+      "sha256": "sha256:61248036140e4e6f036d44efb723dc7df8624fefbbb18692f69ea749eebc256a"
+    },
+    {
+      "name": "OpenWithoutLookingClosed",
+      "kind": "bug",
+      "says": "A watcher finds no open pull request for the latest build, misses the one it opened that was since closed or merged, and opens another.",
+      "expect": "OnePullRequest",
+      "sha256": "sha256:bba290c390f63be43bc9c5a569b02b5bc611d3187665bb7394ab97e9eb24da72"
+    },
+    {
+      "name": "OpenBeforeRetiring",
+      "kind": "bug",
+      "says": "A retry's build opens its pull request while the draft it replaces is still open.",
+      "expect": "OneOpenPullRequest",
+      "sha256": "sha256:8d2b18c2be6e488f8897149ed51587d7a299ec37dcb8d1f6cf34dcb1214b8159"
+    },
+    {
+      "name": "RetireWithoutRecord",
+      "kind": "bug",
+      "says": "The factory closes the draft before storing the retry's record, so after a crash its own close looks like someone else's.",
+      "expect": "RetiredOnlyByRecord",
+      "sha256": "sha256:7635dab77600636ee2ec3e8c8e7ef69a31d6b674a0c92e6e5f61ac21b90ac7c1"
+    },
+    {
+      "name": "ReplaceMergedDraft",
+      "kind": "bug",
+      "says": "A retry whose draft someone merged builds again anyway.",
+      "expect": "NoReplacingMerged",
+      "sha256": "sha256:8bfc298a378474092e3529d8394079d1af4f95f2c7d4180d80eaabeb0887fd94"
+    },
+    {
+      "name": "KeepGateAcrossRetry",
+      "kind": "bug",
+      "says": "A writer's retry keeps CI's result from the draft it replaces.",
+      "expect": "OwnGate",
+      "sha256": "sha256:59b88ea3b3641fbd9218437be6ca42d7e9651cd8c0307cfda738011ac6d1bffb"
+    },
+    {
+      "name": "FinishStaleRun",
+      "kind": "bug",
+      "says": "A watcher whose agent run a retry made stale records it as the latest build's.",
+      "expect": "OwnRun",
+      "sha256": "sha256:1407721b72c4ff3d1a6e98e8f614764c5c234d0b9f779032d042b44bf0964f8a"
+    },
+    {
+      "name": "CloseWithoutLease",
+      "kind": "bug",
+      "says": "A watcher that woke after its lease ran out closes the draft without checking the lease.",
+      "expect": "OnlyHolderActs",
+      "sha256": "sha256:c62b75406153a56e667c6bd72721404962c6d508a71abff04fdad6e7a71fd5c3"
     }
   ]
 }
