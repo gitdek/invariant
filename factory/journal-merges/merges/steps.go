@@ -119,19 +119,21 @@ func (s *Core) TakeMainIn(b *Branch) (ran bool, from, to [][]int) {
 	}
 	from = positions(len(s.Lines), s.Room)
 	to = positions(len(s.Lines), s.Room)
-	s.takeFrom(b, from, to, 0)
+	s.takeFrom(b, from, to, 0 /*@, 1/4 @*/)
 	return true, from, to
 }
 
 // takeFrom takes main in to each of the branch's files from file f on, as
 // TakeMainIn does, rebuilding each from a copy of itself. Each call keeps
 // its own file, so what it proves of that file holds after the files past it
-// are taken.
-// @ requires acc(&s.Lines, 1/4) && acc(&s.Len, 1/4) && acc(&s.Room, 1/4) && 0 <= s.Room && s.Room <= MaxSize
+// are taken. It reads main with the share p of its permission it's given,
+// and gives each next call half of it.
+// @ requires p > 0
+// @ requires acc(&s.Lines, p) && acc(&s.Len, p) && acc(&s.Room, p) && 0 <= s.Room && s.Room <= MaxSize
 // @ requires len(s.Len) == len(s.Lines) && len(s.Lines) <= MaxSize && 0 <= f && f <= len(s.Lines)
-// @ requires forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> acc(&s.Len[g], 1/4) && 0 <= s.Len[g] && s.Len[g] <= s.Room
-// @ requires forall g int :: { &s.Lines[g] } 0 <= g && g < len(s.Lines) ==> acc(&s.Lines[g], 1/4) && len(s.Lines[g]) == s.Room
-// @ requires forall g, k int :: { &s.Lines[g][k] } 0 <= g && g < len(s.Lines) && 0 <= k && k < s.Room ==> acc(&s.Lines[g][k], 1/4)
+// @ requires forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> acc(&s.Len[g], p) && 0 <= s.Len[g] && s.Len[g] <= s.Room
+// @ requires forall g int :: { &s.Lines[g] } 0 <= g && g < len(s.Lines) ==> acc(&s.Lines[g], p) && len(s.Lines[g]) == s.Room
+// @ requires forall g, k int :: { &s.Lines[g][k] } 0 <= g && g < len(s.Lines) && 0 <= k && k < s.Room ==> acc(&s.Lines[g][k], p)
 // @ requires acc(&b.Lines, 1/4) && acc(&b.Len, 1/4) && len(b.Lines) == len(s.Lines) && len(b.Len) == len(s.Lines)
 // @ requires forall g int :: { &b.Len[g] } f <= g && g < len(b.Len) ==> acc(&b.Len[g]) && 0 <= b.Len[g] && s.Len[g] + b.Len[g] <= s.Room
 // @ requires forall g int :: { &b.Lines[g] } f <= g && g < len(b.Lines) ==> acc(&b.Lines[g], 1/4) && len(b.Lines[g]) == s.Room
@@ -141,11 +143,11 @@ func (s *Core) TakeMainIn(b *Branch) (ran bool, from, to [][]int) {
 // @ requires forall g, k int :: { &from[g][k] } f <= g && g < len(from) && 0 <= k && k < s.Room ==> acc(&from[g][k])
 // @ requires forall g int :: { &to[g] } f <= g && g < len(to) ==> acc(&to[g], 1/4) && len(to[g]) == s.Room
 // @ requires forall g, k int :: { &to[g][k] } f <= g && g < len(to) && 0 <= k && k < s.Room ==> acc(&to[g][k])
-// @ ensures acc(&s.Lines, 1/4) && acc(&s.Len, 1/4) && acc(&s.Room, 1/4) && s.Room == old(s.Room)
+// @ ensures acc(&s.Lines, p) && acc(&s.Len, p) && acc(&s.Room, p) && s.Room == old(s.Room)
 // @ ensures len(s.Len) == old(len(s.Len)) && len(s.Lines) == old(len(s.Lines))
-// @ ensures forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> acc(&s.Len[g], 1/4)
-// @ ensures forall g int :: { &s.Lines[g] } 0 <= g && g < len(s.Lines) ==> acc(&s.Lines[g], 1/4) && len(s.Lines[g]) == s.Room
-// @ ensures forall g, k int :: { &s.Lines[g][k] } 0 <= g && g < len(s.Lines) && 0 <= k && k < s.Room ==> acc(&s.Lines[g][k], 1/4)
+// @ ensures forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> acc(&s.Len[g], p)
+// @ ensures forall g int :: { &s.Lines[g] } 0 <= g && g < len(s.Lines) ==> acc(&s.Lines[g], p) && len(s.Lines[g]) == s.Room
+// @ ensures forall g, k int :: { &s.Lines[g][k] } 0 <= g && g < len(s.Lines) && 0 <= k && k < s.Room ==> acc(&s.Lines[g][k], p)
 // @ ensures forall g int :: { &s.Len[g] } { old(s.Len[g]) } 0 <= g && g < len(s.Len) ==> s.Len[g] == old(s.Len[g])
 // @ ensures forall g, k int :: { &s.Lines[g][k] } { old(s.Lines[g][k]) } 0 <= g && g < len(s.Lines) && 0 <= k && k < s.Room ==> s.Lines[g][k] == old(s.Lines[g][k])
 // @ ensures acc(&b.Lines, 1/4) && acc(&b.Len, 1/4) && len(b.Lines) == old(len(b.Lines)) && len(b.Len) == old(len(b.Len))
@@ -165,15 +167,17 @@ func (s *Core) TakeMainIn(b *Branch) (ran bool, from, to [][]int) {
 // @ ensures forall g, q int :: { &to[g][q] } f <= g && g < len(b.Lines) && 0 <= q && q < old(b.Len[g]) && !(exists i int :: { &s.Lines[g][i] } 0 <= i && i < s.Len[g] && s.Lines[g][i] == old(b.Lines[g][q])) ==> s.Len[g] <= to[g][q] && to[g][q] < b.Len[g]
 // @ ensures forall g, q int :: { &to[g][q] } f <= g && g < len(b.Lines) && 0 <= q && q < old(b.Len[g]) && !(exists i int :: { &s.Lines[g][i] } 0 <= i && i < s.Len[g] && s.Lines[g][i] == old(b.Lines[g][q])) ==> b.Lines[g][to[g][q]] == old(b.Lines[g][q])
 // @ decreases len(s.Lines) - f
-func (s *Core) takeFrom(b *Branch, from, to [][]int, f int) {
+func (s *Core) takeFrom(b *Branch, from, to [][]int, f int /*@, ghost p perm @*/) {
 	if f == len(s.Lines) {
 		return
 	}
-	// The branch's file as it was, for its own lines past main's.
+	// Copies of main's file and the branch's, as they are.
+	ours := make([]Line, s.Room)
+	copyLines(ours, s.Lines[f] /*@, p/2 @*/)
 	was := make([]Line, s.Room)
-	copyLines(was, b.Lines[f])
-	b.Len[f] = takeIn(b.Lines[f], s.Lines[f], s.Len[f], was, b.Len[f], from[f], to[f])
-	s.takeFrom(b, from, to, f+1)
+	copyLines(was, b.Lines[f] /*@, 1/2 @*/)
+	b.Len[f] = takeIn(b.Lines[f], ours, s.Len[f], was, b.Len[f], from[f], to[f])
+	s.takeFrom(b, from, to, f+1 /*@, p/2 @*/)
 }
 
 // startsEvery says whether each of main's files is the start of the
@@ -346,7 +350,7 @@ func (s *Core) copyFrom(b *Branch) {
 	// @ invariant forall g, k int :: { &s.Lines[g][k] } 0 <= g && g < f && 0 <= k && k < s.Room ==> s.Lines[g][k] == old(b.Lines[g][k])
 	// @ decreases len(s.Lines) - f
 	for f < len(s.Lines) {
-		copyLines(s.Lines[f], b.Lines[f])
+		copyLines(s.Lines[f], b.Lines[f] /*@, 1/4 @*/)
 		s.Len[f] = b.Len[f]
 		f++
 	}

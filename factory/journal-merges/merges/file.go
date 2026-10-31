@@ -77,20 +77,21 @@ func has(m []Line, n int, l Line) (found bool) {
 	return false
 }
 
-// copyLines copies every line of src into dst, which is as long.
-// @ requires len(dst) == len(src) && len(dst) <= MaxSize
+// copyLines copies every line of src into dst, which is as long. It reads
+// src with the share q of its permission that it's given.
+// @ requires q > 0 && len(dst) == len(src) && len(dst) <= MaxSize
 // @ requires forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
-// @ requires forall k int :: { &src[k] } 0 <= k && k < len(src) ==> acc(&src[k], 1/4)
+// @ requires forall k int :: { &src[k] } 0 <= k && k < len(src) ==> acc(&src[k], q)
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
-// @ ensures forall k int :: { &src[k] } 0 <= k && k < len(src) ==> acc(&src[k], 1/4)
+// @ ensures forall k int :: { &src[k] } 0 <= k && k < len(src) ==> acc(&src[k], q)
 // @ ensures forall k int :: { &src[k] } 0 <= k && k < len(src) ==> src[k] == old(src[k])
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> dst[k] == old(src[k])
 // @ decreases
-func copyLines(dst, src []Line) {
+func copyLines(dst, src []Line /*@, ghost q perm @*/) {
 	i := 0
 	// @ invariant 0 <= i && i <= len(dst)
 	// @ invariant forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
-	// @ invariant forall k int :: { &src[k] } 0 <= k && k < len(src) ==> acc(&src[k], 1/4)
+	// @ invariant forall k int :: { &src[k] } 0 <= k && k < len(src) ==> acc(&src[k], q)
 	// @ invariant forall k int :: { &src[k] } 0 <= k && k < len(src) ==> src[k] == old(src[k])
 	// @ invariant forall k int :: { &dst[k] } 0 <= k && k < i ==> dst[k] == src[k]
 	// @ decreases len(dst) - i
