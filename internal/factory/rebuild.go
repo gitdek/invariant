@@ -57,14 +57,34 @@ func (f *Factory) replacement(ctx context.Context, t Thread, state Post) (Comman
 }
 
 // rebuild answers writer c's retry of the plan build state says failed in
-// the factory's own run, leaving a draft, by building the plan again. Each
-// effect is looked for before it's taken (D-0069): the retry's record, the
-// draft's close and the answer. A draft someone merged first has nothing to
-// replace, so watch records the merge, and the retry is answered after it.
+// the factory's own run, leaving a draft, by building the plan again. The
+// protocol must allow the Rebuild before anything happens, and the build
+// starts from the plan's ratification, which the draft's branch holds.
+// Then each effect is looked for before it's taken (D-0069): the retry's
+// record, the draft's close and the answer. A draft someone merged first has
+// nothing to replace, so watch records the merge, and the retry is answered
+// after it.
 func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) error {
 	n, m := t.Issue.Number, state.Marker
 	old, step := m.PR, replaceStepName(c)
 	want := fmt.Sprintf("#%d", old)
+	before, after := f.rebuildStep(t, state, c)
+	if err := f.allowed(ctx, n, "build the ratified plan again, replacing "+want, before, after); err != nil {
+		return err
+	}
+	from := m.From
+	if from == "" {
+		if err := f.Repo.Fetch(ctx); err != nil {
+			return err
+		}
+		var err error
+		if from, err = f.Repo.FirstCommit(ctx, "origin/"+f.Base, "origin/"+m.Branch, lockFileOf(m.Project)); err != nil {
+			return err
+		}
+		if from == "" {
+			return fmt.Errorf("#%d: %s holds no commit that ratified %s, so the plan can't be built again from it", n, m.Branch, m.Project)
+		}
+	}
 	recorded, err := f.Repo.Recorded(ctx, n, step)
 	if err != nil {
 		return err
@@ -95,22 +115,6 @@ func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) 
 	}
 	if pr.Merged {
 		return f.watch(ctx, t, state)
-	}
-	from := m.From
-	if from == "" {
-		if err := f.Repo.Fetch(ctx); err != nil {
-			return err
-		}
-		if from, err = f.Repo.FirstCommit(ctx, "origin/"+f.Base, "origin/"+m.Branch, lockFileOf(m.Project)); err != nil {
-			return err
-		}
-		if from == "" {
-			return fmt.Errorf("#%d: %s holds no commit that ratified %s, so the plan can't be built again from it", n, m.Branch, m.Project)
-		}
-	}
-	before, after := f.rebuildStep(t, state, c)
-	if err := f.allowed(ctx, n, "build the ratified plan again, replacing "+want, before, after); err != nil {
-		return err
 	}
 	if err := f.recovers(ctx, n, "answer the retry", f.canPost(replacing(recovery.PredRetired, true), recovery.Retry)); err != nil {
 		return err
