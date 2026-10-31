@@ -3,6 +3,7 @@
 import ast
 from collections import Counter
 import hashlib
+import hmac
 import inspect
 import json
 import os
@@ -205,6 +206,44 @@ class Observations(unittest.TestResult):
             outcome = "failed" if issubclass(error[0], test.failureException) else "error"
             self.record(test, outcome, self.diagnostic(error))
 
+
+def conformance():
+    import invariant_observe
+    secret = os.path.join(os.path.dirname(request["output"]), "authentication.key")
+    with open(secret, "rb") as stream:
+        authentication = hmac.new(stream.read(), digestmod="sha256")
+    os.unlink(secret)
+    # Authenticate bytes emitted by the collector, never bytes read back from
+    # the application-writable file. Only a completed collector can seal them.
+    encode = json.dumps
+    write, flush = events.write, events.flush
+    callers = (invariant_observe.Collector.write.__code__, invariant_observe.run.__code__)
+    frame = sys._getframe
+
+    def collect(record):
+        caller = frame(1)
+        if not any(caller.f_code is code for code in callers) or caller.f_globals is not vars(invariant_observe):
+            raise ValueError("observation output did not come from the collector")
+        line = encode(record, ensure_ascii=True, sort_keys=True) + "\n"
+        authentication.update(line.encode("utf-8"))
+        write(line)
+        flush()
+
+    begin = encode(dict(type="begin", version=2, key=request["key"],
+                        snapshot_sha256=request["snapshot_sha256"], runner_sha256=request["runner_sha256"],
+                        execution=request["execution"]), ensure_ascii=True, sort_keys=True) + "\n"
+    authentication.update(begin.encode("utf-8"))
+    write(begin)
+    flush()
+    invariant_observe.run(request, collect, lexical_locations, compiled_methods, sys.argv[2:])
+    write(encode(dict(type="authentication", hmac_sha256=authentication.hexdigest()), sort_keys=True) + "\n")
+    flush()
+    events.close()
+
+
+if request["key"]["kind"] == "conformance":
+    conformance()
+    sys.exit(0)
 
 emit(dict(type="begin", version=1, key=request["key"],
           snapshot_sha256=request["snapshot_sha256"], runner_sha256=request["runner_sha256"]))

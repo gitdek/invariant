@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,14 +59,16 @@ type PythonApplicationTest struct {
 }
 
 type PythonApplicationExecutionResult struct {
-	Key        PythonApplicationInvocationKey      `json:"key"`
-	Declared   project.ResolvedComponentInvocation `json:"declared"`
-	Actual     PythonApplicationActual             `json:"actual"`
-	Provenance PythonApplicationProvenance         `json:"provenance"`
-	Tests      []PythonApplicationTest             `json:"tests"`
-	Complete   bool                                `json:"complete"`
-	Success    bool                                `json:"success"`
-	ExitCode   int                                 `json:"exit_code"`
+	Key             PythonApplicationInvocationKey      `json:"key"`
+	Declared        project.ResolvedComponentInvocation `json:"declared"`
+	Actual          PythonApplicationActual             `json:"actual"`
+	Provenance      PythonApplicationProvenance         `json:"provenance"`
+	Tests           []PythonApplicationTest             `json:"tests"`
+	ObservationMode string                              `json:"observation_mode,omitempty"`
+	Observations    []PythonApplicationObservation      `json:"observations,omitempty"`
+	Complete        bool                                `json:"complete"`
+	Success         bool                                `json:"success"`
+	ExitCode        int                                 `json:"exit_code"`
 	// Operational diagnostics may contain host paths or container IDs.
 	Diagnostics []string `json:"-"`
 	Fingerprint string   `json:"fingerprint"`
@@ -80,6 +83,9 @@ type pythonApplicationRequest struct {
 	Driver         string                         `json:"driver"`
 	Output         string                         `json:"output"`
 	Libraries      string                         `json:"libraries"`
+	Target         project.Component              `json:"target"`
+	Sampling       map[string]string              `json:"sampling"`
+	Execution      string                         `json:"execution"`
 }
 
 func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicationInvocationKey) (*PythonApplicationExecutionResult, error) {
@@ -99,9 +105,6 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if invocation == nil {
 		return nil, fmt.Errorf("unknown Python application invocation")
 	}
-	if key.Kind != "test" {
-		return nil, fmt.Errorf("Python application conformance execution is unsupported")
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -111,6 +114,9 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	runner, err := os.ReadFile(filepath.Join(s.runtime, "runner.py"))
 	if err != nil || pythonApplicationHash(runner) != s.provenance.RunnerSHA256 {
 		return nil, fmt.Errorf("Python application runner changed")
+	}
+	if err := s.freshObserver(); err != nil {
+		return nil, err
 	}
 	output, err := os.MkdirTemp("", "invariant-python-output-")
 	if err != nil {
@@ -127,7 +133,21 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 		Image: s.image, Interpreter: "/usr/local/bin/python", Launcher: "/runtime/runner.py", WorkingDir: path.Join("/src", v.WorkingDir),
 		Env: env, Sampling: maps.Clone(invocation.Sampling), Root: s.root, RuntimeDir: s.runtime, OutputDir: output}
 	c.Args = append([]string{"-S", "-s", "-P", "-B", c.Launcher, "/runtime/request.json"}, v.Args...)
-	req := pythonApplicationRequest{key, c.SnapshotSHA256, c.RunnerSHA256, s.declarations[key.Check], "/src", s.driver, "/output/events.jsonl", toolchain.PythonLibrary}
+	req := pythonApplicationRequest{Key: key, SnapshotSHA256: c.SnapshotSHA256, RunnerSHA256: c.RunnerSHA256,
+		Check: s.declarations[key.Check], Root: "/src", Driver: s.driver, Output: "/output/events.jsonl", Libraries: toolchain.PythonLibrary,
+		Target: s.declarations[key.Target], Sampling: maps.Clone(c.Sampling), Execution: rand.Text()}
+	// The runner consumes and unlinks this bootstrap secret before importing
+	// application code. It never belongs to the application-readable request.
+	var authentication []byte
+	if key.Kind == "conformance" {
+		authentication = make([]byte, 32)
+		if _, err := rand.Read(authentication); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(output, "authentication.key"), authentication, 0o600); err != nil {
+			return nil, err
+		}
+	}
 	b, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -142,8 +162,14 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	command.Args, command.Env, command.Sampling = slices.Clone(c.Args), maps.Clone(c.Env), maps.Clone(c.Sampling)
 	process, executionErr := s.execute(ctx, command)
 	r.ExitCode = process.ExitCode
-	protocolErr := s.observe(c, process.Events, r)
+	var protocolErr error
+	if key.Kind == "conformance" {
+		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r)
+	} else {
+		protocolErr = s.observe(c, process.Events, r)
+	}
 	freshErr := s.fresh()
+	freshErr = errors.Join(freshErr, s.freshObserver())
 	afterRunner, runnerErr := os.ReadFile(filepath.Join(s.runtime, "runner.py"))
 	if runnerErr != nil || pythonApplicationHash(afterRunner) != c.RunnerSHA256 {
 		freshErr = fmt.Errorf("Python application runner changed during execution")
@@ -163,6 +189,22 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	}
 	if process.Stderr != "" {
 		r.Diagnostics = append(r.Diagnostics, process.Stderr)
+	}
+	if key.Kind == "conformance" {
+		err = errors.Join(executionErr, protocolErr, freshErr)
+		r.Success = err == nil && r.Complete && process.ExitCode == 0 && len(r.Observations) > 0
+		if r.Success {
+			r.ObservationMode = "sampled"
+		} else {
+			r.Complete = false
+			r.Observations = nil
+			if err == nil {
+				err = fmt.Errorf("Python application driver did not complete successfully")
+			}
+			r.Diagnostics = append(r.Diagnostics, err.Error())
+		}
+		r.Fingerprint = pythonApplicationFingerprint(r)
+		return r, err
 	}
 	observed, passing := false, len(r.Tests) > 0
 	failed := false
@@ -258,6 +300,10 @@ func readPythonApplicationEvents(dir string) ([]byte, error) {
 // Validate structure before decoding into Go zero values. Duplicate object
 // keys, including nested keys, are never allowed to replace earlier evidence.
 func pythonApplicationJSON(b []byte, required ...string) (map[string]json.RawMessage, error) {
+	return pythonApplicationJSONFields(b, false, required...)
+}
+
+func pythonApplicationJSONFields(b []byte, allowNull bool, required ...string) (map[string]json.RawMessage, error) {
 	if !utf8.Valid(b) {
 		return nil, fmt.Errorf("event is not UTF-8")
 	}
@@ -270,7 +316,7 @@ func pythonApplicationJSON(b []byte, required ...string) (map[string]json.RawMes
 		}
 		delim, ok := t.(json.Delim)
 		if !ok {
-			if t == nil {
+			if t == nil && !allowNull {
 				return fmt.Errorf("null event field")
 			}
 			return nil
