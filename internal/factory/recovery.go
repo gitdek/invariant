@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/gitdek/invariant/factory/recovery/recovery"
+	"github.com/gitdek/invariant/internal/github"
 )
 
 // The watcher runs every effect through its recovery core, factory/recovery
@@ -26,7 +27,12 @@ import (
 // again is the core's replacement (#271, D-0203): its record, the draft's
 // close and its answer are the core's own steps. Each build is an attempt
 // with its own run, so a watcher still in the run of a build a later retry
-// replaced is in a stale run, which the core records as its own (D-0212).
+// replaced is in a stale run, which the core records as its own (D-0212). A
+// writer's retry that watches a modeled project's failed draft again is the
+// core's Watch (#354): its answer, the draft's mark ready and the merge or
+// the report that it can't merge are the core's steps too. Each pull
+// request is the core's as GitHub has it: a draft is a draft, and only a
+// ready one is ready.
 
 // errOutsideRecovery is what an effect the core doesn't allow fails with.
 var errOutsideRecovery = errors.New("the factory's recovery rules don't allow this effect")
@@ -37,19 +43,20 @@ const (
 	another = 1
 )
 
-// step is the step in hand, as every watcher can see it. A pull request the
-// build opened is a ready one, as far as these steps are concerned. pred and
-// intent are a retry's replacement: the draft it replaces, as a
-// recovery.Pred value, and whether its record is stored. attempt is the
-// latest build's attempt: 0 for the ratification's build, and one more for
-// each retry's, as the core counts them.
+// step is the step in hand, as every watcher can see it. draft says the
+// pull request the build opened is a draft. pred and intent are a retry's
+// replacement: the draft it replaces, as a recovery.Pred value, and whether
+// its record is stored. attempt is the latest build's attempt: 0 for the
+// ratification's build, and one more for each retry's, as the core counts
+// them.
 type step struct {
-	given     []int // the commands a writer gave for it: recovery.Solve, Ratify, Note or Retry
+	given     []int // the commands a writer gave for it: recovery.Solve, Ratify, Note, Retry or Watch
 	posted    []int // the steps already answered
 	runs      map[int]RunState
 	ratPushed bool
 	codePushed,
 	prOpen,
+	draft,
 	merged,
 	gatePassed,
 	mergeable bool
@@ -80,6 +87,8 @@ func (f *Factory) repo(s step) recovery.Repo {
 	switch {
 	case s.merged:
 		r.PR = recovery.PRMerged
+	case s.prOpen && s.draft:
+		r.PR = recovery.PRDraft
 	case s.prOpen:
 		r.PR = recovery.PRReady
 	}
@@ -133,6 +142,42 @@ func merging(mergeable, merged bool) step {
 	s.posted = append(s.posted, recovery.Build)
 	s.gatePassed, s.mergeable, s.merged = true, mergeable, merged
 	return s
+}
+
+// drafted is s with its pull request a draft, as a build that failed opens
+// it.
+func drafted(s step) step {
+	s.draft = true
+	return s
+}
+
+// watching is a writer's retry that watches the latest build's failed draft
+// again, answered or not (#354).
+func watching(answered bool) step {
+	s := drafted(building(RunDone, true, true))
+	s.posted = append(s.posted, recovery.Build)
+	s.given = append(s.given, recovery.Watch)
+	if answered {
+		s.posted = append(s.posted, recovery.Watch)
+	}
+	return s
+}
+
+// watchedMerging is a failed draft a writer's retry watches again, its
+// retry answered and CI's gate passed on it, which the factory can merge or
+// not (#354).
+func watchedMerging(mergeable bool) step {
+	s := watching(true)
+	s.gatePassed, s.mergeable = true, mergeable
+	return s
+}
+
+// mergingPR is merging for pr: a watched draft until it's marked ready.
+func mergingPR(pr github.PullRequest, mergeable, merged bool) step {
+	if pr.Draft && !merged {
+		return watchedMerging(mergeable)
+	}
+	return merging(mergeable, merged)
 }
 
 // noting is a command that changes nothing, answered by a post.
@@ -208,10 +253,16 @@ func (f *Factory) canPushCode(s step) bool {
 	return ok
 }
 
-// canOpenPullRequest says whether the build may open its pull request. The
-// core allows a draft exactly when it allows a ready one.
-func (f *Factory) canOpenPullRequest(s step) bool {
-	_, ok := f.repo(s).OpenPullRequest(watcher(recovery.NoRun, s.attempt), recovery.Build, true)
+// canOpenPullRequest says whether the build may open its pull request,
+// ready or as a draft.
+func (f *Factory) canOpenPullRequest(s step, ready bool) bool {
+	_, ok := f.repo(s).OpenPullRequest(watcher(recovery.NoRun, s.attempt), recovery.Build, ready)
+	return ok
+}
+
+// canMarkReady says whether the factory may mark a watched draft ready.
+func (f *Factory) canMarkReady(s step) bool {
+	_, ok := f.repo(s).MarkReady(watcher(recovery.NoRun, s.attempt))
 	return ok
 }
 

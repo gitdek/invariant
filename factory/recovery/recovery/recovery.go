@@ -17,19 +17,24 @@ package recovery
 // that draft (#271). So Posted[Retry], Posted[Build], Runs[Build] and the
 // pull request's fields are the latest retry's and the latest build's. Each
 // build has an attempt number, and a watcher in a build's run remembers the
-// attempt it started in, so a run an earlier build started is stale.
+// attempt it started in, so a run an earlier build started is stale. A
+// writer's retry can instead watch the latest build's failed draft again,
+// as a modeled project's does (#354): the factory marks it ready once CI's
+// gate passes on it and it can merge, then merges it, or reports it.
 
 // The steps the factory answers with a post. The first NumCmds are commands
-// a writer gives; Build and Merge answer events.
+// a writer gives, Retry and Watch the two kinds of retry; Build and Merge
+// answer events.
 const (
 	Solve   = 0
 	Ratify  = 1
 	Note    = 2
 	Retry   = 3
-	Build   = 4
-	Merge   = 5
-	NumCmds = 4
-	NumKeys = 6
+	Watch   = 4
+	Build   = 5
+	Merge   = 6
+	NumCmds = 5
+	NumKeys = 7
 )
 
 // An agent run as recorded where every watcher can read it.
@@ -68,7 +73,7 @@ const (
 
 // Repo is the shared, visible state of one issue in one repository.
 type Repo struct {
-	Given      [NumKeys]bool // commands a writer has given; Given[Retry] once any retry is
+	Given      [NumKeys]bool // commands a writer has given; Given[Retry] once any retry is, Given[Watch] once one watches the latest build's draft
 	Posted     [NumKeys]bool // a factory post answers the step
 	Runs       [NumKeys]int  // the agent run recorded for the step
 	RatPushed  bool          // the branch holds the ratification
@@ -78,6 +83,7 @@ type Repo struct {
 	GatePassed bool          // CI's gate passed on that pull request's head
 	Mergeable  bool          // GitHub can merge it
 	Merged     bool          // the factory merged it
+	Marked     bool          // the factory marked it ready, a draft a writer's retry watches
 	Pred       int           // the draft the latest retry replaces: a Pred value
 	Intent     bool          // the latest retry's record that it replaces that draft is stored
 	Attempt    int           // the latest build's attempt: how many retries started a build
@@ -95,7 +101,7 @@ type Watcher struct {
 // and a lease nobody holds.
 // @ ensures r.Lease == NoOne
 // @ ensures !r.RatPushed && !r.CodePushed && !r.Opened && r.PR == PRNone
-// @ ensures !r.GatePassed && !r.Mergeable && !r.Merged && r.Pred == PredNone && !r.Intent && r.Attempt == 0
+// @ ensures !r.GatePassed && !r.Mergeable && !r.Merged && !r.Marked && r.Pred == PredNone && !r.Intent && r.Attempt == 0
 // @ ensures forall j int :: { r.Given[j] } 0 <= j && j < NumKeys ==> !r.Given[j]
 // @ ensures forall j int :: { r.Posted[j] } 0 <= j && j < NumKeys ==> !r.Posted[j]
 // @ ensures forall j int :: { r.Runs[j] } 0 <= j && j < NumKeys ==> r.Runs[j] == RunNone
@@ -143,7 +149,8 @@ func (r Repo) Replacing() bool {
 
 // Triggered says step k has been asked for: its command was given, the
 // ratification's or the latest retry's answer asks for a build, or the gate
-// passed on a pull request that isn't a failed draft.
+// passed on a pull request that isn't a failed draft, or on a failed draft a
+// writer's retry watches again, once that retry is answered.
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
@@ -151,7 +158,7 @@ func (r Repo) Triggered(k int) bool {
 	return (IsCmd(k) && r.Given[k]) ||
 		(k == Build && r.Given[Retry] && r.Posted[Retry] && r.Replacing()) ||
 		(k == Build && !r.Given[Retry] && r.Posted[Ratify]) ||
-		(k == Merge && r.GatePassed && r.PR != PRDraft)
+		(k == Merge && r.GatePassed && (r.PR != PRDraft || (r.Given[Watch] && r.Posted[Watch])))
 }
 
 // Active says step k is asked for and no post answers it yet.
@@ -171,6 +178,7 @@ func (r Repo) EffectsDone(k int) bool {
 		(k == Ratify && r.RatPushed) ||
 		k == Note ||
 		(k == Retry && r.Pred != PredDraft) ||
+		k == Watch ||
 		(k == Build && r.Runs[Build] == RunDone && r.CodePushed && r.Opened) ||
 		(k == Merge && (r.Merged || !r.Mergeable || r.PR == PRClosed || r.PR == PRMerged))
 }
@@ -194,7 +202,7 @@ func (r Repo) Holds(w Watcher) bool {
 // @ decreases
 // @ pure
 func (r Repo) samePR(s Repo) bool {
-	return s.Opened == r.Opened && s.PR == r.PR && s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged
+	return s.Opened == r.Opened && s.PR == r.PR && s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked
 }
 
 // sameDraft says s's latest retry is r's: the same attempt, replacing r's
@@ -218,8 +226,9 @@ func (r Repo) Stale(w Watcher) bool {
 // @ decreases
 // @ pure
 func (r Repo) CanGive(c int) bool {
-	return (IsCmd(c) && c != Retry && !r.Given[c] && (c != Ratify || r.Posted[Solve])) ||
-		(c == Retry && r.Posted[Build] && (r.PR == PRNone || r.PR == PRDraft) && !r.Merged && r.Settled() && 0 <= r.Attempt && r.Attempt < MaxAttempt)
+	return (IsCmd(c) && c != Retry && c != Watch && !r.Given[c] && (c != Ratify || r.Posted[Solve])) ||
+		(c == Retry && r.Posted[Build] && (r.PR == PRNone || r.PR == PRDraft) && !r.Given[Watch] && !r.Merged && r.Settled() && 0 <= r.Attempt && r.Attempt < MaxAttempt) ||
+		(c == Watch && r.Posted[Build] && r.PR == PRDraft && !r.Given[Watch] && !r.Merged && r.Settled())
 }
 
 // @ requires 0 <= k && k < NumKeys
@@ -269,6 +278,12 @@ func (r Repo) CanOpenPullRequest(w Watcher, k int) bool {
 	return r.Holds(w) && k == Build && r.Active(k) && r.Runs[k] == RunDone && r.CodePushed && !r.Opened
 }
 
+// @ decreases
+// @ pure
+func (r Repo) CanMarkReady(w Watcher) bool {
+	return r.Holds(w) && r.Active(Merge) && r.PR == PRDraft && r.Mergeable
+}
+
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
@@ -296,6 +311,8 @@ func (r Repo) CanFinishRun(w Watcher) bool {
 // code, pull request or gate of its own yet, replacing that draft. After a
 // build that stopped, the draft an earlier retry replaced is still the one
 // it replaces, with that retry's record. The new build is the next attempt.
+// A watch, once the latest build left a failed draft no retry watches yet,
+// starts no build: it watches that draft again, which is never replaced.
 // @ requires 0 <= c && c < NumKeys
 // @ ensures ok == r.CanGive(c)
 // @ ensures !ok ==> s == r
@@ -305,7 +322,7 @@ func (r Repo) CanFinishRun(w Watcher) bool {
 // @ ensures ok && c == Retry ==> !s.Posted[Retry] && !s.Posted[Build] && s.Runs[Build] == RunNone
 // @ ensures ok && c == Retry ==> forall j int :: { s.Posted[j] } 0 <= j && j < NumKeys && j != Retry && j != Build ==> s.Posted[j] == r.Posted[j]
 // @ ensures ok && c == Retry ==> forall j int :: { s.Runs[j] } 0 <= j && j < NumKeys && j != Build ==> s.Runs[j] == r.Runs[j]
-// @ ensures ok && c == Retry ==> !s.CodePushed && !s.Opened && s.PR == PRNone && !s.GatePassed && !s.Mergeable && s.Merged == r.Merged
+// @ ensures ok && c == Retry ==> !s.CodePushed && !s.Opened && s.PR == PRNone && !s.GatePassed && !s.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked
 // @ ensures ok && c == Retry ==> s.Attempt == r.Attempt + 1
 // @ ensures ok && c == Retry && r.PR == PRDraft ==> s.Pred == PredDraft && !s.Intent
 // @ ensures ok && c == Retry && r.PR != PRDraft ==> s.Pred == r.Pred && s.Intent == r.Intent
@@ -345,7 +362,7 @@ func (r Repo) Give(c int) (s Repo, ok bool) {
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.GatePassed && s.Mergeable == m
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
-// @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened && s.PR == r.PR && s.Merged == r.Merged
+// @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened && s.PR == r.PR && s.Merged == r.Merged && s.Marked == r.Marked
 // @ ensures ok ==> r.sameDraft(s)
 func (r Repo) PassGate(m bool) (s Repo, ok bool) {
 	if !((r.PR == PRDraft || r.PR == PRReady) && !r.GatePassed) {
@@ -364,7 +381,7 @@ func (r Repo) PassGate(m bool) (s Repo, ok bool) {
 // @ ensures ok ==> s.PR == PRClosed
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
-// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && r.sameDraft(s)
+// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked && r.sameDraft(s)
 func (r Repo) OthersClosePR() (s Repo, ok bool) {
 	if !(r.PR == PRDraft || r.PR == PRReady) {
 		return r, false
@@ -381,7 +398,7 @@ func (r Repo) OthersClosePR() (s Repo, ok bool) {
 // @ ensures ok ==> s.PR == PRMerged
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
-// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && r.sameDraft(s)
+// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked && r.sameDraft(s)
 func (r Repo) OthersMergePR() (s Repo, ok bool) {
 	if !(r.PR == PRDraft || r.PR == PRReady) {
 		return r, false
@@ -643,7 +660,7 @@ func (r Repo) PushCode(w Watcher, k int) (s Repo, ok bool) {
 // @ ensures ok ==> s.Opened && (ready ==> s.PR == PRReady) && (!ready ==> s.PR == PRDraft)
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed
-// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && r.sameDraft(s)
+// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked && r.sameDraft(s)
 func (r Repo) OpenPullRequest(w Watcher, k int, ready bool) (s Repo, ok bool) {
 	if !r.CanOpenPullRequest(w, k) {
 		return r, false
@@ -658,6 +675,26 @@ func (r Repo) OpenPullRequest(w Watcher, k int, ready bool) (s Repo, ok bool) {
 	return s, true
 }
 
+// MarkReady marks ready the failed draft a writer's retry watches again,
+// once that retry is answered, CI's gate passed on the draft and the factory
+// can merge it: GitHub can merge it, and it doesn't change the trusted base.
+// @ requires w.Ok()
+// @ ensures ok == r.CanMarkReady(w)
+// @ ensures !ok ==> s == r
+// @ ensures ok ==> s.PR == PRReady && s.Marked
+// @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
+// @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
+// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && r.sameDraft(s)
+func (r Repo) MarkReady(w Watcher) (s Repo, ok bool) {
+	if !r.CanMarkReady(w) {
+		return r, false
+	}
+	s = r
+	s.PR = PRReady
+	s.Marked = true
+	return s, true
+}
+
 // MergePullRequest merges the latest build's ready pull request, unless it's
 // already merged.
 // @ requires w.Ok() && 0 <= k && k < NumKeys
@@ -665,7 +702,7 @@ func (r Repo) OpenPullRequest(w Watcher, k int, ready bool) (s Repo, ok bool) {
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.Merged && s.PR == PRMerged && s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
-// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && r.sameDraft(s)
+// @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Marked == r.Marked && r.sameDraft(s)
 func (r Repo) MergePullRequest(w Watcher, k int) (s Repo, ok bool) {
 	if !r.CanMerge(w, k) {
 		return r, false

@@ -1771,7 +1771,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return err
 	}
 	if !found {
-		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
+		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false), res.Final.Passed)); err != nil {
 			return err
 		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
@@ -1786,7 +1786,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}
 	}
 	next.PR = pr.Number
-	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
+	opened := building(RunDone, true, true)
+	opened.draft = pr.Draft
+	if err := f.recovers(ctx, n, "say how the build went", f.canPost(opened, recovery.Build)); err != nil {
 		return err
 	}
 	if !res.Final.Passed {
