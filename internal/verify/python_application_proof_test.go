@@ -867,22 +867,30 @@ func TestPythonApplicationProofReadsDistributionsFromRecords(t *testing.T) {
 // the pinned image's minor version (INVARIANT_PYTHON_PINNED=1, as in CI's
 // second run of the Python tests), they must be its own.
 func TestPythonApplicationProofKnowsThePinnedRuntime(t *testing.T) {
-	for name, list := range map[string]string{"standard library": pythonStdlibModules, "builtins": pythonBuiltins} {
-		if fields := strings.Fields(list); len(fields) < 100 || !slices.IsSorted(fields) {
+	for name, list := range map[string]string{"standard library": pythonStdlibModules, "builtins": pythonBuiltins, "builtin exceptions": pythonBuiltinExceptions,
+		"Nagini's names": naginiNamesList, "Nagini's calls": naginiCallsList} {
+		if fields := strings.Fields(list); len(fields) < 50 || !slices.IsSorted(fields) {
 			t.Fatalf("the %s list: %d names, sorted %v", name, len(fields), slices.IsSorted(fields))
+		}
+	}
+	for _, name := range naginiCalls {
+		if !slices.Contains(naginiNames, name) {
+			t.Fatalf("Nagini's call %s isn't among its names", name)
 		}
 	}
 	if os.Getenv("INVARIANT_PYTHON_PINNED") != "1" {
 		t.Log("INVARIANT_PYTHON_PINNED isn't set, so python3 may be any version here")
 		return
 	}
-	out, err := exec.Command("python3", "-I", "-c", "import builtins, sys\nprint(' '.join(sorted(sys.stdlib_module_names)))\nprint(' '.join(sorted(n for n in dir(builtins) if not n.startswith('_'))))").Output()
+	out, err := exec.Command("python3", "-I", "-c", "import builtins, sys\nprint(' '.join(sorted(sys.stdlib_module_names)))\nprint(' '.join(sorted(n for n in dir(builtins) if not n.startswith('_'))))\n"+
+		"print(' '.join(sorted(n for n in dir(builtins) if not n.startswith('_') and isinstance(getattr(builtins, n), type) and issubclass(getattr(builtins, n), BaseException))))").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 || !slices.Equal(strings.Fields(lines[0]), strings.Fields(pythonStdlibModules)) || !slices.Equal(strings.Fields(lines[1]), strings.Fields(pythonBuiltins)) {
-		t.Fatalf("the pinned runtime's names changed: refresh python_stdlib_modules.txt and python_builtins.txt from toolchain.PythonImage")
+	if len(lines) != 3 || !slices.Equal(strings.Fields(lines[0]), strings.Fields(pythonStdlibModules)) || !slices.Equal(strings.Fields(lines[1]), strings.Fields(pythonBuiltins)) ||
+		!slices.Equal(strings.Fields(lines[2]), strings.Fields(pythonBuiltinExceptions)) {
+		t.Fatalf("the pinned runtime's names changed: refresh python_stdlib_modules.txt, python_builtins.txt and python_builtin_exceptions.txt from toolchain.PythonImage")
 	}
 }
 
@@ -1046,6 +1054,64 @@ func TestPythonApplicationProofReal(t *testing.T) {
 		if proof.Ran || proof.Result.Passed || len(u) != 1 || u[0].Kind != MissingContract || u[0].Operation == nil ||
 			*u[0].Operation != (project.ResolvedComponentOperation{Kind: "dependency", Distribution: "packaging", Module: "packaging.utils", Symbol: "is_normalized_name"}) {
 			t.Fatalf("an omitted contract: %+v", proof.Result)
+		}
+	})
+	// A contract that declares what its operation raises reaches Nagini:
+	// a handler for it is code Nagini checks, so a postcondition that
+	// forgets the handler's path fails.
+	for _, c := range []struct {
+		name, ensures string
+		passes        bool
+	}{
+		{"a handler the contract declares", "Result() >= admitted", true},
+		{"a postcondition the handler breaks", "Result() == admitted + 1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			module := "from nagini_contracts.contracts import *\nimport json\n\n\n" +
+				"def admit(name: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(name) > 0)\n    Ensures(" + c.ensures + ")\n" +
+				"    try:\n        json.loads(name)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
+				"async def report(name: str) -> str:\n    return name\n"
+			root, p := ppRealFixture(t, module, false)
+			pa310Write(t, root, ptcContracts, strings.Replace(ppRealContracts, "    Requires(len(text) > 0)\n", "    Requires(len(text) > 0)\n    Exsures(Exception, True)\n", 1))
+			proof, err := pa315Prepare(t, p, PythonApplicationSessionOptions{}).Prove(ctx, ppAdmitID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("Nagini: %s", strings.TrimSpace(proof.Output))
+			if !proof.Ran || proof.Result.Passed != c.passes || len(proof.Result.Assumed) != 1 || proof.Result.Assumed[0].Contract != "json.loads" {
+				t.Fatalf("passed %v, want %v: %+v", proof.Result.Passed, c.passes, proof.Result)
+			}
+		})
+	}
+	// The names the input treats as Nagini's are the pinned image's own.
+	t.Run("Nagini's names", func(t *testing.T) {
+		image, err := toolchain.NaginiImage(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		script := `import inspect, re
+import nagini_translation.translators.call as call
+import nagini_translation.lib.constants as c
+import nagini_translation.analyzer as a
+import nagini_contracts.contracts as k, nagini_contracts.io_contracts as io, nagini_contracts.obligations as ob, nagini_contracts.thread as th
+calls = set(call.CONTRACT_WRAPPER_FUNCS) | set(call.CONTRACT_FUNCS) | set(call.IO_CONTRACT_FUNCS) | set(call.OBLIGATION_CONTRACT_FUNCS)
+calls |= set(c.BUILTINS) | set(c.THREADING) | set(c.BUILTIN_PREDICATES)
+calls |= set(re.findall(r"'(IOExists\d*)'", inspect.getsource(call))) | {'IOExists'}
+names = set(calls) | set(re.findall(r"has_decorator\([^,]+, '([A-Za-z_]+)'\)", inspect.getsource(a)))
+names |= {n for n in re.findall(r"\.id\s*==\s*'([A-Za-z_]+)'", inspect.getsource(a)) if n != '_'}
+for m in (k, io, ob, th):
+    names |= set(getattr(m, '__all__', None) or [n for n in dir(m) if not n.startswith('_')])
+print(' '.join(sorted(names)))
+print(' '.join(sorted(calls)))
+print(' '.join(sorted(k.__all__)))
+`
+		out, err := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--platform", "linux/amd64", "--entrypoint", "python", image, "-I", "-c", script).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) != 3 || !slices.Equal(strings.Fields(lines[0]), naginiNames) || !slices.Equal(strings.Fields(lines[1]), naginiCalls) || !slices.Equal(strings.Fields(lines[2]), naginiExports) {
+			t.Fatalf("the pinned Nagini's names changed: refresh nagini_names.txt, nagini_calls.txt and naginiExports from its sources")
 		}
 	})
 }
