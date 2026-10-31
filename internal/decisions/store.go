@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS node (
 	status  TEXT NOT NULL DEFAULT '',
 	who     TEXT NOT NULL DEFAULT '',
 	text    TEXT NOT NULL DEFAULT '',
-	record  TEXT NOT NULL DEFAULT ''
+	record  TEXT NOT NULL DEFAULT '',
+	proposal TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS node_project ON node (project, kind);
 CREATE TABLE IF NOT EXISTS edge (
@@ -80,8 +81,8 @@ CREATE TABLE IF NOT EXISTS repo (
 
 // schemaVersion is the schema's version. A store with another has its
 // nodes, edges and checkouts dropped, since a rebuild brings them back, and
-// keeps its journal, which only grows.
-const schemaVersion = 3
+// keeps its journal and reserved IDs, which only grow.
+const schemaVersion = 4
 
 // Store is the decision graph in one SQLite file. Every process that needs
 // it opens it directly: SQLite in WAL mode lets many read while one writes,
@@ -199,9 +200,15 @@ func put(tx *sql.Tx, project string, events []Event, d Decision) error {
 	if err := journalLines(tx, project, d.ID, events); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record`,
-		d.ID, project, d.Date, d.Door, d.Status, d.Who, d.Text, d.Record); err != nil {
+	// Project only this checkout's current ratification, never retained
+	// journal lines from another branch or a proposal mentioned in text.
+	proposal := ""
+	if d.Status == "ratified" && d.Ratification != nil {
+		proposal = d.Ratification.Proposal
+	}
+	if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record, proposal) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record, proposal = excluded.proposal`,
+		d.ID, project, d.Date, d.Door, d.Status, d.Who, d.Text, d.Record, proposal); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM edge WHERE src = ? AND project = ? AND derived = 0`, d.ID, project); err != nil {
@@ -786,25 +793,26 @@ func putFile(tx *sql.Tx, repo Repo, short string) error {
 
 // Node is one node of the graph.
 type Node struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Project string `json:"project"`
-	Date    string `json:"date,omitempty"`
-	Door    string `json:"door,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Who     string `json:"who,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Record  string `json:"record,omitempty"`
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Project  string `json:"project"`
+	Date     string `json:"date,omitempty"`
+	Door     string `json:"door,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Who      string `json:"who,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Record   string `json:"record,omitempty"`
+	Proposal string `json:"proposal,omitempty"`
 }
 
-const nodeColumns = `n.id, n.kind, n.project, n.date, n.door, n.status, n.who, n.text, n.record`
+const nodeColumns = `n.id, n.kind, n.project, n.date, n.door, n.status, n.who, n.text, n.record, n.proposal`
 
 func scanNodes(rows *sql.Rows) ([]Node, error) {
 	defer rows.Close()
 	var out []Node
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Kind, &n.Project, &n.Date, &n.Door, &n.Status, &n.Who, &n.Text, &n.Record); err != nil {
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Project, &n.Date, &n.Door, &n.Status, &n.Who, &n.Text, &n.Record, &n.Proposal); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -835,7 +843,7 @@ type Neighbor struct {
 
 // Neighbors is every edge at a node, out from it first.
 func (s *Store) Neighbors(id string) ([]Neighbor, error) {
-	cols := `COALESCE(n.kind, ''), COALESCE(n.project, ''), COALESCE(n.date, ''), COALESCE(n.door, ''), COALESCE(n.status, ''), COALESCE(n.who, ''), COALESCE(n.text, ''), COALESCE(n.record, '')`
+	cols := `COALESCE(n.kind, ''), COALESCE(n.project, ''), COALESCE(n.date, ''), COALESCE(n.door, ''), COALESCE(n.status, ''), COALESCE(n.who, ''), COALESCE(n.text, ''), COALESCE(n.record, ''), COALESCE(n.proposal, '')`
 	rows, err := s.db.Query(`SELECT e.type, 1, e.dst, `+cols+` FROM edge e LEFT JOIN node n ON n.id = e.dst WHERE e.src = ?1
 		UNION ALL
 		SELECT e.type, 0, e.src, `+cols+` FROM edge e LEFT JOIN node n ON n.id = e.src WHERE e.dst = ?1
@@ -848,7 +856,7 @@ func (s *Store) Neighbors(id string) ([]Neighbor, error) {
 	for rows.Next() {
 		var nb Neighbor
 		n := &nb.Node
-		if err := rows.Scan(&nb.Type, &nb.Out, &n.ID, &n.Kind, &n.Project, &n.Date, &n.Door, &n.Status, &n.Who, &n.Text, &n.Record); err != nil {
+		if err := rows.Scan(&nb.Type, &nb.Out, &n.ID, &n.Kind, &n.Project, &n.Date, &n.Door, &n.Status, &n.Who, &n.Text, &n.Record, &n.Proposal); err != nil {
 			return nil, err
 		}
 		out = append(out, nb)

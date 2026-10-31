@@ -681,6 +681,9 @@ func printShow(n decisions.Node, near []decisions.Neighbor) {
 			head = append(head, v)
 		}
 	}
+	if n.Proposal != "" {
+		head = append(head, "proposal "+n.Proposal)
+	}
 	fmt.Println(strings.Join(head, " · "))
 	fmt.Println(n.Text)
 	if n.Record != "" {

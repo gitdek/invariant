@@ -169,7 +169,11 @@ func (s *Session) show(_ context.Context, args json.RawMessage) (string, bool) {
 		return fail(err)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · %s door · %s · %s · %s\n%s\n", n.ID, n.Door, n.Status, n.Date, n.Who, n.Text)
+	fmt.Fprintf(&b, "%s · %s door · %s · %s · %s", n.ID, n.Door, n.Status, n.Date, n.Who)
+	if n.Proposal != "" {
+		fmt.Fprintf(&b, " · proposal %s", n.Proposal)
+	}
+	fmt.Fprintf(&b, "\n%s\n", n.Text)
 	if n.Record != "" {
 		fmt.Fprintf(&b, "Its full record: decisions/%s\n", n.Record)
 	}
