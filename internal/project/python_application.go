@@ -155,6 +155,9 @@ func pythonApplicationSelection(root, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := exactName(filepath.Dir(full), filepath.Base(full)); err != nil {
+		return err
+	}
 	if info.Mode().IsRegular() && strings.HasSuffix(name, ".py") {
 		return nil
 	}

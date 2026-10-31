@@ -69,12 +69,15 @@ type ComponentContractUse struct {
 }
 
 // ComponentUnaccounted is a boundary a proof attempt reached with no declared
-// trusted contract (missing_contract), or an assumption its verifier made that
-// no declaration accounts for (unaccounted_assumption), in the adapter's words.
+// trusted contract (missing_contract), named by the operation's identity in
+// the inventory's own form, or an assumption its verifier made that no
+// declaration accounts for (unaccounted_assumption), described in Detail and
+// naming its operation where it has one. An operation a declared contract
+// binds is accounted for, so neither may name one.
 type ComponentUnaccounted struct {
-	Kind      string `json:"kind"`
-	Operation string `json:"operation"`
-	Detail    string `json:"detail,omitempty"`
+	Kind      string                              `json:"kind"`
+	Operation *project.ResolvedComponentOperation `json:"operation,omitempty"`
+	Detail    string                              `json:"detail,omitempty"`
 }
 
 // Unaccounted kinds.
@@ -98,10 +101,11 @@ type ComponentContractEvidence struct {
 
 // ComponentContractDiagnostic is one problem at a trusted boundary, in the
 // same shape whichever adapter found it: an operation the report can't bind
-// to a pinned runtime or one resolved wheel, a proof's assumption whose
-// contract lacks tested support, and a proof's missing contract or
-// unaccounted assumption. Stale evidence never gets this far: attribution
-// rejects it with ErrStaleComponentEvidence.
+// to a pinned runtime or one resolved wheel, a backing test that passed in
+// one run and not in another, a proof's assumption whose contract lacks
+// tested support, and a proof's missing contract or unaccounted assumption.
+// Stale evidence never gets this far: attribution rejects it with
+// ErrStaleComponentEvidence.
 type ComponentContractDiagnostic struct {
 	Kind     string `json:"kind"`
 	Contract string `json:"contract,omitempty"`
@@ -112,6 +116,7 @@ type ComponentContractDiagnostic struct {
 // Diagnostic kinds beyond the unaccounted ones.
 const (
 	UnresolvedOperation = "unresolved_operation"
+	ConflictingSupport  = "conflicting_support"
 	UntestedAssumption  = "untested_assumption"
 )
 
@@ -193,6 +198,13 @@ func (index *componentIndex) indexTrustedContracts(inv project.ComponentInventor
 		}
 		index.contracts[c.ID] = c
 	}
+	// No declaration is both one contract's abstraction and another's
+	// operation.
+	for _, c := range index.contracts {
+		if c.Operation.Kind == project.OperationApplication && declarations[c.Operation.Declaration] {
+			return fmt.Errorf("component inventory: trusted contract %q's operation is another contract's abstraction", c.ID)
+		}
+	}
 	return nil
 }
 
@@ -262,25 +274,6 @@ func sameContractBinding(a, b *ComponentContractBinding) bool {
 		(a.Wheel == nil) == (b.Wheel == nil) && (a.Wheel == nil || *a.Wheel == *b.Wheel)
 }
 
-// contractFiles accepts only known file snapshots: an unknown path is an error,
-// and a known one with other bytes is stale.
-func contractFiles(files map[string]project.ComponentFile, inputs []project.ComponentFile) error {
-	set, err := componentFileSet(inputs)
-	if err != nil {
-		return err
-	}
-	for name, input := range set {
-		file, ok := files[name]
-		if !ok {
-			return fmt.Errorf("component contract tests: unknown file %q", name)
-		}
-		if file != input {
-			return fmt.Errorf("%w: file %q does not match its inventory snapshot", ErrStaleComponentEvidence, name)
-		}
-	}
-	return nil
-}
-
 func (index *componentIndex) contractTests(results []ComponentContractTestResult) ([]ComponentContractTestEvidence, error) {
 	var rows []ComponentContractTestEvidence
 	seen := map[[3]string]bool{}
@@ -291,10 +284,8 @@ func (index *componentIndex) contractTests(results []ComponentContractTestResult
 			return nil, fmt.Errorf("component contract tests: trusted contract %q has no backing test %q", result.Contract, result.Check)
 		}
 		v := result.Invocation
-		if v == nil || v.Kind != "test" || v.Check != result.Check || !slices.ContainsFunc(c.Invocations, func(declared project.ResolvedComponentInvocation) bool {
-			return sameComponentInvocation(*v, declared)
-		}) {
-			return nil, fmt.Errorf("component contract tests: invocation does not match a declared backing test of %q", result.Contract)
+		if err := matchComponentInvocation(v, "test", result.Check, c.Invocations); err != nil {
+			return nil, fmt.Errorf("component contract tests: %q: %w", result.Contract, err)
 		}
 		key := [3]string{result.Contract, result.Check, v.ID}
 		if seen[key] {
@@ -303,16 +294,15 @@ func (index *componentIndex) contractTests(results []ComponentContractTestResult
 		seen[key] = true
 		inputs := map[string]bool{}
 		for _, input := range result.Inputs {
-			d, ok := index.declarations[input.ID]
-			if !ok || inputs[input.ID] {
-				return nil, fmt.Errorf("component contract tests: unknown or duplicate input %q", input.ID)
+			if inputs[input.ID] {
+				return nil, fmt.Errorf("component contract tests: duplicate input %q", input.ID)
 			}
-			if input != d {
-				return nil, fmt.Errorf("%w: input %q does not match its inventory snapshot", ErrStaleComponentEvidence, input.ID)
+			if err := index.componentInput(input); err != nil {
+				return nil, fmt.Errorf("component contract tests: %w", err)
 			}
 			inputs[input.ID] = true
 		}
-		if err := contractFiles(index.files, result.FileInputs); err != nil {
+		if err := componentFileReferences(index.files, result.FileInputs); err != nil {
 			return nil, err
 		}
 		if result.Binding != nil && !sameContractBinding(result.Binding, index.bindings[c.ID].binding) {
@@ -334,7 +324,7 @@ func (index *componentIndex) contractTests(results []ComponentContractTestResult
 				}
 				assertions[assertion.ID] = true
 				if assertion.Source != nil {
-					if err := contractFiles(index.files, []project.ComponentFile{*assertion.Source}); err != nil {
+					if err := componentFileReferences(index.files, []project.ComponentFile{*assertion.Source}); err != nil {
 						return nil, err
 					}
 				}
@@ -479,16 +469,57 @@ func (index *componentIndex) contractUses(result ComponentProofResult) error {
 		if use.Declaration != index.declarations[c.Contract] {
 			return fmt.Errorf("%w: %q assumed trusted contract %q from a declaration this inventory doesn't hold", ErrStaleComponentEvidence, result.Target, use.Contract)
 		}
+		if !slices.ContainsFunc(result.Inputs, func(input project.Component) bool { return input.ID == c.Contract }) {
+			return fmt.Errorf("component proofs: %q assumed trusted contract %q without its declaration among the attempt's inputs", result.Target, use.Contract)
+		}
 		assumed[use.Contract] = true
 	}
-	seen := map[ComponentUnaccounted]bool{}
+	bound := map[string]string{}
+	for id, c := range index.contracts {
+		bound[c.Operation.Key()] = id
+	}
+	seen := map[string]bool{}
 	for _, u := range result.Unaccounted {
-		if (u.Kind != MissingContract && u.Kind != UnaccountedAssumption) || strings.TrimSpace(u.Operation) == "" || seen[u] {
-			return fmt.Errorf("component proofs: invalid or duplicate unaccounted boundary %q for %q", u.Operation, result.Target)
+		key := u.Kind + "\x00" + u.Detail
+		if u.Operation != nil {
+			if !project.ValidComponentOperation(*u.Operation) {
+				return fmt.Errorf("component proofs: unaccounted boundary for %q names an invalid operation", result.Target)
+			}
+			if id, ok := bound[u.Operation.Key()]; ok {
+				return fmt.Errorf("component proofs: %q calls trusted contract %q's operation unaccounted", result.Target, id)
+			}
+			key += "\x00" + u.Operation.Key()
 		}
-		seen[u] = true
+		switch {
+		case u.Kind == MissingContract && u.Operation == nil, u.Kind == UnaccountedAssumption && strings.TrimSpace(u.Detail) == "",
+			u.Kind != MissingContract && u.Kind != UnaccountedAssumption, seen[key]:
+			return fmt.Errorf("component proofs: invalid or duplicate unaccounted boundary for %q", result.Target)
+		}
+		seen[key] = true
 	}
 	return nil
+}
+
+// unaccountedText names an unaccounted boundary for a diagnostic.
+func unaccountedText(u ComponentUnaccounted) string {
+	var text string
+	if o := u.Operation; o != nil {
+		switch o.Kind {
+		case project.OperationApplication:
+			text = o.Declaration
+		case project.OperationDependency:
+			text = o.Distribution + ": " + o.Module + "." + o.Symbol
+		default:
+			text = o.Module + "." + o.Symbol
+		}
+	}
+	if u.Detail != "" {
+		if text != "" {
+			text += ": "
+		}
+		text += u.Detail
+	}
+	return text
 }
 
 // retainContractUses keeps a retained attempt's assumed contracts anchored to
@@ -507,14 +538,22 @@ func (index *componentIndex) retainContractUses(old project.ComponentInventory, 
 // contractStanding derives every declared contract's binding, support and use,
 // and the trusted-boundary diagnostics, from the evidence being committed.
 func (index *componentIndex) contractStanding(e *ComponentEvidence) {
-	supported := map[string]map[string]bool{}
+	// A backing test supports its contract when some result tests it and no
+	// result reports it unsuccessful: one failed or skipped run of a test
+	// vetoes the passing run of another, so a flaky test supports nothing.
+	supported, vetoed := map[[2]string]bool{}, map[[2]string]string{}
 	for _, row := range e.ContractTests {
 		for _, test := range row.Tests {
 			if test.Status == "tested" {
-				if supported[row.Contract] == nil {
-					supported[row.Contract] = map[string]bool{}
+				supported[[2]string{row.Contract, test.Check}] = true
+			}
+		}
+		for _, test := range row.Result.Tests {
+			if test.Outcome != "passed" || !test.Exercised {
+				key := [2]string{row.Contract, test.Check}
+				if _, ok := vetoed[key]; !ok {
+					vetoed[key] = contractUnsuccessful(test)
 				}
-				supported[row.Contract][test.Check] = true
 			}
 		}
 	}
@@ -528,11 +567,7 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 			relying[use.Contract] = append(relying[use.Contract], p.Target)
 		}
 		for _, u := range p.Result.Unaccounted {
-			detail := u.Operation
-			if u.Detail != "" {
-				detail += ": " + u.Detail
-			}
-			diagnostics = append(diagnostics, ComponentContractDiagnostic{Kind: u.Kind, Target: p.Target, Detail: detail})
+			diagnostics = append(diagnostics, ComponentContractDiagnostic{Kind: u.Kind, Target: p.Target, Detail: unaccountedText(u)})
 		}
 	}
 	e.Contracts = nil
@@ -545,10 +580,18 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 			row.Binding = copyContractBinding(b.binding)
 			tested := true
 			for _, test := range c.Tests {
-				tested = tested && supported[c.ID][test]
+				key := [2]string{c.ID, test}
+				_, veto := vetoed[key]
+				tested = tested && supported[key] && !veto
 			}
 			if tested {
 				row.Support = "tested"
+			}
+		}
+		for _, test := range c.Tests {
+			if why, veto := vetoed[[2]string{c.ID, test}]; veto && supported[[2]string{c.ID, test}] {
+				diagnostics = append(diagnostics, ComponentContractDiagnostic{Kind: ConflictingSupport, Contract: c.ID,
+					Detail: fmt.Sprintf("%s passed in one run and %s in another, so it supports nothing", test, why)})
 			}
 		}
 		if targets := relying[c.ID]; len(targets) > 0 {
@@ -564,6 +607,22 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 	}
 	sortContractDiagnostics(diagnostics)
 	e.ContractDiagnostics = diagnostics
+}
+
+// contractUnsuccessful says how a run reported a backing test that didn't
+// pass.
+func contractUnsuccessful(test ComponentRuntimeTestResult) string {
+	switch {
+	case test.Outcome == "":
+		return "had no outcome"
+	case test.Outcome == "passed":
+		return "wasn't exercised"
+	case test.Outcome == "timed_out":
+		return "timed out"
+	case test.Outcome == "empty":
+		return "didn't run"
+	}
+	return test.Outcome
 }
 
 func sortContractDiagnostics(diagnostics []ComponentContractDiagnostic) {
@@ -668,13 +727,25 @@ func copyComponentContractUses(uses []ComponentContractUse) []ComponentContractU
 
 func copyComponentUnaccounted(rows []ComponentUnaccounted) []ComponentUnaccounted {
 	rows = slices.Clone(rows)
+	key := func(u ComponentUnaccounted) string {
+		if u.Operation == nil {
+			return ""
+		}
+		return u.Operation.Key()
+	}
+	for i := range rows {
+		if o := rows[i].Operation; o != nil {
+			operation := *o
+			rows[i].Operation = &operation
+		}
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if a.Kind != b.Kind {
 			return a.Kind < b.Kind
 		}
-		if a.Operation != b.Operation {
-			return a.Operation < b.Operation
+		if key(a) != key(b) {
+			return key(a) < key(b)
 		}
 		return a.Detail < b.Detail
 	})

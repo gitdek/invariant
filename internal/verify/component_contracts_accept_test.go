@@ -85,7 +85,9 @@ func ctFixture(t *testing.T) (string, *project.Project) {
 					Contract:  ctRef(ctContracts, "loads"),
 					Tests:     []project.ComponentRef{ctRef(ctTests, "LoadsTests.test_parses"), ctRef(ctTests, "LoadsTests.test_rejects_empty")},
 					Invocations: []project.ComponentInvocation{{ID: "loads", Kind: "test", Check: ctRef(ctTests, "LoadsTests.test_parses"),
-						Command: "python", Args: []string{"-m", "unittest", "verification.tasks.test_contracts"}, WorkingDir: ".", Inputs: []string{ctProject + "/fixture.json"}}},
+						Command: "python", Args: []string{"-m", "unittest", "verification.tasks.test_contracts"}, WorkingDir: ".", Inputs: []string{ctProject + "/fixture.json"}},
+						{ID: "rejects", Kind: "test", Check: ctRef(ctTests, "LoadsTests.test_rejects_empty"),
+							Command: "python", Args: []string{"-m", "unittest", "verification.tasks.test_contracts.LoadsTests.test_rejects_empty"}, WorkingDir: "."}},
 				},
 				{
 					ID:        "packaging.Version",
@@ -229,6 +231,20 @@ func ctInvocation(t *testing.T, inv *project.ComponentInventory, contract string
 		}
 	}
 	t.Fatalf("no trusted contract %s", contract)
+	return nil
+}
+
+// ctInvocationOf is the contract's declared invocation with this ID.
+func ctInvocationOf(t *testing.T, inv *project.ComponentInventory, contract, id string) *project.ResolvedComponentInvocation {
+	t.Helper()
+	for _, c := range inv.TrustedContracts {
+		for _, v := range c.Invocations {
+			if c.ID == contract && v.ID == id {
+				return &v
+			}
+		}
+	}
+	t.Fatalf("no invocation %s of %s", id, contract)
 	return nil
 }
 
@@ -413,7 +429,8 @@ func TestTrustedContractTestsRejectMismatchedAndStaleReferences(t *testing.T) {
 		{"unknown contract", func(x *verify.ComponentContractTestResult) { x.Contract = "json.dumps" }, false},
 		{"not a backing test", func(x *verify.ComponentContractTestResult) { x.Check = ctID(ctTests, "SaveTests.test_returns") }, false},
 		{"no invocation", func(x *verify.ComponentContractTestResult) { x.Invocation = nil }, false},
-		{"undeclared invocation", func(x *verify.ComponentContractTestResult) { x.Invocation.Args = []string{"-m", "unittest"} }, false},
+		{"undeclared invocation", func(x *verify.ComponentContractTestResult) { x.Invocation.ID = "nonexistent" }, false},
+		{"changed invocation", func(x *verify.ComponentContractTestResult) { x.Invocation.Args = []string{"-m", "unittest"} }, true},
 		{"another contract's invocation", func(x *verify.ComponentContractTestResult) { x.Invocation.ID = "save" }, false},
 		{"unselected test result", func(x *verify.ComponentContractTestResult) {
 			x.Tests = append(x.Tests, verify.ComponentRuntimeTestResult{Check: ctID(ctTests, "VersionTests.test_orders"), Exercised: true, Outcome: "passed"})
@@ -475,6 +492,104 @@ func TestTrustedContractTestsRejectMismatchedAndStaleReferences(t *testing.T) {
 	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{ctPassing(t, inv, r), ctPassing(t, inv, r)}); err == nil {
 		t.Fatal("a duplicate backing-test result was attributed")
 	}
+}
+
+func TestTrustedContractTestsAnUnsuccessfulRunVetoesSupport(t *testing.T) {
+	_, p := ctFixture(t)
+	inv := ctInventory(t, p.Dir)
+	rejects := ctID(ctTests, "LoadsTests.test_rejects_empty")
+	// The loads run reports both tests passing; a second run of
+	// test_rejects_empty, through its own invocation, doesn't.
+	second := func(r *verify.Report, process, outcome string, exercised bool) verify.ComponentContractTestResult {
+		x := ctPassing(t, inv, r)
+		x.Check, x.Invocation, x.Outcome = rejects, ctInvocationOf(t, inv, "json.loads", "rejects"), process
+		x.Tests = []verify.ComponentRuntimeTestResult{{Check: rejects, Exercised: exercised, Outcome: outcome}}
+		return x
+	}
+	for _, c := range []struct {
+		name, process, outcome string
+		exercised              bool
+		want                   string
+	}{
+		{"failed", "failed", "failed", true, "failed"},
+		{"skipped", "passed", "skipped", false, "skipped"},
+		{"timed out", "timed_out", "timed_out", true, "timed out"},
+		{"unexercised", "passed", "passed", false, "wasn't exercised"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := ctReport(t, inv, ctToolchain(ctWheel()))
+			if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{ctPassing(t, inv, r), second(r, c.process, c.outcome, c.exercised)}); err != nil {
+				t.Fatal(err)
+			}
+			if got := ctContract(t, r, "json.loads"); got.Support != "untested" {
+				t.Fatalf("a passing run masked an unsuccessful one: %+v", got)
+			}
+			found := false
+			for _, d := range r.Components.ContractDiagnostics {
+				found = found || d.Kind == verify.ConflictingSupport && d.Contract == "json.loads" && strings.Contains(d.Detail, rejects+" passed in one run and "+c.want+" in another")
+			}
+			if !found {
+				t.Fatalf("no diagnostic for the conflict: %+v", r.Components.ContractDiagnostics)
+			}
+		})
+	}
+	// Two passing runs support it, with nothing to diagnose.
+	r := ctReport(t, inv, ctToolchain(ctWheel()))
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{ctPassing(t, inv, r), second(r, "passed", "passed", true)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "tested" || len(r.Components.ContractDiagnostics) != 0 {
+		t.Fatalf("two passing runs: %+v, %+v", got, r.Components.ContractDiagnostics)
+	}
+}
+
+func TestTrustedContractStaleSnapshotsAlwaysSayStale(t *testing.T) {
+	root, p := ctFixture(t)
+	inv := ctInventory(t, p.Dir)
+	r := ctReport(t, inv, ctToolchain(ctWheel()))
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{ctPassing(t, inv, r)}); err != nil {
+		t.Fatal(err)
+	}
+	stale := func(name string, attribute func() error) {
+		t.Helper()
+		before := ctJSON(t, r)
+		if err := attribute(); !errors.Is(err, verify.ErrStaleComponentEvidence) {
+			t.Fatalf("%s: %v isn't stale", name, err)
+		}
+		if ctJSON(t, r) != before {
+			t.Fatalf("%s: a rejected attribution changed the report", name)
+		}
+	}
+	// A backing test's invocation input or arguments changed.
+	ctWrite(t, root, ctProject+"/fixture.json", "{\"name\": \"other\"}\n")
+	changed := ctInventory(t, p.Dir)
+	stale("an invocation input's bytes", func() error { return r.AttributeComponentProofs(changed, nil) })
+	fresh := ctReport(t, changed, ctToolchain(ctWheel()))
+	before := ctJSON(t, fresh)
+	if err := fresh.AttributeComponentContractTests(changed, []verify.ComponentContractTestResult{ctPassing(t, inv, r)}); !errors.Is(err, verify.ErrStaleComponentEvidence) || ctJSON(t, fresh) != before {
+		t.Fatalf("a new result with the old invocation snapshot: %v", err)
+	}
+	ctWrite(t, root, ctProject+"/fixture.json", "{\"name\": \"task\"}\n")
+	p.Manifest.Components.TrustedContracts[0].Invocations[0].Args = []string{"-m", "unittest", "verification.tasks.test_contracts.LoadsTests"}
+	ctSave(t, p)
+	changed = ctInventory(t, p.Dir)
+	stale("an invocation's arguments", func() error { return r.AttributeComponentRuntime(changed, nil) })
+	// A retained proof that assumed a contract whose declaration changed.
+	if err := r.AttributeComponentContractTests(inv, nil); err != nil {
+		t.Fatal(err)
+	}
+	target := ctID("app/tasks/core.py", "load")
+	loads := ctDeclaration(t, inv, ctID(ctContracts, "loads"))
+	if err := r.AttributeComponentProofs(inv, []verify.ComponentProofResult{{Target: target, Verifier: "nagini", Passed: true,
+		Inputs: []project.Component{ctDeclaration(t, inv, target), loads}, Verified: []string{target}, Contracts: []string{target},
+		Assumed: []verify.ComponentContractUse{{Contract: "json.loads", Declaration: loads}}}}); err != nil {
+		t.Fatal(err)
+	}
+	p.Manifest.Components.TrustedContracts[0].Invocations[0].Args = []string{"-m", "unittest", "verification.tasks.test_contracts"}
+	ctSave(t, p)
+	ctWrite(t, root, ctContracts, strings.Replace(ctContractSource, "Requires(len(text) > 0)", "Requires(len(text) > 3)", 1))
+	changed = ctInventory(t, p.Dir)
+	stale("a retained proof's assumed contract", func() error { return r.AttributeComponentRuntime(changed, nil) })
 }
 
 func TestTrustedContractFingerprintsBindContractDependencyAndTestInputs(t *testing.T) {
@@ -593,14 +708,17 @@ func TestTrustedContractRetentionRejectsStaleAssociationsAtomically(t *testing.T
 	rejects("proofs after an operation change", func() error { return r.AttributeComponentProofs(changed, nil) })
 	p.Manifest.Components.TrustedContracts[1].Operation.Symbol = "Version"
 	// And so does a test that no longer backs its contract.
-	tests := p.Manifest.Components.TrustedContracts[0].Tests
-	p.Manifest.Components.TrustedContracts[0].Tests = tests[:1]
+	tests, invocations := p.Manifest.Components.TrustedContracts[0].Tests, p.Manifest.Components.TrustedContracts[0].Invocations
+	p.Manifest.Components.TrustedContracts[0].Tests, p.Manifest.Components.TrustedContracts[0].Invocations = tests[:1], invocations[:1]
 	ctSave(t, p)
 	changed = ctInventory(t, p.Dir)
 	rejects("proofs after a backing test is dropped", func() error { return r.AttributeComponentProofs(changed, nil) })
-	p.Manifest.Components.TrustedContracts[0].Tests = tests
+	p.Manifest.Components.TrustedContracts[0].Tests, p.Manifest.Components.TrustedContracts[0].Invocations = tests, invocations
 	ctSave(t, p)
-	// Clearing the support is the way to change what it rests on.
+	// Clearing the support recovers a report whose support alone went stale.
+	// Evidence of another kind that rests on the same changed input, such as
+	// a proof that assumed the contract, goes stale with it, and then only a
+	// new report records the changed inputs.
 	if err := r.AttributeComponentContractTests(inv, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -651,8 +769,8 @@ func TestTrustedContractUseComesOnlyFromProofAttempts(t *testing.T) {
 	}
 	// An unaccounted boundary leaves the target unproved and is diagnosed.
 	missing := proof()
-	missing.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: "json.dumps", Detail: "no trusted contract covers it"},
-		{Kind: verify.UnaccountedAssumption, Operation: "builtins.len"}}
+	missing.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: &project.ResolvedComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}, Detail: "no trusted contract covers it"},
+		{Kind: verify.UnaccountedAssumption, Detail: "builtins.len"}}
 	if err := r.AttributeComponentProofs(inv, []verify.ComponentProofResult{missing}); err != nil {
 		t.Fatal(err)
 	}
@@ -680,11 +798,25 @@ func TestTrustedContractUseComesOnlyFromProofAttempts(t *testing.T) {
 			x.Assumed[0].Declaration = ctDeclaration(t, inv, ctID(ctContracts, "version"))
 		}, true},
 		{"invalid unaccounted kind", func(x *verify.ComponentProofResult) {
-			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: "stale", Operation: "json.dumps"}}
+			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: "stale", Detail: "json.dumps"}}
 		}, false},
 		{"blank unaccounted operation", func(x *verify.ComponentProofResult) {
 			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract}}
 		}, false},
+		{"missing a declared contract", func(x *verify.ComponentProofResult) {
+			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: &project.ResolvedComponentOperation{Kind: "standard_library", Module: "json", Symbol: "loads"}}}
+		}, false},
+		{"unaccounted on a declared contract's operation", func(x *verify.ComponentProofResult) {
+			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.UnaccountedAssumption, Detail: "assumed outright",
+				Operation: &project.ResolvedComponentOperation{Kind: "application", Declaration: ctID("app/storage/store.py", "save")}}}
+		}, false},
+		{"invalid unaccounted operation", func(x *verify.ComponentProofResult) {
+			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: &project.ResolvedComponentOperation{Kind: "standard_library", Module: "json/loads"}}}
+		}, false},
+		{"blank unaccounted assumption", func(x *verify.ComponentProofResult) {
+			x.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.UnaccountedAssumption}}
+		}, false},
+		{"assumed without its declaration among the inputs", func(x *verify.ComponentProofResult) { x.Inputs = x.Inputs[:1] }, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := ctReport(t, inv, ctToolchain(ctWheel()))
@@ -748,7 +880,7 @@ func TestTrustedContractEvidenceOwnsItsValues(t *testing.T) {
 	proof := verify.ComponentProofResult{Target: target, Verifier: "nagini", Passed: true,
 		Inputs: []project.Component{ctDeclaration(t, inv, target), loads}, Verified: []string{target}, Contracts: []string{target},
 		Assumed:     []verify.ComponentContractUse{{Contract: "json.loads", Declaration: loads}},
-		Unaccounted: []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: "json.dumps"}}}
+		Unaccounted: []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: &project.ResolvedComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}}}}
 	if err := r.AttributeComponentProofs(inv, []verify.ComponentProofResult{proof}); err != nil {
 		t.Fatal(err)
 	}

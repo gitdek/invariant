@@ -69,12 +69,15 @@ var (
 	componentNormalize    = regexp.MustCompile(`[-_.]+`)
 )
 
-// Key says which real operation this is, so two contracts can't bind it.
+// Key says which real operation this is, so two contracts can't bind it: an
+// application declaration, or else the operation's full dotted name, however
+// a manifest splits it between module and symbol, and whichever kind or
+// distribution it names.
 func (o ResolvedComponentOperation) Key() string {
 	if o.Kind == OperationApplication {
 		return o.Kind + "|" + o.Declaration
 	}
-	return strings.Join([]string{o.Kind, o.Distribution, o.Module, o.Symbol}, "|")
+	return "python|" + o.Module + "." + o.Symbol
 }
 
 // ValidComponentContractID says whether id can name a trusted contract:
@@ -122,6 +125,9 @@ func (r *componentResolver) trustedContracts(declarations []ComponentContract) (
 		if other, ok := operations[op.Key()]; ok {
 			return nil, fail(fmt.Errorf("its operation already has trusted contract %q", other))
 		}
+		if other, ok := contracts[op.Declaration]; ok && op.Kind == OperationApplication {
+			return nil, fail(fmt.Errorf("its operation %s is trusted contract %q's abstraction", op.Declaration, other))
+		}
 		operations[op.Key()] = d.ID
 		contract, err := r.resolve(d.Contract, "contract declaration")
 		if err != nil {
@@ -140,6 +146,9 @@ func (r *componentResolver) trustedContracts(declarations []ComponentContract) (
 		}
 		if other, ok := contracts[contract.ID]; ok {
 			return nil, fail(fmt.Errorf("its contract %s already holds trusted contract %q", contract.ID, other))
+		}
+		if other, ok := operations[(ResolvedComponentOperation{Kind: OperationApplication, Declaration: contract.ID}).Key()]; ok {
+			return nil, fail(fmt.Errorf("its contract %s is trusted contract %q's operation", contract.ID, other))
 		}
 		contracts[contract.ID] = d.ID
 		for _, c := range []Component{contract, operation} {

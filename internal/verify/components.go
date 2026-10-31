@@ -308,9 +308,44 @@ func componentFileReferences(files map[string]project.ComponentFile, inputs []pr
 		return err
 	}
 	for name, input := range set {
-		if file, ok := files[name]; !ok || file != input {
-			return fmt.Errorf("component evidence: file %q does not match its inventory snapshot", name)
+		file, ok := files[name]
+		if !ok {
+			return fmt.Errorf("component evidence: unknown file %q", name)
 		}
+		if file != input {
+			return fmt.Errorf("%w: file %q does not match its inventory snapshot", ErrStaleComponentEvidence, name)
+		}
+	}
+	return nil
+}
+
+// matchComponentInvocation checks a result's actual invocation against the
+// declarations it must match exactly. A missing or unselected one is an
+// error, and a declared (kind, check, id) whose other values differ is stale.
+func matchComponentInvocation(v *project.ResolvedComponentInvocation, kind, check string, declared []project.ResolvedComponentInvocation) error {
+	if v == nil || v.Kind != kind || v.Check != check {
+		return fmt.Errorf("invocation does not match a selected %s check", kind)
+	}
+	for _, d := range declared {
+		if d.Kind == v.Kind && d.Check == v.Check && d.ID == v.ID {
+			if sameComponentInvocation(*v, d) {
+				return nil
+			}
+			return fmt.Errorf("%w: invocation %q no longer matches its declaration", ErrStaleComponentEvidence, v.ID)
+		}
+	}
+	return fmt.Errorf("invocation %q is not declared", v.ID)
+}
+
+// componentInput checks one supplied declaration snapshot: unknown is an
+// error, and a known one with other contents is stale.
+func (index *componentIndex) componentInput(input project.Component) error {
+	c, ok := index.declarations[input.ID]
+	if !ok {
+		return fmt.Errorf("unknown input %q", input.ID)
+	}
+	if input != c {
+		return fmt.Errorf("%w: input %q does not match its inventory snapshot", ErrStaleComponentEvidence, input.ID)
 	}
 	return nil
 }
@@ -333,15 +368,11 @@ func (index *componentIndex) proofs(inv project.ComponentInventory, results []Co
 		}
 		inputs := map[string]bool{}
 		for _, input := range result.Inputs {
-			c, ok := index.declarations[input.ID]
-			if !ok {
-				return nil, fmt.Errorf("component proofs: unknown input %q", input.ID)
-			}
 			if inputs[input.ID] {
 				return nil, fmt.Errorf("component proofs: duplicate input %q", input.ID)
 			}
-			if input != c {
-				return nil, fmt.Errorf("component proofs: input %q does not match its inventory snapshot", input.ID)
+			if err := index.componentInput(input); err != nil {
+				return nil, fmt.Errorf("component proofs: %w", err)
 			}
 			inputs[input.ID] = true
 		}
@@ -350,10 +381,8 @@ func (index *componentIndex) proofs(inv project.ComponentInventory, results []Co
 		}
 		copy := copyComponentProofResult(result)
 		if v := copy.Invocation; v != nil {
-			if v.Kind != "proof" || v.Check != result.Target || !slices.ContainsFunc(check.Invocations, func(selected project.ResolvedComponentInvocation) bool {
-				return sameComponentInvocation(*v, selected)
-			}) {
-				return nil, fmt.Errorf("component proofs: invocation %q does not match a selected proof for %q", v.ID, result.Target)
+			if err := matchComponentInvocation(v, "proof", result.Target, check.Invocations); err != nil {
+				return nil, fmt.Errorf("component proofs: %q: %w", result.Target, err)
 			}
 		}
 		if err := componentFileReferences(index.files, copy.FileInputs); err != nil {
@@ -458,7 +487,7 @@ func (index *componentIndex) retainedConformance(old *ComponentEvidence, bounds 
 		rows[i].Origin = was.Origin
 		if row.Target != was.Target || row.Check != was.Check || row.Status != was.Status ||
 			row.TransitionsChecked != was.TransitionsChecked || row.ExhaustiveStates != was.ExhaustiveStates || row.EveryStep != was.EveryStep {
-			return nil, fmt.Errorf("component conformance: retained qualification changed for %q/%q", was.Target, was.Check)
+			return nil, fmt.Errorf("%w: component conformance: retained qualification changed for %q/%q", ErrStaleComponentEvidence, was.Target, was.Check)
 		}
 	}
 	return rows, nil
@@ -469,7 +498,7 @@ func (index *componentIndex) retainProof(old project.ComponentInventory, row Com
 	prior := slices.IndexFunc(old.Checks, func(c project.ResolvedComponentCheck) bool { return c.Target == row.Target })
 	if row.Target != row.Result.Target || !ok || check.Proof == nil || prior < 0 || old.Checks[prior].Proof == nil ||
 		!slices.Equal(check.Proof.Contracts, old.Checks[prior].Proof.Contracts) {
-		return fmt.Errorf("component proofs: retained selection changed for %q", row.Target)
+		return fmt.Errorf("%w: component proofs: retained selection changed for %q", ErrStaleComponentEvidence, row.Target)
 	}
 	// The inventory anchors incomplete attempts that supplied no input snapshot.
 	declarations := slices.Clone(old.Components)
@@ -481,7 +510,7 @@ func (index *componentIndex) retainProof(old project.ComponentInventory, row Com
 			pos := slices.IndexFunc(declarations, func(c project.Component) bool { return c.ID == id })
 			c, ok := index.declarations[id]
 			if pos < 0 || !ok || declarations[pos] != c {
-				return fmt.Errorf("component proofs: retained declaration %q changed", id)
+				return fmt.Errorf("%w: component proofs: retained declaration %q changed", ErrStaleComponentEvidence, id)
 			}
 		}
 	}

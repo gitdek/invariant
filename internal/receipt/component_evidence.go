@@ -88,9 +88,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			componentLiteral(row.Record.Assumption.ID), componentAssumption(row.Record.Assumption), componentDeclaration(row.Record.Input))
 	}
 
-	if len(e.Inventory.TrustedContracts) > 0 || len(e.ContractTests) > 0 {
-		componentContracts(b, r)
-	}
+	componentContracts(b, r)
 
 	b.WriteString("\n### Component input provenance\n\nSelected input declarations and files do not add production coverage.\n\n| Input declaration | Source and contract |\n| :-- | :-- |\n")
 	if p := e.Inventory.Provenance; p != nil {
@@ -268,6 +266,24 @@ func componentKnownOutcome(outcome string) string {
 	default:
 		return ""
 	}
+}
+
+// componentProofQualification qualifies a decoded proof row's own result on a
+// detached report, so an edited status can't claim a proof.
+func componentProofQualification(r *verify.Report, row verify.ComponentProof) string {
+	if row.Result == nil || row.Result.Target != row.Target {
+		return "unchecked"
+	}
+	qualified := verify.Report{Bounds: r.Bounds, Toolchain: r.Toolchain}
+	if err := qualified.AttributeComponentProofs(&r.Components.Inventory, []verify.ComponentProofResult{*row.Result}); err != nil {
+		return "unchecked"
+	}
+	for _, p := range qualified.Components.Proofs {
+		if p.Target == row.Target {
+			return p.Status
+		}
+	}
+	return "unchecked"
 }
 
 func componentConformanceQualification(r *verify.Report, row verify.ComponentConformanceEvidence) verify.ComponentConformanceEvidence {

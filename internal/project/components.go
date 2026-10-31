@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -430,6 +431,7 @@ func componentPath(root, rel string, directory bool) (string, error) {
 	full := root
 	parts := strings.Split(rel, "/")
 	for i, part := range parts {
+		parent := full
 		full = filepath.Join(full, part)
 		info, err := os.Lstat(full)
 		if err != nil {
@@ -437,6 +439,11 @@ func componentPath(root, rel string, directory bool) (string, error) {
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return "", fmt.Errorf("%q must not contain symbolic links", rel)
+		}
+		if part != "." {
+			if err := exactName(parent, part); err != nil {
+				return "", fmt.Errorf("%q: %w", rel, err)
+			}
 		}
 		if i < len(parts)-1 || directory {
 			if !info.IsDir() {
@@ -447,6 +454,25 @@ func componentPath(root, rel string, directory bool) (string, error) {
 		}
 	}
 	return full, nil
+}
+
+// exactName requires name to be spelled as dir lists it. A case-insensitive
+// volume finds a differently cased name too, which would give one file a
+// second identity.
+func exactName(dir, name string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(names, name) {
+		return fmt.Errorf("%q isn't spelled as its directory lists it", name)
+	}
+	return nil
 }
 
 // componentPackage uses the nearest module inside the project, including a

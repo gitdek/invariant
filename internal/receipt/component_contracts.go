@@ -10,10 +10,29 @@ import (
 
 // componentContracts renders trusted contracts (#294): each declaration with
 // its operation's identity, support and use, the supplied backing-test
-// results, and the trusted-boundary diagnostics.
+// results, and the trusted-boundary diagnostics. A report without contracts
+// still shows a proof's unaccounted boundaries.
 func componentContracts(b *strings.Builder, r *verify.Report) {
 	e := r.Components
 	standing, diagnostics := componentContractStanding(r)
+	if len(e.Inventory.TrustedContracts) > 0 || len(e.ContractTests) > 0 {
+		componentContractViews(b, r, standing)
+	} else if len(diagnostics) == 0 {
+		return
+	}
+	b.WriteString("\n### Trusted boundary diagnostics\n\n")
+	if len(diagnostics) == 0 {
+		b.WriteString("none\n")
+		return
+	}
+	b.WriteString("| Kind | Contract | Target | Detail |\n| :-- | :-- | :-- | :-- |\n")
+	for _, d := range diagnostics {
+		fmt.Fprintf(b, "| %s | %s | %s | %s |\n", componentLiteral(d.Kind), componentOptional(d.Contract), componentOptional(d.Target), componentText(d.Detail))
+	}
+}
+
+func componentContractViews(b *strings.Builder, r *verify.Report, standing map[string]verify.ComponentContractEvidence) {
+	e := r.Components
 	declarations := map[string]project.Component{}
 	if p := e.Inventory.Provenance; p != nil {
 		for _, c := range p.Declarations {
@@ -59,16 +78,6 @@ func componentContracts(b *strings.Builder, r *verify.Report) {
 		}
 		parts = append(parts, componentTests(result.Tests, qualified.Tests)...)
 		componentCheckRow(b, row.Contract, row.Check, qualified.Status, parts)
-	}
-
-	b.WriteString("\n### Trusted boundary diagnostics\n\n")
-	if len(diagnostics) == 0 {
-		b.WriteString("none\n")
-		return
-	}
-	b.WriteString("| Kind | Contract | Target | Detail |\n| :-- | :-- | :-- | :-- |\n")
-	for _, d := range diagnostics {
-		fmt.Fprintf(b, "| %s | %s | %s | %s |\n", componentLiteral(d.Kind), componentOptional(d.Contract), componentOptional(d.Target), componentText(d.Detail))
 	}
 }
 
@@ -183,7 +192,10 @@ func componentBoundary(result *verify.ComponentProofResult) []string {
 		parts = append(parts, "assumed trusted contracts: "+componentStrings(ids))
 	}
 	for _, u := range result.Unaccounted {
-		text := componentLiteral(u.Kind) + " " + componentLiteral(u.Operation)
+		text := componentLiteral(u.Kind)
+		if u.Operation != nil {
+			text += " " + componentOperation(*u.Operation, nil)
+		}
 		if u.Detail != "" {
 			text += ": " + componentText(u.Detail)
 		}

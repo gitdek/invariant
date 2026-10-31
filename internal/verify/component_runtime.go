@@ -110,10 +110,8 @@ func (index *componentIndex) runtime(results []ComponentRuntimeResult, bounds ma
 			return nil, fmt.Errorf("component runtime: target %q has no selected test %q", result.Target, result.Check)
 		}
 		v := result.Invocation
-		if v == nil || v.Kind != "test" || v.Check != result.Check || !slices.ContainsFunc(check.Invocations, func(selected project.ResolvedComponentInvocation) bool {
-			return sameComponentInvocation(*v, selected)
-		}) {
-			return nil, fmt.Errorf("component runtime: invocation does not match a selected test for %q", result.Target)
+		if err := matchComponentInvocation(v, "test", result.Check, check.Invocations); err != nil {
+			return nil, fmt.Errorf("component runtime: %q: %w", result.Target, err)
 		}
 		key := [3]string{result.Target, result.Check, v.ID}
 		if seen[key] {
@@ -122,9 +120,11 @@ func (index *componentIndex) runtime(results []ComponentRuntimeResult, bounds ma
 		seen[key] = true
 		inputs := map[string]bool{}
 		for _, input := range result.Inputs {
-			c, ok := index.declarations[input.ID]
-			if !ok || input != c || inputs[input.ID] {
-				return nil, fmt.Errorf("component runtime: invalid, stale or duplicate input %q", input.ID)
+			if inputs[input.ID] {
+				return nil, fmt.Errorf("component runtime: duplicate input %q", input.ID)
+			}
+			if err := index.componentInput(input); err != nil {
+				return nil, fmt.Errorf("component runtime: %w", err)
 			}
 			inputs[input.ID] = true
 		}
@@ -266,7 +266,7 @@ func (index *componentIndex) retainedRuntime(old *ComponentEvidence, bounds map[
 			!slices.EqualFunc(row.Tests, was.Tests, func(a, b ComponentRuntimeTestEvidence) bool {
 				return a.Check == b.Check && a.Status == b.Status && slices.Equal(a.Assertions, b.Assertions)
 			}) {
-			return nil, fmt.Errorf("component runtime: retained qualification changed for %q/%q", was.Target, was.Check)
+			return nil, fmt.Errorf("%w: component runtime: retained qualification changed for %q/%q", ErrStaleComponentEvidence, was.Target, was.Check)
 		}
 	}
 	return rows, nil
@@ -277,7 +277,7 @@ func (index *componentIndex) retainRuntime(old project.ComponentInventory, row C
 	prior := slices.IndexFunc(old.Checks, func(c project.ResolvedComponentCheck) bool { return c.Target == row.Target })
 	if row.Target != row.Result.Target || row.Check != row.Result.Check || !ok || prior < 0 ||
 		(check.Proof == nil) != (old.Checks[prior].Proof == nil) {
-		return fmt.Errorf("component runtime: retained selection changed for %q", row.Target)
+		return fmt.Errorf("%w: component runtime: retained selection changed for %q", ErrStaleComponentEvidence, row.Target)
 	}
 	ids := []string{row.Target, row.Check}
 	for _, test := range row.Result.Tests {
@@ -285,7 +285,7 @@ func (index *componentIndex) retainRuntime(old project.ComponentInventory, row C
 	}
 	if check.Proof != nil {
 		if !slices.Equal(check.Proof.Contracts, old.Checks[prior].Proof.Contracts) {
-			return fmt.Errorf("component runtime: retained contracts changed for %q", row.Target)
+			return fmt.Errorf("%w: component runtime: retained contracts changed for %q", ErrStaleComponentEvidence, row.Target)
 		}
 		ids = append(ids, check.Proof.Contracts...)
 	}
@@ -299,7 +299,7 @@ func (index *componentIndex) retainRuntime(old project.ComponentInventory, row C
 		pos := slices.IndexFunc(declarations, func(c project.Component) bool { return c.ID == id })
 		c, ok := index.declarations[id]
 		if pos < 0 || !ok || declarations[pos] != c {
-			return fmt.Errorf("component runtime: retained declaration %q changed", id)
+			return fmt.Errorf("%w: component runtime: retained declaration %q changed", ErrStaleComponentEvidence, id)
 		}
 	}
 	return nil

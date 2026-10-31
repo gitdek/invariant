@@ -277,6 +277,28 @@ func TestTrustedContractsRejectInvalidAndAmbiguousBindings(t *testing.T) {
 		{"same distribution normalized", func(cfg *project.ComponentsConfig) {
 			cfg.TrustedContracts[0].Operation = project.ComponentOperation{Kind: "dependency", Distribution: "PACKAGING", Module: "packaging.version", Symbol: "Version"}
 		}, "already has trusted contract"},
+		{"same dotted name split differently", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[0].Operation = project.ComponentOperation{Kind: "standard_library", Module: "os.path", Symbol: "join"}
+			cfg.TrustedContracts[1].Operation = project.ComponentOperation{Kind: "standard_library", Module: "os", Symbol: "path.join"}
+		}, "already has trusted contract"},
+		{"same dotted name in another kind", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[1].Operation = project.ComponentOperation{Kind: "dependency", Distribution: "packaging", Module: "json", Symbol: "loads"}
+		}, "already has trusted contract"},
+		{"operation is another contract's abstraction", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[1].Operation = project.ComponentOperation{Kind: "application", Source: tcProject + "/contracts.py", Symbol: "loads"}
+		}, `is trusted contract "json.loads"'s abstraction`},
+		{"abstraction is another contract's operation", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[0].Operation = project.ComponentOperation{Kind: "application", Source: tcProject + "/contracts.py", Symbol: "version"}
+		}, `is trusted contract "json.loads"'s operation`},
+		{"misspelled contract source", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[0].Contract.Source = "Verification/tasks/contracts.py"
+		}, ""},
+		{"misspelled scoped contract", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[0].Contract = py304Ref("App/Tasks/contracted.py", "load")
+		}, ""},
+		{"misspelled application operation", func(cfg *project.ComponentsConfig) {
+			cfg.TrustedContracts[2].Operation.Source = "APP/storage/store.py"
+		}, ""},
 		{"missing contract", func(cfg *project.ComponentsConfig) { cfg.TrustedContracts[0].Contract.Symbol = "absent" }, "exactly one declaration"},
 		{"unannotated contract", func(cfg *project.ComponentsConfig) { cfg.TrustedContracts[0].Contract.Symbol = "unannotated" }, "no supported inline Nagini contract"},
 		{"contract in a test file", func(cfg *project.ComponentsConfig) {

@@ -208,7 +208,7 @@ func TestTrustedContractReceiptQualifiesSuppliedResultsAndProofUse(t *testing.T)
 		t.Fatalf("supplied backing-test row: %q", tests)
 	}
 	// An unaccounted boundary is diagnosed, and the proof row says why.
-	proof.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: "json.dumps", Detail: "no contract"}}
+	proof.Unaccounted = []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: &project.ResolvedComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}, Detail: "no contract"}}
 	if err := r.AttributeComponentProofs(inv, []verify.ComponentProofResult{proof}); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestTrustedContractReceiptQualifiesSuppliedResultsAndProofUse(t *testing.T)
 	if row := rcRow(t, md, "missing_contract"); !strings.Contains(row[3], "json.dumps: no contract") {
 		t.Fatalf("missing contract diagnostic: %q", row)
 	}
-	if !strings.Contains(md, "unaccounted boundary: <code>missing&#95;contract</code> <code>json.dumps</code>: no contract") {
+	if !strings.Contains(md, "unaccounted boundary: <code>missing&#95;contract</code> standard library: <code>json.dumps</code>: no contract") {
 		t.Fatalf("proof row lacks its unaccounted boundary:\n%s", md)
 	}
 }
@@ -265,6 +265,42 @@ func TestTrustedContractReceiptEscapesUntrustedText(t *testing.T) {
 	}
 	if row := rcRow(t, md, id); len(row) != 5 || row[2] != "trusted · untested" {
 		t.Fatalf("escaped contract row: %q", row)
+	}
+}
+
+func TestTrustedContractReceiptRederivesProofStatusAndDiagnostics(t *testing.T) {
+	inv, r := rcReport(t, "json.loads")
+	inv.TrustedContracts = nil
+	target := rcID("app/tasks/core.py", "load")
+	plain := &verify.Report{Project: "tasks", Bounds: r.Bounds, Toolchain: r.Toolchain}
+	if err := plain.AttributeComponentProofs(inv, []verify.ComponentProofResult{{Target: target, Verifier: "nagini", Passed: true,
+		Inputs: []project.Component{rcDeclaration(t, inv, target)}, Verified: []string{target}, Contracts: []string{target},
+		Unaccounted: []verify.ComponentUnaccounted{{Kind: verify.MissingContract, Operation: &project.ResolvedComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Without declared contracts, a proof's unaccounted boundary still shows.
+	md := receipt.Markdown(plain)
+	if !strings.Contains(md, "### Trusted boundary diagnostics") || rcRow(t, md, "missing_contract") == nil || strings.Contains(md, "### Trusted contracts") {
+		t.Fatalf("diagnostics without contracts:\n%s", md)
+	}
+	// A decoded proof edited to proved stays unchecked: its result doesn't qualify.
+	b, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forged verify.Report
+	if err := json.Unmarshal(b, &forged); err != nil {
+		t.Fatal(err)
+	}
+	for i := range forged.Components.Proofs {
+		forged.Components.Proofs[i].Status = "proved"
+	}
+	md = receipt.Markdown(&forged)
+	if !strings.Contains(md, "Component proofs: **0 proved;") {
+		t.Fatalf("a forged proof status was rendered:\n%s", md)
+	}
+	if row := rcRow(t, md, target); row[1] != "unchecked" {
+		t.Fatalf("forged proof row: %q", row)
 	}
 }
 
