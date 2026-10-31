@@ -130,6 +130,88 @@ func retry263RedraftWords(t *testing.T, body string, pr int) {
 	}
 }
 
+// retry271RebuildWords checks that advice to retry #pr, a plan's draft whose
+// build failed in the factory's own run, says what the retry does (#271): it
+// closes #pr and builds the plan again, its checks and review afresh, in a
+// new pull request. A plan that changes the trusted base still has a person
+// merge it. It never says the retry watches #pr again.
+func retry271RebuildWords(t *testing.T, body string, pr int, trusted bool) {
+	t.Helper()
+	s := strings.NewReplacer("`", "", "’", "'").Replace(retry263Visible(body))
+	for _, want := range []string{"/invariant retry", fmt.Sprintf("close #%d", pr), "build the plan again", "new pull request"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("retry advice must say what building the plan again does, missing %q:\n%s", want, body)
+		}
+	}
+	if !regexp.MustCompile(`review[^.!?\n]*(?:afresh|again)`).MatchString(s) {
+		t.Errorf("retry advice must say the new build is reviewed again:\n%s", body)
+	}
+	for _, verb := range []string{"watch", "watching", "watches"} {
+		if strings.Contains(s, fmt.Sprintf("%s #%d again", verb, pr)) {
+			t.Errorf("retry advice still says it watches #%d again:\n%s", pr, body)
+		}
+	}
+	if trusted && (!strings.Contains(s, "trusted base") || !strings.Contains(s, "a person merges") || mergePromise.MatchString(s)) {
+		t.Errorf("retry advice must leave merging the trusted-base change to a person:\n%s", body)
+	}
+}
+
+// retry271ReviseWords checks that advice on a plan's failed draft, #pr,
+// says how to change the plan instead: close #pr, say what to change,
+// revise, and ratify the new draft before it's built.
+func retry271ReviseWords(t *testing.T, body string, pr int) {
+	t.Helper()
+	s := retry263Visible(body)
+	closeAt := strings.LastIndex(s, fmt.Sprintf("close #%d,", pr))
+	reviseAt := strings.LastIndex(s, "/invariant revise")
+	if closeAt < 0 || reviseAt < closeAt || !strings.Contains(s[reviseAt:], "ratif") {
+		t.Errorf("changing the plan must require closing #%d, revising and ratifying again:\n%s", pr, body)
+	}
+}
+
+// retry271Rebuilds has a writer retry the draft failed left, and checks the
+// factory replaces it (#271): its record that the retry replaces the
+// draft, the draft's close, without readying or merging it, the answer, and
+// a new build, reviewed again, that opens a pull request of its own from a
+// branch of its own. It returns that build's post.
+func retry271Rebuilds(t *testing.T, r *rig, b *retry263Builder, failed Post) Post {
+	t.Helper()
+	old := failed.Marker.PR
+	before := *r.gh.prs[old]
+	body := r.gh.prBody(old)
+	builds, reviews, drafts := b.calls, len(b.base.built), len(r.form.requests)
+	// A command from someone without write access still can't retry.
+	r.gh.say(1, "mallory", "/invariant retry")
+	r.poll()
+	if b.calls != builds || r.gh.prs[old].State != "open" {
+		t.Fatal("a nonwriter's retry changed the failed draft")
+	}
+	command := r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	answer := r.expect(1, KindRatified, LabelBuilding)
+	m := answer.Marker
+	if m.Replaces != old || m.Hash != failed.Marker.Hash || m.Branch == failed.Marker.Branch || m.From == "" || !slices.Contains(m.ReplyTo, command.ID) {
+		t.Fatalf("the retry must answer with a build of the same plan on a branch of its own, replacing #%d: %+v", old, m)
+	}
+	if closed := r.gh.prs[old]; closed.State != "closed" || closed.Merged || closed.Draft != before.Draft || closed.Head.SHA != before.Head.SHA || r.gh.prBody(old) != body || len(r.gh.merged) != 0 {
+		t.Fatalf("the retry must close #%d as it is, without readying or merging it: %+v", old, closed)
+	}
+	if what, err := r.f.Repo.Recorded(context.Background(), 1, replaceStepName(Command{Comment: command.ID})); err != nil || what != fmt.Sprintf("#%d", old) {
+		t.Fatalf("the retry's record must say it replaces #%d: %q, %v", old, what, err)
+	}
+	if b.calls != builds || len(r.form.requests) != drafts {
+		t.Fatal("answering the retry built or drafted")
+	}
+	r.poll()
+	built := r.gh.last(1)
+	pr := built.Marker.PR
+	if b.calls != builds+1 || len(b.base.built) != reviews+1 || len(r.form.requests) != drafts || pr == 0 || pr == old || built.Marker.Replaces != old ||
+		r.gh.prs[pr].Head.Ref != m.Branch || !strings.Contains(retry263Visible(built.Comment.Body), fmt.Sprintf("replaces #%d", old)) {
+		t.Fatalf("the retry's build must run and be reviewed once more, and open its own pull request from %s, replacing #%d: %+v\n%s", m.Branch, old, built.Marker, built.Comment.Body)
+	}
+	return built
+}
+
 func retry263RetryWatches(t *testing.T, r *rig, b *retry263Builder, failed Post) {
 	t.Helper()
 	pr, builds, drafts := failed.Marker.PR, b.calls, len(r.form.requests)
@@ -166,46 +248,59 @@ func retry263RetryWatches(t *testing.T, r *rig, b *retry263Builder, failed Post)
 	}
 }
 
-func TestPlumbingDraftRetryPostsMatchWatching(t *testing.T) {
+// A plan's draft whose build failed in the factory's own run, because its
+// agent stopped with an error, its tests failed or its review asked for
+// changes, is built again by a writer's retry, which replaces it (#271). Its
+// failure post and the note refusing revise say so, and say how to change
+// the plan instead; the retry closes the draft, and the plan's new build
+// opens its own pull request, which merges once CI's gate passes.
+func TestPlumbingDraftRetryPostsMatchRebuilding(t *testing.T) {
 	for _, outcome := range []string{"agent error", "failed tests", "review changes"} {
 		t.Run(outcome, func(t *testing.T) {
 			r, b, failed := retry263Start(t, outcome, "page/page.go")
 			if failed.Marker.Kind != KindFailed || failed.Marker.Failure != FailGate || failed.Marker.PR == 0 || !r.gh.prs[failed.Marker.PR].Draft {
 				t.Fatalf("fixture must publish a failed draft: %+v", failed.Marker)
 			}
-			retry263WatchWords(t, failed.Comment.Body, failed.Marker.PR, true)
-			retry263MergeWords(t, failed.Comment.Body, failed.Marker.PR, false, true)
-			retry263RedraftWords(t, failed.Comment.Body, failed.Marker.PR)
-			if outcome == "review changes" {
-				retry263RejectedReviewWords(t, failed.Comment.Body)
-			}
-			// Revise is still refused while the draft is open, but its advice
-			// must describe the same watch action and the manual redraft path.
+			retry271RebuildWords(t, failed.Comment.Body, failed.Marker.PR, false)
+			retry271ReviseWords(t, failed.Comment.Body, failed.Marker.PR)
+			// Revise is still refused while the draft is open, and its note
+			// offers the same rebuild and the same way to change the plan.
 			r.gh.say(1, "gitdek", "/invariant revise")
 			r.poll()
 			note := r.expect(1, KindNote, LabelHumanReview)
-			retry263WatchWords(t, note.Comment.Body, failed.Marker.PR, true)
-			retry263MergeWords(t, note.Comment.Body, failed.Marker.PR, false, true)
-			retry263RedraftWords(t, note.Comment.Body, failed.Marker.PR)
-			if outcome == "review changes" {
-				retry263RejectedReviewWords(t, note.Comment.Body)
-			}
+			retry271RebuildWords(t, note.Comment.Body, failed.Marker.PR, false)
+			retry271ReviseWords(t, note.Comment.Body, failed.Marker.PR)
 			if b.calls != 1 || len(r.form.requests) != 1 {
 				t.Fatal("revise started work while the failed draft was open")
 			}
-			retry263RetryWatches(t, r, b, failed)
-			// Follow the advertised alternative. Closing and revising drafts a
-			// proposal; it does not bypass ratification or start another build.
-			r.gh.prs[failed.Marker.PR].State = "closed"
+			built := retry271Rebuilds(t, r, b, failed)
+			pr := built.Marker.PR
+			if built.Marker.Kind != KindPR || r.gh.prs[pr].Draft {
+				t.Fatalf("the plan's new build passed, so its pull request must be ready: %+v", built.Marker)
+			}
+			r.gh.ci(pr, "success")
 			r.poll()
-			r.expect(1, KindClosed)
-			r.gh.say(1, "gitdek", "draft the same plan again\n\n/invariant revise")
-			r.poll()
-			r.expect(1, KindProposal, LabelProposal)
-			if b.calls != 1 || len(r.form.requests) != 2 || len(r.gh.prs) != 1 {
-				t.Fatal("closing and revising must wait for a new ratification before building")
+			merged := r.expect(1, KindMerged, LabelMerged)
+			if merged.Marker.PR != pr || !reflect.DeepEqual(r.gh.merged, []int{pr}) || len(r.gh.prs) != 2 || b.calls != 2 {
+				t.Fatalf("only the new build's pull request merges: %+v, merged %v", merged.Marker, r.gh.merged)
 			}
 		})
+	}
+	// The other way the posts offer: a person closes the draft and revises,
+	// which drafts again and builds nothing until the new draft is ratified.
+	// It stays in the parent: the plan checker's output parser treats a
+	// passing subtest as a passing acceptance test.
+	{
+		r, b, failed := retry263Start(t, "failed tests", "page/page.go")
+		r.gh.prs[failed.Marker.PR].State = "closed"
+		r.poll()
+		r.expect(1, KindClosed)
+		r.gh.say(1, "gitdek", "draft the same plan again\n\n/invariant revise")
+		r.poll()
+		r.expect(1, KindProposal, LabelProposal)
+		if b.calls != 1 || len(r.form.requests) != 2 || len(r.gh.prs) != 1 {
+			t.Fatal("closing and revising must wait for a new ratification before building")
+		}
 	}
 }
 
@@ -271,12 +366,13 @@ func TestRetryPostsDistinguishCIFailureAndStoppedBuild(t *testing.T) {
 	}
 }
 
-// A rejected agent review is not a merge gate in the retry protocol. A
-// writer can retry the untouched draft, and CI passing at that same head
-// makes it mergeable without a new build or agent review. Only a person
-// merges the trusted-base variant; the factory does not mark that draft
-// ready either. The posts must make these consequences visible beforehand.
-func TestRejectedReviewRetrySaysAndDoesMergeTheUnchangedDraft(t *testing.T) {
+// A rejected agent review is a failure of the factory's own run, so a
+// writer's retry builds the plan again rather than merging the draft as it
+// is (#271): the draft is closed with its head and review as they were,
+// never marked ready or merged, and the new build is reviewed again. Only a
+// person merges the trusted-base variant's new pull request. The posts say
+// so beforehand.
+func TestRejectedReviewRetryRebuildsInsteadOfMergingTheDraft(t *testing.T) {
 	for _, file := range []string{"page/page.go", "internal/factory/page.go"} {
 		t.Run(file, func(t *testing.T) {
 			trusted := file == "internal/factory/page.go"
@@ -285,62 +381,34 @@ func TestRejectedReviewRetrySaysAndDoesMergeTheUnchangedDraft(t *testing.T) {
 			if pr == 0 || failed.Marker.Kind != KindFailed || failed.Marker.Failure != FailGate || !r.gh.prs[pr].Draft || !strings.Contains(failed.Comment.Body, "review asks for changes") {
 				t.Fatalf("fixture must leave a draft whose tests passed and review asked for changes: %+v\n%s", failed.Marker, failed.Comment.Body)
 			}
-			retry263WatchWords(t, failed.Comment.Body, pr, true)
-			retry263MergeWords(t, failed.Comment.Body, pr, trusted, true)
-			retry263RejectedReviewWords(t, failed.Comment.Body)
-			retry263RedraftWords(t, failed.Comment.Body, pr)
-
-			// Record both the exact rejected head and the review published on
-			// its PR. The agent builder owns review too, so another build call
-			// would expose any attempt to obtain a new approval before merging.
-			before := *r.gh.prs[pr]
-			body := r.gh.prBody(pr)
-			if !strings.Contains(body, "VERDICT: changes needed") {
+			retry271RebuildWords(t, failed.Comment.Body, pr, trusted)
+			retry271ReviseWords(t, failed.Comment.Body, pr)
+			if !strings.Contains(r.gh.prBody(pr), "VERDICT: changes needed") {
 				t.Fatal("fixture does not retain the rejected review on the PR")
 			}
 			g := &draftGitHub{fakeGitHub: r.gh}
 			r.f.GitHub = g
-			command := r.gh.say(1, "gitdek", "/invariant retry")
-			r.poll()
-			answer := r.expect(1, KindPR, LabelPR)
-			if answer.Marker.PR != pr || answer.Marker.Hash != failed.Marker.Hash || answer.Marker.Branch != failed.Marker.Branch || !slices.Contains(answer.Marker.ReplyTo, command.ID) {
-				t.Fatalf("retry must watch and answer for the same rejected draft: %+v", answer.Marker)
+			built := retry271Rebuilds(t, r, b, failed)
+			next := built.Marker.PR
+			if built.Marker.Kind != KindPR || len(g.calls) != 0 {
+				t.Fatalf("the new build passed its checks and its new review, so it opens a ready pull request: %+v, calls %v", built.Marker, g.calls)
 			}
-			retry263WatchWords(t, answer.Comment.Body, pr, false)
-			retry263MergeWords(t, answer.Comment.Body, pr, trusted, true)
-			retry263RejectedReviewWords(t, answer.Comment.Body)
-			if !reflect.DeepEqual(*r.gh.prs[pr], before) || len(g.calls) != 0 {
-				t.Fatal("answering retry changed the rejected draft or tried to make it ready/merge it")
-			}
-			r.poll()
-			r.expect(1, KindPR, LabelPR)
-			if len(g.calls) != 0 || len(r.gh.merged) != 0 {
-				t.Fatal("the rejected draft was marked ready or merged before CI's gate passed")
-			}
-
-			// No commit is pushed and no review is changed. CI is the only
-			// new evidence; the gate passing on this head drives the outcome.
-			r.gh.ci(pr, "success")
+			r.gh.ci(next, "success")
 			r.poll()
 			if trusted {
 				waiting := r.expect(1, KindFailed, LabelHumanReview)
-				if waiting.Marker.Failure != FailTrusted || waiting.Marker.PR != pr || len(g.calls) != 0 || len(r.gh.merged) != 0 || !r.gh.prs[pr].Draft {
-					t.Fatalf("trusted draft must still wait for a person without ready/merge calls: %+v, calls %v", waiting.Marker, g.calls)
-				}
-				retry263MergeWords(t, waiting.Comment.Body, pr, true, true)
-				visible := retry263Visible(waiting.Comment.Body)
-				if strings.Contains(visible, "the review passed") || strings.Contains(visible, "review approved") || strings.Contains(visible, "review has passed") {
-					t.Errorf("CI passing must not be described as approval of the rejected review:\n%s", waiting.Comment.Body)
+				if waiting.Marker.Failure != FailTrusted || waiting.Marker.PR != next || len(r.gh.merged) != 0 {
+					t.Fatalf("the trusted plan's new pull request must wait for a person: %+v, merged %v", waiting.Marker, r.gh.merged)
 				}
 			} else {
 				r.expect(1, KindMerged, LabelMerged)
-				want := []string{fmt.Sprintf("ready #%d", pr), fmt.Sprintf("merge #%d", pr)}
-				if !reflect.DeepEqual(g.calls, want) || !reflect.DeepEqual(r.gh.merged, []int{pr}) || r.gh.prs[pr].Draft {
-					t.Fatalf("green CI must mark the unchanged draft ready and merge it, in order: calls %v, merged %v", g.calls, r.gh.merged)
+				if !reflect.DeepEqual(r.gh.merged, []int{next}) {
+					t.Fatalf("only the new pull request merges: %v", r.gh.merged)
 				}
 			}
-			if b.calls != 1 || len(b.base.built) != 1 || len(r.form.requests) != 1 || len(r.gh.prs) != 1 || r.gh.prs[pr].Head.SHA != before.Head.SHA || r.gh.prBody(pr) != body {
-				t.Fatal("retry must preserve the rejected draft's head and review, with no build, review, redraft or replacement PR")
+			if old := r.gh.prs[pr]; old.State != "closed" || old.Merged || !old.Draft || slices.Contains(g.calls, fmt.Sprintf("ready #%d", pr)) || slices.Contains(g.calls, fmt.Sprintf("merge #%d", pr)) ||
+				!strings.Contains(r.gh.prBody(pr), "VERDICT: changes needed") {
+				t.Fatalf("the rejected draft must stay closed as it was, never readied or merged: %+v, calls %v", old, g.calls)
 			}
 		})
 	}
