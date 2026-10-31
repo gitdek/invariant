@@ -27,7 +27,7 @@ const (
 	Choose = "choose" // /invariant choose F1 A: decide a fork
 	Revise = "revise" // /invariant revise: draft again, reading the comments
 	Ratify = "ratify" // /invariant ratify <hash>: ratify the current proposal
-	Retry  = "retry"  // /invariant retry: look at a failed pull request again, once people have fixed what failed
+	Retry  = "retry"  // /invariant retry: build a stopped build, or a plan's failed draft, again, or look at a failed pull request again once people have fixed what failed
 	Plan   = "plan"   // /invariant plan: draft a plan of issues for the PRD this issue holds or links
 	Stop   = "stop"   // /invariant stop: open no more of the ratified plan of issues on this issue (#126)
 )
@@ -109,8 +109,10 @@ const (
 	FailGate        = "gate"        // the code failed the gate in the factory's own run
 	FailCI          = "ci"          // CI's gate failed on the pull request
 	FailUnmergeable = "unmergeable" // CI's gate passed, but the pull request can't merge
-	// FailTrusted is a plan's pull request that passed CI's gate and the
-	// review, and changes the trusted base, so a person merges it (D-0105).
+	// FailTrusted is a plan's pull request that passed CI's gate on its
+	// current head and changes the trusted base, so only a person merges it
+	// (D-0105). Its build's review approved it, though a writer's retry that
+	// watched it again after CI failed reviews nothing pushed since (#263).
 	// The protocol counts it as one the factory can't merge.
 	FailTrusted = "trusted"
 	// FailMerge is a pull request whose gate passed that GitHub refused to
@@ -136,6 +138,12 @@ type Marker struct {
 	Hash     string              `json:"hash,omitempty"` // the ratified proposal
 	PR       int                 `json:"pr,omitempty"`
 	Failure  string              `json:"failure,omitempty"` // why a failed post failed: Fail*
+	// A writer's retry of a plan's failed draft builds the plan again on a
+	// branch of its own (#271). Replaces is the draft its build replaces,
+	// which the factory closed, and From the commit its branch starts from:
+	// the plan's ratification.
+	Replaces int    `json:"replaces,omitempty"`
+	From     string `json:"from,omitempty"`
 	// Spend is the agents' estimated cost for the step this post reports,
 	// and GateRuns the gate runs its synthesis used. A post that carries an
 	// earlier marker forward clears them, so nothing counts twice (D-0048).
@@ -164,6 +172,16 @@ func (m Marker) carried() Marker {
 // Why is why a failed post failed: one of the Fail kinds, or "" for a post
 // that didn't fail.
 func (m Marker) Why() string { return m.failure() }
+
+// Rebuilds says a writer's retry of this failure builds its ratified plan
+// again, in a new pull request that replaces its draft (#271): a plan's
+// build failed in the factory's own run and left a draft. Any other failure
+// with a pull request is watched again, and one without builds again, as
+// before (D-0191).
+func (m Marker) Rebuilds() bool {
+	plan := isPlan(m.Project) || (m.Proposal != nil && m.Proposal.Plan != nil)
+	return m.Kind == KindFailed && m.PR != 0 && m.Why() == FailGate && plan
+}
 
 // failure is why a failed post failed. Posts from before failures were
 // recorded have a pull request when CI failed it, and none when the build

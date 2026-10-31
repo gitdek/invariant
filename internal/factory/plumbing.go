@@ -211,7 +211,13 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
-	wt, err := f.Repo.Worktree(ctx, m.Branch, "origin/"+m.Branch)
+	// A retry's build of a plan starts its own branch from the plan's
+	// ratification, until it has pushed its code there (#271).
+	from := "origin/" + m.Branch
+	if _, err := f.Repo.RevParse(ctx, from); err != nil && m.From != "" {
+		from = m.From
+	}
+	wt, err := f.Repo.Worktree(ctx, m.Branch, from)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -252,6 +258,8 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	verdict := "It passed every test, and the review approves it."
 	switch {
+	case res.AgentError != "":
+		verdict = "Its agent's last run ended with an error, so the build failed."
 	case !res.Passed:
 		verdict = "It didn't pass every test."
 	case !res.Approved:
@@ -272,6 +280,11 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
 	if err != nil {
 		return "", "", nil, nil, err
+	}
+	if stale, err := f.superseded(ctx, n, ratified); err != nil {
+		return "", "", nil, nil, err
+	} else if stale {
+		return "", "", nil, nil, f.finishSuperseded(ctx, n, step, result)
 	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
 		return "", "", nil, nil, err
@@ -300,9 +313,14 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		return err
 	}
 	head := "origin/" + m.Branch
-	if has, err := f.Repo.Holds(ctx, head, code); err != nil {
-		return err
-	} else if !has {
+	has := false
+	// A retry's branch is there only once its code is pushed (#271).
+	if _, err := f.Repo.RevParse(ctx, head); err == nil {
+		if has, err = f.Repo.Holds(ctx, head, code); err != nil {
+			return err
+		}
+	}
+	if !has {
 		if err := f.recovers(ctx, n, "push the code", f.canPushCode(building(RunDone, false, false))); err != nil {
 			return err
 		}
@@ -321,7 +339,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		return err
 	}
 	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
-	ok := res.Passed && res.Approved
+	ok := res.Built()
 	from, to := buildStep(ratified, stops, at)
 	if !ok {
 		to.kind, to.failure = protocol.KindFailed, FailGate
@@ -329,11 +347,18 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	pr, open, err := f.GitHub.OpenPullRequest(ctx, m.Branch)
+	// A retry's build opens its pull request once: one GitHub already opened
+	// from its branch is its own, whatever has become of it, so a crash or a
+	// close never makes a second (#271, D-0203).
+	lookup := f.GitHub.OpenPullRequest
+	if m.Replaces != 0 {
+		lookup = f.GitHub.PullRequestFrom
+	}
+	pr, found, err := lookup(ctx, m.Branch)
 	if err != nil {
 		return err
 	}
-	if !open {
+	if !found {
 		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
 			return err
 		}
@@ -342,7 +367,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		}); err != nil {
 			return err
 		}
-	} else if ok {
+	} else if ok && pr.State == "open" {
 		if err := f.markReady(ctx, n, pr); err != nil {
 			return err
 		}

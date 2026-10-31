@@ -46,6 +46,13 @@ type GitHub interface {
 	PullRequest(ctx context.Context, n int) (github.PullRequest, error)
 	// OpenPullRequest finds the open pull request from a branch, if there is one.
 	OpenPullRequest(ctx context.Context, branch string) (github.PullRequest, bool, error)
+	// PullRequestFrom finds the newest pull request from a branch, in any
+	// state, if there is one.
+	PullRequestFrom(ctx context.Context, branch string) (github.PullRequest, bool, error)
+	// ClosePullRequest closes a pull request without merging it, and
+	// returns it as it is then: closing a closed one changes nothing, and a
+	// merged one stays merged.
+	ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error)
 	CheckRuns(ctx context.Context, sha, name string) ([]github.CheckRun, error)
 	// Job reads the job behind a check run, to tell a gate that failed from
 	// one GitHub never started.
@@ -94,6 +101,9 @@ type Repo interface {
 	Load(ctx context.Context, commit, dir string) error
 	Holds(ctx context.Context, ref, commit string) (bool, error)
 	PushCommit(ctx context.Context, commit, branch string) error
+	// FirstCommit is the first commit on head, past base, that touched
+	// path, or "" when none did.
+	FirstCommit(ctx context.Context, base, head, path string) (string, error)
 }
 
 // Factory turns issues into merged pull requests.
@@ -550,6 +560,16 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 				return err
 			}
 			if pr.Merged || pr.State == "closed" {
+				// A draft closed for a writer's retry that recorded it
+				// replaces it is the factory's own replacement under way,
+				// not someone else's close, so the retry goes on (#271).
+				if !pr.Merged {
+					if c, ok, err := f.replacement(ctx, t, state); err != nil {
+						return err
+					} else if ok {
+						return f.rebuild(ctx, t, state, c)
+					}
+				}
 				return f.watch(ctx, t, state)
 			}
 			open = pr
@@ -582,6 +602,10 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		switch {
 		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
+		case kind == KindFailed && state.Marker.Rebuilds():
+			// A retry builds the plan again, replacing #n (#271).
+			n := state.Marker.PR
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n), rebuildInstead(n))
 		case kind == KindFailed && state.Marker.PR != 0:
 			// A retry only watches #n again (#263). The note says a person
 			// merges it whenever the failure or the plan shows it changes
@@ -621,6 +645,11 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 				return err
 			}
 			return f.say(ctx, t.Issue.Number, post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m), LabelBuilding)
+		}
+		// A plan's build that failed in the factory's own run is built
+		// again, replacing its draft (#271).
+		if state.Marker.Rebuilds() {
+			return f.rebuild(ctx, t, state, c)
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
 		// on its current head, it stays in scope, and its lock is still the
@@ -1340,7 +1369,8 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
 	f.logf("#%d: building %s", n, m.Project)
 	f.doing(n, "building")
-	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash}
+	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
+		Replaces: m.Replaces, From: m.From}
 	stops := t.Stops()
 	// failed posts that the build failed before it made a pull request: it
 	// stopped, or the factory wouldn't start it (#13).
@@ -1381,6 +1411,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		}
 		if isPlan(m.Project) {
 			built, agent, res, runErr, err := f.runPlanBuild(ctx, t, ratified, step)
+			if errors.Is(err, errSuperseded) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -1399,6 +1432,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 			return f.publish(ctx, t, ratified, built, next, stops)
 		}
 		built, agent, res, runErr, err := f.runBuild(ctx, t, ratified, step)
+		if errors.Is(err, errSuperseded) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -1596,6 +1632,11 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	result, err := f.saveResult(ctx, saved, fmt.Sprintf("invariant: the result of the build for #%d by %s", n, agent), code)
 	if err != nil {
 		return "", "", nil, nil, err
+	}
+	if stale, err := f.superseded(ctx, n, ratified); err != nil {
+		return "", "", nil, nil, err
+	} else if stale {
+		return "", "", nil, nil, f.finishSuperseded(ctx, n, step, result)
 	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
 		return "", "", nil, nil, err

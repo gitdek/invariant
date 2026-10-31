@@ -244,6 +244,13 @@ func (g leasedGitHub) MarkReady(ctx context.Context, n int) error {
 	return g.GitHub.MarkReady(ctx, n)
 }
 
+func (g leasedGitHub) ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error) {
+	if !g.f.holds() {
+		return github.PullRequest{}, errLeaseLost
+	}
+	return g.GitHub.ClosePullRequest(ctx, n)
+}
+
 func (g leasedGitHub) DeleteBranch(ctx context.Context, branch string) error {
 	if !g.f.holds() {
 		return errLeaseLost

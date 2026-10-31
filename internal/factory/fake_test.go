@@ -34,6 +34,7 @@ type fakeGitHub struct {
 	// noActions is an App without the Actions permission: it can't read jobs.
 	noActions bool
 	merged    []int
+	closed    []int // pull requests the factory closed
 	deleted   []string
 	bodies    map[int]string
 	nextID    int64
@@ -202,6 +203,39 @@ func (g *fakeGitHub) OpenPullRequest(_ context.Context, branch string) (github.P
 		}
 	}
 	return github.PullRequest{}, false, nil
+}
+
+// PullRequestFrom finds the newest pull request from a branch, in any
+// state.
+func (g *fakeGitHub) PullRequestFrom(_ context.Context, branch string) (github.PullRequest, bool, error) {
+	newest := 0
+	for n, pr := range g.prs {
+		if pr.Head.Ref == branch && n > newest {
+			newest = n
+		}
+	}
+	if newest == 0 {
+		return github.PullRequest{}, false, nil
+	}
+	pr := g.prs[newest]
+	if pr.State == "open" {
+		pr.Head.SHA = g.head(branch)
+	}
+	return *pr, true, nil
+}
+
+// ClosePullRequest closes a pull request without merging it, as GitHub
+// does: a closed one stays closed and a merged one stays merged.
+func (g *fakeGitHub) ClosePullRequest(_ context.Context, n int) (github.PullRequest, error) {
+	pr, ok := g.prs[n]
+	if !ok {
+		return github.PullRequest{}, github.ErrNotFound
+	}
+	if !pr.Merged && pr.State == "open" {
+		pr.State = "closed"
+		g.closed = append(g.closed, n)
+	}
+	return *pr, nil
 }
 
 func (g *fakeGitHub) head(branch string) string {
