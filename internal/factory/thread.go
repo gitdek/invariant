@@ -177,7 +177,7 @@ func (m Marker) Why() string { return m.failure() }
 // again, in a new pull request that replaces its draft (#271): a plan's
 // build failed in the factory's own run and left a draft. Any other failure
 // with a pull request is watched again, and one without builds again, as
-// before (D-0191).
+// before (D-0191, D-0218).
 func (m Marker) Rebuilds() bool {
 	plan := isPlan(m.Project) || (m.Proposal != nil && m.Proposal.Plan != nil)
 	return m.Kind == KindFailed && m.PR != 0 && m.Why() == FailGate && plan

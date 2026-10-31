@@ -93,7 +93,7 @@ func rebuildingComment(by string, old int, m Marker) string {
 }
 
 // rebuildOffer says what a writer's retry of a plan's failed draft, pr,
-// does, and what else a person can do (#271): a retry closes the draft and
+// does, and what else a person can do (#271, D-0218): a retry closes the draft and
 // builds the same ratified plan again, review included, and the factory
 // drafts again only once the draft is closed (#218, D-0156). A plan that
 // changes the trusted base still has a person merge what it builds, so

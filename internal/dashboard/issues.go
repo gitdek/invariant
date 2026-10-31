@@ -511,7 +511,7 @@ func retryCopy(m factory.Marker) *RetryCopy {
 // rebuildCopy is what a retry of a plan's draft does, when its build failed
 // in the factory's own run: it closes the draft and builds the plan again,
 // review included, and the new build opens a pull request of its own (#271,
-// D-0191).
+// D-0191, D-0218).
 func rebuildCopy(pr int, trusted bool) *RetryCopy {
 	merge := " If it changes the trusted base, a person merges it."
 	if trusted {

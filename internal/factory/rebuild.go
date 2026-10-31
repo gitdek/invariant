@@ -12,7 +12,7 @@ import (
 )
 
 // A writer's retry of a plan's build that failed in the factory's own run,
-// and left a draft, builds the plan again (#271). It's the recovery core's
+// and left a draft, builds the plan again (#271, D-0218). It's the recovery core's
 // replacement (D-0203) and the protocol's Rebuild (D-0202): the factory
 // records that the retry replaces the draft, closes the draft without
 // merging it, so its failed work stays there to read, and answers the
