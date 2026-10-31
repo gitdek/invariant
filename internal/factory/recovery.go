@@ -145,7 +145,9 @@ func replacing(pred int, intent bool) step {
 }
 
 // watcher is this watcher in the core's terms, in the agent run for key,
-// or in none.
+// or in none. Its run is the latest build attempt's, the core's attempt 0 as
+// repo leaves it: until #271's plumbing, no retry replaces a draft, so no
+// build has a newer attempt (D-0212).
 func watcher(inRun int) recovery.Watcher {
 	w := recovery.NewWatcher(me)
 	w.InRun = inRun

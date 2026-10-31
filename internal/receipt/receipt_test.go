@@ -126,3 +126,20 @@ func TestEveryStepTriedRow(t *testing.T) {
 		t.Errorf("a Go explorer with Try:\n%s", md)
 	}
 }
+
+// A receipt names the decision that ratified a lock by hand, and says why
+// the lock isn't what a person ratified when it isn't (D-0208).
+func TestReceiptsNameAHandLocksRatification(t *testing.T) {
+	r := &verify.Report{Project: "demo", Decision: "D-0001", Proposal: "sha256:aa",
+		Journal: &verify.JournalRatification{Decision: "D-0001", By: "@gitdek", Proposal: "sha256:aa"}}
+	if md := Markdown(r); !strings.Contains(md, "| Pinned statements | ✅") || !strings.Contains(md, "ratified by @gitdek in D-0001, for exactly this proposal") {
+		t.Errorf("the receipt doesn't name the journal's ratification:\n%s", md)
+	}
+	r.Journal.Problem = "decision D-0001, which the lock names, records @gitdek's ratification of sha256:bb"
+	md := Markdown(r)
+	for _, want := range []string{"| Pinned statements | ❌", "the lock isn't what the journal says a person ratified: " + r.Journal.Problem, "- Ratification: " + r.Journal.Problem} {
+		if !strings.Contains(md, want) {
+			t.Errorf("receipt lacks %q:\n%s", want, md)
+		}
+	}
+}

@@ -267,6 +267,12 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 	if inv.Mode != "explicit" || inv.Provenance == nil {
 		return nil, fmt.Errorf("Python application sessions require explicit components")
 	}
+	// The inventory and receipts carry trusted contracts, but nothing here
+	// runs their backing tests yet (#294's next step), so refuse them rather
+	// than let a declaration pass for checked support.
+	if len(inv.TrustedContracts) > 0 {
+		return nil, fmt.Errorf("Python application trusted contracts are inventoried, but the gate doesn't run their backing tests yet")
+	}
 	decls := map[string]project.Component{}
 	for _, c := range inv.Provenance.Declarations {
 		decls[c.ID] = c

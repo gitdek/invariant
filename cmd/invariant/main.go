@@ -182,10 +182,20 @@ func pinCmd(args []string) int {
 	}
 	if len(changed) == 0 {
 		fmt.Println("Every pin already matches the statements' text.")
-		return 0
+	} else {
+		fmt.Printf("Pinned the current text of: %s.\n", strings.Join(changed, ", "))
+		fmt.Println("Pinning records a ratification. Log it in decisions/log.md.")
 	}
-	fmt.Printf("Pinned the current text of: %s.\n", strings.Join(changed, ", "))
-	fmt.Println("Pinning records a ratification. Log it in decisions/log.md.")
+	// A lock ratified by hand holds only for the proposal its decision's
+	// ratify line names, so the person needs its hash (D-0208).
+	if p.Lock.Ratified == nil {
+		id := p.Lock.Decision
+		if id == "" {
+			id = "D-NNNN"
+		}
+		proposal := project.ProposalHash(p.Lock.Bounds, p.Lock.Statements)
+		fmt.Printf("The lock's proposal is %s. A person ratifies exactly that with `invariant decisions ratify -by @PERSON -proposal %s %s`.\n", proposal, proposal, id)
+	}
 	return 0
 }
 
@@ -1039,12 +1049,13 @@ func ratificationCmd(ctx context.Context, args []string) int {
 		r := p.Lock.Ratified
 		switch {
 		case r == nil:
-			if err := handRatified(ctx, dir, p.Lock.Decision); err != nil {
+			hand, err := handRatified(ctx, dir, p.Lock)
+			if err != nil {
 				fmt.Printf("❌ %s: %v\n", dir, err)
 				code = 1
 				continue
 			}
-			fmt.Printf("✅ %s: ratified by hand, recorded in %s\n", dir, p.Lock.Decision)
+			fmt.Printf("✅ %s: ratified by hand by %s, as %s records (%s)\n", dir, hand.By, p.Lock.Decision, hand.Proposal)
 		case factory.VerifyRatification(ctx, gh, *repo, p.Lock) == nil:
 			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
 		default:

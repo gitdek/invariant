@@ -1,6 +1,6 @@
 # Let a retry build a failed plumbing build again
 
-Issue #271 in gitdek/invariant, opened by @gitdek: part 2 of 3, amended by hand and ratified as D-0203.
+Issue #271 in gitdek/invariant, opened by @gitdek: part 2 of 3, amended by hand and ratified as D-0203, and its exact proposal as D-0210.
 
 A retry that builds again replaces the failed draft with a new pull request (#271). The recovery core pinned one pull request per ratification, so it needs a chain of replacements:
 

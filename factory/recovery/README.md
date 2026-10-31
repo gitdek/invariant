@@ -2,7 +2,7 @@
 
 Written by Invariant for [#23](https://github.com/gitdek/invariant/issues/23): Prove the factory recovers from a crash at any point, and from a second watcher. The factory rebuilt its explorer for [#68](https://github.com/gitdek/invariant/issues/68), and a coding agent amended it by hand for [#271](https://github.com/gitdek/invariant/issues/271), so a writer's retry can replace a failed draft with a new pull request.
 
-@gitdek ratified these statements by hand, as [D-0203](../../decisions/journal/D-0203.jsonl), in place of a comment on the issue: they amend the statements he ratified [on #68](https://github.com/gitdek/invariant/issues/68#issuecomment-5875564945). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/WatcherRecovery.tla`](.invariant/specs/WatcherRecovery.tla).
+@gitdek ratified these statements by hand, as [D-0203](../../decisions/journal/D-0203.jsonl), and their exact proposal as [D-0210](../../decisions/journal/D-0210.jsonl), which the lock names in place of a comment on the issue: they amend the statements he ratified [on #68](https://github.com/gitdek/invariant/issues/68#issuecomment-5875564945). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/WatcherRecovery.tla`](.invariant/specs/WatcherRecovery.tla).
 
 | Statement | Kind | Says |
 | :-- | :-- | :-- |

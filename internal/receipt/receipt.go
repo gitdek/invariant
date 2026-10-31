@@ -91,7 +91,7 @@ func Markdown(r *verify.Report) string {
 		writeRow("Build", r.Build.Passed, render.buildResult(r.Build), "sandboxed, no network")
 	}
 	if explicit {
-		componentEvidence(&b, r.Components)
+		componentEvidence(&b, r)
 		componentViews(&b, r)
 	}
 	if r.Application != nil {
@@ -193,10 +193,13 @@ func (render renderer) value(s string) string {
 
 // componentEvidence reports every scoped declaration, even when it was only
 // a contract input or had no selected check. Package-wide results cannot
-// supply a component's proof status.
-func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
+// supply a component's proof status, and a decoded status counts only when
+// its own result qualifies again, as attribution qualifies it.
+func componentEvidence(b *strings.Builder, r *verify.Report) {
+	evidence := r.Components
 	proofs := make(map[string]verify.ComponentProof, len(evidence.Proofs))
 	for _, p := range evidence.Proofs {
+		p.Status = componentProofQualification(r, p)
 		proofs[p.Target] = p
 	}
 	contracts := make(map[string][]string)
@@ -243,6 +246,7 @@ func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
 			details = append(details, fmt.Sprintf("supplied proof passed: %t", result.Passed),
 				"verified IDs: "+componentStrings(result.Verified), "checked contracts: "+componentStrings(result.Contracts),
 				componentInputs(result.Inputs, result.FileInputs), componentInvocation(result.Invocation), componentTool(result.Tool))
+			details = append(details, componentBoundary(result)...)
 		} else if _, ok := contracts[c.ID]; ok {
 			details = append(details, "no verifier result")
 		}
@@ -302,9 +306,9 @@ func row(b *strings.Builder, check string, ok bool, result, evidence string) {
 	fmt.Fprintf(b, "| %s | %s %s | %s |\n", check, mark(ok), result, evidence)
 }
 
-// provenance says where the statements were ratified: an entry in
-// decisions/log.md for a hand-built project, or a comment on an issue for a
-// factory project.
+// provenance says where the statements were ratified: a comment on an issue
+// for a factory project, or, for a project ratified by hand, the decision its
+// lock names, checked against the repository's journal when it keeps one.
 func (render renderer) provenance(r *verify.Report) string {
 	if render.explicit && r.Ratified != nil {
 		ratified := r.Ratified
@@ -320,6 +324,10 @@ func (render renderer) provenance(r *verify.Report) string {
 	switch {
 	case r.Ratified != nil && !r.RatificationMatches():
 		return fmt.Sprintf("the lock no longer matches what @%s ratified on #%d", r.Ratified.By, r.Ratified.Issue)
+	case r.Journal != nil && !r.RatificationMatches():
+		return "the lock isn't what the journal says a person ratified: " + render.text(r.Journal.Problem)
+	case r.Journal != nil:
+		return fmt.Sprintf("ratified by %s in %s, for exactly this proposal", render.value(r.Journal.By), render.value(r.Journal.Decision))
 	case r.Ratified != nil && r.Ratified.Previous != "":
 		return fmt.Sprintf("ratified by @%s on [#%d](%s), amending %s", r.Ratified.By, r.Ratified.Issue, r.Ratified.Comment, r.Ratified.Previous)
 	case r.Ratified != nil:
@@ -538,8 +546,12 @@ func (render renderer) buildResult(b verify.Build) string {
 
 func (render renderer) failures(r *verify.Report) []string {
 	var out []string
-	if !r.RatificationMatches() {
+	switch {
+	case r.RatificationMatches():
+	case r.Ratified != nil:
 		out = append(out, fmt.Sprintf("Ratification: the lock's statements or bounds no longer match the proposal %s ratified (%s)", render.value("@"+r.Ratified.By), render.literal(short(r.Ratified.Proposal))))
+	default:
+		out = append(out, "Ratification: "+render.text(r.Journal.Problem))
 	}
 	for _, p := range r.Pins {
 		switch {
