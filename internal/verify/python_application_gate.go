@@ -322,7 +322,8 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			checks := &pythonApplicationModelRunner{runner: runner, root: d}
 			c.Result, e = conformance.Check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, traces, model)
 			if v.Explored {
-				c.Result.Exhaustive = true
+				// Attempts carry no runs; the exploration's are its replays.
+				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs
 				// It claims every state the code can reach, so it must reach
 				// every state the model does; its checked steps still stand.
 				if c.Result.Passed && int64(c.Result.States) != c.Result.ModelStates {

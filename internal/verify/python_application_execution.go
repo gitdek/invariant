@@ -127,6 +127,10 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	return s.run(ctx, key, nil)
 }
 
+// pythonApplicationLargerBudget is the runs and steps an exploration one
+// size larger may take: the most a declaration may give (#342).
+const pythonApplicationLargerBudget = "2147483647"
+
 // pythonApplicationDriverCopy is a driver copy one size larger (#342): its
 // staged path and hash, and the private file that holds it.
 type pythonApplicationDriverCopy struct {
@@ -226,9 +230,15 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 		env[k] = ""
 	}
 	maps.Copy(env, v.Env)
+	sampling := maps.Clone(invocation.Sampling)
+	if larger != nil {
+		// Budgets sized for the ratified bounds don't fit one size larger,
+		// where the larger check's time allowance bounds the run instead.
+		sampling["runs"], sampling["steps"] = pythonApplicationLargerBudget, pythonApplicationLargerBudget
+	}
 	c := PythonApplicationCommand{Key: key, SnapshotSHA256: s.provenance.Fingerprint, RunnerSHA256: s.provenance.RunnerSHA256,
 		Image: s.image, Interpreter: "/usr/local/bin/python", Launcher: "/runtime/runner.py", WorkingDir: path.Join("/src", v.WorkingDir),
-		Env: env, Sampling: maps.Clone(invocation.Sampling), Root: s.root, RuntimeDir: s.runtime, OutputDir: output, Mode: "sampled"}
+		Env: env, Sampling: sampling, Root: s.root, RuntimeDir: s.runtime, OutputDir: output, Mode: "sampled"}
 	c.Args = append([]string{"-S", "-s", "-P", "-B", c.Launcher, "/runtime/request.json"}, v.Args...)
 	req := pythonApplicationRequest{Key: key, SnapshotSHA256: c.SnapshotSHA256, RunnerSHA256: c.RunnerSHA256,
 		Legacy: s.legacy, Targets: s.targets, Drivers: drivers, Delegates: s.delegates[key.Target],
@@ -304,9 +314,13 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	if process.Stderr != "" {
 		r.Diagnostics = append(r.Diagnostics, process.Stderr)
 	}
+	paths := []string{c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output"}
+	if larger != nil {
+		paths = append(paths, filepath.Dir(larger.host), "/larger")
+	}
 	normalize := func() {
 		for i, diagnostic := range r.Diagnostics {
-			diagnostic = strings.NewReplacer(c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output").Replace(diagnostic)
+			diagnostic = strings.NewReplacer(paths...).Replace(diagnostic)
 			diagnostic = strings.ReplaceAll(diagnostic, req.Execution, "<execution>")
 			if strings.HasPrefix(c.Image, "sha256:") {
 				diagnostic = strings.ReplaceAll(diagnostic, c.Image, "<selected image>")

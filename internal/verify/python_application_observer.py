@@ -916,7 +916,7 @@ class _Exploration:
         n = len(self.nodes)
         key = self.key(state)
         self.index[key] = n
-        self.nodes.append(dict(key=key, state=copied(state), start=start, edges=edges, trail=trail + [n], level=level))
+        self.nodes.append(dict(key=key, state=copied(state), start=start, edges=edges, trail=trail + [n], level=level, expanded=False))
         return n
 
     def make(self, r):
@@ -947,9 +947,16 @@ class _Exploration:
             self.entering = None
         key = self.key(record.state)
         if self.roots[r] is None:
-            if key in self.index:
+            n = self.index.get(key)
+            if n is None:
+                n = self.add(record.state, r, [], [], 1)
+            elif n in self.roots or self.nodes[n]["expanded"]:
                 raise ValueError("two starts reached the same initial state")
-            self.roots[r] = self.add(record.state, r, [], [], 1)
+            else:
+                # An earlier start reached this start's initial state, and
+                # hasn't tried a step there: this start tries them, directly.
+                self.nodes[n].update(start=r, edges=[], trail=[n], level=1)
+            self.roots[r] = n
         elif self.nodes[self.roots[r]]["key"] != key:
             raise ValueError("a start did not reproduce its initial state")
         if node is None:
@@ -976,15 +983,19 @@ class _Exploration:
             self.leaving = None
 
     def run(self):
+        # Each start's initial state is tried from the start itself, and
+        # every other state from the path that first reached it, once.
         for r in range(len(self.starts)):
             for si, ai in self.instances:
                 self.try_step(r, None, si, ai)
+            self.nodes[self.roots[r]]["expanded"] = True
         n = 0
         while n < len(self.nodes):
             node = self.nodes[n]
-            if node["edges"]:
+            if not node["expanded"]:
                 for si, ai in self.instances:
                     self.try_step(node["start"], node, si, ai)
+                node["expanded"] = True
             n += 1
 
 

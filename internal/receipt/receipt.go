@@ -95,7 +95,12 @@ func Markdown(r *verify.Report) string {
 		componentViews(&b, r)
 	}
 	if r.Application != nil {
-		pythonApplication(&b, r.Application)
+		// A component receipt has no row for the check one size larger.
+		var larger *verify.Larger
+		if explicit {
+			larger = r.Larger
+		}
+		pythonApplication(&b, r.Application, larger)
 	}
 
 	if explicit {

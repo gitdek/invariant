@@ -192,7 +192,7 @@ func pa342New(t *testing.T, explicit, wheel bool) pa342Fixture {
 // must be tried in every state, and Inc wherever the ratified Limit allows
 // it. Application runs execute the actual staged runner and collector with
 // local Python, honoring read-only overlays as Docker's nested mounts do.
-const pa342Docker = `import os,sys,json,subprocess,pathlib,re,shutil,tempfile,time
+const pa342Docker = `import os,sys,json,subprocess,pathlib,re,shutil,tempfile
 args=sys.argv[1:]
 log=os.environ['PA342_LOG']
 def record(row):
@@ -208,21 +208,20 @@ mounts={}
 for i,a in enumerate(args[:-1]):
     if a=='-v':
         host,guest,*rest=args[i+1].split(':'); mounts[guest]=host
-fail=os.environ.get('PA342_FAIL','')
 if 'tlc2.TLC' in args:
     work=mounts['/work']; module=args[-1][:-4]
     body=pathlib.Path(work,module+'.tla').read_text(); cfg=pathlib.Path(work,'Invariant.cfg').read_text()
     limit=int(re.search(r'CONSTANT Limit = (\d+)',cfg).group(1))
     record({'kind':'tlc','module':module,'limit':limit})
     msg(2262,'TLC2 Version 2.19 of 08 August 2024')
-    def passed(n):
-        msg(2193,'Model checking completed. No error has been found.'); msg(2199,'%d states generated, %d distinct states found, 0 states left on queue.'%(n+1,n)); msg(2194,'The depth of the complete state graph search is %d.'%n); sys.exit(0)
+    def passed(n,depth=None):
+        msg(2193,'Model checking completed. No error has been found.'); msg(2199,'%d states generated, %d distinct states found, 0 states left on queue.'%(n+1,n)); msg(2194,'The depth of the complete state graph search is %d.'%(n if depth is None else depth)); sys.exit(0)
     if module=='Counter':
-        if limit!=2 and fail=='larger-model':
-            msg(2110,'Invariant Safe is violated.'); msg(2217,'1: <Initial predicate>\n/\\ count = 0'); sys.exit(12)
-        if limit!=2 and fail=='larger-slow':
-            time.sleep(60)
-        passed(limit+1)
+        # Small, where a case adds it, holds only up to 2.
+        if limit>2 and 'INVARIANT Small' in cfg:
+            msg(2110,'Invariant Small is violated.'); msg(2217,'1: <Initial predicate>\n/\\ count = 3'); sys.exit(12)
+        # Two initial states, 0 and 1, start the search on one level.
+        passed(limit+1, limit if 'Init == count \\in {0, 1}' in body else None)
     if module.startswith('Witness_'):
         msg(2110,'Invariant Invariant_Never_Full is violated.'); msg(2217,'1: <Initial predicate>\n/\\ count = 2'); sys.exit(12)
     if module.startswith('Bug_'):
@@ -273,10 +272,6 @@ if '/usr/local/bin/python' in args:
     record({'kind':'python','key':req.get('key'),'mode':req.get('mode',''),'overlays':sorted(overlays),'env':env,'image':image,
             'network':args[args.index('--network')+1],'argv':args[pos+1:]})
     result=subprocess.run([os.environ['PA342_PYTHON']]+argv,cwd=mapped(args[args.index('-w')+1]),env=env)
-    events=pathlib.Path(mounts['/output'],'events.jsonl')
-    corrupt=os.environ.get('PA342_EVENTS','')
-    if req.get('key',{}).get('kind')=='conformance' and (corrupt=='all' or (corrupt=='larger' and overlays)):
-        events.write_text('{malformed}\n')
     sys.exit(result.returncode)
 record({'kind':'forbidden','args':args}); print('unexpected Docker operation',args); sys.exit(93)
 `
@@ -297,8 +292,6 @@ func pa342Fake(t *testing.T) (toolchain.Toolchain, string) {
 	}
 	t.Setenv("PA342_LOG", log)
 	t.Setenv("PA342_PYTHON", py)
-	t.Setenv("PA342_FAIL", "")
-	t.Setenv("PA342_EVENTS", "")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if b, _ := os.ReadFile(log); strings.Contains(string(b), `"kind": "forbidden"`) {
@@ -456,50 +449,80 @@ func TestPythonApplicationGateExplores(t *testing.T) {
 	})
 }
 
+// pa342Startup is a start that fails the exploration unless its interpreter
+// started as the gate starts it: no site processing, no user site, no
+// implicit path, no bytecode, hash seed 0, and in Docker no network.
+const pa342Startup = `def start():
+    import os, socket, sys
+    assert sys.flags.no_site and sys.flags.no_user_site and sys.flags.safe_path and sys.flags.dont_write_bytecode, sys.flags
+    assert os.environ.get('PYTHONHASHSEED') == '0' and not sys.flags.hash_randomization, sys.flags
+    if OFFLINE:
+        try:
+            socket.create_connection(('1.1.1.1', 53), timeout=2).close()
+        except OSError:
+            pass
+        else:
+            raise AssertionError('the exploration reached the network')
+`
+
 // The exploration's every execution, ordinary and larger, runs offline in
-// the session's one image with the gate's startup settings.
+// the session's one image with the gate's startup settings, and the driver
+// sees them in both runs.
 func TestPythonApplicationGateExplorationExecutions(t *testing.T) {
-	tc, log := pa342Fake(t)
-	f := pa342New(t, true, false)
-	r := pa342Run(t, f, tc)
-	if !r.Passed {
-		t.Fatal("exploration failed")
-	}
-	b, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var runs, larger int
-	images := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		var row struct {
-			Kind     string            `json:"kind"`
-			Mode     string            `json:"mode"`
-			Overlays []string          `json:"overlays"`
-			Env      map[string]string `json:"env"`
-			Image    string            `json:"image"`
-			Network  string            `json:"network"`
-			Argv     []string          `json:"argv"`
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		f := pa342New(t, true, real)
+		pa342Edit(t, f, pa342DriverPath, "def start():\n", pa342Startup)
+		pa342Edit(t, f, pa342DriverPath, "Limit = 2\n", fmt.Sprintf("Limit = 2\nOFFLINE = %s\n", map[bool]string{true: "True", false: "False"}[real]))
+		r := pa342Run(t, f, tc)
+		if !r.Passed || r.Larger == nil || !r.Larger.Passed {
+			x, _ := pa342Explored(t, r)
+			t.Fatalf("the gate's startup settings didn't hold in every run: %q %+v", x.Diagnostics, r.Larger)
 		}
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
+		// The commands a custom executor gets say the same, and only the
+		// run one size larger mounts a driver copy.
+		var commands []PythonApplicationCommand
+		options := PythonApplicationSessionOptions{Execute: func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
+			commands = append(commands, c)
+			p, err := RunPythonApplicationCommand(ctx, c)
+			// A host path in an error is the session's to keep out of the record.
+			for _, o := range c.Overlays {
+				p.Stderr += "\nmount " + o.Host
+			}
+			return p, err
+		}}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		s, err := PreparePythonApplicationSession(ctx, f.p, filepath.Join(t.TempDir(), "stage"), options)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if row.Kind != "python" {
-			continue
-		}
-		runs++
-		images[row.Image] = true
-		if row.Env["PYTHONHASHSEED"] != "0" || row.Network != "none" || !reflect.DeepEqual(row.Argv[:6], []string{"-S", "-s", "-P", "-B", "/runtime/runner.py", "/runtime/request.json"}) {
-			t.Fatalf("execution lost the gate's startup settings: %+v", row)
-		}
-		if len(row.Overlays) > 0 {
-			larger++
-			if row.Mode != "explored" || !reflect.DeepEqual(row.Overlays, []string{"/src/" + pa342DriverPath}) {
-				t.Fatalf("larger run overlays: %+v", row)
+		defer s.Close()
+		for _, v := range s.Invocations() {
+			if !v.Explored {
+				continue
+			}
+			x, err := s.Run(ctx, v.Key)
+			if err != nil || !x.Success {
+				t.Fatalf("ordinary exploration: %q %v", x.Diagnostics, err)
+			}
+			l, _, err := s.RunLarger(ctx, v.Key, map[string]int{"Limit": 3})
+			if err != nil || !l.Success {
+				t.Fatalf("larger exploration: %q %v", l.Diagnostics, err)
+			}
+			if d := strings.Join(l.Diagnostics, "\n"); strings.Contains(d, "invariant-python-larger-") || !strings.Contains(d, "/larger/driver.py") {
+				t.Fatalf("a larger run's host path reached its record: %q", l.Diagnostics)
 			}
 		}
-	}
-	if runs != 3 || larger != 1 || len(images) != 1 {
-		t.Fatalf("want a test run, an exploration and one larger exploration in one image: runs=%d larger=%d images=%v", runs, larger, images)
-	}
+		if len(commands) != 2 {
+			t.Fatalf("want an exploration and one larger exploration: %+v", commands)
+		}
+		for i, c := range commands {
+			if c.Image != s.image || c.Mode != "explored" || c.Env["PYTHONHASHSEED"] != "0" || !reflect.DeepEqual(c.Args[:6], []string{"-S", "-s", "-P", "-B", "/runtime/runner.py", "/runtime/request.json"}) {
+				t.Fatalf("execution %d lost the gate's settings: %+v", i, c)
+			}
+			if want := i == 1; (len(c.Overlays) == 1 && c.Overlays[0].Guest == "/src/"+pa342DriverPath) != want || (want && len(c.Overlays) != 1) || (!want && len(c.Overlays) != 0) {
+				t.Fatalf("execution %d overlays: %+v", i, c.Overlays)
+			}
+		}
+	})
 }

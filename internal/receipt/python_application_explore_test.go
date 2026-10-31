@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gitdek/invariant/internal/conformance"
+	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/verify"
 )
 
@@ -24,6 +25,15 @@ func TestPythonApplicationExplorationReceipt(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("explored receipt lacks %q:\n%s", want, md)
 		}
+	}
+	// A component receipt has no table row one size larger, so when TLC
+	// couldn't finish there the application section says so.
+	components := &verify.Report{Project: "explored counter", Bounds: map[string]string{"Limit": "2"},
+		Components:  &verify.ComponentEvidence{Inventory: project.ComponentInventory{Mode: "explicit"}},
+		Larger:      &verify.Larger{Bounds: map[string]string{"Limit": "3"}, Message: "TLC didn't finish one size larger within 3m0s: context deadline exceeded"},
+		Application: &verify.PythonApplicationReport{Conformance: explored.Application.Conformance}}
+	if md := Markdown(components); !strings.Contains(md, "One size larger, overall: ") || !strings.Contains(md, "didn't finish one size larger") {
+		t.Errorf("component receipt hides the check one size larger:\n%s", md)
 	}
 	sampled := &verify.Report{Project: "sampled counter", Bounds: map[string]string{"Limit": "2"}, Application: &verify.PythonApplicationReport{
 		Conformance: []verify.PythonApplicationConformance{{Key: key, Result: conformance.Result{Passed: true, States: 3, ModelStates: 3}}}}}

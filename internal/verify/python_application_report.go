@@ -168,11 +168,10 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 			if c.Result.Message != "" {
 				row.Diagnostics = append(row.Diagnostics, c.Result.Message)
 			}
-			// An explored invocation's runs are its replays, and its attempts
-			// are qualified on their own: a failed check of them blocks the
-			// every-step and every-state labels, not its checked transitions.
-			if mode == "bounded-exhaustive" && x.Exploration != nil {
-				row.Runs = int64(x.Exploration.Runs)
+			// An explored invocation's attempts are qualified on their own: a
+			// failed check of them blocks the every-step and every-state
+			// labels, not its checked transitions.
+			if mode == "bounded-exhaustive" {
 				if t := c.Result.Tried; t != nil {
 					a := &ComponentAttemptResult{Outcome: "failed", Attempts: int64(t.Attempts), States: int64(t.States)}
 					if t.Passed {

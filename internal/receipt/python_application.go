@@ -15,7 +15,10 @@ func componentOrigin(origin string) string {
 	return componentLiteral(origin)
 }
 
-func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport) {
+// pythonApplication renders the application's executions and checks, and
+// larger, the overall check one size larger, when the receipt shows it
+// nowhere else, as when TLC couldn't finish there (#342).
+func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, larger *verify.Larger) {
 	explored := false
 	for _, c := range a.Conformance {
 		explored = explored || c.Mode == "bounded-exhaustive"
@@ -47,6 +50,10 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport) {
 	for _, l := range a.Larger {
 		raw, _ := json.MarshalIndent(l, "", "  ")
 		fmt.Fprintf(b, "\nOne size larger: %s\n", componentLiteral(string(raw)))
+	}
+	if larger != nil {
+		raw, _ := json.MarshalIndent(larger, "", "  ")
+		fmt.Fprintf(b, "\nOne size larger, overall: %s\n", componentLiteral(string(raw)))
 	}
 }
 

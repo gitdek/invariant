@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
 )
 
@@ -166,14 +168,10 @@ func TestPythonApplicationGateExplorationLarger(t *testing.T) {
 				t.Fatalf("unfinished larger exploration: passed=%v %+v", r.Passed, r.Larger)
 			}
 		})
-		if real {
-			return
-		}
-		// The double alone can make TLC fail or stall one size larger, or
-		// corrupt only the larger run's evidence.
 		t.Run("TLC finding a problem one size larger claims nothing", func(t *testing.T) {
-			t.Setenv("PA342_FAIL", "larger-model")
-			f := pa342New(t, true, false)
+			// Small holds at Limit 2, and fails at 3, where TLC finds it.
+			f := pa342New(t, true, real)
+			pa342Invariant(t, f, "Small", "count <= 2")
 			r := pa342Unchanged(t, f, tc)
 			if !r.Passed || r.Larger == nil || r.Larger.Required || !strings.Contains(r.Larger.Message, "TLC found a problem one size larger") || len(r.Application.Larger) != 0 {
 				t.Fatalf("larger model problem: passed=%v %+v", r.Passed, r.Larger)
@@ -181,25 +179,65 @@ func TestPythonApplicationGateExplorationLarger(t *testing.T) {
 		})
 		t.Run("TLC not finishing one size larger claims nothing", func(t *testing.T) {
 			saved := pythonApplicationLargerTimeouts
-			pythonApplicationLargerTimeouts.model = 3 * time.Second
+			pythonApplicationLargerTimeouts.model = time.Millisecond
 			defer func() { pythonApplicationLargerTimeouts = saved }()
-			t.Setenv("PA342_FAIL", "larger-slow")
-			f := pa342New(t, true, false)
+			f := pa342New(t, true, real)
 			r := pa342Unchanged(t, f, tc)
 			if !r.Passed || r.Larger == nil || r.Larger.Required || !strings.Contains(r.Larger.Message, "TLC didn't finish one size larger") || len(r.Application.Larger) != 0 {
 				t.Fatalf("larger model timeout: passed=%v %+v", r.Passed, r.Larger)
 			}
 		})
 		t.Run("malformed evidence one size larger fails it", func(t *testing.T) {
-			t.Setenv("PA342_EVENTS", "larger")
-			f := pa342New(t, true, false)
+			// The driver overwrites the start of its own run's evidence, as
+			// only a run one size larger does.
+			f := pa342New(t, true, real)
+			pa342Edit(t, f, pa342DriverPath, "    explore(start, STEPS)\n", "    explore(start, STEPS)\n    if Limit > 2:\n        import invariant_observe\n        with open(invariant_observe._collector.request['output'], 'r+') as events:\n            events.write('{malformed')\n")
 			r := pa342Unchanged(t, f, tc)
 			_, c := pa342Explored(t, r)
-			if r.Passed || !c.passed() || r.Larger == nil || !r.Larger.Required || r.Larger.Passed {
+			if r.Passed || !c.passed() || r.Larger == nil || !r.Larger.Required || r.Larger.Passed || len(r.Application.Larger) != 1 || r.Application.Larger[0].Execution.Success {
 				t.Fatalf("malformed larger evidence: passed=%v %+v", r.Passed, r.Larger)
 			}
 		})
+		t.Run("the ratified bounds' budgets don't bound the run one size larger", func(t *testing.T) {
+			// Six runs and three steps are exactly what Limit 2 needs; Limit 3
+			// needs eight and four.
+			f := pa342New(t, true, real)
+			f.p.Manifest.Components.Checks[0].Invocations[1].Sampling = map[string]string{"runs": "6", "steps": "3", "seed": "1"}
+			pa342Save(t, f)
+			r := pa342Unchanged(t, f, tc)
+			if !r.Passed || r.Larger == nil || !r.Larger.Passed || r.Larger.States != 4 || len(r.Application.Larger) != 1 {
+				t.Fatalf("budgets bound the larger run: passed=%v %+v", r.Passed, r.Larger)
+			}
+			x, _ := pa342Explored(t, r)
+			if got := r.Application.Larger[0].Execution.Actual.Sampling; x.Actual.Sampling["runs"] != "6" || got["runs"] != pythonApplicationLargerBudget || got["steps"] != pythonApplicationLargerBudget || got["seed"] != "1" {
+				t.Fatalf("effective budgets: ordinary %v, larger %v", x.Actual.Sampling, got)
+			}
+		})
 	})
+}
+
+// pa342Invariant adds an invariant to the fixture's model and pins it, after
+// Safe, so the known bug is still caught as Safe.
+func pa342Invariant(t *testing.T, f pa342Fixture, name, body string) {
+	t.Helper()
+	model := strings.Replace(pa342Model, "Full == count = Limit\n", "Full == count = Limit\n"+name+" == "+body+"\n", 1)
+	pa342Write(t, f.root, pa342ModelPath, model)
+	var statements []project.Statement
+	for _, s := range f.p.Lock.Statements {
+		statements = append(statements, s)
+		if s.Name == "Safe" {
+			statements = append(statements, project.Statement{Name: name, Kind: project.Invariant, Says: name + " fixture obligation"})
+		}
+	}
+	for i := range statements {
+		h, err := tla.PinHash(model, statements[i].Name, project.Model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		statements[i].SHA256 = h
+	}
+	f.p.Lock.Statements = statements
+	pa342Save(t, f)
 }
 
 func TestPythonApplicationGateExplorationRefusesMisuse(t *testing.T) {
@@ -416,6 +454,23 @@ func TestPythonApplicationGateExplorationFingerprints(t *testing.T) {
 func TestPythonApplicationGateExplorationKeepsOneImage(t *testing.T) {
 	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
 		f := pa342New(t, true, real)
+		if real {
+			// Requirements no other suite shares give this test its own cache
+			// tag to move. A run that died with the tag moved left it on the
+			// base image, so it starts by dropping that.
+			pa342Edit(t, f, "deps/application.txt", "-c constraints.txt\n", "-c constraints.txt\n# #342's one-image test moves this cache tag.\n")
+			recipe, err := toolchain.PythonDepsRecipe(f.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tag := "invariant-python-deps:" + strings.TrimPrefix(recipe, "sha256:")
+			base, _ := toolchain.Docker(context.Background(), "image", "inspect", "--format", "{{.Id}}", toolchain.PythonImage).Output()
+			if was, err := toolchain.Docker(context.Background(), "image", "inspect", "--format", "{{.Id}}", tag).Output(); err == nil && len(base) > 0 && string(was) == string(base) {
+				if out, err := toolchain.Docker(context.Background(), "image", "rm", tag).CombinedOutput(); err != nil {
+					t.Fatalf("dropping a moved cache tag: %v %s", err, out)
+				}
+			}
+		}
 		var images []string
 		options := PythonApplicationSessionOptions{Execute: func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
 			images = append(images, c.Image)
@@ -466,18 +521,55 @@ func TestPythonApplicationGateExplorationKeepsOneImage(t *testing.T) {
 // Python.Check returns an explored invocation's attempts, as an exhaustive
 // driver's are, for the generic gate.
 func TestPythonApplicationGateExplorationDirect(t *testing.T) {
-	pa342Fake(t)
-	f := pa342New(t, true, false)
-	b, evidence, err := (Python{}).Check(context.Background(), f.p)
-	if err != nil || !b.Passed || len(evidence.Traces) == 0 {
-		t.Fatalf("direct check: %+v %+v %v", b, evidence, err)
-	}
-	var attempts struct {
-		States   []map[string]any `json:"states"`
-		Init     []int            `json:"init"`
-		Attempts [][]any          `json:"attempts"`
-	}
-	if err := json.Unmarshal(evidence.Traces, &attempts); err != nil || len(attempts.States) != 3 || len(attempts.Init) != 1 || len(attempts.Attempts) != 5 {
-		t.Fatalf("direct attempts: %s %v", evidence.Traces, err)
-	}
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		f := pa342New(t, true, real)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		b, evidence, err := (Python{}).Check(ctx, f.p)
+		if err != nil || !b.Passed || len(evidence.Traces) == 0 {
+			t.Fatalf("direct check: %+v %+v %v", b, evidence, err)
+		}
+		var attempts struct {
+			States   []map[string]any `json:"states"`
+			Init     []int            `json:"init"`
+			Attempts [][]any          `json:"attempts"`
+		}
+		if err := json.Unmarshal(evidence.Traces, &attempts); err != nil || len(attempts.States) != 3 || len(attempts.Init) != 1 || len(attempts.Attempts) != 5 {
+			t.Fatalf("direct attempts: %s %v", evidence.Traces, err)
+		}
+	})
+}
+
+// Several starts each begin in their own initial state, even one another
+// start reaches, in either order, and the exploration tries every state's
+// steps once (#342).
+func TestPythonApplicationGateExplorationStarts(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		for _, starts := range []string{"[start, start_one]", "[start_one, start]"} {
+			t.Run(starts, func(t *testing.T) {
+				f := pa342New(t, true, real)
+				model := strings.Replace(pa342Model, "Init == count = 0\n", "Init == count \\in {0, 1}\n", 1)
+				pa342Write(t, f.root, pa342ModelPath, model)
+				for i := range f.p.Lock.Statements {
+					h, err := tla.PinHash(model, f.p.Lock.Statements[i].Name, project.Model)
+					if err != nil {
+						t.Fatal(err)
+					}
+					f.p.Lock.Statements[i].SHA256 = h
+				}
+				pa342Save(t, f)
+				pa342Edit(t, f, "counter/service.py", "def start():\n    return 0\n", "def start():\n    return 0\n\n\ndef start_one():\n    return 1\n")
+				pa342Edit(t, f, pa342DriverPath, "def inc(", "def start_one():\n    return functional(increment, service.start_one, argument='count', field='count')\n\n\ndef inc(")
+				pa342Edit(t, f, pa342DriverPath, "explore(start, STEPS)", "explore("+starts+", STEPS)")
+				r := pa342Unchanged(t, f, tc)
+				x, c := pa342Explored(t, r)
+				if !r.Passed || x.Exploration == nil || x.Exploration.States != 3 || x.Exploration.Runs != 6 || x.Exploration.Attempts != 5 || x.Exploration.Depth != 2 || !c.passed() {
+					t.Fatalf("several starts: passed=%v %+v %q", r.Passed, x.Exploration, x.Diagnostics)
+				}
+				if l := r.Larger; l == nil || !l.Passed || l.States != 4 || l.Depth != 3 {
+					t.Fatalf("several starts one size larger: %+v", l)
+				}
+			})
+		}
+	})
 }
