@@ -201,7 +201,13 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	r := &Result{Usage: usage}
 	r.CheckRuns, _ = readRuns(checkLog)
 
-	p, report, err := Check(ctx, ws, f.Toolchain)
+	var p *Proposal
+	var report *verify.Report
+	if synth.ProviderUnavailable(runErr) {
+		err = unfinished(runErr)
+	} else {
+		p, report, err = Check(ctx, ws, f.Toolchain)
+	}
 	if p != nil {
 		p.Language = req.Language
 		if e := req.Existing; e != nil {
@@ -214,6 +220,8 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		}
 	}
 	switch {
+	case synth.ProviderUnavailable(runErr):
+		r.Problem = err.Error()
 	case err != nil && runErr != nil:
 		r.Problem = fmt.Sprintf("the agent's run failed (%v), and it left no usable draft: %v", runErr, err)
 	case err != nil:
@@ -235,6 +243,13 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	b, _ := json.MarshalIndent(r, "", "  ")
 	os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
 	return r, nil
+}
+
+// unfinished is why a draft whose agent's provider stayed unavailable
+// proposes nothing (#261): what the agent left is an interrupted attempt,
+// however usable it looks, so the factory neither checks nor proposes it.
+func unfinished(runErr error) error {
+	return fmt.Errorf("the agent's run didn't finish, so nothing it left is proposed: %w", runErr)
 }
 
 // copyPath copies a file, or a directory and everything in it.

@@ -46,6 +46,10 @@ type BuildResult struct {
 	// Fallback says the agent ran once more, when the loop guard stopped its
 	// first run (D-0125). Usage includes both runs and every review and repair.
 	Fallback *synth.Fallback `json:"fallback,omitempty"`
+	// ProviderError says the build didn't finish: its agent's provider, or
+	// its review's, stayed unavailable (#261). Nothing it left reached the
+	// checkout, and a retry builds it again, review included.
+	ProviderError string `json:"provider_error,omitempty"`
 }
 
 // Build implements issue n's ratified plan in the checkout at root, which
@@ -94,12 +98,20 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	}
 	r := &BuildResult{Tests: len(plan.Tests)}
 	defer func() {
-		// Keep the original checkout fixed through every round, including the
-		// test tool's baseline. Saving a timed-out candidate is not more work
-		// for the agent: it leaves a draft and the findings for a person.
 		r.TestRuns, _ = readRuns(testLog)
 		r.Usage.Backend = b.Backend.Name()
 		r.Spend = r.Usage.CostUSD
+		if r.ProviderError != "" {
+			// A build whose provider never let its agent or review finish
+			// is recorded as failed, with nothing it left in the checkout,
+			// whatever its time allowance did (#261).
+			b2, _ := json.MarshalIndent(r, "", "  ")
+			os.WriteFile(filepath.Join(out, "build.json"), append(b2, '\n'), 0o644)
+			return
+		}
+		// Keep the original checkout fixed through every round, including the
+		// test tool's baseline. Saving a timed-out candidate is not more work
+		// for the agent: it leaves a draft and the findings for a person.
 		changes, err := Diff(context.WithoutCancel(ctx), root, ws, plan)
 		if err == nil {
 			r.Changes = changes
@@ -133,6 +145,12 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		r.Summary = ""
 		if runErr != nil {
 			r.Summary = fmt.Sprintf("The agent's run ended with an error: %v\n", runErr)
+		}
+		// What an agent its provider interrupted left is unfinished, however
+		// it would do: it's never checked, reviewed or taken back (#261).
+		if synth.ProviderUnavailable(runErr) {
+			r.Passed, r.Approved, r.ProviderError = false, false, runErr.Error()
+			return r, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return r, err
@@ -174,6 +192,12 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 				r.Review += "\n" + review
 			}
 			r.Review += "\nThe review didn't finish: " + reviewErr.Error()
+			// A review its provider never let finish leaves the build
+			// unfinished, though its checks passed (#261).
+			if synth.ProviderUnavailable(reviewErr) {
+				r.Approved, r.ProviderError = false, reviewErr.Error()
+				return r, nil
+			}
 			return r, reviewErr
 		}
 		r.Review, r.Approved = review, approved
@@ -253,7 +277,9 @@ func (b Builder) review(ctx context.Context, root, candidate string, n int, plan
 	r.Usage = synth.AddUsage(r.Usage, usage)
 	text := strings.TrimSpace(usage.Summary)
 	os.WriteFile(filepath.Join(out, fmt.Sprintf("review-%d.txt", round)), []byte(text), 0o644)
-	if ctx.Err() != nil {
+	// A provider that stayed unavailable until the time ran out is still why
+	// the review didn't finish (#261).
+	if ctx.Err() != nil && !synth.ProviderUnavailable(err) {
 		return text, false, ctx.Err()
 	}
 	if err != nil {

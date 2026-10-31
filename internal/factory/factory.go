@@ -849,6 +849,18 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
 	switch p := res.Proposal; {
+	case res.Problem != "" && synth.ProviderUnavailable(errors.New(res.Problem)):
+		// A draft its agent's provider never let finish needs only drafting
+		// again, and says so, naming what it was drafting (#261).
+		what := "statements"
+		switch {
+		case prd:
+			what = "plan of issues"
+		case req.Plumbing != "":
+			what = "plan"
+		}
+		m.Kind, m.Proposal = KindStuck, p
+		return f.drafted(ctx, t, cause, base, m, providerStuckComment(res.Problem, what, m), LabelHumanReview)
 	case res.Problem != "":
 		m.Kind, m.Proposal = KindStuck, p
 		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
@@ -1356,6 +1368,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		// The ratified proposal settles the agent whose run stopped, so its
 		// post names it (#179).
 		next.Agent, _, _ = f.buildAgent(m)
+		if said, err := f.sayUnavailable(ctx, n, step, next, failed); said || err != nil {
+			return err
+		}
 		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the factory stopped"), withFailure(next, FailStopped)))
 	case RunNone:
 		// Each build costs an agent run, so after two stop, a writer decides
@@ -1374,6 +1389,11 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 					return err
 				}
 				next.Agent = agent
+				if res != nil && res.ProviderError != "" {
+					if said, err := f.sayUnavailable(ctx, n, step, next, failed); said || err != nil {
+						return err
+					}
+				}
 				return failed(FailStopped, planFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 			}
 			return f.publish(ctx, t, ratified, built, next, stops)
@@ -1392,11 +1412,66 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 				next.Spend, next.GateRuns = res.Spend(), len(res.GateRuns)
 			}
 			next.Agent = agent
+			if synth.ProviderUnavailable(runErr) {
+				if said, err := f.sayUnavailable(ctx, n, step, next, failed); said || err != nil {
+					return err
+				}
+			}
 			return failed(FailStopped, buildFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 		}
 		result = built
 	}
 	return f.publish(ctx, t, ratified, result, next, stops)
+}
+
+// unavailable is why a build's agent run stopped partway when its agent's
+// provider, or its review's, stayed unavailable through every retry (#261),
+// with what the build spent. The factory records it beside the run, which
+// stays recorded with no result, before it says so, so whichever watcher
+// says so, after a restart too, says why.
+type unavailable struct {
+	Error    string  `json:"error"`
+	Agent    string  `json:"agent,omitempty"`
+	Spend    float64 `json:"spend,omitempty"`
+	GateRuns int     `json:"gate_runs,omitempty"`
+}
+
+// unavailableStep names the record of why a build's run stopped, after the
+// run's own.
+func unavailableStep(step string) string { return step + "-unavailable" }
+
+// recordUnavailable records why a build's run stopped, unless it's already
+// recorded.
+func (f *Factory) recordUnavailable(ctx context.Context, n int, step string, u unavailable) error {
+	b, err := json.Marshal(u)
+	if err != nil {
+		return err
+	}
+	if err := f.Repo.Record(ctx, n, unavailableStep(step), string(b)); err != nil && !errors.Is(err, ErrRecorded) {
+		return err
+	}
+	return nil
+}
+
+// sayUnavailable says a build stopped because its provider stayed
+// unavailable, when its record says so, and says whether it did. It
+// publishes no pull request, so the issue goes the way of any build that
+// stopped before it made one: a writer's retry builds the ratified proposal
+// again, review included (#261).
+func (f *Factory) sayUnavailable(ctx context.Context, n int, step string, next Marker, failed func(why, body string) error) (bool, error) {
+	what, err := f.Repo.Recorded(ctx, n, unavailableStep(step))
+	if err != nil || what == "" {
+		return false, err
+	}
+	var u unavailable
+	if err := json.Unmarshal([]byte(what), &u); err != nil {
+		return false, fmt.Errorf("the record of why #%d's build stopped can't be read: %w", n, err)
+	}
+	next.Spend, next.GateRuns = u.Spend, u.GateRuns
+	if u.Agent != "" {
+		next.Agent = u.Agent
+	}
+	return true, failed(FailStopped, providerFailedComment(u.Error, withFailure(next, FailStopped)))
 }
 
 // buildStepName names a build's record after the post that started it: a
@@ -1463,6 +1538,16 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	runErr = localError(runErr, f.Work)
 	if res != nil && res.Review != nil {
 		res.Review.Text = localPaths(res.Review.Text, f.Work)
+	}
+	// A build whose agent's provider, or its review's, never let it finish
+	// stopped partway, whatever its leftover code would pass, so it gives
+	// no result and publishes nothing (#261). Its record says why.
+	if synth.ProviderUnavailable(runErr) {
+		u := unavailable{Error: runErr.Error(), Agent: agent}
+		if res != nil {
+			u.Spend, u.GateRuns = res.Spend(), len(res.GateRuns)
+		}
+		return "", agent, res, runErr, f.recordUnavailable(ctx, n, step, u)
 	}
 	if res == nil || res.Final == nil {
 		return "", agent, res, runErr, nil

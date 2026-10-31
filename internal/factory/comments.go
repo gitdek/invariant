@@ -312,6 +312,16 @@ func stuckComment(problem string, m Marker, closing ...string) string {
 		quote(problem, 40), m, strings.Join(closing, ""), "\n\nSay what you'd like in a comment, then comment `/invariant revise` to try again.")
 }
 
+// providerStuckComment says a draft stopped because its agent's provider
+// stayed unavailable while it tried again (#261), quoting the last error.
+// what is what the draft was: statements, a plan or a plan of issues. The
+// draft proposed nothing its agent left, and drafting again is all it needs.
+func providerStuckComment(problem, what string, m Marker) string {
+	return post("I couldn't draft this", fmt.Sprintf("I couldn't draft the %s for this issue: the provider its agent runs on stayed unavailable while it tried again, "+
+		"so the draft didn't finish, and I proposed nothing it left. The last error:\n\n%s", what, quote(problem, 40)), m,
+		"\n\nNothing about the issue needs to change. Once the provider is back, comment `/invariant revise` to draft again.")
+}
+
 func unsupportedComment(reason string, m Marker) string {
 	return post("not one I can take", reason, m, "\n\nIf I've misread the issue, say how in a comment, then comment `/invariant revise`.")
 }
@@ -370,6 +380,20 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 		end += footer
 	}
 	return post("needs a person", b.String(), m, end)
+}
+
+// providerFailedComment says a build stopped because its agent's provider,
+// or its review's, stayed unavailable while it tried again (#261), quoting
+// the last error. The build published nothing, so a retry builds the
+// ratified proposal again, review included.
+func providerFailedComment(why string, m Marker) string {
+	proposal := "statements"
+	if isPlan(m.Project) {
+		proposal = "plan"
+	}
+	return post("needs a person", "The build stopped with its provider unavailable: the provider its agent or its review runs on stayed unavailable while it tried again, "+
+		"so the build didn't finish. I published nothing it left, and opened no pull request. The last error:\n\n"+quote(why, 40), m,
+		fmt.Sprintf("\n\nA retry is all it needs. Once the provider is back, comment `/invariant retry` to build again from the same ratified %s, review included.", proposal))
 }
 
 // trustedOf is what a failed build's marker shows of whether its pull

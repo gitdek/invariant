@@ -13,6 +13,7 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/synth"
 )
 
 // Plumbing issues (D-0105). An issue marked Kind: plumbing gets a plan in
@@ -238,6 +239,17 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		return "", agent, nil, runErr, nil
 	}
 	res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
+	// A build whose agent's provider, or its review's, never let it finish
+	// stopped partway, as for a project: no result, nothing published, and
+	// a record of why (#261).
+	why := localPaths(res.ProviderError, f.Work)
+	if why == "" && synth.ProviderUnavailable(runErr) {
+		why = runErr.Error()
+	}
+	if why != "" {
+		res.ProviderError = why
+		return "", agent, res, runErr, f.recordUnavailable(ctx, n, step, unavailable{Error: why, Agent: agent, Spend: res.Spend, GateRuns: len(res.TestRuns)})
+	}
 	verdict := "It passed every test, and the review approves it."
 	switch {
 	case !res.Passed:
