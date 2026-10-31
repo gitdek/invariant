@@ -432,8 +432,11 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		if err := r.attributePythonApplication(s.inventory); err != nil {
 			return nil, err
 		}
-		if err := r.AttributeComponentProofs(s.inventory, proofs); err != nil {
-			return nil, err
+		// Conformance-only applications keep their reports exactly as before.
+		if len(proofTargets) > 0 {
+			if err := r.AttributeComponentProofs(s.inventory, proofs); err != nil {
+				return nil, err
+			}
 		}
 		r.Build.Passed = r.pythonApplicationContractSteps(contractSteps) && r.Build.Passed
 	}
