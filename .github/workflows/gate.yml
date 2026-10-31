@@ -98,7 +98,8 @@ jobs:
       - name: Vet and unit tests
         run: |
           go vet ./...
-          go test ./...
+          # internal/verify alone takes nearly ten minutes, go test's default.
+          go test -timeout 20m ./...
 
       - name: Build the gate
         run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
@@ -294,13 +295,40 @@ jobs:
         if: ${{ !startsWith(github.head_ref, 'invariant/') || steps.kind.outputs.plumbing == 'true' }}
         run: go test -tags integration -count=1 -timeout 20m ./internal/verify/ ./internal/synth/ ./internal/formalize/ ./internal/conformance/ ./internal/plumbing/
 
+  python:
+    # The collector runs in the pinned Python image, so the Python tests run
+    # again, beside invariant/verify's run under the runner's python3, under
+    # that image's minor version, toolchain.PythonVersion. With
+    # INVARIANT_PYTHON_PINNED set, a test fails if python3 doesn't match it,
+    # so a new image digest can't leave this job behind (#332).
+    name: invariant/python
+    needs: changes
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Python tests under the pinned image's Python
+        env:
+          INVARIANT_PYTHON_PINNED: '1'
+        run: go test -count=1 -timeout 25m -run Python ./internal/verify/ ./internal/project/ ./cmd/invariant/
+
   gate:
     # The check the factory merges its pull requests on (D-0004, D-0033). It
     # passes when the checks, every project's verification and the gathering
     # of their receipts did, and the gate's own tests did or had nothing to
     # run. Skipped only when the change is docs alone.
     name: invariant/gate
-    needs: [changes, verify, projects, project, receipts, integration]
+    needs: [changes, verify, python, projects, project, receipts, integration]
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -308,14 +336,15 @@ jobs:
       - name: Verification and the gate's own tests
         env:
           VERIFY: ${{ needs.verify.result }}
+          PYTHON: ${{ needs.python.result }}
           PROJECTS: ${{ needs.projects.result }}
           FOUND: ${{ needs.projects.outputs.projects }}
           PROJECT: ${{ needs.project.result }}
           RECEIPTS: ${{ needs.receipts.result }}
           INTEGRATION: ${{ needs.integration.result }}
         run: |
-          echo "Checks: $VERIFY. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION."
-          [ "$VERIFY" = success ] && [ "$PROJECTS" = success ] || exit 1
+          echo "Checks: $VERIFY. Python tests under the pinned image's Python: $PYTHON. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION."
+          [ "$VERIFY" = success ] && [ "$PYTHON" = success ] && [ "$PROJECTS" = success ] || exit 1
           # A repository with no projects has nothing to verify or gather.
           if [ "$FOUND" != "[]" ]; then [ "$PROJECT" = success ] && [ "$RECEIPTS" = success ] || exit 1; fi
           [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ]
