@@ -460,8 +460,8 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 		return "", errors.New("a one-way door has a full record: name it with its slug, for decisions/D-NNNN-slug.md")
 	case d.Record != "" && !slug.MatchString(d.Record):
 		return "", fmt.Errorf("a record's slug is lowercase words joined by hyphens, not %q", d.Record)
-	case d.Status == "ratified" && !strings.HasPrefix(d.Who, "@"):
-		return "", errors.New("only a person ratifies, so a ratified decision's who is a person, such as @gitdek")
+	case d.Status == "ratified" && !IsPerson(d.Who):
+		return "", errors.New("only a person ratifies, so a ratified decision's who is a person's GitHub login, such as @gitdek")
 	case text == "":
 		return "", errors.New("a decision says what was decided")
 	case strings.Contains(text, "|"):

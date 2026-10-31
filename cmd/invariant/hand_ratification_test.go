@@ -148,6 +148,21 @@ func TestARatificationByHandNeedsADecisionAPersonRatified(t *testing.T) {
 		}
 	})
 
+	t.Run("a proposed decision that would supersede it", func(t *testing.T) {
+		dir, repo, store := handProject(t, "D-0001")
+		decide(t, store, repo, "proposed", "agent")
+		if err := store.RatifyProposal(repo, "D-0001", "@gitdek", proposalOf(t, dir)); err != nil {
+			t.Fatal(err)
+		}
+		decide(t, store, repo, "proposed", "agent")
+		if err := store.Link(repo, "D-0002", decisions.Edge{Type: decisions.Supersedes, To: "D-0001"}, "agent"); err != nil {
+			t.Fatal(err)
+		}
+		if code, out := ratificationPrints(t, "-repo", "gitdek/demo", dir); code != 0 {
+			t.Fatalf("a decision only proposed doesn't supersede anything yet, but the lock was refused: exit %d\n%s", code, out)
+		}
+	})
+
 	for _, c := range []struct {
 		name, lock string
 		setup      func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store)
@@ -228,6 +243,24 @@ func TestARatificationByHandNeedsADecisionAPersonRatified(t *testing.T) {
 				}
 			},
 			[]string{"D-0001", "is superseded by"}},
+		{"superseded by a later decision's edge", "D-0001",
+			func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {
+				decide(t, store, repo, "proposed", "agent")
+				if err := store.RatifyProposal(repo, "D-0001", "@gitdek", proposalOf(t, dir)); err != nil {
+					t.Fatal(err)
+				}
+				decide(t, store, repo, "decided", "agent")
+				if err := store.Link(repo, "D-0002", decisions.Edge{Type: decisions.Supersedes, To: "D-0001"}, "agent"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			[]string{"D-0001", "is superseded by", "D-0002"}},
+		{"ratified by a bot", "D-0001",
+			func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {
+				decide(t, store, repo, "proposed", "agent")
+				ratifyAs(t, repo, "D-0001", "@invariant-code-factory[bot]")
+			},
+			[]string{"D-0001", "only a person ratifies"}},
 		{"named nowhere", "",
 			func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {},
 			[]string{"no ratification record"}},
@@ -282,12 +315,19 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 // itself refuses to write.
 func ratifyAsAgent(t *testing.T, repo decisions.Repo, id string) {
 	t.Helper()
+	ratifyAs(t, repo, id, "agent")
+}
+
+// ratifyAs appends a ratification by by to a decision's journal, sealed and
+// chained as the store seals a line, whatever the store would refuse.
+func ratifyAs(t *testing.T, repo decisions.Repo, id, by string) {
+	t.Helper()
 	path := filepath.Join(repo.JournalDir(), id+".jsonl")
 	events, err := decisions.ReadJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := decisions.Event{At: time.Now().UTC().Format(time.RFC3339), By: "agent", Op: decisions.OpRatify, ID: id,
+	e := decisions.Event{At: time.Now().UTC().Format(time.RFC3339), By: by, Op: decisions.OpRatify, ID: id,
 		Prev: events[len(events)-1].Hash}
 	b, err := json.Marshal(e)
 	if err != nil {
@@ -308,5 +348,46 @@ func ratifyAsAgent(t *testing.T, repo decisions.Repo, id string) {
 	}
 	if _, err := decisions.ReadJournal(path); err != nil {
 		t.Fatalf("the agent's ratification isn't sealed as the store seals a line: %v", err)
+	}
+}
+
+// pin says what a lock ratified by hand needs once its statements are
+// pinned: nothing, when its decision ratifies exactly its proposal; that
+// decision's ratification, when it waits for one; or a new decision, when
+// it names none, or the one it names is ratified already, since a decision
+// is ratified once (D-0208).
+func TestPinSaysWhatAHandLockNeeds(t *testing.T) {
+	for _, c := range []struct {
+		name, lock string
+		setup      func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store)
+		want, not  string
+	}{
+		{"ratified for its proposal", "D-0001", func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {
+			decide(t, store, repo, "proposed", "agent")
+			if err := store.RatifyProposal(repo, "D-0001", "@gitdek", proposalOf(t, dir)); err != nil {
+				t.Fatal(err)
+			}
+		}, "which D-0001 ratifies", "invariant decisions ratify"},
+		{"waiting for its ratification", "D-0001", func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {
+			decide(t, store, repo, "proposed", "agent")
+		}, "-proposal " + "PROPOSAL D-0001`", "new decision"},
+		{"ratified for another proposal", "D-0001", func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {
+			decide(t, store, repo, "proposed", "agent")
+			if err := store.RatifyProposal(repo, "D-0001", "@gitdek", "sha256:"+strings.Repeat("ab", 32)); err != nil {
+				t.Fatal(err)
+			}
+		}, "D-0001 is ratified already", "PROPOSAL D-0001`"},
+		{"naming no decision", "", func(t *testing.T, dir string, repo decisions.Repo, store *decisions.Store) {}, "names no decision", "PROPOSAL D-0001`"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, repo, store := handProject(t, c.lock)
+			c.setup(t, dir, repo, store)
+			proposal := proposalOf(t, dir)
+			got := pinHint(t.Context(), dir, c.lock, proposal)
+			want, not := strings.ReplaceAll(c.want, "PROPOSAL", proposal), strings.ReplaceAll(c.not, "PROPOSAL", proposal)
+			if !strings.Contains(got, proposal) || !strings.Contains(got, want) || strings.Contains(got, not) {
+				t.Errorf("pin says %q; want it to say %q, and not %q", got, want, not)
+			}
+		})
 	}
 }

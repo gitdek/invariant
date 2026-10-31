@@ -69,6 +69,17 @@ func TestTheGateReadsAHandLocksRatificationInTheJournal(t *testing.T) {
 			}
 		}, "no proposal in particular"},
 		{"not ratified", func(t *testing.T, lock *project.Lock, repo decisions.Repo, store *decisions.Store) {}, "is proposed"},
+		{"superseded by a later decision's edge", func(t *testing.T, lock *project.Lock, repo decisions.Repo, store *decisions.Store) {
+			if err := store.RatifyProposal(repo, "D-0001", "@gitdek", project.ProposalHash(lock.Bounds, lock.Statements)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Decide(repo, decisions.NewDecision{Door: "two-way", Status: "decided", Who: "agent", Text: "A later call."}, "agent"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Link(repo, "D-0002", decisions.Edge{Type: decisions.Supersedes, To: "D-0001"}, "agent"); err != nil {
+				t.Fatal(err)
+			}
+		}, "is superseded by"},
 		{"a decision the journal doesn't hold", func(t *testing.T, lock *project.Lock, repo decisions.Repo, store *decisions.Store) {
 			lock.Decision = "D-0009"
 		}, "isn't in the repository's journal"},

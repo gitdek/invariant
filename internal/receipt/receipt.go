@@ -181,6 +181,15 @@ func (render renderer) text(s string) string {
 	return s
 }
 
+// journalText is text a repository's journal holds, which the receipt keeps
+// within its table cell or list item: a | or a line break in it ends neither.
+func (render renderer) journalText(s string) string {
+	if render.explicit {
+		return componentText(s)
+	}
+	return strings.NewReplacer("|", `\|`, "\r", " ", "\n", " ").Replace(s)
+}
+
 func (render renderer) literal(s string) string {
 	if render.explicit {
 		return componentLiteral(s)
@@ -330,9 +339,9 @@ func (render renderer) provenance(r *verify.Report) string {
 	case r.Ratified != nil && !r.RatificationMatches():
 		return fmt.Sprintf("the lock no longer matches what @%s ratified on #%d", r.Ratified.By, r.Ratified.Issue)
 	case r.Journal != nil && !r.RatificationMatches():
-		return "the lock isn't what the journal says a person ratified: " + render.text(r.Journal.Problem)
+		return "the lock isn't what the journal says a person ratified: " + render.journalText(r.Journal.Problem)
 	case r.Journal != nil:
-		return fmt.Sprintf("ratified by %s in %s, for exactly this proposal", render.value(r.Journal.By), render.value(r.Journal.Decision))
+		return fmt.Sprintf("ratified by %s in %s, for exactly this proposal", render.journalText(r.Journal.By), render.journalText(r.Journal.Decision))
 	case r.Ratified != nil && r.Ratified.Previous != "":
 		return fmt.Sprintf("ratified by @%s on [#%d](%s), amending %s", r.Ratified.By, r.Ratified.Issue, r.Ratified.Comment, r.Ratified.Previous)
 	case r.Ratified != nil:
@@ -556,7 +565,7 @@ func (render renderer) failures(r *verify.Report) []string {
 	case r.Ratified != nil:
 		out = append(out, fmt.Sprintf("Ratification: the lock's statements or bounds no longer match the proposal %s ratified (%s)", render.value("@"+r.Ratified.By), render.literal(short(r.Ratified.Proposal))))
 	default:
-		out = append(out, "Ratification: "+render.text(r.Journal.Problem))
+		out = append(out, "Ratification: "+render.journalText(r.Journal.Problem))
 	}
 	for _, p := range r.Pins {
 		switch {
