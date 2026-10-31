@@ -271,7 +271,11 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 	for _, c := range inv.Provenance.Declarations {
 		decls[c.ID] = c
 	}
-	driver, err := filepath.Rel(root, filepath.Join(p.Dir, p.Manifest.Conformance))
+	dir, err := filepath.Abs(p.Dir)
+	if err != nil {
+		return nil, err
+	}
+	driver, err := filepath.Rel(root, filepath.Join(dir, p.Manifest.Conformance))
 	if err != nil {
 		return nil, err
 	}

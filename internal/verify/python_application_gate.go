@@ -112,7 +112,11 @@ func pythonApplicationLegacyBindings(p *project.Project, root string) (targets, 
 			return
 		}
 	}
-	driver, err := filepath.Rel(root, filepath.Join(p.Dir, p.Manifest.Conformance))
+	dir, err := filepath.Abs(p.Dir)
+	if err != nil {
+		return
+	}
+	driver, err := filepath.Rel(root, filepath.Join(dir, p.Manifest.Conformance))
 	if err != nil {
 		return
 	}
@@ -127,7 +131,11 @@ func pythonApplicationLegacyInvocations(p *project.Project, root string) ([]Pyth
 	if _, _, err := pythonApplicationLegacyBindings(p, root); err != nil {
 		return nil, err
 	}
-	dir, err := filepath.Rel(root, p.Dir)
+	dir, err := filepath.Abs(p.Dir)
+	if err != nil {
+		return nil, err
+	}
+	dir, err = filepath.Rel(root, dir)
 	if err != nil {
 		return nil, err
 	}
