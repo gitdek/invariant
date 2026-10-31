@@ -3,7 +3,14 @@
 Nagini reads contracts statically; its own module isn't meant to run. When
 the gate runs a Nagini-proved Python core (for its tests and its conformance
 driver), it puts this module first on PYTHONPATH, so every contract call is a
-no-op and the proved file runs unchanged.
+no-op and the proved file runs unchanged. An application that proves a
+function in place ships this package at its root, so the module that holds
+the function imports wherever the application runs (#359).
+
+Python evaluates a contract call's argument before the call, so Result()
+returns an inert value: comparing it, doing arithmetic with it, calling it or
+reading from it gives itself back, and it's true, so a contract such as
+Ensures(Result() >= count) evaluates without effect.
 """
 
 from typing import Any, Callable, TypeVar
@@ -33,7 +40,31 @@ def dict_pred(*args: Any) -> bool: return True
 def set_pred(*args: Any) -> bool: return True
 def Implies(p: Any, q: Any) -> bool: return True
 def Old(x: T) -> T: return x
-def Result() -> Any: return None
+class _Inert:
+    """What Result() stands for when the program runs: nothing a contract
+    does with it fails, and nothing it gives back means anything."""
+
+    def __bool__(self) -> bool: return True
+    def __len__(self) -> int: return 0
+    def __hash__(self) -> int: return 0
+    def __iter__(self) -> Any: return iter(())
+    def __contains__(self, item: Any) -> bool: return True
+    def __getattr__(self, name: str) -> Any: return self
+    def __getitem__(self, key: Any) -> Any: return self
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: return self
+    def _same(self, *args: Any) -> Any: return self
+    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _same  # type: ignore
+    __add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = _same
+    __truediv__ = __rtruediv__ = __floordiv__ = __rfloordiv__ = __mod__ = __rmod__ = _same
+    __pow__ = __rpow__ = __and__ = __rand__ = __or__ = __ror__ = __xor__ = __rxor__ = _same
+    __lshift__ = __rlshift__ = __rshift__ = __rrshift__ = __matmul__ = __rmatmul__ = _same
+    __neg__ = __pos__ = __abs__ = __invert__ = _same
+
+
+_INERT = _Inert()
+
+
+def Result() -> Any: return _INERT
 def Forall(*args: Any) -> bool: return True
 def Exists(*args: Any) -> bool: return True
 def Pure(f: T) -> T: return f
