@@ -57,40 +57,37 @@ func (f *Factory) replacement(ctx context.Context, t Thread, state Post) (Comman
 }
 
 // rebuild answers writer c's retry of the plan build state says failed in
-// the factory's own run, leaving a draft, by building the plan again. The
-// protocol must allow the Rebuild before anything happens, and the build
-// starts from the plan's ratification, which the draft's branch holds.
-// Then each effect is looked for before it's taken (D-0069): the retry's
-// record, the draft's close and the answer. A draft someone merged first has
-// nothing to replace, so watch records the merge, and the retry is answered
-// after it.
+// the factory's own run, leaving a draft, by building the plan again. A
+// retry applies to the failure that was the issue's latest when it was
+// posted, so one posted before it rebuilds nothing. The protocol must allow
+// the Rebuild before anything happens, and the build starts from the plan's
+// ratification, which the draft's branch holds. Then each effect is looked
+// for before it's taken (D-0069): the retry's record, the draft's close and
+// the answer. A draft someone else merged, or closed before the record was
+// stored, isn't the factory's to replace, so watch records it, and the
+// retry is answered after it. A watcher that paused partway, and finds the
+// retry answered or the issue moved on when it comes back, answers nothing.
 func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) error {
 	n, m := t.Issue.Number, state.Marker
 	old, step := m.PR, replaceStepName(c)
 	want := fmt.Sprintf("#%d", old)
+	_, trusted, _ := trustedOf(m)
+	if c.Comment < state.Comment.ID {
+		return f.note(ctx, t, c, fmt.Sprintf("This retry came before #%d failed, so it doesn't build the plan again.", old), "\n\n"+rebuildOffer(old, trusted))
+	}
 	before, after := f.rebuildStep(t, state, c)
 	if err := f.allowed(ctx, n, "build the ratified plan again, replacing "+want, before, after); err != nil {
 		return err
 	}
-	// The plan's ratification is the first commit on the draft's branch that
-	// holds its lock, or, after an earlier rebuild, the commit that build
-	// started from. Without it there's nothing to build again from, so a
-	// person closes the draft and drafts the plan again.
-	from := m.From
-	if from == "" {
-		if err := f.Repo.Fetch(ctx); err != nil {
-			return err
-		}
-		if _, err := f.Repo.RevParse(ctx, "origin/"+m.Branch); err == nil {
-			if from, err = f.Repo.FirstCommit(ctx, "origin/"+f.Base, "origin/"+m.Branch, lockFileOf(m.Project)); err != nil {
-				return err
-			}
-		}
-	} else if _, err := f.Repo.RevParse(ctx, from); err != nil {
-		from = ""
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return err
+	}
+	from, missing, err := f.ratificationOf(ctx, m)
+	if err != nil {
+		return err
 	}
 	if from == "" {
-		return f.note(ctx, t, c, fmt.Sprintf("I can't build the plan again: `%s`, the branch that holds the plan's ratification, is gone.", m.Branch), cantRebuild(old))
+		return f.note(ctx, t, c, "I can't build the plan again: "+missing+".", cantRebuild(old))
 	}
 	recorded, err := f.Repo.Recorded(ctx, n, step)
 	if err != nil {
@@ -99,6 +96,15 @@ func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) 
 	switch recorded {
 	case want:
 	case "":
+		// The draft as it is now: someone else's close or merge before the
+		// record is theirs.
+		pr, err := f.GitHub.PullRequest(ctx, old)
+		if err != nil {
+			return err
+		}
+		if pr.Merged || pr.State == "closed" {
+			return f.watch(ctx, t, state)
+		}
 		if err := f.recovers(ctx, n, "record that the retry replaces "+want, f.canRecordIntent(replacing(recovery.PredDraft, false))); err != nil {
 			return err
 		}
@@ -123,6 +129,12 @@ func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) 
 	if pr.Merged {
 		return f.watch(ctx, t, state)
 	}
+	if current, err := f.stillCurrent(ctx, t.Issue, state, c); err != nil || !current {
+		if err == nil {
+			f.logf("#%d: another watcher answered the retry, or the issue moved on, so this one answers nothing", n)
+		}
+		return err
+	}
 	if err := f.recovers(ctx, n, "answer the retry", f.canPost(replacing(recovery.PredRetired, true), recovery.Retry)); err != nil {
 		return err
 	}
@@ -130,6 +142,49 @@ func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) 
 	next.Kind, next.ReplyTo, next.Failure, next.PR = KindRatified, []int64{c.Comment}, "", 0
 	next.Branch, next.From, next.Replaces = attemptBranch(m.Branch, c), from, old
 	return f.say(ctx, n, rebuildingComment(c.By, old, next), LabelBuilding)
+}
+
+// ratificationGone is a retry's build that can't start: what it starts
+// from, the plan's ratification, is gone from the clone (D-0220).
+type ratificationGone struct{ missing string }
+
+func (e ratificationGone) Error() string { return "I can't build the plan again: " + e.missing }
+
+// ratificationOf is the commit a rebuild of m's plan starts from: the one an
+// earlier rebuild started from, or the first commit on the draft's branch
+// that holds the plan's lock, as the clone has them after a fetch. When it's
+// gone, missing says what's gone.
+func (f *Factory) ratificationOf(ctx context.Context, m Marker) (from, missing string, err error) {
+	if m.From != "" {
+		if _, err := f.Repo.RevParse(ctx, m.From); err != nil {
+			return "", fmt.Sprintf("`%s`, the commit with the plan's ratification that its last build started from, is gone", m.From), nil
+		}
+		return m.From, "", nil
+	}
+	if _, err := f.Repo.RevParse(ctx, "origin/"+m.Branch); err != nil {
+		return "", fmt.Sprintf("`%s`, the branch that holds the plan's ratification, is gone", m.Branch), nil
+	}
+	if from, err = f.Repo.FirstCommit(ctx, "origin/"+f.Base, "origin/"+m.Branch, lockFileOf(m.Project)); err != nil {
+		return "", "", err
+	}
+	if from == "" {
+		return "", fmt.Sprintf("`%s` holds no commit that ratified the plan", m.Branch), nil
+	}
+	return from, "", nil
+}
+
+// stillCurrent says whether state is still the issue's latest post, and
+// writer c's command still waits for an answer, as GitHub has them now.
+func (f *Factory) stillCurrent(ctx context.Context, issue github.Issue, state Post, c Command) (bool, error) {
+	fresh, err := f.read(ctx, issue)
+	if err != nil {
+		return false, err
+	}
+	latest, ok := fresh.State()
+	if !ok || latest.Comment.ID != state.Comment.ID {
+		return false, nil
+	}
+	return slices.ContainsFunc(fresh.Pending(), func(p Command) bool { return p.Comment == c.Comment }), nil
 }
 
 // Why a build's run no longer stands for the issue's latest state, if it
@@ -178,6 +233,18 @@ func (f *Factory) buildPullRequest(ctx context.Context, branch string, ratified 
 		return github.PullRequest{}, false, err
 	}
 	return pr, true, nil
+}
+
+// stillBuilding says whether ratified, the post that started a build, still
+// stands for the issue's latest state, so its result may be published: a
+// watcher that paused after its run publishes nothing once a later post
+// answered or replaced the build (#271).
+func (f *Factory) stillBuilding(ctx context.Context, n int, ratified Post) (bool, error) {
+	why, err := f.superseded(ctx, n, ratified)
+	if err == nil && why != current {
+		f.logf("#%d: a later post answered or replaced this build, so this watcher publishes nothing of it", n)
+	}
+	return why == current, err
 }
 
 // latestBuild is the post that started the issue's latest build: the latest

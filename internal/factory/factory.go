@@ -951,9 +951,10 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	}
 	f.runsAgent(n, agent, out)
 	res, runErr := form.Formalize(ctx, req, out)
-	// A watcher that lost the lease during the run drops it. The holder will
-	// find it recorded, and say it stopped.
-	if !f.holds() {
+	// A watcher that lost the lease during the run drops it, even one that
+	// took it back since. The holder will find it recorded, and say it
+	// stopped.
+	if !f.holdsFor(ctx) {
 		return nil, errLeaseLost
 	}
 	switch {
@@ -1428,6 +1429,10 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 						return err
 					}
 				}
+				var gone ratificationGone
+				if errors.As(runErr, &gone) {
+					return failed(FailStopped, post("needs a person", "I can't build the plan again: "+gone.missing+".", withFailure(next, FailStopped), cantRebuildFrom()))
+				}
 				return failed(FailStopped, planFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 			}
 			return f.publish(ctx, t, ratified, built, next, stops)
@@ -1565,9 +1570,10 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	f.runsAgent(n, agent, out)
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := run.Builder.Build(ctx, root, out, amend)
-	// A watcher that lost the lease during the run drops it. The holder will
-	// find it recorded, and say it stopped.
-	if !f.holds() {
+	// A watcher that lost the lease during the run drops it, even one that
+	// took it back since. The holder will find it recorded, and say it
+	// stopped.
+	if !f.holdsFor(ctx) {
 		return "", "", nil, nil, errLeaseLost
 	}
 	// Anyone can read the run's error and review, in a post or the record, so
@@ -1706,13 +1712,20 @@ func (f *Factory) loadResult(ctx context.Context, commit string, v any) error {
 }
 
 // publish takes a finished build to its post: it pushes the build's code,
-// unless the branch has it, opens the pull request, unless one is open from
-// the branch, and says how the build went. Whichever watcher ran the build,
-// its record holds everything this needs.
+// unless the branch has it, opens the pull request, unless the build opened
+// one from its branch already, open, closed or merged, and says how the
+// build went. Whichever watcher ran the build, its record holds everything
+// this needs, and a build a later post answered or replaced publishes
+// nothing.
 func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result string, next Marker, stops int) error {
 	n, m := t.Issue.Number, ratified.Marker
 	var built builtResult
 	if err := f.loadResult(ctx, result, &built); err != nil {
+		return err
+	}
+	// A watcher back from a pause publishes nothing of a build a later post
+	// answered or replaced (#271).
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
 		return err
 	}
 	if built.Plumbing != nil {
@@ -1766,6 +1779,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
+		return err
+	}
 	pr, found, err := f.buildPullRequest(ctx, m.Branch, ratified)
 	if err != nil {
 		return err
@@ -1786,6 +1802,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}
 	}
 	next.PR = pr.Number
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
+		return err
+	}
 	opened := building(RunDone, true, true)
 	opened.draft = pr.Draft
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(opened, recovery.Build)); err != nil {
@@ -2179,6 +2198,7 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 			err = fmt.Errorf("the factory's step panicked: %v\n%s", r, debug.Stack())
 		}
 	}()
+	ctx = f.inTenure(ctx)
 	issue, err := f.GitHub.Issue(ctx, n)
 	if err != nil {
 		return err

@@ -25,7 +25,9 @@ import (
 // core's model leaves out, a CI failure and the limit on stopped builds, are
 // the protocol's alone. A writer's retry that builds a plan's failed draft
 // again is the core's replacement (#271, D-0203): its record, the draft's
-// close and its answer are the core's own steps. Each build is an attempt
+// close and its answer are the core's own steps. Someone else closing or
+// merging a pull request is still the protocol's alone: the posts that say
+// so take no step of the core. Each build is an attempt
 // with its own run, so a watcher still in the run of a build a later retry
 // replaced is in a stale run, which the core records as its own (D-0212). A
 // writer's retry that watches a modeled project's failed draft again is the
