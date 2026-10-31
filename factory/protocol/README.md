@@ -2,7 +2,7 @@
 
 Written by Invariant for [#9](https://github.com/gitdek/invariant/issues/9): Prove the factory's issue protocol. The factory amended it through [#13](https://github.com/gitdek/invariant/issues/13) and [#69](https://github.com/gitdek/invariant/issues/69), and a coding agent amended it by hand for [#271](https://github.com/gitdek/invariant/issues/271), so a writer's retry can build a failed build again.
 
-@gitdek ratified these statements by hand, as [D-0202](../../decisions/journal/D-0202.jsonl), in place of a comment on the issue: they amend the statements he ratified [on #69](https://github.com/gitdek/invariant/issues/69#issuecomment-5875565342). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/IssueProtocol.tla`](.invariant/specs/IssueProtocol.tla).
+@gitdek ratified these statements by hand, as [D-0202](../../decisions/journal/D-0202.jsonl), and their exact proposal as [D-0209](../../decisions/journal/D-0209.jsonl), which the lock names in place of a comment on the issue: they amend the statements he ratified [on #69](https://github.com/gitdek/invariant/issues/69#issuecomment-5875565342). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/IssueProtocol.tla`](.invariant/specs/IssueProtocol.tla).
 
 | Statement | Kind | Says |
 | :-- | :-- | :-- |

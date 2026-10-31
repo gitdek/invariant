@@ -1,6 +1,6 @@
 # Let a retry build a failed plumbing build again
 
-Issue #271 in gitdek/invariant, opened by @gitdek: part 1 of 3, amended by hand and ratified as D-0202.
+Issue #271 in gitdek/invariant, opened by @gitdek: part 1 of 3, amended by hand and ratified as D-0202, and its exact proposal as D-0209.
 
 When a plumbing build fails in the factory's own run, the factory keeps its work in a draft pull request: its agent stopped with partial work, its tests failed, or its review asked for changes. A writer's `/invariant retry` can only watch that draft again. #271 asks that a retry build the ratified plan again and replace the failed draft, while a retry after CI's gate fails still watches its pull request again.
 
