@@ -312,6 +312,16 @@ func stuckComment(problem string, m Marker, closing ...string) string {
 		quote(problem, 40), m, strings.Join(closing, ""), "\n\nSay what you'd like in a comment, then comment `/invariant revise` to try again.")
 }
 
+// providerStuckComment says a draft stopped because its agent's provider
+// stayed unavailable while it tried again (#261), quoting the last error.
+// what is what the draft was: statements, a plan or a plan of issues. The
+// draft proposed nothing its agent left, and drafting again is all it needs.
+func providerStuckComment(problem, what string, m Marker) string {
+	return post("I couldn't draft this", fmt.Sprintf("I couldn't draft the %s for this issue: the provider its agent runs on stayed unavailable while it tried again, "+
+		"so the draft didn't finish, and I proposed nothing it left. The last error:\n\n%s", what, quote(problem, 40)), m,
+		"\n\nNothing about the issue needs to change. Once the provider is back, comment `/invariant revise` to draft again.")
+}
+
 func unsupportedComment(reason string, m Marker) string {
 	return post("not one I can take", reason, m, "\n\nIf I've misread the issue, say how in a comment, then comment `/invariant revise`.")
 }

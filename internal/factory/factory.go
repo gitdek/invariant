@@ -808,6 +808,18 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
 	switch p := res.Proposal; {
+	case res.Problem != "" && synth.ProviderUnavailable(errors.New(res.Problem)):
+		// A draft its agent's provider never let finish needs only drafting
+		// again, and says so, naming what it was drafting (#261).
+		what := "statements"
+		switch {
+		case prd:
+			what = "plan of issues"
+		case req.Plumbing != "":
+			what = "plan"
+		}
+		m.Kind, m.Proposal = KindStuck, p
+		return f.drafted(ctx, t, cause, base, m, providerStuckComment(res.Problem, what, m), LabelHumanReview)
 	case res.Problem != "":
 		m.Kind, m.Proposal = KindStuck, p
 		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)

@@ -10,13 +10,14 @@ import (
 )
 
 // A provider's outage is what's retried, and nothing else: not a limit on
-// the account a few minutes won't lift, and not Invariant's MCP server
-// failing to start, however its words read (#261).
+// the account a few minutes won't lift, not Invariant's MCP server failing
+// to start, however its words read, and not Codex's notice that it's
+// reconnecting, which says nothing of how a run ended (#261).
 func TestTransientTellsAnOutageFromAnOrdinaryFailure(t *testing.T) {
 	for failure, want := range map[string]bool{
 		"Selected model is at capacity. Please try a different model.":                                             true,
 		"stream disconnected before completion: error sending request for url (https://example.invalid/responses)": true,
-		"Reconnecting... 2/5": true,
+		"Reconnecting... 2/5": false,
 		`API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`:                               true,
 		"rate_limit: API Error: 429 rate_limit_error":                                                                              true,
 		"You've hit your usage limit. Try again in 3 days.":                                                                        false,

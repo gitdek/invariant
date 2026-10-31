@@ -79,22 +79,42 @@ func ProviderUnavailable(err error) bool {
 
 // unavailableWords are what a provider that's briefly unavailable ends a
 // run with: at capacity, limiting the rate, overloaded, or dropping the
-// connection.
+// connection, in Codex's words and Claude Code's.
 var unavailableWords = []string{
-	"at capacity", "over capacity",
-	"rate limit", "rate_limit", "rate-limit", "ratelimit", "too many requests",
-	"overloaded", "service unavailable", "temporarily unavailable",
-	"connection reset", "connection closed", "connection aborted", "stream disconnected", "reconnecting",
-	"broken pipe", "econnreset", "socket hang up", "error sending request", "unexpected eof",
+	"at capacity", "over capacity", "capacity unavailable", "high demand", "temporary capacity issue",
+	"rate limit", "rate_limit", "rate-limit", "ratelimit", "too many requests", "temporarily limiting requests",
+	"overloaded", "high load", "service unavailable", "temporarily unavailable", "usually temporary",
+	"connection reset", "connection closed", "connection aborted", "connection dropped", "connection lost",
+	"connection to the api was lost", "stream disconnected", "broken pipe", "econnreset", "econnaborted", "epipe",
+	"connectionclosed", "und_err_socket", "err_socket_closed", "socket hang up", "error sending request",
+	"unexpected eof", "request timed out", "no response from api",
 }
 
+// serverStatus is an HTTP status that says the provider failed or limited
+// the rate, as Codex reports one after its own retries ran out.
+var serverStatus = regexp.MustCompile(`last status: (?:429|5[0-9][0-9])\b`)
+
 // lastingWords are limits on the account that a few minutes won't lift.
-var lastingWords = []string{"usage limit", "quota", "billing", "credit balance"}
+var lastingWords = []string{"usage limit", "usage credit", "usage not included", "quota", "billing", "credit", "spend limit", "spend cap"}
+
+// lasting says whether failure, in lower case, names a limit on the account,
+// such as its usage limit. A provider that says its limit isn't the
+// account's, as Claude Code's "(not your usage limit)" does, names none.
+func lasting(failure string) bool {
+	failure = strings.ReplaceAll(failure, "not your usage limit", "")
+	for _, w := range lastingWords {
+		if strings.Contains(failure, w) {
+			return true
+		}
+	}
+	return false
+}
 
 // transient says whether failure, the words a run's attempt ended with, is
 // its provider being briefly unavailable. Invariant's MCP server failing to
 // start isn't, even where it says a connection closed: a line that names
-// MCP and a failure or an error makes it an ordinary failure.
+// MCP and a failure or an error makes it an ordinary failure. Neither is a
+// limit on the account.
 func transient(failure string) bool {
 	s := strings.ToLower(failure)
 	for _, line := range strings.Split(s, "\n") {
@@ -103,17 +123,24 @@ func transient(failure string) bool {
 			return false
 		}
 	}
-	for _, w := range lastingWords {
-		if strings.Contains(s, w) {
-			return false
-		}
+	if lasting(s) {
+		return false
 	}
 	for _, w := range unavailableWords {
 		if strings.Contains(s, w) {
 			return true
 		}
 	}
-	return false
+	return serverStatus.MatchString(s)
+}
+
+// progressNotice says whether a Codex error event is only Codex saying it's
+// trying again itself, such as "Reconnecting... 2/5", which says nothing of
+// how the run ended.
+func progressNotice(message string) bool {
+	s := strings.ToLower(strings.TrimSpace(message))
+	return strings.HasPrefix(s, "reconnecting") || strings.Contains(s, "retrying sampling request") ||
+		strings.Contains(s, "waiting to retry") || strings.Contains(s, "waiting for network")
 }
 
 // sleep waits d, or until ctx ends, and says which.
@@ -144,9 +171,12 @@ type try struct {
 // one, takes back what an attempt needs, as Codex's turn. spent says why no
 // retry can run, when the run has used up a limit it would need: that's
 // the run's error, an ordinary one, since the run would have stopped there
-// whatever its provider did. An attempt that ctx cut off, after an earlier
-// one found the provider unavailable, leaves the provider's unavailability
-// as why the run didn't finish.
+// whatever its provider did. An attempt that ended once ctx was done, after
+// an earlier one found the provider unavailable, leaves the provider's
+// unavailability as why the run didn't finish: whatever else the attempt
+// said, such as an error from a command its deadline refused to start,
+// that's the safe reading, since a run its provider stopped publishes
+// nothing.
 func retrying(ctx context.Context, name string, wait func(context.Context, time.Duration) error,
 	attempt func(spent Usage) try, resume func(context.Context) error, spent func(total Usage, last error) error) (Usage, error) {
 	if wait == nil {
@@ -162,8 +192,12 @@ func retrying(ctx context.Context, name string, wait func(context.Context, time.
 			return total, nil
 		case t.provider:
 			last = t.err
-		case last != nil && t.cut:
-			return total, &ProviderError{Backend: name, Attempts: n, Last: last, Stopped: fmt.Errorf("its next attempt didn't finish: %w", t.err)}
+		case last != nil && (t.cut || ctx.Err() != nil):
+			stopped := fmt.Errorf("its next attempt didn't finish: %w", t.err)
+			if cut := ctx.Err(); cut != nil && !errors.Is(t.err, cut) {
+				stopped = fmt.Errorf("its next attempt didn't finish (%w): %w", cut, t.err)
+			}
+			return total, &ProviderError{Backend: name, Attempts: n, Last: last, Stopped: stopped}
 		default:
 			return total, t.err
 		}
@@ -224,10 +258,11 @@ const ToolAllowanceEnv = "INVARIANT_TOOL_ALLOWANCE"
 // allowance is the calls one run's servers have made to each tool. The run
 // keeps it, and a server can only take a call from it, never give one back.
 type allowance struct {
-	ln    net.Listener
-	mu    sync.Mutex
-	calls map[string]int
-	wg    sync.WaitGroup
+	ln     net.Listener
+	mu     sync.Mutex
+	calls  map[string]int
+	wg     sync.WaitGroup
+	closed chan struct{}
 }
 
 // newAllowance starts keeping a run's tool calls, for a job with
@@ -240,15 +275,38 @@ func newAllowance(job Job) (*allowance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("keeping the run's tool calls: %w", err)
 	}
-	a := &allowance{ln: ln, calls: map[string]int{}}
+	return serveAllowance(ln), nil
+}
+
+// acceptBackoff is the most an allowance waits after a failed accept before
+// it tries again.
+const acceptBackoff = time.Second
+
+// serveAllowance keeps a run's tool calls, answering servers on ln until the
+// run closes it. An accept that fails for a while, as when the process has
+// run out of file descriptors, stops nothing: it waits a little, longer
+// each time up to acceptBackoff, and accepts again.
+func serveAllowance(ln net.Listener) *allowance {
+	a := &allowance{ln: ln, calls: map[string]int{}, closed: make(chan struct{})}
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
+		wait := 5 * time.Millisecond
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				return
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				select {
+				case <-a.closed:
+					return
+				case <-time.After(wait):
+				}
+				wait = min(2*wait, acceptBackoff)
+				continue
 			}
+			wait = 5 * time.Millisecond
 			a.wg.Add(1)
 			go func() {
 				defer a.wg.Done()
@@ -256,7 +314,7 @@ func newAllowance(job Job) (*allowance, error) {
 			}()
 		}
 	}()
-	return a, nil
+	return a
 }
 
 // answer takes one call from the allowance for a server that asks, of the
@@ -328,6 +386,7 @@ func (a *allowance) close() {
 	if a == nil {
 		return
 	}
+	close(a.closed)
 	a.ln.Close()
 	a.wg.Wait()
 }

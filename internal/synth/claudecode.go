@@ -179,21 +179,24 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return try{err: err}
+		// A run whose deadline has passed starts nothing.
+		return try{err: err, cut: ctx.Err() != nil}
 	}
 	usage, end, readErr := readClaudeStream(stdout, job.Transcript)
 	if readErr != nil {
 		stop() // stop the agent, rather than wait for it
 	}
 	waitErr := cmd.Wait()
-	// The result's own words, when there's a result, alone say why it
-	// failed. Without one, an API error Claude Code reported in place of a
-	// reply does, and only without that, stderr. stderr is diagnostic only.
+	// The result, when there's one, alone says why the attempt failed, in
+	// its fields and its words. Without one, an API error Claude Code
+	// reported in place of a reply does, and only without that, stderr's
+	// words. stderr is otherwise diagnostic only.
+	reported := end.result || end.api != ""
 	failure := end.failure
 	if failure == "" {
 		failure = end.api
 	}
-	if failure == "" && !end.result {
+	if !reported {
 		failure = stderr.String()
 	}
 	diag := lastLines(stderr.String(), 20)
@@ -205,7 +208,7 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 		// What the agent did before the stream ended is all the run has of
 		// its turns.
 		usage.Turns = end.replies
-	case usage.Outcome == "success" && !(end.isError && transient(failure)):
+	case usage.Outcome == "success" && !(end.isError && end.unavailable(failure)):
 		return try{usage: usage}
 	default:
 		if usage.Outcome == "success" || usage.Outcome == "" {
@@ -224,10 +227,15 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 		err = errors.New(strings.TrimRight(why, "\n"))
 	}
 	t := try{usage: usage, err: err}
-	if cut := ctx.Err(); cut != nil {
-		// The run's deadline or its cancellation ended this attempt.
+	switch cut := ctx.Err(); {
+	case readErr == nil && reported && end.unavailable(failure):
+		// A provider's failure Claude Code reported is why the attempt ended,
+		// even when the run's deadline passed before the attempt saw it end.
+		t.provider = true
+	case cut != nil:
+		// Otherwise the run's deadline or its cancellation ended it.
 		t.err, t.cut = fmt.Errorf("the run was cut off (%w): %w", cut, err), true
-	} else if readErr == nil {
+	case readErr == nil && !reported:
 		t.provider = transient(failure)
 	}
 	// Claude Code says what a run cost only in its result. One that ended
@@ -267,8 +275,64 @@ type claudeEnd struct {
 	isError bool   // the result says the run failed
 	failure string // what the result said went wrong: its errors, or else its text
 	api     string // the last API error Claude Code reported in place of a reply
+	kind    string // that API error's kind, such as rate_limit or server_error
+	status  int    // the API's HTTP status for the error, from the result or that message
+	cause   string // Claude Code's typed cause for it, such as usage_limit_reached
 	replies int    // the agent's replies, each a turn, as the events showed them
 	paid    bool   // the provider sent a reply, which costs, before any result
+}
+
+// claudeTerminal are the typed causes Claude Code gives an API error that no
+// wait lifts: limits on the account, and faults of the request, the model or
+// the setup. Claude Code adds causes over time, and one not named here, as
+// its own documentation says of an unknown one, says nothing.
+var claudeTerminal = map[string]bool{
+	"usage_limit_reached": true, "model_requires_usage_credits": true, "long_context_credits_required": true,
+	"max_output_tokens": true, "dlp_request_denied": true, "claude_code_version_too_old": true, "safety_monitor_blocked": true,
+	"effort_requires_thinking": true, "advisor_incompatible": true, "tool_history_mismatch": true, "autocompact_thrashing": true,
+	"pdf_too_large": true, "pdf_password_protected": true, "media_removed": true, "tls_untrusted_ca": true,
+	"gateway_content_type": true, "provider_credentials": true, "gateway_signin_required": true, "gateway_session_expired": true,
+	"api_key_auth_disabled": true, "org_disabled_credential": true, "invalid_credential_header": true, "consent_unanswered": true,
+	"no_allowed_fallback": true, "model_substitution_disabled": true, "field_not_granted": true, "empty_completion": true,
+	"unattended_start_limit": true, "unattended_start_unconfirmed": true,
+}
+
+// unavailable says whether the attempt ended because Claude Code's provider
+// was briefly unavailable. Claude Code's own fields say so where it gave
+// them: its typed cause, the API's status, such as 429, 529 or another 5xx,
+// and the error's kind, rate_limit or server_error. Even then, words that
+// name a limit on the account win, since Claude Code reports a usage limit
+// as a rate limit too. Only without those fields do failure's words decide.
+func (e claudeEnd) unavailable(failure string) bool {
+	known, outage := false, false
+	switch {
+	case e.cause == "no_response":
+		known, outage = true, true
+	case claudeTerminal[e.cause]:
+		return false
+	case e.status == 408 || e.status == 429 || e.status >= 500 && e.status <= 599:
+		known, outage = true, true
+	case e.status >= 400 && e.status <= 499:
+		return false
+	case e.kind == "rate_limit" || e.kind == "server_error":
+		known, outage = true, true
+	case e.kind == "authentication_failed" || e.kind == "billing_error" || e.kind == "invalid_request" ||
+		e.kind == "model_not_found" || e.kind == "max_output_tokens" || e.kind == "verification_required":
+		return false
+	}
+	if known {
+		return outage && !lasting(strings.ToLower(failure+"\n"+e.api))
+	}
+	return transient(failure)
+}
+
+// apiStatus is an API error's HTTP status as an event gives it, or 0.
+func apiStatus(v json.RawMessage) int {
+	n, err := strconv.Atoi(strings.TrimSpace(string(v)))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // readClaudeStream is ReadStream, with what the events said of how the run
@@ -290,22 +354,26 @@ func readClaudeStream(r io.Reader, transcript io.Writer) (Usage, claudeEnd, erro
 			transcript.Write(append(append([]byte{}, line...), '\n'))
 		}
 		var ev struct {
-			Type    string          `json:"type"`
-			Subtype string          `json:"subtype"`
-			Model   string          `json:"model"`
-			Result  string          `json:"result"`
-			Cost    float64         `json:"total_cost_usd"`
-			Turns   int             `json:"num_turns"`
-			IsError bool            `json:"is_error"`
-			Errors  json.RawMessage `json:"errors"`
-			Error   json.RawMessage `json:"error"`
-			Servers []struct {
+			Type      string          `json:"type"`
+			Subtype   string          `json:"subtype"`
+			Model     string          `json:"model"`
+			Result    string          `json:"result"`
+			Cost      float64         `json:"total_cost_usd"`
+			Turns     int             `json:"num_turns"`
+			IsError   bool            `json:"is_error"`
+			Errors    json.RawMessage `json:"errors"`
+			Error     json.RawMessage `json:"error"`
+			APIStatus json.RawMessage `json:"api_error_status"`
+			APIError  json.RawMessage `json:"api_error"`
+			Servers   []struct {
 				Name   string `json:"name"`
 				Status string `json:"status"`
 			} `json:"mcp_servers"`
 			Message struct {
-				ID      string          `json:"id"`
-				Content json.RawMessage `json:"content"`
+				ID        string          `json:"id"`
+				Content   json.RawMessage `json:"content"`
+				APIStatus json.RawMessage `json:"api_error_status"`
+				APIError  json.RawMessage `json:"api_error"`
 			} `json:"message"`
 		}
 		if json.Unmarshal(line, &ev) != nil {
@@ -339,7 +407,17 @@ func readClaudeStream(r io.Reader, transcript io.Writer) (Usage, claudeEnd, erro
 						text = append(text, c.Text)
 					}
 				}
-				end.api = strings.TrimSpace(kind + ": " + strings.Join(text, "\n"))
+				end.api, end.kind = strings.TrimSpace(kind+": "+strings.Join(text, "\n")), kind
+				for _, v := range []json.RawMessage{ev.APIStatus, ev.Message.APIStatus} {
+					if n := apiStatus(v); n != 0 {
+						end.status = n
+					}
+				}
+				for _, v := range []json.RawMessage{ev.APIError, ev.Message.APIError} {
+					if w := words(v); w != "" {
+						end.cause = w
+					}
+				}
 				break
 			}
 			end.paid = true
@@ -376,6 +454,14 @@ func readClaudeStream(r io.Reader, transcript io.Writer) (Usage, claudeEnd, erro
 			end.result, end.isError, end.failure = true, ev.IsError, words(ev.Errors)
 			if end.failure == "" {
 				end.failure = strings.TrimSpace(ev.Result)
+			}
+			// The result's own account of the API error that ended the turn
+			// is the last word on it.
+			if n := apiStatus(ev.APIStatus); n != 0 {
+				end.status = n
+			}
+			if w := words(ev.APIError); w != "" {
+				end.cause = w
 			}
 		}
 	}

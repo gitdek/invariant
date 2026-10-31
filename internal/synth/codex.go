@@ -381,7 +381,8 @@ func (c Codex) attempt(ctx context.Context, job Job, steps int, first bool) try 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return try{err: err}
+		// A run whose deadline has passed starts nothing.
+		return try{err: err, cut: ctx.Err() != nil}
 	}
 	// Codex's events carry no time and no workspace, which the live view
 	// needs, so the transcript starts with the workspace, and each event is
@@ -417,13 +418,18 @@ func (c Codex) attempt(ctx context.Context, job Job, steps int, first bool) try 
 	if err == nil {
 		err = errors.New(strings.TrimRight(why, "\n"))
 	}
-	// The run's deadline or its cancellation ended this attempt, whatever
-	// codex said as it went.
+	// The failed turn's own words, when codex gave any, alone say whether its
+	// provider was why: what came before it on stderr is diagnostic only. A
+	// provider's failure codex reported is why the attempt ended, even when
+	// the run's deadline passed before the attempt saw it end.
+	if readErr == nil && failure != "" && transient(failure) {
+		return try{usage: usage, err: err, provider: true}
+	}
+	// Otherwise the run's deadline or its cancellation ended this attempt,
+	// whatever codex said as it went.
 	if cut := ctx.Err(); cut != nil {
 		return try{usage: usage, err: fmt.Errorf("the run was cut off (%w): %w", cut, err), cut: true}
 	}
-	// The failed turn's own words, when codex gave any, alone say whether its
-	// provider was why: what came before it on stderr is diagnostic only.
 	if failure == "" {
 		failure = stderr.String()
 	}
@@ -524,10 +530,11 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 
 // readCodexStream is ReadCodexStream, with what codex's events said of a
 // turn that didn't succeed: the failed turn's message, or else its last
-// error event's (#261). It's "" when they said nothing.
+// error event's that isn't only Codex saying it's trying again (#261). It's
+// "" when they said nothing.
 func readCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, string, error) {
 	u := Usage{ToolCalls: map[string]int{}}
-	var lastError, failed string
+	var lastError, lastFailure, failed string
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 64<<20)
 	for scanner.Scan() {
@@ -586,6 +593,9 @@ func readCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 			u.Outcome, u.Summary, failed = "failed", ev.Error.Message, ev.Error.Message
 		case "error":
 			lastError = ev.Message
+			if !progressNotice(ev.Message) {
+				lastFailure = ev.Message
+			}
 		}
 	}
 	if u.Outcome == "failed" && u.Summary == "" {
@@ -595,7 +605,7 @@ func readCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 		u.Summary = lastError
 	}
 	if failed == "" {
-		failed = lastError
+		failed = lastFailure
 	}
 	return u, failed, scanner.Err()
 }
