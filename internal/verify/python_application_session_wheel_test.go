@@ -23,11 +23,11 @@ func TestPythonApplicationDependenciesAcceptDottedWheelNames(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"example.pkg-1.0-py3-none-any.whl", "example_pkg-1.0-py3-none-any.whl", "Example.Pkg-1.0-py3-none-any.whl"} {
-		if err := pythonApplicationDependencies(files, image, evidence(name)); err != nil {
+		if err := pythonApplicationDependencies(files, "", image, evidence(name)); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if err := pythonApplicationDependencies(files, image, evidence("other.pkg-1.0-py3-none-any.whl")); err == nil {
+	if err := pythonApplicationDependencies(files, "", image, evidence("other.pkg-1.0-py3-none-any.whl")); err == nil {
 		t.Error("accepted a wheel for another distribution")
 	}
 }
