@@ -70,7 +70,9 @@ func (s *Server) took(c act, url string) {
 }
 
 // actedText says what a command asked for, and what the factory does next,
-// by its first command, which is the one the factory takes.
+// by its first command, which is the one the factory takes. A retry says
+// what its card said it does (#263). A snapshot from before cards said that
+// has no copy, and keeps the old words.
 func actedText(w *Waiting, verb string) string {
 	switch verb {
 	case factory.Ratify:
@@ -81,6 +83,9 @@ func actedText(w *Waiting, verb string) string {
 	case factory.Choose:
 		return "Answered. The factory drafts again next."
 	case factory.Retry:
+		if w.Retry != nil {
+			return w.Retry.Posted
+		}
 		return "Asked for a retry. The factory tries again next."
 	}
 	return "Asked for a new draft. The factory drafts again next."

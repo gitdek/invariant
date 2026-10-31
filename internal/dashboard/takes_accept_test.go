@@ -13,9 +13,9 @@ import (
 // Each card offers what the factory takes in its state, and /act posts
 // exactly that (#218). After a failure, the factory drafts again only once
 // nothing of the build is open: a build whose pull request is still open
-// only builds again, and closing that pull request gives the issue a closed
-// card, which drafts again. A draft the factory couldn't make has nothing
-// to build, so it only drafts again.
+// only retries, which watches it again (#263), and closing that pull request
+// gives the issue a closed card, which drafts again. A draft the factory
+// couldn't make has nothing to build, so it only drafts again.
 func TestCardsOfferOnlyWhatTheFactoryTakes(t *testing.T) {
 	for _, c := range []struct {
 		name string

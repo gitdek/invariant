@@ -107,6 +107,20 @@ type Waiting struct {
 	// only these, so neither offers a command the factory refuses (#218,
 	// D-0156).
 	Takes []string `json:"takes"`
+	// Retry says what the retry the card offers does, only where Takes
+	// offers one (#263).
+	Retry *RetryCopy `json:"retry,omitempty"`
+}
+
+// RetryCopy is what a card says of its retry, as plain text both pages
+// escape: its button's label, the question /act asks before it posts, what
+// the retry leads to, and what the page says once GitHub takes it. The
+// command it posts is /invariant retry all the same.
+type RetryCopy struct {
+	Label        string `json:"label"`
+	Confirmation string `json:"confirmation"`
+	Guidance     string `json:"guidance"`
+	Posted       string `json:"posted"`
 }
 
 // PlanView is what a plumbing plan says: the change, the files it may
@@ -239,7 +253,7 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 			}
 		}
 		said = append(said, saidAt{at, cmds})
-		l.Events = append(l.Events, Event{At: at, Issue: issue.Number, Who: WhoPerson, By: c.User.Login, Kind: cmds[0].Verb, Text: commandText(cmds)})
+		l.Events = append(l.Events, Event{At: at, Issue: issue.Number, Who: WhoPerson, By: c.User.Login, Kind: cmds[0].Verb, Text: commandText(cmds, latest)})
 	}
 	sort.SliceStable(l.Events, func(i, j int) bool { return l.Events[i].At.Before(l.Events[j].At) })
 
@@ -427,13 +441,14 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 	case factory.KindFailed:
 		w.PR, w.Failure = m.PR, m.Why()
 		// A build that stopped before it made a pull request builds or
-		// drafts again (#13). One whose pull request is open only builds
-		// again: the factory drafts again once that pull request is closed,
-		// which makes its card a closed one.
+		// drafts again (#13). One whose pull request is open only retries,
+		// which watches it again: the factory drafts again once that pull
+		// request is closed, which makes its card a closed one.
 		w.Takes = []string{factory.Retry}
 		if w.Failure == factory.FailStopped || w.Failure == factory.FailLimit {
 			w.Takes = append(w.Takes, factory.Revise)
 		}
+		w.Retry = retryCopy(m)
 	case factory.KindStuck:
 		// There's no draft to build, so it only drafts again.
 		w.Takes = []string{factory.Revise}
@@ -446,6 +461,47 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 		return nil
 	}
 	return w
+}
+
+// retryCopy says what a writer's retry of the failure m records does, as
+// the factory takes it (#263). With no pull request, it builds the ratified
+// proposal again (D-0064). With one, it watches that pull request again
+// (D-0047): once CI's gate passes on its current head, the factory marks it
+// ready and merges it, without another review (#145, D-0105), unless it
+// changes the trusted base, which only a person merges (D-0109). The failure
+// or the plan's trusted files show that it does. Neither can rule out what a
+// later push changes, so the factory's merge keeps that exception.
+func retryCopy(m factory.Marker) *RetryCopy {
+	pr := m.PR
+	if pr == 0 {
+		return &RetryCopy{
+			Label:        "Build ratified proposal again",
+			Confirmation: "Have the factory build the ratified proposal again, as you?",
+			Guidance:     "Retrying has the factory build the ratified proposal again, from the same ratification, without drafting it again.",
+			Posted:       "Asked for a retry. The factory builds the ratified proposal again next.",
+		}
+	}
+	plan := m.Proposal != nil && m.Proposal.Plan != nil
+	r := &RetryCopy{}
+	if m.Why() == factory.FailTrusted || (plan && len(m.Proposal.Plan.Trusted) > 0) {
+		r.Label = fmt.Sprintf("Have a person merge #%d once CI passes", pr)
+		r.Confirmation = fmt.Sprintf("Have the factory watch #%d again until CI's gate passes on its current head, as you? A person merges #%d because it changes the trusted base. It won't review #%d again.", pr, pr, pr)
+		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again until CI's gate passes on its current head. It changes the trusted base, so a person merges it: the factory won't mark it ready or merge it.", pr)
+		r.Posted = fmt.Sprintf("Asked for a retry. The factory watches #%d again until CI's gate passes on its current head, then waits for a person to merge it. It won't review #%d again.", pr, pr)
+	} else {
+		const exception = " If it changes the trusted base, a person merges it."
+		r.Label = fmt.Sprintf("Merge #%d once CI passes", pr)
+		r.Confirmation = fmt.Sprintf("Have the factory merge #%d once CI's gate passes on its current head, as you? It won't review #%d again.", pr, pr) + exception
+		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again. Once CI's gate passes on its current head, and it's in scope with its ratified lock, the factory marks it ready, if it's a draft, and merges it.", pr) + exception
+		r.Posted = fmt.Sprintf("Asked for a retry. The factory watches #%d again, then marks it ready and merges it once CI's gate passes on its current head. It won't review #%d again.", pr, pr) + exception
+	}
+	r.Guidance += fmt.Sprintf(" The factory won't review #%d again, even if its review asked for changes, so push any changes it needs before you retry.", pr)
+	if plan {
+		r.Guidance += fmt.Sprintf(" To build the plan again instead, close #%d, say \"draft the same plan again\" or what to change, and comment /invariant revise, then ratify the new draft before it's built.", pr)
+	} else {
+		r.Guidance += fmt.Sprintf(" To build again instead, close #%d, say \"draft the same statements again\" or what to change, and comment /invariant revise, then ratify the new proposal before it's built.", pr)
+	}
+	return r
 }
 
 func postText(m factory.Marker, previous string) string {
@@ -484,7 +540,10 @@ func postText(m factory.Marker, previous string) string {
 	return m.Kind
 }
 
-func commandText(cmds []factory.Command) string {
+// commandText says what a person's commands asked for. answered is the
+// factory's latest post before them, if any: a retry asked for what its
+// failure's card offered then, whatever the factory posted after (#263).
+func commandText(cmds []factory.Command, answered *factory.Marker) string {
 	switch verb := cmds[0].Verb; verb {
 	case factory.Choose:
 		var picks []string
@@ -502,7 +561,15 @@ func commandText(cmds []factory.Command) string {
 	case factory.Revise:
 		return "asked for a revision"
 	case factory.Retry:
-		return "asked the factory to try again"
+		if answered == nil || answered.Kind != factory.KindFailed {
+			return "asked the factory to try again"
+		}
+		r := retryCopy(*answered)
+		said := "asked to " + strings.ToLower(r.Label[:1]) + r.Label[1:]
+		if answered.PR != 0 {
+			said += fmt.Sprintf(", and the factory won't review #%d again", answered.PR)
+		}
+		return said
 	case factory.Solve:
 		return "asked the factory to take it"
 	default:
