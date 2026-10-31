@@ -693,13 +693,16 @@ func TestPythonApplicationExecutionBoundaries(t *testing.T) {
 	if err := Check(p.Dir); err != nil {
 		t.Fatalf("public preflight: %v", err)
 	}
-	p.Manifest.Exhaustive = true
+	// Exhaustive applications are admitted since #342; a proof selection,
+	// and an existing selection no root holds, still are not.
+	p.Manifest.Components.Checks[0].Proof = &project.ComponentProof{Contracts: []project.ComponentRef{pa310Ref(pa315Target, "advance")}}
 	pa310Save(t, p)
 	if r, err := Run(context.Background(), p.Dir, "", toolchain.Toolchain{}); r != nil || err == nil {
 		t.Fatalf("public gate: %+v %v", r, err)
 	}
 	savedComponents := p.Manifest.Components
 	p.Manifest.Components = nil
+	p.Manifest.Existing = []string{"tasks/missing.py"}
 	pa310Save(t, p)
 	if err := Check(p.Dir); err == nil {
 		t.Fatalf("existing preflight: %v", err)
@@ -708,8 +711,9 @@ func TestPythonApplicationExecutionBoundaries(t *testing.T) {
 		t.Fatalf("direct legacy runner: %v", err)
 	}
 	// Restore the fixture manifest; comparisons cover all original bytes.
+	savedComponents.Checks[0].Proof = nil
 	p.Manifest.Components = savedComponents
-	p.Manifest.Exhaustive = false
+	p.Manifest.Existing = []string{pa315Target}
 	pa310Save(t, p)
 	after := pa315Tree(t, root)
 	if !reflect.DeepEqual(before, after) {

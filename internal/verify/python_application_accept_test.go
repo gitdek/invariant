@@ -788,13 +788,16 @@ func TestPythonApplicationPreservesLegacyAndRefusesExecution(t *testing.T) {
 	if err := Check(p.Dir); err != nil {
 		t.Fatalf("sampled application preflight: %v", err)
 	}
-	p.Manifest.Exhaustive = true
+	// Exhaustive applications are admitted since #342; a proof selection,
+	// and existing code with no callable to bind, still are not.
+	p.Manifest.Components.Checks[0].Proof = &project.ComponentProof{Contracts: []project.ComponentRef{pa310Ref("acme/service/core.py", "advance")}}
 	pa310Save(t, p)
 	report, err := Run(ctx, p.Dir, "", toolchain.Toolchain{})
 	if report != nil || err == nil {
 		t.Fatalf("explicit application execution fell through: %+v %v", report, err)
 	}
 	p.Manifest.Components = nil
+	p.Manifest.Existing = []string{"acme/shared.py"}
 	pa310Save(t, p)
 	pa310Load(t, p)
 	if err := Check(p.Dir); err == nil {
@@ -812,6 +815,7 @@ func TestPythonApplicationPreservesLegacyAndRefusesExecution(t *testing.T) {
 		t.Fatalf("unsupported execution started tools: %v", err)
 	}
 	p.Manifest.Components = legacyComponents310()
+	p.Manifest.Existing = []string{"acme/service/core.py"}
 	pa310Save(t, p)
 	model, err := RunModel(ctx, p.Dir, toolchain.Toolchain{})
 	if err != nil || model == nil || !model.ModelOnly {

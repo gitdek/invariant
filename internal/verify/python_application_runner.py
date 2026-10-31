@@ -558,7 +558,7 @@ def conformance():
     # the application-writable file. Only a completed collector can seal them.
     encode = json.dumps
     write, flush = events.write, events.flush
-    callers = (invariant_observe.Collector.write.__code__, invariant_observe.run.__code__)
+    callers = (invariant_observe.Collector.write.__code__, invariant_observe.Collector.declare.__code__, invariant_observe.run.__code__)
     frame = sys._getframe
 
     def collect(record):
