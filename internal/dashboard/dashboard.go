@@ -945,12 +945,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 					t := c.t
 					t.Projects++
 					t.Proved += p.Verified
-					if rep.Ratified != nil {
-						t.LocksChecked++
-						if rep.Proposal != rep.Ratified.Proposal {
-							t.BadLocks++
-						}
-					}
+					countLock(t, rep)
 					if c.seen[ps.key] {
 						continue
 					}
@@ -1231,6 +1226,20 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 		p.Factory = rt.Issue > 0
 	}
 	return p
+}
+
+// countLock counts a project's lock in t when the gate checked it against
+// its ratification: a comment, or, for a lock ratified by hand, a person's
+// ratify line in the journal (D-0208). It's a bad lock when it isn't the
+// proposal its ratification names.
+func countLock(t *Totals, rep *verify.Report) {
+	if rep.Ratified == nil && rep.Journal == nil {
+		return
+	}
+	t.LocksChecked++
+	if !rep.RatificationMatches() {
+		t.BadLocks++
+	}
 }
 
 // nowLine says what the factory is doing, or what it's waiting for.

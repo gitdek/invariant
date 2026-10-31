@@ -21,8 +21,11 @@ import (
 //
 // The core knows each step's effects, not the issue protocol's rules. The
 // protocol still decides which steps there are (D-0064). The posts the
-// core's model leaves out, a CI failure, a closed pull request and the limit
-// on stopped builds, are the protocol's alone.
+// core's model leaves out, a CI failure and the limit on stopped builds, are
+// the protocol's alone. Since #271 the core also has a writer's retry that
+// replaces a failed draft, with someone else closing or merging a pull
+// request (D-0203), but the watcher maps none of its steps onto those yet: a
+// closed pull request is still the protocol's alone.
 
 // errOutsideRecovery is what an effect the core doesn't allow fails with.
 var errOutsideRecovery = errors.New("the factory's recovery rules don't allow this effect")
@@ -33,9 +36,10 @@ const (
 	another = 1
 )
 
-// step is the step in hand, as every watcher can see it.
+// step is the step in hand, as every watcher can see it. A pull request the
+// build opened is a ready one, as far as these steps are concerned.
 type step struct {
-	given     []int // the commands a writer gave for it: recovery.Solve, Ratify, Note or Retry
+	given     []int // the commands a writer gave for it: recovery.Solve, Ratify or Note
 	posted    []int // the steps already answered
 	runs      map[int]RunState
 	ratPushed bool
@@ -64,7 +68,13 @@ func (f *Factory) repo(s step) recovery.Repo {
 			r.Runs[k] = recovery.RunDone
 		}
 	}
-	r.RatPushed, r.CodePushed, r.PROpen, r.Merged = s.ratPushed, s.codePushed, s.prOpen, s.merged
+	r.RatPushed, r.CodePushed, r.Opened, r.Merged = s.ratPushed, s.codePushed, s.prOpen, s.merged
+	switch {
+	case s.merged:
+		r.PR = recovery.PRMerged
+	case s.prOpen:
+		r.PR = recovery.PRReady
+	}
 	r.GatePassed, r.Mergeable = s.gatePassed, s.mergeable
 	r.Lease = another
 	if f.holds() {
@@ -122,7 +132,9 @@ func noting() step {
 }
 
 // watcher is this watcher in the core's terms, in the agent run for key,
-// or in none.
+// or in none. Its run is the latest build attempt's, the core's attempt 0 as
+// repo leaves it: until #271's plumbing, no retry replaces a draft, so no
+// build has a newer attempt (D-0212).
 func watcher(inRun int) recovery.Watcher {
 	w := recovery.NewWatcher(me)
 	w.InRun = inRun
@@ -156,8 +168,10 @@ func (f *Factory) canPushCode(s step) bool {
 	return ok
 }
 
+// canOpenPullRequest says whether the build may open its pull request. The
+// core allows a draft exactly when it allows a ready one.
 func (f *Factory) canOpenPullRequest(s step) bool {
-	_, ok := f.repo(s).OpenPullRequest(watcher(recovery.NoRun), recovery.Build)
+	_, ok := f.repo(s).OpenPullRequest(watcher(recovery.NoRun), recovery.Build, true)
 	return ok
 }
 

@@ -44,6 +44,11 @@ type Report struct {
 	// its lock holds now. The two must agree.
 	Ratified *project.Ratification `json:"ratified,omitempty"`
 	Proposal string                `json:"proposal,omitempty"`
+	// Journal is the ratification a lock ratified by hand names instead, as
+	// the journal of the repository the project is in records it, when that
+	// repository keeps one (D-0204, D-0208). It must name what the lock
+	// holds now, too.
+	Journal *JournalRatification `json:"journal,omitempty"`
 	// ModelOnly marks a check of the model alone, with no code and no build,
 	// as the factory runs on a draft before anyone ratifies it.
 	ModelOnly bool              `json:"model_only,omitempty"`
@@ -293,9 +298,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		// records, if any (#179).
 		Agent: p.Manifest.Agent,
 	}
-	if l := p.Lock; l.Ratified != nil {
-		r.Ratified, r.Proposal = l.Ratified, project.ProposalHash(l.Bounds, l.Statements)
-	}
+	ratification(ctx, r, p.Dir, p.Lock)
 	switch lang.(type) {
 	case Go:
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
@@ -704,10 +707,19 @@ func modelPassed(r *Report) bool {
 	return ok
 }
 
-// RatificationMatches says whether the lock still holds what was ratified.
-// Hand-built projects are ratified in decisions/log.md instead, so they pass.
+// RatificationMatches says whether the lock still holds what was ratified:
+// the proposal a ratifying comment names, or the one a person's ratify line
+// names in the journal, for a lock ratified by hand. A lock ratified by hand
+// in a repository that keeps no journal has nothing here to match, so it
+// passes, as it always has.
 func (r *Report) RatificationMatches() bool {
-	return r.Ratified == nil || r.Proposal == r.Ratified.Proposal
+	switch {
+	case r.Ratified != nil:
+		return r.Proposal == r.Ratified.Proposal
+	case r.Journal != nil:
+		return r.Journal.Problem == "" && r.Proposal == r.Journal.Proposal
+	}
+	return true
 }
 
 // agree compares the implementation's exploration with TLC's.

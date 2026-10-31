@@ -80,8 +80,11 @@ type Event struct {
 	Record string `json:"record,omitempty"` // a one-way door's full record, relative to decisions/
 	Edges  []Edge `json:"edges,omitempty"`
 	With   string `json:"with,omitempty"` // the decision that supersedes this one
-	Prev   string `json:"prev"`
-	Hash   string `json:"hash"`
+	// Proposal is the exact proposal a person ratified, on a ratify line
+	// that names one: the ProposalHash of a lock ratified by hand (D-0208).
+	Proposal string `json:"proposal,omitempty"`
+	Prev     string `json:"prev"`
+	Hash     string `json:"hash"`
 }
 
 // seal sets the event's hash over its canonical encoding, which is its JSON
@@ -106,11 +109,22 @@ func (e Event) sealed() bool {
 	return e.Hash == want
 }
 
-// idPattern is a decision ID, alone or qualified by its project.
+// idPattern is a decision ID, alone or qualified by its project,
+// proposalPattern a proposal's hash, and personPattern a person: @ and a
+// GitHub login, letters and digits joined by single hyphens.
 var (
-	idPattern   = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?(D-\d{4,})$`)
-	mentionedID = regexp.MustCompile(`\bD-\d{4,}\b`)
+	idPattern       = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?(D-\d{4,})$`)
+	mentionedID     = regexp.MustCompile(`\bD-\d{4,}\b`)
+	proposalPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	personPattern   = regexp.MustCompile(`^@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
 )
+
+// IsPerson says whether who names a person, by their GitHub login after an
+// @, as @gitdek. A bot's login, such as one ending in [bot], isn't one, and
+// neither is anything else a ratify line's by could hold (D-0208).
+func IsPerson(who string) bool {
+	return len(who) <= 40 && personPattern.MatchString(who)
+}
 
 // Qualify turns a short ID into its store ID within project, and leaves a
 // qualified one as it is.
@@ -177,12 +191,22 @@ func ReadJournal(path string) ([]Event, error) {
 }
 
 // A Decision is one decision as its journal leaves it: its node, the edges
-// its lines record, and the decision that supersedes it, if one does. IDs
-// here are qualified by their project.
+// its lines record, the line that ratified it and the decision that
+// supersedes it, if they exist. IDs here are qualified by their project.
 type Decision struct {
 	Node
 	Edges        []Edge
+	Ratification *Ratification
 	SupersededBy string
+}
+
+// Ratification is a ratify line: the person who ratified a decision, when,
+// and the exact proposal they ratified with it, if they named one (D-0208).
+// A decision recorded as ratified when it was decided has none.
+type Ratification struct {
+	By       string `json:"by"`
+	At       string `json:"at"`
+	Proposal string `json:"proposal,omitempty"`
 }
 
 // fold reads one decision's journal lines into the decision, on
@@ -199,6 +223,9 @@ func fold(project string, events []Event) (Decision, error) {
 		where := fmt.Sprintf("%s/%s, line %d", project, e.ID, n+1)
 		if (e.Op == OpImport || e.Op == OpDecide) != (n == 0) {
 			return d, fmt.Errorf("%s: a journal's first line, and only its first, records the decision", where)
+		}
+		if e.Proposal != "" && (e.Op != OpRatify || !proposalPattern.MatchString(e.Proposal)) {
+			return d, fmt.Errorf("%s: only a ratify line names a proposal, as sha256: and 64 hex digits, not %q", where, e.Proposal)
 		}
 		for _, edge := range e.Edges {
 			if !edgeTypes[edge.Type] || edge.Type == Implements {
@@ -222,19 +249,23 @@ func fold(project string, events []Event) (Decision, error) {
 			if (e.Op == OpDecide && e.Door != "one-way" && e.Door != "two-way") || (e.Door == "one-way" && e.Status == "decided") {
 				return d, fmt.Errorf("%s: a decision's door is one-way or two-way, and a one-way door is proposed until it's ratified", where)
 			}
-			if e.Status == "ratified" && !strings.HasPrefix(e.Who, "@") {
-				return d, fmt.Errorf("%s: only a person ratifies, so a ratified decision's who is a person, not %q", where, e.Who)
+			if e.Status == "ratified" && !IsPerson(e.Who) {
+				return d, fmt.Errorf("%s: only a person ratifies, so a ratified decision's who is a person's GitHub login, not %q", where, e.Who)
 			}
 			d.Node = Node{ID: project + "/" + e.ID, Kind: "decision", Project: project, Date: e.Date, Door: e.Door,
 				Status: e.Status, Who: e.Who, Text: e.Text, Record: e.Record}
 		case OpRatify:
-			if !strings.HasPrefix(e.By, "@") {
-				return d, fmt.Errorf("%s: only a person ratifies, not %q", where, e.By)
+			if !IsPerson(e.By) {
+				return d, fmt.Errorf("%s: only a person ratifies, by their GitHub login, not %q", where, e.By)
+			}
+			if e.Date != "" || e.Door != "" || e.Status != "" || e.Who != "" || e.Text != "" || e.Record != "" || len(e.Edges) > 0 || e.With != "" {
+				return d, fmt.Errorf("%s: a ratify line says who ratified, when, and the proposal, if it names one, and nothing a decision records", where)
 			}
 			if d.Status == "ratified" || d.Status == "superseded" {
 				return d, fmt.Errorf("%s: it's %s already", where, d.Status)
 			}
 			d.Status, d.Who = "ratified", e.By
+			d.Ratification = &Ratification{By: e.By, At: e.At, Proposal: e.Proposal}
 		case OpSupersede:
 			with, err := Qualify(project, e.With)
 			if err != nil {
@@ -277,6 +308,21 @@ func Load(repo Repo) ([]Decision, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// Read reads one of a repository's own decisions from its journal, checked
+// and folded as Load reads every one. A decision the journal doesn't hold is
+// an error that wraps os.ErrNotExist.
+func Read(repo Repo, id string) (Decision, error) {
+	m := idPattern.FindStringSubmatch(strings.TrimSpace(id))
+	if m == nil || m[1] != "" {
+		return Decision{}, fmt.Errorf("%q isn't one of the repository's own decision IDs, such as D-0096", id)
+	}
+	events, err := ReadJournal(filepath.Join(repo.JournalDir(), m[2]+".jsonl"))
+	if err != nil {
+		return Decision{}, err
+	}
+	return fold(repo.Name, events)
 }
 
 // highest is the number of the highest decision in a repository's journal.
