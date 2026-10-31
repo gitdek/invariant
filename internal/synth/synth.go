@@ -51,9 +51,14 @@ type Job struct {
 	Effort string
 	// Timeout cuts the run off, counted from when it starts rather than
 	// from when it's asked for: a Codex run waits for its turn first
-	// (D-0138, D-0154), and the wait isn't the agent's time. Zero leaves
-	// the run uncut.
+	// (D-0138, D-0154), and the wait isn't the agent's time. Once the run
+	// starts, its provider retries, the waits before them and a Codex
+	// run's later turns all count against it (#261). Zero leaves the run
+	// uncut.
 	Timeout time.Duration
+	// allowance is where the run keeps its tool calls, for every server it
+	// starts to count against (#261).
+	allowance string
 }
 
 // Usage is how the agent's run went, by the agent's own account.
@@ -69,6 +74,10 @@ type Usage struct {
 	// Tokens is what the run used, where the agent reports tokens rather
 	// than a cost, as Codex does on an account (#153).
 	Tokens *Tokens `json:"tokens,omitempty"`
+	// CostIncomplete says CostUSD is a conservative estimate: an attempt
+	// ended before Claude Code said what it cost, so the rest of the run's
+	// budget counts as spent (#261).
+	CostIncomplete bool `json:"cost_incomplete,omitempty"`
 }
 
 // AddUsage adds every counter in next to total, keeping next's description of
@@ -77,6 +86,7 @@ func AddUsage(total, next Usage) Usage {
 	combined := next
 	combined.Turns += total.Turns
 	combined.CostUSD += total.CostUSD
+	combined.CostIncomplete = total.CostIncomplete || next.CostIncomplete
 	if total.ToolCalls != nil || next.ToolCalls != nil {
 		combined.ToolCalls = make(map[string]int, len(total.ToolCalls)+len(next.ToolCalls))
 		for tool, count := range total.ToolCalls {
@@ -328,7 +338,9 @@ func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Durati
 			return Usage{}, err
 		}
 		usage, err := backend.Run(ctx, job)
-		if timeoutErr := ctx.Err(); timeoutErr != nil {
+		// A provider that stayed unavailable until the allowance ran out is
+		// still why the run didn't finish, and its error keeps the cause.
+		if timeoutErr := ctx.Err(); timeoutErr != nil && !ProviderUnavailable(err) {
 			return usage, timeoutErr
 		}
 		return usage, err
@@ -434,6 +446,15 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	usage.Backend = o.Backend.Name()
 
 	r := &Result{Project: p.Manifest.Name, Usage: usage, Fallback: fallback}
+	if ProviderUnavailable(runErr) {
+		// The agent's provider never let it finish, so what it left is an
+		// interrupted attempt: nothing is staged or gated, whatever it would
+		// pass, and the build failed (#261).
+		r.GateRuns, _ = readGateRuns(gateLog)
+		r.Seconds = time.Since(start).Seconds()
+		writeJSON(filepath.Join(out, "synthesis.json"), r)
+		return r, fmt.Errorf("the agent's run failed: %w", runErr)
+	}
 	if r.Tampered, err = Tampered(p, ws); err != nil {
 		return nil, err
 	}
@@ -765,6 +786,9 @@ func Summary(r *Result) string {
 	}
 	fmt.Fprintf(&b, "**%s** %s, model %s, %d turns, about $%.2f by the agent's own estimate, %.0f seconds.\n\n",
 		verdict, r.Usage.Backend, r.Usage.Model, r.Usage.Turns, r.Usage.CostUSD, r.Seconds)
+	if r.Usage.CostIncomplete {
+		b.WriteString("The cost is a conservative estimate: an attempt ended before Claude Code said what it cost, so the rest of its budget counts as spent.\n\n")
+	}
 	if fb := r.Fallback; fb != nil {
 		fmt.Fprintf(&b, "The loop guard stopped the agent's first run, so it ran once more, at %s effort (D-0125). The first run's error: %s\n\n", fb.Effort, fb.Why)
 	}

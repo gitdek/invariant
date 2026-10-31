@@ -98,7 +98,10 @@ func (r *Report) AttributeComponentConformance(inv *project.ComponentInventory, 
 	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
 		return err
 	}
-	r.commitComponentEvidence(evidence)
+	if evidence.ContractTests, err = index.retainedContractTests(r.Components); err != nil {
+		return err
+	}
+	r.commitComponentEvidence(index, evidence)
 	return nil
 }
 
@@ -112,10 +115,8 @@ func (index *componentIndex) conformance(results []ComponentConformanceResult, b
 			return nil, fmt.Errorf("component conformance: target %q has no selected check %q", result.Target, result.Check)
 		}
 		v := result.Invocation
-		if v == nil || v.Kind != "conformance" || v.Check != result.Check || !slices.ContainsFunc(check.Invocations, func(selected project.ResolvedComponentInvocation) bool {
-			return sameComponentInvocation(*v, selected)
-		}) {
-			return nil, fmt.Errorf("component conformance: invocation does not match a selected check for %q", result.Target)
+		if err := matchComponentInvocation(v, "conformance", result.Check, check.Invocations); err != nil {
+			return nil, fmt.Errorf("component conformance: %q: %w", result.Target, err)
 		}
 		key := [3]string{result.Target, result.Check, v.ID}
 		if seen[key] {
@@ -132,9 +133,11 @@ func (index *componentIndex) conformance(results []ComponentConformanceResult, b
 		}
 		inputs := map[string]bool{}
 		for _, input := range result.Inputs {
-			c, ok := index.declarations[input.ID]
-			if !ok || input != c || inputs[input.ID] {
-				return nil, fmt.Errorf("component conformance: invalid, stale or duplicate input %q", input.ID)
+			if inputs[input.ID] {
+				return nil, fmt.Errorf("component conformance: duplicate input %q", input.ID)
+			}
+			if err := index.componentInput(input); err != nil {
+				return nil, fmt.Errorf("component conformance: %w", err)
 			}
 			inputs[input.ID] = true
 		}
@@ -237,13 +240,13 @@ func (index *componentIndex) retainConformance(old project.ComponentInventory, r
 	prior := slices.IndexFunc(old.Checks, func(c project.ResolvedComponentCheck) bool { return c.Target == row.Target })
 	if row.Target != row.Result.Target || row.Check != row.Result.Check || !ok || prior < 0 ||
 		(check.Proof == nil) != (old.Checks[prior].Proof == nil) {
-		return fmt.Errorf("component conformance: retained selection changed for %q", row.Target)
+		return fmt.Errorf("%w: component conformance: retained selection changed for %q", ErrStaleComponentEvidence, row.Target)
 	}
 	ids := []string{row.Target, row.Check}
 	ids = append(ids, row.Result.Checked...)
 	if check.Proof != nil {
 		if !slices.Equal(check.Proof.Contracts, old.Checks[prior].Proof.Contracts) {
-			return fmt.Errorf("component conformance: retained contracts changed for %q", row.Target)
+			return fmt.Errorf("%w: component conformance: retained contracts changed for %q", ErrStaleComponentEvidence, row.Target)
 		}
 		ids = append(ids, check.Proof.Contracts...)
 	}
@@ -256,7 +259,7 @@ func (index *componentIndex) retainConformance(old project.ComponentInventory, r
 		pos := slices.IndexFunc(declarations, func(c project.Component) bool { return c.ID == id })
 		c, ok := index.declarations[id]
 		if pos < 0 || !ok || declarations[pos] != c {
-			return fmt.Errorf("component conformance: retained declaration %q changed", id)
+			return fmt.Errorf("%w: component conformance: retained declaration %q changed", ErrStaleComponentEvidence, id)
 		}
 	}
 	return nil
