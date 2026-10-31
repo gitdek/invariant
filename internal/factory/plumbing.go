@@ -212,9 +212,14 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		return "", "", nil, nil, err
 	}
 	// A retry's build of a plan starts its own branch from the plan's
-	// ratification, until it has pushed its code there (#271).
+	// ratification, until it has pushed its code there (#271). A clone that
+	// can't reach that commit any more, once the draft's branch is gone,
+	// can't build it, and says so for a person (D-0220).
 	from := "origin/" + m.Branch
 	if _, err := f.Repo.RevParse(ctx, from); err != nil && m.From != "" {
+		if _, err := f.Repo.RevParse(ctx, m.From); err != nil {
+			return "", agent, nil, ratificationGone{fmt.Sprintf("`%s`, the commit with the plan's ratification that this build starts from, is gone", m.From)}, nil
+		}
 		from = m.From
 	}
 	wt, err := f.Repo.Worktree(ctx, m.Branch, from)
@@ -234,7 +239,7 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	f.runsAgent(n, agent, out)
 	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
-	if !f.holds() {
+	if !f.holdsFor(ctx) {
 		return "", "", nil, nil, errLeaseLost
 	}
 	// As for a project, the run's error, summary and review name the paths on
@@ -347,6 +352,9 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
+		return err
+	}
 	pr, found, err := f.buildPullRequest(ctx, m.Branch, ratified)
 	if err != nil {
 		return err
@@ -366,6 +374,9 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		}
 	}
 	next.PR = pr.Number
+	if still, err := f.stillBuilding(ctx, n, ratified); err != nil || !still {
+		return err
+	}
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
 		return err
 	}

@@ -284,23 +284,20 @@ func TestPlumbingDraftRetryPostsMatchRebuilding(t *testing.T) {
 			if merged.Marker.PR != pr || !reflect.DeepEqual(r.gh.merged, []int{pr}) || len(r.gh.prs) != 2 || b.calls != 2 {
 				t.Fatalf("only the new build's pull request merges: %+v, merged %v", merged.Marker, r.gh.merged)
 			}
+			// Follow the other way the posts offer, from the same failure:
+			// a person closes the draft and revises, which drafts again and
+			// builds nothing until the new draft is ratified.
+			r, b, failed = retry263Start(t, outcome, "page/page.go")
+			r.gh.prs[failed.Marker.PR].State = "closed"
+			r.poll()
+			r.expect(1, KindClosed)
+			r.gh.say(1, "gitdek", "draft the same plan again\n\n/invariant revise")
+			r.poll()
+			r.expect(1, KindProposal, LabelProposal)
+			if b.calls != 1 || len(r.form.requests) != 2 || len(r.gh.prs) != 1 {
+				t.Fatal("closing and revising must wait for a new ratification before building")
+			}
 		})
-	}
-	// The other way the posts offer: a person closes the draft and revises,
-	// which drafts again and builds nothing until the new draft is ratified.
-	// It stays in the parent: the plan checker's output parser treats a
-	// passing subtest as a passing acceptance test.
-	{
-		r, b, failed := retry263Start(t, "failed tests", "page/page.go")
-		r.gh.prs[failed.Marker.PR].State = "closed"
-		r.poll()
-		r.expect(1, KindClosed)
-		r.gh.say(1, "gitdek", "draft the same plan again\n\n/invariant revise")
-		r.poll()
-		r.expect(1, KindProposal, LabelProposal)
-		if b.calls != 1 || len(r.form.requests) != 2 || len(r.gh.prs) != 1 {
-			t.Fatal("closing and revising must wait for a new ratification before building")
-		}
 	}
 }
 

@@ -24,7 +24,12 @@ func TestTheTimelineNamesTheDraftARebuildReplaces(t *testing.T) {
 		{ID: 1, User: bot, CreatedAt: at(1), Body: atOnceMarker(t, factory.Marker{Kind: factory.KindFailed, Failure: factory.FailGate, PR: 700, Proposal: plan})},
 		{ID: 2, User: github.User{Login: "gitdek"}, CreatedAt: at(2), Body: "/invariant retry"},
 		{ID: 3, User: bot, CreatedAt: at(3), Body: atOnceMarker(t, factory.Marker{Kind: factory.KindRatified, ReplyTo: []int64{2}, Replaces: 700, Proposal: plan})},
-		{ID: 4, User: bot, CreatedAt: at(4), Body: atOnceMarker(t, factory.Marker{Kind: factory.KindPR, PR: 701, Replaces: 700, Proposal: plan})},
+		// The retry's build stopped, and a second retry builds again: it
+		// closes nothing, since #700 is closed already.
+		{ID: 4, User: bot, CreatedAt: at(4), Body: atOnceMarker(t, factory.Marker{Kind: factory.KindFailed, Failure: factory.FailStopped, Replaces: 700, Proposal: plan})},
+		{ID: 5, User: github.User{Login: "gitdek"}, CreatedAt: at(5), Body: "/invariant retry"},
+		{ID: 6, User: bot, CreatedAt: at(6), Body: atOnceMarker(t, factory.Marker{Kind: factory.KindRatified, ReplyTo: []int64{5}, Replaces: 700, Proposal: plan})},
+		{ID: 7, User: bot, CreatedAt: at(7), Body: atOnceMarker(t, factory.Marker{Kind: factory.KindPR, PR: 701, Replaces: 700, Proposal: plan})},
 	}
 	lane := Lane(is, comments, bot.Login, now)
 	var asked, did []string
@@ -36,10 +41,13 @@ func TestTheTimelineNamesTheDraftARebuildReplaces(t *testing.T) {
 			did = append(did, strings.ToLower(e.Text))
 		}
 	}
-	if len(asked) != 1 || !strings.Contains(asked[0], "build the plan again, replacing #700") || strings.Contains(asked[0], "won't review") {
-		t.Errorf("the retry's entry must say it asked to build the plan again, replacing #700: %q", asked)
+	if len(asked) != 2 || !strings.Contains(asked[0], "build the plan again, replacing #700") || strings.Contains(asked[0], "won't review") {
+		t.Errorf("the first retry's entry must say it asked to build the plan again, replacing #700: %q", asked)
 	}
-	if len(did) != 1 || !strings.Contains(did[0], "closed #700") || !strings.Contains(did[0], "building the plan again") {
-		t.Errorf("the factory's entry must say it closed #700 and built the plan again: %q", did)
+	if len(did) != 2 || !strings.Contains(did[0], "closed #700") || !strings.Contains(did[0], "building the plan again") {
+		t.Errorf("the factory's first entry must say it closed #700 and built the plan again: %q", did)
+	}
+	if len(did) == 2 && (strings.Contains(did[1], "closed") || !strings.Contains(did[1], "building the plan again")) {
+		t.Errorf("the second retry's build closes nothing, so its entry mustn't say it closed #700: %q", did[1])
 	}
 }

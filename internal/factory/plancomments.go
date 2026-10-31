@@ -100,6 +100,13 @@ func cantRebuild(pr int) string {
 		"and I'll build it once you ratify the new draft.", pr)
 }
 
+// cantRebuildFrom says what a person does when a retry's build can't start,
+// since what holds the plan's ratification is gone: draft the plan again,
+// as the draft it replaced is closed already (D-0220).
+func cantRebuildFrom() string {
+	return "\n\nA person needs to look at this. Comment `/invariant revise` to draft the plan again, and I'll build it once you ratify the new draft."
+}
+
 // rebuildOffer says what a writer's retry of a plan's failed draft, pr,
 // does, and what else a person can do (#271, D-0218): a retry closes the draft and
 // builds the same ratified plan again, review included, and the factory

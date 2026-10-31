@@ -613,3 +613,259 @@ func TestARetryWhoseDraftBranchIsGoneNeedsAPerson(t *testing.T) {
 		t.Fatal("drafting the plan again builds nothing before the new draft is ratified")
 	}
 }
+
+// answersTo counts the factory's posts that answer comment id.
+func answersTo(r *rig, id int64) int {
+	n := 0
+	for _, p := range r.gh.posts(1) {
+		if slices.Contains(p.Marker.ReplyTo, id) {
+			n++
+		}
+	}
+	return n
+}
+
+// A watcher that pauses just after storing a retry's record, while another
+// watcher closes the draft, answers the retry, builds and opens the
+// successor, answers nothing when it comes back: the retry is answered once,
+// with one build for it and one successor (#357's review).
+func TestAWatcherBackFromAPauseAnswersNoRetryAnotherAnswered(t *testing.T) {
+	for _, polls := range []int{1, 2} { // the other watcher answers; or answers, builds and opens the successor
+		t.Run(fmt.Sprintf("the other watcher polls %d times", polls), func(t *testing.T) {
+			r, b, failed := rebuild271Start(t, 1, "page/page.go")
+			other := freshWatcher(r, r.f.GitHub)
+			other.Plumbing = r.f.Plumbing
+			paused := false
+			r.f.Repo = recordHook{Repo: r.f.Repo, after: func() {
+				if paused {
+					return
+				}
+				paused = true
+				for i := 0; i < polls; i++ {
+					if err := other.Poll(context.Background()); err != nil {
+						t.Fatalf("the other watcher: %v", err)
+					}
+				}
+			}}
+			command := r.gh.say(1, "gitdek", "/invariant retry")
+			for i := 0; i < 4; i++ {
+				r.poll()
+			}
+			if n := answersTo(r, command.ID); n != 1 {
+				t.Errorf("the retry was answered %d times", n)
+			}
+			last := r.gh.last(1)
+			if b.calls != 2 || len(r.gh.prs) != 2 || last.Marker.Kind != KindPR || last.Marker.Replaces != failed.Marker.PR {
+				t.Fatalf("one retry must lead to one build and one successor: %d builds, %d pull requests, last post %+v", b.calls, len(r.gh.prs), last.Marker)
+			}
+		})
+	}
+}
+
+// finishHook does something just after the factory records a build's
+// result, as another watcher might while this one pauses.
+type finishHook struct {
+	Repo
+	after func()
+}
+
+func (h finishHook) Finish(ctx context.Context, issue int, step, result string) error {
+	err := h.Repo.Finish(ctx, issue, step, result)
+	if strings.HasPrefix(step, "build-") && h.after != nil {
+		after := h.after
+		h.after = nil
+		after()
+	}
+	return err
+}
+
+// A watcher that pauses after recording a retry's build's result, while
+// another publishes that build, publishes nothing of it when it comes back:
+// no second pull request, and no second post (#357's review).
+func TestAWatcherBackFromAPausePublishesNothingAnotherPublished(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	r.expect(1, KindRatified, LabelBuilding)
+	other := freshWatcher(r, r.f.GitHub)
+	other.Plumbing = r.f.Plumbing
+	fired := false
+	r.f.Repo = finishHook{Repo: r.f.Repo, after: func() {
+		if fired {
+			return
+		}
+		fired = true
+		if err := other.Poll(context.Background()); err != nil {
+			t.Fatalf("the other watcher: %v", err)
+		}
+	}}
+	r.poll()
+	posts := 0
+	for _, p := range r.gh.posts(1) {
+		if p.Marker.Kind == KindPR {
+			posts++
+		}
+	}
+	if b.calls != 2 || len(r.gh.prs) != 2 || posts != 1 || r.gh.last(1).Marker.Replaces != failed.Marker.PR {
+		t.Fatalf("the build must be published once: %d builds, %d pull requests, %d pull request posts", b.calls, len(r.gh.prs), posts)
+	}
+}
+
+// fetchHook does something just before the factory fetches.
+type fetchHook struct {
+	Repo
+	before func()
+}
+
+func (h fetchHook) Fetch(ctx context.Context) error {
+	if h.before != nil {
+		h.before()
+	}
+	return h.Repo.Fetch(ctx)
+}
+
+// Someone who closes the draft after the factory read it open, but before
+// the retry's record is stored, closed it themselves: the retry is answered
+// without a build, as the recovery model has it (#357's review).
+func TestADraftClosedJustBeforeTheRecordIsSomeoneElses(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	old := failed.Marker.PR
+	armed := false
+	r.f.Repo = fetchHook{Repo: r.f.Repo, before: func() {
+		if armed {
+			armed = false
+			r.gh.prs[old].State = "closed"
+		}
+	}}
+	command := r.gh.say(1, "gitdek", "/invariant retry")
+	armed = true
+	for i := 0; i < 3; i++ {
+		r.poll()
+	}
+	recorded, err := r.f.Repo.Recorded(context.Background(), 1, replaceStepName(Command{Comment: command.ID}))
+	if b.calls != 1 || len(r.gh.prs) != 1 || recorded != "" || err != nil || answersTo(r, command.ID) != 1 {
+		t.Fatalf("a close before the record is someone else's: %d builds, %d pull requests, record %q, %d answers", b.calls, len(r.gh.prs), recorded, answersTo(r, command.ID))
+	}
+}
+
+// A retry's build that a clone on another machine can't start, since the
+// old draft's branch, with the plan's ratification, is gone, says so for a
+// person instead of failing every poll (#357's review, D-0220).
+func TestARetrysBuildWithoutItsRatificationNeedsAPerson(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	r.expect(1, KindRatified, LabelBuilding)
+	git(t, r.origin, "branch", "-D", failed.Marker.Branch)
+	clone := r.f.Repo.(Clone)
+	clone.Dir = t.TempDir() + "/clone"
+	clone.Remote = "file://" + r.origin // a real transport, which fetches only what refs reach
+	if err := clone.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f := freshWatcher(r, r.f.GitHub)
+	f.Repo, f.Work, f.Plumbing = clone, t.TempDir(), r.f.Plumbing
+	if err := f.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	said := r.gh.last(1)
+	visible := retry263Visible(said.Comment.Body)
+	if said.Marker.Kind != KindFailed || said.Marker.Failure != FailStopped || !strings.Contains(visible, "is gone") ||
+		!strings.Contains(visible, "/invariant revise") || b.calls != 1 {
+		t.Fatalf("the build must say for a person that it can't start: %+v\n%s", said.Marker, said.Comment.Body)
+	}
+}
+
+// A retry applies to the failure that was the issue's latest when it was
+// posted: a second retry, given while the first draft was open, gets a note
+// once the first retry's build fails too, and builds nothing (#357's
+// review).
+func TestAQueuedRetryDoesntRebuildTheNextDraft(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 2, "page/page.go")
+	r.gh.say(1, "gitdek", "/invariant retry")
+	second := r.gh.say(1, "gitdek", "/invariant retry")
+	for i := 0; i < 4; i++ {
+		r.poll()
+	}
+	var next Post
+	for _, p := range r.gh.posts(1) {
+		if p.Marker.Kind == KindFailed && p.Marker.Replaces == failed.Marker.PR {
+			next = p
+		}
+	}
+	var answer Post
+	for _, p := range r.gh.posts(1) {
+		if slices.Contains(p.Marker.ReplyTo, second.ID) {
+			answer = p
+		}
+	}
+	if next.Marker.PR == 0 || r.gh.prs[next.Marker.PR].State != "open" || answer.Marker.Kind != KindNote || b.calls != 2 ||
+		!strings.Contains(retry263Visible(answer.Comment.Body), "came before") {
+		t.Fatalf("the queued retry must get a note, and leave the second draft open: second draft %+v, answer %+v, %d builds\n%s", next.Marker, answer.Marker, b.calls, answer.Comment.Body)
+	}
+}
+
+// A pull request from the build's branch that was opened before the build's
+// post is an earlier build's, so the build opens its own instead of adopting
+// it (#271).
+func TestAPullRequestFromBeforeTheBuildIsntItsOwn(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	building := r.expect(1, KindRatified, LabelBuilding)
+	// An earlier pull request from the same branch, closed before the build
+	// started.
+	r.gh.nextPR++
+	earlier := r.gh.nextPR
+	r.gh.prs[earlier] = &github.PullRequest{Number: earlier, State: "closed", Head: github.Ref{Ref: building.Marker.Branch}, CreatedAt: "2026-09-25T09:00:00Z"}
+	r.poll()
+	built := r.expect(1, KindPR, LabelPR)
+	if built.Marker.PR == earlier || built.Marker.PR == failed.Marker.PR || b.calls != 2 || r.gh.prs[built.Marker.PR].State != "open" {
+		t.Fatalf("the build must open its own pull request, not adopt #%d: %+v", earlier, built.Marker)
+	}
+}
+
+// A watcher that loses the lease to another, and takes it back, takes no
+// effect for a step it started before: what that step read may be older
+// than the other watcher's effects (D-0227).
+func TestAStepFromAnEarlierTenureTakesNoEffect(t *testing.T) {
+	ctx := context.Background()
+	origin, _ := gitRepos(t)
+	start := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	nowA, nowB := start, start
+	a, b := leaseFactory(t, origin, "watcher-a", &nowA), leaseFactory(t, origin, "watcher-b", &nowB)
+	gh := a.GitHub.(*fakeGitHub)
+	gh.open(1, "gitdek", "a buffer", "/invariant solve")
+	g := leasedGitHub{a.GitHub, a}
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	step := a.inTenure(ctx)
+	if _, err := g.PostComment(step, 1, "first"); err != nil {
+		t.Fatalf("a step in the watcher's tenure = %v", err)
+	}
+	// a stalls past its lease, b takes it, and b stops; then a takes it back.
+	nowA, nowB = start.Add(7*time.Minute), start.Add(7*time.Minute)
+	if held, err := b.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	nowA = start.Add(14 * time.Minute)
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	if _, err := g.PostComment(step, 1, "stale"); !errors.Is(err, errLeaseLost) {
+		t.Fatalf("a step from before another watcher's tenure = %v; want errLeaseLost", err)
+	}
+	if _, err := g.PostComment(a.inTenure(ctx), 1, "fresh"); err != nil {
+		t.Fatalf("a step in the new tenure = %v", err)
+	}
+	// Renewing the lease it holds keeps the tenure.
+	renewed := a.inTenure(ctx)
+	nowA = start.Add(17 * time.Minute)
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	if _, err := g.PostComment(renewed, 1, "renewed"); err != nil {
+		t.Fatalf("a step across a renewal = %v", err)
+	}
+}

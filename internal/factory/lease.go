@@ -28,7 +28,10 @@ import (
 // leaseSkew after, by theirs, so clocks that disagree by less than that
 // can't let two act at once. Each of its running steps checks for itself, so
 // losing the lease stops every one before its next effect, and each drops
-// its agent run (D-0113).
+// its agent run (D-0113). A watcher that takes the lease back after another
+// held it starts a new tenure, and a step it started in an earlier one takes
+// no effect: what it read of the issue may be older than the other watcher's
+// effects (D-0227).
 
 const leaseRef = "refs/invariant/lease"
 
@@ -122,6 +125,17 @@ type lease struct {
 	sha     string    // the lease it last pushed
 	until   time.Time // when its lease runs out, by its own clock; zero when it holds none
 	waiting string    // the holder it last said it was waiting for
+	tenure  uint64    // counts each time it took the lease from where it last left it
+}
+
+// tenureKey is the context key for the tenure a step started in.
+type tenureKey struct{}
+
+// inTenure is ctx for a step that starts now, in this watcher's tenure.
+func (f *Factory) inTenure(ctx context.Context) context.Context {
+	f.lease.mu.Lock()
+	defer f.lease.mu.Unlock()
+	return context.WithValue(ctx, tenureKey{}, f.lease.tenure)
 }
 
 // hold takes the lease, or renews it, unless another watcher holds it. It
@@ -159,6 +173,11 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	if rec.Holder != f.Holder || sha == "" {
 		f.logf("holding the lease on %s as %s", f.Repository, f.Holder)
 	}
+	// The lease isn't where this watcher left it, so another watcher may
+	// have acted on its issues since: a new tenure begins.
+	if sha != f.lease.sha {
+		f.lease.tenure++
+	}
 	f.lease.sha, f.lease.until, f.lease.waiting = pushed, next.Until, ""
 	return true, nil
 }
@@ -172,6 +191,18 @@ func (f *Factory) holds() bool {
 	f.lease.mu.Lock()
 	defer f.lease.mu.Unlock()
 	return f.now().Before(f.lease.until.Add(-leaseSkew))
+}
+
+// holdsFor says whether the step ctx belongs to may act: this watcher holds
+// the lease, in the tenure the step started in, if it started in one.
+func (f *Factory) holdsFor(ctx context.Context) bool {
+	if f.LeaseFor == 0 {
+		return true
+	}
+	f.lease.mu.Lock()
+	defer f.lease.mu.Unlock()
+	tenure, ok := ctx.Value(tenureKey{}).(uint64)
+	return f.now().Before(f.lease.until.Add(-leaseSkew)) && (!ok || tenure == f.lease.tenure)
 }
 
 // keepLease renews the lease every poll while ctx lasts, so it holds through
@@ -196,63 +227,63 @@ type leasedGitHub struct {
 }
 
 func (g leasedGitHub) PostComment(ctx context.Context, issue int, body string) (c github.Comment, err error) {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return c, errLeaseLost
 	}
 	return g.GitHub.PostComment(ctx, issue, body)
 }
 
 func (g leasedGitHub) CreateIssue(ctx context.Context, is github.NewIssue) (i github.Issue, err error) {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return i, errLeaseLost
 	}
 	return g.GitHub.CreateIssue(ctx, is)
 }
 
 func (g leasedGitHub) AddLabels(ctx context.Context, issue int, labels ...string) error {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return g.GitHub.AddLabels(ctx, issue, labels...)
 }
 
 func (g leasedGitHub) RemoveLabel(ctx context.Context, issue int, label string) error {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return g.GitHub.RemoveLabel(ctx, issue, label)
 }
 
 func (g leasedGitHub) CreatePullRequest(ctx context.Context, pr github.NewPullRequest) (p github.PullRequest, err error) {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return p, errLeaseLost
 	}
 	return g.GitHub.CreatePullRequest(ctx, pr)
 }
 
 func (g leasedGitHub) Merge(ctx context.Context, n int, sha, method string) (string, error) {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return "", errLeaseLost
 	}
 	return g.GitHub.Merge(ctx, n, sha, method)
 }
 
 func (g leasedGitHub) MarkReady(ctx context.Context, n int) error {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return g.GitHub.MarkReady(ctx, n)
 }
 
 func (g leasedGitHub) ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error) {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return github.PullRequest{}, errLeaseLost
 	}
 	return g.GitHub.ClosePullRequest(ctx, n)
 }
 
 func (g leasedGitHub) DeleteBranch(ctx context.Context, branch string) error {
-	if !g.f.holds() {
+	if !g.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return g.GitHub.DeleteBranch(ctx, branch)
@@ -265,28 +296,28 @@ type leasedRepo struct {
 }
 
 func (r leasedRepo) Push(ctx context.Context, worktree, branch string) error {
-	if !r.f.holds() {
+	if !r.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return r.Repo.Push(ctx, worktree, branch)
 }
 
 func (r leasedRepo) PushCommit(ctx context.Context, commit, branch string) error {
-	if !r.f.holds() {
+	if !r.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return r.Repo.PushCommit(ctx, commit, branch)
 }
 
 func (r leasedRepo) Record(ctx context.Context, issue int, step, what string) error {
-	if !r.f.holds() {
+	if !r.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return r.Repo.Record(ctx, issue, step, what)
 }
 
 func (r leasedRepo) Finish(ctx context.Context, issue int, step, result string) error {
-	if !r.f.holds() {
+	if !r.f.holdsFor(ctx) {
 		return errLeaseLost
 	}
 	return r.Repo.Finish(ctx, issue, step, result)
