@@ -49,10 +49,14 @@ func (f *thinking239Fixture) setSteps(t *testing.T, steps ...dashboard.Step) {
 		steps[i].Since = f.since
 		steps[i].Run = "build-20261029-120000"
 	}
-	if err := dashboard.WriteStatus(f.status, dashboard.Status{
+	// Update keeps a step that carries an end as the watcher's recorded
+	// completion (#269).
+	st := dashboard.Status{
 		PID: os.Getpid(), Repo: "gitdek/app", Started: f.since, Heartbeat: f.since,
-		Every: 30, Limit: 9000, Steps: steps,
-	}); err != nil {
+		Every: 30, Limit: 9000,
+	}
+	st.Update(steps, f.since)
+	if err := dashboard.WriteStatus(f.status, st); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -188,7 +192,8 @@ func TestLiveCodexReportsCompletedTurnThinking(t *testing.T) {
 	// Reading from the beginning and retaining an ended card give the same sum.
 	f.restart()
 	thinking239Count(t, f.card(t, 7), 4180, true)
-	f.setSteps(t)
+	ended := f.since.Add(time.Minute)
+	f.setSteps(t, dashboard.Step{Issue: 7, Doing: "building", Agent: "codex", Ended: &ended})
 	c = f.card(t, 7)
 	thinking239Count(t, c, 4180, true)
 	if c.Ended == nil || c.Now != "" {

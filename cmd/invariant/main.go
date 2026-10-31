@@ -867,7 +867,10 @@ func watchCmd(ctx context.Context, args []string) int {
 	// Each coding agent runs every role for the issues it takes: drafting,
 	// building, and a plumbing plan's build and its review (#173). A
 	// plumbing issue's plan is built with tests, not proofs, and a second
-	// agent reviews it (D-0105). Only builds fall back (D-0125).
+	// agent reviews it (D-0105). Only builds fall back (D-0125). Every draft
+	// and build keeps its agent's public activity in its run's directory
+	// before its workspace is cleaned up, for the dashboard's card once the
+	// step has ended (#269).
 	claudeCode := func(budget float64) synth.ClaudeCode {
 		return synth.ClaudeCode{Binary: *claude, Model: *model, BudgetUSD: budget, MaxTurns: *turns, Effort: *effort}
 	}
@@ -875,7 +878,8 @@ func watchCmd(ctx context.Context, args []string) int {
 	top := map[string]string{"claude-code": *effort, "codex": *cx.effort}
 	runners := map[string]factory.Runners{}
 	for _, name := range ready {
-		drafts, builds := backends[name][0], backends[name][1]
+		drafts := dashboard.RecordActivity(backends[name][0], logger.Printf)
+		builds := dashboard.RecordActivity(backends[name][1], logger.Printf)
 		runners[name] = factory.Runners{
 			Formalizer: formalize.Formalizer{Backend: drafts, Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 			Builder: factory.Synthesis{Options: synth.Options{Backend: builds, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc,
@@ -904,25 +908,56 @@ func watchCmd(ctx context.Context, args []string) int {
 	// watcher's name on its lease, which the page follows, and the steps in
 	// hand, each of which the page shows (D-0113), with the coding agent it
 	// runs (#179) and the run's directory (#236). Issue, doing and since name
-	// the longest-running step that's doing something.
+	// the longest-running step that's doing something. It also holds the
+	// agent steps that ended last, with when they really ended, which outlive
+	// the watcher: the next one starts from them (#269).
 	statusPath := dashboard.StatusPath(*work, *repo)
 	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
-	f.Activity = func(steps []factory.Step) {
-		status.Heartbeat = time.Now().UTC()
-		status.Issue, status.Doing, status.Since, status.Steps = 0, "", nil, nil
-		for _, s := range steps {
-			since := s.Since.UTC()
-			status.Steps = append(status.Steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: since, Agent: s.Agent, Run: s.Run})
-			if s.Doing != "" && (status.Since == nil || since.Before(*status.Since)) {
-				status.Issue, status.Doing, status.Since = s.Issue, s.Doing, &since
-			}
-		}
+	if previous, err := dashboard.ReadStatus(statusPath); err != nil {
+		logger.Printf("status: %v", err)
+	} else if previous.Repo == *repo {
+		status.Finished = previous.Finished
+	}
+	var statusMu sync.Mutex
+	writeStatus := func(steps []dashboard.Step) {
+		status.Update(steps, time.Now().UTC())
 		if err := dashboard.WriteStatus(statusPath, status); err != nil {
 			logger.Printf("status: %v", err)
 		}
 	}
+	f.Activity = func(steps []factory.Step) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		running := make([]dashboard.Step, 0, len(steps))
+		for _, s := range steps {
+			running = append(running, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: s.Since.UTC(), Agent: s.Agent, Run: s.Run})
+		}
+		writeStatus(running)
+	}
+	f.Finished = func(s factory.Step) {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		// Finished is heard under the factory's lock, so the steps still
+		// running are the ones last written, less the one that ended. Its
+		// agent ran under this watcher's limit.
+		steps := make([]dashboard.Step, 0, len(status.Steps)+1)
+		for _, step := range status.Steps {
+			if step.Issue != s.Issue {
+				steps = append(steps, step)
+			}
+		}
+		ended := s.Ended.UTC()
+		writeStatus(append(steps, dashboard.Step{Issue: s.Issue, Doing: s.Doing, Since: s.Since.UTC(), Agent: s.Agent, Run: s.Run, Ended: &ended, Limit: status.Limit}))
+	}
 	f.Activity(nil)
-	defer os.Remove(statusPath)
+	// A watcher that stops says so, and leaves the steps that ended last for
+	// the dashboard and the watcher after it.
+	defer func() {
+		statusMu.Lock()
+		defer statusMu.Unlock()
+		status.PID = 0
+		writeStatus(nil)
+	}()
 	logger.Printf("watching %s as @%s; commits by %s <%s>", *repo, actor, clone.Name, clone.Email)
 	if *once {
 		// The poll's steps can run on after it returns, so it waits for them.

@@ -73,15 +73,17 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 	return post("pull request", body, m)
 }
 
-// retriedComment answers a writer's retry of a pull request that failed. It
-// promises a merge only when the factory will make one: a plan's pull
-// request that changes the trusted base waits for a person (D-0105).
-func retriedComment(pr int, trusted []string, m Marker) string {
-	merge := "I'll merge it once CI's `invariant/gate` passes on its current head."
+// retriedComment answers a writer's retry of a pull request that failed, and
+// says what watching it again leads to (#263). It promises a merge only when
+// the factory will make one: a plan's pull request that changes the trusted
+// base waits for a person (D-0105). trusted is what its branch changes there
+// now, as the scope check before a merge reads it.
+func retriedComment(pr github.PullRequest, trusted []string, m Marker) string {
+	body := fmt.Sprintf("Watching #%d again. %s", pr.Number, watchedAgain(pr, len(trusted) > 0, false))
 	if len(trusted) > 0 {
-		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on its current head, a person merges it.", codeList(trusted))
+		body += fmt.Sprintf("\n\nIt changes these files in the trusted base: %s.", codeList(trusted))
 	}
-	return post("pull request", fmt.Sprintf("Watching #%d again. %s", pr, merge), m)
+	return post("pull request", body, m)
 }
 
 func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr error, m Marker) string {
@@ -107,16 +109,31 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 		return post("needs a person", b.String(), m,
 			"\n\nA person needs to look at this. Comment `/invariant retry` to build again, or say what to change and comment `/invariant revise`.")
 	}
-	// The factory drafts again only once the pull request is closed (#218).
+	// A retry watches the pull request again, and the factory drafts again
+	// only once it's closed (#218, #263). The trusted files are detail in the
+	// body, which a long post clips, while its closing keeps the commands and
+	// what they do whole (D-0167).
 	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
-	closing := fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to build again. "+
-		"To change the plan instead, close #%d, say what to change, and comment `/invariant revise`.", pr.Number)
+	files, trusted, unsure := trustedOf(m)
+	if len(files) > 0 {
+		fmt.Fprintf(&b, " It changes these files in the trusted base: %s.", codeList(files))
+	}
+	closing := fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to have me watch #%d again. %s %s",
+		pr.Number, watchedAgain(*pr, trusted, unsure), buildAgainInstead(pr.Number, true))
 	return post("needs a person", b.String(), m, closing)
 }
 
+// trustedComment says a plan's pull request passed CI's gate and changes the
+// trusted base, so a person merges it (D-0105). It doesn't say the review
+// passed: a writer's retry of a draft whose review asked for changes gets
+// here too, without another review (#263).
 func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
-	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` and the review passed on #%d, but it changes the trusted base: %s. Only a person merges that (D-0105), "+
-		"so #%d is waiting for you to review and merge it.", pr.Number, codeList(trusted), pr.Number), m)
+	ready := ""
+	if pr.Draft {
+		ready = "mark it ready or "
+	}
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d's current head, and it changes the trusted base: %s. Only a person merges that (D-0105), "+
+		"so #%d is waiting for you to review and merge it. I won't %smerge it, and I won't review it again.", pr.Number, codeList(trusted), pr.Number, ready), m)
 }
 
 // planPullRequestBody is a plan's pull request: the plan, how the build
