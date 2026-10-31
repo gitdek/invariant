@@ -198,7 +198,7 @@ func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullReque
 func (g *fakeGitHub) OpenPullRequest(_ context.Context, branch string) (github.PullRequest, bool, error) {
 	for _, pr := range g.prs {
 		if pr.State == "open" && pr.Head.Ref == branch {
-			pr.Head.SHA = g.head(branch)
+			pr.Head.SHA = g.headOr(branch, pr.Head.SHA)
 			return *pr, true, nil
 		}
 	}
@@ -219,7 +219,7 @@ func (g *fakeGitHub) PullRequestFrom(_ context.Context, branch string) (github.P
 	}
 	pr := g.prs[newest]
 	if pr.State == "open" {
-		pr.Head.SHA = g.head(branch)
+		pr.Head.SHA = g.headOr(branch, pr.Head.SHA)
 	}
 	return *pr, true, nil
 }
@@ -238,6 +238,16 @@ func (g *fakeGitHub) ClosePullRequest(_ context.Context, n int) (github.PullRequ
 	return *pr, nil
 }
 
+// headOr is branch's head in origin, or sha, a pull request's last head,
+// once someone deleted its branch: GitHub keeps the head a pull request had.
+func (g *fakeGitHub) headOr(branch, sha string) string {
+	out, err := exec.Command("git", "-C", g.origin, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		return sha
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func (g *fakeGitHub) head(branch string) string {
 	out, err := exec.Command("git", "-C", g.origin, "rev-parse", "refs/heads/"+branch).Output()
 	if err != nil {
@@ -252,7 +262,7 @@ func (g *fakeGitHub) PullRequest(_ context.Context, n int) (github.PullRequest, 
 		return github.PullRequest{}, github.ErrNotFound
 	}
 	if pr.State == "open" {
-		pr.Head.SHA = g.head(pr.Head.Ref)
+		pr.Head.SHA = g.headOr(pr.Head.Ref, pr.Head.SHA)
 	}
 	return *pr, nil
 }

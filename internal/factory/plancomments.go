@@ -92,6 +92,14 @@ func rebuildingComment(by string, old int, m Marker) string {
 		"and its checks and review run afresh.", by, short(m.Hash), old, old, m.Branch), m)
 }
 
+// cantRebuild says what a person does when a retry can't build a plan's
+// failed draft, pr, again, since the branch holding the plan's ratification
+// is gone: close the draft, and draft the plan again (#271).
+func cantRebuild(pr int) string {
+	return fmt.Sprintf("\n\nA person needs to look at this. Close #%d, then comment `/invariant revise` to draft the plan again, "+
+		"and I'll build it once you ratify the new draft.", pr)
+}
+
 // rebuildOffer says what a writer's retry of a plan's failed draft, pr,
 // does, and what else a person can do (#271, D-0218): a retry closes the draft and
 // builds the same ratified plan again, review included, and the factory

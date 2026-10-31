@@ -574,3 +574,42 @@ func TestASuccessorClosedBeforeItsPostIsAdopted(t *testing.T) {
 		t.Fatalf("a closed successor is closed, and nothing merges: %+v, merged %v", closed.Marker, r.gh.merged)
 	}
 }
+
+// A draft whose branch is gone holds no ratification to build the plan again
+// from, so a writer's retry is answered with a note for a person instead of
+// an error: close the draft, and draft the plan again. Nothing is recorded,
+// closed or built, and following the note drafts the plan again.
+func TestARetryWhoseDraftBranchIsGoneNeedsAPerson(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	old := failed.Marker.PR
+	git(t, r.origin, "branch", "-D", failed.Marker.Branch)
+	g := &closes{GitHub: r.f.GitHub}
+	r.f.GitHub = g
+	command := r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	note := r.expect(1, KindNote, LabelHumanReview)
+	said := retry263Visible(note.Comment.Body)
+	for _, want := range []string{"is gone", "a person needs to look at this", fmt.Sprintf("close #%d", old), "/invariant revise"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("the note doesn't say %q:\n%s", want, note.Comment.Body)
+		}
+	}
+	recorded, err := r.f.Repo.Recorded(context.Background(), 1, replaceStepName(Command{Comment: command.ID}))
+	if !slices.Equal(note.Marker.ReplyTo, []int64{command.ID}) || len(g.closed) != 0 || recorded != "" || err != nil ||
+		b.calls != 1 || len(r.gh.prs) != 1 || r.gh.prs[old].State != "open" {
+		t.Fatalf("the retry must be answered once, recording, closing and building nothing: %+v, closed %v, record %q, %d builds", note.Marker, g.closed, recorded, b.calls)
+	}
+	r.poll()
+	if last := r.gh.last(1); last.Comment.ID != note.Comment.ID {
+		t.Fatalf("the factory posted again after answering the retry: %+v", last.Marker)
+	}
+	r.gh.prs[old].State = "closed"
+	r.poll()
+	r.expect(1, KindClosed)
+	r.gh.say(1, "gitdek", "draft the same plan again\n\n/invariant revise")
+	r.poll()
+	r.expect(1, KindProposal, LabelProposal)
+	if b.calls != 1 || len(r.gh.prs) != 1 {
+		t.Fatal("drafting the plan again builds nothing before the new draft is ratified")
+	}
+}

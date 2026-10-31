@@ -72,18 +72,25 @@ func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) 
 	if err := f.allowed(ctx, n, "build the ratified plan again, replacing "+want, before, after); err != nil {
 		return err
 	}
+	// The plan's ratification is the first commit on the draft's branch that
+	// holds its lock, or, after an earlier rebuild, the commit that build
+	// started from. Without it there's nothing to build again from, so a
+	// person closes the draft and drafts the plan again.
 	from := m.From
 	if from == "" {
 		if err := f.Repo.Fetch(ctx); err != nil {
 			return err
 		}
-		var err error
-		if from, err = f.Repo.FirstCommit(ctx, "origin/"+f.Base, "origin/"+m.Branch, lockFileOf(m.Project)); err != nil {
-			return err
+		if _, err := f.Repo.RevParse(ctx, "origin/"+m.Branch); err == nil {
+			if from, err = f.Repo.FirstCommit(ctx, "origin/"+f.Base, "origin/"+m.Branch, lockFileOf(m.Project)); err != nil {
+				return err
+			}
 		}
-		if from == "" {
-			return fmt.Errorf("#%d: %s holds no commit that ratified %s, so the plan can't be built again from it", n, m.Branch, m.Project)
-		}
+	} else if _, err := f.Repo.RevParse(ctx, from); err != nil {
+		from = ""
+	}
+	if from == "" {
+		return f.note(ctx, t, c, fmt.Sprintf("I can't build the plan again: `%s`, the branch that holds the plan's ratification, is gone.", m.Branch), cantRebuild(old))
 	}
 	recorded, err := f.Repo.Recorded(ctx, n, step)
 	if err != nil {
