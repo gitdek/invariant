@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -144,22 +145,70 @@ func pythonApplicationLegacyInvocations(p *project.Project, root string) ([]Pyth
 	return out, nil
 }
 
+var pythonApplicationRecordField = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// Only the module boundary gives lists sequence semantics. Application keys
+// are ordinary record fields, never instructions to the conformance encoder.
+func pythonApplicationModelValue(value any) (any, error) {
+	switch v := value.(type) {
+	case []any:
+		items := make([]any, len(v))
+		for i, item := range v {
+			converted, err := pythonApplicationModelValue(item)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = converted
+		}
+		return map[string]any{"$seq": items}, nil
+	case map[string]any:
+		fields := make(map[string]any, len(v))
+		for key, item := range v {
+			if !pythonApplicationRecordField.MatchString(key) {
+				return nil, fmt.Errorf("module observation record field %q is not a TLA+ identifier", key)
+			}
+			converted, err := pythonApplicationModelValue(item)
+			if err != nil {
+				return nil, err
+			}
+			fields[key] = converted
+		}
+		return fields, nil
+	default:
+		if _, err := conformance.Encode(value); err != nil {
+			return nil, fmt.Errorf("module observation cannot encode as TLA+: %w", err)
+		}
+		return value, nil
+	}
+}
+
 func pythonApplicationTraces(x PythonApplicationExecutionResult) ([]byte, error) {
 	if !x.Success || !x.Complete || x.ObservationMode != "sampled" || len(x.Observations) == 0 {
 		return nil, fmt.Errorf("no complete authenticated sampled observations")
 	}
 	t := conformance.Traces{}
 	for _, row := range x.Observations {
+		state := row.After
+		if row.Kind == "initial" {
+			state = row.State
+		}
+		if row.Form == "module" {
+			converted, err := pythonApplicationModelValue(state)
+			if err != nil {
+				return nil, err
+			}
+			state = converted.(map[string]any)
+		}
 		if row.Kind == "initial" {
 			if row.Run != len(t.Traces)+1 {
 				return nil, fmt.Errorf("invalid observation run")
 			}
-			t.Traces = append(t.Traces, []map[string]any{row.State})
+			t.Traces = append(t.Traces, []map[string]any{state})
 		} else {
 			if row.Run < 1 || row.Run > len(t.Traces) {
 				return nil, fmt.Errorf("invalid observation run")
 			}
-			t.Traces[row.Run-1] = append(t.Traces[row.Run-1], row.After)
+			t.Traces[row.Run-1] = append(t.Traces[row.Run-1], state)
 		}
 	}
 	return json.Marshal(t)
