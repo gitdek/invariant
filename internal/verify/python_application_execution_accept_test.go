@@ -98,8 +98,8 @@ package verify
 // Conformance argv starts with a script resolved relative to working_dir;
 // it must be contained, regular and identical to BOTH manifest project-relative
 // driver and selected conformance source. Remaining args are literal, including
-// whitespace and metacharacters. Conformance is retained but Run returns an
-// explicit unsupported error without execution or evidence. Proof rejected.
+// whitespace and metacharacters. Conformance runs the script and requires
+// bound sampled observations under #318's interface. Proof rejected.
 // Tests have no declared sampling and effective runs=1; conformance supports
 // decimal runs/steps in [1,2147483647] and seed in [0,2147483647], defaults
 // 1000/40/1; unknown, malformed, overflow or conflicting controls fail.
@@ -458,8 +458,8 @@ func TestPythonApplicationExecutionSession(t *testing.T) {
 				t.Fatal("bad conformance defaults")
 			}
 			r, err := s.Run(context.Background(), v.Key)
-			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "unsupported") || r != nil || executed != 0 {
-				t.Fatalf("conformance executed: %+v %v", r, err)
+			if err == nil || r == nil || r.Success || len(r.Observations) != 0 || executed != 1 {
+				t.Fatalf("failed conformance execution accepted: %+v %v", r, err)
 			}
 		}
 	}
