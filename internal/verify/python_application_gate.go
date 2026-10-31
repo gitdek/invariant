@@ -150,19 +150,65 @@ func pythonApplicationTraces(x PythonApplicationExecutionResult) ([]byte, error)
 	}
 	t := conformance.Traces{}
 	for _, row := range x.Observations {
+		state := row.After
+		if row.Kind == "initial" {
+			state = row.State
+		}
+		if row.Form == "module" {
+			value, err := pythonApplicationModelValue(state)
+			if err != nil {
+				return nil, err
+			}
+			state = value.(map[string]any)
+		}
 		if row.Kind == "initial" {
 			if row.Run != len(t.Traces)+1 {
 				return nil, fmt.Errorf("invalid observation run")
 			}
-			t.Traces = append(t.Traces, []map[string]any{row.State})
+			t.Traces = append(t.Traces, []map[string]any{state})
 		} else {
 			if row.Run < 1 || row.Run > len(t.Traces) {
 				return nil, fmt.Errorf("invalid observation run")
 			}
-			t.Traces[row.Run-1] = append(t.Traces[row.Run-1], row.After)
+			t.Traces[row.Run-1] = append(t.Traces[row.Run-1], state)
 		}
 	}
 	return json.Marshal(t)
+}
+
+// Only module read-back has unambiguous JSON list semantics. Convert a copy
+// at the model boundary; application keys can never act as conformance tags.
+func pythonApplicationModelValue(value any) (any, error) {
+	switch v := value.(type) {
+	case []any:
+		items := make([]any, len(v))
+		for i, item := range v {
+			var err error
+			items[i], err = pythonApplicationModelValue(item)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"$seq": items}, nil
+	case map[string]any:
+		record := make(map[string]any, len(v))
+		for key, item := range v {
+			if !pythonApplicationName.MatchString(key) || strings.Contains(key, ".") {
+				return nil, fmt.Errorf("module record field %q isn't an identifier", key)
+			}
+			var err error
+			record[key], err = pythonApplicationModelValue(item)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return record, nil
+	default:
+		if _, err := conformance.Encode(value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	}
 }
 
 func runPythonApplication(ctx context.Context, p *project.Project, outDir string, tc toolchain.Toolchain) (*Report, error) {

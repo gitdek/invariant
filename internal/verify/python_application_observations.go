@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -18,6 +19,7 @@ import (
 // PythonApplicationObservation is raw sampled read-back, without a model
 // verdict, assertion record or coverage claim.
 type PythonApplicationObservation struct {
+	Form         string                         `json:"form,omitempty"`
 	Kind         string                         `json:"kind"`
 	Run          int                            `json:"run"`
 	Instance     int                            `json:"instance"`
@@ -44,7 +46,43 @@ func (s *PythonApplicationSession) freshObserver() error {
 	return nil
 }
 
-func pythonApplicationState(state map[string]any, reader map[string]string) bool {
+var pythonApplicationPath = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*|\[([0-9]+|\*)\])*$`)
+
+func pythonApplicationValue(value any, module bool) bool {
+	switch v := value.(type) {
+	case nil, string, bool:
+		return true
+	case json.Number:
+		if strings.ContainsAny(string(v), ".eE") {
+			_, err := strconv.ParseFloat(string(v), 64)
+			return err == nil
+		}
+		return json.Valid([]byte(v))
+	case []any:
+		if !module {
+			return false
+		}
+		for _, item := range v {
+			if !pythonApplicationValue(item, true) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		if !module {
+			return false
+		}
+		for _, item := range v {
+			if !pythonApplicationValue(item, true) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func pythonApplicationState(state map[string]any, reader map[string]string, form ...string) bool {
 	if len(state) != len(reader) || len(state) == 0 {
 		return false
 	}
@@ -52,9 +90,7 @@ func pythonApplicationState(state map[string]any, reader map[string]string) bool
 		if reader[key] == "" {
 			return false
 		}
-		switch value.(type) {
-		case nil, string, bool, json.Number:
-		default:
+		if !pythonApplicationValue(value, len(form) == 1 && form[0] == "module") {
 			return false
 		}
 	}
@@ -91,6 +127,8 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 	events = events[:end]
 	begun, ended := false, false
 	runs := map[int]PythonApplicationObservation{}
+	modules := map[string]int{}
+	instances := map[int]string{}
 	maxInstance := 0
 	runLimit, _ := strconv.Atoi(c.Sampling["runs"])
 	stepLimit, _ := strconv.Atoi(c.Sampling["steps"])
@@ -144,6 +182,11 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return err
 			}
 			required := []string{"type", "kind", "run", "instance", "sequence", "key", "target", "driver", "source_sha256", "driver_sha256", "symbol", "entry", "entry_sha256", "readback"}
+			if row.Form == "module" {
+				required = append(required, "form")
+			} else if row.Form != "" {
+				return fmt.Errorf("unknown observation form")
+			}
 			switch row.Kind {
 			case "initial":
 				required = append(required, "state")
@@ -189,11 +232,18 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return fmt.Errorf("unknown or substituted application entry")
 			}
 			functional := false
+			if row.Form == "module" && (strings.Contains(target.Symbol, ".") || strings.Contains(symbol, ".")) {
+				return fmt.Errorf("module observation requires module functions")
+			}
 			for key, reader := range row.Readback {
 				if key == "" || reader == "" {
 					return fmt.Errorf("empty read-back binding")
 				}
-				if reader == "$return" {
+				if row.Form == "module" {
+					if !pythonApplicationPath.MatchString(reader) {
+						return fmt.Errorf("invalid module reader")
+					}
+				} else if reader == "$return" {
 					functional = true
 				} else if !pythonApplicationName.MatchString(reader) || strings.Contains(reader, ".") {
 					return fmt.Errorf("invalid attribute reader")
@@ -202,20 +252,35 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			if functional && len(row.Readback) != 1 {
 				return fmt.Errorf("invalid functional reader")
 			}
+			if row.Form == "" && !functional && !strings.Contains(target.Symbol, ".") {
+				return fmt.Errorf("instance observation requires an instance method")
+			}
 			previous, exists := runs[row.Run]
 			if row.Kind == "initial" {
-				if exists || row.Run != len(runs)+1 || row.Run > runLimit || row.Instance < 1 || row.Instance > maxInstance+1 || row.Sequence != 0 || !pythonApplicationState(row.State, row.Readback) || (!functional && row.Entry != row.Target) || (functional && row.Entry == row.Target) {
+				if exists || row.Run != len(runs)+1 || row.Run > runLimit || row.Instance < 1 || row.Instance > maxInstance+1 || row.Sequence != 0 || !pythonApplicationState(row.State, row.Readback, row.Form) || (!functional && row.Entry != row.Target) || (functional && row.Entry == row.Target) {
 					return fmt.Errorf("invalid initial observation")
 				}
 				if row.Instance > maxInstance {
 					maxInstance = row.Instance
 				}
+				identity := row.Form
+				if row.Form == "module" {
+					identity += ":" + target.Source
+					if old, ok := modules[target.Source]; ok && old != row.Instance {
+						return fmt.Errorf("changed module instance")
+					}
+					modules[target.Source] = row.Instance
+				}
+				if old, ok := instances[row.Instance]; ok && old != identity {
+					return fmt.Errorf("substituted observation instance")
+				}
+				instances[row.Instance] = identity
 			} else {
 				state := previous.State
 				if previous.Kind == "transition" {
 					state = previous.After
 				}
-				if !exists || row.Instance != previous.Instance || row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !maps.Equal(row.Readback, previous.Readback) || !pythonApplicationState(row.Before, row.Readback) || !pythonApplicationState(row.After, row.Readback) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target {
+				if !exists || row.Form != previous.Form || row.Target != previous.Target || row.Driver != previous.Driver || row.Instance != previous.Instance || row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !maps.Equal(row.Readback, previous.Readback) || !pythonApplicationState(row.Before, row.Readback, row.Form) || !pythonApplicationState(row.After, row.Readback, row.Form) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target {
 					return fmt.Errorf("invalid transition or state continuity")
 				}
 			}

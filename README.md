@@ -346,9 +346,71 @@ if __name__ == "__main__":
 
 The gate reads scalar attributes directly from that receiver's own `__dict__` initially and at call entry/return, and checks the final entry state. The observed receiver must be the exact bound instance. The collector retains the original receiver independently of the lifecycle handle; replacing its target or receiver fails even if the replacement has the same state. Contexts may coexist and interleave; each gets an ordered run number and an execution-local instance number, with initial sequence 0 and steps 1 onward. Each context must close after at least one step. Initial/pre/post expected dictionaries are optional comparisons, never evidence or state overrides. State must continue from the preceding post-state, including when expectations are omitted.
 
-Only ordinary undecorated synchronous module functions and instance methods with staged lexical code and intact module/class bindings are supported. An explicitly selected instance wrapper outside the `existing` files must directly import a selected source and call its intact staged module function inside every observed target step; an import alone earns no evidence. This preserves existing instance sessions without admitting unrelated targets. Closures, wrappers, replaced callables or defaults, async/generators, unbound/static/class methods, custom metaclasses or attribute access, slots, property/descriptor readers, callback readers and mutable/non-JSON state fail with diagnostics. Defaults, when present, must be literal scalars. Concurrency, reentrant/nested selected calls, missing or multiple selected calls, cross-instance substitution, empty/unclosed/reused contexts, import/runtime failures and caught observation errors cannot produce accepted evidence. Application source is never rewritten.
+`functional` and `instance` support only ordinary undecorated synchronous functions and instance methods with staged lexical code and intact module/class bindings. An explicitly selected instance wrapper outside the `existing` files must directly import a selected source and call its intact staged module function inside every observed target step; an import alone earns no evidence. These two forms refuse closures, wrappers, replaced callables or defaults, async/generators, unbound/static/class methods, custom metaclasses or attribute access, slots, property/descriptor readers, callback readers, mutable/non-JSON state and concurrency. Their defaults must be literal scalars. All forms reject reentrant/nested, missing or multiple selected calls, cross-instance substitution, empty/unclosed/reused contexts, import/runtime failures and caught observation errors. Application source is never rewritten.
 
-Successful driver results have `observation_mode: "sampled"` and ordered `observations`, with an empty `tests` array. Each raw record includes `kind`, `run`, `instance`, `sequence`, the full invocation `key`, lexical `target`, `driver`, `symbol` and `entry`, their source hashes, and `readback` (`{"task":"$return"}` or `{"task":"state"}`). Initial records carry `state`; transitions carry actual `before` and `after`, for example `{"task":"pending"}` and `{"task":"running"}`. No assertions or test outcomes are invented. This remains sampled even if a driver imports a legacy exploration harness: The public gate now checks these observations with TLC and attributes actual results under #327. Proof, exhaustive-state and attempted-step coverage remain outside this path.
+For module state, `module(target, *, fields, expected_initial=None, timeout=5.0)` accepts staged module functions, synchronous or async, and registration decorators that return the exact lexical function. It never unwraps a callable. Here is a complete standard-library example of a web-shaped entry that reserves a task and starts its worker, in `tasks/lifecycle.py` (with an empty `tasks/__init__.py`):
+
+```python
+import asyncio
+import threading
+import uuid
+
+tasks = {}
+lock = threading.Lock()
+routes = {}
+
+def register(fn):
+    routes[fn.__name__] = fn
+    return fn
+
+@register
+def advance(key, status):
+    with lock:
+        tasks[key]['status'] = status
+
+@register
+async def submit(upload, *, status='done'):
+    await asyncio.sleep(0)
+    assert upload is not None
+    with lock:
+        key = uuid.uuid4().hex
+        tasks[key] = {'status': 'reserved'}
+    threading.Thread(target=advance, args=(key, status)).start()
+```
+
+The configured driver executes this entry directly, without starting a server:
+
+```python
+from invariant_observe import module
+from tasks import lifecycle as app
+
+def drive():
+    with module(app.advance, fields={'status': 'tasks[*].status'},
+                expected_initial={'status': []}, timeout=5) as life:
+        life.step(app.submit, object(), status='done',
+                  expected_before={'status': []},
+                  expected_after={'status': ['done']})
+
+if __name__ == '__main__':
+    drive()
+```
+
+`life.step(entry, *args, expected_before=None, expected_after=None, **kwargs)` forwards arguments only as inputs. Module entries may have arbitrary object defaults, including framework declarations such as `engine=Form('')` and keyword-only equivalents. Their original defaults tuple, keyword mapping and keyword values must remain unreplaced, even before the first step; equality with replacements is insufficient. Defaults are inputs, never state evidence. Module targets still require literal-scalar defaults. Entries must be distinct staged module functions outside the driver; selected frames must have the target's exact staged module globals. Wrappers, foreign globals, closures and generator targets remain unsupported.
+
+Paths start with an ASCII identifier (`[A-Za-z_][A-Za-z0-9_]*`), followed by zero or more `.identifier` dictionary keys, `[nonnegative decimal index]` list indices or `[*]` projections. For example, `tasks[*].status`, `rows[0].value` and `meta` are valid. Wildcards traverse exact dictionary values in insertion order or exact list elements, projecting the remaining suffix into a list, including `[]` when empty. Leaves are deep copies of exact dictionaries with string keys, lists and finite JSON scalars. Missing keys/indices, wrong containers, subclasses, cycles, non-JSON values, attribute access and callback readers fail. There is no evaluation or coercion. Expectations compare the entire copied state with type-sensitive equality.
+
+The collector reads initial state from the target's module dictionary, then reads before entry and after entry and all its owned threads finish. Reservations and worker mutations belong to that one transition; intermediate target snapshots need not match. A returned awaitable runs in a fresh event loop that is closed afterward. Coroutine resumptions count as one call, and exactly one completed nonrecursive target invocation is required. Ownership follows actual `threading.Thread` objects and start events beneath the entry (including descendant workers), never thread IDs or timing alone. All owned workers must finish; unrelated/preexisting threads and unfinished coroutines poison execution. One total deadline covers entry, awaitable and worker draining: `timeout` is a positive finite number of seconds, default 5, maximum 60. Timeout terminates the isolated execution promptly with a diagnostic and no accepted evidence, including for non-daemon workers or code that catches cancellation.
+
+Module records add `form: "module"`, retain exact paths in `readback`, use module identity for execution-local instance numbers and name the target as the initial entry. Contexts may interleave subject to each context's continuity check. Go independently validates paths, recursive JSON, forms and ordered continuity. At the existing sampled TLC boundary, module lists become ordered TLA+ sequences and dictionaries become ordinary records; raw receipt observations remain JSON. Keys such as `$seq`, `$set`, `$fn` or `$mv` never act as model tags. Invalid record keys, `None`, fractions and other values unsupported by the TLC encoder fail explicitly, while integers remain exact. This extends [D-0183](decisions/journal/D-0183.jsonl) under [#321's ratified plan](.invariant/plans/issue-321.json) and uses [D-0185](decisions/journal/D-0185.jsonl)'s sampled gate without stronger assurance.
+
+The merger must record the module observation policy refining D-0183. When Docker is unavailable during the build, the merger must also run both opt-in suites on the final head:
+
+```sh
+INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL=1 go test ./internal/verify -run '^TestPythonApplicationExecutionModule' -count=1 -timeout 30m
+INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGateModuleObservations$' -count=1 -timeout 30m
+```
+
+Successful driver results have `observation_mode: "sampled"` and ordered `observations`, with an empty `tests` array. Each raw record includes `kind`, `run`, `instance`, `sequence`, the full invocation `key`, lexical `target`, `driver`, `symbol` and `entry`, their source hashes, and `readback` (`{"task":"$return"}`, `{"task":"state"}` or module paths such as `{"status":"tasks[*].status"}`). Initial records carry `state`; transitions carry actual `before` and `after`, for example `{"task":"pending"}` and `{"task":"running"}`. No assertions or test outcomes are invented. This remains sampled even if a driver imports a legacy exploration harness: The public gate now checks these observations with TLC and attributes actual results under #327. Proof, exhaustive-state and attempted-step coverage remain outside this path.
 
 Go independently requires complete, nonempty, correctly bound output and exit 0. Invalid driver execution returns `Success=false`, diagnostics and no accepted observations. A fresh execution identity prevents replay even for the same session/key. The runner also authenticates the exact ordered collector stream with a per-execution HMAC key, consumed and removed before application imports and kept out of the application-readable request. Copying request bindings into fabricated output cannot earn success. Lifecycle handles hold no state, so a driver can't substitute evidence through them: every binding, read-back and continuity check uses the collector's own records, and touching any handle attribute besides `step()` and the `with` protocol poisons the execution, even if the driver catches the error. The trust boundary is the gate's own code. Python in the same process can always reach the collector's module, objects, frames and closures, so no in-process collector can rule out a driver that tampers with them. That driver's bytes are bound to every observation it makes, and authentication defends against output written or replayed outside the collector, not against such tampering. The authentication footer and execution identity never enter portable JSON or fingerprints. Provenance binds both runner and collector assets, the full staged tree and dependency evidence. Changes before, during or between executions invalidate observations without another image selection. Repeated and relocated identical runs have identical portable results. Successful drivers cannot alter, promote or replace independently observed runtime-test outcomes.
 
