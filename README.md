@@ -401,7 +401,7 @@ A module step reads before the entry, checks continuity, then reads after the en
 
 Module rows add `form: "module"` and retain exact paths in `readback`; initial entry is the target. Receipts retain raw JSON lists and dictionaries. Only at the sampled TLC boundary are lists recursively translated to ordered sequences and dictionaries to ordinary records. Application keys never act as `$seq`, `$set`, `$fn` or `$mv` tags: keys that cannot encode as TLA+ record identifiers fail explicitly, as do `None`, fractions and other unrepresentable values. Exact integers survive. Authentication, freshness, poisoning, sampling budgets, stateless handles and the assurance limits below apply to all three forms. This extends [D-0183](decisions/journal/D-0183.jsonl) through the existing [D-0185](decisions/journal/D-0185.jsonl) sampled gate, for both explicit and omitted components.
 
-The merger must record the module observation policy refining D-0183. When Docker is unavailable to the build, the merger must also run both opt-in suites on the final head:
+The module observation policy is recorded as [D-0186](decisions/journal/D-0186.jsonl), refining D-0183, and both opt-in suites passed on #331's final head:
 
 ```sh
 INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL=1 go test ./internal/verify -run '^TestPythonApplicationExecutionModule' -count=1 -timeout 30m
