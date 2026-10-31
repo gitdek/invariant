@@ -169,7 +169,9 @@ exit 1
 			}
 			timeout := 30 * time.Second
 			if !succeeds {
-				timeout = 300 * time.Millisecond
+				// Room for the review's first attempt to report the outage
+				// under load, and still inside its first wait, a minute / 12.
+				timeout = 3 * time.Second
 			}
 			var reviewer synth.Backend = synth.Codex{Binary: bin, Home: t.TempDir()}
 			// Keep the one-minute production wait short here. The type
