@@ -346,7 +346,67 @@ if __name__ == "__main__":
 
 The gate reads scalar attributes directly from that receiver's own `__dict__` initially and at call entry/return, and checks the final entry state. The observed receiver must be the exact bound instance. The collector retains the original receiver independently of the lifecycle handle; replacing its target or receiver fails even if the replacement has the same state. Contexts may coexist and interleave; each gets an ordered run number and an execution-local instance number, with initial sequence 0 and steps 1 onward. Each context must close after at least one step. Initial/pre/post expected dictionaries are optional comparisons, never evidence or state overrides. State must continue from the preceding post-state, including when expectations are omitted.
 
-Only ordinary undecorated synchronous module functions and instance methods with staged lexical code and intact module/class bindings are supported. An explicitly selected instance wrapper outside the `existing` files must directly import a selected source and call its intact staged module function inside every observed target step; an import alone earns no evidence. This preserves existing instance sessions without admitting unrelated targets. Closures, wrappers, replaced callables or defaults, async/generators, unbound/static/class methods, custom metaclasses or attribute access, slots, property/descriptor readers, callback readers and mutable/non-JSON state fail with diagnostics. Defaults, when present, must be literal scalars. Concurrency, reentrant/nested selected calls, missing or multiple selected calls, cross-instance substitution, empty/unclosed/reused contexts, import/runtime failures and caught observation errors cannot produce accepted evidence. Application source is never rewritten.
+The `functional` and `instance` forms support only ordinary undecorated synchronous module functions and instance methods with staged lexical code and intact module/class bindings. An explicitly selected instance wrapper outside the `existing` files must directly import a selected source and call its intact staged module function inside every observed target step; an import alone earns no evidence. This preserves existing instance sessions without admitting unrelated targets. These forms refuse async/generators, decorators, concurrency and mutable state, and require literal-scalar defaults on targets and entries. All forms refuse closures, wrappers, substituted code or bindings, unbound/static/class methods, custom metaclasses or attribute access, slots, property/descriptor readers, callback readers and non-JSON evidence. Reentrant/nested selected calls, missing or multiple selected calls, cross-instance substitution, empty/unclosed/reused contexts, import/runtime failures and caught observation errors cannot produce accepted evidence. Application source is never rewritten.
+
+[#321's ratified plan](.invariant/plans/issue-321.json) adds `module(target, *, fields, expected_initial=None, timeout=5.0)`. It reads copied JSON state from the selected staged module function's own globals. Targets and distinct staged module entries outside the driver can be synchronous or async. Registration decorators are accepted only when the live binding remains the lexical function itself; the collector never unwraps. `life.step(entry, *args, expected_before=None, expected_after=None, **kwargs)` forwards arguments solely as inputs. Module entries may also have arbitrary object defaults, including framework declarations such as `Form('')`: the original positional default tuple, keyword default mapping and each keyword default value must remain unreplaced, including before the first step and between steps. These objects supply no evidence. Targets still require literal-scalar defaults.
+
+For a complete standard-library web-shaped example, the unchanged application `tasks/lifecycle.py` can register an async submission handler and start a worker:
+
+```python
+import asyncio
+import threading
+import uuid
+
+tasks = {}
+routes = {}
+
+def register(fn):
+    routes[fn.__name__] = fn
+    return fn
+
+@register
+def advance(key):
+    tasks[key]["status"] = "done"
+
+@register
+async def submit(upload, *, content_type="application/octet-stream"):
+    assert upload is not None and content_type
+    await asyncio.sleep(0)
+    key = uuid.uuid4().hex
+    tasks[key] = {"status": "reserved"}
+    threading.Thread(target=advance, args=(key,)).start()
+    return {"task": key}
+```
+
+Select `advance` as the target and use this conformance driver:
+
+```python
+from invariant_observe import module
+from tasks import lifecycle as app
+
+def drive():
+    with module(app.advance, fields={"status": "tasks[*].status"},
+                expected_initial={"status": []}, timeout=5.0) as life:
+        life.step(app.submit, object(), content_type="image/png",
+                  expected_before={"status": []},
+                  expected_after={"status": ["done"]})
+
+if __name__ == "__main__":
+    drive()
+```
+
+Paths start with an ASCII identifier (`[A-Za-z_][A-Za-z0-9_]*`) naming a module global, followed by any number of `.identifier` dictionary keys, `[nonnegative decimal index]` list indices or `[*]` projections. For example, `tasks[*].status`, `rows[0].value` and `meta` are valid. Projections traverse exact dictionary values in insertion order or exact list elements and return a list of the remaining suffix, including `[]` for no elements. Leaves are deeply copied exact dictionaries with string keys, lists and finite JSON scalars. Missing keys/indices, wrong container types, subclasses, cycles, malformed paths, attributes, coercions, evaluation and callbacks fail. Expectations compare the entire copied state with type-sensitive equality; they never supply state.
+
+A module step reads before the entry, checks continuity, then reads after the entry and all threads it started (including descendants) have finished. Reservations and worker mutations belong to that step; intermediate target-entry/return state need not match. Exactly one completed, nonrecursive selected call must occur beneath the entry, its returned awaitable or an owned thread. Coroutine resumptions count as one call. Awaitables run in a fresh event loop that closes afterward; unfinished coroutines (including manually suspended or retained unstarted coroutines), failed auxiliary tasks and cancellations fail. Ownership follows thread objects and start events, never reusable IDs or timing alone. Preexisting, unrelated and driver-started threads fail, even if they never call the target. One total deadline covers the entry, awaitable and draining every owned thread: `timeout` must be a positive finite number, defaults to 5 seconds and cannot exceed 60. A separate watchdog process terminates the disposable runner with a diagnostic and no accepted observations on timeout, even while application code holds the interpreter's GIL, for non-daemon workers or for code catching cancellation. Module contexts may interleave, using module identity for instance numbering and the same continuity rules as other forms.
+
+Module rows add `form: "module"` and retain exact paths in `readback`; initial entry is the target. Receipts retain raw JSON lists and dictionaries. Only at the sampled TLC boundary are lists recursively translated to ordered sequences and dictionaries to ordinary records. Application keys never act as `$seq`, `$set`, `$fn` or `$mv` tags: keys that cannot encode as TLA+ record identifiers fail explicitly, as do `None`, fractions and other unrepresentable values. Exact integers survive. Authentication, freshness, poisoning, sampling budgets, stateless handles and the assurance limits below apply to all three forms. This extends [D-0183](decisions/journal/D-0183.jsonl) through the existing [D-0185](decisions/journal/D-0185.jsonl) sampled gate, for both explicit and omitted components.
+
+The merger must record the module observation policy refining D-0183. When Docker is unavailable to the build, the merger must also run both opt-in suites on the final head:
+
+```sh
+INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL=1 go test ./internal/verify -run '^TestPythonApplicationExecutionModule' -count=1 -timeout 30m
+INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGateModuleObservations$' -count=1 -timeout 30m
+```
 
 Successful driver results have `observation_mode: "sampled"` and ordered `observations`, with an empty `tests` array. Each raw record includes `kind`, `run`, `instance`, `sequence`, the full invocation `key`, lexical `target`, `driver`, `symbol` and `entry`, their source hashes, and `readback` (`{"task":"$return"}` or `{"task":"state"}`). Initial records carry `state`; transitions carry actual `before` and `after`, for example `{"task":"pending"}` and `{"task":"running"}`. No assertions or test outcomes are invented. This remains sampled even if a driver imports a legacy exploration harness: The public gate now checks these observations with TLC and attributes actual results under #327. Proof, exhaustive-state and attempted-step coverage remain outside this path.
 

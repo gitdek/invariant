@@ -9,15 +9,21 @@ every observation it makes.
 """
 
 import ast
+import asyncio
 import _thread
+import dis
 import functools
+import gc
 import hashlib
 import inspect
 import math
 import os
 import random
+import re
+import subprocess
 import sys
 import threading
+import time
 import types
 
 
@@ -48,17 +54,62 @@ def equal(a, b):
         return False
     if type(a) is dict:
         return a.keys() == b.keys() and all(equal(a[k], b[k]) for k in a)
-    if type(a) is tuple:
+    if type(a) in (tuple, list):
         return len(a) == len(b) and all(equal(x, y) for x, y in zip(a, b))
     return a == b
 
 
-def expect(actual, expected):
+def copied(value, ancestors=()):
+    if type(value) not in (dict, list):
+        return scalar(value)
+    if any(value is old for old in ancestors):
+        raise ValueError("cyclic read-back")
+    ancestors = ancestors + (value,)
+    if type(value) is list:
+        return [copied(v, ancestors) for v in value]
+    if any(type(k) is not str for k in value):
+        raise ValueError("read-back dictionary keys must be strings")
+    return {k: copied(v, ancestors) for k, v in value.items()}
+
+
+def path_segments(path):
+    name = r"[A-Za-z_][A-Za-z0-9_]*"
+    if re.fullmatch(name + r"(?:\." + name + r"|\[(?:[0-9]+|\*)\])*", path) is None:
+        raise ValueError("invalid module read-back path")
+    return re.findall(name + r"|\[[0-9]+\]|\[\*\]", path)
+
+
+def read_path(value, segments, ancestors=()):
+    if not segments:
+        return copied(value, ancestors)
+    if any(value is old for old in ancestors):
+        raise ValueError("cyclic read-back path")
+    ancestors = ancestors + (value,)
+    head, tail = segments[0], segments[1:]
+    if head == "[*]":
+        if type(value) not in (dict, list):
+            raise ValueError("projection requires an exact dict or list")
+        return [read_path(v, tail, ancestors) for v in (value.values() if type(value) is dict else value)]
+    if head.startswith("["):
+        if type(value) is not list:
+            raise ValueError("index requires an exact list")
+        return read_path(value[int(head[1:-1])], tail, ancestors)
+    if type(value) is not dict:
+        raise ValueError("key requires an exact dict")
+    if any(type(k) is not str for k in value):
+        raise ValueError("dictionary lookup requires string keys")
+    return read_path(value[head], tail, ancestors)
+
+
+def expect(actual, expected, module=False):
     if expected is not None:
         if type(expected) is not dict or any(type(k) is not str for k in expected):
             raise ValueError("expected state must be a dictionary")
-        for value in expected.values():
-            scalar(value)
+        if module:
+            expected = copied(expected)
+        else:
+            for value in expected.values():
+                scalar(value)
         if not equal(actual, expected):
             raise ValueError("expected state differs from application read-back")
 
@@ -80,25 +131,35 @@ def ordinary(obj):
     return data
 
 
+def coroutine_objects():
+    return {value for value in gc.get_objects()
+            if type(value) is types.CoroutineType
+            or (type(value) is types.GeneratorType and value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE)}
+
+
 class Binding:
-    def __init__(self, collector, function):
+    def __init__(self, collector, function, module=False, entry=False):
         self.receiver = None
         if type(function) is types.MethodType:
+            if module:
+                raise ValueError("module function required")
             self.receiver = function.__self__
             ordinary(self.receiver)
             function = function.__func__
         if type(function) is not types.FunctionType or function.__closure__ or hasattr(function, "__wrapped__"):
             raise ValueError("ordinary undecorated function or instance method required")
         code = function.__code__
-        if code.co_flags & (inspect.CO_COROUTINE | inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR) or code.co_freevars:
+        if code.co_flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR) or (not module and code.co_flags & inspect.CO_COROUTINE) or code.co_freevars:
             raise ValueError("async, generators and closures are unsupported")
         self.function, self.code = function, code
         self.component, self.digest, node = collector.lexical(code)
-        if type(node) is not ast.FunctionDef or node.decorator_list or ".<locals>." in self.component:
+        if (not module and (type(node) is not ast.FunctionDef or node.decorator_list)) or ".<locals>." in self.component:
             raise ValueError("decorated and nested declarations are unsupported")
         self.symbol = self.component.split("#", 1)[1].split("@", 1)[0]
         self.source = self.component.rsplit("@", 1)[1]
         self.globals = function.__globals__
+        if module and collector.original_functions.get((id(self.globals), code)) is not function:
+            raise ValueError("replaced lexical module function")
         module = sys.modules.get(self.globals.get("__name__"))
         if type(module) is not types.ModuleType or vars(module) is not self.globals or os.path.abspath(self.globals.get("__file__", "")) != os.path.abspath(code.co_filename):
             raise ValueError("callable globals do not belong to staged module")
@@ -112,22 +173,32 @@ class Binding:
             raise ValueError("unbound methods and descriptors are unsupported")
         if self.receiver is not None and self.owner not in type(self.receiver).__mro__:
             raise ValueError("receiver differs from lexical method owner")
-        # Defaults must still be the values declared in the staged function.
-        try:
-            defaults = tuple(scalar(ast.literal_eval(v)) for v in node.args.defaults)
-            kwdefaults = {k.arg: scalar(ast.literal_eval(v)) for k, v in zip(node.args.kwonlyargs, node.args.kw_defaults) if v is not None}
-        except (ValueError, TypeError):
-            raise ValueError("nonliteral or mutable defaults are unsupported")
-        if not equal(function.__defaults__ or (), defaults) or not equal(function.__kwdefaults__ or {}, kwdefaults):
-            raise ValueError("replaced function defaults")
-        self.defaults, self.kwdefaults = defaults, kwdefaults
+        self.opaque_defaults = module and entry
+        if self.opaque_defaults:
+            if function not in collector.original_defaults:
+                raise ValueError("entry defaults were not observed at definition")
+            self.defaults, self.kwdefaults, self.keyword_values = collector.original_defaults[function]
+        else:
+            # Targets and legacy entries keep literal scalar defaults.
+            try:
+                defaults = tuple(scalar(ast.literal_eval(v)) for v in node.args.defaults)
+                kwdefaults = {k.arg: scalar(ast.literal_eval(v)) for k, v in zip(node.args.kwonlyargs, node.args.kw_defaults) if v is not None}
+            except (ValueError, TypeError):
+                raise ValueError("nonliteral or mutable defaults are unsupported")
+            self.defaults, self.kwdefaults = defaults, kwdefaults
         collector.receivers[self] = self.receiver
         self.check()
 
     def check(self):
         if self not in _collector.receivers or self.receiver is not _collector.receivers[self]:
             raise ValueError("replaced receiver binding")
-        if vars(self.owner).get(self.code.co_name) is not self.function or self.function.__code__ is not self.code or not equal(self.function.__defaults__ or (), self.defaults) or not equal(self.function.__kwdefaults__ or {}, self.kwdefaults):
+        if self.opaque_defaults:
+            valid = self.function.__defaults__ is self.defaults and self.function.__kwdefaults__ is self.kwdefaults
+            actual = self.function.__kwdefaults__ or {}
+            valid = valid and actual.keys() == self.keyword_values.keys() and all(actual[k] is v for k, v in self.keyword_values.items())
+        else:
+            valid = equal(self.function.__defaults__ or (), self.defaults) and equal(self.function.__kwdefaults__ or {}, self.kwdefaults)
+        if vars(self.owner).get(self.code.co_name) is not self.function or self.function.__code__ is not self.code or not valid:
             raise ValueError("replaced callable binding")
         if self.receiver is not None and inspect.getattr_static(self.receiver, self.code.co_name) is not self.function:
             raise ValueError("replaced receiver method")
@@ -139,11 +210,11 @@ class Binding:
         if self.receiver is not None and frame.f_locals.get(self.code.co_varnames[0]) is not self.receiver:
             raise ValueError("selected call used another receiver")
 
-    def call(self, *args):
+    def call(self, *args, **kwargs):
         self.check()
         if self.receiver is not None:
-            return self.function(self.receiver, *args)
-        return self.function(*args)
+            return self.function(self.receiver, *args, **kwargs)
+        return self.function(*args, **kwargs)
 
 
 class Collector:
@@ -160,10 +231,16 @@ class Collector:
         self.thread = threading.get_ident()
         self.driver_codes = set()
         self.handles = {}
+        self.original_defaults = {}
+        self.original_functions = {}
+        self.definitions = {}
+        self.internal_threads = set()
+        self.thread_traces = {}
+        self.thread_start = threading.Thread.start
         # The first reason a handle was misused, kept for the diagnostic in
         # case the driver catches the error.
         self.misuse = None
-        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__)
+        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__, _ModuleLifecycle.step.__wrapped__.__code__)
 
     def lexical(self, code):
         filename = os.path.abspath(code.co_filename)
@@ -174,7 +251,7 @@ class Collector:
             with open(filename, "rb") as stream:
                 raw = stream.read()
             tree = ast.parse(raw, filename)
-            nodes = {(n.lineno, n.name): n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            nodes = {(min([n.lineno] + [d.lineno for d in n.decorator_list]), n.name): n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
             self.sources[filename] = ("sha256:" + hashlib.sha256(raw).hexdigest(), self.locations(tree), list(self.codes(compile(raw, filename, "exec"))), nodes)
         digest, locations, compiled, nodes = self.sources[filename]
         symbol = locations.get((code.co_firstlineno, code.co_name))
@@ -215,6 +292,8 @@ class Collector:
             self.failed = True
             raise ValueError("observation did not come from a lifecycle read-back")
         self.count += 1
+        if life.form:
+            state["form"] = life.form
         self.emit(dict(type="observation", kind="initial" if life.sequence == 0 else "transition",
                        run=life.run, instance=life.identity, sequence=life.sequence,
                        key=self.request["key"], target=life.target.component,
@@ -224,9 +303,20 @@ class Collector:
                        readback=life.fields, **state))
 
     def trace(self, frame, event, arg):
+        current = threading.current_thread()
+        if current in self.internal_threads:
+            return None
+        if current not in self.thread_traces:
+            self.thread_traces[current] = lambda frame, event, arg: self.trace_event(current, frame, event, arg)
+        return self.trace_event(current, frame, event, arg)
+
+    def trace_event(self, current, frame, event, arg):
         try:
             if threading.get_ident() != self.thread:
-                raise ValueError("concurrent execution is unsupported")
+                if self.active is None or self.active.form != "module" or current not in self.active.threads:
+                    raise ValueError("unrelated concurrent execution is unsupported")
+            if frame.f_code.co_name == "<module>" and frame.f_code.co_filename.startswith(self.request["root"] + os.sep):
+                self.capture_definition(frame, event)
             if event == "exception" and frame.f_code in self.driver_codes:
                 self.failed = True
             active = self.active
@@ -235,22 +325,61 @@ class Collector:
         except BaseException:
             self.failed = True
             raise
-        return self.trace
+        return self.thread_traces[current]
+
+    def capture_definition(self, frame, event):
+        # Observe MAKE_FUNCTION before any decorator receives the object, even
+        # through *args, a callable object or a C callable. The evaluation stack
+        # keeps the new function alive and visible to GC at the next opcode.
+        frame.f_trace_opcodes = True
+        if event == "return":
+            self.definitions.pop(frame, None)
+        if event != "opcode":
+            return
+        previous, pending = self.definitions.get(frame, (None, ()))
+        if previous == "MAKE_FUNCTION":
+            pending = tuple(value for value in gc.get_objects()
+                            if type(value) is types.FunctionType
+                            and value.__globals__ is frame.f_globals
+                            and value not in self.original_defaults)
+        if previous in ("MAKE_FUNCTION", "SET_FUNCTION_ATTRIBUTE"):
+            # Python 3.13+ attaches defaults with separate opcodes immediately
+            # after creation. No application callback runs between them.
+            for value in pending:
+                self.original_defaults[value] = (value.__defaults__, value.__kwdefaults__, (value.__kwdefaults__ or {}).copy())
+                self.original_functions.setdefault((id(value.__globals__), value.__code__), value)
+        else:
+            pending = ()
+        self.definitions[frame] = (dis.opname[frame.f_code.co_code[frame.f_lasti]], pending)
 
     def profile(self, frame, event, arg):
         # Refuse thread creation even if the worker never calls the target.
         if event == "c_call" and (arg is _thread.start_new_thread or arg is getattr(_thread, "start_joinable_thread", None)):
+            worker = frame.f_locals.get("self")
+            if worker not in self.internal_threads and (self.active is None or self.active.form != "module" or worker not in self.active.threads):
+                self.failed = True
+                raise ValueError("unowned thread creation is unsupported")
+
+    def start_thread(self, worker, *args, **kwargs):
+        try:
+            life = self.active
+            if life is None or life.form != "module" or not life.owns(sys._getframe(1)):
+                raise ValueError("thread must be started by a module entry or its workers")
+            life.threads.add(worker)
+            return self.thread_start(worker, *args, **kwargs)
+        except BaseException:
             self.failed = True
-            raise ValueError("concurrent execution is unsupported")
+            raise
 
 
 class _Lifecycle:
-    def __init__(self, target, initializer, argument, fields, expected):
+    def __init__(self, target, initializer, argument, fields, expected, form=""):
         c = _collector
         c.driver()
         if c.active is not None:
             raise ValueError("nested lifecycles during a step are unsupported")
-        self.target = Binding(c, target)
+        self.form = form
+        self.target = Binding(c, target, module=form == "module")
         c.targets[self] = self.target
         selected = c.request["target"]
         if c.request.get("legacy"):
@@ -258,7 +387,7 @@ class _Lifecycle:
         if self.target.component != selected.get("id") or self.target.digest != selected.get("source_sha256"):
             raise ValueError("target differs from selected staged declaration")
         self.functional = initializer is not None
-        if self.functional != (self.target.receiver is None):
+        if not form and self.functional != (self.target.receiver is None):
             raise ValueError("unsupported target binding form")
         if type(fields) is not dict or not fields or any(type(k) is not str or not k or type(v) is not str or not v for k, v in fields.items()):
             raise ValueError("read-back requires a nonempty declarative field mapping")
@@ -270,7 +399,7 @@ class _Lifecycle:
             args = inspect.signature(self.target.function).parameters
             if type(argument) is not str or argument not in args or args[argument].kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
                 raise ValueError("named scalar state argument required")
-        else:
+        elif form != "module":
             if any(not v.isidentifier() for v in fields.values()):
                 raise ValueError("read-back attributes must be simple names")
         self.expected = expected
@@ -309,7 +438,7 @@ class _Lifecycle:
         self.entered = True
         self.run = len(c.lives) + 1
         c.lives.append(self)
-        obj = self if self.functional else self.target.receiver
+        obj = self.target.owner if self.form == "module" else self if self.functional else self.target.receiver
         if not any(obj is old for old in c.instances):
             c.instances.append(obj)
         self.identity = next(i + 1 for i, old in enumerate(c.instances) if old is obj)
@@ -318,7 +447,7 @@ class _Lifecycle:
             self.state = {next(iter(self.fields)): scalar(self.initializer.call())}
         else:
             self.state = self.read()
-        expect(self.state, self.expected)
+        expect(self.state, self.expected, module=self.form == "module")
         c.write(self, self.initializer or self.target, state=self.state)
         return self
 
@@ -410,6 +539,205 @@ class _Lifecycle:
             self.entry_frame = self.target_frame = None
 
 
+class _ModuleLifecycle(_Lifecycle):
+    def __init__(self, target, fields, expected, timeout):
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 60:
+            raise ValueError("module timeout must be positive and finite, at most 60 seconds")
+        super().__init__(target, None, None, fields, expected, form="module")
+        self.paths = {key: path_segments(path) for key, path in self.fields.items()}
+        self.timeout = timeout
+
+    def application(self, function):
+        binding = Binding(_collector, function, module=True, entry=True)
+        if binding.source == _collector.request["check"]["source"] or binding.component == self.target.component:
+            raise ValueError("distinct surrounding application entry required")
+        return binding
+
+    def read(self):
+        self.check_target()
+        return {key: read_path(self.target.globals, path) for key, path in self.paths.items()}
+
+    def owns(self, frame):
+        if threading.current_thread() in self.threads:
+            return True
+        if threading.get_ident() != _collector.thread:
+            return False
+        while frame is not None:
+            if frame is self.entry_frame or frame is self.await_frame:
+                return True
+            frame = frame.f_back
+        return False
+
+    def observe(self, frame, event, arg):
+        self.check_target()
+        if frame.f_code.co_flags & (inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE):
+            if event == "call":
+                self.coroutines.add(frame)
+            elif event == "return":
+                code, offset = frame.f_code.co_code, frame.f_lasti
+                # Before 3.10, YIELD_FROM backs f_lasti up one word when it
+                # suspends, so the return event points at the preceding op.
+                if sys.version_info < (3, 10) and offset + 2 < len(code) and dis.opname[code[offset + 2]] == "YIELD_FROM":
+                    offset += 2
+                opcode = dis.opname[code[offset]]
+                # 3.13 reports a suspension at the RESUME after its yield,
+                # whose nonzero oparg marks a resumption point.
+                suspended = opcode in ("YIELD_VALUE", "YIELD_FROM") or (opcode == "RESUME" and code[offset + 1] & 3)
+                if not suspended:
+                    self.coroutines.discard(frame)
+                    if opcode not in ("RETURN_VALUE", "RETURN_CONST"):
+                        raise ValueError("module coroutine failed or was cancelled")
+        if event == "call" and frame.f_code is self.entry.code:
+            self.entry.frame(frame)
+            if self.entry_frame is not None and frame is not self.entry_frame:
+                raise ValueError("reentrant application entry")
+            self.entry_frame = frame
+        if event == "call" and frame.f_code is self.target.code:
+            self.target.frame(frame)
+            if frame is not self.await_frame and not self.owns(frame.f_back):
+                raise ValueError("selected call is not owned by the module entry")
+            if frame is not self.target_frame:
+                if self.calls:
+                    raise ValueError("step requires exactly one nonrecursive selected call")
+                self.calls += 1
+                self.target_frame = frame
+        selected = frame is self.entry_frame or frame is self.target_frame
+        if selected and event == "exception":
+            # Await completion is reported as a stackless StopIteration.
+            # Its instruction varies between supported Python versions.
+            completion = arg[0] in (StopIteration, StopAsyncIteration) and arg[2] is None and frame.f_code.co_flags & inspect.CO_COROUTINE
+            if not completion:
+                raise ValueError("application call raised an exception")
+        if selected and event == "return":
+            # Python reports a return for every coroutine suspension as well
+            # as completion. Retain frame identity until the actual return.
+            opcode = dis.opname[frame.f_code.co_code[frame.f_lasti]]
+            if opcode in ("RETURN_VALUE", "RETURN_CONST"):
+                if frame is self.target_frame:
+                    self.completed = True
+                if frame is self.entry_frame:
+                    self.entry_completed = True
+
+    def expire(self):
+        # A Python thread cannot safely be killed or forcibly joined. End this
+        # disposable runner without a seal, including for non-daemon workers
+        # and code that catches cancellation. Go accepts none of its rows.
+        _collector.failed = True
+        os.write(2, b"module observation timed out or left unfinished work\n")
+        os._exit(1)
+
+    async def await_result(self, result):
+        return await result
+
+    def task(self, loop, coroutine, **kwargs):
+        task = asyncio.Task(coroutine, loop=loop, **kwargs)
+        self.tasks.add(task)
+        return task
+
+    def async_error(self, loop, context):
+        _collector.failed = True
+        _collector.misuse = "module event loop reported failed work"
+        loop.default_exception_handler(context)
+
+    def watchdog(self, deadline):
+        # A separate interpreter enforces the deadline even while application
+        # C code holds this interpreter's GIL. EOF cancels it on normal cleanup
+        # or parent death; no application thread can catch SIGKILL.
+        program = """import os, select, signal, sys, time
+parent, deadline = int(sys.argv[1]), float(sys.argv[2])
+os.write(1, b'1')
+if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
+    if os.getppid() == parent:
+        os.write(2, b'module observation timed out or left unfinished work\\n')
+        os.kill(parent, signal.SIGKILL)
+"""
+        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid()), str(deadline)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        if process.stdout.read(1) != b"1":
+            process.stdin.close()
+            process.stdout.close()
+            process.wait()
+            raise ValueError("module deadline watchdog failed to start")
+        process.stdout.close()
+        return process
+
+    @guarded
+    def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
+        c = _collector
+        c.driver()
+        if not self.entered or self.closed or c.active is not None:
+            raise ValueError("closed, unentered or nested lifecycle step")
+        if self.sequence >= int(c.request["sampling"]["steps"]):
+            raise ValueError("step sampling budget exceeded")
+        self.entry = self.application(entry)
+        self.before = self.read()
+        if not equal(self.before, self.state):
+            raise ValueError("state changed between transitions")
+        expect(self.before, expected_before, module=True)
+        self.calls = 0
+        self.completed = self.entry_completed = False
+        self.entry_frame = self.target_frame = self.await_frame = None
+        self.threads = set()
+        self.coroutines, self.tasks = set(), set()
+        existing_coroutines = coroutine_objects()
+        deadline = time.monotonic() + self.timeout
+        watchdog = self.watchdog(deadline)
+        loop = None
+        c.active = self
+        try:
+            result = self.entry.call(*args, **kwargs)
+            if inspect.isawaitable(result):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.set_task_factory(self.task)
+                loop.set_exception_handler(self.async_error)
+                awaited = self.await_result(result)
+                self.await_frame = awaited.cr_frame
+                loop.run_until_complete(awaited)
+            # Descendants can start more threads while their parents drain.
+            joined = set()
+            while self.threads - joined:
+                for worker in list(self.threads - joined):
+                    worker.join(max(0, deadline - time.monotonic()))
+                    if worker.is_alive() or time.monotonic() >= deadline:
+                        self.expire()
+                    joined.add(worker)
+            unfinished = any((value.cr_frame if type(value) is types.CoroutineType else value.gi_frame) is not None
+                             for value in coroutine_objects() - existing_coroutines)
+            if self.coroutines or unfinished:
+                raise ValueError("module entry left unfinished coroutines")
+            if any(not task.done() or task.cancelled() or task.exception() is not None for task in self.tasks):
+                raise ValueError("module entry left unfinished or failed tasks")
+            if c.failed or self.calls != 1 or not self.completed or not self.entry_completed:
+                raise ValueError("incomplete selected call")
+            self.entry.check()
+            self.after = self.read()
+            expect(self.after, expected_after, module=True)
+            if time.monotonic() >= deadline:
+                self.expire()
+            self.sequence += 1
+            self.state = copied(self.after)
+            c.write(self, self.entry, before=self.before, after=self.after)
+        finally:
+            if loop is not None:
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            if any(worker.is_alive() for worker in self.threads):
+                self.expire()
+            watchdog.stdin.close()
+            if watchdog.wait() != 0:
+                c.failed = True
+            c.active = None
+            self.entry_frame = self.target_frame = self.await_frame = None
+
+
 def _poison(message):
     _collector.failed = True
     _collector.misuse = _collector.misuse or message
@@ -441,8 +769,9 @@ class Lifecycle:
     def __exit__(self, exc_type, exc, tb):
         return _record(self).__exit__(exc_type, exc, tb)
 
-    def step(self, entry, *, expected_before=None, expected_after=None):
-        _record(self).step(entry, expected_before=expected_before, expected_after=expected_after)
+    @guarded
+    def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
+        _record(self).step(entry, *args, expected_before=expected_before, expected_after=expected_after, **kwargs)
 
 
 def _handle(record):
@@ -472,7 +801,21 @@ def instance(target, *, fields, expected_initial=None):
     return _handle(_Lifecycle(target, None, None, fields, expected_initial))
 
 
+@guarded
+def module(target, *, fields, expected_initial=None, timeout=5.0):
+    return _handle(_ModuleLifecycle(target, fields, expected_initial, timeout))
+
+
 def run(request, emit, locations, codes, argv):
+    # Docker starts the runner as namespace init, which cannot be killed by
+    # a child in that namespace. Keep init as a supervisor and execute the
+    # application in its child so the independent deadline can terminate it.
+    # Exiting init also removes every descendant on container cancellation.
+    if os.getpid() == 1:
+        child = os.fork()
+        if child:
+            _, status = os.waitpid(child, 0)
+            os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
     global _collector
     c = _collector = Collector(request, emit, locations, codes)
     random.seed(int(request["sampling"]["seed"]))
@@ -483,9 +826,23 @@ def run(request, emit, locations, codes, argv):
     module.__file__, module.__package__ = filename, None
     sys.modules["__main__"] = module
     sys.argv = list(argv)
+    # Python 3.12 delivers opcode events only if some frame asked for them
+    # before sys.settrace, so ask on this untraced frame first. Later
+    # versions instrument a frame's code when capture_definition asks.
+    if sys.version_info < (3, 13):
+        sys._getframe().f_trace_opcodes = True
     sys.settrace(c.trace)
     sys.setprofile(c.profile)
     threading.settrace(c.trace)
+    threading.setprofile(c.profile)
+    previous_excepthook = threading.excepthook
+    def thread_error(args):
+        c.failed = True
+        previous_excepthook(args)
+    def start(worker, *args, **kwargs):
+        return c.start_thread(worker, *args, **kwargs)
+    threading.Thread.start = start
+    threading.excepthook = thread_error
     try:
         exec(code, vars(module))
         if c.failed or not c.lives or any(not life.closed or life.sequence == 0 for life in c.lives) or sys.gettrace() != c.trace or sys.getprofile() != c.profile:
@@ -494,4 +851,7 @@ def run(request, emit, locations, codes, argv):
         sys.settrace(None)
         sys.setprofile(None)
         threading.settrace(None)
+        threading.setprofile(None)
+        threading.Thread.start = c.thread_start
+        threading.excepthook = previous_excepthook
     emit(dict(type="end", count=c.count))
