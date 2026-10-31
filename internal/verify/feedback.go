@@ -16,8 +16,12 @@ func Feedback(r *Report) string {
 		failed = append(failed, title)
 		fmt.Fprintf(&b, "\n## %s\n\n%s\n", title, strings.Join(lines, "\n"))
 	}
-	if !r.RatificationMatches() {
+	switch {
+	case r.RatificationMatches():
+	case r.Ratified != nil:
 		section("Ratification", fmt.Sprintf("The lock's statements or bounds no longer match the proposal @%s ratified. Restore the lock.", r.Ratified.By))
+	default:
+		section("Ratification", fmt.Sprintf("The lock isn't what a person ratified in the journal: %s. Restore the lock.", r.Journal.Problem))
 	}
 	for _, p := range r.Pins {
 		switch {

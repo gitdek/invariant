@@ -9,7 +9,7 @@ import (
 func TestExplore(t *testing.T) {
 	seen := map[State]bool{Init(): true}
 	queue := []State{Init()}
-	merged := false
+	merged, replaced := false, false
 	for len(queue) > 0 {
 		s := queue[0]
 		queue = queue[1:]
@@ -24,13 +24,31 @@ func TestExplore(t *testing.T) {
 			}
 		}
 		if s.PRs > 1 || s.Merges > 1 {
-			t.Fatalf("more than one pull request or merge in %+v", s)
+			t.Fatalf("more than one pull request for a build, or a second merge, in %+v", s)
 		}
 		if s.Merges > 0 && !(s.Gate && s.Mergeable) {
 			t.Fatalf("merged before the gate in %+v", s)
 		}
+		if (s.PR == PRDraft || s.PR == PRReady) && s.Pred == PredDraft {
+			t.Fatalf("two pull requests open in %+v", s)
+		}
+		if s.Pred == PredRetired && !s.Intent {
+			t.Fatalf("closed a draft with no record of the retry that replaces it in %+v", s)
+		}
+		if s.Pred == PredMerged && (s.Runs[runIndex(Build)] != RunNone || s.PRs > 0) {
+			t.Fatalf("built again over a merged draft in %+v", s)
+		}
+		if s.Gate && s.PRs == 0 {
+			t.Fatalf("a passed gate with no pull request of the latest build's own in %+v", s)
+		}
+		if s.Runs[runIndex(Build)] != RunNone && s.RunStarts[runIndex(Build)] == 0 {
+			t.Fatalf("the latest build's run counted an earlier build's in %+v", s)
+		}
 		if s.Merges == 1 && s.Posts[Merge] == 1 && s.Crashes == MaxCrashes {
 			merged = true
+		}
+		if s.Pred == PredRetired && s.Merges == 1 && s.Posts[Merge] == 1 {
+			replaced = true
 		}
 		if _, err := json.Marshal(Abstract(s)); err != nil {
 			t.Fatal(err)
@@ -44,6 +62,9 @@ func TestExplore(t *testing.T) {
 	}
 	if !merged {
 		t.Fatal("no state merged and reported after the most crashes")
+	}
+	if !replaced {
+		t.Fatal("no state merged and reported a pull request that replaced a failed draft")
 	}
 	t.Logf("%d states", len(seen))
 }
