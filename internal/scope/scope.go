@@ -348,7 +348,16 @@ func plan(g git, base, head string, issue int, r Result) Result {
 		r.Problems = append(r.Problems, fmt.Sprintf("its plan was ratified on #%d, not #%d", lock.Ratified.Issue, issue))
 	}
 	touches := lock.Plan.Touches(issue)
-	before, err := g.treeModes(base)
+	// The changed paths are head's since its merge base with base, so that
+	// merge base's files decide which tests are new, however base has moved
+	// since: a test base deleted after the branch diverged is still one the
+	// branch changes, not one it adds (#298).
+	from, err := g.mergeBase(base, head)
+	if err != nil {
+		r.Problems = append(r.Problems, "the original file inventory can't be read: "+err.Error())
+		return r
+	}
+	before, err := g.treeModes(from)
 	if err != nil {
 		r.Problems = append(r.Problems, "the original file inventory can't be read: "+err.Error())
 		return r
@@ -388,6 +397,13 @@ func plan(g git, base, head string, issue int, r Result) Result {
 		}
 	}
 	return r
+}
+
+// mergeBase is the commit that base...head compares head with. With more
+// than one merge base, git diff and git merge-base both take the first.
+func (g git) mergeBase(base, head string) (string, error) {
+	out, err := g.run("merge-base", base, head)
+	return strings.TrimSpace(out), err
 }
 
 // treeModes reads committed paths and modes, never the working tree. A
