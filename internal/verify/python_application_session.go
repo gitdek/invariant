@@ -40,6 +40,10 @@ type PythonApplicationInvocation struct {
 	Key      PythonApplicationInvocationKey      `json:"key"`
 	Declared project.ResolvedComponentInvocation `json:"declared"`
 	Sampling map[string]string                   `json:"sampling"`
+	// Explored is a conformance driver an exhaustive manifest runs through
+	// the gate's exploration harness, with runs and steps as its budgets
+	// (#342). Otherwise the driver samples.
+	Explored bool `json:"explored,omitempty"`
 }
 
 type PythonApplicationProvenance struct {
@@ -258,9 +262,6 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 }
 
 func pythonApplicationInvocations(p *project.Project, root string, inv *project.ComponentInventory) ([]PythonApplicationInvocation, error) {
-	if p.Manifest.Exhaustive {
-		return nil, fmt.Errorf("Python application exhaustive execution is unsupported")
-	}
 	if inv.Mode == "legacy" {
 		return pythonApplicationLegacyInvocations(p, root)
 	}
@@ -372,11 +373,11 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 			default:
 				return nil, fmt.Errorf("unsupported Python application invocation kind %q", v.Kind)
 			}
-			out = append(out, clonePythonApplicationInvocation(PythonApplicationInvocation{PythonApplicationInvocationKey{check.Target, v.Check, v.Kind, v.ID}, v, sampling}))
+			out = append(out, clonePythonApplicationInvocation(PythonApplicationInvocation{PythonApplicationInvocationKey{check.Target, v.Check, v.Kind, v.ID}, v, sampling, v.Kind == "conformance" && p.Manifest.Exhaustive}))
 		}
 	}
 	if !slices.ContainsFunc(out, func(v PythonApplicationInvocation) bool { return v.Key.Kind == "conformance" }) {
-		return nil, fmt.Errorf("Python application requires sampled conformance")
+		return nil, fmt.Errorf("Python application requires conformance")
 	}
 	return out, nil
 }

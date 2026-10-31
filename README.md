@@ -125,7 +125,7 @@ Markdown receipts and the dashboard derive these claims from evidence even when 
 
 ### Manually adopting an existing Python application
 
-`invariant verify` checks an existing Python application against its model with sampled, authenticated read-back. It uses one staged copy and one dependency image for the whole run. Explicit components get independent evidence; omitting them keeps a legacy receipt with no invented inventory. No Nagini annotation is required, and a `# +nagini` marker does not enable proof on this path. Factory drafting and synthesis for this mode, exhaustive exploration and attempted-step checks are outside #327.
+`invariant verify` checks an existing Python application against its model with authenticated read-back, sampled or, for an exhaustive manifest, explored in every state the application reaches, every step tried and one size larger ([Exploring every state](#exploring-every-state), #342). It uses one staged copy and one dependency image for the whole run. Explicit components get independent evidence; omitting them keeps a legacy receipt with no invented inventory. No Nagini annotation is required, and a `# +nagini` marker does not enable proof on this path. The factory doesn't draft or synthesize this mode yet.
 
 Here is a complete small application layout. Paths in `existing` and `components` are relative to `app`; model, code and conformance paths are relative to `verification/lifecycle`.
 

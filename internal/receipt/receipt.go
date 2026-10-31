@@ -595,6 +595,9 @@ func (render renderer) failures(r *verify.Report) []string {
 	if c := r.Conformance; c != nil && c.Tried != nil && !c.Tried.Passed {
 		out = append(out, "Every step tried: "+render.text(c.Tried.Message)+". "+render.triedEvidence(*c.Tried))
 	}
+	if r.Application != nil {
+		out = append(out, render.pythonApplicationFailures(r.Application)...)
+	}
 	if c := r.Code; c != nil {
 		for _, e := range c.Errors {
 			out = append(out, render.value(c.Verifier)+": "+render.text(e))
