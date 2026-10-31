@@ -347,14 +347,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	// A retry's build opens its pull request once: one GitHub already opened
-	// from its branch is its own, whatever has become of it, so a crash or a
-	// close never makes a second (#271, D-0203).
-	lookup := f.GitHub.OpenPullRequest
-	if m.Replaces != 0 {
-		lookup = f.GitHub.PullRequestFrom
-	}
-	pr, found, err := lookup(ctx, m.Branch)
+	pr, found, err := f.buildPullRequest(ctx, m.Branch, ratified)
 	if err != nil {
 		return err
 	}

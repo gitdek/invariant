@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/gitdek/invariant/factory/recovery/recovery"
+	"github.com/gitdek/invariant/internal/github"
 )
 
 // A writer's retry of a plan's build that failed in the factory's own run,
@@ -152,6 +153,20 @@ func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (superse
 		return replaced, nil
 	}
 	return answered, nil
+}
+
+// buildPullRequest finds the pull request the build ratified started opened
+// from branch, whatever has become of it since: open, closed or merged. So a
+// crash, or someone closing it before the factory says so, never makes a
+// build open a second, as the recovery core's OnePullRequest has it (#271,
+// D-0203). One from the branch opened before the build started is an
+// earlier build's.
+func (f *Factory) buildPullRequest(ctx context.Context, branch string, ratified Post) (github.PullRequest, bool, error) {
+	pr, found, err := f.GitHub.PullRequestFrom(ctx, branch)
+	if err != nil || !found || pr.CreatedAt < ratified.Comment.CreatedAt {
+		return github.PullRequest{}, false, err
+	}
+	return pr, true, nil
 }
 
 // latestBuild is the post that started the issue's latest build: the latest

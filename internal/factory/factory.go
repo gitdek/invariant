@@ -1765,11 +1765,11 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	pr, open, err := f.GitHub.OpenPullRequest(ctx, m.Branch)
+	pr, found, err := f.buildPullRequest(ctx, m.Branch, ratified)
 	if err != nil {
 		return err
 	}
-	if !open {
+	if !found {
 		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
 			return err
 		}
@@ -1779,7 +1779,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}); err != nil {
 			return err
 		}
-	} else if res.Final.Passed {
+	} else if res.Final.Passed && pr.State == "open" {
 		if err := f.markReady(ctx, n, pr); err != nil {
 			return err
 		}

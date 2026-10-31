@@ -106,6 +106,7 @@ type PullRequest struct {
 	MergeCommitSHA string `json:"merge_commit_sha"`
 	MergedAt       string `json:"merged_at,omitempty"`
 	MergedBy       *User  `json:"merged_by,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
 }
 
 // NewPullRequest is a pull request to open.
@@ -272,6 +273,8 @@ func (c Client) PullRequestFrom(ctx context.Context, branch string) (PullRequest
 			newest = pr
 		}
 	}
+	// A list of pull requests says when one merged, not whether it did.
+	newest.Merged = newest.MergedAt != ""
 	return newest, true, nil
 }
 

@@ -189,7 +189,7 @@ func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullReque
 	}
 	g.nextPR++
 	out := &github.PullRequest{Number: g.nextPR, State: "open", Draft: pr.Draft, URL: fmt.Sprintf("https://github.com/o/r/pull/%d", g.nextPR),
-		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}}
+		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}, CreatedAt: "2026-09-25T12:00:00Z"}
 	g.prs[out.Number] = out
 	g.bodies[out.Number] = pr.Body
 	return *out, nil
