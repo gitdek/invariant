@@ -506,7 +506,7 @@ func TestACommandPostedFromActShowsAtOnce(t *testing.T) {
 		atOnceActed(t, "at once", issues, n, command, text, atOnceURL(n, f.id(n)), from, to)
 	}
 	shows(19, "/invariant choose F1 A\n/invariant choose F2 B", "Answered. The factory drafts again next.", false)
-	shows(20, "/invariant retry", "Asked for a retry. The factory tries again next.", false)
+	shows(20, "/invariant retry", "Asked for a retry. The factory builds the ratified proposal again next.", false)
 	shows(21, "/invariant revise", "Asked for a new draft. The factory drafts again next.", true)
 	if got := f.taken(); !strings.HasPrefix(got[len(got)-1], "o/r#21 /invariant revise\n\n") {
 		t.Errorf("the agent's revise went to GitHub as %q; want the command, then the agent's note", got[len(got)-1])

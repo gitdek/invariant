@@ -143,6 +143,10 @@ func TestClippedPlanKeepsRatificationInstructions(t *testing.T) {
 func TestClippedPostsKeepClosingCommands(t *testing.T) {
 	long := strings.Repeat("Evidence with café and 界. ", 4000)
 	pr := github.PullRequest{Number: 251}
+	// A retry of #251 watches it again (#263): what that leads to is part of
+	// every instruction to retry it.
+	const watching = "`/invariant retry` to have me watch #251 again. I'll merge it once CI's `invariant/gate` passes on its current head. " +
+		"I won't review #251 again, so if it needs fixes, including any changes its review asked for, push them first: otherwise it merges as it is."
 	for _, tc := range []struct {
 		name string
 		kind string
@@ -174,26 +178,27 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			name: "retry and revise with a draft PR", kind: KindFailed,
 			make: func(m Marker) string { return planFailedComment(&pr, nil, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Comment `/invariant retry` to build again. To change the plan instead, close #251, say what to change, and comment `/invariant revise`.",
+			want: "\n\nA person needs to look at this. Comment " + watching + " To build the plan again instead, close #251, say \"draft the same plan again\" or what to change, " +
+				"and comment `/invariant revise`. I'll draft it for you to ratify again before I build it.",
 		},
 		{
 			name: "retry refused merge", kind: KindFailed,
 			make: func(m Marker) string { return mergeRefusedComment(pr, false, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.",
+			want: "\n\nA person needs to look at this. Once the cause is fixed, comment " + watching,
 		},
 		{
 			name: "CI never started", kind: KindFailed,
 			make: func(m Marker) string {
 				return ciFailedComment(pr, github.CheckRun{URL: "https://example.test/" + strings.Repeat("x", 2*maxComment)}, gateNeverStarted, m)
 			},
-			want: " Once CI can run, re-run the job, then comment `/invariant retry`.",
+			want: " Once CI can run, re-run the job, then comment " + watching,
 		},
 		{
 			name: "CI start unknown", kind: KindFailed,
 			make: func(m Marker) string {
 				return ciFailedComment(pr, github.CheckRun{URL: "https://example.test/" + strings.Repeat("x", 2*maxComment)}, gateUnknown, m)
 			},
-			want: " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.",
+			want: " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can. Otherwise, a person needs to look at this. Once the cause is fixed, comment " + watching,
 		},
 		{
 			name: "unavailable coding agent", kind: KindUnsupported,
@@ -345,7 +350,7 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			got:   ciFailedComment(pr, github.CheckRun{URL: "https://example.test/run"}, gateNeverStarted, Marker{Kind: KindNote}),
 			title: "needs a person",
-			body:  "CI couldn't start `invariant/gate` on #251 ([run](https://example.test/run)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment `/invariant retry`.",
+			body:  "CI couldn't start `invariant/gate` on #251 ([run](https://example.test/run)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it. Once CI can run, re-run the job, then comment " + watching,
 		},
 		{
 			got:   planOpenedComment(PlanOfIssues{By: "gitdek", Issues: []PlannedIssue{{Title: "First step"}, {Title: "Next step"}}}, 0, 251, Marker{Kind: KindNote}),
