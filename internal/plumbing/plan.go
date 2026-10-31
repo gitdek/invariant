@@ -145,18 +145,22 @@ func (p *Plan) Touches(n int) map[string]bool {
 // belongs to its nearest enclosing package; new unnamed files cannot
 // introduce another package into the plan's scope.
 func (p *Plan) GoPackages(baseFiles []string) []string {
+	touches := append(append([]string(nil), p.Files...), p.TestFiles()...)
+	return p.packagesIn(append(append([]string(nil), baseFiles...), touches...))
+}
+
+// packagesIn finds the packages the plan touches with files as the whole
+// inventory: each file the plan names counts for the nearest directory
+// where files holds Go files. Given a candidate's files, a package the
+// plan deletes is no package at all (#298).
+func (p *Plan) packagesIn(files []string) []string {
 	have := map[string]bool{}
-	for _, f := range baseFiles {
+	for _, f := range files {
 		if strings.HasSuffix(f, ".go") {
 			have[path.Dir(f)] = true
 		}
 	}
 	touches := append(append([]string(nil), p.Files...), p.TestFiles()...)
-	for _, f := range touches {
-		if strings.HasSuffix(f, ".go") {
-			have[path.Dir(f)] = true
-		}
-	}
 	seen := map[string]bool{}
 	for _, f := range touches {
 		for dir := path.Dir(f); ; dir = path.Dir(dir) {
