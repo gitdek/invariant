@@ -716,7 +716,7 @@ These five APIs attribute supplied proof, assumption, conformance, runtime and b
 
 ### Trusted dependency contracts
 
-A function proved in place still calls things its prover can't verify: the standard library, a map, I/O, a third-party package, or the application's own code beyond the proof's boundary. [#343](https://github.com/gitdek/invariant/issues/343), the third step of [#294](https://github.com/gitdek/invariant/issues/294)'s plan, inventories those boundaries as **trusted contracts**: assumptions about a real operation, which its backing tests can support. A trusted contract is never a proof of the operation, and declaring one shows no call, no test run and no proof that used it. The policy is [D-0198](decisions/journal/D-0198.jsonl).
+A function proved in place still calls things its prover can't verify: the standard library, I/O, a third-party package, or the application's own code beyond the proof's boundary. Operations on dicts, lists, sets, strings and tuples, and the builtins Nagini models, aren't among them: they're the verifier's own trusted model, as in the legacy cores ([D-0222](decisions/journal/D-0222.jsonl)). [#343](https://github.com/gitdek/invariant/issues/343), the third step of [#294](https://github.com/gitdek/invariant/issues/294)'s plan, inventories those boundaries as **trusted contracts**: assumptions about a real operation, which its backing tests can support. A trusted contract is never a proof of the operation, and declaring one shows no call, no test run and no proof that used it. The policy is [D-0198](decisions/journal/D-0198.jsonl).
 
 An existing Python application's `components` can declare them beside its checks. Paths are relative to the application root, as its other component paths are:
 
@@ -755,7 +755,7 @@ An existing Python application's `components` can declare them beside its checks
 | Field | Rule |
 | :-- | :-- |
 | `id` | Unique, nonblank, with no spaces or control characters. |
-| `operation` | `standard_library`: a dotted `module` and `symbol` of the pinned Python runtime, builtins and maps included. `dependency`: a `distribution` name, normalized as PEP 503 does, with a dotted module and symbol. `application`: a `source` and `symbol` naming one declaration outside a test file, in scope or not. Two contracts can't bind one operation: the standard library's and a dependency's are told apart by their full dotted name alone, however a manifest splits it between `module` and `symbol`. |
+| `operation` | `standard_library`: a dotted `module` and `symbol` of the pinned Python runtime, builtins included; a contract on a builtin or container operation Nagini models still has required backing tests, though an in-place proof never assumes it. `dependency`: a `distribution` name, normalized as PEP 503 does, with a dotted module and symbol. `application`: a `source` and `symbol` naming one declaration outside a test file, in scope or not. Two contracts can't bind one operation: the standard library's and a dependency's are told apart by their full dotted name alone, however a manifest splits it between `module` and `symbol`. |
 | `contract` | A declaration with supported inline Nagini calls (`Requires`, `Ensures` and the rest), outside scope and test files, which isn't the operation itself or another contract's operation. Two contracts can't share one. |
 | `tests` | At least one declaration in a test file. |
 | `invocations` | Declared as a check's are, each of kind `test` and naming one of the contract's tests. A backing test is supported only through a result for one of its declared invocations, so each test needs one. |
@@ -780,10 +780,11 @@ from nagini_contracts.contracts import *
 
 def loads(text: str) -> object:
     Requires(len(text) > 0)
+    Exsures(Exception, True)
     ...
 ```
 
-and its backing tests exercise the real operation, checking its results, its errors and, for an operation that changes its arguments, the change:
+`Exsures` says the operation may raise: `json.loads('{')` raises a `JSONDecodeError`, a `ValueError`, and the pinned Nagini models only `Exception` and `ConnectionRefusedError` among exception classes, so the contract declares `Exception`. A contract that declares no `Exsures` says its operation never raises under its precondition ([D-0222](decisions/journal/D-0222.jsonl)). Its backing tests exercise the real operation, checking its results, its errors and, for an operation that changes its arguments, the change:
 
 ```python
 # verification/tasks/test_contracts.py
@@ -833,7 +834,7 @@ async def report(name: str) -> str:
     return f"admitted {name}"
 ```
 
-and select it as a check's proof, its own inline contract the proof's contract, with no proof invocation, since the gate runs only its own pinned Nagini:
+and select it as a check's proof, its own inline contract the proof's contract, with no proof invocation, since the gate runs only its own pinned Nagini. The module must be among the manifest's `existing` sources, and the session, as every application session does, needs some check with sampled conformance:
 
 ```json
 {"target": {"source": "tasks/admission.py", "symbol": "admit"},
@@ -849,18 +850,28 @@ def normalized(name: str) -> bool:
     ...
 ```
 
-`(*verify.PythonApplicationSession).Prove` builds Nagini's input from the session's staged snapshot and runs the pinned Nagini on it, offline, in its own linux/amd64 image, where none of the application's requirements is installed; `ProofInput` builds the input alone. The input is a module, `invariant_target.py`, that copies the function's original bytes, and from its module only the imports of Nagini's contracts and typing, `__future__` imports and literal constants holding immutable values nothing in the module rebinds. Each other name the function reads is either a builtin Nagini models itself (`int`, `float`, `bool`, `str`, `object`, `list`, `dict`, `set`, `tuple`, `len`, `isinstance`, `abs`, `min`, `max`, `range`), or bound by an import the gate writes to a boundary module that holds the contract's abstraction: its header renamed for the operation, its contract statements copied, marked `ContractOnly`, so Nagini assumes it and never verifies it. So here the input binds `is_normalized_name` to `normalized`'s contract, and `report` never reaches Nagini, which given the whole file stops on it. Every span of the input maps to the original lines and bytes it copies, with their SHA-256, and is checked against the original before Nagini runs and again after, so a rewritten or detached implementation can't stand for the application's; Nagini's errors come back at the original lines.
+`(*verify.PythonApplicationSession).Prove` builds Nagini's input from the session's staged snapshot and runs the pinned Nagini on it, offline, in its own linux/amd64 image, where none of the application's requirements is installed; `ProofInput` builds the input alone. The input is a module, `invariant_target.py`, that copies the function's original bytes, and from its module only the imports of Nagini's contracts and typing, `__future__` imports and literal constants holding immutable values nothing in the module rebinds. Each other name the function reads is one of these:
+- a builtin Nagini models itself (`int`, `float`, `bool`, `str`, `object`, `list`, `dict`, `set`, `tuple`, `len`, `isinstance`, `abs`, `min`, `max`, `range`), whose operations, on dicts, lists, sets, strings and tuples too, are the verifier's own trusted model, as in the legacy cores;
+- `Exception` or `ConnectionRefusedError`, the exception classes it models;
+- or bound by an import the gate writes to a boundary module that holds the contract's abstraction: its header renamed for the operation, its contract statements copied, `Exsures` included, and marked `ContractOnly`, so Nagini assumes it and never verifies it.
+
+So here the input binds `is_normalized_name` to `normalized`'s contract, and `report` never reaches Nagini, which given the whole file stops on it. Every span of the input maps to the original lines and bytes it copies, with their SHA-256. Each is checked against the original before Nagini runs, a signature renaming only the function, and the files Nagini read are checked again after it runs, so a rewritten or detached implementation can't stand for the application's. Nagini's errors come back at the original lines ([D-0222](decisions/journal/D-0222.jsonl) refines what's refused below).
 
 | The function reaches | What happens |
 | :-- | :-- |
 | An operation a trusted contract binds, by its full dotted name, or for the application's own code by its declaration | The input assumes the abstraction, and the attempt reports the contract as assumed. Contracts the function doesn't reach stay declarations. |
-| An operation no contract binds, other builtins and I/O such as `print` included | A `missing_contract` in the inventory's own form, a dependency's named for the resolved wheel its module matches, and Nagini doesn't run. |
-| A module no resolved wheel provides, or Nagini's `Assume` | An unaccounted assumption, so the attempt proves nothing. |
-| Anything the input can't preserve | Refused before any tool runs: an `async` function, decorators other than `Pure`, nested functions, lambdas, `global` or `nonlocal`, imports in the function, `*args`, classes, star imports other than Nagini's, attributes deeper than a module's function, a module used other than to call its functions, names bound more than once, conditionally or not at all, a copied statement sharing its line with another, a non-UTF-8 source, and an abstraction that holds more than contracts or reads more than its parameters, Nagini's and typing's names and those builtins. |
+| An operation no contract binds, other builtins and I/O such as `print` included | A `missing_contract` in the inventory's own form, a dependency's named for the distribution whose RECORD installed its module (PyYAML's `yaml` is `pyyaml`'s), and Nagini doesn't run. |
+| A module no distribution, or several, installed | An unaccounted assumption, and Nagini doesn't run. |
+| Nagini's `Assume` | An unaccounted assumption: Nagini runs, and the attempt proves nothing. |
+| A call whose contract declares an exception, inside a handler for it | Nagini checks the handler's path. A handler that can catch what the contract doesn't declare is refused: a bare except catches everything. A contract with no `Exsures` says its operation never raises. |
+| A name Nagini reads as its own whatever it's bound to, such as `Assume`, `len`, `range` or `Pure` | Refused unless it's Nagini's own export of that name, typing's or the real builtin. The function may bind none of the calls Nagini dispatches by name, and may not import Nagini's names under others. The lists come from the pinned image's sources. |
+| Anything else the input can't preserve | Refused before any tool runs: an `async` function, decorators other than `Pure`, nested functions, lambdas, `global` or `nonlocal`, imports in the function, `*args`, classes, star imports other than Nagini's, attributes deeper than a module's function, a module used other than to call its functions, names bound more than once, conditionally or not at all, a copied statement sharing its line with another or ending in a line continuation, an annotation the input can't bind, a relative import above the top-level package, an async application operation, an exception class Nagini doesn't model, a non-UTF-8 source, and an abstraction that holds more than contracts or reads more than a function may. |
 
-The attempt's `ComponentProofResult` names the function as verified only when Nagini passed, with its selected contracts, the declarations it read, the contracts it assumed, its original files and its tool's pins: the recipe, the image's digest, the platform and the input's fingerprint. Proof attribution takes it, so beside the contracts' backing tests it shows a proof that rests on tested assumptions. The gate itself still refuses proof selections; #294's sixth step connects proofs and their backing tests to it. `invariant verify` doesn't run in-place proof yet, and marked files keep their adapter. The module imports Nagini's contracts, so the application's environment has to provide `nagini_contracts` wherever the module runs.
+What callers reach is the module's binding of the function's name, so the module must bind it by its one def and never rebind it. The module may not write its namespace in ways no binding shows (with `globals`, `vars`, `setattr`, `delattr`, `exec`, `eval`, `__import__`, `sys.modules` or `__builtins__`), and no staged application source may write its attributes. The gate still assumes nothing outside the application does: a dependency, startup code, patching by name as `mock.patch` does, or reflection could.
 
-`INVARIANT_PYTHON_APPLICATION_PROOF_REAL=1 go test ./internal/verify -run '^TestPythonApplicationProof' -count=1 -timeout 60m` runs the pinned Nagini on that function, with `packaging`'s backing tests run in the application's real dependency image: it proves `admit`, rejects a body that breaks its postcondition at the original line, and reports an omitted contract without running Nagini.
+The attempt's `ComponentProofResult` names the function as verified only when Nagini passed, with its selected contracts, the declarations it read, the contracts it assumed, its original files and its tool's pins: the recipe, the platform and the input's fingerprint. The image's local ID stays beside them in the attempt, never in the pins, so receipts match between machines. Proof attribution takes it, so beside the contracts' backing tests it shows a proof that rests on tested assumptions. The gate itself still refuses proof selections; #294's sixth step connects proofs and their backing tests to it, and must refuse a result with unaccounted entries. `invariant verify` doesn't run in-place proof yet, and marked files keep their adapter. The module imports Nagini's contracts, so the application's environment has to provide `nagini_contracts` wherever the module runs.
+
+`INVARIANT_PYTHON_APPLICATION_PROOF_REAL=1 go test ./internal/verify -run '^TestPythonApplicationProof' -count=1 -timeout 60m` runs the pinned Nagini on that function, with `packaging`'s backing tests run in the application's real dependency image. It proves `admit`, rejects a body that breaks its postcondition at the original line, and reports an omitted contract without running Nagini. It also checks a handler for an exception a contract declares, and checks Nagini's names against the pinned image's sources.
 
 ## One model, three languages
 
