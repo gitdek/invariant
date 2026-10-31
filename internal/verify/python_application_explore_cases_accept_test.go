@@ -138,9 +138,9 @@ func TestPythonApplicationGateExplorationLarger(t *testing.T) {
 				t.Fatalf("nonapplicable larger check: passed=%v %+v", r.Passed, r.Larger)
 			}
 		})
-		t.Run("a substitute target one size larger fails it", func(t *testing.T) {
+		t.Run("a touched target with a substitute lifecycle one size larger fails it", func(t *testing.T) {
 			f := pa342New(t, true, real)
-			pa342Edit(t, f, pa342DriverPath, "def start():\n", "def fake(count):\n    return count + 1\n\n\ndef start():\n    if Limit > 2:\n        return functional(fake, service.start, argument='count', field='count')\n")
+			pa342Edit(t, f, pa342DriverPath, "def start():\n", "def fake(count):\n    return count + 1\n\n\ndef start():\n    if Limit > 2:\n        increment(0)\n        return functional(fake, service.start, argument='count', field='count')\n")
 			r := pa342Unchanged(t, f, tc)
 			_, c := pa342Explored(t, r)
 			if r.Passed || !c.passed() || r.Larger == nil || !r.Larger.Required || r.Larger.Passed || len(r.Application.Larger) != 1 || r.Application.Larger[0].Execution.Success {
@@ -403,6 +403,59 @@ func TestPythonApplicationGateExplorationFingerprints(t *testing.T) {
 		pa342Save(t, g)
 		if r := pa342Run(t, g, tc); r.Fingerprint == first.Fingerprint {
 			t.Fatal("changed bounds left the fingerprint")
+		}
+	})
+}
+
+// A session's ordinary and larger explorations run in the one image it
+// selected, by its immutable ID, even after the dependency cache's mutable
+// tag moves to another image.
+func TestPythonApplicationGateExplorationKeepsOneImage(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		f := pa342New(t, true, real)
+		var images []string
+		options := PythonApplicationSessionOptions{Execute: func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
+			images = append(images, c.Image)
+			return RunPythonApplicationCommand(ctx, c)
+		}}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		s, err := PreparePythonApplicationSession(ctx, f.p, filepath.Join(t.TempDir(), "stage"), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if deps := s.Provenance().Dependencies; real {
+			if deps == nil || !strings.HasPrefix(deps.Image, "sha256:") {
+				t.Fatalf("real session selected no immutable dependency image: %+v", deps)
+			}
+			tag := "invariant-python-deps:" + strings.TrimPrefix(deps.Recipe, "sha256:")
+			if out, err := toolchain.Docker(ctx, "tag", toolchain.PythonImage, tag).CombinedOutput(); err != nil {
+				t.Fatalf("moving the cache tag: %v %s", err, out)
+			}
+			t.Cleanup(func() { toolchain.Docker(context.Background(), "tag", deps.Image, tag).Run() })
+		}
+		var key, unit PythonApplicationInvocationKey
+		for _, v := range s.Invocations() {
+			if v.Explored {
+				key = v.Key
+			} else {
+				unit = v.Key
+			}
+		}
+		x, err := s.Run(ctx, key)
+		if err != nil || !x.Success || x.Exploration.States != 3 {
+			t.Fatalf("ordinary exploration: %+v %v", x, err)
+		}
+		l, driver, err := s.RunLarger(ctx, key, map[string]int{"Limit": 3})
+		if err != nil || !l.Success || l.Exploration.States != 4 || driver.Path != pa342DriverPath {
+			t.Fatalf("larger exploration: %+v %v", l, err)
+		}
+		if len(images) != 2 || images[0] != images[1] || images[0] != s.image {
+			t.Fatalf("explorations ran in different images: %v, session %s", images, s.image)
+		}
+		if _, _, err := s.RunLarger(ctx, unit, map[string]int{"Limit": 3}); err == nil || unit.Kind != "test" {
+			t.Fatalf("a test invocation ran one size larger: %v", err)
 		}
 	})
 }
