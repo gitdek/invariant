@@ -284,13 +284,13 @@ The command writes `receipt/receipt.json` and `receipt/receipt.md`. Passing yiel
 
 This is **sampled tested-against-the-model evidence**: exhaustive design checking does not make the implementation exhaustive, prove it, check every attempted step or cover every size. Fractions and unsupported observation values fail TLC encoding explicitly; integer values are preserved exactly. D-0183's collector trust boundary and stateless handles remain as described below.
 
-**Merger work for #327:** record the new gate/receipt execution policy using decision tooling and add its SPEC citation. Then run and post passing output on the final head before moving on:
+The gate/receipt execution policy is recorded as [D-0185](decisions/journal/D-0185.jsonl), and this real suite passed on #328's final head:
 
 ```sh
 INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify ./internal/conformance ./cmd/invariant -run '^TestPythonApplicationGate' -count=1 -timeout 45m
 ```
 
-Default acceptance checks execute actual local Python with Docker transport and TLC doubles; they do not skip or claim real Docker/TLC validation. The opt-in command requires real Docker, TLC and wheel installation and fails if prerequisites are absent. Decision recording and unavailable Docker/network checks belong to the merger.
+Default acceptance checks execute actual local Python with Docker transport and TLC doubles; they do not skip or claim real Docker/TLC validation. The opt-in command requires real Docker, TLC and wheel installation and fails if prerequisites are absent.
 
 ### Existing Python application foundation
 
