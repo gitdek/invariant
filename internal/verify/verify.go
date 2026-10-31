@@ -66,7 +66,8 @@ type Report struct {
 	// Components attributes supplied proofs, assumptions, conformance and runtime
 	// tests and assertions independently in an explicit inventory. Legacy checks
 	// and other evidence kinds cannot establish component proof coverage.
-	Components *ComponentEvidence `json:"components,omitempty"`
+	Components  *ComponentEvidence       `json:"components,omitempty"`
+	Application *PythonApplicationReport `json:"application,omitempty"`
 	// Larger is agreement again, one size past the bounds, for code whose
 	// explorer names its bounds (D-0068).
 	Larger *Larger `json:"larger,omitempty"`
@@ -206,39 +207,44 @@ func RunModel(ctx context.Context, dir string, tc toolchain.Toolchain) (*Report,
 	return gate(ctx, dir, "", tc, true)
 }
 
-// ErrComponents is why the gate won't verify the code of a project that
-// declares components: execution adapters aren't connected yet (D-0158).
+// ErrComponents rejects explicit code modes without an execution adapter.
 var ErrComponents = errors.New("component verification is not supported yet")
 
-// ErrPythonApplication keeps existing Python declarations out of the legacy
-// code gate until an application execution adapter is available.
+// ErrPythonApplication is retained for callers of the earlier discovery API.
 var ErrPythonApplication = errors.New("existing Python application execution is not supported yet")
 
 // Check loads the project at dir and says whether the gate can verify its
-// code, before anything runs: invalid projects, explicit components and
-// existing Python applications fail here. None needs Docker or TLC, so the
-// CLI checks before it sets them up.
+// code, before verification tools run. Sampled existing Python uses the same
+// preflight as prepared sessions; unsupported modes never reach tool setup.
 func Check(dir string) error {
 	p, err := project.Load(dir)
 	if err != nil {
 		return err
 	}
+	if isPythonApplication(p) {
+		return pythonApplicationPreflight(p)
+	}
 	if p.Manifest.Components != nil {
 		return ErrComponents
-	}
-	if p.Manifest.Language == "python" && len(p.Manifest.Existing) > 0 {
-		return ErrPythonApplication
 	}
 	return nil
 }
 
 func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool) (*Report, error) {
-	return gateSelected(ctx, dir, outDir, tc, model, nil, false)
+	r, err := gateSelected(ctx, dir, outDir, tc, model, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 // The gate retains one admitted immutable image for ordinary and larger runs.
 func gateWithPythonDependencies(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, deps *toolchain.PythonDependencies) (*Report, error) {
-	return gateSelected(ctx, dir, outDir, tc, false, deps, true)
+	r, err := gateSelected(ctx, dir, outDir, tc, false, deps, true)
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, deps *toolchain.PythonDependencies, selected bool) (*Report, error) {
@@ -250,11 +256,11 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	if err != nil {
 		return nil, err
 	}
+	if !model && isPythonApplication(p) {
+		return runPythonApplication(ctx, p, outDir, tc)
+	}
 	if !model && p.Manifest.Components != nil {
 		return nil, ErrComponents
-	}
-	if !model && p.Manifest.Language == "python" && len(p.Manifest.Existing) > 0 {
-		return nil, ErrPythonApplication
 	}
 	raw, err := os.ReadFile(p.ModulePath())
 	if err != nil {
@@ -586,7 +592,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 
 	wg.Wait()
 	if firstErr != nil {
-		return nil, firstErr
+		return r, firstErr
 	}
 	if model {
 		r.Passed = r.Design.Passed && modelPassed(r)
@@ -667,6 +673,8 @@ func (r *Report) CodeAssurance() string {
 		return ""
 	case r.Code != nil && r.Code.Passed && len(r.Code.Functions) > 0:
 		return "proved"
+	case r.Application != nil && r.Application.tested():
+		return "tested against the model"
 	case r.Agreement != nil && r.Agreement.Passed, r.Conformance != nil && r.Conformance.Passed:
 		return "tested against the model"
 	default:
@@ -727,6 +735,9 @@ func agree(d Design, e Exploration) Agreement {
 // that wrote the code, so a local run and a CI run of the same commit have
 // the same fingerprint.
 func Fingerprint(r Report) string {
+	if r.Application != nil {
+		r.Application = portablePythonApplication(r.Application)
+	}
 	r.Fingerprint, r.GeneratedAt, r.Build.Output, r.Toolchain.Go, r.Agent = "", "", "", "", ""
 	if r.Components != nil {
 		r.Components = copyComponentEvidence(*r.Components)

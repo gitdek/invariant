@@ -1,9 +1,11 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,8 +92,13 @@ func decode(raw []byte, vars []string) (rec recorded, problem string) {
 		Traces [][]map[string]any `json:"traces"`
 		attempts
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if err := d.Decode(&out); err != nil {
 		return rec, "the driver's output isn't valid JSON: " + err.Error()
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return rec, "the driver's output isn't valid JSON: trailing data"
 	}
 	if out.Attempts == nil {
 		rec.runs = len(out.Traces)
@@ -129,11 +136,12 @@ func decode(raw []byte, vars []string) (rec recorded, problem string) {
 		ids[n] = i
 	}
 	state := func(v any) (int, bool) {
-		f, ok := v.(float64)
-		if !ok || f != float64(int(f)) || f < 0 || int(f) >= len(ids) {
+		f, ok := v.(json.Number)
+		n, err := f.Int64()
+		if !ok || err != nil || n < 0 || n >= int64(len(ids)) {
 			return 0, false
 		}
-		return ids[int(f)], true
+		return ids[int(n)], true
 	}
 	for _, n := range out.Init {
 		if n < 0 || n >= len(ids) {

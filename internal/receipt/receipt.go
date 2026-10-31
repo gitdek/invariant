@@ -17,7 +17,7 @@ import (
 func Markdown(r *verify.Report) string {
 	var b strings.Builder
 	explicit := hasComponentEvidence(r)
-	render := renderer{explicit: explicit}
+	render := renderer{explicit: explicit || r.Application != nil}
 	writeRow := func(check string, ok bool, result, evidence string) {
 		row(&b, check, ok, result, evidence)
 	}
@@ -25,7 +25,7 @@ func Markdown(r *verify.Report) string {
 	if r.Passed && explicit {
 		fmt.Fprintf(&b, "**✅ Pass.** Gate passed. Assurance: **component evidence**. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
 	} else if r.Passed {
-		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint `%s`\n\n", r.Claim(), short(r.Fingerprint))
+		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint %s\n\n", r.Claim(), render.literal(short(r.Fingerprint)))
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
 	}
@@ -81,7 +81,11 @@ func Markdown(r *verify.Report) string {
 		}
 	}
 	if len(r.Existing) > 0 {
-		writeRow("Existing code", r.Build.Passed, "run as it is, by the factory's driver", render.existingEvidence(r.Existing))
+		description := "run as it is, by the factory's driver"
+		if r.Application != nil {
+			description = "run as it is, by the application driver"
+		}
+		writeRow("Existing code", r.Build.Passed, description, render.existingEvidence(r.Existing))
 	}
 	if !r.ModelOnly {
 		writeRow("Build", r.Build.Passed, render.buildResult(r.Build), "sandboxed, no network")
@@ -89,6 +93,9 @@ func Markdown(r *verify.Report) string {
 	if explicit {
 		componentEvidence(&b, r.Components)
 		componentViews(&b, r)
+	}
+	if r.Application != nil {
+		pythonApplication(&b, r.Application)
 	}
 
 	if explicit {
