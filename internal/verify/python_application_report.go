@@ -17,18 +17,52 @@ type PythonApplicationReport struct {
 	ModelError  string                             `json:"model_error,omitempty"`
 	Executions  []PythonApplicationExecutionResult `json:"executions"`
 	Conformance []PythonApplicationConformance     `json:"conformance"`
+	// Larger is each explored invocation run again one size past the
+	// ratified bounds, apart from the ordinary results (#342).
+	Larger []PythonApplicationLarger `json:"larger,omitempty"`
 }
 
 type PythonApplicationConformance struct {
-	Key              PythonApplicationInvocationKey      `json:"key"`
-	Invocation       project.ResolvedComponentInvocation `json:"invocation"`
-	Result           conformance.Result                  `json:"result"`
-	Model            ComponentConformanceModel           `json:"model"`
-	Bounds           map[string]string                   `json:"bounds"`
-	BoundsSources    []project.ComponentFile             `json:"bounds_sources"`
-	Tool             *ComponentProofTool                 `json:"tool,omitempty"`
-	Checks           []PythonApplicationModelCheck       `json:"checks,omitempty"`
-	OperationalError bool                                `json:"operational_error,omitempty"`
+	Key        PythonApplicationInvocationKey      `json:"key"`
+	Invocation project.ResolvedComponentInvocation `json:"invocation"`
+	// Mode is "bounded-exhaustive" for an explored invocation, whose
+	// attempts TLC also checks for every step tried (#342). A sampled
+	// invocation leaves it empty.
+	Mode             string                        `json:"mode,omitempty"`
+	Result           conformance.Result            `json:"result"`
+	Model            ComponentConformanceModel     `json:"model"`
+	Bounds           map[string]string             `json:"bounds"`
+	BoundsSources    []project.ComponentFile       `json:"bounds_sources"`
+	Tool             *ComponentProofTool           `json:"tool,omitempty"`
+	Checks           []PythonApplicationModelCheck `json:"checks,omitempty"`
+	OperationalError bool                          `json:"operational_error,omitempty"`
+}
+
+// PythonApplicationLarger is an explored invocation's run one size larger:
+// the bounds it ran at, the driver copy that supplied them, beside the
+// staged driver it replaced, what the run did and how its count compares
+// with TLC's there (D-0068, D-0076).
+type PythonApplicationLarger struct {
+	Key       PythonApplicationInvocationKey    `json:"key"`
+	Bounds    map[string]string                 `json:"bounds"`
+	Driver    project.ComponentFile             `json:"driver"`
+	Original  project.ComponentFile             `json:"original"`
+	Execution *PythonApplicationExecutionResult `json:"execution,omitempty"`
+	Result    Larger                            `json:"result"`
+}
+
+// passed is a check's verdict for the gate. An explored check's
+// observations must also reach every state the model does, and its attempts
+// must show every step tried, but where only the environment's bounds rule
+// one out (D-0082, D-0085, D-0088). Its checked transitions stand either way.
+func (c PythonApplicationConformance) passed() bool {
+	if !c.Result.Passed {
+		return false
+	}
+	if c.Mode != "bounded-exhaustive" {
+		return true
+	}
+	return c.Result.ModelStates > 0 && int64(c.Result.States) == c.Result.ModelStates && c.Result.Tried != nil && c.Result.Tried.Passed
 }
 
 type PythonApplicationModelCheck struct {
@@ -65,6 +99,12 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 		x := &out.Executions[i]
 		x.Actual.Image = ""
 		x.Fingerprint, x.Provenance.Fingerprint = "", ""
+	}
+	for i := range out.Larger {
+		if x := out.Larger[i].Execution; x != nil {
+			x.Actual.Image = ""
+			x.Fingerprint, x.Provenance.Fingerprint = "", ""
+		}
 	}
 	return &out
 }
@@ -121,12 +161,33 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 			if c.Result.Passed {
 				outcome = "passed"
 			}
+			mode := "sampled"
+			if c.Mode != "" {
+				mode = c.Mode
+			}
 			row := ComponentConformanceResult{Target: x.Key.Target, Check: x.Key.Check, Invocation: &v, Inputs: inputs,
-				FileInputs: x.Provenance.Files, Runner: c.Tool, Mode: "sampled", Outcome: outcome,
+				FileInputs: x.Provenance.Files, Runner: c.Tool, Mode: mode, Outcome: outcome,
 				Runs: int64(c.Result.Runs), Steps: int64(c.Result.Steps), States: int64(c.Result.States), Transitions: int64(c.Result.Transitions), ModelStates: c.Result.ModelStates,
 				Diagnostics: slices.Clone(x.Diagnostics)}
 			if c.Result.Message != "" {
 				row.Diagnostics = append(row.Diagnostics, c.Result.Message)
+			}
+			// An explored invocation's attempts are qualified on their own: a
+			// failed check of them blocks the every-step and every-state
+			// labels, not its checked transitions.
+			if mode == "bounded-exhaustive" {
+				if t := c.Result.Tried; t != nil {
+					a := &ComponentAttemptResult{Outcome: "failed", Attempts: int64(t.Attempts), States: int64(t.States)}
+					if t.Passed {
+						a.Outcome = "passed"
+					}
+					for _, d := range []string{t.Message, t.Untried, t.In} {
+						if d != "" {
+							a.Diagnostics = append(a.Diagnostics, d)
+						}
+					}
+					row.Attempts = a
+				}
 			}
 			if c.Result.Passed {
 				row.Checked = []string{x.Key.Check}
@@ -149,7 +210,7 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 			}
 			row.Bounds = &bounds
 			for _, o := range x.Observations {
-				if o.Kind != "transition" {
+				if o.Kind != "transition" || (o.Replay != nil && *o.Replay) {
 					continue
 				}
 				from, to := map[string]string{}, map[string]string{}
@@ -159,7 +220,16 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 				for k, v := range o.After {
 					to[k], _ = conformance.Encode(v)
 				}
-				row.Observations = append(row.Observations, ComponentConformanceObservation{Run: int64(o.Run), Step: int64(o.Sequence), Action: o.Entry, From: from, To: to})
+				observation := ComponentConformanceObservation{Run: int64(o.Run), Step: int64(o.Sequence), Action: o.Entry, From: from, To: to}
+				// An attempt names the model step it tried, as Next names it.
+				if o.Step != "" {
+					observation.Action = o.Step
+					for _, arg := range o.Args {
+						text, _ := conformance.Encode(arg)
+						observation.Args = append(observation.Args, text)
+					}
+				}
+				row.Observations = append(row.Observations, observation)
 			}
 			conform = append(conform, row)
 		}

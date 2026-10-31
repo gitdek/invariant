@@ -123,11 +123,13 @@ func rcPassing(t *testing.T, inv *project.ComponentInventory, r *verify.Report, 
 			binding = c.Binding
 		}
 	}
+	source := rcFile(t, inv, rcTests)
 	return verify.ComponentContractTestResult{Contract: loads, Check: test, Invocation: &v,
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: rcRuntime}, Binding: binding,
 		Inputs:     []project.Component{rcDeclaration(t, inv, rcID(rcContracts, "loads")), rcDeclaration(t, inv, test)},
-		FileInputs: []project.ComponentFile{rcFile(t, inv, rcContracts), rcFile(t, inv, rcTests)},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}},
+		FileInputs: []project.ComponentFile{rcFile(t, inv, rcContracts), source},
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed",
+			Assertions: []verify.ComponentRuntimeAssertionResult{{ID: "assertEqual:1", Source: &source, Exercised: true, Outcome: "passed"}}}},
 		Implementation: &verify.ComponentContractImplementation{Kind: "standard_library", Callable: "python",
 			File: &project.ComponentFile{Path: "json/__init__.py", SHA256: rcHash("the runtime's json")}, Python: "3.13.15"},
 		Exercise: []verify.ComponentContractExercise{{Check: test, Calls: 1}}}

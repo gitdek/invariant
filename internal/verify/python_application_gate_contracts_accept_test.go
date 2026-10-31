@@ -250,7 +250,7 @@ func gtcFailures(t *testing.T, tc toolchain.Toolchain, wheel bool) {
 		args       []string
 		reason     string
 	}{
-		{"stub only", "LoadsTests.test_stub_only", nil, "no call reached the bound implementation"},
+		{"stub only", "LoadsTests.test_stub_only", nil, "the test itself made no call into the bound implementation"},
 		{"skipped", "LoadsTests.test_skipped", nil, "skipped"},
 		{"failing contract", "LoadsTests.test_wrong", nil, "failed"},
 		{"passes without running it", "LoadsTests.test_skipped", []string{"-m", "unittest", "tests.test_contracts.LoadsTests.test_parses"}, "didn't run"},

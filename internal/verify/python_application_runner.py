@@ -125,41 +125,105 @@ def identity(test):
 # A trusted contract's backing tests (#294) support it only by reaching its
 # real implementation, which the runner resolves before any test loads: the
 # application's own declaration, or the standard library's or an installed
-# distribution's code. Calls are counted per test, and assertions are the
+# distribution's code. A call counts only when the test method makes it,
+# directly or through code it calls, and never when unittest or the runner
+# does, except a callable the test hands an assertion, such as
+# assertRaises(E, f, x). setUp and tearDown don't count. Assertions are the
 # runner's own records of unittest's checks. Neither runs for other tests.
 boundary = request.get("boundary")
 boundary_python = {}
+boundary_receivers = {}
+boundary_equal = False
 boundary_c = []
 assertions = [None]
+handed = [[], []]
+runner_globals = globals()
 
 
 def boundary_implementation(target):
-    """The code a call into target runs, or the C callable it is, and its file."""
+    """The code a call into target runs, or the C callable it is, and its file:
+    the file that code is in, or for a C callable its extension's, if any."""
     if inspect.isclass(target):
-        codes = []
+        functions = []
         for value in vars(target).values():
-            if isinstance(value, (staticmethod, classmethod)):
+            # A staticmethod has no receiver to check at call time.
+            if isinstance(value, staticmethod):
+                continue
+            if isinstance(value, classmethod):
                 value = value.__func__
             candidates = [value.fget, value.fset, value.fdel] if isinstance(value, property) else [value]
             for candidate in candidates:
-                if candidate is not None and inspect.isfunction(inspect.unwrap(candidate)):
-                    codes.append(inspect.unwrap(candidate).__code__)
-        if not codes:
-            raise TypeError("the class defines no Python code whose calls the runner can observe")
-        return "python", codes, [], getattr(sys.modules.get(target.__module__), "__file__", None)
+                candidate = inspect.unwrap(candidate) if candidate is not None else None
+                # Only methods compiled in the class body, by the qualified
+                # name their code was compiled under, which no assignment
+                # changes: code installed from elsewhere, such as an Enum's
+                # __new__, total_ordering's comparisons or a dataclass's
+                # generated methods, isn't the class's own.
+                if (inspect.isfunction(candidate) and candidate.__code__.co_argcount > 0
+                        and candidate.__code__.co_qualname.rpartition(".")[0] == target.__qualname__
+                        and candidate not in functions):
+                    functions.append(candidate)
+        if not functions:
+            raise TypeError("the class has no Python method written in its own body whose calls the runner can observe; generated methods, such as a dataclass's, aren't its own, and a type written in C has none")
+        files = {f.__code__.co_filename for f in functions}
+        if len(files) != 1:
+            raise TypeError("the class's methods are written in more than one file")
+        return "python", [f.__code__ for f in functions], [], files.pop()
+    if isinstance(target, (types.WrapperDescriptorType, types.MethodWrapperType)):
+        raise TypeError("slot wrappers and method-wrappers are reached through syntax, whose calls the runner can't observe")
     function = inspect.unwrap(target)
     if inspect.ismethod(function):
         function = function.__func__
     if inspect.isfunction(function):
         return "python", [function.__code__], [], function.__code__.co_filename
-    if isinstance(target, (types.BuiltinFunctionType, types.MethodDescriptorType, types.WrapperDescriptorType,
-                           types.ClassMethodDescriptorType, types.MethodWrapperType)):
-        owner = getattr(target, "__objclass__", None)
-        module = getattr(owner if owner is not None else target, "__module__", None)
-        if module is None:
-            module = getattr(getattr(target, "__self__", None), "__name__", None)
-        return "c", [], [target], getattr(sys.modules.get(module), "__file__", None)
+    if isinstance(target, types.BuiltinFunctionType) and isinstance(target.__self__, type):
+        # A C class method, which each access binds anew, is its descriptor.
+        descriptor = inspect.getattr_static(target.__self__, target.__name__, None)
+        if isinstance(descriptor, types.ClassMethodDescriptorType):
+            target = descriptor
+    if isinstance(target, (types.MethodDescriptorType, types.ClassMethodDescriptorType)):
+        if target.__name__.startswith("__") and target.__name__.endswith("__"):
+            raise TypeError("a C special method is reached through syntax, whose calls the runner can't observe")
+        return "c", [], [target], c_origin(target.__objclass__)
+    if isinstance(target, types.BuiltinFunctionType):
+        owner = target.__self__
+        if inspect.ismodule(owner) and c_module(owner):
+            return "c", [], [target], getattr(owner, "__file__", None)
+        # A C method bound to an instance, as random.random is, is its type's.
+        descriptor = inspect.getattr_static(type(owner), target.__name__, None)
+        if owner is not None and not inspect.ismodule(owner) and isinstance(descriptor, types.MethodDescriptorType):
+            return "c", [], [target], c_origin(descriptor.__objclass__)
+        raise TypeError("the runner can't find the C module that defines the operation")
     raise TypeError("the operation is neither a Python function or class nor a C function")
+
+
+def c_module(module):
+    """Whether a module is written in C: built into the interpreter, or an extension."""
+    from importlib import machinery
+    filename = getattr(module, "__file__", None)
+    if not isinstance(filename, str):
+        return getattr(module, "__name__", None) in sys.builtin_module_names
+    return filename.endswith(tuple(machinery.EXTENSION_SUFFIXES))
+
+
+def c_origin(cls):
+    """The file of the C module that defines a type, or None when the
+    interpreter has it built in."""
+    module = sys.modules.get(cls.__module__)
+    if module is None or not c_module(module):
+        # A Python module's C type comes from a C module it imported, as
+        # decimal's Decimal comes from _decimal: the one that holds it.
+        holders = []
+        for candidate in list(sys.modules.values()):
+            try:
+                if inspect.ismodule(candidate) and c_module(candidate) and getattr(candidate, cls.__name__, None) is cls:
+                    holders.append(candidate)
+            except Exception:
+                continue
+        if len({getattr(m, "__file__", None) for m in holders}) != 1:
+            raise TypeError("the runner can't find the one C module that defines %s" % cls.__qualname__)
+        module = holders[0]
+    return getattr(module, "__file__", None)
 
 
 def boundary_digest(filename):
@@ -189,7 +253,7 @@ def resolve_boundary(spec):
     record = dict(type="boundary", contract=spec["contract"], kind=spec["kind"], resolved=False, callable="",
                   file=dict(path="", sha256=""), distribution="", version="", recorded=False,
                   python="%d.%d.%d" % sys.version_info[:3], diagnostics=[])
-    codes, callables = [], []
+    codes, callables, receivers = [], [], {}
     try:
         if spec["kind"] == "application":
             declaration = spec["declaration"]
@@ -205,12 +269,16 @@ def resolve_boundary(spec):
             record.update(callable="python", file=dict(path=declaration["source"], sha256="sha256:" + hashlib.sha256(raw).hexdigest()))
         else:
             import importlib
+            name = spec["module"] + "." + spec["symbol"]
+            if spec["kind"] == "standard_library" and spec["module"].split(".")[0] not in sys.stdlib_module_names:
+                raise LookupError("%s isn't in the runtime's standard library" % spec["module"])
             target = importlib.import_module(spec["module"])
             for part in spec["symbol"].split("."):
                 target = getattr(target, part)
             form, codes, callables, origin = boundary_implementation(target)
+            if inspect.isclass(target):
+                receivers = {code: target for code in codes}
             record["callable"] = form
-            name = spec["module"] + "." + spec["symbol"]
             frozen = origin is None or origin.startswith("<frozen ")
             if spec["kind"] == "standard_library":
                 import sysconfig
@@ -240,22 +308,72 @@ def resolve_boundary(spec):
         record["resolved"] = True
     except Exception as error:
         record["diagnostics"].append("".join(traceback.format_exception_only(type(error), error)).strip())
-        record["callable"], codes, callables = "", [], []
-    return record, codes, callables
+        record["callable"], codes, callables, receivers = "", [], [], {}
+    return record, codes, callables, receivers
 
 
 def boundary_called(function):
+    """Whether a C call is the bound callable: itself, or a method descriptor
+    the receiver's own type resolves to it, never a same-named override."""
     for target in boundary_c:
         if function is target:
             return True
-        if getattr(function, "__name__", None) != getattr(target, "__name__", None):
+        if not isinstance(target, (types.MethodDescriptorType, types.ClassMethodDescriptorType)):
             continue
-        owner, bound = getattr(target, "__objclass__", None), getattr(function, "__self__", None)
-        # A method descriptor arrives bound to its instance, a module function
-        # to its module.
-        if owner is not None and isinstance(bound, owner) or owner is None and bound is not None and bound is getattr(target, "__self__", None):
+        bound = getattr(function, "__self__", None)
+        if bound is None or getattr(function, "__name__", None) != target.__name__:
+            continue
+        owner = bound if isinstance(target, types.ClassMethodDescriptorType) else type(bound)
+        if isinstance(owner, type) and inspect.getattr_static(owner, target.__name__, None) is target:
             return True
     return False
+
+
+def boundary_receiver(frame, target):
+    """Whether a class's method was called on the class, a subclass or an
+    instance: methods that share code with other classes count only there."""
+    code = frame.f_code
+    value = frame.f_locals.get(code.co_varnames[0]) if code.co_argcount > 0 else None
+    return value is target or isinstance(value, target) or isinstance(value, type) and issubclass(value, target)
+
+
+def unittest_frame(frame):
+    """Whether a frame runs unittest's code or the runner's own."""
+    if frame.f_globals is runner_globals:
+        return True
+    name = frame.f_globals.get("__name__") or ""
+    return name == "unittest" or name.startswith("unittest.")
+
+
+def handed_to(callee):
+    """Whether the test handed this callable to an assertion to call."""
+    if isinstance(callee, types.CodeType):
+        return any(callee is code for code in handed[0])
+    return any(callee is value for value in handed[1])
+
+
+def handed_codes(value):
+    """The Python code that runs first when unittest calls a handed callable:
+    a function's own, a class's constructor, an instance's __call__, or the
+    function a wrapper written in C calls."""
+    import functools
+    if inspect.isclass(value):
+        found = [inspect.getattr_static(value, "__new__", None), inspect.getattr_static(value, "__init__", None),
+                 inspect.getattr_static(type(value), "__call__", None)]
+    elif inspect.isfunction(value) or inspect.ismethod(value):
+        found = [value]
+    else:
+        found = [inspect.getattr_static(type(value), "__call__", None), inspect.getattr_static(value, "__wrapped__", None),
+                 value.func if isinstance(value, functools.partial) else None]
+    codes = []
+    for function in found:
+        if isinstance(function, (staticmethod, classmethod)):
+            function = function.__func__
+        if inspect.ismethod(function):
+            function = function.__func__
+        if inspect.isfunction(function):
+            codes.append(function.__code__)
+    return codes
 
 
 def watch_assertions():
@@ -270,6 +388,14 @@ def watch_assertions():
             records = assertions[0]
             if records is None:
                 return function(*args, **kwargs)
+            if depth[0] == 0:
+                # A callable the test hands an assertion, as to
+                # assertRaises(E, f, x), is the test's own call when
+                # unittest makes it.
+                for value in list(args[1:]) + list(kwargs.values()):
+                    if callable(value):
+                        handed[0].extend(handed_codes(value))
+                        handed[1].append(value)
             depth[0] += 1
             try:
                 value = function(*args, **kwargs)
@@ -325,10 +451,32 @@ class Observations(unittest.TestResult):
                 self.pending["exercised"] = True
             if boundary_python:
                 known = boundary_python.get((code.co_filename, code.co_firstlineno, code.co_name))
-                if known is not None and (known is code or known == code):
+                # Only the application's own source compiles anew; any other
+                # implementation is the very code object resolved.
+                if (known is not None and (known is code or boundary_equal and known == code)
+                        and (known not in boundary_receivers or boundary_receiver(frame, boundary_receivers[known]))
+                        and self.by_test(frame.f_back, code)):
                     self.pending["boundary_calls"] += 1
-        elif event == "c_call" and boundary_c and boundary_called(arg):
+        elif event == "c_call" and boundary_c and boundary_called(arg) and self.by_test(frame, arg):
             self.pending["boundary_calls"] += 1
+
+    def by_test(self, caller, callee):
+        """Whether the test method made this call, directly or through code it
+        called: a chain to its frame through unittest's or the runner's code
+        counts only where unittest calls a callable the test handed it."""
+        allowed, below, f = False, callee, caller
+        while f is not None:
+            if f.f_code is self.method_code:
+                return True
+            if unittest_frame(f):
+                if not allowed:
+                    if not handed_to(below):
+                        return False
+                    allowed = True
+            else:
+                allowed = False
+            below, f = f.f_code, f.f_back
+        return False
 
     def startTest(self, test):
         super().startTest(test)
@@ -336,6 +484,7 @@ class Observations(unittest.TestResult):
         self.pending, self.method_code = self.row(test)
         if boundary is not None:
             assertions[0] = self.pending["assertions"]
+            handed[0], handed[1] = [], []
         sys.setprofile(self.profile)
 
     def record(self, test, outcome, diagnostic=None):
@@ -409,7 +558,7 @@ def conformance():
     # the application-writable file. Only a completed collector can seal them.
     encode = json.dumps
     write, flush = events.write, events.flush
-    callers = (invariant_observe.Collector.write.__code__, invariant_observe.run.__code__)
+    callers = (invariant_observe.Collector.write.__code__, invariant_observe.Collector.declare.__code__, invariant_observe.run.__code__)
     frame = sys._getframe
 
     def collect(record):
@@ -444,8 +593,10 @@ if sys.argv[2:4] != ["-m", "unittest"] or len(sys.argv) < 5:
 selections = sys.argv[4:]
 sys.argv = ["unittest"] + selections
 if boundary is not None:
-    resolved, codes, callables = resolve_boundary(boundary)
+    resolved, codes, callables, receivers = resolve_boundary(boundary)
     boundary_python.update(((code.co_filename, code.co_firstlineno, code.co_name), code) for code in codes)
+    boundary_receivers.update(receivers)
+    boundary_equal = boundary["kind"] == "application"
     boundary_c.extend(callables)
     emit(resolved)
     watch_assertions()

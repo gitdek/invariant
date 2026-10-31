@@ -252,13 +252,13 @@ func TestPythonApplicationContractTestsReachRealImplementations(t *testing.T) {
 	}
 	// Calls are counted per test, and assertions record results, mutations
 	// and error outcomes.
-	if row := ptcSelected(t, parse); row.BoundaryCalls != 2 || len(row.Assertions) != 1 || row.Assertions[0] != (PythonApplicationAssertion{ID: "assertLess:1", Outcome: "passed"}) {
+	if row := ptcSelected(t, parse); row.Calls() != 2 || len(row.Assertions) != 1 || row.Assertions[0] != (PythonApplicationAssertion{ID: "assertLess:1", Outcome: "passed"}) {
 		t.Fatalf("dependency test: %+v", row)
 	}
-	if row := ptcSelected(t, ptcExecution(t, r, "LoadsTests-test_rejects_malformed")); row.BoundaryCalls != 1 || len(row.Assertions) != 1 || row.Assertions[0].ID != "assertRaises:1" || row.Assertions[0].Outcome != "passed" {
+	if row := ptcSelected(t, ptcExecution(t, r, "LoadsTests-test_rejects_malformed")); row.Calls() != 1 || len(row.Assertions) != 1 || row.Assertions[0].ID != "assertRaises:1" || row.Assertions[0].Outcome != "passed" {
 		t.Fatalf("error outcome test: %+v", row)
 	}
-	if row := ptcSelected(t, save); row.BoundaryCalls != 1 || len(row.Assertions) != 2 || row.Assertions[1] != (PythonApplicationAssertion{ID: "assertTrue:2", Outcome: "passed"}) {
+	if row := ptcSelected(t, save); row.Calls() != 1 || len(row.Assertions) != 2 || row.Assertions[1] != (PythonApplicationAssertion{ID: "assertTrue:2", Outcome: "passed"}) {
 		t.Fatalf("mutation test: %+v", row)
 	}
 	// Supported without a proof, every contract stays a declaration.
@@ -271,12 +271,22 @@ func TestPythonApplicationContractTestsReachRealImplementations(t *testing.T) {
 			t.Fatalf("a tested contract no proof used became an assumption: %+v (%s)", c, target)
 		}
 	}
-	// Ordinary tests' events keep their fields.
+	// A backing test's record always carries its calls and assertions; an
+	// ordinary test's carries neither.
 	for _, x := range r.Application.Executions {
 		for _, row := range x.Tests {
-			if row.Check != x.Key.Check && (row.BoundaryCalls != 0 || len(row.Assertions) != 0) {
-				t.Fatalf("an unselected test row carries contract evidence: %+v", row)
+			if row.BoundaryCalls == nil || !strings.Contains(pa310JSON(t, row), `"assertions":[`) {
+				t.Fatalf("a backing test's record lacks its calls or assertions: %s", pa310JSON(t, row))
 			}
+		}
+	}
+	unit, err := s.Run(context.Background(), pa315Unit(t, s).Key)
+	if unit == nil {
+		t.Fatal(err)
+	}
+	for _, row := range unit.Tests {
+		if raw := pa310JSON(t, row); row.BoundaryCalls != nil || strings.Contains(raw, "boundary_calls") || strings.Contains(raw, "assertions") {
+			t.Fatalf("an ordinary test's record carries contract evidence: %s", raw)
 		}
 	}
 }
@@ -288,7 +298,7 @@ func TestPythonApplicationContractTestsFailWithoutRealSupport(t *testing.T) {
 		args   []string
 		reason string
 	}{
-		{"stub only", "LoadsTests.test_stub_only", nil, "no call reached the bound implementation"},
+		{"stub only", "LoadsTests.test_stub_only", nil, "the test itself made no call into the bound implementation"},
 		{"skipped", "LoadsTests.test_skipped", nil, "LoadsTests.test_skipped@" + ptcTests + ": skipped"},
 		{"failing contract", "LoadsTests.test_wrong", nil, "LoadsTests.test_wrong@" + ptcTests + ": failed"},
 		{"passes without running it", "LoadsTests.test_skipped", []string{"-m", "unittest", "tests.test_contracts.LoadsTests.test_parses_objects"}, "didn't run"},
@@ -337,13 +347,13 @@ func TestPythonApplicationContractTestsBindTheInstalledDistribution(t *testing.T
 		shadow    bool
 		reason    string
 	}{
-		{"evidence names another version", func(t *testing.T) string { return ptcLibraries(t, ptcTinyver) }, "1.1", false, "didn't resolve the implementation the report binds"},
+		{"evidence names another version", func(t *testing.T) string { return ptcLibraries(t, ptcTinyver) }, "1.1", false, "resolved an implementation the report doesn't bind"},
 		{"file the RECORD doesn't list", func(t *testing.T) string {
 			dir := ptcLibraries(t, ptcTinyver)
 			pa310Write(t, dir, "tinyver/__init__.py", ptcTinyver+"# edited after installation\n")
 			return dir
-		}, "1.0", false, "didn't resolve the implementation the report binds"},
-		{"application shadows the distribution", func(t *testing.T) string { return ptcLibraries(t, ptcTinyver) }, "1.0", true, "no call reached the bound implementation"},
+		}, "1.0", false, "resolved an implementation the report doesn't bind"},
+		{"application shadows the distribution", func(t *testing.T) string { return ptcLibraries(t, ptcTinyver) }, "1.0", true, "didn't resolve the operation's implementation"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			root, p := ptcFixture(t)

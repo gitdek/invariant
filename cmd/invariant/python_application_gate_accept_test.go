@@ -76,27 +76,43 @@ func TestPythonApplicationGateCLI(t *testing.T) {
 		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 		for _, explicit := range []bool{true, false} {
 			dir, m := pa327CLIFixture(t, explicit)
-			code, out := agentCLI(t, "verify", dir)
-			if code != 2 || !strings.Contains(out, "docker isn't available") {
-				t.Fatalf("supported application did not reach tool preparation: exit=%d %s", code, out)
+			// Exhaustive applications are admitted since #342.
+			for _, exhaustive := range []bool{false, true} {
+				m.Exhaustive = exhaustive
+				b, _ := json.Marshal(m)
+				if e := os.WriteFile(filepath.Join(dir, ".invariant/invariant.json"), b, 0644); e != nil {
+					t.Fatal(e)
+				}
+				code, out := agentCLI(t, "verify", dir)
+				if code != 2 || !strings.Contains(out, "docker isn't available") {
+					t.Fatalf("supported application did not reach tool preparation: exit=%d %s", code, out)
+				}
+				b, e := os.ReadFile(log)
+				if e != nil || !strings.Contains(string(b), "docker info") {
+					t.Fatalf("no admitted CLI tool preparation: %s %v", b, e)
+				}
+				if strings.Contains(string(b), "nagini") || strings.Contains(string(b), "pip") {
+					t.Fatal("prepared proof or dependencies before capability check")
+				}
+				if e := os.Remove(log); e != nil {
+					t.Fatal(e)
+				}
 			}
-			b, e := os.ReadFile(log)
-			if e != nil || !strings.Contains(string(b), "docker info") {
-				t.Fatalf("no admitted CLI tool preparation: %s %v", b, e)
+			// A proof selection, or without components an existing selection
+			// no root holds, still fails before tools.
+			want := "contract"
+			if explicit {
+				m.Components.Checks[0].Proof = &project.ComponentProof{Contracts: []project.ComponentRef{m.Components.Checks[0].Target}}
+			} else {
+				m.Existing = []string{"tasks/missing.py"}
+				want = "existing selection"
 			}
-			if strings.Contains(string(b), "nagini") || strings.Contains(string(b), "pip") {
-				t.Fatal("prepared proof or dependencies before capability check")
-			}
-			if e := os.Remove(log); e != nil {
-				t.Fatal(e)
-			}
-			m.Exhaustive = true
-			b, _ = json.Marshal(m)
+			b, _ := json.Marshal(m)
 			if e := os.WriteFile(filepath.Join(dir, ".invariant/invariant.json"), b, 0644); e != nil {
 				t.Fatal(e)
 			}
-			code, out = agentCLI(t, "verify", dir)
-			if code != 2 || !strings.Contains(strings.ToLower(out), "exhaustive") {
+			code, out := agentCLI(t, "verify", dir)
+			if code != 2 || !strings.Contains(strings.ToLower(out), want) {
 				t.Fatalf("unsupported mode lacks capability diagnostic: %d %s", code, out)
 			}
 			if b, e := os.ReadFile(log); e == nil {

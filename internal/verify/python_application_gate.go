@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,9 +28,6 @@ func isPythonApplication(p *project.Project) bool {
 }
 
 func pythonApplicationPreflight(p *project.Project) error {
-	if p.Manifest.Exhaustive {
-		return fmt.Errorf("Python applications support sampled checks, not exhaustive checks")
-	}
 	inv, err := project.ResolveComponents(p)
 	if err != nil {
 		return err
@@ -146,16 +144,22 @@ func pythonApplicationLegacyInvocations(p *project.Project, root string) ([]Pyth
 	if err != nil {
 		return nil, err
 	}
+	// An exhaustive manifest's driver explores rather than samples (#342).
+	id := "sample"
+	if p.Manifest.Exhaustive {
+		id = "explore"
+	}
 	var out []PythonApplicationInvocation
 	for _, v := range []project.ResolvedComponentInvocation{
 		{ID: "discovery", Kind: "test", Check: "discovery", Command: "python", Args: []string{"-m", "unittest", "discover"}, WorkingDir: "."},
-		{ID: "sample", Kind: "conformance", Check: "driver", Command: "python", Args: []string{p.Manifest.Conformance}, WorkingDir: filepath.ToSlash(dir)},
+		{ID: id, Kind: "conformance", Check: "driver", Command: "python", Args: []string{p.Manifest.Conformance}, WorkingDir: filepath.ToSlash(dir)},
 	} {
 		sampling := map[string]string{"runs": "1"}
 		if v.Kind == "conformance" {
 			sampling = map[string]string{"runs": "1000", "steps": "40", "seed": "1"}
 		}
-		out = append(out, PythonApplicationInvocation{Key: PythonApplicationInvocationKey{Target: "existing", Check: v.Check, Kind: v.Kind, ID: v.ID}, Declared: v, Sampling: sampling})
+		out = append(out, PythonApplicationInvocation{Key: PythonApplicationInvocationKey{Target: "existing", Check: v.Check, Kind: v.Kind, ID: v.ID}, Declared: v, Sampling: sampling,
+			Explored: v.Kind == "conformance" && p.Manifest.Exhaustive})
 	}
 	return out, nil
 }
@@ -271,6 +275,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	}
 	all := true
 	contracts := pythonApplicationContracts(s.inventory)
+	var contractSteps [][2]int
 	for i, v := range s.Invocations() {
 		x, runErr := s.Run(ctx, v.Key)
 		if ctx.Err() != nil {
@@ -282,7 +287,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		r.Application.Executions = append(r.Application.Executions, *x)
 		all = all && x.Success
 		if v.Key.Kind == "test" {
-			name, _ := pythonApplicationContractStep(contracts, v.Key)
+			name, contract := pythonApplicationContractStep(contracts, v.Key)
+			if contract {
+				contractSteps = append(contractSteps, [2]int{len(r.Build.Steps), len(r.Application.Executions) - 1})
+			}
 			r.Build.Steps = append(r.Build.Steps, BuildStep{Name: name, Passed: x.Success})
 			r.Build.Passed = r.Build.Passed && x.Success
 			continue
@@ -300,14 +308,41 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				c.Model.Inputs = append(c.Model.Inputs, f)
 			}
 		}
-		traces, traceErr := pythonApplicationTraces(*x)
+		var traces []byte
+		var traceErr error
+		var model *conformance.Model
+		if !v.Explored {
+			traces, traceErr = pythonApplicationTraces(*x)
+		} else {
+			// An explored driver's attempts are checked as every exhaustive
+			// driver's are: against the model's named steps, with the
+			// environment's bounds one larger (D-0082, D-0085, #342).
+			c.Mode = "bounded-exhaustive"
+			c.Result.Exhaustive = true
+			traces, traceErr = pythonApplicationAttempts(*x)
+			model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
+			if steps, err := tla.Steps(string(raw)); err != nil {
+				model.Problem = err.Error()
+			} else {
+				model.Steps = steps
+			}
+		}
 		if traceErr == nil {
 			d, e := stage(work, fmt.Sprintf("conformance-%d", i), p, string(raw), "")
 			if e != nil {
 				return nil, e
 			}
 			checks := &pythonApplicationModelRunner{runner: runner, root: d}
-			c.Result, e = conformance.Check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, traces, nil)
+			c.Result, e = conformance.Check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, traces, model)
+			if v.Explored {
+				// Attempts carry no runs; the exploration's are its replays.
+				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs
+				// It claims every state the code can reach, so it must reach
+				// every state the model does; its checked steps still stand.
+				if c.Result.Passed && int64(c.Result.States) != c.Result.ModelStates {
+					c.Result.Message = fmt.Sprintf("the driver explores every state the code can reach, and it reached %d of the model's %d", c.Result.States, c.Result.ModelStates)
+				}
+			}
 			c.Checks = checks.results
 			slices.SortFunc(c.Checks, func(a, b PythonApplicationModelCheck) int {
 				return strings.Compare(a.Batch+"/"+a.Module, b.Batch+"/"+b.Module)
@@ -329,21 +364,119 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		all = all && c.Result.Passed
+		all = all && c.passed()
 		r.Application.Conformance = append(r.Application.Conformance, c)
+	}
+	if p.Manifest.Exhaustive {
+		if err := runPythonApplicationLarger(ctx, s, r, p, work, string(raw), runner); err != nil {
+			return nil, err
+		}
 	}
 	if s.inventory.Mode == "explicit" {
 		if err := r.attributePythonApplication(s.inventory); err != nil {
 			return nil, err
 		}
+		r.Build.Passed = r.pythonApplicationContractSteps(contractSteps) && r.Build.Passed
 	}
+	// Code that agrees one size larger only when TLC can say what that is
+	// carries no bound; code that disagrees there fails (D-0068, D-0076).
 	// Every declared trusted contract's backing tests are required, whether
 	// or not a proof uses it yet.
-	r.Passed = r.Passed && all && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested()
+	larger := r.Larger == nil || !r.Larger.Required || r.Larger.Passed
+	r.Passed = r.Passed && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested()
 	r.Assurance = r.CodeAssurance()
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	return r, nil
+}
+
+// pythonApplicationLargerTimeouts are the allowances a larger run has: TLC's
+// is every language's, and an exploration's is a driver count's, twice it.
+// Tests shorten them.
+var pythonApplicationLargerTimeouts = struct{ model, explore time.Duration }{largerTimeout, countTimeout}
+
+// runPythonApplicationLarger checks an exhaustive application one size past
+// the ratified bounds when its driver names every bound with a next size, as
+// every exhaustive driver is checked (D-0068, D-0076). TLC runs first; only
+// once it finishes there does each explored invocation run again, with the
+// same snapshot and image, its driver copy supplying the larger bounds.
+func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession, r *Report, p *project.Project, work, src string, runner tlc.Runner) error {
+	larger, sizes := largerBounds(p.Lock.Bounds)
+	driver, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(s.driver)))
+	if err != nil {
+		return err
+	}
+	if !declaresBounds(driver, sizes) {
+		return nil
+	}
+	d, err := stage(work, "larger", p, src, "")
+	if err != nil {
+		return err
+	}
+	timeouts := pythonApplicationLargerTimeouts
+	tctx, cancel := context.WithTimeout(ctx, timeouts.model)
+	res, err := runner.Check(tctx, d, p.ModuleName(), tlc.Config{Specification: p.SpecName(), Constants: larger, Invariants: p.Invariants()})
+	if err == nil && tctx.Err() != nil {
+		err = tctx.Err()
+	}
+	cancel()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		r.Larger = compareLarger(larger, nil, nil, fmt.Sprintf("TLC didn't finish one size larger within %s: %v", timeouts.model, err))
+		return nil
+	}
+	if res.Outcome != tlc.Passed {
+		r.Larger = compareLarger(larger, &res, nil, "")
+		return nil
+	}
+	original := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(driver)}
+	for _, v := range s.Invocations() {
+		if !v.Explored {
+			continue
+		}
+		lctx, cancel := context.WithTimeout(ctx, timeouts.explore)
+		x, file, err := s.RunLarger(lctx, v.Key, sizes)
+		unfinished := lctx.Err() != nil
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var e Exploration
+		switch {
+		case unfinished:
+			// As a driver's count does, an exploration that runs out claims
+			// nothing and fails nothing.
+			e = Exploration{Unfinished: true, Message: fmt.Sprintf("the driver didn't finish exploring one size larger within %s", timeouts.explore)}
+		case x == nil:
+			return err
+		case !x.Success || x.Exploration == nil:
+			e = Exploration{Message: lastLines(strings.Join(x.Diagnostics, "\n"), 20)}
+		default:
+			e = Exploration{OK: true, States: int64(x.Exploration.States), Depth: x.Exploration.Depth}
+		}
+		l := compareLarger(larger, &res, &e, "")
+		r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{Key: v.Key, Bounds: maps.Clone(larger), Driver: file, Original: original, Execution: x, Result: *l})
+	}
+	// The report claims the weakest result: any disagreement, else any run
+	// that couldn't finish, else agreement.
+	weakness := func(l *Larger) int {
+		switch {
+		case l.Required && !l.Passed:
+			return 2
+		case !l.Required:
+			return 1
+		}
+		return 0
+	}
+	for i := range r.Application.Larger {
+		l := r.Application.Larger[i].Result
+		if r.Larger == nil || weakness(&l) > weakness(r.Larger) {
+			r.Larger = &l
+		}
+	}
+	return nil
 }
 
 // Batch completion order is not evidence order. Retain each actual TLC
@@ -353,6 +486,7 @@ type pythonApplicationModelRunner struct {
 	runner  conformance.Runner
 	root    string
 	results []PythonApplicationModelCheck
+	phase   int
 	next    int
 	changed chan struct{}
 	failed  bool
@@ -361,17 +495,28 @@ type pythonApplicationModelRunner struct {
 func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module string, cfg tlc.Config) (tlc.Result, error) {
 	// The shared checker can schedule batches concurrently. Execute application
 	// batches in order so a failure has a deterministic actual invocation prefix,
-	// with no schedule-dependent canceled TLC runs in its provenance.
+	// with no schedule-dependent canceled TLC runs in its provenance. Starting
+	// states come first, then the steps' batches, then the attempts'.
 	batch, _ := filepath.Rel(r.root, dir)
-	order := 0
-	if module == "Invariant_Conformance" {
-		var err error
-		order, err = strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), "steps-"))
-		if err != nil {
-			return tlc.Result{}, err
+	phase, order := 0, 0
+	for i, prefix := range []string{"steps-", "tried-"} {
+		if module == []string{"Invariant_Conformance", "Invariant_Tried"}[i] {
+			var err error
+			phase = i + 1
+			order, err = strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), prefix))
+			if err != nil {
+				return tlc.Result{}, err
+			}
 		}
 	}
 	r.mu.Lock()
+	if phase < r.phase {
+		r.mu.Unlock()
+		return tlc.Result{}, fmt.Errorf("an application model batch ran out of order")
+	}
+	if phase > r.phase {
+		r.phase, r.next = phase, 1
+	}
 	for order != r.next && !r.failed && ctx.Err() == nil {
 		if r.changed == nil {
 			r.changed = make(chan struct{})
@@ -432,7 +577,10 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 	defer s.Close()
 	b, evidence := Build{Passed: true}, Evidence{}
 	var combined conformance.Traces
+	var explored [][]byte
 	contracts := pythonApplicationContracts(s.inventory)
+	var contractSteps [][2]int
+	var executions []PythonApplicationExecutionResult
 	for _, v := range s.Invocations() {
 		x, e := s.Run(ctx, v.Key)
 		if ctx.Err() != nil {
@@ -441,13 +589,22 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 		if x == nil {
 			return b, evidence, e
 		}
-		passed := x.Success
+		executions = append(executions, *x)
 		name, contract := pythonApplicationContractStep(contracts, v.Key)
 		if contract {
-			passed = passed && pythonApplicationContractExercised(*x)
+			contractSteps = append(contractSteps, [2]int{len(b.Steps), len(executions) - 1})
 		}
-		b.Passed = b.Passed && passed
-		b.Steps = append(b.Steps, BuildStep{Name: name, Passed: passed})
+		b.Passed = b.Passed && x.Success
+		b.Steps = append(b.Steps, BuildStep{Name: name, Passed: x.Success})
+		if v.Key.Kind == "conformance" && v.Explored {
+			raw, e := pythonApplicationAttempts(*x)
+			if e != nil {
+				evidence.Message = e.Error()
+				continue
+			}
+			explored = append(explored, raw)
+			continue
+		}
 		if v.Key.Kind == "conformance" {
 			raw, e := pythonApplicationTraces(*x)
 			if e != nil {
@@ -463,8 +620,23 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 			combined.Traces = append(combined.Traces, t.Traces...)
 		}
 	}
+	// Backing-test runs pass here as they pass the gate: each run's own row
+	// tested, against the binding its session records, and every declared
+	// contract tested.
+	if len(contracts) > 0 {
+		r, e := pythonApplicationContractRows(s.inventory, s.Provenance(), executions)
+		if e != nil {
+			return b, evidence, e
+		}
+		r.Build.Steps = b.Steps
+		b.Passed = r.pythonApplicationContractSteps(contractSteps) && b.Passed && r.pythonApplicationContractsTested()
+		b.Steps = r.Build.Steps
+	}
 	if len(combined.Traces) > 0 {
 		evidence.Traces, err = json.Marshal(combined)
+	}
+	if len(explored) > 0 {
+		evidence.Traces, err = mergePythonApplicationAttempts(explored)
 	}
 	return b, evidence, err
 }

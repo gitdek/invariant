@@ -65,7 +65,7 @@ type ComponentContractImplementation struct {
 	File         *project.ComponentFile `json:"file,omitempty"`
 	Distribution string                 `json:"distribution,omitempty"`
 	Version      string                 `json:"version,omitempty"`
-	Recorded     bool                   `json:"recorded,omitempty"`
+	Recorded     bool                   `json:"recorded"`
 	Python       string                 `json:"python,omitempty"`
 }
 
@@ -408,15 +408,6 @@ func (r *ComponentContractTestResult) qualifyContractTest(c project.ResolvedComp
 	for _, test := range r.Tests {
 		exercised := ready && test.Exercised && declared(test.Check)
 		evidence := ComponentRuntimeTestEvidence{Check: test.Check, Status: "unchecked"}
-		// A contract rests on its tests, so an interrupted or failing
-		// process supports nothing, even a test that passed inside it, and a
-		// test that never called the bound implementation tested a stub.
-		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 {
-			evidence.Status = "tested"
-			if test.Check == r.Check {
-				row.Status = "tested"
-			}
-		}
 		for _, assertion := range test.Assertions {
 			item := ComponentRuntimeAssertionEvidence{ID: assertion.ID, Status: "unchecked"}
 			if exercised && assertion.Exercised && assertion.Outcome == "passed" && assertion.Source != nil && files[assertion.Source.Path] {
@@ -424,9 +415,44 @@ func (r *ComponentContractTestResult) qualifyContractTest(c project.ResolvedComp
 			}
 			evidence.Assertions = append(evidence.Assertions, item)
 		}
+		checked := contractAssertionsChecked(test.Assertions, evidence.Assertions)
+		// A contract rests on its tests, so an interrupted or failing
+		// process supports nothing, even a test that passed inside it; a test
+		// that never called the bound implementation tested a stub; and one
+		// that asserted nothing, or had an assertion fail, checked nothing.
+		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 && checked {
+			evidence.Status = "tested"
+			if test.Check == r.Check {
+				row.Status = "tested"
+			}
+		}
 		row.Tests = append(row.Tests, evidence)
 	}
 	return row
+}
+
+// contractAssertionsPassed says whether a run's assertions, as reported,
+// checked something: at least one passed and none didn't.
+func contractAssertionsPassed(results []ComponentRuntimeAssertionResult) bool {
+	for _, a := range results {
+		if a.Outcome != "passed" || !a.Exercised {
+			return false
+		}
+	}
+	return len(results) > 0
+}
+
+// contractAssertionsChecked says whether a backing test checked something:
+// at least one assertion passed, with its source, and none didn't.
+func contractAssertionsChecked(results []ComponentRuntimeAssertionResult, qualified []ComponentRuntimeAssertionEvidence) bool {
+	passed := false
+	for i, a := range results {
+		if a.Outcome != "passed" || !a.Exercised {
+			return false
+		}
+		passed = passed || qualified[i].Status == "passed"
+	}
+	return passed
 }
 
 // contractImplementationBound says whether the implementation a run resolved
@@ -631,6 +657,8 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 				vetoed[key] = contractUnsuccessful(test)
 			} else if calls[test.Check] == 0 {
 				vetoed[key] = "reached no real implementation"
+			} else if !contractAssertionsPassed(test.Assertions) {
+				vetoed[key] = "checked nothing, or had an assertion fail"
 			}
 		}
 	}
@@ -735,10 +763,14 @@ func contractShortfall(c project.ResolvedComponentContract, rows []ComponentCont
 					reason = fmt.Sprintf("%s: not exercised", test)
 				case row.Result.Outcome != "passed":
 					reason = fmt.Sprintf("%s: its run %s", test, contractOutcome(row.Result.Outcome))
-				case calls == 0:
-					reason = fmt.Sprintf("%s: no call reached the bound implementation, so it tested a stub, a substitute or nothing", test)
+				case row.Result.Implementation == nil:
+					reason = fmt.Sprintf("%s: its run didn't resolve the operation's implementation", test)
 				case !contractImplementationBound(row.Result.Implementation, row.Result.Binding):
-					reason = fmt.Sprintf("%s: its run didn't resolve the implementation the report binds", test)
+					reason = fmt.Sprintf("%s: its run resolved an implementation the report doesn't bind", test)
+				case calls == 0:
+					reason = fmt.Sprintf("%s: the test itself made no call into the bound implementation, so it tested a stub, a substitute or nothing", test)
+				case !contractAssertionsChecked(result.Assertions, row.Tests[i].Assertions):
+					reason = fmt.Sprintf("%s: it made no assertion that passed, or one failed", test)
 				default:
 					reason = fmt.Sprintf("%s: its run's provenance is incomplete", test)
 				}

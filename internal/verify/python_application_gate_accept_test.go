@@ -512,19 +512,23 @@ func TestPythonApplicationGateAdmission(t *testing.T) {
 	_, log := pa327Fake(t)
 	for _, explicit := range []bool{true, false} {
 		for _, marked := range []bool{false, true} {
-			f := pa327New(t, explicit, false)
-			if marked {
-				b, _ := os.ReadFile(filepath.Join(f.root, pa327Source))
-				pa327Write(t, f.root, pa327Source, "# +nagini\n"+string(b))
+			// Exhaustive applications are admitted since #342.
+			for _, exhaustive := range []bool{false, true} {
+				f := pa327New(t, explicit, false)
+				if marked {
+					b, _ := os.ReadFile(filepath.Join(f.root, pa327Source))
+					pa327Write(t, f.root, pa327Source, "# +nagini\n"+string(b))
+				}
+				f.p.Manifest.Exhaustive = exhaustive
+				pa327Save(t, f)
+				pa327Admit(t, f)
 			}
-			pa327Admit(t, f)
 		}
 	}
 	cases := []struct {
 		name   string
 		change func(pa327Fixture)
 	}{
-		{"exhaustive", func(f pa327Fixture) { f.p.Manifest.Exhaustive = true }},
 		{"proof selection without invocation", func(f pa327Fixture) {
 			f.p.Manifest.Components.Checks[0].Proof = &project.ComponentProof{Contracts: []project.ComponentRef{pa327Ref(pa327Source, "advance")}}
 		}},
@@ -542,7 +546,7 @@ func TestPythonApplicationGateAdmission(t *testing.T) {
 		{"explicit discovery", func(f pa327Fixture) {
 			f.p.Manifest.Components.Checks[0].Invocations[0].Args = []string{"-m", "unittest", "discover"}
 		}},
-		{"attempt request", func(f pa327Fixture) { f.p.Manifest.Components.Checks[0].Invocations[1].Sampling["mode"] = "attempted" }},
+		{"unknown sampling mode", func(f pa327Fixture) { f.p.Manifest.Components.Checks[0].Invocations[1].Sampling["mode"] = "attempted" }},
 		{"unsupported sampling", func(f pa327Fixture) { f.p.Manifest.Components.Checks[0].Invocations[1].Sampling["steps"] = "0" }},
 		{"reserved environment", func(f pa327Fixture) {
 			f.p.Manifest.Components.Checks[0].Invocations[1].Env = map[string]string{"PYTHONPATH": "."}
