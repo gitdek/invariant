@@ -335,6 +335,7 @@ func TestPythonApplicationProofRefusesWhatItCantPreserve(t *testing.T) {
 		{"varargs", body("def admit(text: str, admitted: int)", "def admit(text: str, admitted: int, *rest: int)"), "*args"},
 		{"an unbound name", body("version = tinyver.parse(text)", "version = undefined_thing(text)"), "isn't bound"},
 		{"a conditional binding", body("LIMIT = 3\n", "if True:\n    LIMIT = 3\n"), "conditionally"},
+		{"a shared line", body("LIMIT = 3\n", "LIMIT = 3; HOOK = print('installed')\n"), "more than one statement"},
 		{"another encoding", func(m string) string { return "# -*- coding: latin-1 -*-\n" + m }, "latin-1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -404,6 +405,20 @@ func TestPythonApplicationProofRefusesWhatItCantPreserve(t *testing.T) {
 			}
 			assertNoTools()
 		})
+	}
+}
+
+func TestPythonApplicationProofCopiesASharedContractLineOnce(t *testing.T) {
+	root, p := ppFixture(t, ppModule)
+	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
+	pa310Write(t, root, ptcContracts, strings.Replace(string(b), ppAbstraction,
+		"\n\ndef version_of(text: str) -> object:\n    Requires(len(text) > 0); Ensures(Result() is not None)\n", 1))
+	in, err := ppSession(t, p, &ppNagini{}).ProofInput(ppAdmitID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ppFile(t, in, "invariant_boundary_0.py"); strings.Count(got, "Requires(len(text) > 0); Ensures(Result() is not None)\n") != 1 {
+		t.Fatalf("the abstraction's module:\n%s", got)
 	}
 }
 

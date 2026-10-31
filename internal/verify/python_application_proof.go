@@ -201,6 +201,9 @@ type pythonProofBinding struct {
 	Name    string `json:"name"`
 	Asname  string `json:"asname"`
 	Literal bool   `json:"literal"`
+	// Shared says the statement shares a line with another, so the gate,
+	// which copies whole lines, can't copy it alone.
+	Shared bool `json:"shared"`
 }
 
 type pythonProofName struct {
@@ -520,6 +523,11 @@ func (b *pythonProofBuilder) build() error {
 			return b.unsupported("%s's decorator %s", b.target.Symbol, decorator)
 		}
 	}
+	for _, f := range d.Future {
+		if f.Shared {
+			return b.unsupported("line %d holds more than one statement, and the input copies whole lines", f.Line)
+		}
+	}
 	b.sources = map[string]bool{b.target.Source: true}
 	if b.s.inventory != nil {
 		for _, c := range b.s.inventory.Components {
@@ -589,9 +597,8 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 		case row.Module == "nagini_contracts.contracts" && row.Level == 0:
 			return nil, b.nagini(name, row)
 		case row.Module == "typing" && row.Level == 0:
-			b.copy(row)
 			b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "typing"})
-			return nil, nil
+			return nil, b.copy(row)
 		}
 		if use.Deep || len(use.Attributes) > 0 {
 			return nil, b.unsupported("the function reads attributes of %s, and only calls it reaches by name are supported", name)
@@ -603,9 +610,8 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 		return []*pythonProofOperation{{op: op, name: name, binding: row, dotted: row.Module + "." + row.Name}}, nil
 	case "import":
 		if row.Module == "typing" && row.Asname == "" {
-			b.copy(row)
 			b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "typing"})
-			return nil, nil
+			return nil, b.copy(row)
 		}
 		if strings.HasPrefix(row.Module, "nagini_contracts") {
 			return nil, b.unsupported("%s imports Nagini's contracts as a module; contract calls are unqualified", name)
@@ -635,9 +641,8 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 		if use.Deep || len(use.Attributes) > 0 {
 			return nil, b.unsupported("the function reads attributes of the constant %s", name)
 		}
-		b.copy(row)
 		b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "constant"})
-		return nil, nil
+		return nil, b.copy(row)
 	case "function":
 		if use.Deep || len(use.Attributes) > 0 {
 			return nil, b.unsupported("the function reads attributes of %s", name)
@@ -664,7 +669,9 @@ func (b *pythonProofBuilder) nagini(name string, row pythonProofBinding) error {
 			}
 		}
 	}
-	b.copy(row)
+	if err := b.copy(row); err != nil {
+		return err
+	}
 	b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "nagini"})
 	if name == "Assume" {
 		b.unaccounted(ComponentUnaccounted{Kind: UnaccountedAssumption, Detail: "the function calls Assume, so Nagini takes a fact that nothing proves"})
@@ -673,14 +680,19 @@ func (b *pythonProofBuilder) nagini(name string, row pythonProofBinding) error {
 }
 
 // copy keeps a module statement for the main module, once, in its original
-// order.
-func (b *pythonProofBuilder) copy(row pythonProofBinding) {
+// order. The gate copies whole lines, so a statement sharing its line with
+// another can't be copied without it.
+func (b *pythonProofBuilder) copy(row pythonProofBinding) error {
+	if row.Shared {
+		return b.unsupported("line %d holds more than one statement, and the input copies whole lines", row.Line)
+	}
 	for _, c := range b.copied {
 		if c.Start == row.Start {
-			return
+			return nil
 		}
 	}
 	b.copied = append(b.copied, row)
+	return nil
 }
 
 func (b *pythonProofBuilder) boundary(x PythonApplicationProofBoundary) {
@@ -927,6 +939,9 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 			}
 		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "typing" && rows[0].Level == 0,
 			len(rows) == 1 && rows[0].Kind == "import" && rows[0].Module == "typing" && rows[0].Asname == "":
+			if rows[0].Shared {
+				return nil, fail("reads %s from line %d, which holds more than one statement", name, rows[0].Line)
+			}
 			if !slices.ContainsFunc(typing, func(t pythonProofBinding) bool { return t.Start == rows[0].Start }) {
 				typing = append(typing, rows[0])
 			}
@@ -993,9 +1008,12 @@ func (b *pythonProofBuilder) write() error {
 			header = append(header, stub.name...)
 			header = append(header, d.source[d.NameEnd:d.HeaderEnd]...)
 			t.copyRenamed("signature", stub.decl.Source, d.source, def, d.HeaderEnd, header, stub.contract.ID)
+			copied := -1
 			for _, s := range d.Body {
-				if s.Kind == "contract" {
+				// Contract calls sharing a line are copied with it, once.
+				if s.Kind == "contract" && s.Start > copied {
 					t.copy("contract", stub.decl.Source, d.source, s.Start, s.End, stub.contract.ID)
+					copied = s.End - 1
 				}
 			}
 		}

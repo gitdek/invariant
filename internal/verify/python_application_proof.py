@@ -172,8 +172,19 @@ def main():
     def bind(name, row):
         bindings.setdefault(name, []).append(row)
 
+    # The gate copies whole lines, so a statement that shares a line with
+    # another can't be copied alone.
+    lines = {}
     for statement in tree.body:
-        where = {"start": offset(statement.lineno, 0), "end": line_end(statement.end_lineno), "line": statement.lineno}
+        for line in range(statement.lineno, statement.end_lineno + 1):
+            lines[line] = lines.get(line, 0) + 1
+
+    def shared(statement):
+        return any(lines[line] > 1 for line in range(statement.lineno, statement.end_lineno + 1))
+
+    for statement in tree.body:
+        where = {"start": offset(statement.lineno, 0), "end": line_end(statement.end_lineno), "line": statement.lineno,
+                 "shared": shared(statement)}
         if isinstance(statement, ast.Import):
             for alias in statement.names:
                 bind(alias.asname or alias.name.split(".")[0], dict(where, kind="import", module=alias.name, asname=alias.asname or ""))
@@ -218,7 +229,7 @@ def main():
     # Names any function in the module rebinds with a global statement, and
     # the module's __future__ imports, which change how it compiles.
     rebound = sorted({name for sub in ast.walk(tree) if isinstance(sub, ast.Global) for name in sub.names})
-    future = [dict(start=offset(s.lineno, 0), end=line_end(s.end_lineno), line=s.lineno)
+    future = [dict(start=offset(s.lineno, 0), end=line_end(s.end_lineno), line=s.lineno, shared=shared(s))
               for s in tree.body if isinstance(s, ast.ImportFrom) and s.module == "__future__"]
 
     free, unsupported = free_names(node)
