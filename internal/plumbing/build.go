@@ -83,8 +83,11 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	defer transcript.Close()
 	testLog := filepath.Join(out, "test-runs.jsonl")
 	// One build cache serves the agent's test runs and the factory's own, so
-	// only the first compiles everything.
+	// only the first compiles everything. Both check formatting against the
+	// original checkout, so a test it already held, which the build may not
+	// edit, never blocks the build.
 	b.Sandbox.Cache = filepath.Join(out, "gocache")
+	b.Sandbox.Original = root
 	job := synth.Job{
 		Workspace: ws,
 		Prompt:    BuildPrompt(plan, n, b.TestRuns),

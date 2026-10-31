@@ -438,8 +438,8 @@ func mcpCmd(ctx context.Context, args []string) int {
 	return 0
 }
 
-// sandbox is where plumbing's tests run: the pinned Go image, with this
-// machine's module cache read-only.
+// sandbox is where plumbing's tests run: the pinned Python image with the
+// pinned Go toolchain, and this machine's module cache read-only.
 func sandbox(ctx context.Context, cache string) (plumbing.Sandbox, error) {
 	out, err := exec.CommandContext(ctx, "go", "env", "GOMODCACHE").Output()
 	if err != nil {
@@ -566,6 +566,9 @@ func checkIssues(ws string, run, maxRuns int, logPath string) string {
 // and its acceptance tests from the checkout at root, and the agent's
 // changes to the files the plan names, in the sandbox.
 func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
+	// The original checkout tells the tests the agent adds from the ones it
+	// may not edit, which never fail its formatting (#298).
+	sb.Original = root
 	calls := toolCalls("test", maxRuns)
 	return mcp.Tool{
 		Name: "test",
