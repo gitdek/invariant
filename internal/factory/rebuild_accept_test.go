@@ -494,3 +494,83 @@ func TestARebuildSurvivesAStopAtEachEffect(t *testing.T) {
 		}
 	}
 }
+
+// A failure posted before failures named why they failed counts a pull
+// request it names as one CI's gate failed, so a retry still watches it
+// again, a plan's draft included: only a failure recorded as the factory's
+// own run's is built again.
+func TestALegacyPlanFailureIsWatchedAgain(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	pr := failed.Marker.PR
+	m := failed.Marker
+	m.Failure = ""
+	for i := range r.gh.comments[1] {
+		if r.gh.comments[1][i].ID == failed.Comment.ID {
+			r.gh.comments[1][i].Body = post("needs a person", "This failed draft is still open.", m)
+		}
+	}
+	if stored := r.expect(1, KindFailed, LabelHumanReview); stored.Marker.Why() != FailCI || stored.Marker.Rebuilds() {
+		t.Fatalf("fixture must be a legacy failure naming a pull request: %+v", stored.Marker)
+	}
+	g := &closes{GitHub: r.f.GitHub}
+	r.f.GitHub = g
+	command := r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	answer := r.expect(1, KindPR, LabelPR)
+	recorded, err := r.f.Repo.Recorded(context.Background(), 1, replaceStepName(Command{Comment: command.ID}))
+	if answer.Marker.PR != pr || len(g.closed) != 0 || b.calls != 1 || len(r.gh.prs) != 1 || recorded != "" || err != nil || r.gh.prs[pr].State != "open" {
+		t.Fatalf("a legacy failure's retry must watch #%d again, building, closing and recording nothing: %+v, closed %v, %d builds", pr, answer.Marker, g.closed, b.calls)
+	}
+}
+
+// errStoppedBeforePost stands for a watcher that stopped after it opened a
+// pull request and before it said so.
+var errStoppedBeforePost = errors.New("the watcher stopped before saying it opened the pull request")
+
+type stopBeforePRPost struct{ GitHub }
+
+func (g stopBeforePRPost) PostComment(ctx context.Context, issue int, body string) (github.Comment, error) {
+	if m, ok := DecodeMarker(body); ok && m.Kind == KindPR {
+		return github.Comment{}, errStoppedBeforePost
+	}
+	return g.GitHub.PostComment(ctx, issue, body)
+}
+
+// A retry's build that opened its pull request and stopped before saying so
+// has a successor already: a fresh watcher finds it by its attempt's branch,
+// even once someone has closed it, and says so, without another agent run or
+// pull request. The draft it replaced is never taken for it.
+func TestASuccessorClosedBeforeItsPostIsAdopted(t *testing.T) {
+	r, b, failed := rebuild271Start(t, 1, "page/page.go")
+	old := failed.Marker.PR
+	r.gh.say(1, "gitdek", "/invariant retry")
+	r.poll()
+	building := r.expect(1, KindRatified, LabelBuilding)
+	hub := r.f.GitHub
+	r.f.GitHub = stopBeforePRPost{GitHub: hub}
+	if err := r.f.Poll(context.Background()); !errors.Is(err, errStoppedBeforePost) {
+		t.Fatalf("expected the watcher to stop before saying it opened the pull request, got %v", err)
+	}
+	if len(r.gh.prs) != 2 {
+		t.Fatalf("the retry's build should have opened its pull request: %d pull requests", len(r.gh.prs))
+	}
+	var next int
+	for n, pr := range r.gh.prs {
+		if pr.Head.Ref == building.Marker.Branch {
+			next = n
+		}
+	}
+	r.gh.prs[next].State = "closed"
+	fresh := freshWatcher(r, hub)
+	fresh.Plumbing = r.f.Plumbing
+	r.f = fresh
+	r.poll()
+	said := r.gh.last(1)
+	if said.Marker.PR != next || said.Marker.Replaces != old || b.calls != 2 || len(r.gh.prs) != 2 {
+		t.Fatalf("the fresh watcher must say the build opened #%d, its successor, with no other run or pull request: %+v, %d builds, %d pull requests", next, said.Marker, b.calls, len(r.gh.prs))
+	}
+	r.poll()
+	if closed := r.expect(1, KindClosed); closed.Marker.PR != next || len(r.gh.merged) != 0 || r.gh.prs[old].Merged {
+		t.Fatalf("a closed successor is closed, and nothing merges: %+v, merged %v", closed.Marker, r.gh.merged)
+	}
+}
