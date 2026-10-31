@@ -592,6 +592,13 @@ func TestTrustedContractRetentionRejectsStaleAssociationsAtomically(t *testing.T
 	changed = ctInventory(t, p.Dir)
 	rejects("proofs after an operation change", func() error { return r.AttributeComponentProofs(changed, nil) })
 	p.Manifest.Components.TrustedContracts[1].Operation.Symbol = "Version"
+	// And so does a test that no longer backs its contract.
+	tests := p.Manifest.Components.TrustedContracts[0].Tests
+	p.Manifest.Components.TrustedContracts[0].Tests = tests[:1]
+	ctSave(t, p)
+	changed = ctInventory(t, p.Dir)
+	rejects("proofs after a backing test is dropped", func() error { return r.AttributeComponentProofs(changed, nil) })
+	p.Manifest.Components.TrustedContracts[0].Tests = tests
 	ctSave(t, p)
 	// Clearing the support is the way to change what it rests on.
 	if err := r.AttributeComponentContractTests(inv, nil); err != nil {

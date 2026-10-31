@@ -443,6 +443,11 @@ func (index *componentIndex) retainContractTest(old project.ComponentInventory, 
 	for _, test := range row.Result.Tests {
 		ids = append(ids, test.Check)
 	}
+	for _, id := range ids[1:] {
+		if id != c.Operation.Declaration && !slices.Contains(c.Tests, id) {
+			return fmt.Errorf("%w: component contract tests: retained test %q no longer backs %q", ErrStaleComponentEvidence, id, row.Contract)
+		}
+	}
 	return index.sameAnchors(old, ids, "component contract tests")
 }
 
