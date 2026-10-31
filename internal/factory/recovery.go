@@ -149,7 +149,9 @@ func replacing(pred int, intent bool) step {
 }
 
 // watcher is this watcher in the core's terms, in the agent run for key,
-// or in none, which the build of attempt started.
+// or in none, which the build of attempt started. The watcher's attempt is
+// never ahead of the step's: it's the step's own, or, for a run a later
+// retry replaced, the one before (D-0212).
 func watcher(inRun, attempt int) recovery.Watcher {
 	w := recovery.NewWatcher(me)
 	w.InRun, w.Attempt = inRun, attempt
