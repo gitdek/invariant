@@ -57,11 +57,36 @@ type PythonApplicationTest struct {
 	Exercised    bool     `json:"exercised"`
 	Outcome      string   `json:"outcome"`
 	Diagnostics  []string `json:"diagnostics"`
-	// A trusted contract's backing test also records how many calls reached
-	// the implementation its run resolved, and each outermost unittest
-	// assertion it made, in order (#294).
-	BoundaryCalls int                          `json:"boundary_calls,omitempty"`
+	// A trusted contract's backing test also records how many of the test's
+	// own calls reached the implementation its run resolved, and each
+	// outermost unittest assertion it made, in order (#294): both always, zero
+	// and none included. Other tests' records have neither.
+	BoundaryCalls *int64                       `json:"boundary_calls,omitempty"`
 	Assertions    []PythonApplicationAssertion `json:"assertions,omitempty"`
+}
+
+// Calls is a backing test's call count, zero for any other test.
+func (t PythonApplicationTest) Calls() int64 {
+	if t.BoundaryCalls == nil {
+		return 0
+	}
+	return *t.BoundaryCalls
+}
+
+// MarshalJSON writes a backing test's assertions even when it made none.
+func (t PythonApplicationTest) MarshalJSON() ([]byte, error) {
+	type plain PythonApplicationTest
+	if t.BoundaryCalls == nil {
+		return json.Marshal(plain(t))
+	}
+	assertions := t.Assertions
+	if assertions == nil {
+		assertions = []PythonApplicationAssertion{}
+	}
+	return json.Marshal(struct {
+		plain
+		Assertions []PythonApplicationAssertion `json:"assertions"`
+	}{plain(t), assertions})
 }
 
 // PythonApplicationAssertion is the runner's record of one unittest assertion:

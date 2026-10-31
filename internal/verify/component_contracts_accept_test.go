@@ -211,6 +211,13 @@ func ctDeclaration(t *testing.T, inv *project.ComponentInventory, id string) pro
 	return project.Component{}
 }
 
+// ctAsserted is one passing assertion in the backing tests' file.
+func ctAsserted(t *testing.T, inv *project.ComponentInventory) []verify.ComponentRuntimeAssertionResult {
+	t.Helper()
+	source := ctFile(t, inv, ctTests)
+	return []verify.ComponentRuntimeAssertionResult{{ID: "assertEqual:1", Source: &source, Exercised: true, Outcome: "passed"}}
+}
+
 func ctFile(t *testing.T, inv *project.ComponentInventory, name string) project.ComponentFile {
 	t.Helper()
 	for _, f := range append(append([]project.ComponentFile(nil), inv.Files...), inv.Provenance.Files...) {
@@ -261,8 +268,8 @@ func ctPassing(t *testing.T, inv *project.ComponentInventory, r *verify.Report) 
 		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), ctFile(t, inv, ctProject+"/fixture.json")},
 		Outcome:    "passed",
 		Tests: []verify.ComponentRuntimeTestResult{
-			{Check: parses, Exercised: true, Outcome: "passed"},
-			{Check: rejects, Exercised: true, Outcome: "passed"},
+			{Check: parses, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)},
+			{Check: rejects, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)},
 		},
 		Implementation: &verify.ComponentContractImplementation{Kind: "standard_library", Callable: "python",
 			File: &project.ComponentFile{Path: "json/__init__.py", SHA256: ctHash("the runtime's json")}, Python: "3.13.15"},
@@ -412,7 +419,7 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: ctRuntime}, Binding: ctContract(t, r, "store.save").Binding,
 		Inputs:     []project.Component{ctDeclaration(t, inv, ctID(ctContracts, "save")), ctDeclaration(t, inv, test)},
 		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), store},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}},
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)}},
 		Implementation: &verify.ComponentContractImplementation{Kind: "application", Callable: "python", File: &store},
 		Exercise:       []verify.ComponentContractExercise{{Check: test, Calls: 1}}}
 	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{save}); err != nil {
@@ -526,7 +533,7 @@ func TestTrustedContractTestsAnUnsuccessfulRunVetoesSupport(t *testing.T) {
 	second := func(r *verify.Report, process, outcome string, exercised bool) verify.ComponentContractTestResult {
 		x := ctPassing(t, inv, r)
 		x.Check, x.Invocation, x.Outcome = rejects, ctInvocationOf(t, inv, "json.loads", "rejects"), process
-		x.Tests = []verify.ComponentRuntimeTestResult{{Check: rejects, Exercised: exercised, Outcome: outcome}}
+		x.Tests = []verify.ComponentRuntimeTestResult{{Check: rejects, Exercised: exercised, Outcome: outcome, Assertions: ctAsserted(t, inv)}}
 		return x
 	}
 	for _, c := range []struct {
@@ -690,7 +697,7 @@ func TestTrustedContractRetentionRejectsStaleAssociationsAtomically(t *testing.T
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: ctRuntime}, Binding: ctContract(t, r, "packaging.Version").Binding,
 		Inputs:     []project.Component{ctDeclaration(t, inv, ctID(ctContracts, "version")), ctDeclaration(t, inv, version)},
 		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests)},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: version, Exercised: true, Outcome: "passed"}},
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: version, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)}},
 		Implementation: &verify.ComponentContractImplementation{Kind: "dependency", Callable: "python", Distribution: "packaging", Version: "24.2", Recorded: true,
 			File: &project.ComponentFile{Path: "packaging/version.py", SHA256: ctHash("packaging/version.py")}},
 		Exercise: []verify.ComponentContractExercise{{Check: version, Calls: 3}}}

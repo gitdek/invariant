@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // A trusted contract's backing tests run in the application's own session
@@ -90,7 +91,7 @@ func pythonApplicationBoundaryTest(line []byte, b *PythonApplicationBoundary, ro
 		return err
 	}
 	calls, err := raw.Calls.Int64()
-	if err != nil || calls < 0 || calls != int64(row.BoundaryCalls) || raw.Assertions == nil {
+	if err != nil || calls < 0 || row.BoundaryCalls == nil || calls != *row.BoundaryCalls || raw.Assertions == nil {
 		return fmt.Errorf("invalid backing test calls or assertions")
 	}
 	if calls > 0 && !b.Resolved {
@@ -145,10 +146,23 @@ func (r *Report) pythonApplicationContractTests(inv *project.ComponentInventory,
 		}
 		test := declarations[x.Key.Check]
 		source := project.ComponentFile{Path: test.Source, SHA256: test.SourceSHA256}
+		var runs []PythonApplicationTest
 		for _, t := range x.Tests {
-			if t.Check != x.Key.Check {
-				continue
+			if t.Check == x.Key.Check {
+				runs = append(runs, t)
 			}
+		}
+		// A backing test supports its contract from one run of it. One that
+		// ran twice in the same invocation, through a subclass say, fails
+		// its evidence rather than the attribution.
+		if len(runs) > 1 {
+			why := fmt.Sprintf("the backing test ran %d times in one invocation", len(runs))
+			result.Tests = []ComponentRuntimeTestResult{{Check: x.Key.Check, Outcome: "failed", Diagnostics: []string{why}}}
+			result.Exercise = []ComponentContractExercise{{Check: x.Key.Check}}
+			result.Diagnostics = append(result.Diagnostics, why)
+			runs = nil
+		}
+		for _, t := range runs {
 			row := ComponentRuntimeTestResult{Check: t.Check, Exercised: t.Exercised, Outcome: "failed", Diagnostics: slices.Clone(t.Diagnostics)}
 			switch t.Outcome {
 			case "passed":
@@ -167,7 +181,7 @@ func (r *Report) pythonApplicationContractTests(inv *project.ComponentInventory,
 				row.Assertions = append(row.Assertions, assertion)
 			}
 			result.Tests = append(result.Tests, row)
-			result.Exercise = append(result.Exercise, ComponentContractExercise{Check: t.Check, Calls: int64(t.BoundaryCalls)})
+			result.Exercise = append(result.Exercise, ComponentContractExercise{Check: t.Check, Calls: t.Calls()})
 		}
 		if b := x.Boundary; b != nil {
 			result.Diagnostics = append(result.Diagnostics, b.Diagnostics...)
@@ -200,19 +214,45 @@ func (r *Report) pythonApplicationContractsTested() bool {
 	return true
 }
 
-// pythonApplicationContractExercised says whether a backing-test run reached
-// the implementation it resolved in its selected test, the least the direct
-// route requires; the gate's attribution also checks the binding.
-func pythonApplicationContractExercised(x PythonApplicationExecutionResult) bool {
-	if x.Boundary == nil || !x.Boundary.Resolved {
-		return false
-	}
-	for _, t := range x.Tests {
-		if t.Check == x.Key.Check && t.BoundaryCalls > 0 {
-			return true
+// pythonApplicationContractSteps marks each backing-test run's build step, at
+// (step, execution) indices, as passing only where its attributed row is
+// tested, so a stub-only run fails its step as it fails its contract, on
+// both routes. It says whether every such step passed.
+func (r *Report) pythonApplicationContractSteps(steps [][2]int) bool {
+	all := true
+	for _, at := range steps {
+		x := r.Application.Executions[at[1]]
+		tested := false
+		if r.Components != nil {
+			for _, row := range r.Components.ContractTests {
+				if row.Check == x.Key.Check && row.Result.Invocation != nil && row.Result.Invocation.ID == x.Key.ID &&
+					slices.ContainsFunc(r.Components.Inventory.TrustedContracts, func(c project.ResolvedComponentContract) bool {
+						return c.ID == row.Contract && c.Contract == x.Key.Target
+					}) {
+					tested = row.Status == "tested"
+				}
+			}
 		}
+		r.Build.Steps[at[0]].Passed = x.Success && tested
+		all = all && r.Build.Steps[at[0]].Passed
 	}
-	return false
+	return all
+}
+
+// pythonApplicationContractRows attributes a session's backing-test runs on
+// a detached report, for the direct route, as the gate attributes them.
+func pythonApplicationContractRows(inv *project.ComponentInventory, deps PythonApplicationProvenance, executions []PythonApplicationExecutionResult) (*Report, error) {
+	r := &Report{Application: &PythonApplicationReport{Executions: executions},
+		Toolchain: Toolchain{PythonImage: toolchain.PythonImage, PythonDependencies: deps.Dependencies}}
+	declarations := map[string]project.Component{}
+	for _, c := range append(slices.Clone(inv.Components), inv.Provenance.Declarations...) {
+		declarations[c.ID] = c
+	}
+	tests, err := r.pythonApplicationContractTests(inv, declarations)
+	if err != nil {
+		return nil, err
+	}
+	return r, r.AttributeComponentContractTests(inv, tests)
 }
 
 // pythonApplicationContractStep names a backing-test invocation's build step
