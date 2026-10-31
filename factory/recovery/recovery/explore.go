@@ -9,7 +9,11 @@ const (
 )
 
 // runKeys lists the steps that start an agent run, in the order State keeps them.
-var runKeys = [3]int{Solve, Build, Retry}
+var runKeys = [2]int{Solve, Build}
+
+// postKeys lists the steps the spec's posts counts, in the order State keeps
+// them; the latest retry's and build's answers are counted apart.
+var postKeys = [4]int{Solve, Ratify, Note, Merge}
 
 // keyNames are the spec's names for the steps, indexed by the code's keys.
 var keyNames = [NumKeys]string{
@@ -28,8 +32,17 @@ var runNames = [3]string{
 	RunDone:     "done",
 }
 
+// prNames and predNames are the spec's names for the latest build's pull
+// request and the draft the latest retry replaces.
+var (
+	prNames   = [5]string{PRNone: "none", PRDraft: "draft", PRReady: "ready", PRClosed: "closed", PRMerged: "merged"}
+	predNames = [5]string{PredNone: "none", PredDraft: "draft", PredRetired: "retired", PredClosed: "closed", PredMerged: "merged"}
+)
+
 // State is the model's state at its bounds. Watchers are 0..Watchers-1, a
-// Lease of NoOne is "nobody", and an InRun of NoRun is "none".
+// Lease of NoOne is "nobody", and an InRun of NoRun is "none". Given[Retry]
+// is the spec's retried, and Posts[Retry] and Posts[Build] its retryPosts and
+// buildPosts.
 type State struct {
 	Given      [NumCmds]bool
 	Posts      [NumKeys]int
@@ -38,9 +51,12 @@ type State struct {
 	RatPushed  bool
 	CodePushed bool
 	PRs        int
+	PR         int
 	Gate       bool
 	Mergeable  bool
 	Merges     int
+	Pred       int
+	Intent     bool
 	Lease      int
 	Up         [Watchers]bool
 	InRun      [Watchers]int
@@ -78,10 +94,13 @@ func repoOf(s State) Repo {
 	}
 	r.RatPushed = s.RatPushed
 	r.CodePushed = s.CodePushed
-	r.PROpen = s.PRs > 0
-	r.Merged = s.Merges > 0
+	r.Opened = s.PRs > 0
+	r.PR = s.PR
 	r.GatePassed = s.Gate
 	r.Mergeable = s.Mergeable
+	r.Merged = s.Merges > 0
+	r.Pred = s.Pred
+	r.Intent = s.Intent
 	r.Lease = s.Lease
 	return r
 }
@@ -99,10 +118,13 @@ func withRepo(s State, r Repo) State {
 	}
 	s.RatPushed = r.RatPushed
 	s.CodePushed = r.CodePushed
-	s.PRs = b2i(r.PROpen)
-	s.Merges = b2i(r.Merged)
+	s.PRs = b2i(r.Opened)
+	s.PR = r.PR
 	s.Gate = r.GatePassed
 	s.Mergeable = r.Mergeable
+	s.Merges = b2i(r.Merged)
+	s.Pred = r.Pred
+	s.Intent = r.Intent
 	s.Lease = r.Lease
 	return s
 }
@@ -149,12 +171,28 @@ func Try(s State, tried func(step string, args []any, next State)) {
 	r := repoOf(s)
 
 	// A writer gives a command.
-	for c := 0; c < NumCmds; c++ {
+	for _, c := range []int{Solve, Ratify, Note} {
 		n := s
 		if t, ok := r.Give(c); ok {
 			n = withRepo(s, t)
 		}
 		tried("Give", []any{keyNames[c]}, n)
+	}
+
+	// A writer retries: a new build, with its own agent run, so a watcher
+	// still in the build before's run is in a stale one.
+	{
+		n := s
+		if t, ok := r.Give(Retry); ok {
+			n = withRepo(s, t)
+			n.RunStarts[runIndex(Build)] = 0
+			for w := 0; w < Watchers; w++ {
+				if n.InRun[w] == Build {
+					n.InRun[w] = Stale
+				}
+			}
+		}
+		tried("GiveRetry", []any{}, n)
 	}
 
 	// CI's gate passes, with the pull request mergeable or not.
@@ -164,6 +202,23 @@ func Try(s State, tried func(step string, args []any, next State)) {
 			n = withRepo(s, t)
 		}
 		tried("CIPass", []any{}, n)
+	}
+
+	// Someone else closes or merges an open pull request: the latest
+	// build's, or the draft a retry replaces.
+	for _, op := range []func() (Repo, bool){r.OthersClosePR, r.OthersCloseDraft} {
+		n := s
+		if t, ok := op(); ok {
+			n = withRepo(s, t)
+		}
+		tried("OthersClose", []any{}, n)
+	}
+	for _, op := range []func() (Repo, bool){r.OthersMergePR, r.OthersMergeDraft} {
+		n := s
+		if t, ok := op(); ok {
+			n = withRepo(s, t)
+		}
+		tried("OthersMerge", []any{}, n)
 	}
 
 	// The lease runs out, unless a running holder keeps renewing it.
@@ -225,7 +280,16 @@ func Try(s State, tried func(step string, args []any, next State)) {
 		tried("Restart", args, n)
 
 		// Act: the next effect of some step.
-		for k := 0; k < NumKeys; k++ {
+		act := func(op func() (Repo, bool)) {
+			n := s
+			if up {
+				if t, ok := op(); ok {
+					n = withRepo(s, t)
+				}
+			}
+			tried("Act", args, n)
+		}
+		for _, k := range runKeys {
 			n = s
 			if up {
 				if t, v, ok := r.StartRun(wt, k); ok {
@@ -234,23 +298,18 @@ func Try(s State, tried func(step string, args []any, next State)) {
 				}
 			}
 			tried("Act", args, n)
-
-			for _, op := range []func(Watcher, int) (Repo, bool){
-				r.ReportStopped,
-				r.PushRatification,
-				r.PushCode,
-				r.OpenPullRequest,
-				r.MergePullRequest,
-				r.Post,
-			} {
-				n = s
-				if up {
-					if t, ok := op(wt, k); ok {
-						n = withRepo(s, t)
-					}
-				}
-				tried("Act", args, n)
-			}
+			act(func() (Repo, bool) { return r.ReportStopped(wt, k) })
+		}
+		act(func() (Repo, bool) { return r.PushRatification(wt, Ratify) })
+		act(func() (Repo, bool) { return r.RecordIntent(wt) })
+		act(func() (Repo, bool) { return r.Retire(wt) })
+		act(func() (Repo, bool) { return r.PushCode(wt, Build) })
+		for _, ready := range []bool{false, true} {
+			act(func() (Repo, bool) { return r.OpenPullRequest(wt, Build, ready) })
+		}
+		act(func() (Repo, bool) { return r.MergePullRequest(wt, Merge) })
+		for k := 0; k < NumKeys; k++ {
+			act(func() (Repo, bool) { return r.Post(wt, k) })
 		}
 
 		// The holder records its finished agent run.
@@ -290,16 +349,27 @@ func fn(pairs []any) map[string]any {
 	return map[string]any{"$fn": pairs}
 }
 
+// inRunName is the spec's name for the agent run a watcher is in.
+func inRunName(k int) string {
+	switch k {
+	case NoRun:
+		return "none"
+	case Stale:
+		return "stale"
+	}
+	return keyNames[k]
+}
+
 // Abstract is s in the spec's vocabulary.
 func Abstract(s State) map[string]any {
 	var given []any
-	for c := 0; c < NumCmds; c++ {
+	for _, c := range []int{Solve, Ratify, Note} {
 		if s.Given[c] {
 			given = append(given, keyNames[c])
 		}
 	}
 	var posts []any
-	for k := 0; k < NumKeys; k++ {
+	for _, k := range postKeys {
 		posts = append(posts, []any{keyNames[k], s.Posts[k]})
 	}
 	var runs, starts []any
@@ -318,11 +388,7 @@ func Abstract(s State) map[string]any {
 	var up, inRun, unleased []any
 	for w := 0; w < Watchers; w++ {
 		up = append(up, []any{mv(w), s.Up[w]})
-		var in any = "none"
-		if s.InRun[w] != NoRun {
-			in = keyNames[s.InRun[w]]
-		}
-		inRun = append(inRun, []any{mv(w), in})
+		inRun = append(inRun, []any{mv(w), inRunName(s.InRun[w])})
 		if s.Unleased[w] {
 			unleased = append(unleased, mv(w))
 		}
@@ -330,14 +396,20 @@ func Abstract(s State) map[string]any {
 	return map[string]any{
 		"given":      set(given),
 		"posts":      fn(posts),
+		"retried":    s.Given[Retry],
+		"retryPosts": s.Posts[Retry],
+		"buildPosts": s.Posts[Build],
 		"runs":       fn(runs),
 		"runStarts":  fn(starts),
 		"ratPushed":  s.RatPushed,
 		"codePushed": s.CodePushed,
 		"prs":        s.PRs,
+		"pr":         prNames[s.PR],
 		"gate":       gate,
 		"mergeable":  s.Mergeable,
 		"merges":     s.Merges,
+		"pred":       predNames[s.Pred],
+		"intent":     s.Intent,
 		"lease":      lease,
 		"up":         fn(up),
 		"inRun":      fn(inRun),

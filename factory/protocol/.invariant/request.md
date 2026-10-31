@@ -1,22 +1,15 @@
-# Rebuild the factory's protocol's explorer to try every step
+# Let a retry build a failed plumbing build again
 
-Issue #69 in gitdek/invariant, opened by @gitdek.
+Issue #271 in gitdek/invariant, opened by @gitdek: part 1 of 3, amended by hand and ratified as D-0202.
 
-The factory's protocol's explorer returns only the states it reaches, through `Successors`, and calls each operation only where it has already checked that the model allows it. So no check can say the code refuses what the model rules out (D-0082). Rebuild it with `Try` and `Abstract` (D-0090), so the gate explores the code itself and checks every attempt:
+When a plumbing build fails in the factory's own run, the factory keeps its work in a draft pull request: its agent stopped with partial work, its tests failed, or its review asked for changes. A writer's `/invariant retry` can only watch that draft again. #271 asks that a retry build the ratified plan again and replace the failed draft, while a retry after CI's gate fails still watches its pull request again.
 
-- Every operation decides for itself whether it runs. Where the model's action can't run, it refuses and changes nothing, and its Gobra contract says both outcomes.
-- `Try` tries every step the model's Next names, for every actor, question, proposal, head and lock, in every state, and lets the code refuse. The model has no numeric bound, so no step goes untried anywhere.
-- The watcher checks each of its own steps with `Successors(State) []State`, so keep it, with the same meaning: every state one step of Next reaches from s. Keep `State` and every constant the watcher uses: the `Kind*`, `Gate*`, `Fail*` and `By*` values, `H1`, `H2`, `P1`, `P2`, `NoP`, `NoHead`, `NoActor`, `Nobody` and `ScopeMany`.
+The protocol lets a failed build with a pull request go back only to `pr_open`, so the rebuild needs a step of its own:
 
-What must be true doesn't change. Keep every ratified statement exactly as it is.
+- `Rebuild`, at a writer's word, after the build failed its own gate in the factory's run and left a draft. The issue goes back to `ratified` with its ratification, and the draft's head, CI's result there, its lock, scope and merge state are retired, so none of them stands for the next build. The stops count afresh.
+- `Retry` keeps its meaning, for stopped builds, CI failures, pull requests that can't merge and modeled projects.
+- Every ratified statement keeps its meaning.
+
+Keep `State`, `Successors` and every constant the watcher uses. The watcher takes no `Rebuild` step until #271's plumbing connects it.
 
 Project: factory/protocol
-
-
-_Posted for @gitdek by a coding agent, through the dashboard._
-
-## Discussion
-
-**@gitdek:**
-
-_Posted for @gitdek by a coding agent, through the dashboard._
