@@ -95,7 +95,12 @@ func Markdown(r *verify.Report) string {
 		componentViews(&b, r)
 	}
 	if r.Application != nil {
-		pythonApplication(&b, r.Application)
+		// A component receipt has no row for the check one size larger.
+		var larger *verify.Larger
+		if explicit {
+			larger = r.Larger
+		}
+		pythonApplication(&b, r.Application, larger)
 	}
 
 	if explicit {
@@ -598,6 +603,9 @@ func (render renderer) failures(r *verify.Report) []string {
 	}
 	if c := r.Conformance; c != nil && c.Tried != nil && !c.Tried.Passed {
 		out = append(out, "Every step tried: "+render.text(c.Tried.Message)+". "+render.triedEvidence(*c.Tried))
+	}
+	if r.Application != nil {
+		out = append(out, render.pythonApplicationFailures(r.Application)...)
 	}
 	if c := r.Code; c != nil {
 		for _, e := range c.Errors {
