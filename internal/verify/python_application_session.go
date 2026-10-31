@@ -197,7 +197,7 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 	if err := s.fresh(); err != nil {
 		return nil, err
 	}
-	if err := pythonApplicationDependencies(files, image, deps); err != nil {
+	if err := pythonApplicationDependencies(files, w.Project.Manifest.Environment, image, deps); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -384,12 +384,14 @@ func selectPythonApplicationImage(ctx context.Context, w *PythonApplicationWorks
 	return image, nil, nil
 }
 
-func pythonApplicationDependencies(files []project.ComponentFile, image string, d *toolchain.PythonDependencies) error {
+// An environment script's inline metadata replaces root requirements, as with
+// `uv run`; its evidence must come from that script as staged (#320).
+func pythonApplicationDependencies(files []project.ComponentFile, environment, image string, d *toolchain.PythonDependencies) error {
 	hashes := map[string]string{}
 	for _, f := range files {
 		hashes[f.Path] = f.SHA256
 	}
-	if hashes["requirements.txt"] == "" {
+	if environment == "" && hashes["requirements.txt"] == "" {
 		if image != toolchain.PythonImage || d != nil {
 			return fmt.Errorf("standard-library session requires the pinned base and no dependency evidence")
 		}
@@ -398,17 +400,26 @@ func pythonApplicationDependencies(files []project.ComponentFile, image string, 
 	if !pythonApplicationDigest.MatchString(image) || d == nil || d.Image != image || d.Base != toolchain.PythonImage || d.Platform != "linux/amd64" || !pythonApplicationDigest.MatchString(d.Recipe) || len(d.Inputs) == 0 || len(d.CanonicalInputs) != 2 || d.Artifacts == nil {
 		return fmt.Errorf("incomplete Python dependency evidence")
 	}
-	seen := map[string]bool{}
-	for i, in := range d.Inputs {
-		if seen[in.Path] || hashes[in.Path] != in.SHA256 || !pythonApplicationDigest.MatchString(in.SHA256) || (i > 0 && d.Inputs[i-1].Path >= in.Path) {
-			return fmt.Errorf("invalid original dependency input %s", in.Path)
+	if environment != "" {
+		if d.Script == nil || d.Script.Path != environment || !pythonApplicationDigest.MatchString(d.Script.SHA256) || len(d.Inputs) != 1 || d.Inputs[0].Path != environment || hashes[environment] == "" || d.Inputs[0].SHA256 != hashes[environment] {
+			return fmt.Errorf("dependency evidence does not come from %s's inline metadata as staged", environment)
 		}
-		seen[in.Path] = true
+	} else {
+		if d.Script != nil {
+			return fmt.Errorf("dependency evidence names an environment script the manifest does not")
+		}
+		seen := map[string]bool{}
+		for i, in := range d.Inputs {
+			if seen[in.Path] || hashes[in.Path] != in.SHA256 || !pythonApplicationDigest.MatchString(in.SHA256) || (i > 0 && d.Inputs[i-1].Path >= in.Path) {
+				return fmt.Errorf("invalid original dependency input %s", in.Path)
+			}
+			seen[in.Path] = true
+		}
+		if !seen["requirements.txt"] {
+			return fmt.Errorf("dependency evidence omits root requirements")
+		}
 	}
-	if !seen["requirements.txt"] {
-		return fmt.Errorf("dependency evidence omits root requirements")
-	}
-	seen = map[string]bool{}
+	seen := map[string]bool{}
 	for i, in := range d.CanonicalInputs {
 		if seen[in.Path] || (in.Path != "requirements.txt" && in.Path != "constraints.txt") || !pythonApplicationDigest.MatchString(in.SHA256) || (i > 0 && d.CanonicalInputs[i-1].Path >= in.Path) {
 			return fmt.Errorf("invalid canonical dependency input")

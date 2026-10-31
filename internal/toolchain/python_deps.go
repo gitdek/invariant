@@ -48,10 +48,14 @@ type PythonArtifact struct {
 // PythonDependencies records the actual resolution, including on cache hits.
 // Image selects execution but is not portable receipt evidence.
 type PythonDependencies struct {
-	Image           string           `json:"-"`
-	Base            string           `json:"base"`
-	Recipe          string           `json:"recipe"`
-	Platform        string           `json:"platform"`
+	Image    string `json:"-"`
+	Base     string `json:"base"`
+	Recipe   string `json:"recipe"`
+	Platform string `json:"platform"`
+	// Script names the application script whose inline metadata (PEP 723)
+	// defined the environment in place of root requirements, with the digest
+	// of that metadata's content (#320). Inputs then holds the script itself.
+	Script          *PythonInput     `json:"script,omitempty"`
 	Inputs          []PythonInput    `json:"inputs"`
 	CanonicalInputs []PythonInput    `json:"canonical_inputs"`
 	Artifacts       []PythonArtifact `json:"artifacts"`
@@ -145,7 +149,12 @@ func PythonDepsImage(ctx context.Context, root string) (*PythonDependencies, err
 	if err != nil || inputs == nil {
 		return nil, err
 	}
-	env := inputs.environment()
+	return installPythonDeps(ctx, inputs.canonical, inputs.environment())
+}
+
+// installPythonDeps builds, or reuses, the image env's recipe names from the
+// accepted canonical inputs, and reads back what it installed.
+func installPythonDeps(ctx context.Context, canonical map[string][]byte, env *PythonDependencies) (*PythonDependencies, error) {
 	tag := "invariant-python-deps:" + strings.TrimPrefix(env.Recipe, "sha256:")
 	id, inspectErr := Docker(ctx, "image", "inspect", "--format", "{{.Id}}", tag).Output()
 	if inspectErr != nil {
@@ -157,7 +166,7 @@ func PythonDepsImage(ctx context.Context, root string) (*PythonDependencies, err
 		if err := os.Mkdir(filepath.Join(dir, "canonical"), 0o755); err != nil {
 			return nil, err
 		}
-		for name, body := range inputs.canonical {
+		for name, body := range canonical {
 			if err := os.WriteFile(filepath.Join(dir, "canonical", name), body, 0o644); err != nil {
 				return nil, err
 			}

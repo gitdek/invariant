@@ -202,9 +202,17 @@ func pythonApplicationDestination(root, dst string) error {
 }
 
 // SelectImage admits dependencies from the staged root using the existing
-// installer and its evidence. It never invokes application code.
+// installer and its evidence: from the environment script's inline metadata
+// when the manifest names one (#320), else from root requirements. It never
+// invokes application code.
 func (w *PythonApplicationWorkspace) SelectImage(ctx context.Context) (string, *toolchain.PythonDependencies, error) {
-	deps, err := toolchain.PythonDepsImage(ctx, w.Root)
+	var deps *toolchain.PythonDependencies
+	var err error
+	if env := w.Project.Manifest.Environment; env != "" {
+		deps, err = toolchain.PythonScriptDepsImage(ctx, w.Root, env)
+	} else {
+		deps, err = toolchain.PythonDepsImage(ctx, w.Root)
+	}
 	if err != nil {
 		return "", nil, err
 	}

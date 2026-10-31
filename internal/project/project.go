@@ -36,6 +36,11 @@ type Manifest struct {
 	// resolve an enclosing application for discovery and staging; execution
 	// is not connected yet. The factory never changes the existing code.
 	Existing []string `json:"existing,omitempty"`
+	// Environment names the application script, relative to a Python
+	// application's root, whose inline metadata (PEP 723) defines the
+	// environment the application runs in, as `uv run` builds it (#320).
+	// Empty keeps the root requirements.txt, or the standard library alone.
+	Environment string `json:"environment,omitempty"`
 	// Parameters names the bounds that are sizes the code takes, such as a
 	// capacity. Refusing work past one is a rule the code keeps, so a driver
 	// must try it there. Every other numeric bound is the environment's, and
@@ -170,6 +175,9 @@ func (p *Project) validate() error {
 				return fmt.Errorf("%s: existing code %q must be a clean path inside its package", manifestFile, e)
 			}
 		}
+	}
+	if m.Environment != "" && (m.Language != "python" || len(m.Existing) == 0) {
+		return fmt.Errorf("%s: environment names a script of an existing Python application, so it needs language python and existing sources", manifestFile)
 	}
 	if len(l.Bounds) == 0 {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)

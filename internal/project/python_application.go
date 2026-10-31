@@ -66,6 +66,17 @@ func ResolvePythonApplication(p *Project) (*PythonApplication, error) {
 	if _, err := componentPath(app.Root, app.ProjectPath, true); err != nil {
 		return nil, fmt.Errorf("Python verification directory: %w", err)
 	}
+	if env := p.Manifest.Environment; env != "" {
+		if err := pythonApplicationPath(env); err != nil {
+			return nil, err
+		}
+		if !strings.HasSuffix(env, ".py") {
+			return nil, fmt.Errorf("Python environment %q must name a .py script", env)
+		}
+		if _, err := componentPath(app.Root, env, false); err != nil {
+			return nil, fmt.Errorf("Python environment script %q: %w", env, err)
+		}
+	}
 	for _, field := range []struct {
 		name      string
 		directory bool
