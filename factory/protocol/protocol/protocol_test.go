@@ -24,7 +24,7 @@ func TestInvariants(t *testing.T) {
 	building := func(k int8) bool {
 		return k == KindRatified || k == KindPROpen || k == KindFailed || k == KindMerged
 	}
-	var sawFactoryMerge, sawAmendment bool
+	var sawFactoryMerge, sawAmendment, sawRebuiltMerge bool
 	sawFailure := map[int8]bool{}
 	for s := range reachable() {
 		if len(Successors(s)) == 0 {
@@ -42,6 +42,13 @@ func TestInvariants(t *testing.T) {
 		if s.Kind == KindFailed {
 			sawFailure[s.Failure] = true
 		}
+		if s.Kind == KindRatified && (s.Head != NoHead || s.Gate != [Heads]int8{} || s.PrLock != NoP ||
+			s.Scope != ScopeOne || s.MergedBy != Nobody || s.MergedHead != NoHead) {
+			t.Fatalf("a ratified proposal waits for its build with an earlier pull request left: %+v", s)
+		}
+		if s.RebuiltAfter != FailNone && s.RebuiltAfter != FailGate {
+			t.Fatalf("built again after a failure other than the factory's own gate: %+v", s)
+		}
 		if building(s.Kind) {
 			if s.Ratified == NoP || s.Ratified != s.Proposal {
 				t.Fatalf("not the current proposal: %+v", s)
@@ -55,6 +62,9 @@ func TestInvariants(t *testing.T) {
 		}
 		if s.Kind == KindMerged && s.MergedBy == ByFactory {
 			sawFactoryMerge = true
+			if s.RebuiltAfter == FailGate {
+				sawRebuiltMerge = true
+			}
 			if s.RatifiedBase != NoP {
 				sawAmendment = true
 			}
@@ -64,8 +74,8 @@ func TestInvariants(t *testing.T) {
 			}
 		}
 	}
-	if !sawFactoryMerge || !sawAmendment {
-		t.Fatalf("factory merge %v, amendment merge %v", sawFactoryMerge, sawAmendment)
+	if !sawFactoryMerge || !sawAmendment || !sawRebuiltMerge {
+		t.Fatalf("factory merge %v, amendment merge %v, merge after a rebuild %v", sawFactoryMerge, sawAmendment, sawRebuiltMerge)
 	}
 	for _, f := range []int8{FailStopped, FailLimit, FailGate, FailCI, FailUnmergeable} {
 		if !sawFailure[f] {

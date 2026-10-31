@@ -31,6 +31,25 @@ type PythonApplicationCommand struct {
 	WorkingDir                   string
 	Env, Sampling                map[string]string
 	Root, RuntimeDir, OutputDir  string
+	// Mode is "explored" for a driver run through the exploration harness,
+	// and "sampled" otherwise (#342).
+	Mode string
+	// Overlays are files mounted read-only over staged ones, as a driver
+	// copy one size larger is over the staged driver (#342).
+	Overlays []PythonApplicationOverlay
+}
+
+// PythonApplicationOverlay mounts the file at Host over Guest, a path in
+// the staged application as the container sees it.
+type PythonApplicationOverlay struct {
+	Host, Guest string
+}
+
+// PythonApplicationOverlayFile is an overlay as its execution records it:
+// the staged path it replaced and its bytes' hash, with no host path.
+type PythonApplicationOverlayFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 
 type PythonApplicationProcess struct {
@@ -48,6 +67,9 @@ type PythonApplicationActual struct {
 	WorkingDir     string            `json:"working_dir"`
 	Env            map[string]string `json:"env"`
 	Sampling       map[string]string `json:"sampling"`
+	// Overlays are the driver copies the execution ran in place of staged
+	// files, such as the driver one size larger (#342).
+	Overlays []PythonApplicationOverlayFile `json:"overlays,omitempty"`
 }
 
 type PythonApplicationTest struct {
@@ -67,9 +89,12 @@ type PythonApplicationExecutionResult struct {
 	Tests           []PythonApplicationTest             `json:"tests"`
 	ObservationMode string                              `json:"observation_mode,omitempty"`
 	Observations    []PythonApplicationObservation      `json:"observations,omitempty"`
-	Complete        bool                                `json:"complete"`
-	Success         bool                                `json:"success"`
-	ExitCode        int                                 `json:"exit_code"`
+	// Exploration is what an explored driver's harness declared and
+	// reached, counted from its authenticated observations (#342).
+	Exploration *PythonApplicationExploration `json:"exploration,omitempty"`
+	Complete    bool                          `json:"complete"`
+	Success     bool                          `json:"success"`
+	ExitCode    int                           `json:"exit_code"`
 	// Operational diagnostics may contain host paths or container IDs.
 	Diagnostics []string `json:"diagnostics,omitempty"`
 	Fingerprint string   `json:"fingerprint"`
@@ -91,6 +116,7 @@ type pythonApplicationRequest struct {
 	Target         project.Component              `json:"target"`
 	Sampling       map[string]string              `json:"sampling"`
 	Execution      string                         `json:"execution"`
+	Mode           string                         `json:"mode,omitempty"`
 }
 
 var pythonApplicationContainerName = regexp.MustCompile(`invariant-[0-9]+-[0-9]+-[0-9]+`)
@@ -98,6 +124,54 @@ var pythonApplicationContainerName = regexp.MustCompile(`invariant-[0-9]+-[0-9]+
 func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicationInvocationKey) (*PythonApplicationExecutionResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.run(ctx, key, nil)
+}
+
+// pythonApplicationLargerBudget is the runs and steps an exploration one
+// size larger may take: the most a declaration may give (#342).
+const pythonApplicationLargerBudget = "2147483647"
+
+// pythonApplicationDriverCopy is a driver copy one size larger (#342): its
+// staged path and hash, and the private file that holds it.
+type pythonApplicationDriverCopy struct {
+	file project.ComponentFile
+	host string
+}
+
+// RunLarger runs an explored invocation again one size past the ratified
+// bounds (D-0068, D-0076). The driver's bound constants are rewritten in a
+// private copy, mounted read-only over the staged driver, so the staged
+// snapshot, the application's bytes and the selected image stay the same.
+// It returns the copy's staged path and hash beside the execution.
+func (s *PythonApplicationSession) RunLarger(ctx context.Context, key PythonApplicationInvocationKey, sizes map[string]int) (*PythonApplicationExecutionResult, project.ComponentFile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, project.ComponentFile{}, fmt.Errorf("Python application session is closed")
+	}
+	original, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(s.driver)))
+	if err != nil {
+		return nil, project.ComponentFile{}, err
+	}
+	if !declaresBounds(original, sizes) {
+		return nil, project.ComponentFile{}, fmt.Errorf("the driver declares no constant for each bound with a next size")
+	}
+	b := largerExplorer(original, sizes)
+	dir, err := os.MkdirTemp("", "invariant-python-larger-")
+	if err != nil {
+		return nil, project.ComponentFile{}, err
+	}
+	defer os.RemoveAll(dir)
+	host := filepath.Join(dir, path.Base(s.driver))
+	if err := os.WriteFile(host, b, 0o444); err != nil {
+		return nil, project.ComponentFile{}, err
+	}
+	file := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(b)}
+	r, err := s.run(ctx, key, &pythonApplicationDriverCopy{file: file, host: host})
+	return r, file, err
+}
+
+func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicationInvocationKey, larger *pythonApplicationDriverCopy) (*PythonApplicationExecutionResult, error) {
 	if s.closed {
 		return nil, fmt.Errorf("Python application session is closed")
 	}
@@ -111,6 +185,26 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	}
 	if invocation == nil {
 		return nil, fmt.Errorf("unknown Python application invocation")
+	}
+	if larger != nil && !invocation.Explored {
+		return nil, fmt.Errorf("only an explored invocation runs one size larger")
+	}
+	// The driver this execution runs, and the declarations bound to it: a
+	// larger run's copy keeps the driver's identity with its own hash.
+	check, drivers := s.declarations[key.Check], s.drivers
+	if s.legacy {
+		check = s.drivers[0]
+	}
+	if larger != nil {
+		if check.Source == s.driver {
+			check.SourceSHA256 = larger.file.SHA256
+		}
+		drivers = slices.Clone(s.drivers)
+		for i := range drivers {
+			if drivers[i].Source == s.driver {
+				drivers[i].SourceSHA256 = larger.file.SHA256
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -136,16 +230,27 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 		env[k] = ""
 	}
 	maps.Copy(env, v.Env)
+	sampling := maps.Clone(invocation.Sampling)
+	if larger != nil {
+		// Budgets sized for the ratified bounds don't fit one size larger,
+		// where the larger check's time allowance bounds the run instead.
+		sampling["runs"], sampling["steps"] = pythonApplicationLargerBudget, pythonApplicationLargerBudget
+	}
 	c := PythonApplicationCommand{Key: key, SnapshotSHA256: s.provenance.Fingerprint, RunnerSHA256: s.provenance.RunnerSHA256,
 		Image: s.image, Interpreter: "/usr/local/bin/python", Launcher: "/runtime/runner.py", WorkingDir: path.Join("/src", v.WorkingDir),
-		Env: env, Sampling: maps.Clone(invocation.Sampling), Root: s.root, RuntimeDir: s.runtime, OutputDir: output}
+		Env: env, Sampling: sampling, Root: s.root, RuntimeDir: s.runtime, OutputDir: output, Mode: "sampled"}
 	c.Args = append([]string{"-S", "-s", "-P", "-B", c.Launcher, "/runtime/request.json"}, v.Args...)
 	req := pythonApplicationRequest{Key: key, SnapshotSHA256: c.SnapshotSHA256, RunnerSHA256: c.RunnerSHA256,
-		Legacy: s.legacy, Targets: s.targets, Drivers: s.drivers, Delegates: s.delegates[key.Target],
-		Check: s.declarations[key.Check], Root: "/src", Driver: s.driver, Output: "/output/events.jsonl", Libraries: toolchain.PythonLibrary,
+		Legacy: s.legacy, Targets: s.targets, Drivers: drivers, Delegates: s.delegates[key.Target],
+		Check: check, Root: "/src", Driver: s.driver, Output: "/output/events.jsonl", Libraries: toolchain.PythonLibrary,
 		Target: s.declarations[key.Target], Sampling: maps.Clone(c.Sampling), Execution: rand.Text()}
-	if s.legacy {
-		req.Check = s.drivers[0]
+	if invocation.Explored {
+		c.Mode, req.Mode = "explored", "explored"
+	}
+	var overlays []PythonApplicationOverlayFile
+	if larger != nil {
+		c.Overlays = []PythonApplicationOverlay{{Host: larger.host, Guest: path.Join("/src", s.driver)}}
+		overlays = []PythonApplicationOverlayFile{{Path: larger.file.Path, SHA256: larger.file.SHA256}}
 	}
 	// The runner consumes and unlinks this bootstrap secret before importing
 	// application code. It never belongs to the application-readable request.
@@ -167,15 +272,17 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 		return nil, err
 	}
 	r := &PythonApplicationExecutionResult{Key: key, Declared: v, Provenance: clonePythonApplicationProvenance(s.provenance),
-		Actual: PythonApplicationActual{c.Image, c.Interpreter, c.Launcher, c.RunnerSHA256, slices.Clone(c.Args), c.WorkingDir, maps.Clone(c.Env), maps.Clone(c.Sampling)}, Tests: []PythonApplicationTest{}}
+		Actual: PythonApplicationActual{Image: c.Image, Interpreter: c.Interpreter, Launcher: c.Launcher, LauncherSHA256: c.RunnerSHA256, Args: slices.Clone(c.Args),
+			WorkingDir: c.WorkingDir, Env: maps.Clone(c.Env), Sampling: maps.Clone(c.Sampling), Overlays: overlays}, Tests: []PythonApplicationTest{}}
 	// The executor owns its command view; mutations cannot alter validation.
 	command := c
 	command.Args, command.Env, command.Sampling = slices.Clone(c.Args), maps.Clone(c.Env), maps.Clone(c.Sampling)
+	command.Overlays = slices.Clone(c.Overlays)
 	process, executionErr := s.execute(ctx, command)
 	r.ExitCode = process.ExitCode
 	var protocolErr error
 	if key.Kind == "conformance" {
-		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r)
+		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r, check, drivers, invocation.Explored)
 	} else {
 		protocolErr = s.observe(c, process.Events, r)
 	}
@@ -189,6 +296,12 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if requestErr != nil || !bytes.Equal(b, afterRequest) {
 		freshErr = fmt.Errorf("Python application request changed during execution")
 	}
+	if larger != nil {
+		driver, driverErr := os.ReadFile(larger.host)
+		if driverErr != nil || pythonApplicationHash(driver) != larger.file.SHA256 {
+			freshErr = fmt.Errorf("Python application driver copy one size larger changed during execution")
+		}
+	}
 	if ctx.Err() != nil {
 		executionErr = ctx.Err()
 	}
@@ -201,9 +314,13 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if process.Stderr != "" {
 		r.Diagnostics = append(r.Diagnostics, process.Stderr)
 	}
+	paths := []string{c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output"}
+	if larger != nil {
+		paths = append(paths, filepath.Dir(larger.host), "/larger")
+	}
 	normalize := func() {
 		for i, diagnostic := range r.Diagnostics {
-			diagnostic = strings.NewReplacer(c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output").Replace(diagnostic)
+			diagnostic = strings.NewReplacer(paths...).Replace(diagnostic)
 			diagnostic = strings.ReplaceAll(diagnostic, req.Execution, "<execution>")
 			if strings.HasPrefix(c.Image, "sha256:") {
 				diagnostic = strings.ReplaceAll(diagnostic, c.Image, "<selected image>")
@@ -216,9 +333,13 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 		r.Success = err == nil && r.Complete && process.ExitCode == 0 && len(r.Observations) > 0
 		if r.Success {
 			r.ObservationMode = "sampled"
+			if invocation.Explored {
+				r.ObservationMode = "explored"
+			}
 		} else {
 			r.Complete = false
 			r.Observations = nil
+			r.Exploration = nil
 			if err == nil {
 				err = fmt.Errorf("Python application driver did not complete successfully")
 			}
@@ -261,8 +382,12 @@ func RunPythonApplicationCommand(ctx context.Context, c PythonApplicationCommand
 	args := []string{"run", "--rm", "--pull=never", "--network", "none", "--platform", "linux/amd64",
 		"--memory", "512m", "--pids-limit", "128", "--cpus", "1", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--hostname", "localhost", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "-w", c.WorkingDir,
-		"-v", c.Root + ":/src:ro", "-v", c.RuntimeDir + ":/runtime:ro", "-v", c.OutputDir + ":/output:rw",
-		"--entrypoint", "/usr/bin/env", c.Image, "-i"}
+		"-v", c.Root + ":/src:ro"}
+	for _, o := range c.Overlays {
+		args = append(args, "-v", o.Host+":"+o.Guest+":ro")
+	}
+	args = append(args, "-v", c.RuntimeDir+":/runtime:ro", "-v", c.OutputDir+":/output:rw",
+		"--entrypoint", "/usr/bin/env", c.Image, "-i")
 	keys := make([]string, 0, len(c.Env))
 	for k := range c.Env {
 		keys = append(keys, k)

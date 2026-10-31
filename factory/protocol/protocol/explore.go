@@ -51,6 +51,7 @@ type State struct {
 	DirectedBy   int8
 	Stops        int8
 	Failure      int8
+	RebuiltAfter int8
 }
 
 var (
@@ -181,6 +182,7 @@ func toIssue(s State) *Issue {
 	i.DirectedBy = int(s.DirectedBy)
 	i.Stops = int(s.Stops)
 	i.Failure = int(s.Failure)
+	i.RebuiltAfter = int(s.RebuiltAfter)
 	return i
 }
 
@@ -211,6 +213,7 @@ func readBack(s State, i *Issue) State {
 	t.DirectedBy = int8(i.DirectedBy)
 	t.Stops = int8(i.Stops)
 	t.Failure = int8(i.Failure)
+	t.RebuiltAfter = int8(i.RebuiltAfter)
 	return t
 }
 
@@ -238,6 +241,7 @@ func attempt(s State, tried func(step string, args []any, next State, ran bool))
 			do("Revise", []any{av, c.value()}, func(i *Issue) bool { return i.Revise(act, c.draft()) })
 		}
 		do("Retry", []any{av}, func(i *Issue) bool { return i.Retry(act) })
+		do("Rebuild", []any{av}, func(i *Issue) bool { return i.Rebuild(act) })
 		for q := 0; q < Questions; q++ {
 			qv := mv(fmt.Sprintf("f%d", q+1))
 			for _, c := range ds {
@@ -317,5 +321,6 @@ func Abstract(s State) map[string]any {
 		"directedBy":   directedValue(int(s.DirectedBy)),
 		"stops":        int(s.Stops),
 		"failure":      failureNames[s.Failure],
+		"rebuiltAfter": failureNames[s.RebuiltAfter],
 	}
 }

@@ -95,7 +95,12 @@ func Markdown(r *verify.Report) string {
 		componentViews(&b, r)
 	}
 	if r.Application != nil {
-		pythonApplication(&b, r.Application)
+		// A component receipt has no row for the check one size larger.
+		var larger *verify.Larger
+		if explicit {
+			larger = r.Larger
+		}
+		pythonApplication(&b, r.Application, larger)
 	}
 
 	if explicit {
@@ -174,6 +179,15 @@ func (render renderer) text(s string) string {
 		return componentText(s)
 	}
 	return s
+}
+
+// journalText is text a repository's journal holds, which the receipt keeps
+// within its table cell or list item: a | or a line break in it ends neither.
+func (render renderer) journalText(s string) string {
+	if render.explicit {
+		return componentText(s)
+	}
+	return strings.NewReplacer("|", `\|`, "\r", " ", "\n", " ").Replace(s)
 }
 
 func (render renderer) literal(s string) string {
@@ -306,9 +320,9 @@ func row(b *strings.Builder, check string, ok bool, result, evidence string) {
 	fmt.Fprintf(b, "| %s | %s %s | %s |\n", check, mark(ok), result, evidence)
 }
 
-// provenance says where the statements were ratified: an entry in
-// decisions/log.md for a hand-built project, or a comment on an issue for a
-// factory project.
+// provenance says where the statements were ratified: a comment on an issue
+// for a factory project, or, for a project ratified by hand, the decision its
+// lock names, checked against the repository's journal when it keeps one.
 func (render renderer) provenance(r *verify.Report) string {
 	if render.explicit && r.Ratified != nil {
 		ratified := r.Ratified
@@ -324,6 +338,10 @@ func (render renderer) provenance(r *verify.Report) string {
 	switch {
 	case r.Ratified != nil && !r.RatificationMatches():
 		return fmt.Sprintf("the lock no longer matches what @%s ratified on #%d", r.Ratified.By, r.Ratified.Issue)
+	case r.Journal != nil && !r.RatificationMatches():
+		return "the lock isn't what the journal says a person ratified: " + render.journalText(r.Journal.Problem)
+	case r.Journal != nil:
+		return fmt.Sprintf("ratified by %s in %s, for exactly this proposal", render.journalText(r.Journal.By), render.journalText(r.Journal.Decision))
 	case r.Ratified != nil && r.Ratified.Previous != "":
 		return fmt.Sprintf("ratified by @%s on [#%d](%s), amending %s", r.Ratified.By, r.Ratified.Issue, r.Ratified.Comment, r.Ratified.Previous)
 	case r.Ratified != nil:
@@ -542,8 +560,12 @@ func (render renderer) buildResult(b verify.Build) string {
 
 func (render renderer) failures(r *verify.Report) []string {
 	var out []string
-	if !r.RatificationMatches() {
+	switch {
+	case r.RatificationMatches():
+	case r.Ratified != nil:
 		out = append(out, fmt.Sprintf("Ratification: the lock's statements or bounds no longer match the proposal %s ratified (%s)", render.value("@"+r.Ratified.By), render.literal(short(r.Ratified.Proposal))))
+	default:
+		out = append(out, "Ratification: "+render.journalText(r.Journal.Problem))
 	}
 	for _, p := range r.Pins {
 		switch {
@@ -598,6 +620,9 @@ func (render renderer) failures(r *verify.Report) []string {
 	}
 	if c := r.Conformance; c != nil && c.Tried != nil && !c.Tried.Passed {
 		out = append(out, "Every step tried: "+render.text(c.Tried.Message)+". "+render.triedEvidence(*c.Tried))
+	}
+	if r.Application != nil {
+		out = append(out, render.pythonApplicationFailures(r.Application)...)
 	}
 	if c := r.Code; c != nil {
 		for _, e := range c.Errors {

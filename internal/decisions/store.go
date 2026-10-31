@@ -460,8 +460,8 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 		return "", errors.New("a one-way door has a full record: name it with its slug, for decisions/D-NNNN-slug.md")
 	case d.Record != "" && !slug.MatchString(d.Record):
 		return "", fmt.Errorf("a record's slug is lowercase words joined by hyphens, not %q", d.Record)
-	case d.Status == "ratified" && !strings.HasPrefix(d.Who, "@"):
-		return "", errors.New("only a person ratifies, so a ratified decision's who is a person, such as @gitdek")
+	case d.Status == "ratified" && !IsPerson(d.Who):
+		return "", errors.New("only a person ratifies, so a ratified decision's who is a person's GitHub login, such as @gitdek")
 	case text == "":
 		return "", errors.New("a decision says what was decided")
 	case strings.Contains(text, "|"):
@@ -641,11 +641,17 @@ func exists(repo Repo, id string) error {
 
 // Ratify records a person's ratification of a proposed or decided decision.
 func (s *Store) Ratify(repo Repo, id, by string) error {
+	return s.RatifyProposal(repo, id, by, "")
+}
+
+// RatifyProposal is Ratify, naming the exact proposal the person ratified,
+// such as a lock's ProposalHash, when proposal isn't empty (D-0208).
+func (s *Store) RatifyProposal(repo Repo, id, by, proposal string) error {
 	return s.update(repo, id, by, func(d Decision) (Event, error) {
 		if d.Status == "ratified" || d.Status == "superseded" {
 			return Event{}, fmt.Errorf("%s is %s already", id, d.Status)
 		}
-		return Event{Op: OpRatify}, nil
+		return Event{Op: OpRatify, Proposal: proposal}, nil
 	})
 }
 
