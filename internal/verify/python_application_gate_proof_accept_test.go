@@ -141,13 +141,13 @@ type gp359Boundary struct {
 func gp359Of(wheel bool) gp359Boundary {
 	if wheel {
 		return gp359Boundary{id: "packaging.is_normalized_name", contract: "admissible",
-			op:    project.ComponentOperation{Kind: "dependency", Distribution: "packaging", Module: "packaging.utils", Symbol: "is_normalized_name"},
-			tests: []string{"NormalizedTests.test_accepts_normalized", "NormalizedTests.test_rejects_unnormalized"},
+			op:      project.ComponentOperation{Kind: "dependency", Distribution: "packaging", Module: "packaging.utils", Symbol: "is_normalized_name"},
+			tests:   []string{"NormalizedTests.test_accepts_normalized", "NormalizedTests.test_rejects_unnormalized"},
 			imports: "from packaging.utils import is_normalized_name", admits: "is_normalized_name(name)"}
 	}
 	return gp359Boundary{id: "keyword.iskeyword", contract: "keyword",
-		op:    project.ComponentOperation{Kind: "standard_library", Module: "keyword", Symbol: "iskeyword"},
-		tests: []string{"KeywordTests.test_recognizes_keywords", "KeywordTests.test_rejects_names"},
+		op:      project.ComponentOperation{Kind: "standard_library", Module: "keyword", Symbol: "iskeyword"},
+		tests:   []string{"KeywordTests.test_recognizes_keywords", "KeywordTests.test_rejects_names"},
 		imports: "from keyword import iskeyword", admits: "not iskeyword(name)"}
 }
 
@@ -182,10 +182,10 @@ func gp359New(t *testing.T, wheel bool) pa342Fixture {
 	b := gp359Of(wheel)
 	files := map[string]string{
 		"counter/__init__.py": "", gp359Source: gp359Core(b.imports, b.admits),
-		"counter/names.py":    "def describe(name):\n    return 'counter ' + name\n",
-		"counter/service.py":  "from .core import admit\n\n\ndef start():\n    return 0\n\n\ndef inc(count):\n    return admit('counter', count)\n",
-		"tests/__init__.py":     "",
-		"tests/test_counter.py": "import unittest\nfrom counter import service\n\n\nclass CounterTests(unittest.TestCase):\n    def test_inc(self):\n        self.assertEqual(service.inc(0), 1)\n",
+		"counter/names.py":        "def describe(name):\n    return 'counter ' + name\n",
+		"counter/service.py":      "from .core import admit\n\n\ndef start():\n    return 0\n\n\ndef inc(count):\n    return admit('counter', count)\n",
+		"tests/__init__.py":       "",
+		"tests/test_counter.py":   "import unittest\nfrom counter import service\n\n\nclass CounterTests(unittest.TestCase):\n    def test_inc(self):\n        self.assertEqual(service.inc(0), 1)\n",
 		"tests/test_contracts.py": gp359Tests,
 		pa342DriverPath:           gp359Driver, pa342ModelPath: pa342Model, gp359Contracts: gp359ContractSource,
 		pa342Project + "/.invariant/specs/Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n",
@@ -418,7 +418,9 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 				t.Fatalf("a failing backing test supported its contract: %s", gp359Dump(t, r))
 			}
 			p := PythonApplicationProofProblems(r.Components)
-			if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "assumes trusted contract "+b.id+", which isn't tested") }) {
+			if !slices.ContainsFunc(p, func(s string) bool {
+				return strings.Contains(s, "assumes trusted contract "+b.id+", which isn't tested")
+			}) {
 				t.Fatalf("a failed required contract still supports the proof: %v", p)
 			}
 		})
