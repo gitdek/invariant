@@ -71,10 +71,48 @@ type ComponentContractImplementation struct {
 
 // ComponentContractExercise counts the calls one backing test made into the
 // resolved implementation. None means it tested a stub, a substitute or
-// nothing at all.
+// nothing at all. Raised is each exception type that escaped those calls,
+// and whether the contract's Exsures declares it.
 type ComponentContractExercise struct {
-	Check string `json:"check"`
-	Calls int64  `json:"calls"`
+	Check  string                   `json:"check"`
+	Calls  int64                    `json:"calls"`
+	Raised []ComponentContractRaise `json:"raised,omitempty"`
+}
+
+// ComponentContractRaise is one exception type a backing test saw escape the
+// resolved implementation: how many calls raised it, and whether it's a
+// subclass of one the contract's Exsures names. A contract says its
+// operation raises nothing else under its precondition, so an undeclared
+// one means the contract is wrong.
+type ComponentContractRaise struct {
+	Exception string `json:"exception"`
+	Calls     int64  `json:"calls"`
+	Declared  bool   `json:"declared"`
+}
+
+// contractOperationName names an operation as a diagnostic does: its dotted
+// name, or an application operation's declaration.
+func contractOperationName(o project.ResolvedComponentOperation) string {
+	if o.Kind == project.OperationApplication {
+		return o.Declaration
+	}
+	return o.Module + "." + o.Symbol
+}
+
+// contractUndeclared names the first exception a test saw escape the
+// operation that its contract doesn't declare, if any.
+func contractUndeclared(exercise []ComponentContractExercise, check string) string {
+	for _, e := range exercise {
+		if e.Check != check {
+			continue
+		}
+		for _, r := range e.Raised {
+			if !r.Declared {
+				return r.Exception
+			}
+		}
+	}
+	return ""
 }
 
 // ComponentContractTestEvidence qualifies one backing-test result. A test
@@ -197,6 +235,9 @@ func (index *componentIndex) indexTrustedContracts(inv project.ComponentInventor
 		}
 		if !project.ValidComponentOperation(c.Operation) || operations[c.Operation.Key()] {
 			return fail("has an invalid operation, or one another contract binds")
+		}
+		if !project.ValidComponentExsures(c.Exsures) {
+			return fail("declares an invalid or duplicate exception")
 		}
 		operations[c.Operation.Key()] = true
 		if c.Operation.Kind == project.OperationApplication {
@@ -354,6 +395,18 @@ func (index *componentIndex) contractTests(results []ComponentContractTestResult
 				return nil, fmt.Errorf("component contract tests: unselected, duplicate or invalid exercise of %q for %q", e.Check, result.Contract)
 			}
 			exercised[e.Check] = true
+			var raising int64
+			exceptions := map[string]bool{}
+			for _, r := range e.Raised {
+				if strings.TrimSpace(r.Exception) == "" || exceptions[r.Exception] || r.Calls < 1 {
+					return nil, fmt.Errorf("component contract tests: invalid or duplicate exception %q raised in %q for %q", r.Exception, e.Check, result.Contract)
+				}
+				exceptions[r.Exception] = true
+				raising += r.Calls
+			}
+			if raising > e.Calls {
+				return nil, fmt.Errorf("component contract tests: more of %q's calls raised than it made for %q", e.Check, result.Contract)
+			}
 		}
 		tests := map[string]bool{}
 		for _, test := range result.Tests {
@@ -418,9 +471,11 @@ func (r *ComponentContractTestResult) qualifyContractTest(c project.ResolvedComp
 		checked := contractAssertionsChecked(test.Assertions, evidence.Assertions)
 		// A contract rests on its tests, so an interrupted or failing
 		// process supports nothing, even a test that passed inside it; a test
-		// that never called the bound implementation tested a stub; and one
-		// that asserted nothing, or had an assertion fail, checked nothing.
-		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 && checked {
+		// that never called the bound implementation tested a stub; one that
+		// asserted nothing, or had an assertion fail, checked nothing; and one
+		// that saw the operation raise what its contract doesn't declare
+		// found the contract wrong.
+		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 && checked && contractUndeclared(r.Exercise, test.Check) == "" {
 			evidence.Status = "tested"
 			if test.Check == r.Check {
 				row.Status = "tested"
@@ -659,6 +714,8 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 				vetoed[key] = "reached no real implementation"
 			} else if !contractAssertionsPassed(test.Assertions) {
 				vetoed[key] = "checked nothing, or had an assertion fail"
+			} else if raised := contractUndeclared(row.Result.Exercise, test.Check); raised != "" {
+				vetoed[key] = "saw its operation raise " + raised + ", which its contract's Exsures doesn't declare"
 			}
 		}
 	}
@@ -769,6 +826,8 @@ func contractShortfall(c project.ResolvedComponentContract, rows []ComponentCont
 					reason = fmt.Sprintf("%s: its run resolved an implementation the report doesn't bind", test)
 				case calls == 0:
 					reason = fmt.Sprintf("%s: the test itself made no call into the bound implementation, so it tested a stub, a substitute or nothing", test)
+				case contractUndeclared(row.Result.Exercise, test) != "":
+					reason = fmt.Sprintf("%s: %s raised %s, which its contract's Exsures doesn't declare", test, contractOperationName(c.Operation), contractUndeclared(row.Result.Exercise, test))
 				case !contractAssertionsChecked(result.Assertions, row.Tests[i].Assertions):
 					reason = fmt.Sprintf("%s: it made no assertion that passed, or one failed", test)
 				default:
@@ -875,6 +934,9 @@ func copyComponentContractTestResult(result ComponentContractTestResult) Compone
 	}
 	if result.Exercise != nil {
 		result.Exercise = slices.Clone(result.Exercise)
+		for i := range result.Exercise {
+			result.Exercise[i].Raised = slices.Clone(result.Exercise[i].Raised)
+		}
 		sort.Slice(result.Exercise, func(a, b int) bool { return result.Exercise[a].Check < result.Exercise[b].Check })
 	}
 	result.Diagnostics = slices.Clone(result.Diagnostics)
@@ -961,6 +1023,7 @@ func copyTrustedContracts(contracts []project.ResolvedComponentContract) []proje
 	contracts = slices.Clone(contracts)
 	for i := range contracts {
 		c := &contracts[i]
+		c.Exsures = slices.Clone(c.Exsures)
 		c.Tests = slices.Clone(c.Tests)
 		sort.Strings(c.Tests)
 		c.Invocations = slices.Clone(c.Invocations)

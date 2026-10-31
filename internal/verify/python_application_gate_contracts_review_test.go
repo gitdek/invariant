@@ -15,13 +15,15 @@ import (
 )
 
 // #355's review at the gate: backing tests that exercise only a substitute or
-// nothing, call without asserting, swallow a failed assertion or run twice
-// fail the gate, on its route and the direct one alike, and leave the rest of
-// its evidence standing.
+// nothing, call without asserting, swallow a failed assertion, run twice or
+// see the operation raise what its contract doesn't declare fail the gate, on
+// its route and the direct one alike, and leave the rest of its evidence
+// standing.
 
 const gtcSubstituteTests = `
 
 import base64
+import binascii
 import dataclasses
 import enum
 import html
@@ -64,6 +66,12 @@ class EncodeTests(unittest.TestCase):
 
 class MoreEncodeTests(EncodeTests):
     pass
+
+
+class DecodeTests(unittest.TestCase):
+    def test_rejects_padding(self):
+        with self.assertRaises(binascii.Error):
+            base64.b64decode('a')
 `
 
 const gtcSubstituteContracts = `
@@ -92,6 +100,10 @@ def escape(text: str) -> str:
     ...
 
 def encode(data: bytes) -> bytes:
+    Requires(True)
+    ...
+
+def decode(text: str) -> bytes:
     Requires(True)
     ...
 `
@@ -130,6 +142,7 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		gtcContract("pstats.StatsProfile", std("pstats", "StatsProfile"), "profile", "SubstituteTests.test_fake_profile"),
 		gtcContract("json.dumps", std("json", "dumps"), "dumps", "SubstituteTests.test_unasserted"),
 		gtcContract("html.escape", std("html", "escape"), "escape", "SubstituteTests.test_swallowed"),
+		gtcContract("base64.b64decode", std("base64", "b64decode"), "decode", "DecodeTests.test_rejects_padding"),
 		encode,
 	)
 	pa327Save(t, f)
@@ -143,6 +156,12 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		t.Fatalf("supported contracts lost their standing: %+v; diagnostics %+v", standing, r.Components.ContractDiagnostics)
 	}
 	md := receipt.Markdown(r)
+	for _, w := range []string{"may raise, by its Exsures: <code>builtins.ValueError</code>", "may raise no exception, by its Exsures",
+		"<code>binascii.Error</code> escaped 1 of them, which its contract doesn't declare"} {
+		if !strings.Contains(md, w) {
+			t.Errorf("the receipt lacks %q", w)
+		}
+	}
 	failed := strings.Split(md[strings.Index(md, "**What failed**"):], "\n")
 	for id, reason := range map[string]string{
 		"builtins.getattr":    "the test itself made no call into the bound implementation",
@@ -152,6 +171,7 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		"json.dumps":          "it made no assertion that passed, or one failed",
 		"html.escape":         "it made no assertion that passed, or one failed",
 		"base64.b64encode":    "EncodeTests.test_encodes@tests/test_contracts.py: failed",
+		"base64.b64decode":    "base64.b64decode raised binascii.Error, which its contract's Exsures doesn't declare",
 	} {
 		if standing[id].Support != "untested" {
 			t.Errorf("%s: %+v", id, standing[id])
@@ -192,7 +212,7 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 			direct[s.Name] = s.Passed
 		}
 	}
-	if len(steps) != 11 || !reflect.DeepEqual(steps, direct) {
+	if len(steps) != 12 || !reflect.DeepEqual(steps, direct) {
 		t.Fatalf("the routes disagree:\ngate   %v\ndirect %v", steps, direct)
 	}
 }

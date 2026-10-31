@@ -247,6 +247,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	defer s.Close()
+	dir, lock := p.Dir, p.Lock
 	p = s.project
 	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false)
 	if ctx.Err() != nil {
@@ -255,6 +256,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	if r == nil {
 		return nil, err
 	}
+	// The gate ran on the staged copy, outside the repository, so the lock's
+	// ratification is read where the project is.
+	ratification(ctx, r, dir, lock)
+	r.Passed = r.Passed && r.RatificationMatches()
 	r.ModelOnly = false
 	r.Application = &PythonApplicationReport{}
 	if err != nil {

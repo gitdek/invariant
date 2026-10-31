@@ -54,7 +54,11 @@ func componentContractViews(b *strings.Builder, r *verify.Report, standing map[s
 		if d, ok := declarations[c.Contract]; ok {
 			contract = componentDeclaration(d)
 		}
-		parts := []string{"contract: " + contract, "identity: " + componentBinding(row.Binding), "backing tests: " + componentStrings(c.Tests)}
+		raises := "may raise no exception, by its Exsures"
+		if len(c.Exsures) > 0 {
+			raises = "may raise, by its Exsures: " + componentStrings(c.Exsures)
+		}
+		parts := []string{"contract: " + contract, raises, "identity: " + componentBinding(row.Binding), "backing tests: " + componentStrings(c.Tests)}
 		for _, v := range c.Invocations {
 			parts = append(parts, "declared "+componentInvocation(&v))
 		}
@@ -65,7 +69,7 @@ func componentContractViews(b *strings.Builder, r *verify.Report, standing map[s
 	if len(e.ContractTests) == 0 {
 		b.WriteString("\nno supplied results\n")
 	}
-	b.WriteString("\nThe gate runs each backing test in the application's environment, with origin gate; supplied results describe runs the component API didn't make. A backing test supports its contract only when it was exercised and passed in a process that passed, and made calls into the real implementation its run resolved, the one the report binds, with the contract's snapshots present. A test that reached only a stub or substitute supports nothing.\n\n")
+	b.WriteString("\nThe gate runs each backing test in the application's environment, with origin gate; supplied results describe runs the component API didn't make. A backing test supports its contract only when it was exercised and passed in a process that passed, made calls into the real implementation its run resolved, the one the report binds, with the contract's snapshots present, and had an assertion pass and none fail. A test that reached only a stub or substitute supports nothing, and one that saw the operation raise an exception its contract's Exsures doesn't declare shows the contract is wrong.\n\n")
 	b.WriteString("| Contract | Check | Status | Evidence |\n| :-- | :-- | :-- | :-- |\n")
 	for _, row := range e.ContractTests {
 		qualified := componentContractTestQualification(r, row)
@@ -74,6 +78,13 @@ func componentContractViews(b *strings.Builder, r *verify.Report, standing map[s
 			componentTool(result.Runner), "identity: " + componentBinding(result.Binding), "implementation: " + componentImplementation(result.Implementation)}
 		for _, e := range result.Exercise {
 			parts = append(parts, fmt.Sprintf("calls into it from %s: %d", componentLiteral(e.Check), e.Calls))
+			for _, raised := range e.Raised {
+				declared := "which its contract doesn't declare"
+				if raised.Declared {
+					declared = "declared"
+				}
+				parts = append(parts, fmt.Sprintf("%s escaped %d of them, %s", componentLiteral(raised.Exception), raised.Calls, declared))
+			}
 		}
 		parts = append(parts, componentInputs(result.Inputs, result.FileInputs), "diagnostics: "+componentStrings(result.Diagnostics))
 		if len(result.Tests) == 0 {

@@ -145,9 +145,13 @@ class CTests(unittest.TestCase):
 `
 
 var prvContracts = ptcContractSource + func() string {
-	var b strings.Builder
+	// What the real-use tests see escape: re.compile('(') raises re.error,
+	// and Version('x.y') a ValueError.
+	raises := map[string]string{"regex": "    Exsures(re.error, True)\n", "version": "    Exsures(ValueError, True)\n"}
+	b := strings.Builder{}
+	b.WriteString("\nimport re\n")
 	for _, name := range []string{"counter", "length", "attr", "pop", "get", "regex", "dumps", "channel", "rank", "config", "version", "ordered", "add", "getitem", "stdparse", "settings", "quantize", "fromkeys"} {
-		fmt.Fprintf(&b, "\ndef %s(x: object) -> object:\n    Requires(True)\n    ...\n", name)
+		fmt.Fprintf(&b, "\ndef %s(x: object) -> object:\n    Requires(True)\n%s    ...\n", name, raises[name])
 	}
 	return b.String()
 }()

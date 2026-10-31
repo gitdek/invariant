@@ -128,13 +128,16 @@ def identity(test):
 # distribution's code. A call counts only when the test method makes it,
 # directly or through code it calls, and never when unittest or the runner
 # does, except a callable the test hands an assertion, such as
-# assertRaises(E, f, x). setUp and tearDown don't count. Assertions are the
-# runner's own records of unittest's checks. Neither runs for other tests.
+# assertRaises(E, f, x). setUp and tearDown don't count. Each exception type
+# that escapes a counted call to code outside the implementation is recorded
+# with whether the contract's Exsures declares it. Assertions are the
+# runner's own records of unittest's checks. None of it runs for other tests.
 boundary = request.get("boundary")
 boundary_python = {}
 boundary_receivers = {}
 boundary_equal = False
 boundary_c = []
+boundary_exsures = []
 assertions = [None]
 handed = [[], []]
 runner_globals = globals()
@@ -305,11 +308,67 @@ def resolve_boundary(spec):
                               file=dict(path=os.path.relpath(os.path.realpath(origin), os.path.realpath(libraries)).replace(os.sep, "/"), sha256=boundary_digest(origin)))
                 if not record["recorded"]:
                     record["diagnostics"].append("%s's file doesn't match %s's RECORD" % (name, spec["distribution"]))
+        declared = boundary_declared(spec.get("exsures") or [])
         record["resolved"] = True
     except Exception as error:
         record["diagnostics"].append("".join(traceback.format_exception_only(type(error), error)).strip())
-        record["callable"], codes, callables, receivers = "", [], [], {}
-    return record, codes, callables, receivers
+        record["callable"], codes, callables, receivers, declared = "", [], [], {}, []
+    return record, codes, callables, receivers, declared
+
+
+def boundary_declared(paths):
+    """The classes the contract's Exsures names, each [path, class]: found
+    now in the standard library, or else among loaded modules, now or once an
+    exception escapes, so resolving one never runs the application."""
+    import importlib
+    if getattr(sys, "monitoring", None) is None:
+        raise LookupError("this runtime can't observe what escapes a call; that needs Python 3.12 or newer")
+    declared = []
+    for path in paths:
+        if path.split(".")[0] in sys.stdlib_module_names:
+            parts = path.split(".")
+            for i in range(len(parts) - 1, 0, -1):
+                try:
+                    importlib.import_module(".".join(parts[:i]))
+                    break
+                except ImportError:
+                    continue
+            if loaded_exception(path) is None:
+                raise LookupError("its contract's Exsures names %s, which isn't an exception class of the runtime" % path)
+        declared.append([path, loaded_exception(path)])
+    return declared
+
+
+def loaded_exception(path):
+    """The exception class a dotted path names among loaded modules, read
+    without importing or running anything, or None."""
+    parts = path.split(".")
+    for i in range(len(parts) - 1, 0, -1):
+        module = sys.modules.get(".".join(parts[:i]))
+        if module is None:
+            continue
+        value = module
+        for name in parts[i:]:
+            value = inspect.getattr_static(value, name, None)
+        return value if isinstance(value, type) and issubclass(value, BaseException) else None
+    return None
+
+
+def boundary_declares(kind):
+    """Whether the contract's Exsures covers an exception type: a subclass of
+    a class one of them names."""
+    for entry in boundary_exsures:
+        if entry[1] is None:
+            entry[1] = loaded_exception(entry[0])
+        if entry[1] is not None and issubclass(kind, entry[1]):
+            return True
+    return False
+
+
+def boundary_code(code):
+    """Whether code is the bound implementation's own."""
+    known = boundary_python.get((code.co_filename, code.co_firstlineno, code.co_name))
+    return known is not None and (known is code or boundary_equal and known == code)
 
 
 def boundary_called(function):
@@ -431,6 +490,14 @@ class Observations(unittest.TestResult):
         self.current = None
         self.method_code = None
         self.pending = None
+        self.calling()
+
+    def calling(self):
+        # Counted calls in flight: a Python call by its own frame, a C call
+        # by its caller's. The profiler sees a call end before the monitor
+        # sees what it raised, so each ending call waits a moment for it.
+        self.open, self.c_open, self.raises = {}, set(), {}
+        self.closing = self.raising = None
 
     def row(self, test):
         check, digest, code = identity(test)
@@ -439,12 +506,21 @@ class Observations(unittest.TestResult):
                    source_sha256=digest, exercised=False,
                    outcome="not_run", diagnostics=[])
         if boundary is not None:
-            row.update(boundary_calls=0, assertions=[])
+            row.update(boundary_calls=0, boundary_raised=[], assertions=[])
         return row, code
+
+    def settle(self):
+        """End the moment an ending call waits: a counted C call that raised
+        without the monitor saying what still raised something."""
+        if self.raising is not None:
+            self.raising = None
+            self.escaped(None)
+        self.closing = None
 
     def profile(self, frame, event, arg):
         if self.pending is None:
             return
+        self.settle()
         if event == "call":
             code = frame.f_code
             if code is self.method_code:
@@ -457,8 +533,50 @@ class Observations(unittest.TestResult):
                         and (known not in boundary_receivers or boundary_receiver(frame, boundary_receivers[known]))
                         and self.by_test(frame.f_back, code)):
                     self.pending["boundary_calls"] += 1
-        elif event == "c_call" and boundary_c and boundary_called(arg) and self.by_test(frame, arg):
-            self.pending["boundary_calls"] += 1
+                    self.open[frame] = True
+        elif event == "return":
+            if self.open.pop(frame, None):
+                self.closing = frame
+        elif event == "c_call":
+            if boundary_c and boundary_called(arg) and self.by_test(frame, arg):
+                self.pending["boundary_calls"] += 1
+                self.c_open.add(frame)
+        elif event == "c_return":
+            self.c_open.discard(frame)
+        elif event == "c_exception" and frame in self.c_open:
+            self.c_open.discard(frame)
+            self.raising = frame
+
+    def unwound(self, code, offset, exception):
+        """A frame unwinds with an exception: a counted Python call raised,
+        unless the implementation called itself and gets the exception back."""
+        if self.pending is None:
+            return
+        frame = sys._getframe(1)
+        if frame is self.closing or self.open.pop(frame, None):
+            self.closing = None
+            if frame.f_back is None or not boundary_code(frame.f_back.f_code):
+                self.escaped(exception)
+
+    def raised(self, code, offset, exception):
+        """An exception reaches a frame: a counted C call there raised it."""
+        if self.pending is not None and self.raising is not None and sys._getframe(1) is self.raising:
+            self.raising = None
+            self.escaped(exception)
+
+    def escaped(self, exception):
+        kind = type(exception) if exception is not None else None
+        # Closing a generator throws GeneratorExit into it; it didn't raise.
+        if kind is GeneratorExit:
+            return
+        name = "%s.%s" % (getattr(kind, "__module__", None), kind.__qualname__) if kind else "an exception the runner couldn't identify"
+        entry = self.raises.get(name)
+        if entry is None:
+            entry = self.raises[name] = dict(exception=name, calls=0, declared=True)
+            self.pending["boundary_raised"].append(entry)
+        # Two classes can share a name; it's declared only if both are.
+        entry["declared"] = entry["declared"] and kind is not None and boundary_declares(kind)
+        entry["calls"] += 1
 
     def by_test(self, caller, callee):
         """Whether the test method made this call, directly or through code it
@@ -485,6 +603,7 @@ class Observations(unittest.TestResult):
         if boundary is not None:
             assertions[0] = self.pending["assertions"]
             handed[0], handed[1] = [], []
+            self.calling()
         sys.setprofile(self.profile)
 
     def record(self, test, outcome, diagnostic=None):
@@ -510,8 +629,11 @@ class Observations(unittest.TestResult):
     def stopTest(self, test):
         sys.setprofile(None)
         assertions[0] = None
+        if boundary is not None:
+            self.settle()
         self.write(self.pending)
         self.current = self.pending = self.method_code = None
+        self.calling()
         super().stopTest(test)
 
     def diagnostic(self, error):
@@ -592,19 +714,28 @@ if sys.argv[2:4] != ["-m", "unittest"] or len(sys.argv) < 5:
     raise ValueError("explicit unittest selections required")
 selections = sys.argv[4:]
 sys.argv = ["unittest"] + selections
+result = Observations()
 if boundary is not None:
-    resolved, codes, callables, receivers = resolve_boundary(boundary)
+    resolved, codes, callables, receivers, declared = resolve_boundary(boundary)
     boundary_python.update(((code.co_filename, code.co_firstlineno, code.co_name), code) for code in codes)
     boundary_receivers.update(receivers)
     boundary_equal = boundary["kind"] == "application"
     boundary_c.extend(callables)
+    boundary_exsures.extend(declared)
     emit(resolved)
     watch_assertions()
+    if resolved["resolved"]:
+        # The profiler can't say what a call raised; the monitor can.
+        monitoring = sys.monitoring
+        tool = next(t for t in range(6) if monitoring.get_tool(t) is None)
+        monitoring.use_tool_id(tool, "invariant")
+        monitoring.register_callback(tool, monitoring.events.PY_UNWIND, result.unwound)
+        monitoring.register_callback(tool, monitoring.events.RAISE, result.raised)
+        monitoring.set_events(tool, monitoring.events.PY_UNWIND | monitoring.events.RAISE)
 if request.get("legacy"):
     suite = unittest.defaultTestLoader.discover(root, pattern="test_*.py", top_level_dir=root)
 else:
     suite = unittest.defaultTestLoader.loadTestsFromNames(selections)
-result = Observations()
 suite.run(result)
 emit(dict(type="end", count=count))
 events.close()

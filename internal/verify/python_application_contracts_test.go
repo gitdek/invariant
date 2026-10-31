@@ -71,10 +71,12 @@ const ptcContractSource = `from nagini_contracts.contracts import *
 
 def loads(text: str) -> object:
     Requires(len(text) > 0)
+    Exsures(ValueError, True)
     ...
 
 def parse(text: str) -> object:
     Requires(len(text) > 0)
+    Exsures(ValueError, True)
     ...
 
 def save(task: dict) -> dict:

@@ -940,3 +940,75 @@ func TestGateRefusesABackingTestWithNoInvocationBeforeTools(t *testing.T) {
 		t.Fatalf("the gate admitted a backing test nothing runs: %v", err)
 	}
 }
+
+// A contract that declares no Exsures for an exception says its operation
+// never raises it under its precondition, so a backing test that saw one
+// escape found the contract wrong, and supports nothing.
+func TestTrustedContractTestsRefuseExceptionsTheContractDoesntDeclare(t *testing.T) {
+	_, p := ctFixture(t)
+	inv := ctInventory(t, p.Dir)
+	parses, rejects := ctID(ctTests, "LoadsTests.test_parses"), ctID(ctTests, "LoadsTests.test_rejects_empty")
+	raising := func(r *verify.Report, raised ...verify.ComponentContractRaise) verify.ComponentContractTestResult {
+		x := ctPassing(t, inv, r)
+		x.Exercise[1].Raised = raised
+		return x
+	}
+	// A declared exception supports it.
+	r := ctReport(t, inv, ctToolchain(ctWheel()))
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{raising(r, verify.ComponentContractRaise{Exception: "json.decoder.JSONDecodeError", Calls: 1, Declared: true})}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "tested" || len(r.Components.ContractDiagnostics) != 0 {
+		t.Fatalf("a declared exception: %+v, %+v", got, r.Components.ContractDiagnostics)
+	}
+	// An undeclared one doesn't, and says which operation raised what.
+	r = ctReport(t, inv, ctToolchain(ctWheel()))
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{raising(r, verify.ComponentContractRaise{Exception: "builtins.KeyError", Calls: 2})}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "untested" {
+		t.Fatalf("an undeclared exception supported its contract: %+v", got)
+	}
+	found := false
+	for _, d := range r.Components.ContractDiagnostics {
+		found = found || d.Kind == verify.UnsupportedContract && d.Contract == "json.loads" &&
+			strings.Contains(d.Detail, rejects+": json.loads raised builtins.KeyError, which its contract's Exsures doesn't declare")
+	}
+	if !found {
+		t.Fatalf("no diagnostic names the operation, the test and the exception: %+v", r.Components.ContractDiagnostics)
+	}
+	for _, row := range r.Components.ContractTests {
+		for _, test := range row.Tests {
+			if test.Check == parses && test.Status != "tested" {
+				t.Fatalf("a test that saw nothing escape lost its support: %+v", row)
+			}
+		}
+	}
+	// A second run that saw one vetoes another's pass.
+	r = ctReport(t, inv, ctToolchain(ctWheel()))
+	second := raising(r, verify.ComponentContractRaise{Exception: "builtins.KeyError", Calls: 1})
+	second.Check, second.Invocation = rejects, ctInvocationOf(t, inv, "json.loads", "rejects")
+	second.Tests = second.Tests[1:]
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{ctPassing(t, inv, r), second}); err != nil {
+		t.Fatal(err)
+	}
+	vetoed := false
+	for _, d := range r.Components.ContractDiagnostics {
+		vetoed = vetoed || d.Kind == verify.ConflictingSupport && strings.Contains(d.Detail, "saw its operation raise builtins.KeyError, which its contract's Exsures doesn't declare")
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "untested" || !vetoed {
+		t.Fatalf("a run that saw an undeclared exception didn't veto: %+v, %+v", got, r.Components.ContractDiagnostics)
+	}
+	// Raised exceptions are counted calls, each named once.
+	for _, bad := range [][]verify.ComponentContractRaise{
+		{{Exception: "", Calls: 1}},
+		{{Exception: "builtins.KeyError", Calls: 0}},
+		{{Exception: "builtins.KeyError", Calls: 1}, {Exception: "builtins.KeyError", Calls: 1}},
+		{{Exception: "builtins.KeyError", Calls: 3}},
+	} {
+		r := ctReport(t, inv, ctToolchain(ctWheel()))
+		if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{raising(r, bad...)}); err == nil {
+			t.Fatalf("invalid raised exceptions accepted: %+v", bad)
+		}
+	}
+}

@@ -31,6 +31,7 @@ const gtcContractSource = `from nagini_contracts.contracts import *
 
 def loads(text: str) -> object:
     Requires(len(text) > 0)
+    Exsures(ValueError, True)
     ...
 
 def next_state(state: str) -> str:
@@ -40,6 +41,7 @@ def next_state(state: str) -> str:
 
 def version(text: str) -> object:
     Requires(len(text) > 0)
+    Exsures(ValueError, True)
     ...
 `
 
