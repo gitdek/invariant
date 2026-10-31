@@ -13,8 +13,10 @@ import (
 // last. The watcher writes it to a file each time it starts or finishes
 // something, and the dashboard reads it (D-0049). Issue, Doing and Since are
 // its longest-running step that's doing something, and a status that lists
-// no steps counts as that one. A watcher that stops leaves its status with
-// no PID, and the next one starts from its finished steps (#269).
+// no steps counts as that one. A watcher that stops leaves its status behind:
+// with no PID after a clean exit, or a PID that no longer runs if it was
+// killed, which reads the same. The next one starts from its finished steps
+// (#269).
 type Status struct {
 	PID       int        `json:"pid"`
 	Repo      string     `json:"repo"`

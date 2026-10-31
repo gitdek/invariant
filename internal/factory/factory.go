@@ -285,9 +285,17 @@ func (f *Factory) Poll(ctx context.Context) error {
 			}
 		default:
 			go func() {
+				// The step ended when it returned, before its error is logged,
+				// and it ends however its goroutine exits.
+				var ended time.Time
+				defer func() {
+					if ended.IsZero() {
+						ended = f.now()
+					}
+					f.end(n, ended)
+				}()
 				err := f.safeStep(ctx, n)
-				// The step ended when it returned, before its error is logged.
-				defer f.end(n, f.now())
+				ended = f.now()
 				if err != nil {
 					f.logf("#%d: %v", n, err)
 				}
