@@ -120,14 +120,23 @@ func (f *Factory) rebuild(ctx context.Context, t Thread, state Post, c Command) 
 	return f.say(ctx, n, rebuildingComment(c.By, old, next), LabelBuilding)
 }
 
-// superseded says a build's post is no longer the issue's latest state: a
-// watcher that comes back to such a build's run, as after another watcher
-// reported it stopped and a writer retried, records the run as its own and
-// publishes nothing of it, as the recovery core's Stale run (D-0203).
-func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (bool, error) {
+// Why a build's run no longer stands for the issue's latest state, if it
+// doesn't.
+type supersession int
+
+const (
+	current  supersession = iota // the build's post is still the issue's latest state
+	replaced                     // a later retry started a newer build, so this run is stale
+	answered                     // a later post answered the build, as another watcher's report that it stopped
+)
+
+// superseded says whether a later post superseded the build that ratified
+// started, as when a writer retried while its watcher was away. Such a
+// watcher records the run as its own and publishes nothing of it (D-0212).
+func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (supersession, error) {
 	comments, err := f.GitHub.Comments(ctx, n)
 	if err != nil {
-		return false, err
+		return current, err
 	}
 	var t Thread
 	for _, c := range comments {
@@ -136,12 +145,41 @@ func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (bool, e
 		}
 	}
 	state, ok := t.State()
-	return ok && state.Comment.ID != ratified.Comment.ID, nil
+	switch {
+	case !ok || state.Comment.ID == ratified.Comment.ID:
+		return current, nil
+	case latestBuild(t).Comment.ID != ratified.Comment.ID:
+		return replaced, nil
+	}
+	return answered, nil
 }
 
-// finishSuperseded records a superseded build's run as its own, and says so.
-func (f *Factory) finishSuperseded(ctx context.Context, n int, step, result string) error {
-	if err := f.recovers(ctx, n, "record a superseded build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Stale)); err != nil {
+// latestBuild is the post that started the issue's latest build: the latest
+// that says it's ratified and building.
+func latestBuild(t Thread) Post {
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		if t.Posts[i].Marker.Kind == KindRatified {
+			return t.Posts[i]
+		}
+	}
+	return Post{}
+}
+
+// finishSuperseded records a superseded build's run as its own, and says so:
+// a stale run beside a newer build's, or the run of a build already answered.
+func (f *Factory) finishSuperseded(ctx context.Context, n int, why supersession, step, result string) error {
+	ok := false
+	switch why {
+	case replaced:
+		newer := building(RunNone, false, false)
+		newer.attempt = 1
+		ok = f.canFinishStaleRun(newer)
+	case answered:
+		done := building(RunRecorded, false, false)
+		done.posted = append(done.posted, recovery.Build)
+		ok = f.canFinishRun(done, recovery.Build)
+	}
+	if err := f.recovers(ctx, n, "record a superseded build's result", ok); err != nil {
 		return err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {

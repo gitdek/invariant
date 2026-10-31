@@ -1633,10 +1633,10 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if err != nil {
 		return "", "", nil, nil, err
 	}
-	if stale, err := f.superseded(ctx, n, ratified); err != nil {
+	if why, err := f.superseded(ctx, n, ratified); err != nil {
 		return "", "", nil, nil, err
-	} else if stale {
-		return "", "", nil, nil, f.finishSuperseded(ctx, n, step, result)
+	} else if why != current {
+		return "", "", nil, nil, f.finishSuperseded(ctx, n, why, step, result)
 	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
 		return "", "", nil, nil, err
