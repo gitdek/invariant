@@ -243,6 +243,7 @@ func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
 			details = append(details, fmt.Sprintf("supplied proof passed: %t", result.Passed),
 				"verified IDs: "+componentStrings(result.Verified), "checked contracts: "+componentStrings(result.Contracts),
 				componentInputs(result.Inputs, result.FileInputs), componentInvocation(result.Invocation), componentTool(result.Tool))
+			details = append(details, componentBoundary(result)...)
 		} else if _, ok := contracts[c.ID]; ok {
 			details = append(details, "no verifier result")
 		}

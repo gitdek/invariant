@@ -98,7 +98,10 @@ func (r *Report) AttributeComponentConformance(inv *project.ComponentInventory, 
 	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
 		return err
 	}
-	r.commitComponentEvidence(evidence)
+	if evidence.ContractTests, err = index.retainedContractTests(r.Components); err != nil {
+		return err
+	}
+	r.commitComponentEvidence(index, evidence)
 	return nil
 }
 

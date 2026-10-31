@@ -93,7 +93,10 @@ func (r *Report) AttributeComponentRuntime(inv *project.ComponentInventory, resu
 	if evidence.Conformance, err = index.retainedConformance(r.Components, r.Bounds); err != nil {
 		return err
 	}
-	r.commitComponentEvidence(evidence)
+	if evidence.ContractTests, err = index.retainedContractTests(r.Components); err != nil {
+		return err
+	}
+	r.commitComponentEvidence(index, evidence)
 	return nil
 }
 
@@ -326,9 +329,15 @@ func copyComponentRuntimeResult(result ComponentRuntimeResult) ComponentRuntimeR
 		bounds.Sources = copyComponentFiles(bounds.Sources)
 		result.Bounds = &bounds
 	}
-	result.Tests = slices.Clone(result.Tests)
-	for i := range result.Tests {
-		test := &result.Tests[i]
+	result.Tests = copyComponentRuntimeTests(result.Tests)
+	result.Diagnostics = slices.Clone(result.Diagnostics)
+	return result
+}
+
+func copyComponentRuntimeTests(tests []ComponentRuntimeTestResult) []ComponentRuntimeTestResult {
+	tests = slices.Clone(tests)
+	for i := range tests {
+		test := &tests[i]
 		test.Assertions = slices.Clone(test.Assertions)
 		for j := range test.Assertions {
 			assertion := &test.Assertions[j]
@@ -341,9 +350,8 @@ func copyComponentRuntimeResult(result ComponentRuntimeResult) ComponentRuntimeR
 		sort.Slice(test.Assertions, func(i, j int) bool { return test.Assertions[i].ID < test.Assertions[j].ID })
 		test.Diagnostics = slices.Clone(test.Diagnostics)
 	}
-	sort.Slice(result.Tests, func(i, j int) bool { return result.Tests[i].Check < result.Tests[j].Check })
-	result.Diagnostics = slices.Clone(result.Diagnostics)
-	return result
+	sort.Slice(tests, func(i, j int) bool { return tests[i].Check < tests[j].Check })
+	return tests
 }
 
 func copyComponentRuntime(rows []ComponentRuntimeEvidence) []ComponentRuntimeEvidence {

@@ -17,10 +17,13 @@ import (
 )
 
 // ComponentsConfig declares package directories and the checks intended for
-// their code. It says nothing about what a verifier or test has established.
+// their code, and for an existing Python application, the trusted contracts
+// its proofs may rest on. It says nothing about what a verifier or test has
+// established.
 type ComponentsConfig struct {
-	Scope  []string         `json:"scope"`
-	Checks []ComponentCheck `json:"checks,omitempty"`
+	Scope            []string            `json:"scope"`
+	Checks           []ComponentCheck    `json:"checks,omitempty"`
+	TrustedContracts []ComponentContract `json:"trusted_contracts,omitempty"`
 }
 
 // ComponentRef selects one declaration in a source file, relative to the
@@ -46,12 +49,13 @@ type ComponentProof struct {
 // ComponentInventory keeps source identity separate from intended checks.
 // Legacy projects have no inferred scope, components or checks.
 type ComponentInventory struct {
-	Mode       string                   `json:"mode"`
-	Scope      []string                 `json:"scope,omitempty"`
-	Files      []ComponentFile          `json:"files,omitempty"`
-	Components []Component              `json:"components,omitempty"`
-	Checks     []ResolvedComponentCheck `json:"checks,omitempty"`
-	Provenance *ComponentProvenance     `json:"provenance,omitempty"`
+	Mode             string                      `json:"mode"`
+	Scope            []string                    `json:"scope,omitempty"`
+	Files            []ComponentFile             `json:"files,omitempty"`
+	Components       []Component                 `json:"components,omitempty"`
+	Checks           []ResolvedComponentCheck    `json:"checks,omitempty"`
+	TrustedContracts []ResolvedComponentContract `json:"trusted_contracts,omitempty"`
+	Provenance       *ComponentProvenance        `json:"provenance,omitempty"`
 }
 
 type ComponentFile struct {
@@ -187,6 +191,16 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 			return nil, fmt.Errorf("components target %s: %w", target.ID, err)
 		}
 		inv.Checks = append(inv.Checks, resolved)
+	}
+	if len(cfg.TrustedContracts) > 0 {
+		if language != "python" || len(p.Manifest.Existing) == 0 {
+			return nil, fmt.Errorf("components: trusted contracts need an existing Python application")
+		}
+		contracts, err := r.trustedContracts(cfg.TrustedContracts)
+		if err != nil {
+			return nil, err
+		}
+		inv.TrustedContracts = contracts
 	}
 	inv.Provenance = r.provenance()
 	sort.Slice(inv.Files, func(i, j int) bool { return inv.Files[i].Path < inv.Files[j].Path })

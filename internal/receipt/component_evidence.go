@@ -77,34 +77,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 		if len(result.Tests) == 0 {
 			parts = append(parts, "no supplied test results")
 		}
-		for _, test := range result.Tests {
-			status := "unchecked"
-			var assertions []verify.ComponentRuntimeAssertionEvidence
-			for _, q := range qualified.Tests {
-				if q.Check == test.Check {
-					status, assertions = q.Status, q.Assertions
-				}
-			}
-			parts = append(parts, "Test: "+componentLiteral(test.Check), "Test status: "+status,
-				fmt.Sprintf("test exercised: %t", test.Exercised), "Test outcome: "+componentOutcome(test.Outcome),
-				"test diagnostics: "+componentStrings(test.Diagnostics))
-			for _, a := range test.Assertions {
-				status := "unchecked"
-				for _, q := range assertions {
-					if q.ID == a.ID {
-						status = q.Status
-					}
-				}
-				parts = append(parts, "Assertion: "+componentLiteral(a.ID), "Assertion status: "+status,
-					fmt.Sprintf("assertion exercised: %t", a.Exercised), "Assertion outcome: "+componentOutcome(a.Outcome),
-					"assertion diagnostics: "+componentStrings(a.Diagnostics))
-				if a.Source != nil {
-					parts = append(parts, "assertion source: "+componentFile(*a.Source))
-				} else {
-					parts = append(parts, "assertion source not supplied")
-				}
-			}
-		}
+		parts = append(parts, componentTests(result.Tests, qualified.Tests)...)
 		componentCheckRow(b, row.Target, row.Check, qualified.Status, parts)
 	}
 
@@ -113,6 +86,10 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 	for _, row := range e.Assumptions {
 		fmt.Fprintf(b, "| %s | %s | assumed / unverified | %s; target input: %s |\n", componentLiteral(row.Target),
 			componentLiteral(row.Record.Assumption.ID), componentAssumption(row.Record.Assumption), componentDeclaration(row.Record.Input))
+	}
+
+	if len(e.Inventory.TrustedContracts) > 0 || len(e.ContractTests) > 0 {
+		componentContracts(b, r)
 	}
 
 	b.WriteString("\n### Component input provenance\n\nSelected input declarations and files do not add production coverage.\n\n| Input declaration | Source and contract |\n| :-- | :-- |\n")
@@ -129,6 +106,41 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(f.Path), componentLiteral(short(f.SHA256)))
 		}
 	}
+}
+
+// componentTests renders supplied test results with their qualifications,
+// and each one's assertions.
+func componentTests(tests []verify.ComponentRuntimeTestResult, qualified []verify.ComponentRuntimeTestEvidence) []string {
+	var parts []string
+	for _, test := range tests {
+		status := "unchecked"
+		var assertions []verify.ComponentRuntimeAssertionEvidence
+		for _, q := range qualified {
+			if q.Check == test.Check {
+				status, assertions = q.Status, q.Assertions
+			}
+		}
+		parts = append(parts, "Test: "+componentLiteral(test.Check), "Test status: "+status,
+			fmt.Sprintf("test exercised: %t", test.Exercised), "Test outcome: "+componentOutcome(test.Outcome),
+			"test diagnostics: "+componentStrings(test.Diagnostics))
+		for _, a := range test.Assertions {
+			status := "unchecked"
+			for _, q := range assertions {
+				if q.ID == a.ID {
+					status = q.Status
+				}
+			}
+			parts = append(parts, "Assertion: "+componentLiteral(a.ID), "Assertion status: "+status,
+				fmt.Sprintf("assertion exercised: %t", a.Exercised), "Assertion outcome: "+componentOutcome(a.Outcome),
+				"assertion diagnostics: "+componentStrings(a.Diagnostics))
+			if a.Source != nil {
+				parts = append(parts, "assertion source: "+componentFile(*a.Source))
+			} else {
+				parts = append(parts, "assertion source not supplied")
+			}
+		}
+	}
+	return parts
 }
 
 func componentCheckHeader(b *strings.Builder, kind string, records int) {

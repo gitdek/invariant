@@ -25,6 +25,13 @@ type ComponentProofResult struct {
 	Invocation *project.ResolvedComponentInvocation `json:"invocation,omitempty"`
 	FileInputs []project.ComponentFile              `json:"file_inputs,omitempty"`
 	Tool       *ComponentProofTool                  `json:"tool,omitempty"`
+	// Assumed and Unaccounted are the attempt's trusted boundary as its
+	// prover's adapter reports it from the verifier's actual inputs (#294):
+	// each trusted contract they assumed, and each boundary reached or
+	// assumption made that no declared contract accounts for. Neither proves
+	// a contract, and an unaccounted boundary leaves the target unproved.
+	Assumed     []ComponentContractUse `json:"assumed,omitempty"`
+	Unaccounted []ComponentUnaccounted `json:"unaccounted,omitempty"`
 }
 
 // ComponentProofTool retains supplied tool identity and pins as opaque data.
@@ -50,13 +57,18 @@ type ComponentAssumptionEvidence struct {
 }
 
 // ComponentEvidence keeps complete proof coverage, supplied assumptions,
-// conformance and runtime independent. Declarations alone create no records.
+// conformance, runtime and trusted contracts' backing tests independent.
+// Declarations alone create no records. Contracts and ContractDiagnostics are
+// derived from the rest on every attribution, never supplied.
 type ComponentEvidence struct {
-	Inventory   project.ComponentInventory     `json:"inventory"`
-	Proofs      []ComponentProof               `json:"proofs"`
-	Assumptions []ComponentAssumptionEvidence  `json:"assumptions,omitempty"`
-	Conformance []ComponentConformanceEvidence `json:"conformance,omitempty"`
-	Runtime     []ComponentRuntimeEvidence     `json:"runtime,omitempty"`
+	Inventory           project.ComponentInventory      `json:"inventory"`
+	Proofs              []ComponentProof                `json:"proofs"`
+	Assumptions         []ComponentAssumptionEvidence   `json:"assumptions,omitempty"`
+	Conformance         []ComponentConformanceEvidence  `json:"conformance,omitempty"`
+	Runtime             []ComponentRuntimeEvidence      `json:"runtime,omitempty"`
+	ContractTests       []ComponentContractTestEvidence `json:"contract_tests,omitempty"`
+	Contracts           []ComponentContractEvidence     `json:"contracts,omitempty"`
+	ContractDiagnostics []ComponentContractDiagnostic   `json:"contract_diagnostics,omitempty"`
 }
 
 // ComponentProof is one component's proof status, including an unsuccessful
@@ -88,7 +100,10 @@ func (r *Report) AttributeComponentProofs(inv *project.ComponentInventory, resul
 	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
 		return err
 	}
-	r.commitComponentEvidence(evidence)
+	if evidence.ContractTests, err = index.retainedContractTests(r.Components); err != nil {
+		return err
+	}
+	r.commitComponentEvidence(index, evidence)
 	return nil
 }
 
@@ -114,7 +129,10 @@ func (r *Report) AttributeComponentAssumptions(inv *project.ComponentInventory, 
 	if evidence.Runtime, err = index.retainedRuntime(r.Components, r.Bounds); err != nil {
 		return err
 	}
-	r.commitComponentEvidence(evidence)
+	if evidence.ContractTests, err = index.retainedContractTests(r.Components); err != nil {
+		return err
+	}
+	r.commitComponentEvidence(index, evidence)
 	return nil
 }
 
@@ -127,10 +145,15 @@ func (r *Report) componentReplacement(inv *project.ComponentInventory) (*Compone
 	}
 	evidence := &ComponentEvidence{Inventory: copyComponentInventory(*inv)}
 	index, err := indexComponentInventory(evidence.Inventory)
-	return evidence, index, err
+	if err != nil {
+		return nil, nil, err
+	}
+	index.bindings = index.contractBindings(r.Toolchain)
+	return evidence, index, nil
 }
 
-func (r *Report) commitComponentEvidence(evidence *ComponentEvidence) {
+func (r *Report) commitComponentEvidence(index *componentIndex, evidence *ComponentEvidence) {
+	index.contractStanding(evidence)
 	next := *r
 	next.Components, next.Assurance = evidence, "component evidence"
 	next.Fingerprint = Fingerprint(next)
@@ -142,12 +165,15 @@ type componentIndex struct {
 	declarations map[string]project.Component
 	files        map[string]project.ComponentFile
 	checks       map[string]project.ResolvedComponentCheck
+	contracts    map[string]project.ResolvedComponentContract
+	bindings     map[string]contractBinding
 }
 
 // Each collection is unique within itself. A production declaration or module
 // may also be selected as provenance, but the overlapping snapshots must agree.
 func indexComponentInventory(inv project.ComponentInventory) (*componentIndex, error) {
-	index := &componentIndex{declarations: map[string]project.Component{}, files: map[string]project.ComponentFile{}, checks: map[string]project.ResolvedComponentCheck{}}
+	index := &componentIndex{declarations: map[string]project.Component{}, files: map[string]project.ComponentFile{}, checks: map[string]project.ResolvedComponentCheck{},
+		contracts: map[string]project.ResolvedComponentContract{}}
 	for i, scope := range inv.Scope {
 		if i > 0 && scope == inv.Scope[i-1] {
 			return nil, fmt.Errorf("component inventory: duplicate scope %q", scope)
@@ -256,6 +282,9 @@ func indexComponentInventory(inv project.ComponentInventory) (*componentIndex, e
 		}
 		index.checks[check.Target] = check
 	}
+	if err := index.indexTrustedContracts(inv, declarationSets[1], fileSets[1]); err != nil {
+		return nil, err
+	}
 	return index, nil
 }
 
@@ -315,6 +344,9 @@ func (index *componentIndex) proofs(inv project.ComponentInventory, results []Co
 				return nil, fmt.Errorf("component proofs: input %q does not match its inventory snapshot", input.ID)
 			}
 			inputs[input.ID] = true
+		}
+		if err := index.contractUses(result); err != nil {
+			return nil, err
 		}
 		copy := copyComponentProofResult(result)
 		if v := copy.Invocation; v != nil {
@@ -453,6 +485,9 @@ func (index *componentIndex) retainProof(old project.ComponentInventory, row Com
 			}
 		}
 	}
+	if err := index.retainContractUses(old, *row.Result); err != nil {
+		return err
+	}
 	status := "unchecked"
 	if row.Result.covers(check.Proof.Contracts) {
 		status = "proved"
@@ -478,7 +513,7 @@ func componentProofReferences(components map[string]project.Component, ids []str
 }
 
 func (r *ComponentProofResult) covers(contracts []string) bool {
-	if !r.Passed || r.Verifier == "" || len(r.Errors) > 0 || !slices.Contains(r.Verified, r.Target) {
+	if !r.Passed || r.Verifier == "" || len(r.Errors) > 0 || len(r.Unaccounted) > 0 || !slices.Contains(r.Verified, r.Target) {
 		return false
 	}
 	for _, id := range contracts {
@@ -536,19 +571,26 @@ func copyComponentInventory(inv project.ComponentInventory) project.ComponentInv
 		for j := range check.Invocations {
 			check.Invocations[j] = copyComponentInvocation(check.Invocations[j])
 		}
-		sort.Slice(check.Invocations, func(i, j int) bool {
-			a, b := check.Invocations[i], check.Invocations[j]
-			if a.Kind != b.Kind {
-				return a.Kind < b.Kind
-			}
-			if a.Check != b.Check {
-				return a.Check < b.Check
-			}
-			return a.ID < b.ID
-		})
+		sortComponentInvocations(check.Invocations)
 	}
 	sort.Slice(inv.Checks, func(i, j int) bool { return inv.Checks[i].Target < inv.Checks[j].Target })
+	if inv.TrustedContracts != nil {
+		inv.TrustedContracts = copyTrustedContracts(inv.TrustedContracts)
+	}
 	return inv
+}
+
+func sortComponentInvocations(invocations []project.ResolvedComponentInvocation) {
+	sort.Slice(invocations, func(i, j int) bool {
+		a, b := invocations[i], invocations[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.Check != b.Check {
+			return a.Check < b.Check
+		}
+		return a.ID < b.ID
+	})
 }
 
 func copyComponentFiles(files []project.ComponentFile) []project.ComponentFile {
@@ -583,6 +625,12 @@ func copyComponentProofResult(result ComponentProofResult) ComponentProofResult 
 		tool.Pins = maps.Clone(tool.Pins)
 		result.Tool = &tool
 	}
+	if result.Assumed != nil {
+		result.Assumed = copyComponentContractUses(result.Assumed)
+	}
+	if result.Unaccounted != nil {
+		result.Unaccounted = copyComponentUnaccounted(result.Unaccounted)
+	}
 	return result
 }
 
@@ -610,5 +658,15 @@ func copyComponentEvidence(e ComponentEvidence) *ComponentEvidence {
 	e.Assumptions = copyComponentAssumptions(e.Assumptions)
 	e.Conformance = copyComponentConformance(e.Conformance)
 	e.Runtime = copyComponentRuntime(e.Runtime)
+	if e.ContractTests != nil {
+		e.ContractTests = copyComponentContractTests(e.ContractTests)
+	}
+	if e.Contracts != nil {
+		e.Contracts = copyComponentContracts(e.Contracts)
+	}
+	if e.ContractDiagnostics != nil {
+		e.ContractDiagnostics = slices.Clone(e.ContractDiagnostics)
+		sortContractDiagnostics(e.ContractDiagnostics)
+	}
 	return &e
 }
