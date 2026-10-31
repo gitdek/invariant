@@ -361,13 +361,13 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 	extends, rest := []string{}, toks
 	if len(toks) > 0 && toks[0].text == "EXTENDS" {
 		i := 1
-		for i < len(toks) && (i == 1 || toks[i-1].text == ",") {
-			if toks[i].text == "," {
+		for i < len(toks) {
+			extends = append(extends, toks[i].text)
+			if i++; i < len(toks) && toks[i].text == "," {
 				i++
 				continue
 			}
-			extends = append(extends, toks[i].text)
-			i++
+			break
 		}
 		rest = toks[i:]
 	}
@@ -444,12 +444,9 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 	// The proof keeps its own lines: its EXTENDS clause becomes blank, so
 	// line n of the proof is line n+2 of the module.
 	text := []byte(body)
-	if len(rest) < len(toks) {
-		end := len(body)
-		if len(rest) > 0 {
-			end = rest[0].offset
-		}
-		for i := toks[0].offset; i < end; i++ {
+	if n := len(toks) - len(rest); n > 0 {
+		last := toks[n-1]
+		for i := toks[0].offset; i < last.offset+len(last.text); i++ {
 			if text[i] != '\n' {
 				text[i] = ' '
 			}
@@ -463,6 +460,10 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 	return b, nil
 }
 
+// proofStart are the words a lemma's proof can begin with, besides a step
+// label.
+var proofStart = map[string]bool{"BY": true, "OBVIOUS": true, "PROOF": true}
+
 // tlapsLemma checks that toks state the lemma name exactly as the gate does,
 // and give it a proof.
 func tlapsLemma(toks []tlaToken, name, statement string) error {
@@ -472,9 +473,12 @@ func tlapsLemma(toks []tlaToken, name, statement string) error {
 		if !kinds[toks[i].text] || toks[i+1].text != name || toks[i+2].text != "==" {
 			continue
 		}
+		// The statement runs to its proof, or, when it has none, to the next
+		// unit: another lemma, a USE or HIDE, or a definition.
 		j := i + 3
 		var got []string
-		for j < len(toks) && !toks[j].label && toks[j].text != "BY" && toks[j].text != "OBVIOUS" && toks[j].text != "PROOF" {
+		for j < len(toks) && !toks[j].label && !proofStart[toks[j].text] && !kinds[toks[j].text] &&
+			toks[j].text != "USE" && toks[j].text != "HIDE" && !(toks[j].first && j+1 < len(toks) && toks[j+1].text == "==") {
 			got = append(got, toks[j].text)
 			j++
 		}
@@ -485,7 +489,7 @@ func tlapsLemma(toks []tlaToken, name, statement string) error {
 		if !slices.Equal(got, w) {
 			return fmt.Errorf("lemma %s states %q; the gate's statement is %q", name, strings.Join(got, " "), statement)
 		}
-		if j == len(toks) {
+		if j == len(toks) || !toks[j].label && !proofStart[toks[j].text] {
 			return fmt.Errorf("lemma %s has no proof", name)
 		}
 		return nil
