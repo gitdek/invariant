@@ -890,7 +890,7 @@ class _Exploration:
         self.starting = False
         self.made = []
         self.entering = self.leaving = None
-        self.record = self.handle = self.attempt = None
+        self.record = self.attempt = None
         self.stepped = False
         self.nodes, self.index = [], {}
         self.roots = [None] * len(starts)
@@ -931,12 +931,12 @@ class _Exploration:
 
     def take(self, handle, record, si, ai, replay):
         name, take, args = self.steps[si]
-        self.record, self.handle, self.stepped = record, handle, False
+        self.record, self.stepped = record, False
         self.attempt = dict(step=name, args=copied(args[ai]), replay=replay)
         try:
             take(handle, copied(record.state), *copied(args[ai]))
         finally:
-            self.record = self.handle = None
+            self.record = None
 
     def try_step(self, r, node, si, ai):
         handle, record = self.make(r)

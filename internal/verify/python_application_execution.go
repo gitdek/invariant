@@ -127,9 +127,9 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	return s.run(ctx, key, nil)
 }
 
-// pythonApplicationLarger is a driver copy one size larger (#342): its
+// pythonApplicationDriverCopy is a driver copy one size larger (#342): its
 // staged path and hash, and the private file that holds it.
-type pythonApplicationLarger struct {
+type pythonApplicationDriverCopy struct {
 	file project.ComponentFile
 	host string
 }
@@ -163,11 +163,11 @@ func (s *PythonApplicationSession) RunLarger(ctx context.Context, key PythonAppl
 		return nil, project.ComponentFile{}, err
 	}
 	file := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(b)}
-	r, err := s.run(ctx, key, &pythonApplicationLarger{file: file, host: host})
+	r, err := s.run(ctx, key, &pythonApplicationDriverCopy{file: file, host: host})
 	return r, file, err
 }
 
-func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicationInvocationKey, larger *pythonApplicationLarger) (*PythonApplicationExecutionResult, error) {
+func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicationInvocationKey, larger *pythonApplicationDriverCopy) (*PythonApplicationExecutionResult, error) {
 	if s.closed {
 		return nil, fmt.Errorf("Python application session is closed")
 	}
