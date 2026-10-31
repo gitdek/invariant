@@ -135,8 +135,21 @@ func StagePythonApplication(p *project.Project, dst string) (*PythonApplicationW
 }
 
 func pythonApplicationDestination(root, dst string) error {
-	// Inspect all existing destination components before creating anything.
+	// Inspect all existing destination components before creating anything,
+	// up to the platform's temporary directory: it and its ancestors belong to
+	// the platform, and some are links, such as macOS's /var to /private/var.
+	tmp, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return err
+	}
+	existing := ""
 	for dir := dst; ; dir = filepath.Dir(dir) {
+		if dir == tmp || strings.HasPrefix(tmp, dir+string(filepath.Separator)) {
+			if existing == "" {
+				existing = dir
+			}
+			break
+		}
 		info, err := os.Lstat(dir)
 		if err != nil && !os.IsNotExist(err) {
 			return err
@@ -144,16 +157,29 @@ func pythonApplicationDestination(root, dst string) error {
 		if err == nil && !info.IsDir() {
 			return fmt.Errorf("Python workspace path must contain only directories: %s", dir)
 		}
+		if err == nil && existing == "" {
+			existing = dir
+		}
 		if filepath.Dir(dir) == dir {
 			break
 		}
 	}
+	// Compare real paths as well, so a platform alias cannot conceal overlap.
+	realExisting, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return err
+	}
+	rest, err := filepath.Rel(existing, dst)
+	if err != nil {
+		return err
+	}
+	realDst := filepath.Join(realExisting, rest)
 	// Canonicalize the application too, so a host alias cannot conceal overlap.
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return err
 	}
-	for _, pair := range [][2]string{{root, dst}, {dst, root}, {realRoot, dst}, {dst, realRoot}} {
+	for _, pair := range [][2]string{{root, dst}, {dst, root}, {realRoot, dst}, {dst, realRoot}, {realRoot, realDst}, {realDst, realRoot}} {
 		rel, err := filepath.Rel(pair[0], pair[1])
 		if err != nil {
 			return err
