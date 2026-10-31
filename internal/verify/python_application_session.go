@@ -53,6 +53,9 @@ type PythonApplicationProvenance struct {
 type PythonApplicationSessionOptions struct {
 	SelectImage func(context.Context, *PythonApplicationWorkspace) (string, *toolchain.PythonDependencies, error)
 	Execute     func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
+	// Nagini runs a selected function's verifier input (#353); without it,
+	// the pinned Nagini runs in its own image.
+	Nagini func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
 }
 
 // PythonApplicationSession owns immutable declarations and private runtime
@@ -74,6 +77,7 @@ type PythonApplicationSession struct {
 	contracts map[string]project.ResolvedComponentContract
 	snapshot  map[string]pythonApplicationFile
 	execute   func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
+	nagini    func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
 }
 
 type pythonApplicationFile struct {
@@ -185,7 +189,7 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, fmt.Errorf("Python application changed during staging")
 	}
 	s := &PythonApplicationSession{root: w.Root, snapshot: snapshot, invocations: prepared,
-		declarations: map[string]project.Component{}, contracts: map[string]project.ResolvedComponentContract{}, execute: options.Execute}
+		declarations: map[string]project.Component{}, contracts: map[string]project.ResolvedComponentContract{}, execute: options.Execute, nagini: options.Nagini}
 	for _, c := range w.Inventory.TrustedContracts {
 		s.contracts[c.Contract] = c
 	}
@@ -287,13 +291,18 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 	}
 	var out []PythonApplicationInvocation
 	for _, check := range inv.Checks {
-		if check.Proof != nil {
-			return nil, fmt.Errorf("Python application proof selections are unsupported")
-		}
 		var target project.Component
 		for _, c := range inv.Components {
 			if c.ID == check.Target {
 				target = c
+			}
+		}
+		// A session admits a proof selection in the form in-place proof
+		// supports, for PythonApplicationSession.Prove; the gate itself
+		// refuses it until #294's step 6 connects proof (#353).
+		if check.Proof != nil {
+			if err := pythonApplicationProofCheck(check, target); err != nil {
+				return nil, err
 			}
 		}
 		if _, err := pythonApplicationTargetSources(p, root, target); err != nil {
