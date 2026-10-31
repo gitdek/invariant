@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -67,14 +68,37 @@ const ppTarget = `def admit(text: str, admitted: int) -> int:
 `
 
 // ppAbstraction is the trusted contract tinyver.parse stands for, under its
-// own name, which the input renames to the operation's.
+// own name, which the input renames to the operation's. Its backing tests see
+// tinyver.parse raise ValueError, which Exception covers.
 const ppAbstraction = `
 
 def version_of(text: str) -> object:
     """The version a non-empty text names."""
     Requires(len(text) > 0)
+    Exsures(Exception, True)
     ...
 `
+
+// ppLoads rewrites step 4's json.loads contract to declare that its operation
+// raises exception, or with exception empty, nothing.
+func ppLoads(exception string) func(*testing.T, string, *project.Project) {
+	return func(t *testing.T, root string, _ *project.Project) {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, ptcContracts))
+		if err != nil {
+			t.Fatal(err)
+		}
+		loads := regexp.MustCompile(`(?s)def loads\(text: str\) -> object:\n.*?\n\n`)
+		if !loads.Match(b) {
+			t.Fatal("step 4's fixture has no json.loads contract")
+		}
+		contract := "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n"
+		if exception != "" {
+			contract += "    Exsures(" + exception + ", True)\n"
+		}
+		pa310Write(t, root, ptcContracts, string(loads.ReplaceAllLiteral(b, []byte(contract+"    ...\n\n"))))
+	}
+}
 
 func ppAdmitID() string { return pa310ID(ppSource, "admit") }
 
@@ -186,7 +210,7 @@ func TestPythonApplicationProofInputKeepsTheFunctionAsWritten(t *testing.T) {
 		}
 	}
 	boundary := ppFile(t, in, "invariant_boundary_0.py")
-	if want := "from nagini_contracts.contracts import *\n\n\n@ContractOnly\ndef parse(text: str) -> object:\n    Requires(len(text) > 0)\n"; boundary != want {
+	if want := "from nagini_contracts.contracts import *\n\n\n@ContractOnly\ndef parse(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(Exception, True)\n"; boundary != want {
 		t.Fatalf("the abstraction's module:\n%s\nwant:\n%s", boundary, want)
 	}
 	// Every span maps to the original bytes it copies, the function's
@@ -658,6 +682,16 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 				abstraction, symbol+"_of", "Of"+symbol+".test_of", "\n\nclass Of"+symbol+"(unittest.TestCase):\n    def test_of(self):\n        pass\n")
 		}
 	}
+	// handler is a module whose function calls json.loads inside a try with
+	// one handler, "except" followed by caught.
+	handler := func(caught string) func(string) string {
+		return func(string) string {
+			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
+				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
+				"    try:\n        json.loads(text)\n    except" + caught + ":\n        return admitted\n    return admitted + 1\n\n\n" +
+				"async def report(text: str) -> str:\n    return text\n"
+		}
+	}
 	for _, c := range []struct {
 		name     string
 		module   func(string) string
@@ -702,18 +736,14 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			return strings.Replace(m, "    Requires(admitted >= 0)\n", "    Pre(admitted >= 0)\n", 1)
 		}, want: ""},
 		// What a trusted contract says its operation raises.
-		{name: "a bare except around a boundary call", module: func(string) string {
-			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
-				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
-				"    try:\n        json.loads(text)\n    except:\n        return admitted\n    return admitted + 1\n\n\n" +
-				"async def report(text: str) -> str:\n    return text\n"
-		}, want: "bare except"},
-		{name: "an except Exception the contract doesn't declare", module: func(string) string {
-			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
-				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
-				"    try:\n        json.loads(text)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
-				"async def report(text: str) -> str:\n    return text\n"
-		}, want: "doesn't declare with Exsures"},
+		{name: "a bare except around a boundary call", module: handler(""), contract: ppLoads("Exception"), want: "bare except"},
+		{name: "an except Exception around a contract with no Exsures", module: handler(" Exception"), contract: ppLoads(""), want: "doesn't declare with Exsures"},
+		{name: "an except Exception around a narrower Exsures", module: handler(" Exception"), contract: ppLoads("ConnectionRefusedError"), want: "doesn't declare with Exsures"},
+		{name: "an Exsures Nagini doesn't model", module: handler(" Exception"), contract: ppLoads("ValueError"), want: "raises builtins.ValueError, which the pinned Nagini doesn't model"},
+		{name: "an abstraction beside another star import", module: func(m string) string { return m }, contract: func(t *testing.T, root string, _ *project.Project) {
+			b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
+			pa310Write(t, root, ptcContracts, "from os.path import *\n"+string(b))
+		}, want: "which may come from a star import"},
 		{name: "an exception Nagini doesn't model", module: replace("    return admitted\n\n\nasync", "    raise ValueError('empty')\n\n\nasync"), want: "an exception class the pinned Nagini doesn't model"},
 		// Writes the module's bindings don't show.
 		{name: "globals()", module: replace("LIMIT = 3\n", "LIMIT = 3\nglobals()['LIMIT'] = 100\n"), want: "with globals"},
@@ -762,40 +792,44 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 	}
 }
 
-// A trusted contract says what its operation raises with Exsures, with an
-// exception Nagini models, and a handler may catch only what the contract
-// declares.
+// A trusted contract says what its operation raises with Exsures, as the
+// inventory reads it (D-0221), with an exception Nagini models, and a handler
+// may catch only what the contract declares.
 func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
-	module := "from nagini_contracts.contracts import *\nimport json\nfrom typing import Final\n\nLIMIT: Final = 3\n\n\n" +
-		"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Requires(len(text) > 0)\n" +
-		"    Ensures(Result() >= admitted)\n    Exsures(Exception, True)\n" +
-		"    try:\n        json.loads(text)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
-		"async def report(text: str) -> str:\n    return text\n"
-	root, p := ppFixture(t, module)
-	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
-	pa310Write(t, root, ptcContracts, strings.Replace(string(b), "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n",
-		"def loads(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(Exception, True)\n", 1))
-	in, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID())
-	if err != nil {
-		t.Fatal(err)
+	module := func(caught string) string {
+		return "from nagini_contracts.contracts import *\nimport json\nfrom typing import Final\n\nLIMIT: Final = 3\n\n\n" +
+			"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Requires(len(text) > 0)\n" +
+			"    Ensures(Result() >= admitted)\n    Exsures(Exception, True)\n" +
+			"    try:\n        json.loads(text)\n    except " + caught + ":\n        return admitted\n    return admitted + 1\n\n\n" +
+			"async def report(text: str) -> str:\n    return text\n"
 	}
-	main := ppFile(t, in, PythonApplicationProofMain)
-	for _, want := range []string{"from typing import Final\n", "LIMIT: Final = 3\n", "import invariant_boundary_0 as json\n"} {
-		if !strings.Contains(main, want) {
-			t.Fatalf("the input lacks %q:\n%s", want, main)
-		}
-	}
-	if got := ppFile(t, in, "invariant_boundary_0.py"); !strings.Contains(got, "    Exsures(Exception, True)\n") {
-		t.Fatalf("the contract's Exsures didn't reach its stub:\n%s", got)
-	}
-	if bs := ppBoundaries(in); bs["Exception"].Kind != "native" || bs["json"].Contract != "json.loads" {
-		t.Fatalf("boundaries: %+v", in.Boundaries)
-	}
-	// A contract may declare only exceptions Nagini models.
-	pa310Write(t, root, ptcContracts, strings.Replace(string(b), "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n",
-		"def loads(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(ValueError, True)\n", 1))
-	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil || !strings.Contains(err.Error(), "raises ValueError, which the pinned Nagini doesn't model") {
-		t.Fatalf("an unmodeled exception in a contract: %v", err)
+	for _, c := range []struct{ caught, declared string }{{"Exception", "Exception"}, {"ConnectionRefusedError", "Exception"}, {"ConnectionRefusedError", "ConnectionRefusedError"}} {
+		t.Run("except "+c.caught+" around "+c.declared, func(t *testing.T) {
+			root, p := ppFixture(t, module(c.caught))
+			ppLoads(c.declared)(t, root, p)
+			s := ppSession(t, p, &ppNagini{})
+			if got := s.inventory.TrustedContracts; !slices.ContainsFunc(got, func(tc project.ResolvedComponentContract) bool {
+				return tc.ID == "json.loads" && slices.Equal(tc.Exsures, []string{"builtins." + c.declared})
+			}) {
+				t.Fatalf("the inventory's exsures: %+v", got)
+			}
+			in, err := s.ProofInput(context.Background(), ppAdmitID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			main := ppFile(t, in, PythonApplicationProofMain)
+			for _, want := range []string{"from typing import Final\n", "LIMIT: Final = 3\n", "import invariant_boundary_0 as json\n"} {
+				if !strings.Contains(main, want) {
+					t.Fatalf("the input lacks %q:\n%s", want, main)
+				}
+			}
+			if got := ppFile(t, in, "invariant_boundary_0.py"); !strings.Contains(got, "    Exsures("+c.declared+", True)\n") {
+				t.Fatalf("the contract's Exsures didn't reach its stub:\n%s", got)
+			}
+			if bs := ppBoundaries(in); bs[c.caught].Kind != "native" || bs["json"].Contract != "json.loads" {
+				t.Fatalf("boundaries: %+v", in.Boundaries)
+			}
+		})
 	}
 }
 

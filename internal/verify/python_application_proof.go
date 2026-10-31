@@ -280,7 +280,6 @@ type pythonProofLines struct {
 	End     int    `json:"end"`
 	Line    int    `json:"line"`
 	EndLine int    `json:"end_line"`
-	Exsures string `json:"exsures"`
 }
 
 type pythonProofBinding struct {
@@ -1224,19 +1223,10 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 		}
 	}
 	contracts := 0
-	var raises []string
 	for _, s := range d.Body {
 		switch s.Kind {
 		case "contract":
 			contracts++
-			if s.Exsures != "" {
-				if !naginiExceptions[s.Exsures] {
-					return nil, nil, fail("declares that its operation raises %s, which the pinned Nagini doesn't model: it models Exception and ConnectionRefusedError", s.Exsures)
-				}
-				if !slices.Contains(raises, s.Exsures) {
-					raises = append(raises, s.Exsures)
-				}
-			}
 		case "docstring", "ellipsis", "pass":
 		default:
 			return nil, nil, fail("holds a statement that isn't a contract, on line %d", s.Line)
@@ -1245,6 +1235,17 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 	if contracts == 0 {
 		return nil, nil, fail("holds no contract")
 	}
+	// What the operation raises is what the inventory read from the
+	// contract's own Exsures (D-0221), the bytes its stub copies to Nagini,
+	// which models only these classes.
+	var raises []string
+	for _, path := range c.Exsures {
+		name, builtin := strings.CutPrefix(path, "builtins.")
+		if !builtin || !naginiExceptions[name] {
+			return nil, nil, fail("declares that its operation raises %s, which the pinned Nagini doesn't model: it models Exception and ConnectionRefusedError", path)
+		}
+		raises = append(raises, name)
+	}
 	for _, name := range d.Bound {
 		if slices.Contains(naginiCalls, name) {
 			return nil, nil, fail("binds %s, which Nagini reads as its own", name)
@@ -1252,8 +1253,15 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 	}
 	var typing []pythonProofBinding
 	naginiStar := d.naginiStar()
+	// The stub holds none of the module's other imports, so a name that may
+	// come from another star import may not mean in the stub what it means
+	// where the contract's tests read it.
+	otherStar := slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module != "nagini_contracts.contracts" || s.Level != 0 })
 	for name, use := range d.Free {
 		rows := d.Bindings[name]
+		if len(rows) == 0 && otherStar {
+			return nil, nil, fail("reads %s, which may come from a star import", name)
+		}
 		switch {
 		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "nagini_contracts.contracts" && rows[0].Level == 0 && rows[0].Name == name,
 			len(rows) == 0 && naginiStar && slices.Contains(naginiExports, name):

@@ -255,24 +255,19 @@ def declaration(request):
 
     body = []
     for statement in node.body:
-        kind, exsures = "other", None
+        kind = "other"
         if isinstance(statement, ast.Expr):
             value = statement.value
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in ("Requires", "Ensures", "Exsures", "Decreases"):
                 kind = "contract"
-                if value.func.id == "Exsures":
-                    exsures = value.args[0].id if value.args and isinstance(value.args[0], ast.Name) else "?"
             elif isinstance(value, ast.Constant) and value.value is Ellipsis:
                 kind = "ellipsis"
             elif isinstance(value, ast.Constant) and isinstance(value.value, str):
                 kind = "docstring"
         elif isinstance(statement, ast.Pass):
             kind = "pass"
-        row = {"kind": kind, "start": offset(statement.lineno, 0), "end": line_end(statement.end_lineno),
-               "line": statement.lineno, "end_line": statement.end_lineno}
-        if exsures is not None:
-            row["exsures"] = exsures
-        body.append(row)
+        body.append({"kind": kind, "start": offset(statement.lineno, 0), "end": line_end(statement.end_lineno),
+                     "line": statement.lineno, "end_line": statement.end_lineno})
 
     defline = raw[offset(node.lineno, 0):line_end(node.lineno)]
     m = re.match(rb"(async[ \t]+)?def[ \t]+" + re.escape(node.name.encode()) + rb"\b", defline)
