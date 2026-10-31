@@ -165,7 +165,19 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return err
 			}
 			target, driver := s.declarations[c.Key.Target], s.declarations[c.Key.Check]
-			if row.Key != c.Key || row.Target != c.Key.Target || row.Driver != c.Key.Check || row.SourceSHA256 != target.SourceSHA256 || row.DriverSHA256 != driver.SourceSHA256 || row.Symbol != target.Symbol {
+			if s.legacy {
+				for _, t := range s.targets {
+					if t.ID == row.Target {
+						target = t
+					}
+				}
+				for _, d := range s.drivers {
+					if d.ID == row.Driver {
+						driver = d
+					}
+				}
+			}
+			if row.Key != c.Key || target.ID == "" || driver.ID == "" || row.Target != target.ID || row.Driver != driver.ID || row.SourceSHA256 != target.SourceSHA256 || row.DriverSHA256 != driver.SourceSHA256 || row.Symbol != target.Symbol {
 				return fmt.Errorf("foreign observation binding")
 			}
 			// Entries may live outside production scope; the Python collector

@@ -118,7 +118,7 @@ def identity(test):
         return "", digest, code
     source = os.path.relpath(filename, root).replace(os.sep, "/")
     component = "python:" + source[:-3].replace("/", ".") + "#" + symbol + "@" + source
-    check = component if component == request["check"]["id"] else ""
+    check = component if request.get("legacy") or component == request["check"]["id"] else ""
     return check, digest, code
 
 
@@ -251,7 +251,10 @@ if sys.argv[2:4] != ["-m", "unittest"] or len(sys.argv) < 5:
     raise ValueError("explicit unittest selections required")
 selections = sys.argv[4:]
 sys.argv = ["unittest"] + selections
-suite = unittest.defaultTestLoader.loadTestsFromNames(selections)
+if request.get("legacy"):
+    suite = unittest.defaultTestLoader.discover(root, pattern="test_*.py", top_level_dir=root)
+else:
+    suite = unittest.defaultTestLoader.loadTestsFromNames(selections)
 result = Observations()
 suite.run(result)
 emit(dict(type="end", count=count))

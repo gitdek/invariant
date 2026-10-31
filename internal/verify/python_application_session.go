@@ -58,6 +58,11 @@ type PythonApplicationSessionOptions struct {
 // PythonApplicationSession owns immutable declarations and private runtime
 // resources. The caller owns the staged destination, including on failure.
 type PythonApplicationSession struct {
+	project                      *project.Project
+	inventory                    *project.ComponentInventory
+	legacy                       bool
+	targets, drivers             []project.Component
+	delegates                    map[string][]string
 	mu                           sync.Mutex
 	closed                       bool
 	root, runtime, image, driver string
@@ -107,6 +112,10 @@ func clonePythonApplicationProvenance(p PythonApplicationProvenance) PythonAppli
 	p.Files = slices.Clone(p.Files)
 	if p.Dependencies != nil {
 		d := *p.Dependencies
+		if d.Script != nil {
+			script := *d.Script
+			d.Script = &script
+		}
 		d.Inputs = slices.Clone(d.Inputs)
 		d.CanonicalInputs = slices.Clone(d.CanonicalInputs)
 		d.Artifacts = slices.Clone(d.Artifacts)
@@ -174,11 +183,34 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 	}
 	s := &PythonApplicationSession{root: w.Root, snapshot: snapshot, invocations: prepared,
 		declarations: map[string]project.Component{}, execute: options.Execute}
-	for _, c := range append(slices.Clone(w.Inventory.Components), w.Inventory.Provenance.Declarations...) {
+	s.project, s.inventory = w.Project, w.Inventory
+	s.delegates = map[string][]string{}
+	s.legacy = w.Inventory.Mode == "legacy"
+	declarations := slices.Clone(w.Inventory.Components)
+	if s.legacy {
+		s.targets, s.drivers, err = pythonApplicationLegacyBindings(w.Project, w.Root)
+		if err != nil {
+			return nil, err
+		}
+		declarations = append(declarations, s.targets...)
+		declarations = append(declarations, s.drivers...)
+	} else {
+		declarations = append(declarations, w.Inventory.Provenance.Declarations...)
+	}
+	for _, c := range declarations {
 		if f, ok := snapshot[c.Source]; !ok || f.hash != c.SourceSHA256 {
 			return nil, fmt.Errorf("stale declaration %s", c.ID)
 		}
 		s.declarations[c.ID] = c
+	}
+	if !s.legacy {
+		for _, check := range w.Inventory.Checks {
+			paths, err := pythonApplicationTargetSources(w.Project, w.Root, s.declarations[check.Target])
+			if err != nil {
+				return nil, err
+			}
+			s.delegates[check.Target] = paths
+		}
 	}
 	rel, err := filepath.Rel(w.Root, w.Project.Dir)
 	if err != nil {
@@ -226,6 +258,12 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 }
 
 func pythonApplicationInvocations(p *project.Project, root string, inv *project.ComponentInventory) ([]PythonApplicationInvocation, error) {
+	if p.Manifest.Exhaustive {
+		return nil, fmt.Errorf("Python application exhaustive execution is unsupported")
+	}
+	if inv.Mode == "legacy" {
+		return pythonApplicationLegacyInvocations(p, root)
+	}
 	if inv.Mode != "explicit" || inv.Provenance == nil {
 		return nil, fmt.Errorf("Python application sessions require explicit components")
 	}
@@ -239,6 +277,28 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 	}
 	var out []PythonApplicationInvocation
 	for _, check := range inv.Checks {
+		if check.Proof != nil {
+			return nil, fmt.Errorf("Python application proof selections are unsupported")
+		}
+		var target project.Component
+		for _, c := range inv.Components {
+			if c.ID == check.Target {
+				target = c
+			}
+		}
+		if _, err := pythonApplicationTargetSources(p, root, target); err != nil {
+			return nil, err
+		}
+		for _, group := range []struct {
+			kind string
+			ids  []string
+		}{{"test", check.Tests}, {"conformance", check.Conformance}} {
+			for _, id := range group.ids {
+				if !slices.ContainsFunc(check.Invocations, func(v project.ResolvedComponentInvocation) bool { return v.Kind == group.kind && v.Check == id }) {
+					return nil, fmt.Errorf("selected %s has no executable invocation", group.kind)
+				}
+			}
+		}
 		for _, v := range check.Invocations {
 			if v.Command != "python" {
 				return nil, fmt.Errorf("invocation %s requires command python", v.ID)
@@ -310,6 +370,9 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 			}
 			out = append(out, clonePythonApplicationInvocation(PythonApplicationInvocation{PythonApplicationInvocationKey{check.Target, v.Check, v.Kind, v.ID}, v, sampling}))
 		}
+	}
+	if !slices.ContainsFunc(out, func(v PythonApplicationInvocation) bool { return v.Key.Kind == "conformance" }) {
+		return nil, fmt.Errorf("Python application requires sampled conformance")
 	}
 	return out, nil
 }

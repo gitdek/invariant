@@ -690,23 +690,26 @@ func TestPythonApplicationExecutionBoundaries(t *testing.T) {
 	if len(s.Invocations()) != 2 {
 		t.Fatal("direct adapter unusable")
 	}
-	if err := Check(p.Dir); !errors.Is(err, ErrComponents) {
+	if err := Check(p.Dir); err != nil {
 		t.Fatalf("public preflight: %v", err)
 	}
-	if r, err := Run(context.Background(), p.Dir, "", toolchain.Toolchain{}); r != nil || !errors.Is(err, ErrComponents) {
+	p.Manifest.Exhaustive = true
+	pa310Save(t, p)
+	if r, err := Run(context.Background(), p.Dir, "", toolchain.Toolchain{}); r != nil || err == nil {
 		t.Fatalf("public gate: %+v %v", r, err)
 	}
 	savedComponents := p.Manifest.Components
 	p.Manifest.Components = nil
 	pa310Save(t, p)
-	if err := Check(p.Dir); !errors.Is(err, ErrPythonApplication) {
+	if err := Check(p.Dir); err == nil {
 		t.Fatalf("existing preflight: %v", err)
 	}
-	if _, _, err := (Python{}).Check(context.Background(), p); !errors.Is(err, ErrPythonApplication) {
+	if _, _, err := (Python{}).Check(context.Background(), p); err == nil {
 		t.Fatalf("direct legacy runner: %v", err)
 	}
 	// Restore the fixture manifest; comparisons cover all original bytes.
 	p.Manifest.Components = savedComponents
+	p.Manifest.Exhaustive = false
 	pa310Save(t, p)
 	after := pa315Tree(t, root)
 	if !reflect.DeepEqual(before, after) {

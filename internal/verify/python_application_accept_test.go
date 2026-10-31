@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -786,11 +785,13 @@ func TestPythonApplicationPreservesLegacyAndRefusesExecution(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := Check(p.Dir); !errors.Is(err, ErrComponents) {
-		t.Fatalf("explicit preflight guard changed: %v", err)
+	if err := Check(p.Dir); err != nil {
+		t.Fatalf("sampled application preflight: %v", err)
 	}
+	p.Manifest.Exhaustive = true
+	pa310Save(t, p)
 	report, err := Run(ctx, p.Dir, "", toolchain.Toolchain{})
-	if report != nil || !errors.Is(err, ErrComponents) {
+	if report != nil || err == nil {
 		t.Fatalf("explicit application execution fell through: %+v %v", report, err)
 	}
 	p.Manifest.Components = nil

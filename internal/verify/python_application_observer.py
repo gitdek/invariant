@@ -194,13 +194,17 @@ class Collector:
         while frame is not None:
             if os.path.abspath(frame.f_code.co_filename) == os.path.join(self.request["root"], self.request["check"]["source"]):
                 component, digest, _ = self.lexical(frame.f_code)
-                if component == self.request["key"]["check"]:
+                selected = self.request["check"]
+                if self.request.get("legacy"):
+                    selected = next((d for d in self.request["drivers"] if d["id"] == component), {})
+                if component == selected.get("id"):
                     function = frame.f_globals.get(frame.f_code.co_name)
                     binding = Binding(self, function)
                     binding.frame(frame)
-                    if digest != self.request["check"]["source_sha256"]:
+                    if digest != selected["source_sha256"]:
                         raise ValueError("driver source changed")
                     self.driver_codes.add(frame.f_code)
+                    self.current_driver = selected
                     return
             frame = frame.f_back
         raise ValueError("configured driver is not executing")
@@ -214,8 +218,8 @@ class Collector:
         self.emit(dict(type="observation", kind="initial" if life.sequence == 0 else "transition",
                        run=life.run, instance=life.identity, sequence=life.sequence,
                        key=self.request["key"], target=life.target.component,
-                       driver=self.request["key"]["check"], source_sha256=life.target.digest,
-                       driver_sha256=self.request["check"]["source_sha256"],
+                       driver=self.current_driver["id"], source_sha256=life.target.digest,
+                       driver_sha256=self.current_driver["source_sha256"],
                        symbol=life.target.symbol, entry=entry.component, entry_sha256=entry.digest,
                        readback=life.fields, **state))
 
@@ -248,7 +252,10 @@ class _Lifecycle:
             raise ValueError("nested lifecycles during a step are unsupported")
         self.target = Binding(c, target)
         c.targets[self] = self.target
-        if self.target.component != c.request["key"]["target"] or self.target.digest != c.request["target"]["source_sha256"]:
+        selected = c.request["target"]
+        if c.request.get("legacy"):
+            selected = next((t for t in c.request["targets"] if t["id"] == self.target.component), {})
+        if self.target.component != selected.get("id") or self.target.digest != selected.get("source_sha256"):
             raise ValueError("target differs from selected staged declaration")
         self.functional = initializer is not None
         if self.functional != (self.target.receiver is None):
@@ -327,6 +334,16 @@ class _Lifecycle:
 
     def observe(self, frame, event, arg):
         self.check_target()
+        if event == 'call' and self.target_frame is not None:
+            source = os.path.relpath(os.path.abspath(frame.f_code.co_filename), _collector.request['root']).replace(os.sep, '/')
+            if source in _collector.request.get('delegates', []):
+                parent = frame.f_back
+                while parent is not None and parent is not self.target_frame:
+                    parent = parent.f_back
+                if parent is not None:
+                    binding = Binding(_collector, frame.f_globals.get(frame.f_code.co_name))
+                    binding.frame(frame)
+                    self.delegate_called = True
         if event == "call" and frame.f_code is self.entry.code:
             self.entry.frame(frame)
             if self.entry_frame is not None:
@@ -374,12 +391,13 @@ class _Lifecycle:
             raise ValueError("state changed between transitions")
         expect(self.before, expected_before)
         self.calls, self.after = 0, None
+        self.delegate_called = not bool(c.request.get('delegates'))
         self.entry_frame = self.target_frame = None
         c.active = self
         try:
             args = [next(iter(self.state.values()))] if self.functional else []
             self.entry.call(*args)
-            if c.failed or self.calls != 1 or self.after is None:
+            if c.failed or self.calls != 1 or self.after is None or not self.delegate_called:
                 raise ValueError("incomplete selected call")
             self.check_target()
             self.entry.check()

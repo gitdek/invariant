@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -39,7 +40,7 @@ type PythonApplicationProcess struct {
 }
 
 type PythonApplicationActual struct {
-	Image          string            `json:"-"`
+	Image          string            `json:"image"`
 	Interpreter    string            `json:"interpreter"`
 	Launcher       string            `json:"launcher"`
 	LauncherSHA256 string            `json:"launcher_sha256"`
@@ -70,11 +71,15 @@ type PythonApplicationExecutionResult struct {
 	Success         bool                                `json:"success"`
 	ExitCode        int                                 `json:"exit_code"`
 	// Operational diagnostics may contain host paths or container IDs.
-	Diagnostics []string `json:"-"`
+	Diagnostics []string `json:"diagnostics,omitempty"`
 	Fingerprint string   `json:"fingerprint"`
 }
 
 type pythonApplicationRequest struct {
+	Legacy         bool                           `json:"legacy,omitempty"`
+	Targets        []project.Component            `json:"targets,omitempty"`
+	Drivers        []project.Component            `json:"drivers,omitempty"`
+	Delegates      []string                       `json:"delegates,omitempty"`
 	Key            PythonApplicationInvocationKey `json:"key"`
 	SnapshotSHA256 string                         `json:"snapshot_sha256"`
 	RunnerSHA256   string                         `json:"runner_sha256"`
@@ -87,6 +92,8 @@ type pythonApplicationRequest struct {
 	Sampling       map[string]string              `json:"sampling"`
 	Execution      string                         `json:"execution"`
 }
+
+var pythonApplicationContainerName = regexp.MustCompile(`invariant-[0-9]+-[0-9]+-[0-9]+`)
 
 func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicationInvocationKey) (*PythonApplicationExecutionResult, error) {
 	s.mu.Lock()
@@ -134,8 +141,12 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 		Env: env, Sampling: maps.Clone(invocation.Sampling), Root: s.root, RuntimeDir: s.runtime, OutputDir: output}
 	c.Args = append([]string{"-S", "-s", "-P", "-B", c.Launcher, "/runtime/request.json"}, v.Args...)
 	req := pythonApplicationRequest{Key: key, SnapshotSHA256: c.SnapshotSHA256, RunnerSHA256: c.RunnerSHA256,
+		Legacy: s.legacy, Targets: s.targets, Drivers: s.drivers, Delegates: s.delegates[key.Target],
 		Check: s.declarations[key.Check], Root: "/src", Driver: s.driver, Output: "/output/events.jsonl", Libraries: toolchain.PythonLibrary,
 		Target: s.declarations[key.Target], Sampling: maps.Clone(c.Sampling), Execution: rand.Text()}
+	if s.legacy {
+		req.Check = s.drivers[0]
+	}
 	// The runner consumes and unlinks this bootstrap secret before importing
 	// application code. It never belongs to the application-readable request.
 	var authentication []byte
@@ -190,6 +201,16 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if process.Stderr != "" {
 		r.Diagnostics = append(r.Diagnostics, process.Stderr)
 	}
+	normalize := func() {
+		for i, diagnostic := range r.Diagnostics {
+			diagnostic = strings.NewReplacer(c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output").Replace(diagnostic)
+			diagnostic = strings.ReplaceAll(diagnostic, req.Execution, "<execution>")
+			if strings.HasPrefix(c.Image, "sha256:") {
+				diagnostic = strings.ReplaceAll(diagnostic, c.Image, "<selected image>")
+			}
+			r.Diagnostics[i] = pythonApplicationContainerName.ReplaceAllString(diagnostic, "<container>")
+		}
+	}
 	if key.Kind == "conformance" {
 		err = errors.Join(executionErr, protocolErr, freshErr)
 		r.Success = err == nil && r.Complete && process.ExitCode == 0 && len(r.Observations) > 0
@@ -203,16 +224,17 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 			}
 			r.Diagnostics = append(r.Diagnostics, err.Error())
 		}
-		r.Fingerprint = pythonApplicationFingerprint(r)
+		normalize()
+		r.Fingerprint = pythonApplicationExecutionFingerprint(*r)
 		return r, err
 	}
 	observed, passing := false, len(r.Tests) > 0
 	failed := false
 	for _, row := range r.Tests {
-		if row.Check == key.Check {
+		if row.Check == key.Check || s.legacy && row.Check != "" {
 			observed = true
 		}
-		passing = passing && row.Outcome == "passed" && row.Exercised
+		passing = passing && row.Outcome == "passed" && row.Exercised && (!s.legacy || row.Check != "")
 		failed = failed || row.Outcome == "failed" || row.Outcome == "error" || row.Outcome == "unexpected_success"
 	}
 	if !observed {
@@ -228,7 +250,8 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if err != nil {
 		r.Diagnostics = append(r.Diagnostics, err.Error())
 	}
-	r.Fingerprint = pythonApplicationFingerprint(r)
+	normalize()
+	r.Fingerprint = pythonApplicationExecutionFingerprint(*r)
 	return r, err
 }
 
@@ -308,6 +331,7 @@ func pythonApplicationJSONFields(b []byte, allowNull bool, required ...string) (
 		return nil, fmt.Errorf("event is not UTF-8")
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
 	var value func() error
 	value = func() error {
 		t, err := d.Token()
@@ -426,8 +450,15 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, events []
 			if row.ID == "" || seen[row.ID] {
 				return fmt.Errorf("missing or duplicate runtime test ID")
 			}
-			if row.Check != "" && (row.Check != c.Key.Check || row.SourceSHA256 != s.declarations[c.Key.Check].SourceSHA256) {
+			if !s.legacy && row.Check != "" && (row.Check != c.Key.Check || row.SourceSHA256 != s.declarations[c.Key.Check].SourceSHA256) {
 				return fmt.Errorf("foreign test declaration or source")
+			}
+			if s.legacy && row.Check != "" {
+				prefix, source, ok := strings.Cut(row.Check, "@")
+				module, symbol, named := strings.Cut(prefix, "#")
+				if !ok || !named || symbol == "" || !strings.HasSuffix(source, ".py") || module != "python:"+strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".") || s.snapshot[source].hash != row.SourceSHA256 {
+					return fmt.Errorf("foreign discovered test declaration or source")
+				}
 			}
 			if row.SourceSHA256 != "" {
 				known := false

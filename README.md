@@ -121,6 +121,177 @@ For projects without explicit components, code assurance comes from successful r
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](decisions/D-0024-checking-typescript-and-python.md) and [D-0031](decisions/journal/D-0031.jsonl), and the larger check in [D-0070](decisions/journal/D-0070.jsonl).
 
+### Manually adopting an existing Python application
+
+`invariant verify` checks an existing Python application against its model with sampled, authenticated read-back. It uses one staged copy and one dependency image for the whole run. Explicit components get independent evidence; omitting them keeps a legacy receipt with no invented inventory. No Nagini annotation is required, and a `# +nagini` marker does not enable proof on this path. Factory drafting and synthesis for this mode, exhaustive exploration and attempted-step checks are outside #327.
+
+Here is a complete small application layout. Paths in `existing` and `components` are relative to `app`; model, code and conformance paths are relative to `verification/lifecycle`.
+
+```text
+app/
+  requirements.txt
+  deps/application.txt
+  deps/constraints.txt
+  tasks/__init__.py
+  tasks/lifecycle.py
+  tasks/application.py
+  tasks/next.txt
+  tests/__init__.py
+  tests/test_tasks.py
+  verification/lifecycle/
+    driver.py
+    .invariant/invariant.json
+    .invariant/ratified.lock
+    .invariant/specs/Lifecycle.tla
+```
+
+The two `__init__.py` files are empty. `requirements.txt` contains `-r deps/application.txt`. `deps/application.txt` contains these two lines:
+
+```text
+packaging>=24,<25
+-c constraints.txt
+```
+
+`deps/constraints.txt` contains `packaging==24.2`, and `tasks/next.txt` contains `running` followed by a newline. Only application-root requirements select the environment; a verification-local requirements file cannot replace them. Installation admits public PyPI wheels, with original inputs, canonical requirements and actual wheel hashes recorded. Installation may need network; execution is offline. Omitting requirements uses the pinned standard-library image.
+
+`tasks/lifecycle.py`:
+
+```python
+from pathlib import Path
+from packaging.version import Version
+
+def advance(state):
+    assert Version('1.9') < Version('1.10')
+    if state == 'pending':
+        return Path(__file__).with_name('next.txt').read_text().strip()
+    return 'done'
+```
+
+`tasks/application.py`:
+
+```python
+from .lifecycle import advance
+
+def start():
+    return 'pending'
+
+def tick(state):
+    return advance(state)
+```
+
+`tests/test_tasks.py`:
+
+```python
+import unittest
+from tasks.application import tick
+
+class TaskTests(unittest.TestCase):
+    def test_step(self):
+        self.assertEqual(tick('pending'), 'running')
+```
+
+`verification/lifecycle/driver.py` reads actual calls through the gate's stateless lifecycle handle:
+
+```python
+from invariant_observe import functional
+from tasks.lifecycle import advance
+from tasks import application
+
+def drive():
+    with functional(advance, application.start,
+                    argument='state', field='task') as life:
+        life.step(application.tick)
+        life.step(application.tick)
+        life.step(application.tick)
+
+if __name__ == '__main__':
+    drive()
+```
+
+The complete `.invariant/specs/Lifecycle.tla` is:
+
+```tla
+---- MODULE Lifecycle ----
+EXTENDS Naturals
+CONSTANT Limit
+VARIABLE task
+vars == <<task>>
+Init == task = "pending"
+Next == \/ /\ task = "pending" /\ task' = "running"
+        \/ /\ task = "running" /\ task' = "done"
+        \/ /\ task = "done" /\ UNCHANGED task
+Spec == Init /\ [][Next]_vars
+Safe == task \in {"pending", "running", "done"} /\ Limit >= 1
+Seen == task = "done"
+Bad == task' = "broken"
+Fair == WF_vars(Next)
+Eventually == <> (task = "done")
+====
+```
+
+`.invariant/invariant.json`:
+
+```json
+{
+  "name": "Task lifecycle",
+  "language": "python",
+  "code": ".",
+  "module": ".invariant/specs/Lifecycle.tla",
+  "conformance": "driver.py",
+  "existing": ["tasks/lifecycle.py"],
+  "components": {
+    "scope": ["tasks"],
+    "checks": [{
+      "target": {"source": "tasks/lifecycle.py", "symbol": "advance"},
+      "tests": [{"source": "tests/test_tasks.py", "symbol": "TaskTests.test_step"}],
+      "conformance": [{"source": "verification/lifecycle/driver.py", "symbol": "drive"}],
+      "invocations": [
+        {"id": "unit", "kind": "test", "check": {"source": "tests/test_tasks.py", "symbol": "TaskTests.test_step"}, "command": "python", "args": ["-m", "unittest", "tests.test_tasks.TaskTests.test_step"], "working_dir": ".", "inputs": ["tasks/next.txt"]},
+        {"id": "sample", "kind": "conformance", "check": {"source": "verification/lifecycle/driver.py", "symbol": "drive"}, "command": "python", "args": ["driver.py"], "working_dir": "verification/lifecycle", "sampling": {"runs": "2", "steps": "4", "seed": "1"}, "inputs": ["verification/lifecycle/.invariant/specs/Lifecycle.tla", "verification/lifecycle/.invariant/ratified.lock"]}
+      ]
+    }]
+  }
+}
+```
+
+For the omitted-components variant, remove the entire `components` member and its preceding comma. Keep `existing`, which may also select directories containing Python sources. The gate discovers lexical bindings for execution, runs normal `unittest` discovery from the application root and executes the manifest driver with default maximum budgets 1000 runs / 40 steps / seed 1. It creates no component inventory or coverage for neighbors. Explicit configurations require an executable invocation for every selected test/driver; they never fall back to discovery.
+
+Start a **new, unratified** `.invariant/ratified.lock` with the following proposal. This example supplies no decision, ratifier or pinned hashes:
+
+```json
+{
+  "bounds": {"Limit": "2"},
+  "statements": [
+    {"name": "Spec", "kind": "spec", "says": "Runs start pending and follow the lifecycle."},
+    {"name": "Safe", "kind": "invariant", "says": "Task state is pending, running or done."},
+    {"name": "Seen", "kind": "witness", "says": "Completion is reachable."},
+    {"name": "Bad", "kind": "bug", "expect": "Safe", "says": "The invariant catches a broken task state."},
+    {"name": "Fair", "kind": "fairness", "says": "Continuously enabled lifecycle progress eventually occurs."},
+    {"name": "Eventually", "kind": "property", "says": "Every fair run eventually completes."}
+  ]
+}
+```
+
+A human reviews the model, bounds, statements, selected code and driver before ratifying. In the adopting repository, record a proposed decision with `invariant decisions decide -door two-way -status proposed "Adopt the lifecycle model and bounds after human review."`; use the actual returned decision ID as the new lock's `decision`. After review, the human runs `invariant pin app/verification/lifecycle` to pin the reviewed statements and `invariant decisions ratify -by @YOUR_LOGIN D-NNNN`, substituting their own login and the real decision ID. An agent may record that ratification only when that person explicitly asks. Do not copy a fixture identity or another project's hashes, invent a ratifier, or repin an existing ratified lock without its authorizing decision.
+
+With host Python 3 and Docker available, run:
+
+```sh
+invariant verify -out receipt app/verification/lifecycle
+```
+
+The command writes `receipt/receipt.json` and `receipt/receipt.md`. Passing yields exit 0; a failed check yields a receipt and exit 1; unsupported preflight or setup failure yields exit 2. TLC checks Init and Next for the authenticated observations at `Limit = 2`, in batches for larger samples. The receipt shows actual executions, selected versus actual launcher settings, model/includes, dependencies, resources, observations and independent outcomes. Failed/skipped/unexecuted tests, runtime/import errors or invalid/missing observations fail, as do pin, ratification or design obligations. Successful independent evidence survives. Component rows say origin `gate` or `supplied`; public attribution always treats incoming data as supplied and cannot change the gate verdict. Neither origin is an authorization token. Proofs and unselected neighbors stay unchecked, assumptions stay assumed, and runtime tests confer no target coverage or invented assertions.
+
+This is **sampled tested-against-the-model evidence**: exhaustive design checking does not make the implementation exhaustive, prove it, check every attempted step or cover every size. Fractions and unsupported observation values fail TLC encoding explicitly; integer values are preserved exactly. D-0183's collector trust boundary and stateless handles remain as described below.
+
+**Merger work for #327:** record the new gate/receipt execution policy using decision tooling and add its SPEC citation. Then run and post passing output on the final head before moving on:
+
+```sh
+INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify ./internal/conformance ./cmd/invariant -run '^TestPythonApplicationGate' -count=1 -timeout 45m
+```
+
+Default acceptance checks execute actual local Python with Docker transport and TLC doubles; they do not skip or claim real Docker/TLC validation. The opt-in command requires real Docker, TLC and wheel installation and fails if prerequisites are absent. Decision recording and unavailable Docker/network checks belong to the merger.
+
 ### Existing Python application foundation
 
 [#310's ratified plan](.invariant/plans/issue-310.json) admits Python `existing` manifests with a conformance driver. `project.ResolvePythonApplication` returns an absolute `Root` and slash-separated `ProjectPath`: exactly one strict ancestor of the verification directory must contain every named regular `.py` source or directory containing Python sources. Requirements and Python markers are optional and never select among ambiguous roots. Missing selections, ambiguous roots, unclean paths, absolute paths, parent escapes, backslash aliases, selection `.` and symlinks fail, including links from root to the verification directory.
@@ -135,7 +306,7 @@ An application that runs as `uv run serve.py` declares its dependencies in the s
 
 `verify.PreparePythonApplicationSession(ctx, p, dst, PythonApplicationSessionOptions{})` prepares a directly callable test and sampled-observation adapter under [#313's ratified child plan](https://github.com/gitdek/invariant/issues/313#issuecomment-6536681769) (`sha256:0380e0c90425c12cb24fed241112820b07758fecb6d812130b71424a857d2366`) and [#315's implementation plan](.invariant/plans/issue-315.json). It validates every invocation before image selection, stages the complete application, selects one immutable dependency image (or acquires the pinned standard-library base), and reuses it for every `session.Run(ctx, key)`. `Invocations()` and `Provenance()` return detached views; keys include target, check, kind and ID. The destination follows `StagePythonApplication`'s ownership rules. `Close()` releases private runtime/output resources, is idempotent and prevents further runs; callers still remove the destination, including partial copies after preparation failure.
 
-Tests require literal command `python` and ordered arguments `-m unittest` followed by explicit dotted selections, with no discovery, options or implicit suite. Safe environment values are preserved exactly; interpreter, import, loader, proxy and adapter controls are reserved. Tests have effective `runs=1` and no declared sampling. Under [#318's ratified plan](.invariant/plans/issue-318.json), conformance executes the configured script as `__main__` from its declared working directory, with literal ordered argv. Its path must resolve to both the manifest driver and the selected conformance source. The selected driver declaration must actually execute; the adapter never implicitly calls `drive()`. Decimal `runs`/`steps` in 1–2147483647 are maximum lifecycle/step budgets, and `seed` in 0–2147483647 seeds Python's random generator (defaults 1000/40/1). Exceeding a budget fails. Declared controls and effective settings remain separate. Proof invocations are rejected.
+Explicit tests require literal command `python` and ordered arguments `-m unittest` followed by explicit dotted selections, with no discovery, options or implicit suite. Safe environment values are preserved exactly; interpreter, import, loader, proxy and adapter controls are reserved. Tests have effective `runs=1` and no declared sampling. Under [#318's ratified plan](.invariant/plans/issue-318.json), conformance executes the configured script as `__main__` from its declared working directory, with literal ordered argv. Its path must resolve to both the manifest driver and the selected conformance source. The selected driver declaration must actually execute; the adapter never implicitly calls `drive()`. Decimal `runs`/`steps` in 1–2147483647 are maximum lifecycle/step budgets, and `seed` in 0–2147483647 seeds Python's random generator (defaults 1000/40/1). Exceeding a budget fails. Declared controls and effective settings remain separate. Proof invocations are rejected.
 
 The staged runtime supplies `invariant_observe`. A functional lifecycle calls a staged application initializer, owns its scalar return as current state, passes it as the first argument to the surrounding application entry, and reads the selected target's actual argument and return:
 
@@ -175,9 +346,9 @@ if __name__ == "__main__":
 
 The gate reads scalar attributes directly from that receiver's own `__dict__` initially and at call entry/return, and checks the final entry state. The observed receiver must be the exact bound instance. The collector retains the original receiver independently of the lifecycle handle; replacing its target or receiver fails even if the replacement has the same state. Contexts may coexist and interleave; each gets an ordered run number and an execution-local instance number, with initial sequence 0 and steps 1 onward. Each context must close after at least one step. Initial/pre/post expected dictionaries are optional comparisons, never evidence or state overrides. State must continue from the preceding post-state, including when expectations are omitted.
 
-Only ordinary undecorated synchronous module functions and instance methods with staged lexical code and intact module/class bindings are supported. Closures, wrappers, replaced callables or defaults, async/generators, unbound/static/class methods, custom metaclasses or attribute access, slots, property/descriptor readers, callback readers and mutable/non-JSON state fail with diagnostics. Defaults, when present, must be literal scalars. Concurrency, reentrant/nested selected calls, missing or multiple selected calls, cross-instance substitution, empty/unclosed/reused contexts, import/runtime failures and caught observation errors cannot produce accepted evidence. Application source is never rewritten.
+Only ordinary undecorated synchronous module functions and instance methods with staged lexical code and intact module/class bindings are supported. An explicitly selected instance wrapper outside the `existing` files must directly import a selected source and call its intact staged module function inside every observed target step; an import alone earns no evidence. This preserves existing instance sessions without admitting unrelated targets. Closures, wrappers, replaced callables or defaults, async/generators, unbound/static/class methods, custom metaclasses or attribute access, slots, property/descriptor readers, callback readers and mutable/non-JSON state fail with diagnostics. Defaults, when present, must be literal scalars. Concurrency, reentrant/nested selected calls, missing or multiple selected calls, cross-instance substitution, empty/unclosed/reused contexts, import/runtime failures and caught observation errors cannot produce accepted evidence. Application source is never rewritten.
 
-Successful driver results have `observation_mode: "sampled"` and ordered `observations`, with an empty `tests` array. Each raw record includes `kind`, `run`, `instance`, `sequence`, the full invocation `key`, lexical `target`, `driver`, `symbol` and `entry`, their source hashes, and `readback` (`{"task":"$return"}` or `{"task":"state"}`). Initial records carry `state`; transitions carry actual `before` and `after`, for example `{"task":"pending"}` and `{"task":"running"}`. No assertions or test outcomes are invented. This remains sampled even if a driver imports a legacy exploration harness: TLC checking, report attribution, proof, exhaustive-state and attempted-step coverage and public admission remain subsequent work.
+Successful driver results have `observation_mode: "sampled"` and ordered `observations`, with an empty `tests` array. Each raw record includes `kind`, `run`, `instance`, `sequence`, the full invocation `key`, lexical `target`, `driver`, `symbol` and `entry`, their source hashes, and `readback` (`{"task":"$return"}` or `{"task":"state"}`). Initial records carry `state`; transitions carry actual `before` and `after`, for example `{"task":"pending"}` and `{"task":"running"}`. No assertions or test outcomes are invented. This remains sampled even if a driver imports a legacy exploration harness: The public gate now checks these observations with TLC and attributes actual results under #327. Proof, exhaustive-state and attempted-step coverage remain outside this path.
 
 Go independently requires complete, nonempty, correctly bound output and exit 0. Invalid driver execution returns `Success=false`, diagnostics and no accepted observations. A fresh execution identity prevents replay even for the same session/key. The runner also authenticates the exact ordered collector stream with a per-execution HMAC key, consumed and removed before application imports and kept out of the application-readable request. Copying request bindings into fabricated output cannot earn success. Lifecycle handles hold no state, so a driver can't substitute evidence through them: every binding, read-back and continuity check uses the collector's own records, and touching any handle attribute besides `step()` and the `with` protocol poisons the execution, even if the driver catches the error. The trust boundary is the gate's own code. Python in the same process can always reach the collector's module, objects, frames and closures, so no in-process collector can rule out a driver that tampers with them. That driver's bytes are bound to every observation it makes, and authentication defends against output written or replayed outside the collector, not against such tampering. The authentication footer and execution identity never enter portable JSON or fingerprints. Provenance binds both runner and collector assets, the full staged tree and dependency evidence. Changes before, during or between executions invalidate observations without another image selection. Repeated and relocated identical runs have identical portable results. Successful drivers cannot alter, promote or replace independently observed runtime-test outcomes.
 
@@ -185,13 +356,13 @@ The adapter uses absolute Python with site/user-site and implicit paths disabled
 
 Structured observations record actual unittest IDs separately from configured lexical checks, using the executed method's staged source and lexical location. Passed, failed, error, skipped, expected failure, unexpected success and not-run outcomes remain distinct; skipped cases retain their reason and are never exercised or passed. Missing, substituted, malformed, incomplete or unsuccessful execution cannot earn success, and valid preceding observations survive later failure. Provenance hashes every staged file and the runner and retains original/canonical dependency input hashes and actual wheel evidence. Result fingerprints bind declared and actual settings and ordered observations, excluding host paths, local image IDs and operational diagnostics. Snapshot content, membership, symlinks and replacements are checked around preparation and every execution. Original bytes stay unchanged; runtime-test records infer no assertions, target coverage, proof, conformance or project assurance.
 
-Public code verification remains guarded: explicit components retain `verify.ErrComponents`, and without them preflight, the gate and `Python.Check` return `verify.ErrPythonApplication` before tools or dependency installation. Model-only checking, supplied attribution, legacy Python/marked files and TypeScript retain their behavior. [D-0181](decisions/journal/D-0181.jsonl) records the preceding session/runtime-test policy. The observation/execution policy, with its trust boundary, is recorded as [D-0183](decisions/journal/D-0183.jsonl), and `INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL=1 go test ./internal/verify -run '^TestPythonApplicationExecution' -count=1 -timeout 30m` passed on #323's final head. The suite runs meaningful actual-Python checks without Docker and enables real Docker only explicitly, failing on missing prerequisites.
+Shared preflight, `verify.Run`, `Python.Check` and prepared sessions admit sampled existing Python applications, with or without components. Unsupported proof selections, exhaustive or attempted modes, missing selected invocations and mismatched drivers fail before verification tools or dependency installation; malformed explicit configurations never fall back to legacy execution. Model-only checking, supplied attribution, legacy Python/marked files and TypeScript retain their behavior. [D-0181](decisions/journal/D-0181.jsonl) records the preceding session/runtime-test policy. The observation/execution policy, with its trust boundary, is recorded as [D-0183](decisions/journal/D-0183.jsonl), and `INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL=1 go test ./internal/verify -run '^TestPythonApplicationExecution' -count=1 -timeout 30m` passed on #323's final head. The suite runs meaningful actual-Python checks without Docker and enables real Docker only explicitly, failing on missing prerequisites.
 
 The direct adapter also builds on [D-0013](decisions/journal/D-0013.jsonl), [D-0029](decisions/journal/D-0029.jsonl), [D-0047](decisions/journal/D-0047.jsonl), [D-0170](decisions/journal/D-0170.jsonl), [D-0171](decisions/journal/D-0171.jsonl) and [D-0180](decisions/journal/D-0180.jsonl). This foundation builds on [D-0054](decisions/journal/D-0054.jsonl), [D-0158](decisions/journal/D-0158.jsonl), [D-0168](decisions/journal/D-0168.jsonl), [D-0177](decisions/journal/D-0177.jsonl), [D-0178](decisions/journal/D-0178.jsonl), [D-0122](decisions/journal/D-0122.jsonl).
 
 ### Component configuration and evidence in ordinary Go and Python
 
-The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. [#304's ratified plan](.invariant/plans/issue-304.json) extends discovery to explicit Python scopes. [#234](https://github.com/gitdek/invariant/issues/234) adds an API to attribute supplied proof results to those components and render their evidence. [#257](https://github.com/gitdek/invariant/issues/257) retains target assumptions, inert invocation declarations and exact input provenance in that inventory. [#274's ratified plan](.invariant/plans/issue-274.json) adds independent supplied assumption records and optional actual proof provenance. [#279's ratified plan](.invariant/plans/issue-279.json) adds independent supplied conformance results, with separate qualifications for checked transitions, exhaustive states and tried steps. **Code verification with explicit components is not supported yet:** `invariant verify`, `verify.Check` and `verify.Run` reject it with `verify.ErrComponents` before running any verification tool. Python syntax discovery may run its isolated parser. Model-only checking through `verify.RunModel` remains available. Omitting `components` preserves legacy verification and infers no component inventory. Python manifests with nonempty `existing` support discovery and staging, plus directly callable test and sampled driver sessions with explicit components under #315 and #318. Public gate execution remains unavailable for these manifests, including without components.
+The first slice of [#212](https://github.com/gitdek/invariant/issues/212) adds optional `components` metadata to `.invariant/invariant.json`. It inventories Go source and resolves intended checks. [#304's ratified plan](.invariant/plans/issue-304.json) extends discovery to explicit Python scopes. [#234](https://github.com/gitdek/invariant/issues/234) adds an API to attribute supplied proof results to those components and render their evidence. [#257](https://github.com/gitdek/invariant/issues/257) retains target assumptions, inert invocation declarations and exact input provenance in that inventory. [#274's ratified plan](.invariant/plans/issue-274.json) adds independent supplied assumption records and optional actual proof provenance. [#279's ratified plan](.invariant/plans/issue-279.json) adds independent supplied conformance results, with separate qualifications for checked transitions, exhaustive states and tried steps. **Sampled existing Python applications support explicit component verification.** Other explicit code configurations return `verify.ErrComponents` before verification tools. Python syntax discovery may run its isolated parser. Model-only checking through `verify.RunModel` remains available. Omitting `components` preserves legacy verification and infers no component inventory. Python manifests with nonempty `existing` support discovery and staging, plus directly callable test and sampled driver sessions with explicit components under #315 and #318. The public sampled gate supports these manifests with or without components; omitted components create no inventory.
 
 For example, a Go manifest can include:
 
@@ -304,7 +475,7 @@ The fingerprint binds the complete scope and files, including unchecked neighbor
 
 The first slice of [#229](https://github.com/gitdek/invariant/issues/229) corrects legacy assurance claims as described above. Successful legacy Go, Python and TypeScript receipts retain their Markdown, fingerprints and unverified-function lists. No component scope is inferred: a successful legacy proof still lists the functions outside its proof, and its project-wide label does not establish proof of those neighbors. The legacy assurance policy is [D-0161](decisions/journal/D-0161.jsonl); component direction and inventory are [D-0152](decisions/journal/D-0152.jsonl) and [D-0158](decisions/journal/D-0158.jsonl).
 
-These four APIs attribute supplied proof, assumption, conformance and runtime records only: no execution, discovery, instrumentation, execution protocol, adapter or gate connection is added, and no filesystem lookup is performed during attribution ([D-0169](decisions/journal/D-0169.jsonl), [D-0170](decisions/journal/D-0170.jsonl)). [#244](https://github.com/gitdek/invariant/issues/244)'s evidence foundation for the narrowed step 1 of [#210](https://github.com/gitdek/invariant/issues/210) now includes completed Markdown and JSON receipts through [#296](https://github.com/gitdek/invariant/issues/296), with component dashboard views still later work: bounded or sampled conformance, runtime checks and trusted assumptions as separate evidence kinds alongside proof. #210's plan is narrowed to the path ask3d needs: #294 then checks unchanged Python against a model, backs trusted dependency contracts with tests and proves selected Python functions in place, each connecting the gate for its path. Its Go steps, the checks on callers against proved contracts and the CI check on evidence regressions wait until ask3d shows they're needed ([D-0172](decisions/journal/D-0172.jsonl)). TypeScript discovery is outside this ordinary Go and Python scope. Explicit code verification still returns `verify.ErrComponents` before verification tools run. Explicit Python configurations support discovery and direct application test and sampled driver sessions; explicit TypeScript discovery remains rejected; model-only checking remains available and its reports reject all four attribution APIs, including clears. Existing proof policy is [D-0163](decisions/journal/D-0163.jsonl), declaration provenance is [D-0168](decisions/journal/D-0168.jsonl), independent proof and assumption attribution is [D-0169](decisions/journal/D-0169.jsonl), conformance attribution is [D-0170](decisions/journal/D-0170.jsonl), and runtime attribution is [D-0171](decisions/journal/D-0171.jsonl). The merger of [#296](https://github.com/gitdek/invariant/issues/296) records the remaining receipt-policy roll-up refining D-0169 before moving on: this plumbing build cannot write `decisions/`. Keeping this description current is required by [D-0122](decisions/journal/D-0122.jsonl).
+These four APIs attribute supplied proof, assumption, conformance and runtime records only: no execution, discovery, instrumentation, execution protocol, adapter or gate connection is added, and no filesystem lookup is performed during attribution ([D-0169](decisions/journal/D-0169.jsonl), [D-0170](decisions/journal/D-0170.jsonl)). [#244](https://github.com/gitdek/invariant/issues/244)'s evidence foundation for the narrowed step 1 of [#210](https://github.com/gitdek/invariant/issues/210) now includes completed Markdown and JSON receipts through [#296](https://github.com/gitdek/invariant/issues/296), with component dashboard views still later work: bounded or sampled conformance, runtime checks and trusted assumptions as separate evidence kinds alongside proof. #210's plan is narrowed to the path ask3d needs: #294 then checks unchanged Python against a model, backs trusted dependency contracts with tests and proves selected Python functions in place, each connecting the gate for its path. Its Go steps, the checks on callers against proved contracts and the CI check on evidence regressions wait until ask3d shows they're needed ([D-0172](decisions/journal/D-0172.jsonl)). TypeScript discovery is outside this ordinary Go and Python scope. Explicit code verification outside sampled existing Python still returns `verify.ErrComponents` before verification tools run. Explicit Python configurations support discovery and direct application test and sampled driver sessions; explicit TypeScript discovery remains rejected; model-only checking remains available and its reports reject all four attribution APIs, including clears. Existing proof policy is [D-0163](decisions/journal/D-0163.jsonl), declaration provenance is [D-0168](decisions/journal/D-0168.jsonl), independent proof and assumption attribution is [D-0169](decisions/journal/D-0169.jsonl), conformance attribution is [D-0170](decisions/journal/D-0170.jsonl), and runtime attribution is [D-0171](decisions/journal/D-0171.jsonl). The merger of [#296](https://github.com/gitdek/invariant/issues/296) records the remaining receipt-policy roll-up refining D-0169 before moving on: this plumbing build cannot write `decisions/`. Keeping this description current is required by [D-0122](decisions/journal/D-0122.jsonl).
 
 ## One model, three languages
 
@@ -316,7 +487,7 @@ Pip's report produces `canonical/requirements.txt` and `canonical/constraints.tx
 
 Checks run the base's absolute interpreter with site startup, user sites and implicit source paths disabled, and hash seed 0 effective for compilation, tests, ordinary conformance and larger-bound runs, including projects without requirements. After startup, trusted standard-library and gate paths precede the application root and driver directory, which precede installed libraries. Import resolution also protects application namespace packages from dependency regular packages, including nested namespaces. Installed scripts stay off PATH; `.pth`, `sitecustomize` and `usercustomize` do not run on startup. Imported dependencies execute as part of the application under test and receive no separate proof claim.
 
-One immutable image ID supplies installation evidence and ordinary and larger-bound checks. Receipts and fingerprints record the base, platform, complete recipe identity, original and canonical input hashes, and resolved wheel names, versions, filenames and SHA-256 hashes, also through component attribution. Cached images retain their actual resolution; a fresh build of unpinned requirements may resolve differently. Nagini keeps its separate pinned dependencies. Projects without `requirements.txt` keep the standard-library path. Python existing-code discovery and staging are available through the foundation APIs below; the direct session/test adapter is available under #315, with sampled driver read-back under #318; TLC checking, report attribution, contract checks and gate connection remain subsequent work.
+One immutable image ID supplies installation evidence and ordinary and larger-bound checks. Receipts and fingerprints record the base, platform, complete recipe identity, original and canonical input hashes, and resolved wheel names, versions, filenames and SHA-256 hashes, also through component attribution. Cached images retain their actual resolution; a fresh build of unpinned requirements may resolve differently. Nagini keeps its separate pinned dependencies. Projects without `requirements.txt` keep the standard-library path. Python existing-code discovery and staging are available through the foundation APIs below; the direct session/test adapter is available under #315, with sampled driver read-back under #318; #327 connects sampled TLC checking, report attribution and the public gate. Contract checks, proof, exhaustive and attempted-step checks remain later work.
 
 This implements [#227's ratified plan](.invariant/plans/issue-227.json), on the existing toolchain, conformance and isolation foundations ([D-0013](decisions/journal/D-0013.jsonl), [D-0029](decisions/journal/D-0029.jsonl), [D-0030](decisions/journal/D-0030.jsonl), [D-0031](decisions/journal/D-0031.jsonl), [D-0032](decisions/journal/D-0032.jsonl), [D-0047](decisions/journal/D-0047.jsonl), [D-0054](decisions/journal/D-0054.jsonl), [D-0122](decisions/journal/D-0122.jsonl)). The merger must record the new dependency-policy decision and add its citation to the affected SPEC bullets; this plumbing build cannot write `decisions/`. Before merging, the merger must run the real Docker/PyPI suite on the final pull request head and post its passing output:
 
@@ -491,7 +662,7 @@ Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory t
 - [x] **Slice 12 · One decision graph for every project.** Every project's decisions move into one embedded store, SQLite used as a graph, with a journal in each repository and traversal tools agents call over MCP, so a decision can be traced to what rests on it and what implements it ([D-0096](decisions/D-0096-decision-graph.md)). This repository's decisions are in it. copythis-ad's were too, from a journal of its own ([copythis-ad#41](https://github.com/gitdek/copythis-ad/pull/41)), so a question crossed projects: what in copythis-ad rested on one of Invariant's decisions. That repository has since started over and left Invariant. `invariant decisions` records and answers, coding agents ask it over MCP, CI checks it on every change, and the dashboard draws it ([#135](https://github.com/gitdek/invariant/pull/135)). Now [#177](https://github.com/gitdek/invariant/issues/177) proves the journal in four parts, and three are in. Decision IDs are proved unique, and `decide` runs on the proof ([#192](https://github.com/gitdek/invariant/issues/192)). A decision's state is proved to be the fold of its lines, and every fold runs on the proof ([#193](https://github.com/gitdek/invariant/issues/193)). The store's journal is proved only to grow, and every write and rebuild runs on the proof ([#195](https://github.com/gitdek/invariant/issues/195)).
 - [ ] **Slice 13 · The factory takes every change, and a whole PRD.** Plumbing goes through the factory too, with a plan and tests where a model doesn't fit, and a PRD becomes a plan of issues a person ratifies, which the factory works one at a time ([D-0105](decisions/D-0105-factory-takes-every-change.md)). In progress: the factory built eleven of its own plumbing changes on 2026-09-29, and since [#134](https://github.com/gitdek/invariant/pull/134) it works on three issues at once. `/invariant plan` turns a PRD into a plan of issues to ratify ([#139](https://github.com/gitdek/invariant/pull/139)), and the factory now works each plan a writer ratifies, one issue at a time ([#144](https://github.com/gitdek/invariant/pull/144), [#148](https://github.com/gitdek/invariant/issues/148)). It planned [#153](https://github.com/gitdek/invariant/issues/153), the first real PRD, then opened and built its first issue itself. The dashboard's `/act` plans too: it opens a PRD with `/invariant plan`, or plans an open issue a writer opened that the factory hasn't taken ([#201](https://github.com/gitdek/invariant/issues/201)). Paused from 2026-09-29 to 2026-10-29, while coding agents built changes by hand; it runs again since, on Codex.
 - [ ] **Slice 14 · Codex on chosen projects.** A project picks its coding agent, Codex or Claude Code, and the factory runs Codex under the same rules, limits, view and records as Claude Code ([#153](https://github.com/gitdek/invariant/issues/153)). In progress: an issue picks its agent with an `Agent:` line, else its project's manifest does, that agent drafts and builds it ([#173](https://github.com/gitdek/invariant/issues/173)), and every record of its work names it ([#179](https://github.com/gitdek/invariant/issues/179)). Built by hand while the factory is paused: the factory takes back only regular files from an agent's workspace, Codex has a backend that runs it headless under a permission profile of its own, where its commands see nothing outside the workspace, the watcher checks its agents at start, the live view shows a Codex run, and Codex gets the decision graph's tools. Its first run built the two-phase commit and passed the final gate with proof ([#189](https://github.com/gitdek/invariant/pull/189)). Next: the factory's first Codex issue, once it resumes. Since 2026-10-29, Codex is the default everywhere, on `gpt-6-astra` at its highest reasoning, and Claude Code runs only where it's turned on ([#207](https://github.com/gitdek/invariant/issues/207)).
-- [ ] **Slice 15 · Verification inside ordinary code.** Ordinary Go and Python stay as they are, the critical components get proved in place, and Invariant checks how the code around them uses them, one component at a time, with every receipt saying what's proved and what's only tested. In progress: [#212](https://github.com/gitdek/invariant/issues/212)'s first slice inventories Go components and validates intended checks. [#229](https://github.com/gitdek/invariant/issues/229)'s first slice derives legacy assurance from successful evidence. [#234](https://github.com/gitdek/invariant/issues/234) adds an API for attributing proof results to exact Go components and recording complete coverage in fingerprints and JSON and Markdown receipts. [#257](https://github.com/gitdek/invariant/issues/257) retains assumptions, inert invocation declarations and exact input provenance through that proof-report path. [#274](https://github.com/gitdek/invariant/issues/274) adds independently replaceable supplied assumption records and optional actual proof provenance, with atomic validation and canonical fingerprints. [#279](https://github.com/gitdek/invariant/issues/279) adds independent supplied conformance records, with exact provenance and separate transition, exhaustive-state and attempt coverage in JSON. [#287](https://github.com/gitdek/invariant/issues/287) adds supplied runtime tests and assertions, qualified independently from actual outcomes and provenance, and makes all four attribution kinds revalidate incoming and retained evidence on replacement and clearing. [#296](https://github.com/gitdek/invariant/issues/296) completes Markdown views of all supplied evidence and input provenance alongside optional JSON, preserving independent proof coverage, report values, fingerprints and legacy receipts. Dashboard views and further execution adapters remain later work; #315 and #318 provide the direct Python application test and sampled-observation adapter. [#304](https://github.com/gitdek/invariant/issues/304) adds Python syntax discovery, lexical identities and exact inline contract snapshots. Public component gate execution remains unavailable; the Python application test and sampled-observation adapter is directly callable. [#244](https://github.com/gitdek/invariant/issues/244)'s evidence foundation for the narrowed step 1 of [#210](https://github.com/gitdek/invariant/issues/210) now includes completed Markdown and JSON receipts through [#296](https://github.com/gitdek/invariant/issues/296), with component dashboard views still later work. #210's plan is narrowed to the path ask3d needs: #294 then checks unchanged Python against a model, backs trusted dependency contracts with tests and proves selected Python functions in place, each connecting the gate for its path. Its Go steps, the checks on callers against proved contracts and the CI check on evidence regressions wait until ask3d shows they're needed ([D-0172](decisions/journal/D-0172.jsonl)). TypeScript discovery is outside this ordinary Go and Python scope.
+- [ ] **Slice 15 · Verification inside ordinary code.** Ordinary Go and Python stay as they are, the critical components get proved in place, and Invariant checks how the code around them uses them, one component at a time, with every receipt saying what's proved and what's only tested. In progress: [#212](https://github.com/gitdek/invariant/issues/212)'s first slice inventories Go components and validates intended checks. [#229](https://github.com/gitdek/invariant/issues/229)'s first slice derives legacy assurance from successful evidence. [#234](https://github.com/gitdek/invariant/issues/234) adds an API for attributing proof results to exact Go components and recording complete coverage in fingerprints and JSON and Markdown receipts. [#257](https://github.com/gitdek/invariant/issues/257) retains assumptions, inert invocation declarations and exact input provenance through that proof-report path. [#274](https://github.com/gitdek/invariant/issues/274) adds independently replaceable supplied assumption records and optional actual proof provenance, with atomic validation and canonical fingerprints. [#279](https://github.com/gitdek/invariant/issues/279) adds independent supplied conformance records, with exact provenance and separate transition, exhaustive-state and attempt coverage in JSON. [#287](https://github.com/gitdek/invariant/issues/287) adds supplied runtime tests and assertions, qualified independently from actual outcomes and provenance, and makes all four attribution kinds revalidate incoming and retained evidence on replacement and clearing. [#296](https://github.com/gitdek/invariant/issues/296) completes Markdown views of all supplied evidence and input provenance alongside optional JSON, preserving independent proof coverage, report values, fingerprints and legacy receipts. Dashboard views and further execution adapters remain later work; #315 and #318 provide the direct Python application test and sampled-observation adapter. [#304](https://github.com/gitdek/invariant/issues/304) adds Python syntax discovery, lexical identities and exact inline contract snapshots. #327 connects the Python application sampled gate with explicit components or legacy selections. Other component execution adapters remain later work. [#244](https://github.com/gitdek/invariant/issues/244)'s evidence foundation for the narrowed step 1 of [#210](https://github.com/gitdek/invariant/issues/210) now includes completed Markdown and JSON receipts through [#296](https://github.com/gitdek/invariant/issues/296), with component dashboard views still later work. #210's plan is narrowed to the path ask3d needs: #294 then checks unchanged Python against a model, backs trusted dependency contracts with tests and proves selected Python functions in place, each connecting the gate for its path. Its Go steps, the checks on callers against proved contracts and the CI check on evidence regressions wait until ask3d shows they're needed ([D-0172](decisions/journal/D-0172.jsonl)). TypeScript discovery is outside this ordinary Go and Python scope.
 
 The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-0013-slice-plan.md). Slice 4's are in [D-0036](decisions/D-0036-slice-4-plan.md).
 

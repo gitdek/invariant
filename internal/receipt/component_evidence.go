@@ -48,6 +48,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			transitions = "checked"
 		}
 		parts := []string{
+			"Origin: " + componentOrigin(row.Origin),
 			"Mode: " + componentLiteral(result.Mode), "Outcome: " + componentOutcome(result.Outcome),
 			fmt.Sprintf("%d runs, %d steps, %d states, %d transitions, %d model states", result.Runs, result.Steps, result.States, result.Transitions, result.ModelStates),
 			"Transitions: " + transitions, "State coverage: " + state, "Attempt coverage: " + attempt,
@@ -70,7 +71,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 	for _, row := range e.Runtime {
 		qualified := componentRuntimeQualification(r, row)
 		result := row.Result
-		parts := []string{"Process outcome: " + componentOutcome(result.Outcome), componentInvocation(result.Invocation),
+		parts := []string{"Origin: " + componentOrigin(row.Origin), "Process outcome: " + componentOutcome(result.Outcome), componentInvocation(result.Invocation),
 			componentTool(result.Runner), componentInputs(result.Inputs, result.FileInputs), componentContext(result.Model, result.Bounds),
 			"diagnostics: " + componentStrings(result.Diagnostics)}
 		if len(result.Tests) == 0 {

@@ -397,6 +397,11 @@ func Encode(v any) (string, error) {
 			return "", fmt.Errorf("%v isn't an integer; TLA+ has no fractions", x)
 		}
 		return strconv.FormatInt(int64(x), 10), nil
+	case json.Number:
+		if !regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`).MatchString(string(x)) {
+			return "", fmt.Errorf("%s isn't an integer; TLA+ has no fractions", x)
+		}
+		return string(x), nil
 	case []any:
 		return "", fmt.Errorf(`a bare array is ambiguous: write {"$set": [...]} or {"$seq": [...]}`)
 	case map[string]any:

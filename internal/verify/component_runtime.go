@@ -52,6 +52,7 @@ type ComponentRuntimeAssertionResult struct {
 // ComponentRuntimeEvidence qualifies only supplied tests and assertions. A
 // tested row grants no target code coverage, proof or conformance claim.
 type ComponentRuntimeEvidence struct {
+	Origin string                         `json:"origin,omitempty"`
 	Target string                         `json:"target"`
 	Check  string                         `json:"check"`
 	Status string                         `json:"status"`
@@ -212,7 +213,7 @@ func (r *ComponentRuntimeResult) qualifyRuntime(check project.ResolvedComponentC
 	if r.Bounds != nil {
 		ready = ready && len(r.Bounds.Sources) > 0 && filesPresent(r.Bounds.Sources)
 	}
-	row := ComponentRuntimeEvidence{Target: r.Target, Check: r.Check, Status: "unchecked", Result: *r}
+	row := ComponentRuntimeEvidence{Origin: "supplied", Target: r.Target, Check: r.Check, Status: "unchecked", Result: *r}
 	for _, test := range r.Tests {
 		testReady := ready && test.Exercised && declarationPresent(test.Check)
 		evidence := ComponentRuntimeTestEvidence{Check: test.Check, Status: "unchecked"}
@@ -254,6 +255,10 @@ func (index *componentIndex) retainedRuntime(old *ComponentEvidence, bounds map[
 	}
 	for i, row := range rows {
 		was := prior.Runtime[i]
+		if was.Origin != "" && was.Origin != "gate" && was.Origin != "supplied" {
+			return nil, fmt.Errorf("invalid runtime origin")
+		}
+		rows[i].Origin = was.Origin
 		if row.Target != was.Target || row.Check != was.Check || row.Status != was.Status ||
 			!slices.EqualFunc(row.Tests, was.Tests, func(a, b ComponentRuntimeTestEvidence) bool {
 				return a.Check == b.Check && a.Status == b.Status && slices.Equal(a.Assertions, b.Assertions)

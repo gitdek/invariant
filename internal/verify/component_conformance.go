@@ -67,6 +67,7 @@ type ComponentAttemptResult struct {
 }
 
 type ComponentConformanceEvidence struct {
+	Origin             string                     `json:"origin,omitempty"`
 	Target             string                     `json:"target"`
 	Check              string                     `json:"check"`
 	Status             string                     `json:"status"`
@@ -171,7 +172,7 @@ func (index *componentIndex) conformance(results []ComponentConformanceResult, b
 		if a := result.Attempts; a != nil && (!componentConformanceOutcome(a.Outcome) || a.Attempts < 0 || a.States < 0) {
 			return nil, fmt.Errorf("component conformance: invalid attempt outcome or counts for %q", result.Target)
 		}
-		row := ComponentConformanceEvidence{Target: result.Target, Check: result.Check, Status: "unchecked", Result: result}
+		row := ComponentConformanceEvidence{Origin: "supplied", Target: result.Target, Check: result.Check, Status: "unchecked", Result: result}
 		if result.coversConformance(check) {
 			row.Status = "tested"
 			row.TransitionsChecked = result.Transitions > 0

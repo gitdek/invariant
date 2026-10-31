@@ -420,6 +420,10 @@ func (index *componentIndex) retainedConformance(old *ComponentEvidence, bounds 
 	}
 	for i, row := range rows {
 		was := prior.Conformance[i]
+		if was.Origin != "" && was.Origin != "gate" && was.Origin != "supplied" {
+			return nil, fmt.Errorf("invalid conformance origin")
+		}
+		rows[i].Origin = was.Origin
 		if row.Target != was.Target || row.Check != was.Check || row.Status != was.Status ||
 			row.TransitionsChecked != was.TransitionsChecked || row.ExhaustiveStates != was.ExhaustiveStates || row.EveryStep != was.EveryStep {
 			return nil, fmt.Errorf("component conformance: retained qualification changed for %q/%q", was.Target, was.Check)
