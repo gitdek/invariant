@@ -76,6 +76,10 @@ var pythonApplicationDecimal = regexp.MustCompile(`^[0-9]+$`)
 var pythonApplicationDistribution = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var pythonApplicationVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.!+_]*$`)
 
+// pythonApplicationWheelName normalizes the distribution part of a wheel's
+// filename as the installer does: runs of -, _ and . become -.
+var pythonApplicationWheelName = regexp.MustCompile(`[-_.]+`)
+
 func pythonApplicationHash(b []byte) string {
 	h := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(h[:])
@@ -407,7 +411,7 @@ func pythonApplicationDependencies(files []project.ComponentFile, image string, 
 	for i, a := range d.Artifacts {
 		parts := strings.Split(strings.TrimSuffix(a.Filename, ".whl"), "-")
 		if !pythonApplicationDistribution.MatchString(a.Name) || !pythonApplicationVersion.MatchString(a.Version) || path.Base(a.Filename) != a.Filename || !strings.HasSuffix(a.Filename, ".whl") || !pythonApplicationDigest.MatchString(a.SHA256) || seen[a.Name] || (i > 0 && d.Artifacts[i-1].Name >= a.Name) ||
-			(len(parts) != 5 && len(parts) != 6) || strings.ReplaceAll(strings.ToLower(parts[0]), "_", "-") != a.Name || parts[1] != a.Version {
+			(len(parts) != 5 && len(parts) != 6) || pythonApplicationWheelName.ReplaceAllString(strings.ToLower(parts[0]), "-") != a.Name || parts[1] != a.Version {
 			return fmt.Errorf("invalid wheel evidence")
 		}
 		seen[a.Name] = true
