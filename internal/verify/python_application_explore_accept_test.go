@@ -155,7 +155,7 @@ func pa342New(t *testing.T, explicit, wheel bool) pa342Fixture {
 	step := "from pathlib import Path\n\n\ndef next_count(count):\n    return count + int(Path(__file__).with_name('step.txt').read_text())\n"
 	files := map[string]string{
 		"counter/__init__.py": "", pa342Source: pa342Core, "counter/step.txt": "1\n",
-		"counter/service.py": "from .core import increment\n\n\ndef start():\n    return 0\n\n\ndef inc(count):\n    return increment(count)\n\n\ndef peek(count):\n    return count\n",
+		"counter/service.py":  "from .core import increment\n\n\ndef start():\n    return 0\n\n\ndef inc(count):\n    return increment(count)\n\n\ndef peek(count):\n    return count\n",
 		"counter/neighbor.py": "def unchecked():\n    return 23\n", "resources/payload.txt": "unchanged resource\n",
 		"tests/__init__.py":     "",
 		"tests/test_counter.py": "import unittest\nfrom counter import service\n\n\nclass CounterTests(unittest.TestCase):\n    def test_inc(self):\n        self.assertEqual(service.inc(0), 1)\n",

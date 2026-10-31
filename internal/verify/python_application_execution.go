@@ -93,8 +93,8 @@ type PythonApplicationExecutionResult struct {
 	// reached, counted from its authenticated observations (#342).
 	Exploration *PythonApplicationExploration `json:"exploration,omitempty"`
 	Complete    bool                          `json:"complete"`
-	Success         bool                                `json:"success"`
-	ExitCode        int                                 `json:"exit_code"`
+	Success     bool                          `json:"success"`
+	ExitCode    int                           `json:"exit_code"`
 	// Operational diagnostics may contain host paths or container IDs.
 	Diagnostics []string `json:"diagnostics,omitempty"`
 	Fingerprint string   `json:"fingerprint"`

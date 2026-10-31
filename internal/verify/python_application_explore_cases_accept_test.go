@@ -370,12 +370,16 @@ func TestPythonApplicationGateExplorationFingerprints(t *testing.T) {
 			{"model include", func(f pa342Fixture) {
 				pa342Write(t, f.root, pa342Project+"/.invariant/specs/Local.tla", "---- MODULE Local ----\nHelper == TRUE /\\ TRUE\n====\n")
 			}},
-			{"driver", func(f pa342Fixture) { pa342Edit(t, f, pa342DriverPath, "STEPS = ", "# Every step, everywhere.\nSTEPS = ") }},
+			{"driver", func(f pa342Fixture) {
+				pa342Edit(t, f, pa342DriverPath, "STEPS = ", "# Every step, everywhere.\nSTEPS = ")
+			}},
 			{"driver bound", func(f pa342Fixture) {
 				pa342Edit(t, f, pa342DriverPath, "if state['count'] >= Limit:", "if state['count'] >= Limit or state['count'] < 0:")
 			}},
 			{"resource", func(f pa342Fixture) { pa342Write(t, f.root, "resources/payload.txt", "changed resource\n") }},
-			{"sibling", func(f pa342Fixture) { pa342Write(t, f.root, "counter/neighbor.py", "def unchecked():\n    return 29\n") }},
+			{"sibling", func(f pa342Fixture) {
+				pa342Write(t, f.root, "counter/neighbor.py", "def unchecked():\n    return 29\n")
+			}},
 		}
 		if real {
 			changes = append(changes, struct {
