@@ -16,6 +16,7 @@ import functools
 import gc
 import hashlib
 import inspect
+import json
 import math
 import os
 import random
@@ -240,7 +241,12 @@ class Collector:
         # The first reason a handle was misused, kept for the diagnostic in
         # case the driver catches the error.
         self.misuse = None
-        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__, _ModuleLifecycle.step.__wrapped__.__code__)
+        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__, _ModuleLifecycle.step.__wrapped__.__code__, _Exploration.try_step.__code__)
+        # An explored invocation drives the application only through
+        # explore(), which runs once (#342).
+        self.exploring = request.get("mode") == "explored"
+        self.exploration = None
+        self.explored = False
 
     def lexical(self, code):
         filename = os.path.abspath(code.co_filename)
@@ -268,13 +274,16 @@ class Collector:
         if self.failed or threading.get_ident() != self.thread or sys.gettrace() != self.trace:
             raise ValueError("observation execution is poisoned or tracing changed" + (": " + self.misuse if self.misuse else ""))
         frame = sys._getframe(1)
+        # An exploration's rows all name the driver function that called
+        # explore(), beneath the steps' own functions.
+        exploring = self.exploration.driver["id"] if self.exploration is not None else None
         while frame is not None:
             if os.path.abspath(frame.f_code.co_filename) == os.path.join(self.request["root"], self.request["check"]["source"]):
                 component, digest, _ = self.lexical(frame.f_code)
                 selected = self.request["check"]
                 if self.request.get("legacy"):
                     selected = next((d for d in self.request["drivers"] if d["id"] == component), {})
-                if component == selected.get("id"):
+                if component == selected.get("id") and exploring in (None, component):
                     function = frame.f_globals.get(frame.f_code.co_name)
                     binding = Binding(self, function)
                     binding.frame(frame)
@@ -286,7 +295,7 @@ class Collector:
             frame = frame.f_back
         raise ValueError("configured driver is not executing")
 
-    def write(self, life, entry, **state):
+    def write(self, life, entry, kind=None, **state):
         caller = sys._getframe(1)
         if not any(caller.f_code is code for code in self.writers) or caller.f_globals is not globals():
             self.failed = True
@@ -294,13 +303,28 @@ class Collector:
         self.count += 1
         if life.form:
             state["form"] = life.form
-        self.emit(dict(type="observation", kind="initial" if life.sequence == 0 else "transition",
-                       run=life.run, instance=life.identity, sequence=life.sequence,
-                       key=self.request["key"], target=life.target.component,
-                       driver=self.current_driver["id"], source_sha256=life.target.digest,
-                       driver_sha256=self.current_driver["source_sha256"],
-                       symbol=life.target.symbol, entry=entry.component, entry_sha256=entry.digest,
-                       readback=life.fields, **state))
+        if kind is None:
+            kind = "initial" if life.sequence == 0 else "transition"
+        if self.exploration is not None:
+            state.update(self.exploration.fields(life, kind))
+        row = dict(type="observation", kind=kind,
+                   run=life.run, instance=life.identity, sequence=life.sequence,
+                   key=self.request["key"], target=life.target.component,
+                   driver=self.current_driver["id"], source_sha256=life.target.digest,
+                   driver_sha256=self.current_driver["source_sha256"],
+                   symbol=life.target.symbol, readback=life.fields, **state)
+        # An omitted step calls no application entry.
+        if entry is not None:
+            row.update(entry=entry.component, entry_sha256=entry.digest)
+        self.emit(row)
+
+    def declare(self, steps):
+        # The harness's own record of the steps it tries, before any run.
+        caller = sys._getframe(1)
+        if caller.f_code is not explore.__wrapped__.__code__ or caller.f_globals is not globals():
+            self.failed = True
+            raise ValueError("exploration steps did not come from the harness")
+        self.emit(dict(type="exploration", steps=steps))
 
     def trace(self, frame, event, arg):
         current = threading.current_thread()
@@ -378,6 +402,8 @@ class _Lifecycle:
         c.driver()
         if c.active is not None:
             raise ValueError("nested lifecycles during a step are unsupported")
+        if c.exploring and (c.exploration is None or not c.exploration.starting):
+            raise ValueError("an explored invocation makes lifecycles only in explore()'s starts")
         self.form = form
         self.target = Binding(c, target, module=form == "module")
         c.targets[self] = self.target
@@ -405,6 +431,11 @@ class _Lifecycle:
         self.expected = expected
         self.entered = self.closed = False
         self.sequence = 0
+        # An exploration run whose one attempt the environment rules out
+        # can end with no step.
+        self.omitted = False
+        if c.exploration is not None:
+            c.exploration.made.append(self)
 
     def application(self, function):
         binding = Binding(_collector, function)
@@ -433,6 +464,8 @@ class _Lifecycle:
         c.driver()
         if self.entered or self.closed or c.active is not None:
             raise ValueError("reused or nested lifecycle")
+        if c.exploring and (c.exploration is None or c.exploration.entering is not self):
+            raise ValueError("explore() enters an explored invocation's lifecycles")
         if len(c.lives) >= int(c.request["sampling"]["runs"]):
             raise ValueError("run sampling budget exceeded")
         self.entered = True
@@ -453,11 +486,14 @@ class _Lifecycle:
 
     @guarded
     def __exit__(self, exc_type, exc, tb):
-        _collector.driver()
-        if not self.entered or self.closed or _collector.active is not None:
+        c = _collector
+        c.driver()
+        if not self.entered or self.closed or c.active is not None:
             raise ValueError("closed, unentered or nested lifecycle exit")
+        if c.exploring and (c.exploration is None or c.exploration.leaving is not self):
+            raise ValueError("explore() closes an explored invocation's lifecycles")
         self.closed = True
-        if exc_type is not None or self.sequence == 0:
+        if exc_type is not None or (self.sequence == 0 and not self.omitted):
             raise ValueError("exception or empty lifecycle")
         return False
 
@@ -499,10 +535,14 @@ class _Lifecycle:
         if event == "return" and frame is self.target_frame:
             self.after = {next(iter(self.fields)): scalar(arg)} if self.functional else self.read()
         if event == "return" and frame is self.entry_frame:
-            if self.after is None:
-                raise ValueError("application entry did not return a selected call")
             actual = {next(iter(self.fields)): scalar(arg)} if self.functional else self.read()
-            if not equal(actual, self.after):
+            if self.after is None:
+                # An explored step the application refuses before its
+                # selected call must leave the state as it was (#342).
+                if not (_collector.exploring and self.calls == 0 and equal(actual, self.before)):
+                    raise ValueError("application entry did not return a selected call")
+                self.after = actual
+            elif not equal(actual, self.after):
                 raise ValueError("application entry substituted selected result")
 
     @guarded
@@ -513,6 +553,8 @@ class _Lifecycle:
             raise ValueError("closed, unentered or nested lifecycle step")
         if self.sequence >= int(c.request["sampling"]["steps"]):
             raise ValueError("step sampling budget exceeded")
+        if c.exploring:
+            c.exploration.stepping(self)
         self.check_target()
         self.entry = self.application(entry)
         self.before = self.state.copy() if self.functional else self.read()
@@ -526,7 +568,8 @@ class _Lifecycle:
         try:
             args = [next(iter(self.state.values()))] if self.functional else []
             self.entry.call(*args)
-            if c.failed or self.calls != 1 or self.after is None or not self.delegate_called:
+            refused = c.exploring and self.calls == 0 and self.after is not None
+            if c.failed or (self.calls != 1 and not refused) or self.after is None or not (self.delegate_called or refused):
                 raise ValueError("incomplete selected call")
             self.check_target()
             self.entry.check()
@@ -669,6 +712,8 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
             raise ValueError("closed, unentered or nested lifecycle step")
         if self.sequence >= int(c.request["sampling"]["steps"]):
             raise ValueError("step sampling budget exceeded")
+        if c.exploring:
+            c.exploration.stepping(self)
         self.entry = self.application(entry)
         self.before = self.read()
         if not equal(self.before, self.state):
@@ -708,10 +753,15 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 raise ValueError("module entry left unfinished coroutines")
             if any(not task.done() or task.cancelled() or task.exception() is not None for task in self.tasks):
                 raise ValueError("module entry left unfinished or failed tasks")
-            if c.failed or self.calls != 1 or not self.completed or not self.entry_completed:
+            # An explored step the application refuses before its selected
+            # call completes the entry and leaves the state as it was (#342).
+            refused = c.exploring and self.calls == 0
+            if c.failed or (self.calls != 1 and not refused) or not (self.completed or refused) or not self.entry_completed:
                 raise ValueError("incomplete selected call")
             self.entry.check()
             self.after = self.read()
+            if refused and not equal(self.after, self.before):
+                raise ValueError("a refused step changed the state without a selected call")
             expect(self.after, expected_after, module=True)
             if time.monotonic() >= deadline:
                 self.expire()
@@ -806,6 +856,195 @@ def module(target, *, fields, expected_initial=None, timeout=5.0):
     return _handle(_ModuleLifecycle(target, fields, expected_initial, timeout))
 
 
+class Step:
+    """A step the model's Next names, such as Advance or Submit(t) (#342).
+
+    name is the step's name, exactly as Next names it. args is every argument
+    list to try it with, as Next passes them, in the spec's encoding:
+    [[{"$mv": "t1"}], [{"$mv": "t2"}]]; leave it out for a step with no
+    arguments. take(life, state, *args) tries the step: it calls life.step()
+    once, with the application entry that takes it, or returns without
+    calling it only where the environment's bounds rule the step out. state
+    is a copy of what the gate read back, so the driver can apply those
+    bounds; changing it changes nothing.
+    """
+
+    def __init__(self, name, take, args=None):
+        self.name = name
+        self.take = take
+        self.args = args if args is not None else [[]]
+
+
+_step_name = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+class _Exploration:
+    """The harness's own records of one exploration: every state read back,
+    and the path of attempts that first reached it."""
+
+    def __init__(self, collector, starts, steps):
+        self.c = collector
+        self.driver = collector.current_driver
+        self.starts, self.steps = starts, steps
+        self.instances = [(s, a) for s in range(len(steps)) for a in range(len(steps[s][2]))]
+        self.starting = False
+        self.made = []
+        self.entering = self.leaving = None
+        self.record = self.attempt = None
+        self.stepped = False
+        self.nodes, self.index = [], {}
+        self.roots = [None] * len(starts)
+        self.start_index = None
+
+    def fields(self, life, kind):
+        if kind == "initial":
+            return dict(start=self.start_index)
+        if kind == "omitted":
+            return dict(step=self.attempt["step"], args=self.attempt["args"])
+        return dict(step=self.attempt["step"], args=self.attempt["args"],
+                    replay=self.attempt["replay"], called=life.calls == 1)
+
+    def stepping(self, life):
+        if life is not self.record or self.attempt is None or self.stepped:
+            raise ValueError("a step's take calls life.step() at most once, on the lifecycle it was given")
+        self.stepped = True
+
+    def key(self, state):
+        return json.dumps(state, sort_keys=True)
+
+    def add(self, state, start, edges, trail, level):
+        n = len(self.nodes)
+        key = self.key(state)
+        self.index[key] = n
+        self.nodes.append(dict(key=key, state=copied(state), start=start, edges=edges, trail=trail + [n], level=level, expanded=False))
+        return n
+
+    def make(self, r):
+        self.made, self.starting = [], True
+        try:
+            handle = self.starts[r]()
+        finally:
+            self.starting = False
+        if type(handle) is not Lifecycle or len(self.made) != 1 or self.c.handles.get(handle) is not self.made[0]:
+            raise ValueError("a start returns the one new lifecycle it made")
+        return handle, self.made[0]
+
+    def take(self, handle, record, si, ai, replay):
+        name, take, args = self.steps[si]
+        self.record, self.stepped = record, False
+        self.attempt = dict(step=name, args=copied(args[ai]), replay=replay)
+        try:
+            take(handle, copied(record.state), *copied(args[ai]))
+        finally:
+            self.record = None
+
+    def try_step(self, r, node, si, ai):
+        handle, record = self.make(r)
+        self.entering, self.start_index = record, r
+        try:
+            record.__enter__()
+        finally:
+            self.entering = None
+        key = self.key(record.state)
+        if self.roots[r] is None:
+            n = self.index.get(key)
+            if n is None:
+                n = self.add(record.state, r, [], [], 1)
+            elif n in self.roots or self.nodes[n]["expanded"]:
+                raise ValueError("two starts reached the same initial state")
+            else:
+                # An earlier start reached this start's initial state, and
+                # hasn't tried a step there: this start tries them, directly.
+                self.nodes[n].update(start=r, edges=[], trail=[n], level=1)
+            self.roots[r] = n
+        elif self.nodes[self.roots[r]]["key"] != key:
+            raise ValueError("a start did not reproduce its initial state")
+        if node is None:
+            node = self.nodes[self.roots[r]]
+        # Replay the path that first reached the state, then try one step.
+        for j, (psi, pai) in enumerate(node["edges"]):
+            self.take(handle, record, psi, pai, True)
+            if not self.stepped:
+                raise ValueError("a replay did not take the step it took before")
+            if self.key(record.state) != self.nodes[node["trail"][j + 1]]["key"]:
+                raise ValueError("the application is not deterministic: a replay reached another state")
+        self.take(handle, record, si, ai, False)
+        if self.stepped:
+            if self.key(record.state) not in self.index:
+                self.add(record.state, r, node["edges"] + [(si, ai)], node["trail"], node["level"] + 1)
+        else:
+            record.omitted = True
+            self.c.write(record, None, kind="omitted", state=copied(record.state))
+        self.attempt = None
+        self.leaving = record
+        try:
+            record.__exit__(None, None, None)
+        finally:
+            self.leaving = None
+
+    def run(self):
+        # Each start's initial state is tried from the start itself, and
+        # every other state from the path that first reached it, once.
+        for r in range(len(self.starts)):
+            for si, ai in self.instances:
+                self.try_step(r, None, si, ai)
+            self.nodes[self.roots[r]]["expanded"] = True
+        n = 0
+        while n < len(self.nodes):
+            node = self.nodes[n]
+            if not node["expanded"]:
+                for si, ai in self.instances:
+                    self.try_step(node["start"], node, si, ai)
+                node["expanded"] = True
+            n += 1
+
+
+@guarded
+def explore(start, steps):
+    """Explore every state the application reaches, trying every step there.
+
+    start is a callable, or a list of them, each making a new lifecycle with
+    functional(), instance() or module() and returning it unentered, in one
+    initial state. For every state reached and every step and argument list,
+    the harness makes a new lifecycle, replays through the application the
+    path that first reached the state, and has the step's take try it. The
+    gate reads every state back from the application, and the attempts it
+    records are checked as a driver's are (D-0082, D-0085). A start that
+    doesn't reproduce its state, or a replay that doesn't, fails the run.
+    """
+    c = _collector
+    c.driver()
+    if not c.exploring:
+        raise ValueError("explore() needs an exhaustive manifest")
+    if c.exploration is not None or c.explored or c.lives or c.active is not None:
+        raise ValueError("explore() runs once, before any other lifecycle")
+    starts = list(start) if type(start) in (list, tuple) else [start]
+    if not starts or any(not callable(s) for s in starts):
+        raise ValueError("explore() needs one or more start callables")
+    if type(steps) not in (list, tuple) or not steps:
+        raise ValueError("explore() needs a nonempty list of steps")
+    records, names = [], set()
+    for s in steps:
+        if type(s) is not Step:
+            raise ValueError("each step must be a Step")
+        name, take, args = s.name, s.take, s.args
+        if type(name) is not str or _step_name.fullmatch(name) is None or name in names:
+            raise ValueError("step names must be distinct TLA+ identifiers")
+        if not callable(take):
+            raise ValueError("a step's take must be callable")
+        if type(args) not in (list, tuple) or not args or any(type(a) not in (list, tuple) for a in args):
+            raise ValueError("a step's args must be a nonempty list of argument lists")
+        names.add(name)
+        records.append((name, take, [copied(list(a)) for a in args]))
+    c.declare([dict(name=name, args=args) for name, _, args in records])
+    c.exploration = _Exploration(c, starts, records)
+    try:
+        c.exploration.run()
+    finally:
+        c.exploration = None
+    c.explored = True
+
+
 def run(request, emit, locations, codes, argv):
     # Docker starts the runner as namespace init, which cannot be killed by
     # a child in that namespace. Keep init as a supervisor and execute the
@@ -845,8 +1084,10 @@ def run(request, emit, locations, codes, argv):
     threading.excepthook = thread_error
     try:
         exec(code, vars(module))
-        if c.failed or not c.lives or any(not life.closed or life.sequence == 0 for life in c.lives) or sys.gettrace() != c.trace or sys.getprofile() != c.profile:
+        if c.failed or not c.lives or any(not life.closed or (life.sequence == 0 and not life.omitted) for life in c.lives) or sys.gettrace() != c.trace or sys.getprofile() != c.profile:
             raise ValueError("driver did not complete bound lifecycles")
+        if c.exploring and not c.explored:
+            raise ValueError("an explored invocation's driver did not complete explore()")
     finally:
         sys.settrace(None)
         sys.setprofile(None)

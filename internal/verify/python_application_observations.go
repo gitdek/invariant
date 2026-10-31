@@ -15,10 +15,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/project"
 )
 
-// PythonApplicationObservation is raw sampled read-back, without a model
-// verdict, assertion record or coverage claim.
+// PythonApplicationObservation is raw read-back, sampled or explored,
+// without a model verdict, assertion record or coverage claim.
 type PythonApplicationObservation struct {
 	Form         string                         `json:"form,omitempty"`
 	Kind         string                         `json:"kind"`
@@ -37,6 +39,15 @@ type PythonApplicationObservation struct {
 	State        map[string]any                 `json:"state,omitempty"`
 	Before       map[string]any                 `json:"before,omitempty"`
 	After        map[string]any                 `json:"after,omitempty"`
+	// An explored driver's rows also say which start a run began from, and
+	// which model step and arguments each step tried, whether it replayed
+	// an earlier attempt and whether the selected target was called (#342).
+	// An omitted row records a step the environment's bounds rule out.
+	Start  *int   `json:"start,omitempty"`
+	Step   string `json:"step,omitempty"`
+	Args   []any  `json:"args,omitempty"`
+	Replay *bool  `json:"replay,omitempty"`
+	Called *bool  `json:"called,omitempty"`
 }
 
 func (s *PythonApplicationSession) freshObserver() error {
@@ -101,7 +112,11 @@ func pythonApplicationState(state map[string]any, reader map[string]string, modu
 	return true
 }
 
-func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand, execution string, authentication, events []byte, r *PythonApplicationExecutionResult) error {
+// observeTransitions accepts an authenticated collector stream for c. check
+// and drivers are the declarations of the driver this execution ran, which
+// a larger run's copy keeps with its own hash. An explored stream is also
+// held to the exploration harness's protocol (#342).
+func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand, execution string, authentication, events []byte, r *PythonApplicationExecutionResult, check project.Component, drivers []project.Component, explored bool) error {
 	if len(events) > pythonApplicationEventsLimit {
 		return fmt.Errorf("Python application observations exceed limit")
 	}
@@ -136,6 +151,10 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 	maxInstance := 0
 	runLimit, _ := strconv.Atoi(c.Sampling["runs"])
 	stepLimit, _ := strconv.Atoi(c.Sampling["steps"])
+	var explorer *pythonApplicationExplorer
+	if explored {
+		explorer = &pythonApplicationExplorer{}
+	}
 	for len(events) > 0 {
 		n := bytes.IndexByte(events, '\n')
 		if n < 0 {
@@ -175,9 +194,19 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return fmt.Errorf("foreign, replayed or duplicate observation begin")
 			}
 			begun = true
+		case "exploration":
+			if !begun || explorer == nil || explorer.declared || len(r.Observations) > 0 {
+				return fmt.Errorf("exploration steps outside an explored invocation's start")
+			}
+			if err := explorer.declare(line); err != nil {
+				return err
+			}
 		case "observation":
 			if !begun {
 				return fmt.Errorf("observation before begin")
+			}
+			if explorer != nil && !explorer.declared {
+				return fmt.Errorf("observation before the exploration's steps")
 			}
 			var row PythonApplicationObservation
 			d := json.NewDecoder(bytes.NewReader(line))
@@ -185,7 +214,10 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			if err := d.Decode(&row); err != nil {
 				return err
 			}
-			required := []string{"type", "kind", "run", "instance", "sequence", "key", "target", "driver", "source_sha256", "driver_sha256", "symbol", "entry", "entry_sha256", "readback"}
+			required := []string{"type", "kind", "run", "instance", "sequence", "key", "target", "driver", "source_sha256", "driver_sha256", "symbol", "readback"}
+			if row.Kind != "omitted" {
+				required = append(required, "entry", "entry_sha256")
+			}
 			if row.Form != "" {
 				if row.Form != "module" {
 					return fmt.Errorf("unknown observation form")
@@ -195,8 +227,19 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			switch row.Kind {
 			case "initial":
 				required = append(required, "state")
+				if explored {
+					required = append(required, "start")
+				}
 			case "transition":
 				required = append(required, "before", "after")
+				if explored {
+					required = append(required, "step", "args", "replay", "called")
+				}
+			case "omitted":
+				if !explored {
+					return fmt.Errorf("unknown observation kind")
+				}
+				required = append(required, "state", "step", "args")
 			default:
 				return fmt.Errorf("unknown observation kind")
 			}
@@ -212,14 +255,14 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			if _, err := pythonApplicationJSON(fields["key"], "target", "check", "kind", "id"); err != nil {
 				return err
 			}
-			target, driver := s.declarations[c.Key.Target], s.declarations[c.Key.Check]
+			target, driver := s.declarations[c.Key.Target], check
 			if s.legacy {
 				for _, t := range s.targets {
 					if t.ID == row.Target {
 						target = t
 					}
 				}
-				for _, d := range s.drivers {
+				for _, d := range drivers {
 					if d.ID == row.Driver {
 						driver = d
 					}
@@ -228,17 +271,23 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			if row.Key != c.Key || target.ID == "" || driver.ID == "" || row.Target != target.ID || row.Driver != driver.ID || row.SourceSHA256 != target.SourceSHA256 || row.DriverSHA256 != driver.SourceSHA256 || row.Symbol != target.Symbol {
 				return fmt.Errorf("foreign observation binding")
 			}
-			// Entries may live outside production scope; the Python collector
-			// validates their lexical declarations against the full staged tree.
-			prefix, source, ok := strings.Cut(row.Entry, "@")
-			module, symbol, named := strings.Cut(prefix, "#")
-			file, staged := s.snapshot[source]
-			if !ok || !named || !staged || !strings.HasSuffix(source, ".py") || module != "python:"+strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".") || !pythonApplicationName.MatchString(symbol) || row.EntrySHA256 != file.hash || source == driver.Source {
-				return fmt.Errorf("unknown or substituted application entry")
+			isModule := row.Form == "module"
+			// An omitted step calls no application entry.
+			if row.Kind != "omitted" {
+				// Entries may live outside production scope; the Python collector
+				// validates their lexical declarations against the full staged tree.
+				prefix, source, ok := strings.Cut(row.Entry, "@")
+				module, symbol, named := strings.Cut(prefix, "#")
+				file, staged := s.snapshot[source]
+				if !ok || !named || !staged || !strings.HasSuffix(source, ".py") || module != "python:"+strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".") || !pythonApplicationName.MatchString(symbol) || row.EntrySHA256 != file.hash || source == driver.Source {
+					return fmt.Errorf("unknown or substituted application entry")
+				}
+				if isModule && strings.Contains(symbol, ".") {
+					return fmt.Errorf("module observations require module functions")
+				}
 			}
 			functional := false
-			isModule := row.Form == "module"
-			if isModule && (strings.Contains(row.Symbol, ".") || strings.Contains(symbol, ".")) {
+			if isModule && strings.Contains(row.Symbol, ".") {
 				return fmt.Errorf("module observations require module functions")
 			}
 			for key, reader := range row.Readback {
@@ -281,8 +330,21 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				if previous.Kind == "transition" {
 					state = previous.After
 				}
-				if !exists || row.Form != previous.Form || row.Target != previous.Target || row.Driver != previous.Driver || row.Instance != previous.Instance || row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !maps.Equal(row.Readback, previous.Readback) || !pythonApplicationState(row.Before, row.Readback, isModule) || !pythonApplicationState(row.After, row.Readback, isModule) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target {
+				if !exists || previous.Kind == "omitted" || row.Form != previous.Form || row.Target != previous.Target || row.Driver != previous.Driver || row.Instance != previous.Instance || !maps.Equal(row.Readback, previous.Readback) {
 					return fmt.Errorf("invalid transition or state continuity")
+				}
+				if row.Kind == "omitted" {
+					// An omission ends its run in the state it reached.
+					if row.Sequence != previous.Sequence || !pythonApplicationState(row.State, row.Readback, isModule) || !reflect.DeepEqual(row.State, state) {
+						return fmt.Errorf("invalid omitted step or state continuity")
+					}
+				} else if row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !pythonApplicationState(row.Before, row.Readback, isModule) || !pythonApplicationState(row.After, row.Readback, isModule) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target {
+					return fmt.Errorf("invalid transition or state continuity")
+				}
+			}
+			if explorer != nil {
+				if err := explorer.observe(row); err != nil {
+					return err
 				}
 			}
 			runs[row.Run] = row
@@ -301,9 +363,16 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return fmt.Errorf("missing or miscounted observations")
 			}
 			for _, row := range runs {
-				if row.Sequence == 0 {
+				if row.Sequence == 0 && row.Kind != "omitted" {
 					return fmt.Errorf("empty lifecycle")
 				}
+			}
+			if explorer != nil {
+				x, err := explorer.finish()
+				if err != nil {
+					return err
+				}
+				r.Exploration = x
 			}
 			ended = true
 		default:
