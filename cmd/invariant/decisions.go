@@ -102,6 +102,31 @@ func checkout(ctx context.Context, dir, project string) (decisions.Repo, error) 
 	return decisions.Repo{Name: project, Dir: root}, nil
 }
 
+// handRatified checks a lock ratified by hand, not on GitHub: it names a
+// decision in the journal of the repository dir is in, and a person, never a
+// coding agent, ratified that decision (D-0034, D-0204).
+func handRatified(ctx context.Context, dir, id string) error {
+	if id == "" {
+		return errors.New("the lock has no ratification record: no ratifying comment, and no decision")
+	}
+	repo, err := checkout(ctx, dir, "")
+	if err != nil {
+		return fmt.Errorf("decision %s, which the lock names, can't be checked: %v", id, err)
+	}
+	d, err := decisions.Read(repo, id)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("decision %s, which the lock names, isn't in the repository's journal", id)
+	case err != nil:
+		return fmt.Errorf("decision %s, which the lock names, can't be read: %v", id, err)
+	case d.Status != "ratified":
+		return fmt.Errorf("decision %s, which the lock names, is %s: only a decision a person ratified ratifies a lock", id, d.Status)
+	case !strings.HasPrefix(d.Who, "@"):
+		return fmt.Errorf("decision %s, which the lock names, was ratified by %s, not a person", id, d.Who)
+	}
+	return nil
+}
+
 func (f decisionFlags) open() (*decisions.Store, error) {
 	path := *f.store
 	if path == "" {

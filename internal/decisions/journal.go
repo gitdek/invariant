@@ -279,6 +279,21 @@ func Load(repo Repo) ([]Decision, error) {
 	return out, nil
 }
 
+// Read reads one of a repository's own decisions from its journal, checked
+// and folded as Load reads every one. A decision the journal doesn't hold is
+// an error that wraps os.ErrNotExist.
+func Read(repo Repo, id string) (Decision, error) {
+	m := idPattern.FindStringSubmatch(strings.TrimSpace(id))
+	if m == nil || m[1] != "" {
+		return Decision{}, fmt.Errorf("%q isn't one of the repository's own decision IDs, such as D-0096", id)
+	}
+	events, err := ReadJournal(filepath.Join(repo.JournalDir(), m[2]+".jsonl"))
+	if err != nil {
+		return Decision{}, err
+	}
+	return fold(repo.Name, events)
+}
+
 // highest is the number of the highest decision in a repository's journal.
 func highest(repo Repo) (int, error) {
 	entries, err := os.ReadDir(repo.JournalDir())
