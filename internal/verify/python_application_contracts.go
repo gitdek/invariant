@@ -202,7 +202,11 @@ func (r *Report) pythonApplicationContractTests(inv *project.ComponentInventory,
 				row.Assertions = append(row.Assertions, assertion)
 			}
 			result.Tests = append(result.Tests, row)
-			result.Exercise = append(result.Exercise, ComponentContractExercise{Check: t.Check, Calls: t.Calls()})
+			exercise := ComponentContractExercise{Check: t.Check, Calls: t.Calls()}
+			for _, r := range t.BoundaryRaised {
+				exercise.Raised = append(exercise.Raised, ComponentContractRaise{Exception: r.Exception, Calls: r.Calls, Declared: r.Declared})
+			}
+			result.Exercise = append(result.Exercise, exercise)
 		}
 		if b := x.Boundary; b != nil {
 			result.Diagnostics = append(result.Diagnostics, b.Diagnostics...)

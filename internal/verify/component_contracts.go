@@ -90,6 +90,15 @@ type ComponentContractRaise struct {
 	Declared  bool   `json:"declared"`
 }
 
+// contractOperationName names an operation as a diagnostic does: its dotted
+// name, or an application operation's declaration.
+func contractOperationName(o project.ResolvedComponentOperation) string {
+	if o.Kind == project.OperationApplication {
+		return o.Declaration
+	}
+	return o.Module + "." + o.Symbol
+}
+
 // contractUndeclared names the first exception a test saw escape the
 // operation that its contract doesn't declare, if any.
 func contractUndeclared(exercise []ComponentContractExercise, check string) string {
@@ -226,6 +235,9 @@ func (index *componentIndex) indexTrustedContracts(inv project.ComponentInventor
 		}
 		if !project.ValidComponentOperation(c.Operation) || operations[c.Operation.Key()] {
 			return fail("has an invalid operation, or one another contract binds")
+		}
+		if !project.ValidComponentExsures(c.Exsures) {
+			return fail("declares an invalid or duplicate exception")
 		}
 		operations[c.Operation.Key()] = true
 		if c.Operation.Kind == project.OperationApplication {
@@ -459,9 +471,11 @@ func (r *ComponentContractTestResult) qualifyContractTest(c project.ResolvedComp
 		checked := contractAssertionsChecked(test.Assertions, evidence.Assertions)
 		// A contract rests on its tests, so an interrupted or failing
 		// process supports nothing, even a test that passed inside it; a test
-		// that never called the bound implementation tested a stub; and one
-		// that asserted nothing, or had an assertion fail, checked nothing.
-		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 && checked {
+		// that never called the bound implementation tested a stub; one that
+		// asserted nothing, or had an assertion fail, checked nothing; and one
+		// that saw the operation raise what its contract doesn't declare
+		// found the contract wrong.
+		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 && checked && contractUndeclared(r.Exercise, test.Check) == "" {
 			evidence.Status = "tested"
 			if test.Check == r.Check {
 				row.Status = "tested"
@@ -700,6 +714,8 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 				vetoed[key] = "reached no real implementation"
 			} else if !contractAssertionsPassed(test.Assertions) {
 				vetoed[key] = "checked nothing, or had an assertion fail"
+			} else if raised := contractUndeclared(row.Result.Exercise, test.Check); raised != "" {
+				vetoed[key] = "saw its operation raise " + raised + ", which its contract's Exsures doesn't declare"
 			}
 		}
 	}
@@ -810,6 +826,8 @@ func contractShortfall(c project.ResolvedComponentContract, rows []ComponentCont
 					reason = fmt.Sprintf("%s: its run resolved an implementation the report doesn't bind", test)
 				case calls == 0:
 					reason = fmt.Sprintf("%s: the test itself made no call into the bound implementation, so it tested a stub, a substitute or nothing", test)
+				case contractUndeclared(row.Result.Exercise, test) != "":
+					reason = fmt.Sprintf("%s: %s raised %s, which its contract's Exsures doesn't declare", test, contractOperationName(c.Operation), contractUndeclared(row.Result.Exercise, test))
 				case !contractAssertionsChecked(result.Assertions, row.Tests[i].Assertions):
 					reason = fmt.Sprintf("%s: it made no assertion that passed, or one failed", test)
 				default:
@@ -916,6 +934,9 @@ func copyComponentContractTestResult(result ComponentContractTestResult) Compone
 	}
 	if result.Exercise != nil {
 		result.Exercise = slices.Clone(result.Exercise)
+		for i := range result.Exercise {
+			result.Exercise[i].Raised = slices.Clone(result.Exercise[i].Raised)
+		}
 		sort.Slice(result.Exercise, func(a, b int) bool { return result.Exercise[a].Check < result.Exercise[b].Check })
 	}
 	result.Diagnostics = slices.Clone(result.Diagnostics)
@@ -1002,6 +1023,7 @@ func copyTrustedContracts(contracts []project.ResolvedComponentContract) []proje
 	contracts = slices.Clone(contracts)
 	for i := range contracts {
 		c := &contracts[i]
+		c.Exsures = slices.Clone(c.Exsures)
 		c.Tests = slices.Clone(c.Tests)
 		sort.Strings(c.Tests)
 		c.Invocations = slices.Clone(c.Invocations)

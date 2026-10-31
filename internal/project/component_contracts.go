@@ -91,6 +91,19 @@ func ValidComponentContractID(id string) bool {
 	return id != "" && strings.IndexFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) < 0
 }
 
+// ValidComponentExsures checks a resolved contract's declared exceptions:
+// distinct dotted paths.
+func ValidComponentExsures(paths []string) bool {
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if !componentDotted.MatchString(p) || !strings.Contains(p, ".") || seen[p] {
+			return false
+		}
+		seen[p] = true
+	}
+	return true
+}
+
 // ValidComponentOperation checks a resolved operation's shape alone.
 func ValidComponentOperation(o ResolvedComponentOperation) bool {
 	switch o.Kind {
