@@ -54,8 +54,11 @@ type PythonApplicationSessionOptions struct {
 	SelectImage func(context.Context, *PythonApplicationWorkspace) (string, *toolchain.PythonDependencies, error)
 	Execute     func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
 	// Nagini runs a selected function's verifier input (#353); without it,
-	// the pinned Nagini runs in its own image.
-	Nagini func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
+	// the pinned Nagini runs in its own image. Distributions maps the
+	// dependency image's top-level modules to the distributions that
+	// installed them; without it, they're read in the image, offline.
+	Nagini        func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
+	Distributions func(ctx context.Context, image string) (map[string][]string, error)
 }
 
 // PythonApplicationSession owns immutable declarations and private runtime
@@ -74,10 +77,12 @@ type PythonApplicationSession struct {
 	declarations                 map[string]project.Component
 	// contracts holds each trusted contract by its declaration's ID, the
 	// target of its backing tests' invocation keys.
-	contracts map[string]project.ResolvedComponentContract
-	snapshot  map[string]pythonApplicationFile
-	execute   func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
-	nagini    func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
+	contracts     map[string]project.ResolvedComponentContract
+	snapshot      map[string]pythonApplicationFile
+	execute       func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
+	nagini        func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
+	distributions func(context.Context, string) (map[string][]string, error)
+	modules       map[string][]string
 }
 
 type pythonApplicationFile struct {
@@ -189,7 +194,7 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, fmt.Errorf("Python application changed during staging")
 	}
 	s := &PythonApplicationSession{root: w.Root, snapshot: snapshot, invocations: prepared,
-		declarations: map[string]project.Component{}, contracts: map[string]project.ResolvedComponentContract{}, execute: options.Execute, nagini: options.Nagini}
+		declarations: map[string]project.Component{}, contracts: map[string]project.ResolvedComponentContract{}, execute: options.Execute, nagini: options.Nagini, distributions: options.Distributions}
 	for _, c := range w.Inventory.TrustedContracts {
 		s.contracts[c.Contract] = c
 	}

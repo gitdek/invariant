@@ -130,9 +130,22 @@ func (n *ppNagini) run(_ context.Context, c PythonApplicationNaginiCommand) (Pyt
 
 const ppVerified = "Verification successful\nVerification took 21.10 seconds.\n"
 
+// ppDistributions stands in for the dependency image's installed
+// distributions, as their RECORDs say: tinyver's module and, where a test
+// adds them, others'.
+func ppDistributions(extra map[string][]string) func(context.Context, string) (map[string][]string, error) {
+	return func(context.Context, string) (map[string][]string, error) {
+		out := map[string][]string{"tinyver": {"tinyver"}}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out, nil
+	}
+}
+
 func ppSession(t *testing.T, p *project.Project, n *ppNagini) *PythonApplicationSession {
 	t.Helper()
-	return pa315Prepare(t, p, PythonApplicationSessionOptions{SelectImage: ptcDependencies("1.0"), Nagini: n.run})
+	return pa315Prepare(t, p, PythonApplicationSessionOptions{SelectImage: ptcDependencies("1.0"), Nagini: n.run, Distributions: ppDistributions(nil)})
 }
 
 func ppFile(t *testing.T, in *PythonApplicationProofInput, name string) string {
@@ -158,7 +171,7 @@ func TestPythonApplicationProofInputKeepsTheFunctionAsWritten(t *testing.T) {
 	root, p := ppFixture(t, ppModule)
 	before := pa315Tree(t, root)
 	s := ppSession(t, p, &ppNagini{})
-	in, err := s.ProofInput(ppAdmitID())
+	in, err := s.ProofInput(context.Background(), ppAdmitID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +247,7 @@ func TestPythonApplicationProofInputKeepsTheFunctionAsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := ppSession(t, q, &ppNagini{}).ProofInput(ppAdmitID())
+	again, err := ppSession(t, q, &ppNagini{}).ProofInput(context.Background(), ppAdmitID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,9 +274,18 @@ func TestPythonApplicationProofReportsWhatNoContractBinds(t *testing.T) {
 		{name: "a module no wheel provides", from: "version = tinyver.parse(text)", to: "version = yamlish.load(text)", kind: UnaccountedAssumption},
 		{name: "two names for one operation", from: "version = tinyver.parse(text)", to: "version = json.dumps(text) + dumps(text)", kind: MissingContract,
 			op: project.ResolvedComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}},
+		// A module named other than its distribution is the distribution's,
+		// as its RECORD says, as yaml is PyYAML's.
+		{name: "a module named other than its distribution", from: "version = tinyver.parse(text)", to: "version = yaml.safe_load(text)", kind: MissingContract,
+			op: project.ResolvedComponentOperation{Kind: "dependency", Distribution: "pyyaml", Module: "yaml", Symbol: "safe_load"}},
+		// The comprehension's own print is its own, so the call after it
+		// reaches the builtin.
+		{name: "a builtin a comprehension's variable shares a name with", from: "version = tinyver.parse(text)",
+			to: "shown = [print for print in [text]]\n        print(text)", kind: MissingContract,
+			op: project.ResolvedComponentOperation{Kind: "standard_library", Module: "builtins", Symbol: "print"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			module := strings.Replace(ppModule, "import tinyver\n", "import tinyver\nimport json\nimport yamlish\nfrom json import dumps\n", 1)
+			module := strings.Replace(ppModule, "import tinyver\n", "import tinyver\nimport json\nimport yamlish\nimport yaml\nfrom json import dumps\n", 1)
 			if c.from != "" {
 				module = strings.Replace(module, c.from, c.to, 1)
 			}
@@ -273,7 +295,8 @@ func TestPythonApplicationProofReportsWhatNoContractBinds(t *testing.T) {
 				pa310Save(t, p)
 			}
 			n := &ppNagini{output: ppVerified}
-			s := ppSession(t, p, n)
+			s := pa315Prepare(t, p, PythonApplicationSessionOptions{SelectImage: ptcDependencies("1.0"), Nagini: n.run,
+				Distributions: ppDistributions(map[string][]string{"yaml": {"pyyaml"}})})
 			proof, err := s.Prove(context.Background(), ppAdmitID())
 			if err != nil {
 				t.Fatal(err)
@@ -282,16 +305,19 @@ func TestPythonApplicationProofReportsWhatNoContractBinds(t *testing.T) {
 			if len(u) != 1 || u[0].Kind != c.kind || (c.kind == MissingContract && (u[0].Operation == nil || *u[0].Operation != c.op)) {
 				t.Fatalf("unaccounted: %+v", u)
 			}
+			// Nothing binds a name the function reaches, so the input is
+			// incomplete and Nagini doesn't run.
+			if proof.Ran || n.calls != 0 || proof.Result.Passed || len(proof.Result.Verified) != 0 || len(proof.Result.Errors) != 1 {
+				t.Fatalf("an incomplete input ran or passed: %+v (calls %d)", proof.Result, n.calls)
+			}
 			if c.kind == UnaccountedAssumption {
-				// Nagini runs, and the proof still covers nothing.
-				if !proof.Ran || n.calls != 1 || !strings.Contains(u[0].Detail, "yamlish.load") {
-					t.Fatalf("ran %v calls %d detail %q", proof.Ran, n.calls, u[0].Detail)
+				if !strings.Contains(u[0].Detail, "yamlish.load") || !strings.Contains(proof.Result.Errors[0], "yamlish") {
+					t.Fatalf("detail %q, errors %q", u[0].Detail, proof.Result.Errors)
 				}
 				return
 			}
-			if proof.Ran || n.calls != 0 || proof.Result.Passed || len(proof.Result.Verified) != 0 || len(proof.Result.Errors) != 1 ||
-				!strings.Contains(proof.Result.Errors[0], "no trusted contract binds") {
-				t.Fatalf("an incomplete input ran or passed: %+v (calls %d)", proof.Result, n.calls)
+			if !strings.Contains(proof.Result.Errors[0], "no trusted contract binds") {
+				t.Fatalf("errors: %q", proof.Result.Errors)
 			}
 			// The attempt is attributable, and proves nothing.
 			r := &Report{Project: "task lifecycle", Bounds: map[string]string{"Limit": "2"}, Toolchain: Toolchain{PythonImage: toolchain.PythonImage, PythonDependencies: s.Provenance().Dependencies}}
@@ -413,7 +439,7 @@ func TestPythonApplicationProofCopiesASharedContractLineOnce(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
 	pa310Write(t, root, ptcContracts, strings.Replace(string(b), ppAbstraction,
 		"\n\ndef version_of(text: str) -> object:\n    Requires(len(text) > 0); Ensures(Result() is not None)\n", 1))
-	in, err := ppSession(t, p, &ppNagini{}).ProofInput(ppAdmitID())
+	in, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +451,7 @@ func TestPythonApplicationProofCopiesASharedContractLineOnce(t *testing.T) {
 func TestPythonApplicationProofChecksItsInputAgainstTheApplication(t *testing.T) {
 	_, p := ppFixture(t, ppModule)
 	s := ppSession(t, p, &ppNagini{output: ppVerified})
-	in, _, err := s.proofInput(ppAdmitID())
+	in, _, err := s.proofInput(context.Background(), ppAdmitID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +504,7 @@ func TestPythonApplicationProofChecksItsInputAgainstTheApplication(t *testing.T)
 	if err := os.WriteFile(filepath.Join(s.root, ppSource), []byte(strings.Replace(ppModule, "admitted + 1", "admitted + 2", 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ProofInput(ppAdmitID()); err == nil {
+	if _, err := s.ProofInput(context.Background(), ppAdmitID()); err == nil {
 		t.Fatal("an input was built from a changed source")
 	}
 	// What Nagini reads must be what the input records.
@@ -506,10 +532,13 @@ func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
 	if n.main != ppFile(t, &proof.Input, PythonApplicationProofMain) || n.commands[0].Main != PythonApplicationProofMain {
 		t.Fatal("Nagini didn't read the recorded input")
 	}
+	// The pins name the recipe, the same on every machine, and never a local
+	// image, which the attempt records beside them.
 	tag := "invariant-nagini:" + strings.TrimPrefix(toolchain.NaginiRecipe(), "sha256:")[:12]
 	if r.Tool == nil || r.Tool.Name != "Nagini" || r.Tool.Version != NaginiVersion || r.Tool.Pins["recipe"] != toolchain.NaginiRecipe() ||
-		r.Tool.Pins["platform"] != "linux/amd64" || r.Tool.Pins["input"] != proof.Input.Fingerprint || r.Tool.Pins["image"] != tag || proof.Recipe != toolchain.NaginiRecipe() {
-		t.Fatalf("the tool's identity: %+v", r.Tool)
+		r.Tool.Pins["platform"] != "linux/amd64" || r.Tool.Pins["input"] != proof.Input.Fingerprint || len(r.Tool.Pins) != 3 ||
+		proof.Image != tag || proof.Recipe != toolchain.NaginiRecipe() {
+		t.Fatalf("the tool's identity: %+v, image %q", r.Tool, proof.Image)
 	}
 	if !slices.Contains(proof.Command, "/input:/work") || !slices.Contains(proof.Command, "none") || slices.ContainsFunc(proof.Command, func(a string) bool { return strings.Contains(a, os.TempDir()) }) {
 		t.Fatalf("the command: %v", proof.Command)
@@ -729,7 +758,7 @@ func TestPythonApplicationProofReal(t *testing.T) {
 	if len(proof.Result.Assumed) != 1 || proof.Result.Assumed[0].Contract != "packaging.is_normalized_name" {
 		t.Fatalf("assumed: %+v", proof.Result.Assumed)
 	}
-	if !pythonApplicationDigest.MatchString(proof.Image) || proof.Result.Tool.Pins["image"] != proof.Image {
+	if !pythonApplicationDigest.MatchString(proof.Image) || proof.Result.Tool.Pins["image"] != "" {
 		t.Fatalf("the Nagini image: %q", proof.Image)
 	}
 	if err := r.AttributeComponentProofs(s.inventory, []ComponentProofResult{proof.Result}); err != nil {

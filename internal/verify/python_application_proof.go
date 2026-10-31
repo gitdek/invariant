@@ -40,16 +40,39 @@ import (
 //go:embed python_application_proof.py
 var pythonApplicationProofAnalyzer string
 
-// pythonStdlibModules are the pinned runtime's sys.stdlib_module_names, and
-// pythonBuiltins its builtins, at toolchain.PythonVersion's minor version.
-// They tell a missing contract on the standard library from one on a
-// dependency's code, the same on every host.
+// pythonStdlibModules are the pinned runtime's sys.stdlib_module_names,
+// pythonBuiltins its builtins and pythonBuiltinExceptions its builtin
+// exception classes, at toolchain.PythonVersion's minor version. They tell a
+// missing contract on the standard library from one on a dependency's code,
+// the same on every host.
 var (
 	//go:embed python_stdlib_modules.txt
 	pythonStdlibModules string
 	//go:embed python_builtins.txt
 	pythonBuiltins string
+	//go:embed python_builtin_exceptions.txt
+	pythonBuiltinExceptions string
 )
+
+// naginiNames are the names the pinned Nagini reads as its own wherever they
+// appear, whatever a module binds them to: the contract functions and their
+// wrappers, the IO, obligation and thread names, the builtins it translates
+// itself, its predicates and the decorators it matches by name, taken from
+// its sources (call.py's dispatch, constants.py and the analyzer). A
+// function may read one only as Nagini's own export of it, typing's, or the
+// real builtin.
+//
+//go:embed nagini_names.txt
+var naginiNamesList string
+
+// naginiCalls are the ones its call translation dispatches on by name alone
+// (call.py), even when the function binds the name itself, so the function
+// may bind none of them.
+//
+//go:embed nagini_calls.txt
+var naginiCallsList string
+
+var naginiNames, naginiCalls = strings.Fields(naginiNamesList), strings.Fields(naginiCallsList)
 
 // naginiExports are what the pinned Nagini's nagini_contracts.contracts
 // exports, so a star import of it binds exactly these.
@@ -60,13 +83,18 @@ Pure RD_PRED RaisedException Rd Refute Requires Result ResultT Reveal Terminates
 Unfolding Wildcard bytearray_pred dict_pred isNaN list_pred set_pred`)
 
 // naginiNative are the builtins Nagini models itself, as part of the
-// verifier: the types it knows, and the functions and containers its own
-// theory defines. Every other operation beyond the selected function needs
-// a trusted contract, I/O such as print included, which Nagini would
-// otherwise accept with no contract at all.
-var naginiNative = map[string]bool{"int": true, "float": true, "bool": true, "str": true, "object": true,
-	"list": true, "dict": true, "set": true, "tuple": true, "len": true, "isinstance": true, "abs": true,
-	"min": true, "max": true, "range": true}
+// verifier, with the operations of the containers and strings they make: the
+// types it knows, and the functions its own theory defines. Every other
+// operation beyond the selected function needs a trusted contract, I/O such
+// as print included, which Nagini would otherwise accept with no contract at
+// all. naginiExceptions are the only builtin exception classes the pinned
+// Nagini models (its builtins.json).
+var (
+	naginiNative = map[string]bool{"int": true, "float": true, "bool": true, "str": true, "object": true,
+		"list": true, "dict": true, "set": true, "tuple": true, "len": true, "isinstance": true, "abs": true,
+		"min": true, "max": true, "range": true}
+	naginiExceptions = map[string]bool{"Exception": true, "ConnectionRefusedError": true}
+)
 
 // NaginiVersion is the Nagini the recipe pins.
 const NaginiVersion = "1.3.1"
@@ -104,6 +132,10 @@ type PythonApplicationProofSpan struct {
 	Contract      string `json:"contract,omitempty"`
 	start, end    int
 	from, to      int
+	// A signature's original name runs from name to nameEnd, and the input
+	// holds rename in its place.
+	name, nameEnd int
+	rename        string
 }
 
 // PythonApplicationProofBoundary says how the verifier input binds one name
@@ -136,11 +168,12 @@ type PythonApplicationProofInput struct {
 }
 
 // PythonApplicationProof is one attempt to prove a selected function in its
-// module: the input Nagini got, the recipe and image it ran in and how it
-// ran, its output with the session's paths removed, and the result in the
-// form proof attribution takes. An attempt that reached an operation no
-// trusted contract binds doesn't run, since no complete input exists; one
-// that ran reports exactly what Nagini said. It grants no gate success.
+// module: the input Nagini got, the recipe and the local image it ran in and
+// how it ran, its output with the session's paths removed, and the result in
+// the form proof attribution takes, whose pins name the recipe, never a
+// local image. An attempt that reaches an operation no trusted contract
+// binds doesn't run, since no complete input exists; one that ran reports
+// exactly what Nagini said. It grants no gate success.
 type PythonApplicationProof struct {
 	Result  ComponentProofResult        `json:"result"`
 	Input   PythonApplicationProofInput `json:"input"`
@@ -183,12 +216,71 @@ func pythonApplicationNaginiArgs(c PythonApplicationNaginiCommand, dir string) [
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "-v", dir + ":/work", "-w", "/work", c.Image, c.Main}
 }
 
+// pythonApplicationDistributionsScript names the distribution each top-level
+// module of a libraries directory belongs to, from each installed
+// distribution's RECORD, which lists every file it installed.
+const pythonApplicationDistributionsScript = `import json, os, re, sys
+lib = sys.argv[1]
+out = {}
+for entry in sorted(os.listdir(lib)) if os.path.isdir(lib) else []:
+    if not entry.endswith(".dist-info"):
+        continue
+    name = None
+    try:
+        with open(os.path.join(lib, entry, "METADATA"), encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    break
+                if line.lower().startswith("name:"):
+                    name = line.split(":", 1)[1].strip()
+                    break
+        with open(os.path.join(lib, entry, "RECORD"), encoding="utf-8") as f:
+            paths = [line.split(",", 1)[0] for line in f]
+    except OSError:
+        continue
+    if not name:
+        continue
+    name = re.sub(r"[-_.]+", "-", name).lower()
+    for p in paths:
+        first = p.split("/", 1)[0]
+        if not first or first.startswith("..") or first.endswith((".dist-info", ".data")):
+            continue
+        if "/" in p:
+            top = first
+        elif first.endswith(".py"):
+            top = first[:-3]
+        elif first.endswith((".so", ".pyd")):
+            top = first.split(".", 1)[0]
+        else:
+            continue
+        out.setdefault(top, set()).add(name)
+print(json.dumps({k: sorted(v) for k, v in sorted(out.items())}))
+`
+
+// pythonApplicationDistributions maps each top-level module the session's
+// dependency image installed to its distributions, read in that image,
+// offline.
+func pythonApplicationDistributions(ctx context.Context, image string) (map[string][]string, error) {
+	b, err := toolchain.Docker(ctx, "run", "--rm", "--pull=never", "--network", "none", "--platform", "linux/amd64", "--read-only",
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "/usr/local/bin/python", image,
+		"-I", "-S", "-c", pythonApplicationDistributionsScript, toolchain.PythonLibrary).Output()
+	if err != nil {
+		return nil, fmt.Errorf("reading the dependency image's distributions: %w", err)
+	}
+	var out map[string][]string
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("the dependency image's distributions: %w", err)
+	}
+	return out, nil
+}
+
 type pythonProofLines struct {
 	Kind    string `json:"kind"`
 	Start   int    `json:"start"`
 	End     int    `json:"end"`
 	Line    int    `json:"line"`
 	EndLine int    `json:"end_line"`
+	Exsures string `json:"exsures"`
 }
 
 type pythonProofBinding struct {
@@ -202,14 +294,30 @@ type pythonProofBinding struct {
 	Asname  string `json:"asname"`
 	Literal bool   `json:"literal"`
 	// Shared says the statement shares a line with another, so the gate,
-	// which copies whole lines, can't copy it alone.
-	Shared bool `json:"shared"`
+	// which copies whole lines, can't copy it alone. Annotation names what an
+	// annotated constant's annotation reads, "." for an attribute.
+	Shared     bool     `json:"shared"`
+	Annotation []string `json:"annotation"`
 }
 
 type pythonProofName struct {
 	Attributes []string `json:"attributes"`
 	Bare       bool     `json:"bare"`
 	Deep       bool     `json:"deep"`
+}
+
+// pythonProofTry is one try statement of the function: what its handlers
+// catch, "*" for a bare except and "?" for what the reader can't name, and
+// what its body reads.
+type pythonProofTry struct {
+	Line     int                        `json:"line"`
+	Handlers []string                   `json:"handlers"`
+	Reads    map[string]pythonProofName `json:"reads"`
+}
+
+type pythonProofDynamic struct {
+	Line int    `json:"line"`
+	What string `json:"what"`
 }
 
 // pythonProofDeclaration is the analyzer's account of one top-level function.
@@ -226,35 +334,45 @@ type pythonProofDeclaration struct {
 	NameEnd      int                             `json:"name_end"`
 	Body         []pythonProofLines              `json:"body"`
 	Free         map[string]pythonProofName      `json:"free"`
+	Bound        []string                        `json:"bound"`
+	Tries        []pythonProofTry                `json:"tries"`
 	Unsupported  []string                        `json:"unsupported"`
 	Bindings     map[string][]pythonProofBinding `json:"bindings"`
 	Star         []pythonProofBinding            `json:"star"`
 	Declarations []string                        `json:"declarations"`
 	Globals      []string                        `json:"globals"`
 	Future       []pythonProofBinding            `json:"future"`
+	Dynamic      []pythonProofDynamic            `json:"dynamic"`
 	source       []byte
+}
+
+func runPythonProofAnalyzer(request any, out any) error {
+	b, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", "-I", "-S", "-c", pythonApplicationProofAnalyzer)
+	cmd.Stdin = bytes.NewReader(b)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	reply, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("isolated Python 3 syntax reader: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if err := json.Unmarshal(reply, out); err != nil {
+		return fmt.Errorf("Python syntax reader output: %w", err)
+	}
+	return nil
 }
 
 // analyzePythonProof reads one top-level function with the host's Python in
 // isolated mode, which parses the source and never imports or runs it.
 func analyzePythonProof(source []byte, symbol string) (*pythonProofDeclaration, error) {
-	request, err := json.Marshal(map[string]string{"source": base64.StdEncoding.EncodeToString(source), "symbol": symbol})
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "python3", "-I", "-S", "-c", pythonApplicationProofAnalyzer)
-	cmd.Stdin = bytes.NewReader(request)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("isolated Python 3 syntax reader: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
 	var d pythonProofDeclaration
-	if err := json.Unmarshal(out, &d); err != nil {
-		return nil, fmt.Errorf("Python syntax reader output: %w", err)
+	if err := runPythonProofAnalyzer(map[string]string{"source": base64.StdEncoding.EncodeToString(source), "symbol": symbol}, &d); err != nil {
+		return nil, err
 	}
 	inside := func(start, end int) bool { return 0 <= start && start <= end && end <= len(source) }
 	ok := inside(d.Start, d.End) && inside(d.Start, d.HeaderEnd) && d.HeaderEnd <= d.End && inside(d.NameStart, d.NameEnd) &&
@@ -277,21 +395,28 @@ func analyzePythonProof(source []byte, symbol string) (*pythonProofDeclaration, 
 	return &d, nil
 }
 
+type pythonProofWrite struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	What string `json:"what"`
+}
+
 // pythonProofOperation is an operation the selected function reaches beyond
 // its boundary, and the name and form it reaches it by.
 type pythonProofOperation struct {
-	op       project.ResolvedComponentOperation
-	name     string // the name the function reads
-	attr     string // for a module the function reads attributes of
-	binding  pythonProofBinding
-	dotted   string
-	contract *project.ResolvedComponentContract
+	op      project.ResolvedComponentOperation
+	name    string // the name the function reads
+	attr    string // for a module the function reads attributes of
+	binding pythonProofBinding
+	dotted  string
 }
 
 // ProofInput builds Nagini's input for the proof check on target, the
-// canonical ID of a selected function, without running any tool beyond the
-// host's isolated Python parser.
-func (s *PythonApplicationSession) ProofInput(target string) (*PythonApplicationProofInput, error) {
+// canonical ID of a selected function. It runs no tool beyond the host's
+// isolated Python parser, but for one look at the dependency image's
+// installed distributions when the function reaches a dependency no
+// trusted contract binds.
+func (s *PythonApplicationSession) ProofInput(ctx context.Context, target string) (*PythonApplicationProofInput, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -300,7 +425,7 @@ func (s *PythonApplicationSession) ProofInput(target string) (*PythonApplication
 	if err := s.fresh(); err != nil {
 		return nil, err
 	}
-	in, _, err := s.proofInput(target)
+	in, _, err := s.proofInput(ctx, target)
 	return in, err
 }
 
@@ -321,7 +446,7 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	if err := s.fresh(); err != nil {
 		return nil, err
 	}
-	in, check, err := s.proofInput(target)
+	in, check, err := s.proofInput(ctx, target)
 	if err != nil {
 		return nil, err
 	}
@@ -330,14 +455,26 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 		Inputs: s.proofInputs(in, check), FileInputs: slices.Clone(in.Sources), Assumed: copyComponentContractUses(in.Assumed),
 		Unaccounted: copyComponentUnaccounted(in.Unaccounted),
 		Tool:        &ComponentProofTool{Name: "Nagini", Version: NaginiVersion, Pins: map[string]string{"recipe": proof.Recipe, "platform": "linux/amd64", "input": in.Fingerprint}}}
-	var missing []string
-	for _, u := range in.Unaccounted {
-		if u.Kind == MissingContract {
-			missing = append(missing, "no trusted contract binds "+unaccountedText(u)+", which the function reaches")
+	// An input that binds nothing to a name the function reaches is
+	// incomplete, so Nagini doesn't run on it.
+	var incomplete []string
+	through := map[string][]string{}
+	for _, b := range in.Boundaries {
+		if b.Kind == "missing" && b.Operation != nil {
+			key := b.Operation.Key()
+			through[key] = append(through[key], b.Name)
 		}
 	}
-	if len(missing) > 0 {
-		result.Errors = missing
+	for _, u := range in.Unaccounted {
+		switch {
+		case u.Kind == MissingContract && u.Operation != nil:
+			incomplete = append(incomplete, "no trusted contract binds "+unaccountedText(u)+", which the function reaches through "+strings.Join(through[u.Operation.Key()], " and "))
+		case u.Kind == UnaccountedAssumption && strings.Contains(u.Detail, "no trusted contract binds"):
+			incomplete = append(incomplete, u.Detail)
+		}
+	}
+	if len(incomplete) > 0 {
+		result.Errors = incomplete
 		proof.Result = result
 		return proof, nil
 	}
@@ -349,9 +486,10 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	if err := writePythonProofInput(work, in); err != nil {
 		return nil, err
 	}
-	// The image Nagini runs in is the recipe's, by the digest of what the
-	// recipe built. A session's double runs no image, and records the tag
-	// the recipe would have.
+	// The image Nagini runs in is the recipe's, by the local ID of what the
+	// recipe built, which the attempt records and the result's pins don't:
+	// the recipe names it the same on every machine. A session's double runs
+	// no image, and records the tag the recipe would have.
 	image := "invariant-nagini:" + strings.TrimPrefix(proof.Recipe, "sha256:")[:12]
 	run := s.nagini
 	if run == nil {
@@ -367,7 +505,6 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	}
 	command := PythonApplicationNaginiCommand{Image: image, Dir: work, Main: in.Main}
 	proof.Image, proof.Command = image, pythonApplicationNaginiArgs(command, "/input")
-	result.Tool.Pins["image"] = image
 	process, err := run(ctx, command)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -430,7 +567,7 @@ func pythonApplicationProofCheck(check project.ResolvedComponentCheck, target pr
 	return nil
 }
 
-func (s *PythonApplicationSession) proofInput(target string) (*PythonApplicationProofInput, project.ResolvedComponentCheck, error) {
+func (s *PythonApplicationSession) proofInput(ctx context.Context, target string) (*PythonApplicationProofInput, project.ResolvedComponentCheck, error) {
 	var check project.ResolvedComponentCheck
 	found := false
 	if s.inventory != nil {
@@ -455,7 +592,8 @@ func (s *PythonApplicationSession) proofInput(target string) (*PythonApplication
 	if err != nil {
 		return nil, check, fmt.Errorf("in-place proof of %s: %w", target, err)
 	}
-	b := &pythonProofBuilder{s: s, target: decl, d: d, in: &PythonApplicationProofInput{Target: decl, Main: PythonApplicationProofMain}}
+	b := &pythonProofBuilder{ctx: ctx, s: s, target: decl, d: d, in: &PythonApplicationProofInput{Target: decl, Main: PythonApplicationProofMain},
+		reached: map[string]map[string]string{}, raises: map[string][]string{}}
 	if err := b.build(); err != nil {
 		return nil, check, fmt.Errorf("in-place proof of %s: %w", target, err)
 	}
@@ -464,21 +602,78 @@ func (s *PythonApplicationSession) proofInput(target string) (*PythonApplication
 
 // proofSource reads a declaration's source as the session staged it.
 func (s *PythonApplicationSession) proofSource(c project.Component) ([]byte, error) {
-	f, ok := s.snapshot[c.Source]
-	if !ok || f.hash != c.SourceSHA256 {
-		return nil, fmt.Errorf("stale declaration %s", c.ID)
+	return s.stagedSource(c.Source, c.SourceSHA256, c.ID)
+}
+
+func (s *PythonApplicationSession) stagedSource(source, hash, what string) ([]byte, error) {
+	f, ok := s.snapshot[source]
+	if !ok || (hash != "" && f.hash != hash) {
+		return nil, fmt.Errorf("stale declaration %s", what)
 	}
-	b, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(c.Source)))
+	b, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(source)))
 	if err != nil {
 		return nil, err
 	}
-	if pythonApplicationHash(b) != c.SourceSHA256 {
-		return nil, fmt.Errorf("stale declaration %s", c.ID)
+	if pythonApplicationHash(b) != f.hash {
+		return nil, fmt.Errorf("stale declaration %s", what)
 	}
 	return b, nil
 }
 
+// moduleDistributions maps the dependency image's top-level modules to the
+// distributions that installed them, read once per session.
+func (s *PythonApplicationSession) moduleDistributions(ctx context.Context) (map[string][]string, error) {
+	if s.modules != nil {
+		return s.modules, nil
+	}
+	modules := map[string][]string{}
+	if s.provenance.Dependencies != nil {
+		read := s.distributions
+		if read == nil {
+			read = pythonApplicationDistributions
+		}
+		var err error
+		if modules, err = read(ctx, s.image); err != nil {
+			return nil, err
+		}
+	}
+	s.modules = modules
+	return modules, nil
+}
+
+// moduleWrites finds every place a staged source writes one of module's
+// attributes, which no binding in the module itself shows.
+func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWrite, error) {
+	type file struct {
+		Path   string `json:"path"`
+		Source string `json:"source"`
+	}
+	var files []file
+	names := make([]string, 0, len(s.snapshot))
+	for name := range s.snapshot {
+		if strings.HasSuffix(name, ".py") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		b, err := s.stagedSource(name, "", name)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b)})
+	}
+	var reply struct {
+		Writes []pythonProofWrite `json:"writes"`
+	}
+	if err := runPythonProofAnalyzer(map[string]any{"writes": true, "module": module, "files": files}, &reply); err != nil {
+		return nil, err
+	}
+	return reply.Writes, nil
+}
+
 type pythonProofBuilder struct {
+	ctx    context.Context
 	s      *PythonApplicationSession
 	target project.Component
 	d      *pythonProofDeclaration
@@ -489,6 +684,11 @@ type pythonProofBuilder struct {
 	bindings []string
 	modules  []*pythonProofModule
 	sources  map[string]bool
+	// reached names the trusted contract each name, and each module's
+	// attribute, stands for, and raises what each contract declares its
+	// operation raises.
+	reached map[string]map[string]string
+	raises  map[string][]string
 }
 
 // pythonProofModule is one boundary module: the abstractions the target
@@ -523,10 +723,32 @@ func (b *pythonProofBuilder) build() error {
 			return b.unsupported("%s's decorator %s", b.target.Symbol, decorator)
 		}
 	}
+	// What callers and the function's own recursion reach is the module's
+	// binding of its name, so that must be the def and nothing else.
+	if rows := d.Bindings[b.target.Symbol]; len(rows) != 1 || rows[0].Kind != "function" || slices.Contains(d.Globals, b.target.Symbol) {
+		return b.unsupported("the module binds %s other than by its one def, so callers may not reach the function the input proves", b.target.Symbol)
+	}
 	for _, f := range d.Future {
 		if f.Shared {
 			return b.unsupported("line %d holds more than one statement, and the input copies whole lines", f.Line)
 		}
+	}
+	if len(d.Dynamic) > 0 {
+		return b.unsupported("line %d writes the module's names with %s, which no binding shows", d.Dynamic[0].Line, d.Dynamic[0].What)
+	}
+	for _, name := range d.Bound {
+		if slices.Contains(naginiCalls, name) {
+			return b.unsupported("%s binds %s, which Nagini reads as its own", b.target.Symbol, name)
+		}
+	}
+	module := strings.TrimSuffix(b.target.Package, ".__init__")
+	writes, err := b.s.moduleWrites(module)
+	if err != nil {
+		return err
+	}
+	if len(writes) > 0 {
+		w := writes[0]
+		return b.unsupported("%s:%d writes %s, which no binding in the module shows", w.Path, w.Line, w.What)
 	}
 	b.sources = map[string]bool{b.target.Source: true}
 	if b.s.inventory != nil {
@@ -553,7 +775,15 @@ func (b *pythonProofBuilder) build() error {
 	if err := b.boundaries(operations); err != nil {
 		return err
 	}
+	if err := b.handlers(); err != nil {
+		return err
+	}
 	return b.write()
+}
+
+// naginiStar says the module star-imports Nagini's contracts.
+func (d *pythonProofDeclaration) naginiStar() bool {
+	return slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module == "nagini_contracts.contracts" && s.Level == 0 })
 }
 
 // bind classifies one name the target reads, and returns the operations it
@@ -562,24 +792,41 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 	d := b.d
 	if name == b.target.Symbol {
 		// A recursive call uses the function's own contract, which the
-		// input holds.
+		// input holds; build checked the module binds the name to it alone.
 		return nil, nil
 	}
 	rows := d.Bindings[name]
 	if len(rows) > 1 {
 		return nil, b.unsupported("%s is bound more than once at its module's top level", name)
 	}
+	// Any other star import could bind an unbound name, Nagini's included.
+	if len(rows) == 0 && slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module != "nagini_contracts.contracts" || s.Level != 0 }) {
+		return nil, b.unsupported("%s may come from a star import", name)
+	}
+	// Nagini reads some names as its own wherever they appear, so the
+	// function may read one only as what Nagini takes it for.
+	if slices.Contains(naginiNames, name) {
+		switch {
+		case len(rows) == 0 && d.naginiStar() && slices.Contains(naginiExports, name):
+		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Level == 0 && rows[0].Name == name && rows[0].Asname == "" &&
+			(rows[0].Module == "nagini_contracts.contracts" || rows[0].Module == "typing"):
+		case len(rows) == 0 && naginiNative[name]:
+		case len(rows) == 0 && slices.Contains(strings.Fields(pythonBuiltins), name):
+			return nil, b.unsupported("the function uses the builtin %s, which in-place proof doesn't take yet", name)
+		default:
+			return nil, b.unsupported("the function reads %s, which Nagini reads as its own whatever the module binds it to", name)
+		}
+	}
 	if len(rows) == 0 {
-		naginiStar := slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module == "nagini_contracts.contracts" && s.Level == 0 })
-		if naginiStar && slices.Contains(naginiExports, name) {
+		if d.naginiStar() && slices.Contains(naginiExports, name) {
 			return nil, b.nagini(name, pythonProofBinding{Kind: "star"})
 		}
-		if slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module != "nagini_contracts.contracts" || s.Level != 0 }) {
-			return nil, b.unsupported("%s may come from a star import", name)
-		}
-		if naginiNative[name] {
+		if naginiNative[name] || naginiExceptions[name] {
 			b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "native"})
 			return nil, nil
+		}
+		if slices.Contains(strings.Fields(pythonBuiltinExceptions), name) {
+			return nil, b.unsupported("the function reads %s, an exception class the pinned Nagini doesn't model: it models Exception and ConnectionRefusedError", name)
 		}
 		if !slices.Contains(strings.Fields(pythonBuiltins), name) {
 			return nil, b.unsupported("%s isn't bound in its module", name)
@@ -595,6 +842,9 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 	case "from":
 		switch {
 		case row.Module == "nagini_contracts.contracts" && row.Level == 0:
+			if row.Name != name {
+				return nil, b.unsupported("the module imports Nagini's %s as %s, and Nagini reads its names only as themselves", row.Name, name)
+			}
 			return nil, b.nagini(name, row)
 		case row.Module == "typing" && row.Level == 0:
 			b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "typing"})
@@ -640,6 +890,21 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 		}
 		if use.Deep || len(use.Attributes) > 0 {
 			return nil, b.unsupported("the function reads attributes of the constant %s", name)
+		}
+		// An annotation is copied with its constant, so what it reads must
+		// be in the input too.
+		for _, a := range row.Annotation {
+			switch rows := d.Bindings[a]; {
+			case a == ".":
+				return nil, b.unsupported("%s's annotation reads an attribute", name)
+			case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "typing" && rows[0].Level == 0:
+				if err := b.copy(rows[0]); err != nil {
+					return nil, err
+				}
+			case len(rows) == 0 && naginiNative[a]:
+			default:
+				return nil, b.unsupported("%s's annotation reads %s, which the input can't bind", name, a)
+			}
 		}
 		b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "constant"})
 		return nil, b.copy(row)
@@ -697,7 +962,7 @@ func (b *pythonProofBuilder) copy(row pythonProofBinding) error {
 
 func (b *pythonProofBuilder) boundary(x PythonApplicationProofBoundary) {
 	if !slices.ContainsFunc(b.in.Boundaries, func(y PythonApplicationProofBoundary) bool {
-		return y.Name == x.Name && y.Kind == x.Kind && y.Contract == x.Contract
+		return y.Name == x.Name && y.Kind == x.Kind && y.Contract == x.Contract && (y.Operation == nil) == (x.Operation == nil) && (y.Operation == nil || *y.Operation == *x.Operation)
 	}) {
 		b.in.Boundaries = append(b.in.Boundaries, x)
 	}
@@ -744,6 +1009,9 @@ func (b *pythonProofBuilder) applicationModule(module string) string {
 	return ""
 }
 
+// applicationSource is the source a relative or absolute import of module
+// names. A relative import can't reach above the top-level package, as at
+// runtime.
 func (b *pythonProofBuilder) applicationSource(module string, level int) (string, error) {
 	if level == 0 {
 		return b.applicationModule(module), nil
@@ -751,14 +1019,14 @@ func (b *pythonProofBuilder) applicationSource(module string, level int) (string
 	if module == "" {
 		return "", b.unsupported("the function imports a module with a relative import of a package")
 	}
-	base := path.Dir(b.target.Source)
-	for i := 1; i < level; i++ {
-		base = path.Dir(base)
+	parts := strings.Split(path.Dir(b.target.Source), "/")
+	if path.Dir(b.target.Source) == "." {
+		parts = nil
 	}
-	if base == "." || strings.HasPrefix(base, "..") {
-		base = ""
+	if level-1 >= len(parts) {
+		return "", b.unsupported("the relative import of %s reaches above the top-level package", module)
 	}
-	name := path.Join(base, strings.ReplaceAll(module, ".", "/"))
+	name := path.Join(path.Join(parts[:len(parts)-(level-1)]...), strings.ReplaceAll(module, ".", "/"))
 	for _, candidate := range []string{name + ".py", name + "/__init__.py"} {
 		if _, ok := b.s.snapshot[candidate]; ok {
 			return candidate, nil
@@ -768,9 +1036,7 @@ func (b *pythonProofBuilder) applicationSource(module string, level int) (string
 }
 
 // boundaries binds every operation the target reaches to its trusted
-// contract's abstraction, or records it as missing. A dependency
-// operation no contract binds names the resolved wheel its module's name
-// matches, or, with none, is an assumption no declaration accounts for.
+// contract's abstraction, or records it as missing.
 func (b *pythonProofBuilder) boundaries(operations []*pythonProofOperation) error {
 	byKey := map[string]project.ResolvedComponentContract{}
 	if b.s.inventory != nil {
@@ -782,13 +1048,13 @@ func (b *pythonProofBuilder) boundaries(operations []*pythonProofOperation) erro
 	var order []string
 	assumed := map[string]bool{}
 	for _, o := range operations {
-		key := o.op.Key()
-		c, ok := byKey[key]
+		c, ok := byKey[o.op.Key()]
 		if !ok {
-			b.missing(o)
+			if err := b.missing(o); err != nil {
+				return err
+			}
 			continue
 		}
-		o.contract = &c
 		decl, found := b.s.declarations[c.Contract]
 		if !found {
 			return fmt.Errorf("trusted contract %s has no declaration in the session", c.ID)
@@ -801,13 +1067,23 @@ func (b *pythonProofBuilder) boundaries(operations []*pythonProofOperation) erro
 		if err != nil {
 			return fmt.Errorf("trusted contract %s's abstraction: %w", c.ID, err)
 		}
-		typing, err := b.abstraction(c, ad)
+		typing, raises, err := b.abstraction(c, ad)
 		if err != nil {
 			return err
+		}
+		if c.Operation.Kind == project.OperationApplication {
+			if err := b.applicationOperation(c); err != nil {
+				return err
+			}
 		}
 		b.sources[decl.Source] = true
 		op := c.Operation
 		b.boundary(PythonApplicationProofBoundary{Name: o.name, Kind: "contract", Contract: c.ID, Operation: &op})
+		if b.reached[o.name] == nil {
+			b.reached[o.name] = map[string]string{}
+		}
+		b.reached[o.name][o.attr] = c.ID
+		b.raises[c.ID] = raises
 		if !assumed[c.ID] {
 			assumed[c.ID] = true
 			b.in.Assumed = append(b.in.Assumed, ComponentContractUse{Contract: c.ID, Declaration: decl})
@@ -828,6 +1104,9 @@ func (b *pythonProofBuilder) boundaries(operations []*pythonProofOperation) erro
 			}
 		case o.attr != "":
 			stub = o.attr
+		}
+		if slices.Contains(naginiNames, stub) {
+			return b.unsupported("trusted contract %s's operation is named %s, which Nagini reads as its own", c.ID, stub)
 		}
 		if i := slices.IndexFunc(m.stubs, func(x pythonProofStub) bool { return x.name == stub }); i >= 0 && m.stubs[i].contract.ID != c.ID {
 			return b.unsupported("%s stands for two trusted contracts", o.name)
@@ -857,26 +1136,54 @@ func (b *pythonProofBuilder) boundaries(operations []*pythonProofOperation) erro
 	return nil
 }
 
-// missing records an operation no trusted contract binds.
-func (b *pythonProofBuilder) missing(o *pythonProofOperation) {
+// applicationOperation checks an application operation a trusted contract
+// stands for is a function the abstraction can stand for: not async, whose
+// call returns a coroutine, and not a class.
+func (b *pythonProofBuilder) applicationOperation(c project.ResolvedComponentContract) error {
+	decl, ok := b.s.declarations[c.Operation.Declaration]
+	if !ok {
+		return fmt.Errorf("trusted contract %s's operation has no declaration in the session", c.ID)
+	}
+	src, err := b.s.proofSource(decl)
+	if err != nil {
+		return err
+	}
+	od, err := analyzePythonProof(src, decl.Symbol)
+	if err != nil {
+		return b.unsupported("trusted contract %s's operation %s: %v", c.ID, decl.ID, err)
+	}
+	if od.Async {
+		return b.unsupported("trusted contract %s's operation %s is an async function, whose call returns a coroutine", c.ID, decl.ID)
+	}
+	return nil
+}
+
+// missing records an operation no trusted contract binds. A dependency's
+// names the distribution the dependency image installed its module from; a
+// module none or several installed is an assumption no declaration accounts
+// for.
+func (b *pythonProofBuilder) missing(o *pythonProofOperation) error {
 	op := o.op
 	if op.Kind == project.OperationDependency {
-		if d := b.s.provenance.Dependencies; d != nil {
-			want := normalizePythonDistribution(strings.Split(op.Module, ".")[0])
-			for _, a := range d.Artifacts {
-				if normalizePythonDistribution(a.Name) == want {
-					op.Distribution = want
-				}
+		modules, err := b.s.moduleDistributions(b.ctx)
+		if err != nil {
+			return err
+		}
+		dists := modules[strings.Split(op.Module, ".")[0]]
+		if len(dists) != 1 {
+			why := "no installed distribution provides its module"
+			if len(dists) > 1 {
+				why = "its module comes from several installed distributions, " + strings.Join(dists, ", ")
 			}
+			b.boundary(PythonApplicationProofBoundary{Name: o.name, Kind: "missing"})
+			b.unaccounted(ComponentUnaccounted{Kind: UnaccountedAssumption, Detail: "the function reaches " + o.dotted + ", which no trusted contract binds, and " + why})
+			return nil
 		}
-		if op.Distribution == "" {
-			b.unaccounted(ComponentUnaccounted{Kind: UnaccountedAssumption,
-				Detail: "the function reaches " + o.dotted + ", which no trusted contract binds and no resolved wheel provides by that name"})
-			return
-		}
+		op.Distribution = normalizePythonDistribution(dists[0])
 	}
 	b.boundary(PythonApplicationProofBoundary{Name: o.name, Kind: "missing", Operation: &op})
 	b.unaccounted(ComponentUnaccounted{Kind: MissingContract, Operation: &op})
+	return nil
 }
 
 // unaccounted records a boundary once, however many names reach it.
@@ -897,61 +1204,124 @@ func normalizePythonDistribution(name string) string {
 // nothing more: an unadorned function at its module's top level whose body
 // holds only Nagini's contract calls, besides a docstring, ... or pass, and
 // which reads nothing but its own parameters, Nagini's contract names,
-// typing names and the builtins Nagini models. So no assumption hides
-// behind another. It returns the typing imports the abstraction needs.
-func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d *pythonProofDeclaration) ([]pythonProofBinding, error) {
+// typing names, the builtins Nagini models and the exception classes it
+// models. So no assumption hides behind another. It returns the typing
+// imports the abstraction needs, and the exceptions its Exsures say the
+// operation raises; it raises no other.
+func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d *pythonProofDeclaration) ([]pythonProofBinding, []string, error) {
 	fail := func(format string, args ...any) error {
 		return b.unsupported("trusted contract %s's abstraction %s", c.ID, fmt.Sprintf(format, args...))
 	}
 	if d.Async {
-		return nil, fail("is an async function")
+		return nil, nil, fail("is an async function")
 	}
 	if len(d.Unsupported) > 0 {
-		return nil, fail("holds %s", strings.Join(d.Unsupported, ", "))
+		return nil, nil, fail("holds %s", strings.Join(d.Unsupported, ", "))
 	}
 	for _, decorator := range d.Decorators {
 		if decorator != "ContractOnly" {
-			return nil, fail("has the decorator %s", decorator)
+			return nil, nil, fail("has the decorator %s", decorator)
 		}
 	}
 	contracts := 0
+	var raises []string
 	for _, s := range d.Body {
 		switch s.Kind {
 		case "contract":
 			contracts++
+			if s.Exsures != "" {
+				if !naginiExceptions[s.Exsures] {
+					return nil, nil, fail("declares that its operation raises %s, which the pinned Nagini doesn't model: it models Exception and ConnectionRefusedError", s.Exsures)
+				}
+				if !slices.Contains(raises, s.Exsures) {
+					raises = append(raises, s.Exsures)
+				}
+			}
 		case "docstring", "ellipsis", "pass":
 		default:
-			return nil, fail("holds a statement that isn't a contract, on line %d", s.Line)
+			return nil, nil, fail("holds a statement that isn't a contract, on line %d", s.Line)
 		}
 	}
 	if contracts == 0 {
-		return nil, fail("holds no contract")
+		return nil, nil, fail("holds no contract")
+	}
+	for _, name := range d.Bound {
+		if slices.Contains(naginiCalls, name) {
+			return nil, nil, fail("binds %s, which Nagini reads as its own", name)
+		}
 	}
 	var typing []pythonProofBinding
-	naginiStar := slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module == "nagini_contracts.contracts" && s.Level == 0 })
+	naginiStar := d.naginiStar()
 	for name, use := range d.Free {
 		rows := d.Bindings[name]
 		switch {
-		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "nagini_contracts.contracts" && rows[0].Level == 0,
+		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "nagini_contracts.contracts" && rows[0].Level == 0 && rows[0].Name == name,
 			len(rows) == 0 && naginiStar && slices.Contains(naginiExports, name):
 			if name == "Assume" {
-				return nil, fail("calls Assume")
+				return nil, nil, fail("calls Assume")
 			}
-		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "typing" && rows[0].Level == 0,
+		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "typing" && rows[0].Level == 0 && (rows[0].Name == name || !slices.Contains(naginiNames, name)),
 			len(rows) == 1 && rows[0].Kind == "import" && rows[0].Module == "typing" && rows[0].Asname == "":
 			if rows[0].Shared {
-				return nil, fail("reads %s from line %d, which holds more than one statement", name, rows[0].Line)
+				return nil, nil, fail("reads %s from line %d, which holds more than one statement", name, rows[0].Line)
 			}
 			if !slices.ContainsFunc(typing, func(t pythonProofBinding) bool { return t.Start == rows[0].Start }) {
 				typing = append(typing, rows[0])
 			}
-		case len(rows) == 0 && naginiNative[name] && !use.Deep:
+		case len(rows) == 0 && (naginiNative[name] || naginiExceptions[name]) && !use.Deep:
 		default:
-			return nil, fail("reads %s, which is neither its parameter, Nagini's, typing's nor a builtin Nagini models", name)
+			return nil, nil, fail("reads %s, which is neither its parameter, Nagini's, typing's, a builtin Nagini models nor an exception it models", name)
 		}
 	}
 	slices.SortFunc(typing, func(x, y pythonProofBinding) int { return x.Start - y.Start })
-	return typing, nil
+	sort.Strings(raises)
+	return typing, raises, nil
+}
+
+// handlers refuses an exception handler that can catch an exception from a
+// boundary operation that its trusted contract doesn't declare. Nagini takes
+// a contract with no Exsures for an exception to mean its operation never
+// raises it, so such a handler is code the proof thinks is never reached.
+// A bare except catches everything, and the exceptions a handler names must
+// be ones Nagini models.
+func (b *pythonProofBuilder) handlers() error {
+	for _, t := range b.d.Tries {
+		var contracts []string
+		names := make([]string, 0, len(t.Reads))
+		for name := range t.Reads {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			use := t.Reads[name]
+			if id, ok := b.reached[name][""]; ok && use.Bare {
+				contracts = append(contracts, id)
+			}
+			for _, attr := range use.Attributes {
+				if id, ok := b.reached[name][attr]; ok {
+					contracts = append(contracts, id)
+				}
+			}
+		}
+		if len(contracts) == 0 {
+			continue
+		}
+		for _, h := range t.Handlers {
+			switch {
+			case h == "*":
+				return b.unsupported("the bare except on line %d's try can catch any exception from %s, beyond what its trusted contract declares", t.Line, contracts[0])
+			case h == "?" || !naginiExceptions[h]:
+				return b.unsupported("a handler of line %d's try catches what Nagini doesn't model: it models Exception and ConnectionRefusedError", t.Line)
+			}
+			for _, id := range contracts {
+				covered := slices.ContainsFunc(b.raises[id], func(d string) bool { return h == d || (h == "ConnectionRefusedError" && d == "Exception") })
+				if !covered {
+					return b.unsupported("the handler for %s on line %d's try can catch an exception from %s that its trusted contract doesn't declare with Exsures", h, t.Line, id)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // write assembles the main module and each boundary module, line by line,
@@ -1007,7 +1377,8 @@ func (b *pythonProofBuilder) write() error {
 			header := append([]byte{}, d.source[def:d.NameStart]...)
 			header = append(header, stub.name...)
 			header = append(header, d.source[d.NameEnd:d.HeaderEnd]...)
-			t.copyRenamed("signature", stub.decl.Source, d.source, def, d.HeaderEnd, header, stub.contract.ID)
+			s := t.copyRenamed("signature", stub.decl.Source, d.source, def, d.HeaderEnd, header, stub.contract.ID)
+			s.name, s.nameEnd, s.rename = d.NameStart, d.NameEnd, stub.name
 			copied := -1
 			for _, s := range d.Body {
 				// Contract calls sharing a line are copied with it, once.
@@ -1048,8 +1419,9 @@ func (b *pythonProofBuilder) write() error {
 }
 
 // check confirms the input says what the application says: every copied
-// span holds exactly the original bytes, the target among them, and every
-// signature renames only the function.
+// span holds exactly the original bytes, the target among them, every
+// signature renames only the function, and no copied line continues past
+// what was copied.
 func (b *pythonProofBuilder) check() error {
 	contents := map[string][]byte{}
 	for _, f := range b.in.Files {
@@ -1067,6 +1439,19 @@ func (b *pythonProofBuilder) check() error {
 			}
 		}
 		return nil, fmt.Errorf("no original source %s", source)
+	}
+	for _, s := range b.in.Spans {
+		if s.Source == "" {
+			continue
+		}
+		original, err := read(s.Source)
+		if err != nil {
+			return err
+		}
+		if s.from >= 0 && s.to <= len(original) && s.from <= s.to &&
+			bytes.HasSuffix(bytes.TrimRight(original[s.from:s.to], "\r\n"), []byte(`\`)) {
+			return b.unsupported("%s's line %d ends in a line continuation, which would join the input's next line", s.Source, s.SourceEndLine)
+		}
 	}
 	return checkPythonProofSpans(b.in, contents, read)
 }
@@ -1092,6 +1477,15 @@ func checkPythonProofSpans(in *PythonApplicationProofInput, contents map[string]
 		}
 		switch s.Kind {
 		case "signature":
+			// A signature is the original header with only the function's
+			// name replaced.
+			if s.name < s.from || s.nameEnd < s.name || s.to < s.nameEnd {
+				return fmt.Errorf("the verifier input's signature in %s doesn't name what it renames", s.File)
+			}
+			want := append(append(append([]byte{}, original[s.from:s.name]...), s.rename...), original[s.nameEnd:s.to]...)
+			if !bytes.Equal(generated[s.start:s.end], want) {
+				return fmt.Errorf("the verifier input's signature in %s changes more than the function's name", s.File)
+			}
 		default:
 			if s.SHA256 != s.SourceSHA256 {
 				return fmt.Errorf("the verifier input's %s span in %s changed what it copies from %s", s.Kind, s.File, s.Source)
@@ -1155,8 +1549,10 @@ func (t *pythonProofText) copy(kind, source string, src []byte, from, to int, co
 	t.source(t.add(kind, text, contract), source, src, from, to)
 }
 
-func (t *pythonProofText) copyRenamed(kind, source string, src []byte, from, to int, text []byte, contract string) {
-	t.source(t.add(kind, text, contract), source, src, from, to)
+func (t *pythonProofText) copyRenamed(kind, source string, src []byte, from, to int, text []byte, contract string) *PythonApplicationProofSpan {
+	s := t.add(kind, text, contract)
+	t.source(s, source, src, from, to)
+	return s
 }
 
 func (t *pythonProofText) source(s *PythonApplicationProofSpan, source string, src []byte, from, to int) {
