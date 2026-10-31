@@ -580,7 +580,10 @@ class _ModuleLifecycle(_Lifecycle):
                 if sys.version_info < (3, 10) and offset + 2 < len(code) and dis.opname[code[offset + 2]] == "YIELD_FROM":
                     offset += 2
                 opcode = dis.opname[code[offset]]
-                if opcode not in ("YIELD_VALUE", "YIELD_FROM"):
+                # 3.13 reports a suspension at the RESUME after its yield,
+                # whose nonzero oparg marks a resumption point.
+                suspended = opcode in ("YIELD_VALUE", "YIELD_FROM") or (opcode == "RESUME" and code[offset + 1] & 3)
+                if not suspended:
                     self.coroutines.discard(frame)
                     if opcode not in ("RETURN_VALUE", "RETURN_CONST"):
                         raise ValueError("module coroutine failed or was cancelled")
@@ -823,6 +826,11 @@ def run(request, emit, locations, codes, argv):
     module.__file__, module.__package__ = filename, None
     sys.modules["__main__"] = module
     sys.argv = list(argv)
+    # Python 3.12 delivers opcode events only if some frame asked for them
+    # before sys.settrace, so ask on this untraced frame first. Later
+    # versions instrument a frame's code when capture_definition asks.
+    if sys.version_info < (3, 13):
+        sys._getframe().f_trace_opcodes = True
     sys.settrace(c.trace)
     sys.setprofile(c.profile)
     threading.settrace(c.trace)

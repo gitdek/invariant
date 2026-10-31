@@ -9,14 +9,16 @@ import (
 )
 
 func TestPythonApplicationExecutionModuleReturnEvents(t *testing.T) {
-	// Exercise the 3.9 trace offsets even when the test host uses a newer
-	// interpreter. These are CPython wordcode bytes, not executable code.
+	// Exercise the 3.9 and 3.13 trace offsets even when the test host uses
+	// another interpreter. These are CPython wordcode bytes, not executable
+	// code, under a stand-in opcode table.
 	const probe = `import sys, types
 observer = {}
 exec(compile(sys.stdin.read(), 'invariant_observe.py', 'exec'), observer)
 observer['dis'] = types.SimpleNamespace(opname={
     72: 'YIELD_FROM', 83: 'RETURN_VALUE', 100: 'LOAD_CONST',
     130: 'RAISE_VARARGS', 131: 'CALL_FUNCTION',
+    86: 'YIELD_VALUE', 121: 'RETURN_CONST', 149: 'RESUME',
 })
 class Frame:
     pass
@@ -31,6 +33,13 @@ for version, code, offset, outcome in [
     ((3, 10), [100, 0, 130, 1], 2, 'failed'),
     ((3, 9), [131, 0, 83, 0], 0, 'failed'),
     ((3, 10), [131, 0, 83, 0], 0, 'failed'),
+    # 3.13 reports a yield at the RESUME after it: oparg 1 follows a yield,
+    # 3 an await. RESUME 0 starts a function, so it isn't a suspension.
+    ((3, 13), [86, 0, 149, 1], 2, 'suspended'),
+    ((3, 13), [86, 0, 149, 3], 2, 'suspended'),
+    ((3, 13), [149, 0, 121, 0], 0, 'failed'),
+    ((3, 13), [149, 0, 121, 0], 2, 'completed'),
+    ((3, 14), [86, 0, 149, 1], 0, 'suspended'),
 ]:
     observer['sys'] = types.SimpleNamespace(version_info=version)
     frame = Frame()
