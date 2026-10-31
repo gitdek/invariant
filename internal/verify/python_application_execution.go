@@ -57,6 +57,47 @@ type PythonApplicationTest struct {
 	Exercised    bool     `json:"exercised"`
 	Outcome      string   `json:"outcome"`
 	Diagnostics  []string `json:"diagnostics"`
+	// A trusted contract's backing test also records how many calls reached
+	// the implementation its run resolved, and each outermost unittest
+	// assertion it made, in order (#294).
+	BoundaryCalls int                          `json:"boundary_calls,omitempty"`
+	Assertions    []PythonApplicationAssertion `json:"assertions,omitempty"`
+}
+
+// PythonApplicationAssertion is the runner's record of one unittest assertion:
+// passed, failed or error, as it returned or raised.
+type PythonApplicationAssertion struct {
+	ID      string `json:"id"`
+	Outcome string `json:"outcome"`
+}
+
+// PythonApplicationBoundary is the implementation a trusted contract's
+// backing-test run resolved before any test loaded (#294): the application's
+// declaration in its staged source, or the standard library's or an installed
+// distribution's code, with its file and, for a distribution, its installed
+// name, version and whether its RECORD lists the file's bytes.
+type PythonApplicationBoundary struct {
+	Contract     string                `json:"contract"`
+	Kind         string                `json:"kind"`
+	Resolved     bool                  `json:"resolved"`
+	Callable     string                `json:"callable"`
+	File         project.ComponentFile `json:"file"`
+	Distribution string                `json:"distribution"`
+	Version      string                `json:"version"`
+	Recorded     bool                  `json:"recorded"`
+	Python       string                `json:"python"`
+	Diagnostics  []string              `json:"diagnostics"`
+}
+
+// pythonApplicationContractRequest tells the runner what a backing-test run
+// resolves before its tests load.
+type pythonApplicationContractRequest struct {
+	Contract     string             `json:"contract"`
+	Kind         string             `json:"kind"`
+	Module       string             `json:"module,omitempty"`
+	Symbol       string             `json:"symbol,omitempty"`
+	Distribution string             `json:"distribution,omitempty"`
+	Declaration  *project.Component `json:"declaration,omitempty"`
 }
 
 type PythonApplicationExecutionResult struct {
@@ -65,6 +106,7 @@ type PythonApplicationExecutionResult struct {
 	Actual          PythonApplicationActual             `json:"actual"`
 	Provenance      PythonApplicationProvenance         `json:"provenance"`
 	Tests           []PythonApplicationTest             `json:"tests"`
+	Boundary        *PythonApplicationBoundary          `json:"boundary,omitempty"`
 	ObservationMode string                              `json:"observation_mode,omitempty"`
 	Observations    []PythonApplicationObservation      `json:"observations,omitempty"`
 	Complete        bool                                `json:"complete"`
@@ -91,6 +133,8 @@ type pythonApplicationRequest struct {
 	Target         project.Component              `json:"target"`
 	Sampling       map[string]string              `json:"sampling"`
 	Execution      string                         `json:"execution"`
+	// Boundary is set for a trusted contract's backing-test run alone.
+	Boundary *pythonApplicationContractRequest `json:"boundary,omitempty"`
 }
 
 var pythonApplicationContainerName = regexp.MustCompile(`invariant-[0-9]+-[0-9]+-[0-9]+`)
@@ -147,6 +191,14 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if s.legacy {
 		req.Check = s.drivers[0]
 	}
+	if contract, ok := s.contracts[key.Target]; ok {
+		o := contract.Operation
+		req.Boundary = &pythonApplicationContractRequest{Contract: contract.ID, Kind: o.Kind, Module: o.Module, Symbol: o.Symbol, Distribution: o.Distribution}
+		if o.Kind == project.OperationApplication {
+			d := s.declarations[o.Declaration]
+			req.Boundary.Declaration = &d
+		}
+	}
 	// The runner consumes and unlinks this bootstrap secret before importing
 	// application code. It never belongs to the application-readable request.
 	var authentication []byte
@@ -177,7 +229,7 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if key.Kind == "conformance" {
 		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r)
 	} else {
-		protocolErr = s.observe(c, process.Events, r)
+		protocolErr = s.observe(c, req.Boundary, process.Events, r)
 	}
 	freshErr := s.fresh()
 	freshErr = errors.Join(freshErr, s.freshObserver())
@@ -201,14 +253,22 @@ func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicatio
 	if process.Stderr != "" {
 		r.Diagnostics = append(r.Diagnostics, process.Stderr)
 	}
+	clean := func(diagnostic string) string {
+		diagnostic = strings.NewReplacer(c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output").Replace(diagnostic)
+		diagnostic = strings.ReplaceAll(diagnostic, req.Execution, "<execution>")
+		if strings.HasPrefix(c.Image, "sha256:") {
+			diagnostic = strings.ReplaceAll(diagnostic, c.Image, "<selected image>")
+		}
+		return pythonApplicationContainerName.ReplaceAllString(diagnostic, "<container>")
+	}
 	normalize := func() {
 		for i, diagnostic := range r.Diagnostics {
-			diagnostic = strings.NewReplacer(c.Root, "/src", c.RuntimeDir, "/runtime", c.OutputDir, "/output").Replace(diagnostic)
-			diagnostic = strings.ReplaceAll(diagnostic, req.Execution, "<execution>")
-			if strings.HasPrefix(c.Image, "sha256:") {
-				diagnostic = strings.ReplaceAll(diagnostic, c.Image, "<selected image>")
+			r.Diagnostics[i] = clean(diagnostic)
+		}
+		if r.Boundary != nil {
+			for i, diagnostic := range r.Boundary.Diagnostics {
+				r.Boundary.Diagnostics[i] = clean(diagnostic)
 			}
-			r.Diagnostics[i] = pythonApplicationContainerName.ReplaceAllString(diagnostic, "<container>")
 		}
 	}
 	if key.Kind == "conformance" {
@@ -395,9 +455,13 @@ func pythonApplicationJSONFields(b []byte, allowNull bool, required ...string) (
 	return fields, nil
 }
 
-func (s *PythonApplicationSession) observe(c PythonApplicationCommand, events []byte, r *PythonApplicationExecutionResult) error {
+func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary *pythonApplicationContractRequest, events []byte, r *PythonApplicationExecutionResult) error {
 	seen := map[string]bool{}
 	begun, ended := false, false
+	testFields := []string{"type", "id", "check", "source_sha256", "exercised", "outcome", "diagnostics"}
+	if boundary != nil {
+		testFields = append(testFields, "boundary_calls", "assertions")
+	}
 	for len(events) > 0 {
 		n := bytes.IndexByte(events, '\n')
 		if n < 0 {
@@ -436,16 +500,33 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, events []
 				return fmt.Errorf("foreign or duplicate begin record")
 			}
 			begun = true
+		case "boundary":
+			if boundary == nil || !begun || r.Boundary != nil || len(r.Tests) > 0 {
+				return fmt.Errorf("unexpected boundary record")
+			}
+			resolved, err := s.boundary(c, boundary, line)
+			if err != nil {
+				return err
+			}
+			r.Boundary = resolved
 		case "test":
 			if !begun {
 				return fmt.Errorf("test before begin")
 			}
-			if _, err := pythonApplicationJSON(line, "type", "id", "check", "source_sha256", "exercised", "outcome", "diagnostics"); err != nil {
+			if boundary != nil && r.Boundary == nil {
+				return fmt.Errorf("test before its contract's boundary record")
+			}
+			if _, err := pythonApplicationJSON(line, testFields...); err != nil {
 				return err
 			}
 			var row PythonApplicationTest
 			if err := json.Unmarshal(line, &row); err != nil {
 				return err
+			}
+			if boundary != nil {
+				if err := pythonApplicationBoundaryTest(line, r.Boundary, &row); err != nil {
+					return err
+				}
 			}
 			if row.ID == "" || seen[row.ID] {
 				return fmt.Errorf("missing or duplicate runtime test ID")
@@ -503,6 +584,9 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, events []
 			}
 			if e.Count != len(r.Tests) {
 				return fmt.Errorf("test count mismatch")
+			}
+			if boundary != nil && r.Boundary == nil {
+				return fmt.Errorf("missing contract boundary record")
 			}
 			ended = true
 		default:

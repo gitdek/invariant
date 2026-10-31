@@ -264,6 +264,9 @@ func ctPassing(t *testing.T, inv *project.ComponentInventory, r *verify.Report) 
 			{Check: parses, Exercised: true, Outcome: "passed"},
 			{Check: rejects, Exercised: true, Outcome: "passed"},
 		},
+		Implementation: &verify.ComponentContractImplementation{Kind: "standard_library", Callable: "python",
+			File: &project.ComponentFile{Path: "json/__init__.py", SHA256: ctHash("the runtime's json")}, Python: "3.13.15"},
+		Exercise: []verify.ComponentContractExercise{{Check: parses, Calls: 1}, {Check: rejects, Calls: 2}},
 	}
 }
 
@@ -379,6 +382,12 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 		{"no contract snapshot", func(x *verify.ComponentContractTestResult) { x.Inputs = x.Inputs[1:] }, "unchecked"},
 		{"no contract file", func(x *verify.ComponentContractTestResult) { x.FileInputs = x.FileInputs[1:] }, "unchecked"},
 		{"no invocation input", func(x *verify.ComponentContractTestResult) { x.FileInputs = x.FileInputs[:2] }, "unchecked"},
+		{"no implementation", func(x *verify.ComponentContractTestResult) { x.Implementation = nil }, "unchecked"},
+		{"another implementation", func(x *verify.ComponentContractTestResult) {
+			x.Implementation.Distribution, x.Implementation.Version, x.Implementation.Recorded = "simplejson", "3.19", true
+		}, "unchecked"},
+		{"stub only", func(x *verify.ComponentContractTestResult) { x.Exercise[1].Calls = 0 }, "tested"},
+		{"no exercise", func(x *verify.ComponentContractTestResult) { x.Exercise = nil }, "unchecked"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := ctReport(t, inv, ctToolchain(ctWheel()))
@@ -398,11 +407,14 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 	// An application operation's tests also need its declaration's snapshot.
 	r = ctReport(t, inv, ctToolchain(ctWheel()))
 	test := ctID(ctTests, "SaveTests.test_returns")
+	store := ctFile(t, inv, "app/storage/store.py")
 	save := verify.ComponentContractTestResult{Contract: "store.save", Check: test, Invocation: ctInvocation(t, inv, "store.save"),
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: ctRuntime}, Binding: ctContract(t, r, "store.save").Binding,
 		Inputs:     []project.Component{ctDeclaration(t, inv, ctID(ctContracts, "save")), ctDeclaration(t, inv, test)},
-		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), ctFile(t, inv, "app/storage/store.py")},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}}}
+		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), store},
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}},
+		Implementation: &verify.ComponentContractImplementation{Kind: "application", Callable: "python", File: &store},
+		Exercise:       []verify.ComponentContractExercise{{Check: test, Calls: 1}}}
 	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{save}); err != nil {
 		t.Fatal(err)
 	}
@@ -415,6 +427,17 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 	}
 	if ctContract(t, r, "store.save").Support != "tested" {
 		t.Fatalf("complete application support: %+v", r.Components.ContractTests)
+	}
+	// And the implementation its run resolved must be the declaration's own
+	// source as the inventory holds it.
+	other := store
+	other.SHA256 = ctHash("an edited store")
+	save.Implementation.File = &other
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{save}); err != nil {
+		t.Fatal(err)
+	}
+	if ctContract(t, r, "store.save").Support != "untested" {
+		t.Fatal("another source's implementation supported the application operation")
 	}
 }
 
@@ -667,7 +690,10 @@ func TestTrustedContractRetentionRejectsStaleAssociationsAtomically(t *testing.T
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: ctRuntime}, Binding: ctContract(t, r, "packaging.Version").Binding,
 		Inputs:     []project.Component{ctDeclaration(t, inv, ctID(ctContracts, "version")), ctDeclaration(t, inv, version)},
 		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests)},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: version, Exercised: true, Outcome: "passed"}}}
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: version, Exercised: true, Outcome: "passed"}},
+		Implementation: &verify.ComponentContractImplementation{Kind: "dependency", Callable: "python", Distribution: "packaging", Version: "24.2", Recorded: true,
+			File: &project.ComponentFile{Path: "packaging/version.py", SHA256: ctHash("packaging/version.py")}},
+		Exercise: []verify.ComponentContractExercise{{Check: version, Calls: 3}}}
 	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{supported, ctPassing(t, inv, r)}); err != nil {
 		t.Fatal(err)
 	}
@@ -896,17 +922,14 @@ func TestTrustedContractEvidenceOwnsItsValues(t *testing.T) {
 	}
 }
 
-func TestGateRefusesTrustedContractsBeforeTools(t *testing.T) {
+func TestGateRefusesABackingTestWithNoInvocationBeforeTools(t *testing.T) {
 	_, p := ctFixture(t)
-	// Without the proof selection the sampled gate would admit the target.
+	// Leave json.loads's second backing test with nothing to run it.
+	loads := &p.Manifest.Components.TrustedContracts[0]
+	loads.Invocations = loads.Invocations[:1]
 	p.Manifest.Components.Checks = nil
 	ctSave(t, p)
-	if err := verify.Check(p.Dir); err == nil || !strings.Contains(err.Error(), "trusted contracts") {
-		t.Fatalf("the gate admitted trusted contracts it can't test: %v", err)
-	}
-	p.Manifest.Components.TrustedContracts = nil
-	ctSave(t, p)
-	if err := verify.Check(p.Dir); err != nil && strings.Contains(err.Error(), "trusted contracts") {
-		t.Fatalf("the refusal outlived the contracts: %v", err)
+	if err := verify.Check(p.Dir); err == nil || !strings.Contains(err.Error(), `trusted contract "json.loads"'s backing test`) {
+		t.Fatalf("the gate admitted a backing test nothing runs: %v", err)
 	}
 }

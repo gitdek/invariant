@@ -127,7 +127,10 @@ func rcPassing(t *testing.T, inv *project.ComponentInventory, r *verify.Report, 
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: rcRuntime}, Binding: binding,
 		Inputs:     []project.Component{rcDeclaration(t, inv, rcID(rcContracts, "loads")), rcDeclaration(t, inv, test)},
 		FileInputs: []project.ComponentFile{rcFile(t, inv, rcContracts), rcFile(t, inv, rcTests)},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}}}
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}},
+		Implementation: &verify.ComponentContractImplementation{Kind: "standard_library", Callable: "python",
+			File: &project.ComponentFile{Path: "json/__init__.py", SHA256: rcHash("the runtime's json")}, Python: "3.13.15"},
+		Exercise: []verify.ComponentContractExercise{{Check: test, Calls: 1}}}
 }
 
 // rcRow finds the table row whose first cell holds text, and its cells.
@@ -192,7 +195,7 @@ func TestTrustedContractReceiptQualifiesSuppliedResultsAndProofUse(t *testing.T)
 	if other := rcRow(t, md, "packaging.Version"); other[2] != "trusted · untested" || other[3] != "declaration only: no proof reported using it" {
 		t.Fatalf("an unused contract must stay a declaration: %q", other)
 	}
-	for _, want := range []string{"Supplied results describe runs the component API didn't make", "Origin: <code>supplied</code>", "assumed trusted contracts: <code>json.loads</code>",
+	for _, want := range []string{"supplied results describe runs the component API didn't make", "Origin: <code>supplied</code>", "calls into it from", "assumed trusted contracts: <code>json.loads</code>",
 		"### Trusted boundary diagnostics\n\nnone\n"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("receipt lacks %q:\n%s", want, md)

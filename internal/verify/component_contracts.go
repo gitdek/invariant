@@ -30,27 +30,57 @@ type ComponentContractBinding struct {
 	Wheel       *toolchain.PythonArtifact `json:"wheel,omitempty"`
 }
 
-// ComponentContractTestResult records a supplied run of a trusted contract's
-// backing tests through one of its declared invocations, with the snapshots
-// and the operation identity they ran against (#294). Attribution runs
-// nothing: an executor supplies these from actual runs, and a passing process
-// alone supports no contract.
+// ComponentContractTestResult records a run of a trusted contract's backing
+// tests through one of its declared invocations, with the snapshots and the
+// operation identity they ran against (#294). The gate's Python application
+// executor makes these from actual runs; attribution itself runs nothing, and
+// a passing process alone supports no contract.
 type ComponentContractTestResult struct {
-	Contract    string                               `json:"contract"`
-	Check       string                               `json:"check"`
-	Invocation  *project.ResolvedComponentInvocation `json:"invocation,omitempty"`
-	Runner      *ComponentProofTool                  `json:"runner,omitempty"`
-	Binding     *ComponentContractBinding            `json:"binding,omitempty"`
-	Inputs      []project.Component                  `json:"inputs"`
-	FileInputs  []project.ComponentFile              `json:"file_inputs"`
-	Outcome     string                               `json:"outcome"`
-	Tests       []ComponentRuntimeTestResult         `json:"tests,omitempty"`
-	Diagnostics []string                             `json:"diagnostics,omitempty"`
+	Contract   string                               `json:"contract"`
+	Check      string                               `json:"check"`
+	Invocation *project.ResolvedComponentInvocation `json:"invocation,omitempty"`
+	Runner     *ComponentProofTool                  `json:"runner,omitempty"`
+	Binding    *ComponentContractBinding            `json:"binding,omitempty"`
+	Inputs     []project.Component                  `json:"inputs"`
+	FileInputs []project.ComponentFile              `json:"file_inputs"`
+	Outcome    string                               `json:"outcome"`
+	Tests      []ComponentRuntimeTestResult         `json:"tests,omitempty"`
+	// Implementation is what the run resolved as the operation before its
+	// tests loaded, and Exercise how many calls each test made into it.
+	Implementation *ComponentContractImplementation `json:"implementation,omitempty"`
+	Exercise       []ComponentContractExercise      `json:"exercise,omitempty"`
+	Diagnostics    []string                         `json:"diagnostics,omitempty"`
 }
 
-// ComponentContractTestEvidence qualifies one supplied backing-test result.
-// A test supports its contract only when it was exercised and passed in a
-// process that passed, with the contract's snapshots and identity present.
+// ComponentContractImplementation is the real implementation a backing-test
+// run resolved: the operation's kind, whether its calls run Python code or a
+// C callable, and its file, the application's staged source, a standard
+// library file or an installed distribution's, which has no file when the
+// runtime has it built in. A distribution's also names its installed name and
+// version, and whether its RECORD lists the file's bytes. Python is the
+// interpreter's version, recorded as evidence.
+type ComponentContractImplementation struct {
+	Kind         string                 `json:"kind"`
+	Callable     string                 `json:"callable"`
+	File         *project.ComponentFile `json:"file,omitempty"`
+	Distribution string                 `json:"distribution,omitempty"`
+	Version      string                 `json:"version,omitempty"`
+	Recorded     bool                   `json:"recorded,omitempty"`
+	Python       string                 `json:"python,omitempty"`
+}
+
+// ComponentContractExercise counts the calls one backing test made into the
+// resolved implementation. None means it tested a stub, a substitute or
+// nothing at all.
+type ComponentContractExercise struct {
+	Check string `json:"check"`
+	Calls int64  `json:"calls"`
+}
+
+// ComponentContractTestEvidence qualifies one backing-test result. A test
+// supports its contract only when it was exercised and passed, in a process
+// that passed, and made calls into the implementation its run resolved, which
+// must be the one the report binds, with the contract's snapshots present.
 type ComponentContractTestEvidence struct {
 	Origin   string                         `json:"origin,omitempty"`
 	Contract string                         `json:"contract"`
@@ -102,10 +132,10 @@ type ComponentContractEvidence struct {
 // ComponentContractDiagnostic is one problem at a trusted boundary, in the
 // same shape whichever adapter found it: an operation the report can't bind
 // to a pinned runtime or one resolved wheel, a backing test that passed in
-// one run and not in another, a proof's assumption whose contract lacks
-// tested support, and a proof's missing contract or unaccounted assumption.
-// Stale evidence never gets this far: attribution rejects it with
-// ErrStaleComponentEvidence.
+// one run and not in another, a contract whose backing tests ran and don't
+// all support it, a proof's assumption whose contract lacks tested support,
+// and a proof's missing contract or unaccounted assumption. Stale evidence
+// never gets this far: attribution rejects it with ErrStaleComponentEvidence.
 type ComponentContractDiagnostic struct {
 	Kind     string `json:"kind"`
 	Contract string `json:"contract,omitempty"`
@@ -117,6 +147,7 @@ type ComponentContractDiagnostic struct {
 const (
 	UnresolvedOperation = "unresolved_operation"
 	ConflictingSupport  = "conflicting_support"
+	UnsupportedContract = "unsupported_contract"
 	UntestedAssumption  = "untested_assumption"
 )
 
@@ -311,6 +342,19 @@ func (index *componentIndex) contractTests(results []ComponentContractTestResult
 		if !componentConformanceOutcome(result.Outcome) {
 			return nil, fmt.Errorf("component contract tests: invalid outcome for %q", result.Contract)
 		}
+		if i := result.Implementation; i != nil {
+			if i.Kind != c.Operation.Kind || (i.Callable != "python" && i.Callable != "c") ||
+				i.File != nil && (i.File.Path == "" || !contractWheelHash.MatchString(i.File.SHA256)) {
+				return nil, fmt.Errorf("component contract tests: invalid implementation for %q", result.Contract)
+			}
+		}
+		exercised := map[string]bool{}
+		for _, e := range result.Exercise {
+			if !slices.Contains(c.Tests, e.Check) || exercised[e.Check] || e.Calls < 0 {
+				return nil, fmt.Errorf("component contract tests: unselected, duplicate or invalid exercise of %q for %q", e.Check, result.Contract)
+			}
+			exercised[e.Check] = true
+		}
 		tests := map[string]bool{}
 		for _, test := range result.Tests {
 			if !slices.Contains(c.Tests, test.Check) || tests[test.Check] || !componentConformanceOutcome(test.Outcome) {
@@ -349,20 +393,25 @@ func (r *ComponentContractTestResult) qualifyContractTest(c project.ResolvedComp
 		return ok && files[input.Source]
 	}
 	ready := r.Runner != nil && strings.TrimSpace(r.Runner.Name) != "" && strings.TrimSpace(r.Runner.Version) != "" &&
-		r.Binding != nil && declared(c.Contract)
+		r.Binding != nil && contractImplementationBound(r.Implementation, r.Binding) && declared(c.Contract)
 	if c.Operation.Kind == project.OperationApplication {
 		ready = ready && declared(c.Operation.Declaration)
 	}
 	for _, file := range r.Invocation.Inputs {
 		ready = ready && files[file.Path]
 	}
+	calls := map[string]int64{}
+	for _, e := range r.Exercise {
+		calls[e.Check] = e.Calls
+	}
 	row := ComponentContractTestEvidence{Origin: "supplied", Contract: r.Contract, Check: r.Check, Status: "unchecked", Result: *r}
 	for _, test := range r.Tests {
 		exercised := ready && test.Exercised && declared(test.Check)
 		evidence := ComponentRuntimeTestEvidence{Check: test.Check, Status: "unchecked"}
 		// A contract rests on its tests, so an interrupted or failing
-		// process supports nothing, even a test that passed inside it.
-		if exercised && test.Outcome == "passed" && r.Outcome == "passed" {
+		// process supports nothing, even a test that passed inside it, and a
+		// test that never called the bound implementation tested a stub.
+		if exercised && test.Outcome == "passed" && r.Outcome == "passed" && calls[test.Check] > 0 {
 			evidence.Status = "tested"
 			if test.Check == r.Check {
 				row.Status = "tested"
@@ -378,6 +427,26 @@ func (r *ComponentContractTestResult) qualifyContractTest(c project.ResolvedComp
 		row.Tests = append(row.Tests, evidence)
 	}
 	return row
+}
+
+// contractImplementationBound says whether the implementation a run resolved
+// is the one the report binds: the application declaration's own staged
+// source, or the bound wheel's distribution and version with its file in the
+// installed RECORD, or, for the standard library, no distribution at all.
+func contractImplementationBound(i *ComponentContractImplementation, b *ComponentContractBinding) bool {
+	if i == nil || b == nil || i.Kind != b.Kind || (i.Callable != "python" && i.Callable != "c") {
+		return false
+	}
+	switch b.Kind {
+	case project.OperationApplication:
+		return i.Callable == "python" && i.File != nil && b.Declaration != nil && i.File.Path == b.Declaration.Source &&
+			i.File.SHA256 == b.Declaration.SourceSHA256 && i.Distribution == "" && i.Version == "" && !i.Recorded
+	case project.OperationDependency:
+		return b.Wheel != nil && i.File != nil && i.Distribution == b.Wheel.Name && i.Version == b.Wheel.Version && i.Recorded
+	case project.OperationStandardLibrary:
+		return i.Distribution == "" && i.Version == "" && !i.Recorded
+	}
+	return false
 }
 
 // Retained backing-test results replay through the same validation against
@@ -539,8 +608,9 @@ func (index *componentIndex) retainContractUses(old project.ComponentInventory, 
 // and the trusted-boundary diagnostics, from the evidence being committed.
 func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 	// A backing test supports its contract when some result tests it and no
-	// result reports it unsuccessful: one failed or skipped run of a test
-	// vetoes the passing run of another, so a flaky test supports nothing.
+	// result reports it unsuccessful: one failed or skipped run of a test, or
+	// one that reached no real implementation, vetoes the passing run of
+	// another, so a flaky test supports nothing.
 	supported, vetoed := map[[2]string]bool{}, map[[2]string]string{}
 	for _, row := range e.ContractTests {
 		for _, test := range row.Tests {
@@ -548,12 +618,19 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 				supported[[2]string{row.Contract, test.Check}] = true
 			}
 		}
+		calls := map[string]int64{}
+		for _, x := range row.Result.Exercise {
+			calls[x.Check] = x.Calls
+		}
 		for _, test := range row.Result.Tests {
+			key := [2]string{row.Contract, test.Check}
+			if _, ok := vetoed[key]; ok {
+				continue
+			}
 			if test.Outcome != "passed" || !test.Exercised {
-				key := [2]string{row.Contract, test.Check}
-				if _, ok := vetoed[key]; !ok {
-					vetoed[key] = contractUnsuccessful(test)
-				}
+				vetoed[key] = contractUnsuccessful(test)
+			} else if calls[test.Check] == 0 {
+				vetoed[key] = "reached no real implementation"
 			}
 		}
 	}
@@ -594,6 +671,11 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 					Detail: fmt.Sprintf("%s passed in one run and %s in another, so it supports nothing", test, why)})
 			}
 		}
+		if row.Support != "tested" {
+			if shortfall := contractShortfall(c, e.ContractTests); shortfall != "" {
+				diagnostics = append(diagnostics, ComponentContractDiagnostic{Kind: UnsupportedContract, Contract: c.ID, Detail: shortfall})
+			}
+		}
 		if targets := relying[c.ID]; len(targets) > 0 {
 			row.Use, row.Relying = "assumed", slices.Compact(slices.Sorted(slices.Values(targets)))
 			if row.Support != "tested" {
@@ -607,6 +689,85 @@ func (index *componentIndex) contractStanding(e *ComponentEvidence) {
 	}
 	sortContractDiagnostics(diagnostics)
 	e.ContractDiagnostics = diagnostics
+}
+
+// contractShortfall says why a contract whose backing tests ran has no tested
+// support, a reason for each test that doesn't support it. A contract no test
+// result names has none: nothing ran to fall short.
+func contractShortfall(c project.ResolvedComponentContract, rows []ComponentContractTestEvidence) string {
+	var mine []ComponentContractTestEvidence
+	for _, row := range rows {
+		if row.Contract == c.ID {
+			mine = append(mine, row)
+		}
+	}
+	if len(mine) == 0 {
+		return ""
+	}
+	var reasons []string
+	for _, test := range c.Tests {
+		reason, found := "", false
+		for _, row := range mine {
+			for i, t := range row.Tests {
+				if t.Check != test {
+					continue
+				}
+				found = true
+				if row.Tests[i].Status == "tested" {
+					reason = ""
+					break
+				}
+				var calls int64
+				for _, e := range row.Result.Exercise {
+					if e.Check == test {
+						calls = e.Calls
+					}
+				}
+				n := slices.IndexFunc(row.Result.Tests, func(r ComponentRuntimeTestResult) bool { return r.Check == test })
+				if n < 0 {
+					continue
+				}
+				result := row.Result.Tests[n]
+				switch {
+				case result.Outcome != "passed":
+					reason = fmt.Sprintf("%s: %s", test, contractOutcome(result.Outcome))
+				case !result.Exercised:
+					reason = fmt.Sprintf("%s: not exercised", test)
+				case row.Result.Outcome != "passed":
+					reason = fmt.Sprintf("%s: its run %s", test, contractOutcome(row.Result.Outcome))
+				case calls == 0:
+					reason = fmt.Sprintf("%s: no call reached the bound implementation, so it tested a stub, a substitute or nothing", test)
+				case !contractImplementationBound(row.Result.Implementation, row.Result.Binding):
+					reason = fmt.Sprintf("%s: its run didn't resolve the implementation the report binds", test)
+				default:
+					reason = fmt.Sprintf("%s: its run's provenance is incomplete", test)
+				}
+			}
+			if found && reason == "" {
+				break
+			}
+		}
+		if !found {
+			reason = test + ": didn't run"
+		}
+		if reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	return strings.Join(reasons, "; ")
+}
+
+// contractOutcome says what a test's or run's outcome means for support.
+func contractOutcome(outcome string) string {
+	switch outcome {
+	case "":
+		return "has no outcome"
+	case "empty":
+		return "didn't run"
+	case "timed_out":
+		return "timed out"
+	}
+	return outcome
 }
 
 // contractUnsuccessful says how a run reported a backing test that didn't
@@ -672,6 +833,18 @@ func copyComponentContractTestResult(result ComponentContractTestResult) Compone
 	sort.Slice(result.Inputs, func(i, j int) bool { return result.Inputs[i].ID < result.Inputs[j].ID })
 	result.FileInputs = copyComponentFiles(result.FileInputs)
 	result.Tests = copyComponentRuntimeTests(result.Tests)
+	if i := result.Implementation; i != nil {
+		implementation := *i
+		if i.File != nil {
+			file := *i.File
+			implementation.File = &file
+		}
+		result.Implementation = &implementation
+	}
+	if result.Exercise != nil {
+		result.Exercise = slices.Clone(result.Exercise)
+		sort.Slice(result.Exercise, func(a, b int) bool { return result.Exercise[a].Check < result.Exercise[b].Check })
+	}
 	result.Diagnostics = slices.Clone(result.Diagnostics)
 	return result
 }

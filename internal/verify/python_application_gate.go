@@ -263,6 +263,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	all := true
+	contracts := pythonApplicationContracts(s.inventory)
 	for i, v := range s.Invocations() {
 		x, runErr := s.Run(ctx, v.Key)
 		if ctx.Err() != nil {
@@ -274,7 +275,8 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		r.Application.Executions = append(r.Application.Executions, *x)
 		all = all && x.Success
 		if v.Key.Kind == "test" {
-			r.Build.Steps = append(r.Build.Steps, BuildStep{Name: v.Key.ID, Passed: x.Success})
+			name, _ := pythonApplicationContractStep(contracts, v.Key)
+			r.Build.Steps = append(r.Build.Steps, BuildStep{Name: name, Passed: x.Success})
 			r.Build.Passed = r.Build.Passed && x.Success
 			continue
 		}
@@ -328,7 +330,9 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			return nil, err
 		}
 	}
-	r.Passed = r.Passed && all && r.Build.Passed && len(r.Application.Conformance) > 0
+	// Every declared trusted contract's backing tests are required, whether
+	// or not a proof uses it yet.
+	r.Passed = r.Passed && all && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested()
 	r.Assurance = r.CodeAssurance()
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
@@ -421,6 +425,7 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 	defer s.Close()
 	b, evidence := Build{Passed: true}, Evidence{}
 	var combined conformance.Traces
+	contracts := pythonApplicationContracts(s.inventory)
 	for _, v := range s.Invocations() {
 		x, e := s.Run(ctx, v.Key)
 		if ctx.Err() != nil {
@@ -429,8 +434,13 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 		if x == nil {
 			return b, evidence, e
 		}
-		b.Passed = b.Passed && x.Success
-		b.Steps = append(b.Steps, BuildStep{Name: v.Key.ID, Passed: x.Success})
+		passed := x.Success
+		name, contract := pythonApplicationContractStep(contracts, v.Key)
+		if contract {
+			passed = passed && pythonApplicationContractExercised(*x)
+		}
+		b.Passed = b.Passed && passed
+		b.Steps = append(b.Steps, BuildStep{Name: name, Passed: passed})
 		if v.Key.Kind == "conformance" {
 			raw, e := pythonApplicationTraces(*x)
 			if e != nil {
