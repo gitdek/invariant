@@ -16,6 +16,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/decisions"
 	"github.com/gitdek/invariant/internal/mcp"
+	"github.com/gitdek/invariant/internal/project"
 )
 
 const decisionsUsage = `invariant decisions keeps every project's decisions in one graph (D-0096).
@@ -24,8 +25,10 @@ Recording:
   invariant decisions decide [-door two-way|one-way] [-status decided|proposed|ratified] [-who WHO]
                              [-record SLUG] [-refines ID]... [-cites ID]... [-reopens ID]... TEXT
                                     record a new decision, and print its ID
-  invariant decisions ratify -by @PERSON ID
-                                    record a person's ratification; only when that person asks
+  invariant decisions ratify -by @PERSON [-proposal sha256:HASH] ID
+                                    record a person's ratification; only when that person asks.
+                                    -proposal names the exact proposal they ratified, which a
+                                    lock ratified by hand needs
   invariant decisions supersede -with ID ID
                                     record that a later decision replaces one
   invariant decisions link ID refines|cites|reopens|supersedes ID
@@ -104,27 +107,22 @@ func checkout(ctx context.Context, dir, project string) (decisions.Repo, error) 
 
 // handRatified checks a lock ratified by hand, not on GitHub: it names a
 // decision in the journal of the repository dir is in, and a person, never a
-// coding agent, ratified that decision (D-0034, D-0204).
-func handRatified(ctx context.Context, dir, id string) error {
-	if id == "" {
-		return errors.New("the lock has no ratification record: no ratifying comment, and no decision")
+// coding agent, ratified that decision with a ratify line of their own that
+// names exactly the lock's proposal (D-0034, D-0204, D-0208). It returns
+// that line.
+func handRatified(ctx context.Context, dir string, lock project.Lock) (*decisions.Ratification, error) {
+	if lock.Decision == "" {
+		return nil, errors.New("the lock has no ratification record: no ratifying comment, and no decision")
 	}
 	repo, err := checkout(ctx, dir, "")
 	if err != nil {
-		return fmt.Errorf("decision %s, which the lock names, can't be checked: %v", id, err)
+		return nil, fmt.Errorf("decision %s, which the lock names, can't be checked: %v", lock.Decision, err)
 	}
-	d, err := decisions.Read(repo, id)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("decision %s, which the lock names, isn't in the repository's journal", id)
-	case err != nil:
-		return fmt.Errorf("decision %s, which the lock names, can't be read: %v", id, err)
-	case d.Status != "ratified":
-		return fmt.Errorf("decision %s, which the lock names, is %s: only a decision a person ratified ratifies a lock", id, d.Status)
-	case !strings.HasPrefix(d.Who, "@"):
-		return fmt.Errorf("decision %s, which the lock names, was ratified by %s, not a person", id, d.Who)
+	r, err := decisions.RatifiesLock(repo, lock.Decision, project.ProposalHash(lock.Bounds, lock.Statements))
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return r, nil
 }
 
 func (f decisionFlags) open() (*decisions.Store, error) {
@@ -258,7 +256,11 @@ func changeCmd(ctx context.Context, sub string, args []string) error {
 	fs, f := newDecisionFlags(sub)
 	by := fs.String("by", "agent", "who is writing it down; for ratify, the person ratifying")
 	with := fs.String("with", "", "for supersede: the decision that replaces it")
+	proposal := fs.String("proposal", "", "for ratify: the exact proposal the person ratified, as sha256:HASH, which a lock ratified by hand needs")
 	fs.Parse(args)
+	if *proposal != "" && sub != "ratify" {
+		return errors.New("only ratify names a proposal")
+	}
 	repo, err := checkout(ctx, *f.dir, *f.project)
 	if err != nil {
 		return err
@@ -276,7 +278,7 @@ func changeCmd(ctx context.Context, sub string, args []string) error {
 		if !strings.HasPrefix(*by, "@") {
 			return errors.New("ratify names the person ratifying, as -by @gitdek. Ratifying is theirs: record it only when they ask")
 		}
-		err = s.Ratify(repo, fs.Arg(0), *by)
+		err = s.RatifyProposal(repo, fs.Arg(0), *by, *proposal)
 	case sub == "supersede" && fs.NArg() == 1 && *with != "":
 		err = s.Supersede(repo, fs.Arg(0), *with, *by)
 	case sub == "link" && fs.NArg() == 3:
@@ -492,6 +494,13 @@ func checkDecisionsCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Every lock ratified by hand holds only for what its decision ratified
+	// (D-0208).
+	locks, more, err := decisions.CheckLocks(ctx, repo)
+	if err != nil {
+		return 0, err
+	}
+	problems = append(problems, more...)
 	if *base != "" {
 		more, err := decisions.Grown(ctx, repo, *base)
 		if err != nil {
@@ -507,8 +516,19 @@ func checkDecisionsCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	fmt.Printf("✅ %s's decision graph holds: %d decisions and %d edges, every cited decision exists, the SPEC rests on none that's superseded, and decisions/log.md is the journal's view.\n", repo.Name, n, e)
+	fmt.Printf("✅ %s's decision graph holds: %d decisions and %d edges, every cited decision exists, the SPEC rests on none that's superseded, %s, and decisions/log.md is the journal's view.\n", repo.Name, n, e, handLocks(locks))
 	return 0, nil
+}
+
+// handLocks says what the check found of the locks ratified by hand.
+func handLocks(n int) string {
+	switch n {
+	case 0:
+		return "no lock is ratified by hand"
+	case 1:
+		return "the lock ratified by hand is what a person ratified"
+	}
+	return fmt.Sprintf("all %d locks ratified by hand are what a person ratified", n)
 }
 
 func logCmd(ctx context.Context, args []string) error {

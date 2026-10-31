@@ -1039,12 +1039,13 @@ func ratificationCmd(ctx context.Context, args []string) int {
 		r := p.Lock.Ratified
 		switch {
 		case r == nil:
-			if err := handRatified(ctx, dir, p.Lock.Decision); err != nil {
+			hand, err := handRatified(ctx, dir, p.Lock)
+			if err != nil {
 				fmt.Printf("❌ %s: %v\n", dir, err)
 				code = 1
 				continue
 			}
-			fmt.Printf("✅ %s: ratified by hand, recorded in %s\n", dir, p.Lock.Decision)
+			fmt.Printf("✅ %s: ratified by hand by %s, as %s records (%s)\n", dir, hand.By, p.Lock.Decision, hand.Proposal)
 		case factory.VerifyRatification(ctx, gh, *repo, p.Lock) == nil:
 			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
 		default:

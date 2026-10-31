@@ -15,8 +15,9 @@ package recovery
 // A writer can retry after each build that stopped or left a failed draft,
 // and each retry starts a new build, with its own agent run, that replaces
 // that draft (#271). So Posted[Retry], Posted[Build], Runs[Build] and the
-// pull request's fields are the latest retry's and the latest build's, and a
-// watcher still in an earlier build's run is Stale.
+// pull request's fields are the latest retry's and the latest build's. Each
+// build has an attempt number, and a watcher in a build's run remembers the
+// attempt it started in, so a run an earlier build started is stale.
 
 // The steps the factory answers with a post. The first NumCmds are commands
 // a writer gives; Build and Merge answer events.
@@ -56,12 +57,13 @@ const (
 	PredMerged  = 4 // merged by someone else
 )
 
-// NoOne holds the lease when nobody does. NoRun is a watcher in no agent
-// run, and Stale one still in a build's run that a retry has superseded.
+// NoOne holds the lease when nobody does, and NoRun is a watcher in no
+// agent run. MaxAttempt is the most retries an issue may have, so the
+// attempt number never overflows; no issue comes near it.
 const (
-	NoOne = -1
-	NoRun = -1
-	Stale = NumKeys
+	NoOne      = -1
+	NoRun      = -1
+	MaxAttempt = 1 << 30
 )
 
 // Repo is the shared, visible state of one issue in one repository.
@@ -78,20 +80,22 @@ type Repo struct {
 	Merged     bool          // the factory merged it
 	Pred       int           // the draft the latest retry replaces: a Pred value
 	Intent     bool          // the latest retry's record that it replaces that draft is stored
+	Attempt    int           // the latest build's attempt: how many retries started a build
 	Lease      int           // the watcher holding the lease, or NoOne
 }
 
 // Watcher is one running watcher's memory.
 type Watcher struct {
-	ID    int // the watcher's name for the lease
-	InRun int // the step whose agent run it's waiting on, Stale, or NoRun
+	ID      int // the watcher's name for the lease
+	InRun   int // the step whose agent run it's waiting on, or NoRun
+	Attempt int // the attempt of the build whose agent run it started
 }
 
 // NewRepo is an issue with no commands, posts, runs, branch or pull request,
 // and a lease nobody holds.
 // @ ensures r.Lease == NoOne
 // @ ensures !r.RatPushed && !r.CodePushed && !r.Opened && r.PR == PRNone
-// @ ensures !r.GatePassed && !r.Mergeable && !r.Merged && r.Pred == PredNone && !r.Intent
+// @ ensures !r.GatePassed && !r.Mergeable && !r.Merged && r.Pred == PredNone && !r.Intent && r.Attempt == 0
 // @ ensures forall j int :: { r.Given[j] } 0 <= j && j < NumKeys ==> !r.Given[j]
 // @ ensures forall j int :: { r.Posted[j] } 0 <= j && j < NumKeys ==> !r.Posted[j]
 // @ ensures forall j int :: { r.Runs[j] } 0 <= j && j < NumKeys ==> r.Runs[j] == RunNone
@@ -102,7 +106,7 @@ func NewRepo() (r Repo) {
 
 // NewWatcher is a watcher that has just started, remembering nothing.
 // @ requires 0 <= id
-// @ ensures w.ID == id && w.InRun == NoRun && w.Ok()
+// @ ensures w.ID == id && w.InRun == NoRun && w.Attempt == 0 && w.Ok()
 func NewWatcher(id int) (w Watcher) {
 	w.ID = id
 	w.InRun = NoRun
@@ -112,7 +116,7 @@ func NewWatcher(id int) (w Watcher) {
 // @ decreases
 // @ pure
 func (w Watcher) Ok() bool {
-	return 0 <= w.ID && NoRun <= w.InRun && w.InRun <= Stale
+	return 0 <= w.ID && NoRun <= w.InRun && w.InRun < NumKeys && 0 <= w.Attempt
 }
 
 // @ decreases
@@ -193,11 +197,21 @@ func (r Repo) samePR(s Repo) bool {
 	return s.Opened == r.Opened && s.PR == r.PR && s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged
 }
 
-// sameDraft says s's latest retry replaces r's draft, with r's record.
+// sameDraft says s's latest retry is r's: the same attempt, replacing r's
+// draft, with r's record.
 // @ decreases
 // @ pure
 func (r Repo) sameDraft(s Repo) bool {
-	return s.Pred == r.Pred && s.Intent == r.Intent
+	return s.Pred == r.Pred && s.Intent == r.Intent && s.Attempt == r.Attempt
+}
+
+// Stale says w is in an agent run an earlier build started, before the
+// latest retry started the latest build.
+// @ requires w.Ok()
+// @ decreases
+// @ pure
+func (r Repo) Stale(w Watcher) bool {
+	return w.InRun == Build && w.Attempt != r.Attempt
 }
 
 // @ requires 0 <= c && c < NumKeys
@@ -205,7 +219,7 @@ func (r Repo) sameDraft(s Repo) bool {
 // @ pure
 func (r Repo) CanGive(c int) bool {
 	return (IsCmd(c) && c != Retry && !r.Given[c] && (c != Ratify || r.Posted[Solve])) ||
-		(c == Retry && r.Posted[Build] && (r.PR == PRNone || r.PR == PRDraft) && !r.Merged && r.Settled())
+		(c == Retry && r.Posted[Build] && (r.PR == PRNone || r.PR == PRDraft) && !r.Merged && r.Settled() && 0 <= r.Attempt && r.Attempt < MaxAttempt)
 }
 
 // @ requires 0 <= k && k < NumKeys
@@ -281,7 +295,7 @@ func (r Repo) CanFinishRun(w Watcher) bool {
 // and every command before it is answered, starts a new build: with no run,
 // code, pull request or gate of its own yet, replacing that draft. After a
 // build that stopped, the draft an earlier retry replaced is still the one
-// it replaces, with that retry's record.
+// it replaces, with that retry's record. The new build is the next attempt.
 // @ requires 0 <= c && c < NumKeys
 // @ ensures ok == r.CanGive(c)
 // @ ensures !ok ==> s == r
@@ -292,8 +306,9 @@ func (r Repo) CanFinishRun(w Watcher) bool {
 // @ ensures ok && c == Retry ==> forall j int :: { s.Posted[j] } 0 <= j && j < NumKeys && j != Retry && j != Build ==> s.Posted[j] == r.Posted[j]
 // @ ensures ok && c == Retry ==> forall j int :: { s.Runs[j] } 0 <= j && j < NumKeys && j != Build ==> s.Runs[j] == r.Runs[j]
 // @ ensures ok && c == Retry ==> !s.CodePushed && !s.Opened && s.PR == PRNone && !s.GatePassed && !s.Mergeable && s.Merged == r.Merged
+// @ ensures ok && c == Retry ==> s.Attempt == r.Attempt + 1
 // @ ensures ok && c == Retry && r.PR == PRDraft ==> s.Pred == PredDraft && !s.Intent
-// @ ensures ok && c == Retry && r.PR != PRDraft ==> r.sameDraft(s)
+// @ ensures ok && c == Retry && r.PR != PRDraft ==> s.Pred == r.Pred && s.Intent == r.Intent
 func (r Repo) Give(c int) (s Repo, ok bool) {
 	if !r.CanGive(c) {
 		return r, false
@@ -319,6 +334,7 @@ func (r Repo) Give(c int) (s Repo, ok bool) {
 		s.PR = PRNone
 		s.GatePassed = false
 		s.Mergeable = false
+		s.Attempt = r.Attempt + 1
 	}
 	return s, true
 }
@@ -379,7 +395,7 @@ func (r Repo) OthersMergePR() (s Repo, ok bool) {
 // replaces, while it's open.
 // @ ensures ok == (r.Pred == PredDraft)
 // @ ensures !ok ==> s == r
-// @ ensures ok ==> s.Pred == PredClosed && s.Intent == r.Intent
+// @ ensures ok ==> s.Pred == PredClosed && s.Intent == r.Intent && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
 func (r Repo) OthersCloseDraft() (s Repo, ok bool) {
@@ -395,7 +411,7 @@ func (r Repo) OthersCloseDraft() (s Repo, ok bool) {
 // replaces, while it's open.
 // @ ensures ok == (r.Pred == PredDraft)
 // @ ensures !ok ==> s == r
-// @ ensures ok ==> s.Pred == PredMerged && s.Intent == r.Intent
+// @ ensures ok ==> s.Pred == PredMerged && s.Intent == r.Intent && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
 func (r Repo) OthersMergeDraft() (s Repo, ok bool) {
@@ -468,11 +484,13 @@ func (r Repo) Restart(w Watcher) (v Watcher, ok bool) {
 	return NewWatcher(w.ID), true
 }
 
-// StartRun records step k's agent run, then starts it, when none was recorded.
+// StartRun records step k's agent run, then starts it, when none was
+// recorded. The watcher remembers the attempt it started in.
 // @ requires w.Ok() && 0 <= k && k < NumKeys
+// @ requires 0 <= r.Attempt
 // @ ensures ok == r.CanStartRun(w, k)
 // @ ensures !ok ==> s == r && v == w
-// @ ensures ok ==> s.Runs[k] == RunRecorded && v.ID == w.ID && v.InRun == k && v.Ok()
+// @ ensures ok ==> s.Runs[k] == RunRecorded && v.ID == w.ID && v.InRun == k && v.Attempt == r.Attempt && v.Ok()
 // @ ensures ok ==> forall j int :: { s.Runs[j] } 0 <= j && j < NumKeys && j != k ==> s.Runs[j] == r.Runs[j]
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
@@ -486,18 +504,19 @@ func (r Repo) StartRun(w Watcher, k int) (s Repo, v Watcher, ok bool) {
 	s.Runs = rs
 	v = w
 	v.InRun = k
+	v.Attempt = r.Attempt
 	return s, v, true
 }
 
 // FinishRun records that w's agent run finished, while w holds the lease. A
-// run a retry made stale is recorded as its own, an earlier build's, so it
+// stale run, which an earlier build started, is recorded as its own, so it
 // changes nothing of the latest build.
 // @ requires w.Ok()
 // @ ensures ok == r.CanFinishRun(w)
 // @ ensures !ok ==> s == r && v == w
-// @ ensures ok && w.InRun != Stale ==> 0 <= w.InRun && w.InRun < NumKeys && s.Runs[w.InRun] == RunDone
-// @ ensures ok && w.InRun != Stale ==> forall j int :: { s.Runs[j] } 0 <= j && j < NumKeys && j != w.InRun ==> s.Runs[j] == r.Runs[j]
-// @ ensures ok && w.InRun == Stale ==> s.Runs == r.Runs
+// @ ensures ok && !r.Stale(w) ==> 0 <= w.InRun && w.InRun < NumKeys && s.Runs[w.InRun] == RunDone
+// @ ensures ok && !r.Stale(w) ==> forall j int :: { s.Runs[j] } 0 <= j && j < NumKeys && j != w.InRun ==> s.Runs[j] == r.Runs[j]
+// @ ensures ok && r.Stale(w) ==> s.Runs == r.Runs
 // @ ensures ok ==> v.ID == w.ID && v.InRun == NoRun && v.Ok()
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
@@ -506,7 +525,7 @@ func (r Repo) FinishRun(w Watcher) (s Repo, v Watcher, ok bool) {
 		return r, w, false
 	}
 	s = r
-	if w.InRun != Stale {
+	if !r.Stale(w) {
 		rs := r.Runs
 		rs[w.InRun] = RunDone
 		s.Runs = rs
@@ -572,7 +591,7 @@ func (r Repo) PushRatification(w Watcher, k int) (s Repo, ok bool) {
 // @ requires w.Ok()
 // @ ensures ok == r.CanRecordIntent(w)
 // @ ensures !ok ==> s == r
-// @ ensures ok ==> s.Intent && s.Pred == r.Pred
+// @ ensures ok ==> s.Intent && s.Pred == r.Pred && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
 func (r Repo) RecordIntent(w Watcher) (s Repo, ok bool) {
@@ -588,7 +607,7 @@ func (r Repo) RecordIntent(w Watcher) (s Repo, ok bool) {
 // @ requires w.Ok()
 // @ ensures ok == r.CanRetire(w)
 // @ ensures !ok ==> s == r
-// @ ensures ok ==> s.Pred == PredRetired && s.Intent == r.Intent
+// @ ensures ok ==> s.Pred == PredRetired && s.Intent == r.Intent && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
 func (r Repo) Retire(w Watcher) (s Repo, ok bool) {

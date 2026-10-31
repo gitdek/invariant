@@ -1,5 +1,5 @@
 {
-  "decision": "D-0202",
+  "decision": "D-0209",
   "bounds": {
     "Actors": "{alice, mallory, invbot}",
     "Bots": "{invbot}",

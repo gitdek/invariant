@@ -641,11 +641,17 @@ func exists(repo Repo, id string) error {
 
 // Ratify records a person's ratification of a proposed or decided decision.
 func (s *Store) Ratify(repo Repo, id, by string) error {
+	return s.RatifyProposal(repo, id, by, "")
+}
+
+// RatifyProposal is Ratify, naming the exact proposal the person ratified,
+// such as a lock's ProposalHash, when proposal isn't empty (D-0208).
+func (s *Store) RatifyProposal(repo Repo, id, by, proposal string) error {
 	return s.update(repo, id, by, func(d Decision) (Event, error) {
 		if d.Status == "ratified" || d.Status == "superseded" {
 			return Event{}, fmt.Errorf("%s is %s already", id, d.Status)
 		}
-		return Event{Op: OpRatify}, nil
+		return Event{Op: OpRatify, Proposal: proposal}, nil
 	})
 }
 

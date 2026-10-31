@@ -80,8 +80,11 @@ type Event struct {
 	Record string `json:"record,omitempty"` // a one-way door's full record, relative to decisions/
 	Edges  []Edge `json:"edges,omitempty"`
 	With   string `json:"with,omitempty"` // the decision that supersedes this one
-	Prev   string `json:"prev"`
-	Hash   string `json:"hash"`
+	// Proposal is the exact proposal a person ratified, on a ratify line
+	// that names one: the ProposalHash of a lock ratified by hand (D-0208).
+	Proposal string `json:"proposal,omitempty"`
+	Prev     string `json:"prev"`
+	Hash     string `json:"hash"`
 }
 
 // seal sets the event's hash over its canonical encoding, which is its JSON
@@ -106,10 +109,12 @@ func (e Event) sealed() bool {
 	return e.Hash == want
 }
 
-// idPattern is a decision ID, alone or qualified by its project.
+// idPattern is a decision ID, alone or qualified by its project, and
+// proposalPattern a proposal's hash.
 var (
-	idPattern   = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?(D-\d{4,})$`)
-	mentionedID = regexp.MustCompile(`\bD-\d{4,}\b`)
+	idPattern       = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?(D-\d{4,})$`)
+	mentionedID     = regexp.MustCompile(`\bD-\d{4,}\b`)
+	proposalPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // Qualify turns a short ID into its store ID within project, and leaves a
@@ -177,12 +182,22 @@ func ReadJournal(path string) ([]Event, error) {
 }
 
 // A Decision is one decision as its journal leaves it: its node, the edges
-// its lines record, and the decision that supersedes it, if one does. IDs
-// here are qualified by their project.
+// its lines record, the line that ratified it and the decision that
+// supersedes it, if they exist. IDs here are qualified by their project.
 type Decision struct {
 	Node
 	Edges        []Edge
+	Ratification *Ratification
 	SupersededBy string
+}
+
+// Ratification is a ratify line: the person who ratified a decision, when,
+// and the exact proposal they ratified with it, if they named one (D-0208).
+// A decision recorded as ratified when it was decided has none.
+type Ratification struct {
+	By       string `json:"by"`
+	At       string `json:"at"`
+	Proposal string `json:"proposal,omitempty"`
 }
 
 // fold reads one decision's journal lines into the decision, on
@@ -199,6 +214,9 @@ func fold(project string, events []Event) (Decision, error) {
 		where := fmt.Sprintf("%s/%s, line %d", project, e.ID, n+1)
 		if (e.Op == OpImport || e.Op == OpDecide) != (n == 0) {
 			return d, fmt.Errorf("%s: a journal's first line, and only its first, records the decision", where)
+		}
+		if e.Proposal != "" && (e.Op != OpRatify || !proposalPattern.MatchString(e.Proposal)) {
+			return d, fmt.Errorf("%s: only a ratify line names a proposal, as sha256: and 64 hex digits, not %q", where, e.Proposal)
 		}
 		for _, edge := range e.Edges {
 			if !edgeTypes[edge.Type] || edge.Type == Implements {
@@ -235,6 +253,7 @@ func fold(project string, events []Event) (Decision, error) {
 				return d, fmt.Errorf("%s: it's %s already", where, d.Status)
 			}
 			d.Status, d.Who = "ratified", e.By
+			d.Ratification = &Ratification{By: e.By, At: e.At, Proposal: e.Proposal}
 		case OpSupersede:
 			with, err := Qualify(project, e.With)
 			if err != nil {

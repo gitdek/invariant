@@ -42,7 +42,9 @@ var (
 // State is the model's state at its bounds. Watchers are 0..Watchers-1, a
 // Lease of NoOne is "nobody", and an InRun of NoRun is "none". Given[Retry]
 // is the spec's retried, and Posts[Retry] and Posts[Build] its retryPosts and
-// buildPosts.
+// buildPosts. Attempts count from the latest build's, which is latest, so
+// Earlier marks a watcher in a build's run that an earlier attempt started:
+// the spec's stale run.
 type State struct {
 	Given      [NumCmds]bool
 	Posts      [NumKeys]int
@@ -60,6 +62,7 @@ type State struct {
 	Lease      int
 	Up         [Watchers]bool
 	InRun      [Watchers]int
+	Earlier    [Watchers]bool
 	Crashes    int
 	Unleased   [Watchers]bool
 }
@@ -79,6 +82,9 @@ func runIndex(k int) int {
 	}
 	return -1
 }
+
+// latest is the latest build's attempt in the code's Repo, as repoOf makes it.
+const latest = 1
 
 // repoOf makes the code's Repo from s.
 func repoOf(s State) Repo {
@@ -101,12 +107,18 @@ func repoOf(s State) Repo {
 	r.Merged = s.Merges > 0
 	r.Pred = s.Pred
 	r.Intent = s.Intent
+	r.Attempt = latest
 	r.Lease = s.Lease
 	return r
 }
 
-// withRepo reads the code's Repo back into s.
+// withRepo reads the code's Repo back into s, counting attempts from its
+// latest build's again: after a retry, every build's run a watcher is in is
+// an earlier attempt's.
 func withRepo(s State, r Repo) State {
+	for w := 0; w < Watchers; w++ {
+		s.Earlier[w] = r.Stale(watcherOf(s, w))
+	}
 	for c := 0; c < NumCmds; c++ {
 		s.Given[c] = r.Given[c]
 	}
@@ -130,12 +142,18 @@ func withRepo(s State, r Repo) State {
 }
 
 func watcherOf(s State, w int) Watcher {
-	return Watcher{ID: w, InRun: s.InRun[w]}
+	v := Watcher{ID: w, InRun: s.InRun[w], Attempt: latest}
+	if s.Earlier[w] {
+		v.Attempt = latest - 1
+	}
+	return v
 }
 
-// withWatcher reads watcher w's memory back into s.
+// withWatcher reads watcher w's memory back into s, after a step that left
+// the latest build's attempt as it was.
 func withWatcher(s State, w int, v Watcher) State {
 	s.InRun[w] = v.InRun
+	s.Earlier[w] = v.InRun == Build && v.Attempt != latest
 	return s
 }
 
@@ -179,18 +197,13 @@ func Try(s State, tried func(step string, args []any, next State)) {
 		tried("Give", []any{keyNames[c]}, n)
 	}
 
-	// A writer retries: a new build, with its own agent run, so a watcher
-	// still in the build before's run is in a stale one.
+	// A writer retries: a new build, the next attempt, with its own agent
+	// run, so a watcher still in the build before's run is in a stale one.
 	{
 		n := s
 		if t, ok := r.Give(Retry); ok {
 			n = withRepo(s, t)
 			n.RunStarts[runIndex(Build)] = 0
-			for w := 0; w < Watchers; w++ {
-				if n.InRun[w] == Build {
-					n.InRun[w] = Stale
-				}
-			}
 		}
 		tried("GiveRetry", []any{}, n)
 	}
@@ -254,7 +267,7 @@ func Try(s State, tried func(step string, args []any, next State)) {
 		} else if spare {
 			n = s
 			n.Up[w] = false
-			n.InRun[w] = NoRun
+			n.InRun[w], n.Earlier[w] = NoRun, false
 			n.Crashes++
 			tried("Crash", args, n)
 		}
@@ -349,15 +362,15 @@ func fn(pairs []any) map[string]any {
 	return map[string]any{"$fn": pairs}
 }
 
-// inRunName is the spec's name for the agent run a watcher is in.
-func inRunName(k int) string {
-	switch k {
-	case NoRun:
+// inRunName is the spec's name for the agent run watcher w is in.
+func inRunName(s State, w int) string {
+	switch {
+	case s.InRun[w] == NoRun:
 		return "none"
-	case Stale:
+	case s.Earlier[w]:
 		return "stale"
 	}
-	return keyNames[k]
+	return keyNames[s.InRun[w]]
 }
 
 // Abstract is s in the spec's vocabulary.
@@ -388,7 +401,7 @@ func Abstract(s State) map[string]any {
 	var up, inRun, unleased []any
 	for w := 0; w < Watchers; w++ {
 		up = append(up, []any{mv(w), s.Up[w]})
-		inRun = append(inRun, []any{mv(w), inRunName(s.InRun[w])})
+		inRun = append(inRun, []any{mv(w), inRunName(s, w)})
 		if s.Unleased[w] {
 			unleased = append(unleased, mv(w))
 		}
