@@ -213,6 +213,10 @@ func componentEvidence(b *strings.Builder, r *verify.Report) {
 			contracts[check.Target] = check.Proof.Contracts
 		}
 	}
+	var standing map[string]verify.ComponentContractEvidence
+	if len(evidence.Inventory.TrustedContracts) > 0 {
+		standing, _ = componentContractStanding(r)
+	}
 	proved := 0
 	for _, c := range evidence.Inventory.Components {
 		if proofs[c.ID].Status == "proved" {
@@ -252,6 +256,9 @@ func componentEvidence(b *strings.Builder, r *verify.Report) {
 				"verified IDs: "+componentStrings(result.Verified), "checked contracts: "+componentStrings(result.Contracts),
 				componentInputs(result.Inputs, result.FileInputs), componentInvocation(result.Invocation), componentTool(result.Tool))
 			details = append(details, componentBoundary(result)...)
+			if status == "proved" && len(result.Assumed) > 0 {
+				details = append(details, componentConditional(result, standing))
+			}
 		} else if _, ok := contracts[c.ID]; ok {
 			details = append(details, "no verifier result")
 		}
@@ -619,7 +626,8 @@ func (render renderer) failures(r *verify.Report) []string {
 			out = append(out, "Build:\n\n```\n"+r.Build.Output+"\n```")
 		}
 	}
-	return append(out, componentContractFailures(r)...)
+	out = append(out, componentContractFailures(r)...)
+	return append(out, componentProofFailures(r)...)
 }
 
 func count[T any](xs []T, ok func(T) bool) int {

@@ -27,24 +27,55 @@ func isPythonApplication(p *project.Project) bool {
 	return p.Manifest.Language == "python" && len(p.Manifest.Existing) > 0
 }
 
+// pythonApplicationGateOptions are the options the gate prepares its
+// session with. The gate's own are the zero value: every selected proof runs
+// the pinned Nagini, and the dependency image's own records name its
+// distributions. This package's tests substitute doubles; no caller can.
+var pythonApplicationGateOptions PythonApplicationSessionOptions
+
 func pythonApplicationPreflight(p *project.Project) error {
+	_, err := pythonApplicationAdmit(p)
+	return err
+}
+
+// pythonApplicationAdmit checks a Python application's configuration before
+// any tool runs, and returns its inventory.
+func pythonApplicationAdmit(p *project.Project) (*project.ComponentInventory, error) {
 	inv, err := project.ResolveComponents(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// The gate grants no proof until #294's step 6 connects proof and its
-	// backing tests: PythonApplicationSession.Prove runs on its own (#353).
+	// The gate qualifies an in-place proof only beside conformance on the
+	// same function (#359): its collector binds what conformance observes to
+	// the function's exact staged declaration, the same bytes Nagini's input
+	// copies, so the function proved is the function the application runs.
 	for _, check := range inv.Checks {
-		if check.Proof != nil {
-			return fmt.Errorf("the gate doesn't prove Python in place yet: %s selects a proof, which only PythonApplicationSession.Prove runs until #294's step 6 connects it", check.Target)
+		if check.Proof != nil && len(check.Conformance) == 0 {
+			return nil, fmt.Errorf("%s selects a proof and no conformance: the gate qualifies an in-place proof only beside conformance on the same function, which shows the application runs the declaration Nagini proved", check.Target)
 		}
 	}
 	app, err := project.ResolvePythonApplication(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = pythonApplicationInvocations(p, app.Root, inv)
-	return err
+	if _, err := pythonApplicationInvocations(p, app.Root, inv); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+// pythonApplicationProofTargets are an inventory's in-place proof selections,
+// in the inventory's order.
+func pythonApplicationProofTargets(inv *project.ComponentInventory) []string {
+	var out []string
+	if inv != nil {
+		for _, check := range inv.Checks {
+			if check.Proof != nil {
+				out = append(out, check.Target)
+			}
+		}
+	}
+	return out
 }
 
 func pythonApplicationTargetSources(p *project.Project, root string, target project.Component) ([]string, error) {
@@ -242,11 +273,19 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	defer os.RemoveAll(work)
-	s, err := PreparePythonApplicationSession(ctx, p, filepath.Join(work, "src"), PythonApplicationSessionOptions{})
+	s, err := PreparePythonApplicationSession(ctx, p, filepath.Join(work, "src"), pythonApplicationGateOptions)
 	if err != nil {
 		return nil, err
 	}
 	defer s.Close()
+	// Every selected proof's verifier input is built, and the application
+	// shown to import the contracts its module reads, before anything runs:
+	// a selection the input can't preserve is refused, as preflight refuses
+	// configuration (#359).
+	proofTargets := pythonApplicationProofTargets(s.inventory)
+	if err := s.preparePythonApplicationProofs(ctx, proofTargets); err != nil {
+		return nil, err
+	}
 	p = s.project
 	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false)
 	if ctx.Err() != nil {
@@ -372,8 +411,28 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			return nil, err
 		}
 	}
+	// Each selected function is proved in its module, by the pinned Nagini,
+	// apart from the application's image (#359).
+	var proofs []ComponentProofResult
+	for _, target := range proofTargets {
+		proof, err := s.Prove(ctx, target)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			return nil, err
+		}
+		r.Application.Proofs = append(r.Application.Proofs, *proof)
+		proofs = append(proofs, proof.Result)
+	}
+	if len(proofTargets) > 0 {
+		r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
+	}
 	if s.inventory.Mode == "explicit" {
 		if err := r.attributePythonApplication(s.inventory); err != nil {
+			return nil, err
+		}
+		if err := r.AttributeComponentProofs(s.inventory, proofs); err != nil {
 			return nil, err
 		}
 		r.Build.Passed = r.pythonApplicationContractSteps(contractSteps) && r.Build.Passed
@@ -381,9 +440,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	// Code that agrees one size larger only when TLC can say what that is
 	// carries no bound; code that disagrees there fails (D-0068, D-0076).
 	// Every declared trusted contract's backing tests are required, whether
-	// or not a proof uses it yet.
+	// or not a proof uses it yet, and every selected proof must qualify.
 	larger := r.Larger == nil || !r.Larger.Required || r.Larger.Passed
-	r.Passed = r.Passed && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested()
+	r.Passed = r.Passed && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested() &&
+		len(r.pythonApplicationProofProblems()) == 0
 	r.Assurance = r.CodeAssurance()
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
@@ -562,8 +622,15 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 }
 
 func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	if err := pythonApplicationPreflight(p); err != nil {
+	inv, err := pythonApplicationAdmit(p)
+	if err != nil {
 		return Build{}, Evidence{}, err
+	}
+	// The direct route returns a build and traces, never a proof: an in-place
+	// proof qualifies only in verify.Run, beside the conformance and the
+	// backing tests it rests on (#359).
+	if targets := pythonApplicationProofTargets(inv); len(targets) > 0 {
+		return Build{}, Evidence{}, fmt.Errorf("%s selects a proof, which the direct Python check doesn't run: an in-place proof qualifies only in the gate, verify.Run, beside the conformance and backing tests it rests on", targets[0])
 	}
 	work, err := os.MkdirTemp("", "invariant-application-check-")
 	if err != nil {

@@ -35,7 +35,7 @@ import (
 // from and checked against them before Nagini runs, so a rewritten or
 // detached implementation can't stand for the application's. The pinned
 // Nagini runs in its own image, where no application requirement is
-// installed. The gate doesn't use this yet (#294's step 6 connects it).
+// installed. The gate runs it on every selected function (#359).
 
 //go:embed python_application_proof.py
 var pythonApplicationProofAnalyzer string

@@ -606,10 +606,13 @@ func TestPythonApplicationProofAttributesWithItsBackingTests(t *testing.T) {
 	}
 }
 
-func TestPythonApplicationProofTheGateStillRefuses(t *testing.T) {
+func TestPythonApplicationProofTheGateNeedsConformanceOnTheFunction(t *testing.T) {
+	// ppFixture's proof check selects no conformance, and the gate qualifies
+	// an in-place proof only beside conformance on the same function (#359):
+	// every route refuses it before any tool runs.
 	_, p := ppFixture(t, ppModule)
 	assertNoTools := pa315TrapTools(t)
-	if err := Check(p.Dir); err == nil || !strings.Contains(err.Error(), "doesn't prove Python in place yet") {
+	if err := Check(p.Dir); err == nil || !strings.Contains(err.Error(), "selects a proof and no conformance") {
 		t.Fatalf("Check: %v", err)
 	}
 	if r, err := Run(context.Background(), p.Dir, "", toolchain.Toolchain{}); err == nil || r != nil {
