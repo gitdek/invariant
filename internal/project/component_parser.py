@@ -1,6 +1,7 @@
 """Inventory syntax from stdin without importing or executing inspected code."""
 
 import ast
+import builtins
 import codecs
 from collections import Counter
 import io
@@ -39,6 +40,49 @@ def inventory(raw):
             else:
                 yield from declarations(child)
 
+    # An Exsures call names an exception its operation may raise. The name
+    # resolves without running the module: through an absolute import at its
+    # top level, or to a builtin exception. Anything else the module binds
+    # itself, or binds only conditionally, can't be resolved this way.
+    imports, local = {}, set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                imports[alias.asname or top] = alias.name if alias.asname else top
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                if alias.name != "*":
+                    imports[alias.asname or alias.name] = node.module + "." + alias.name
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local.add(node.name)
+        else:
+            for child in ast.walk(node):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    local.add(child.id)
+                elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                    local.update((alias.asname or alias.name).split(".")[0] for alias in child.names)
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    local.add(child.name)
+                elif isinstance(child, ast.ExceptHandler) and child.name:
+                    local.add(child.name)
+
+    def exception(call):
+        node = call.args[0] if call.args else None
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.insert(0, node.attr)
+            node = node.value
+        expression = ast.get_source_segment(text, call.args[0]) if call.args else ""
+        if not isinstance(node, ast.Name) or node.id in local:
+            return {"expression": expression or "", "path": ""}
+        if node.id in imports:
+            return {"expression": expression, "path": ".".join([imports[node.id]] + parts)}
+        value = getattr(builtins, node.id, None)
+        if not parts and isinstance(value, type) and issubclass(value, BaseException):
+            return {"expression": expression, "path": "builtins." + node.id}
+        return {"expression": expression, "path": ""}
+
     result = []
 
     def namespace(node, prefix):
@@ -53,7 +97,7 @@ def inventory(raw):
             if isinstance(child, ast.ClassDef):
                 namespace(child, symbol + ".")
                 continue
-            contracts = []
+            contracts, exsures = [], []
             for statement in child.body:
                 if not isinstance(statement, ast.Expr):
                     continue
@@ -64,7 +108,9 @@ def inventory(raw):
                         offset(call.lineno, call.col_offset),
                         offset(call.end_lineno, call.end_col_offset),
                     ])
-            result.append({"symbol": symbol, "contracts": contracts})
+                    if call.func.id == "Exsures":
+                        exsures.append(exception(call))
+            result.append({"symbol": symbol, "contracts": contracts, "exsures": exsures})
             namespace(child, symbol + ".<locals>.")
 
     namespace(tree, "")

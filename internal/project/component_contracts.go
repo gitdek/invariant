@@ -3,6 +3,7 @@ package project
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -44,6 +45,10 @@ type ResolvedComponentContract struct {
 	Contract    string                        `json:"contract"`
 	Tests       []string                      `json:"tests"`
 	Invocations []ResolvedComponentInvocation `json:"invocations,omitempty"`
+	// Exsures are the exception classes the contract says its operation may
+	// raise, by the dotted path each of its Exsures calls resolves to; under
+	// its precondition, the operation raises no other.
+	Exsures []string `json:"exsures,omitempty"`
 }
 
 // ResolvedComponentOperation keeps a dependency's normalized distribution
@@ -161,6 +166,20 @@ func (r *componentResolver) trustedContracts(declarations []ComponentContract) (
 			return nil, fail(fmt.Errorf("it must select at least one backing test"))
 		}
 		out := ResolvedComponentContract{ID: d.ID, Operation: op, Contract: contract.ID}
+		// What the contract lets its operation raise comes from the same
+		// bytes its contract hash covers.
+		source, err := r.read(contract.Source)
+		if err != nil {
+			return nil, fail(err)
+		}
+		for _, e := range source.exsures[contract.Symbol] {
+			if e.Path == "" {
+				return nil, fail(fmt.Errorf("its contract %s's Exsures(%s, ...) must name an exception class: a builtin, or a name its module imports at top level", contract.ID, e.Expression))
+			}
+			if !slices.Contains(out.Exsures, e.Path) {
+				out.Exsures = append(out.Exsures, e.Path)
+			}
+		}
 		if out.Tests, err = r.associations(d.Tests, "test"); err != nil {
 			return nil, fail(err)
 		}
