@@ -1813,7 +1813,6 @@
   // watcher is running has a card of its own (D-0113).
   const LIVE_KINDS = [["read", "reading"], ["search", "searching"], ["list", "listing"], ["build", "building"], ["test", "test runs"], ["git", "version control"], ["edit", "editing"], ["gate", "gate runs"], ["check", "draft checks"], ["other", "other tools"]];
   const LIVE_NOW = { thinking: "Thinking", read: "Reading a file", search: "Searching the code", list: "Listing files", build: "Building", git: "Using version control", edit: "Writing code", gate: "Running the gate", check: "Checking the draft", test: "Running the tests", other: "Using a tool" };
-  const LIVE_DOING = { building: "Building", formalizing: "Drafting", answering: "Answering" };
   let live = null;
   // The cards shown, by their step's repository, issue and run, so each
   // one is kept across reads and its dial and strip never start over. A
@@ -1941,7 +1940,9 @@
     const { el, l } = c;
     el.classList.toggle("ended", !!l.ended);
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
-    put($(".live-title", el), `${esc(LIVE_DOING[l.doing] || cap(l.doing))} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}${l.by ? ` <span class="by">by ${esc(l.by)}</span>` : ""}`);
+    // The live JSON says what the step does, or, once it has ended, that it
+    // ended, so a finished card never reads as still running (#269).
+    put($(".live-title", el), `${esc(l.title)} <span class="n">${esc(ref(l.repo, l.issue))}</span>${issue ? ` <q>${esc(issue.title)}</q>` : ""}${l.by ? ` <span class="by">by ${esc(l.by)}</span>` : ""}`);
 
     // What the agent is doing now, or how its run ended.
     let now;
