@@ -23,7 +23,8 @@ type ComponentsConfig struct {
 	Checks []ComponentCheck `json:"checks,omitempty"`
 }
 
-// ComponentRef selects one declaration in a project-relative source file.
+// ComponentRef selects one declaration in a source file, relative to the
+// application for existing Python and to the project otherwise.
 type ComponentRef struct {
 	Source string `json:"source"`
 	Symbol string `json:"symbol"`
@@ -85,6 +86,14 @@ type ResolvedComponentProof struct {
 // directory and resolves every selected reference. Python uses an isolated
 // syntax parser; no project code runs and no verification evidence is supplied.
 func ResolveComponents(p *Project) (*ComponentInventory, error) {
+	root := p.Dir
+	if p.Manifest.Language == "python" && len(p.Manifest.Existing) > 0 {
+		app, err := ResolvePythonApplication(p)
+		if err != nil {
+			return nil, err
+		}
+		root = app.Root
+	}
 	cfg := p.Manifest.Components
 	if cfg == nil {
 		return &ComponentInventory{Mode: "legacy"}, nil
@@ -103,7 +112,7 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 	sort.Strings(inv.Scope)
 	r := componentResolver{
 		language: language,
-		root:     p.Dir, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{},
+		root:     root, files: map[string]componentSource{}, scoped: map[ComponentRef]Component{},
 		inputs: map[string]componentInput{}, declarations: map[string]Component{},
 		provenanceFiles: map[string]ComponentFile{}, modules: map[string]ComponentFile{},
 	}
@@ -111,7 +120,7 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 		if i > 0 && dir == inv.Scope[i-1] {
 			return nil, fmt.Errorf("components: duplicate scope %q", dir)
 		}
-		full, err := componentPath(p.Dir, dir, true)
+		full, err := componentPath(root, dir, true)
 		if err != nil {
 			return nil, fmt.Errorf("components scope %q: %w", dir, err)
 		}

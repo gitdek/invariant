@@ -32,8 +32,9 @@ type Manifest struct {
 	Exhaustive bool `json:"exhaustive,omitempty"`
 	// Existing names code the project checks without holding it (D-0054):
 	// files and directories outside the project, relative to the root of
-	// the package they belong to, such as src/lib. The conformance driver
-	// runs that code where it is, and the factory never changes it.
+	// the package they belong to, such as src/lib. Python selections instead
+	// resolve an enclosing application for discovery and staging; execution
+	// is not connected yet. The factory never changes the existing code.
 	Existing []string `json:"existing,omitempty"`
 	// Parameters names the bounds that are sizes the code takes, such as a
 	// capacity. Refusing work past one is a rule the code keeps, so a driver
@@ -161,8 +162,8 @@ func (p *Project) validate() error {
 		return fmt.Errorf("%s: module and code are required", manifestFile)
 	}
 	if len(m.Existing) > 0 {
-		if m.Language != "typescript" || m.Conformance == "" {
-			return fmt.Errorf("%s: a project that checks existing code needs a TypeScript conformance driver", manifestFile)
+		if (m.Language != "typescript" && m.Language != "python") || m.Conformance == "" {
+			return fmt.Errorf("%s: a project that checks existing code needs a TypeScript or Python conformance driver", manifestFile)
 		}
 		for _, e := range m.Existing {
 			if clean := path.Clean(e); e == "" || clean != e || path.IsAbs(e) || e == "." || strings.HasPrefix(e, "../") || e == ".." || strings.Contains(e, `\`) {
