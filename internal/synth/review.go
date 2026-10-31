@@ -70,14 +70,16 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 	}
 	defer f.Close()
 	u, err := backend.Run(ctx, Job{Workspace: ws, Prompt: reviewPrompt(p), ReadOnly: true, Transcript: f})
-	if err != nil {
-		return nil, fmt.Errorf("the review: %w", err)
-	}
 	of := "driver"
 	if l := p.Manifest.Language; l == "" || l == "go" {
 		of = "explorer"
 	}
-	return &Review{Usage: u, Text: strings.TrimSpace(u.Summary), Of: of}, nil
+	review := &Review{Usage: u, Text: strings.TrimSpace(u.Summary), Of: of}
+	if err != nil {
+		// A review that failed still spent what its attempts did (#261).
+		return review, fmt.Errorf("the review: %w", err)
+	}
+	return review, nil
 }
 
 // driverFile is what the review reads: a TypeScript or Python project's

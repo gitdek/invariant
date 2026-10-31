@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ClaudeCode runs the official Claude Code CLI headlessly (claude -p), on the
@@ -32,9 +34,20 @@ type ClaudeCode struct {
 	// that names its own effort, as a build's fallback run does, thinks at
 	// that instead (D-0125).
 	Effort string
+	// wait is how a run waits before it tries its provider again, or nil
+	// for the timer (#261).
+	wait func(context.Context, time.Duration) error
 }
 
 func (c ClaudeCode) Name() string { return "claude-code" }
+
+// WithProviderWait returns c with wait in place of the timer a run waits on
+// before it tries its provider again, as a test does to keep the minutes
+// short; nil restores the timer. The waits the run asks for are the same.
+func (c ClaudeCode) WithProviderWait(wait func(context.Context, time.Duration) error) Backend {
+	c.wait = wait
+	return c
+}
 
 // fileTools are the only built-in tools an agent gets.
 const fileTools = "Read,Write,Edit,Glob,Grep"
@@ -48,7 +61,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"-p", job.Prompt,
 			"--output-format", "stream-json", "--verbose",
 			"--model", c.Model,
-			"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
+			"--max-budget-usd", usd(c.BudgetUSD),
 			"--max-turns", strconv.Itoa(c.MaxTurns),
 			"--strict-mcp-config",
 			"--tools", readTools,
@@ -58,9 +71,11 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"--no-session-persistence",
 		}, c.effort(job)...), nil
 	}
-	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		"invariant": map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]},
-	}})
+	server := map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]}
+	if job.allowance != "" {
+		server["env"] = map[string]string{ToolAllowanceEnv: job.allowance}
+	}
+	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"invariant": server}})
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +91,7 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 		"-p", job.Prompt,
 		"--output-format", "stream-json", "--verbose",
 		"--model", c.Model,
-		"--max-budget-usd", strconv.FormatFloat(c.BudgetUSD, 'f', 2, 64),
+		"--max-budget-usd", usd(c.BudgetUSD),
 		"--max-turns", strconv.Itoa(c.MaxTurns),
 		"--mcp-config", string(config), "--strict-mcp-config",
 		// --tools sets which built-in tools exist at all; --allowedTools only
@@ -103,40 +118,127 @@ func (c ClaudeCode) effort(job Job) []string {
 	return []string{"--effort", effort}
 }
 
+// Run runs the job, trying again when Claude Code's provider is briefly
+// unavailable (#261). Its attempts share the run's time, its tool calls,
+// and its budget and turns: each attempt gets only what the ones before it
+// left.
 func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
-	args, err := c.args(job)
-	if err != nil {
+	if _, err := c.args(job); err != nil {
 		return Usage{}, err
 	}
 	ctx, cancel := within(ctx, job)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Binary, args...)
+	tools, err := newAllowance(job)
+	if err != nil {
+		return Usage{}, err
+	}
+	defer tools.close()
+	job.allowance = tools.address()
+	return retrying(ctx, c.Name(), c.wait,
+		func(spent Usage) try {
+			before := tools.taken()
+			t := c.attempt(ctx, job, spent)
+			tools.reconcile(&t.usage, before)
+			return t
+		}, nil,
+		func(total Usage, last error) error {
+			if c.BudgetUSD > 0 && leftUSD(c.BudgetUSD, total.CostUSD) <= 0 {
+				return fmt.Errorf("claude's run has spent its $%s budget, so it can't try its provider again: %v", usd(c.BudgetUSD), last)
+			}
+			if c.MaxTurns > 0 && total.Turns >= c.MaxTurns {
+				return fmt.Errorf("claude's run has taken all %d of its turns, so it can't try its provider again: %v", c.MaxTurns, last)
+			}
+			return nil
+		})
+}
+
+// attempt runs claude once, under ctx, the run's deadline, with what spent,
+// the attempts before it, left of the run's budget and turns.
+func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
+	left := c
+	if c.BudgetUSD > 0 {
+		left.BudgetUSD = leftUSD(c.BudgetUSD, spent.CostUSD)
+	}
+	if c.MaxTurns > 0 {
+		left.MaxTurns = c.MaxTurns - spent.Turns
+	}
+	args, err := left.args(job)
+	if err != nil {
+		return try{err: err}
+	}
+	run, stop := context.WithCancel(ctx)
+	defer stop()
+	cmd := exec.CommandContext(run, c.Binary, args...)
 	cmd.Dir = job.Workspace
 	// The gate takes a while; give its tool calls time.
 	cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=900000", "MCP_TIMEOUT=60000")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return Usage{}, err
+		return try{err: err}
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return Usage{}, err
+		return try{err: err}
 	}
-	usage, readErr := ReadStream(stdout, job.Transcript)
+	usage, end, readErr := readClaudeStream(stdout, job.Transcript)
 	if readErr != nil {
-		cancel() // stop the agent, rather than wait for it
+		stop() // stop the agent, rather than wait for it
 	}
 	waitErr := cmd.Wait()
+	// The result's own words, when there's a result, alone say why it
+	// failed. Without one, an API error Claude Code reported in place of a
+	// reply does, and only without that, stderr. stderr is diagnostic only.
+	failure := end.failure
+	if failure == "" {
+		failure = end.api
+	}
+	if failure == "" && !end.result {
+		failure = stderr.String()
+	}
+	diag := lastLines(stderr.String(), 20)
+	var why string
 	switch {
 	case readErr != nil:
-		return usage, readErr
-	case usage.Outcome == "":
-		return usage, fmt.Errorf("claude ended without a result: %v\n%s", waitErr, lastLines(stderr.String(), 20))
-	case usage.Outcome != "success":
-		return usage, fmt.Errorf("claude stopped: %s", usage.Outcome)
+	case !end.result:
+		why = fmt.Sprintf("claude ended without a result: %v\n%s", waitErr, diag)
+		// What the agent did before the stream ended is all the run has of
+		// its turns.
+		usage.Turns = end.replies
+	case usage.Outcome == "success" && !(end.isError && transient(failure)):
+		return try{usage: usage}
+	default:
+		if usage.Outcome == "success" || usage.Outcome == "" {
+			usage.Outcome = "error" // a result that's an error, as an API error's is
+		}
+		why = "claude stopped: " + usage.Outcome
+		if failure != "" {
+			why += ": " + failure
+		}
+		if diag != "" {
+			why += "\n" + diag
+		}
 	}
-	return usage, nil
+	err = readErr
+	if err == nil {
+		err = errors.New(strings.TrimRight(why, "\n"))
+	}
+	t := try{usage: usage, err: err}
+	if cut := ctx.Err(); cut != nil {
+		// The run's deadline or its cancellation ended this attempt.
+		t.err, t.cut = fmt.Errorf("the run was cut off (%w): %w", cut, err), true
+	} else if readErr == nil {
+		t.provider = transient(failure)
+	}
+	// Claude Code says what a run cost only in its result. One that ended
+	// without it, after the provider sent paid replies, may have spent all
+	// the run had left, so it counts as having spent exactly that, and no
+	// retry can renew the budget: a conservative estimate (#261).
+	if readErr == nil && !end.result && end.paid && c.BudgetUSD > 0 {
+		t.usage.CostUSD, t.usage.CostIncomplete, t.final = left.BudgetUSD, true, true
+		t.err = fmt.Errorf("%w; this attempt ended before Claude Code said what it cost, so the rest of the run's budget, $%s, counts as spent: a conservative estimate, since its real cost is unknown", t.err, usd(left.BudgetUSD))
+	}
+	return t
 }
 
 // ErrThinkingLoop is a run the factory stopped because the agent's replies
@@ -154,7 +256,27 @@ const maxThinkingOnly = 2
 // early, with ErrThinkingLoop, once the agent's replies keep ending with
 // nothing but thinking.
 func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
+	u, _, err := readClaudeStream(r, transcript)
+	return u, err
+}
+
+// claudeEnd is what Claude Code's events said of how a run ended, beyond
+// its Usage (#261).
+type claudeEnd struct {
+	result  bool   // a result closed the run, with what it cost and its turns
+	isError bool   // the result says the run failed
+	failure string // what the result said went wrong: its errors, or else its text
+	api     string // the last API error Claude Code reported in place of a reply
+	replies int    // the agent's replies, each a turn, as the events showed them
+	paid    bool   // the provider sent a reply, which costs, before any result
+}
+
+// readClaudeStream is ReadStream, with what the events said of how the run
+// ended.
+func readClaudeStream(r io.Reader, transcript io.Writer) (Usage, claudeEnd, error) {
 	u := Usage{ToolCalls: map[string]int{}}
+	var end claudeEnd
+	seen := map[string]bool{}
 	// A reply is one message, whose blocks can come in several events. It
 	// ran out of room if it held only thinking when the next turn began.
 	var reply string
@@ -168,12 +290,15 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 			transcript.Write(append(append([]byte{}, line...), '\n'))
 		}
 		var ev struct {
-			Type    string  `json:"type"`
-			Subtype string  `json:"subtype"`
-			Model   string  `json:"model"`
-			Result  string  `json:"result"`
-			Cost    float64 `json:"total_cost_usd"`
-			Turns   int     `json:"num_turns"`
+			Type    string          `json:"type"`
+			Subtype string          `json:"subtype"`
+			Model   string          `json:"model"`
+			Result  string          `json:"result"`
+			Cost    float64         `json:"total_cost_usd"`
+			Turns   int             `json:"num_turns"`
+			IsError bool            `json:"is_error"`
+			Errors  json.RawMessage `json:"errors"`
+			Error   json.RawMessage `json:"error"`
 			Servers []struct {
 				Name   string `json:"name"`
 				Status string `json:"status"`
@@ -189,6 +314,7 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 		var content []struct {
 			Type string `json:"type"`
 			Name string `json:"name"`
+			Text string `json:"text"`
 		}
 		if bytes.HasPrefix(bytes.TrimSpace(ev.Message.Content), []byte("[")) {
 			json.Unmarshal(ev.Message.Content, &content)
@@ -204,6 +330,23 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 				}
 			}
 		case "assistant":
+			// Claude Code reports an API error that took a reply's place as a
+			// message with an error, which the provider didn't send.
+			if kind := words(ev.Error); kind != "" {
+				var text []string
+				for _, c := range content {
+					if c.Text != "" {
+						text = append(text, c.Text)
+					}
+				}
+				end.api = strings.TrimSpace(kind + ": " + strings.Join(text, "\n"))
+				break
+			}
+			end.paid = true
+			if ev.Message.ID == "" || !seen[ev.Message.ID] {
+				seen[ev.Message.ID] = true
+				end.replies++
+			}
 			if ev.Message.ID != reply {
 				reply, thinkingOnly = ev.Message.ID, true
 			}
@@ -226,13 +369,42 @@ func ReadStream(r io.Reader, transcript io.Writer) (Usage, error) {
 			}
 			reply = ""
 			if cutOff >= maxThinkingOnly {
-				return u, ErrThinkingLoop
+				return u, end, ErrThinkingLoop
 			}
 		case "result":
 			u.Outcome, u.Summary, u.CostUSD, u.Turns = ev.Subtype, ev.Result, ev.Cost, ev.Turns
+			end.result, end.isError, end.failure = true, ev.IsError, words(ev.Errors)
+			if end.failure == "" {
+				end.failure = strings.TrimSpace(ev.Result)
+			}
 		}
 	}
-	return u, scanner.Err()
+	return u, end, scanner.Err()
+}
+
+// words is a JSON value's text, as an event's error or errors may hold it:
+// a string, a list of them, or anything else, as it reads in JSON. Nothing,
+// null and false say nothing.
+func words(v json.RawMessage) string {
+	v = bytes.TrimSpace(v)
+	if len(v) == 0 || bytes.Equal(v, []byte("null")) || bytes.Equal(v, []byte("false")) {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(v, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(v, &list) == nil {
+		var out []string
+		for _, item := range list {
+			if w := words(item); w != "" {
+				out = append(out, w)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	return string(v)
 }
 
 func lastLines(s string, n int) string {

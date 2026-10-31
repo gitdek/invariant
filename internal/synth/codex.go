@@ -61,6 +61,17 @@ type Codex struct {
 	// GoModCache is Go's module cache, which its commands read to build Go
 	// without the network.
 	GoModCache string
+	// wait is how a run waits before it tries its provider again, or nil
+	// for the timer (#261).
+	wait func(context.Context, time.Duration) error
+}
+
+// WithProviderWait returns c with wait in place of the timer a run waits on
+// before it tries its provider again, as a test does to keep the minutes
+// short; nil restores the timer. The waits the run asks for are the same.
+func (c Codex) WithProviderWait(wait func(context.Context, time.Duration) error) Backend {
+	c.wait = wait
+	return c
 }
 
 // codexTurn lets one of this process's Codex runs go at a time (D-0138).
@@ -230,6 +241,11 @@ func (c Codex) args(job Job, tmp string) ([]string, error) {
 		server := fmt.Sprintf(`mcp_servers.%s={command=%s, args=%s, required=true, default_tools_approval_mode="approve", enabled_tools=%s, startup_timeout_sec=60, tool_timeout_sec=%d}`,
 			codexServer, tomlString(job.GateServer[0]), tomlStrings(job.GateServer[1:]), tomlStrings(tools), timeout)
 		args = append(args, "-c", server)
+		// Codex starts its servers with only the environment it names, so the
+		// run's allowance goes in the server's own (#261).
+		if job.allowance != "" {
+			args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.env={%s=%s}", codexServer, ToolAllowanceEnv, tomlString(job.allowance)))
+		}
 	}
 	if c.Model != "" {
 		args = append(args, "-m", c.Model)
@@ -273,6 +289,10 @@ func (c Codex) codexEnv() []string {
 	return env
 }
 
+// Run runs the job, trying again when Codex's provider is briefly
+// unavailable (#261). Its attempts share the run's time, its cap on steps
+// and its tool calls, and each gives its turn back when it ends, so the
+// wait before the next holds up no other run.
 func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if c.Home == "" {
 		return Usage{}, errors.New("codex needs a home of its own, where its sign-in lives")
@@ -281,23 +301,71 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	defer release()
-	// The agent's commands get a temporary directory of the run's own, which
-	// holds their Go build cache, where the profile lets them write. In the
-	// workspace, it would count as the agent's work.
-	tmp, err := os.MkdirTemp("/tmp", "invariant-codex-")
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	// The run's time starts now that its first turn has come (D-0154). The
+	// waits before its retries and its later turns all count against it.
+	ctx, cancel := within(ctx, job)
+	defer cancel()
+	tools, err := newAllowance(job)
 	if err != nil {
 		return Usage{}, err
+	}
+	defer tools.close()
+	job.allowance = tools.address()
+	first := true
+	return retrying(ctx, c.Name(), c.wait,
+		func(spent Usage) try {
+			defer func() {
+				if release != nil {
+					release()
+					release = nil
+				}
+			}()
+			steps := 0
+			if c.MaxTurns > 0 {
+				steps = c.MaxTurns - spent.Turns
+			}
+			before := tools.taken()
+			t := c.attempt(ctx, job, steps, first)
+			first = false
+			tools.reconcile(&t.usage, before)
+			return t
+		},
+		func(ctx context.Context) (err error) {
+			release, err = c.turn(ctx)
+			return err
+		},
+		func(total Usage, last error) error {
+			if c.MaxTurns > 0 && total.Turns >= c.MaxTurns {
+				return fmt.Errorf("%w: all %d of its steps were spent when its provider failed, so it can't try again: %v", ErrTooManyTurns, c.MaxTurns, last)
+			}
+			return nil
+		})
+}
+
+// attempt runs codex once, under ctx, the run's deadline, stopping it after
+// steps more steps when the run has a cap. The first attempt starts the
+// transcript.
+func (c Codex) attempt(ctx context.Context, job Job, steps int, first bool) try {
+	// The agent's commands get a temporary directory of the attempt's own,
+	// which holds their Go build cache, where the profile lets them write.
+	// In the workspace, it would count as the agent's work.
+	tmp, err := os.MkdirTemp("/tmp", "invariant-codex-")
+	if err != nil {
+		return try{err: err}
 	}
 	defer os.RemoveAll(tmp)
 	args, err := c.args(job, tmp)
 	if err != nil {
-		return Usage{}, err
+		return try{err: err}
 	}
-	// The run's time starts now that its turn has come.
-	ctx, cancel := within(ctx, job)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Binary, args...)
+	run, stop := context.WithCancel(ctx)
+	defer stop()
+	cmd := exec.CommandContext(run, c.Binary, args...)
 	cmd.Dir = job.Workspace
 	cmd.Env = c.codexEnv()
 	// Codex's agent has a shell, so stopping the run stops everything it
@@ -308,23 +376,23 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	cmd.Stdin = nil
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return Usage{}, err
+		return try{err: err}
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return Usage{}, err
+		return try{err: err}
 	}
 	// Codex's events carry no time and no workspace, which the live view
 	// needs, so the transcript starts with the workspace, and each event is
 	// stamped with when it came (#153).
-	if job.Transcript != nil {
+	if first && job.Transcript != nil {
 		start, _ := json.Marshal(map[string]string{"type": "invariant.workspace", "cwd": job.Workspace})
 		job.Transcript.Write(append(stamped(start, time.Now()), '\n'))
 	}
-	usage, readErr := ReadCodexStream(stdout, job.Transcript, c.MaxTurns, !job.ReadOnly)
+	usage, failure, readErr := readCodexStream(stdout, job.Transcript, steps, !job.ReadOnly)
 	if readErr != nil {
-		cancel() // stop the agent, rather than wait for it
+		stop() // stop the agent, rather than wait for it
 	}
 	waitErr := cmd.Wait()
 	usage.Backend, usage.Model = c.Name(), c.Model
@@ -332,15 +400,34 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 	if !job.ReadOnly && usage.GateTool == "" && strings.Contains(stderr.String(), "MCP servers failed") {
 		usage.GateTool = "failed"
 	}
+	var why string
 	switch {
 	case readErr != nil:
-		return usage, readErr
+	case usage.Outcome == "success":
+		return try{usage: usage}
 	case usage.Outcome == "":
-		return usage, fmt.Errorf("codex ended without finishing its turn: %v\n%s", waitErr, lastLines(stderr.String(), 20))
-	case usage.Outcome != "success":
-		return usage, fmt.Errorf("codex stopped: %s", usage.Summary)
+		why = fmt.Sprintf("codex ended without finishing its turn: %v\n%s", waitErr, lastLines(stderr.String(), 20))
+	default:
+		why = "codex stopped: " + usage.Summary
+		if diag := lastLines(stderr.String(), 20); diag != "" {
+			why += "\n" + diag
+		}
 	}
-	return usage, nil
+	err = readErr
+	if err == nil {
+		err = errors.New(strings.TrimRight(why, "\n"))
+	}
+	// The run's deadline or its cancellation ended this attempt, whatever
+	// codex said as it went.
+	if cut := ctx.Err(); cut != nil {
+		return try{usage: usage, err: fmt.Errorf("the run was cut off (%w): %w", cut, err), cut: true}
+	}
+	// The failed turn's own words, when codex gave any, alone say whether its
+	// provider was why: what came before it on stderr is diagnostic only.
+	if failure == "" {
+		failure = stderr.String()
+	}
+	return try{usage: usage, err: err, provider: readErr == nil && transient(failure)}
 }
 
 // Probe checks, before the factory runs Codex, that its sandbox holds as
@@ -431,8 +518,16 @@ var ErrTooManyTurns = errors.New("the agent took more steps than its cap allows,
 // says the run has Invariant's server, which Codex must start before the
 // agent's turn does.
 func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, error) {
+	u, _, err := readCodexStream(r, transcript, maxTurns, gated)
+	return u, err
+}
+
+// readCodexStream is ReadCodexStream, with what codex's events said of a
+// turn that didn't succeed: the failed turn's message, or else its last
+// error event's (#261). It's "" when they said nothing.
+func readCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, string, error) {
 	u := Usage{ToolCalls: map[string]int{}}
-	var lastError string
+	var lastError, failed string
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1<<20), 64<<20)
 	for scanner.Scan() {
@@ -483,12 +578,12 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 			u.Turns++
 			if maxTurns > 0 && u.Turns > maxTurns {
 				u.Outcome = "error_max_turns"
-				return u, ErrTooManyTurns
+				return u, "", ErrTooManyTurns
 			}
 		case "turn.completed":
 			u.Outcome, u.Tokens = "success", ev.Usage
 		case "turn.failed":
-			u.Outcome, u.Summary = "failed", ev.Error.Message
+			u.Outcome, u.Summary, failed = "failed", ev.Error.Message, ev.Error.Message
 		case "error":
 			lastError = ev.Message
 		}
@@ -499,7 +594,10 @@ func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool
 	if u.Outcome == "" && lastError != "" {
 		u.Summary = lastError
 	}
-	return u, scanner.Err()
+	if failed == "" {
+		failed = lastError
+	}
+	return u, failed, scanner.Err()
 }
 
 // stamped is a JSON event with when it came, as its first field. Anything

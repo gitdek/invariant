@@ -372,6 +372,20 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 	return post("needs a person", b.String(), m, end)
 }
 
+// providerFailedComment says a build stopped because its agent's provider,
+// or its review's, stayed unavailable while it tried again (#261), quoting
+// the last error. The build published nothing, so a retry builds the
+// ratified proposal again, review included.
+func providerFailedComment(why string, m Marker) string {
+	proposal := "statements"
+	if isPlan(m.Project) {
+		proposal = "plan"
+	}
+	return post("needs a person", "The build stopped with its provider unavailable: the provider its agent or its review runs on stayed unavailable while it tried again, "+
+		"so the build didn't finish. I published nothing it left, and opened no pull request. The last error:\n\n"+quote(why, 40), m,
+		fmt.Sprintf("\n\nA retry is all it needs. Once the provider is back, comment `/invariant retry` to build again from the same ratified %s, review included.", proposal))
+}
+
 // ciFailedComment says why CI's gate didn't pass. A gate GitHub never
 // started didn't fail, so it says that instead, and how to go on.
 // gateStart is whether CI's gate job ran. GitHub fails a job it never gives
