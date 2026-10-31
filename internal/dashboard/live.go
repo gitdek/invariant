@@ -20,11 +20,13 @@ import (
 // or changed, and the checks it ran. It's read from the watcher's work
 // directory, and it holds counts, times and paths inside the agent's copy
 // of the repository only: never code, the agent's words or thinking, a
-// command, a tool's output or the model (D-0051, D-0052).
+// command, a tool's output or the model (D-0051, D-0052). Once the step has
+// ended, it's the step as the watcher recorded it (#269).
 type Live struct {
 	Repo          string         `json:"repo"`
 	Issue         int            `json:"issue"`
 	Doing         string         `json:"doing"`
+	Title         string         `json:"title"`         // what the card's heading says the step does, or did once it has ended
 	Run           string         `json:"run,omitempty"` // the watcher's opaque run directory basename
 	Since         *time.Time     `json:"since,omitempty"`
 	Limit         float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
@@ -81,6 +83,7 @@ type transcript struct {
 	offset        int64
 	cwd           string // the agent's copy of the repository, from the transcript's first event
 	ids           map[string]bool
+	turns         int // the turns of the agent's sessions before this one
 	thinking      int
 	thinkingExact bool
 	context       int
@@ -204,6 +207,7 @@ func (t *transcript) line(b []byte) {
 	}
 	switch {
 	case e.Type == "system" && e.Subtype == "init":
+		t.session()
 		if e.Cwd != "" {
 			t.workspace(e.Cwd)
 		}
@@ -423,6 +427,7 @@ func (t *transcript) codexLine(b []byte) {
 	}
 	switch e.Type {
 	case "invariant.workspace":
+		t.session()
 		if e.Cwd != "" {
 			t.workspace(e.Cwd)
 		}
@@ -515,6 +520,18 @@ func (t *transcript) endThinking() {
 	t.think = -1
 }
 
+// session starts an agent session, at its first event. A build's fallback
+// and repairs run the agent again into the same transcript (D-0125), and
+// each run numbers its messages and items afresh, so what's matched by them
+// starts again, keeping the turns before it. A call the last session left
+// waiting for its result never gets one.
+func (t *transcript) session() {
+	t.endThinking()
+	t.turns += len(t.ids)
+	t.ids, t.items, t.calls, t.open = map[string]bool{}, map[string]int{}, map[string]bool{}, nil
+	t.agent, t.now = "", ""
+}
+
 // touch counts a read or an edit of a file, if it's inside the agent's
 // copy. A path outside it is dropped whole, since it can name the machine's
 // user.
@@ -544,6 +561,10 @@ func (t *transcript) touch(p, kind string) {
 	}
 	t.touches++
 	f.at = t.touches
+	// Its size as it's touched, kept if the file goes before a view.
+	if info, err := os.Stat(filepath.Join(t.cwd, filepath.FromSlash(rel))); err == nil && info.Mode().IsRegular() {
+		f.size = info.Size()
+	}
 }
 
 func (t *transcript) workspace(dir string) {
@@ -624,7 +645,7 @@ func agentEnded(subtype string, isError bool) string {
 // now, in the agent's copy, and keeps the last size it read once the copy
 // is gone.
 func (t *transcript) view() Live {
-	v := Live{Turns: len(t.ids), Thinking: t.thinking, ThinkingExact: t.thinkingExact, Context: t.context, Output: t.output, Now: t.now, Agent: t.agent,
+	v := Live{Turns: t.turns + len(t.ids), Thinking: t.thinking, ThinkingExact: t.thinkingExact, Context: t.context, Output: t.output, Now: t.now, Agent: t.agent,
 		Tools: map[string]int{}, Marks: append([]Mark{}, t.marks...), Files: []LiveFile{}}
 	for k, n := range t.tools {
 		v.Tools[k] = n
@@ -647,13 +668,12 @@ func (t *transcript) view() Live {
 	return v
 }
 
-// live keeps what the dashboard has read of each repository's running
-// steps, and the steps it last read for each, which the page shows until
-// one runs again.
+// live keeps what the dashboard has read of the transcripts its cards show,
+// and the last read it served. A card for a step that has ended comes from
+// what its watcher recorded, never from what a page last asked for (#269).
 type live struct {
 	mu    sync.Mutex
 	reads map[string]*transcript // by transcript path
-	last  map[string][]*Live     // each repository's steps, as last read
 	at    time.Time
 	body  []byte
 	steps []Live
@@ -663,8 +683,9 @@ type live struct {
 // dashboard reads again, however many pages ask.
 const liveEvery = 2 * time.Second
 
-// LiveJSON is every step each repository's watcher is running, or the ones
-// it last ran, longest-running first, as the page's live view reads it.
+// LiveJSON is every step each repository's watcher is running, or, where
+// none is, the steps its watchers recorded as finishing last, longest-running
+// first, as the page's live view reads it.
 func (s *Server) LiveJSON(now time.Time) ([]byte, error) {
 	return s.liveJSON(now, false)
 }
@@ -711,15 +732,19 @@ type privateLive struct {
 
 func (s *Server) refreshLive(now time.Time) error {
 	if s.live.reads == nil {
-		s.live.reads, s.live.last = map[string]*transcript{}, map[string][]*Live{}
+		s.live.reads = map[string]*transcript{}
 	}
 	steps := []Live{}
 	read := map[string]bool{}
 	for _, r := range s.Repos {
 		st, work := s.watcherOf(r)
-		steps = append(steps, s.liveSteps(r.Name, st, work, now, read)...)
+		running := s.liveSteps(r.Name, st, work, read)
+		if len(running) == 0 {
+			running = s.finishedSteps(r, read)
+		}
+		steps = append(steps, running...)
 	}
-	// A transcript no running step is on anymore is forgotten.
+	// A transcript no card is read from anymore is forgotten.
 	for path := range s.live.reads {
 		if !read[path] {
 			delete(s.live.reads, path)
@@ -738,35 +763,20 @@ func (s *Server) refreshLive(now time.Time) error {
 }
 
 // liveSteps reads every step repo's watcher is running with an agent at
-// work, and notes each transcript it reads in read. Once none of them is
-// running, it shows the steps it last read, marked ended, until one runs
-// again.
-func (s *Server) liveSteps(repo string, st Status, work string, now time.Time, read map[string]bool) []Live {
-	var running []*Live
+// work, and notes each transcript it reads in read.
+func (s *Server) liveSteps(repo string, st Status, work string, read map[string]bool) []Live {
+	var running []Live
 	if st.Running() && work != "" {
 		for _, step := range st.steps() {
+			if step.Ended != nil {
+				continue // a completion is never a running step
+			}
 			if v := s.liveStep(repo, st, step, work, read); v != nil {
-				running = append(running, v)
+				running = append(running, *v)
 			}
 		}
 	}
-	if len(running) > 0 {
-		s.live.last[repo] = running
-	}
-	var out []Live
-	for _, last := range s.live.last[repo] {
-		if last.Ended == nil && len(running) == 0 {
-			ended := now.UTC()
-			last.Ended, last.Now = &ended, ""
-			for i := range last.Marks {
-				if last.Marks[i].Kind == "think" && last.Marks[i].Until == nil {
-					last.Marks[i].Until = last.Last
-				}
-			}
-		}
-		out = append(out, *last)
-	}
-	return out
+	return running
 }
 
 // liveStep reads one step from its own issue's named run directory: its
@@ -783,31 +793,16 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 		return nil
 	}
 	path := filepath.Join(dir, "transcript.jsonl")
-	t := s.live.reads[path]
-	if t == nil {
-		t = newTranscript()
-		// Each agent writes its own transcript, so the view reads it as the
-		// step's agent writes it (#153).
-		t.codex = step.Agent == "codex"
-		s.live.reads[path] = t
-	}
-	if err := t.read(path); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			s.logf("live: %v", err)
-		}
+	v, ok := s.readTranscript(path, step.Agent, read, false)
+	if !ok {
 		return nil
 	}
-	read[path] = true
-	v := t.view()
 	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, st.Limit, step.Agent
+	v.Title = liveTitle(step.Doing, false)
 	v.Run, v.path = step.Run, path
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
-	}
-	if info, err := os.Stat(path); err == nil {
-		m := info.ModTime().UTC()
-		v.Last = &m
 	}
 	v.Runs, v.RunsKind = readRuns(dir, step.Doing)
 	for i := range v.Marks {
@@ -816,6 +811,143 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 		}
 	}
 	return &v
+}
+
+// readTranscript is a step's transcript as its reader has it after reading
+// what's new, noted in read. Each agent writes its own transcript, so the
+// view reads it as the step's agent writes it (#153). whole reads it to its
+// end, however much no page read while the step ran. It's false for a
+// transcript that can't be read.
+func (s *Server) readTranscript(path, agent string, read map[string]bool, whole bool) (Live, bool) {
+	t := s.live.reads[path]
+	if t == nil {
+		t = newTranscript()
+		t.codex = agent == "codex"
+		s.live.reads[path] = t
+	}
+	for {
+		offset := t.offset
+		if err := t.read(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				s.logf("live: %v", err)
+			}
+			return Live{}, false
+		}
+		if !whole || t.offset == offset {
+			break
+		}
+	}
+	read[path] = true
+	v := t.view()
+	if info, err := os.Stat(path); err == nil {
+		m := info.ModTime().UTC()
+		v.Last = &m
+	}
+	return v, true
+}
+
+// finishedSteps is r's cards once none of its steps is running: the steps
+// its watchers recorded as ending last (#269). That's the latest end in any
+// watcher's status, running or stopped, whatever the order of their work
+// directories, and every step that ended at that same time, each read from
+// its own watcher's run directory. What a page last saw chooses none of
+// them, and a later end replaces them all.
+func (s *Server) finishedSteps(r *Repo, read map[string]bool) []Live {
+	type watched struct {
+		status, work string
+	}
+	watchers := []watched{{r.Status, s.Work}}
+	if len(s.Works) > 0 {
+		watchers = nil
+		for _, w := range s.Works {
+			watchers = append(watchers, watched{StatusPath(w, r.Name), w})
+		}
+	}
+	type finished struct {
+		step Step
+		work string
+	}
+	var latest []finished
+	seen := map[string]bool{}
+	for _, w := range watchers {
+		st, err := ReadStatus(w.status)
+		if err != nil {
+			continue
+		}
+		for _, step := range st.Finished {
+			dir := stepDir(w.work, r.Name, step)
+			if !step.finished() || dir == "" || seen[dir] {
+				continue
+			}
+			if len(latest) > 0 {
+				switch first := *latest[0].step.Ended; {
+				case step.Ended.Before(first):
+					continue
+				case step.Ended.After(first):
+					latest, seen = nil, map[string]bool{}
+				}
+			}
+			seen[dir] = true
+			latest = append(latest, finished{step, w.work})
+		}
+	}
+	var out []Live
+	for _, f := range latest {
+		out = append(out, s.finishedStep(r.Name, f.step, f.work, read))
+	}
+	return out
+}
+
+// finishedStep is the card of a step its watcher recorded as finished: what
+// its agent did, as the watcher saved it before the agent's workspace was
+// cleaned up, or, from a run that saved none, its whole transcript; its
+// checks; and its identity, start, end and limit, as the watcher recorded
+// them. It's still at its end, and says it ended.
+func (s *Server) finishedStep(repo string, step Step, work string, read map[string]bool) Live {
+	dir := stepDir(work, repo, step)
+	path := filepath.Join(dir, "transcript.jsonl")
+	v, ok := readFinishedActivity(dir)
+	if !ok {
+		if v, ok = s.readTranscript(path, step.Agent, read, true); !ok {
+			// An agent that wrote nothing still ran until the step ended.
+			v = Live{Tools: map[string]int{}, Marks: []Mark{}, Files: []LiveFile{}}
+		}
+	}
+	ended := *step.Ended
+	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, step.Limit, step.Agent
+	v.Title = liveTitle(step.Doing, true)
+	v.Run, v.path, v.Ended, v.Now = step.Run, path, &ended, ""
+	if !step.Since.IsZero() {
+		since := step.Since
+		v.Since = &since
+	}
+	v.Runs, v.RunsKind = readRuns(dir, step.Doing)
+	// Thinking still going on in its last view ended by its last activity,
+	// and nothing goes on past the step's end.
+	stop := ended
+	if v.Last != nil && v.Last.Before(ended) {
+		stop = *v.Last
+	}
+	for i := range v.Marks {
+		if v.Marks[i].At.IsZero() && v.Since != nil {
+			v.Marks[i].At = *v.Since // thinking before the first tool call
+		}
+		if v.Marks[i].Kind == "think" && v.Marks[i].Until == nil {
+			until := stop
+			v.Marks[i].Until = &until
+		}
+	}
+	return v
+}
+
+// liveTitle is what a card's heading says its step does, or did, once it
+// has ended. An ended step's heading says only that it ended, since the
+// attempt may have stopped or failed.
+func liveTitle(doing string, ended bool) string {
+	if ended {
+		return map[string]string{"building": "Build step ended", "formalizing": "Draft step ended", "answering": "Answer step ended"}[doing]
+	}
+	return map[string]string{"building": "Building", "formalizing": "Drafting", "answering": "Answering"}[doing]
 }
 
 // stepFiles is the prefix of a step's directory in the work directory, and
@@ -835,7 +967,7 @@ func stepFiles(doing string) (prefix string, runs []string) {
 // stepDir selects only the basename the watcher published for this step.
 // Run names are opaque: neither their spelling nor their times select a run.
 func stepDir(work, repo string, step Step) string {
-	if work == "" || step.Issue == 0 || step.Run == "" || step.Run == "." || step.Run == ".." || filepath.Base(step.Run) != step.Run {
+	if work == "" || step.Issue == 0 || !validRun(step.Run) {
 		return ""
 	}
 	return filepath.Join(work, filepath.FromSlash(repo), "issues", fmt.Sprintf("issue-%d", step.Issue), step.Run)

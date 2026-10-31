@@ -130,6 +130,15 @@ type Factory struct {
 	// runs, so it mustn't call the factory. The watcher writes them down for
 	// the dashboard (D-0049).
 	Activity func(steps []Step)
+	// Finished, when set, hears once that a step's agent run ended, with the
+	// step as Activity last heard it and Ended, when it really ended: as
+	// soon as the step returned, whether it succeeded, failed, was called
+	// off or panicked, or when the step moved on to something else (#269).
+	// It runs under the same lock as Activity, before Activity hears the
+	// step has gone, so it mustn't call the factory either. Activity and
+	// Steps never hold a finished step, and a step that starts on the same
+	// issue has no run until its own new directory exists (D-0166).
+	Finished func(Step)
 	// Holder names this watcher, and LeaseFor is how long its lease on the
 	// repository lasts (D-0069). A watcher acts only while it holds the
 	// lease. Zero means no lease, as in a one-off run.
@@ -270,14 +279,16 @@ func (f *Factory) Poll(ctx context.Context) error {
 			// Its last step is still running.
 		case most == 1:
 			err := f.safeStep(ctx, n)
-			f.end(n)
+			f.end(n, f.now())
 			if err != nil {
 				errs = append(errs, fmt.Errorf("#%d: %w", n, err))
 			}
 		default:
 			go func() {
-				defer f.end(n)
-				if err := f.safeStep(ctx, n); err != nil {
+				err := f.safeStep(ctx, n)
+				// The step ended when it returned, before its error is logged.
+				defer f.end(n, f.now())
+				if err != nil {
 					f.logf("#%d: %v", n, err)
 				}
 			}()
@@ -295,12 +306,14 @@ func (f *Factory) Poll(ctx context.Context) error {
 // one of those, and since when. Agent is the coding agent it runs, from
 // when its run starts (#179). Run is its output directory's opaque basename,
 // published after the directory exists and before its agent starts (#236).
+// Ended is set only on the step Finished hears (#269).
 type Step struct {
 	Issue int
 	Doing string
 	Since time.Time
 	Agent string
 	Run   string
+	Ended *time.Time
 }
 
 // running is the steps a watcher is running, one per issue (D-0113).
@@ -368,14 +381,26 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 	}
 }
 
-// end ends the step on issue n.
-func (f *Factory) end(n int) {
+// end ends the step on issue n, which ended at ended.
+func (f *Factory) end(n int, ended time.Time) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
+	f.finished(f.running.steps[n], ended)
 	delete(f.running.steps, n)
 	f.tell()
 	close(f.running.ended)
 	f.running.ended = make(chan struct{})
+}
+
+// finished lets Finished hear that a step's agent run ended at ended. A step
+// with no run started no agent, so there's nothing to hear. Its caller holds
+// the steps' lock, and the step is still among them.
+func (f *Factory) finished(s Step, ended time.Time) {
+	if s.Run == "" || f.Finished == nil {
+		return
+	}
+	s.Ended = &ended
+	f.Finished(s)
 }
 
 // read gathers an issue's thread: the factory's posts, and the commands and
@@ -2020,12 +2045,14 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 }
 
 // doing records what the step on an issue starts doing, with no agent or
-// run directory yet.
+// run directory yet. A run it had already started has ended.
 func (f *Factory) doing(issue int, what string) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
 	if s, ok := f.running.steps[issue]; ok && (s.Doing != what || s.Run != "" || s.Agent != "") {
-		s.Doing, s.Since, s.Agent, s.Run = what, f.now(), "", ""
+		now := f.now()
+		f.finished(s, now)
+		s.Doing, s.Since, s.Agent, s.Run = what, now, "", ""
 		f.running.steps[issue] = s
 		f.tell()
 	}
@@ -2042,12 +2069,16 @@ func (f *Factory) newRun(issue int, kind string) (string, error) {
 }
 
 // runsAgent records the coding agent and its already-created output
-// directory before the run starts, so the watcher's status names both.
+// directory before the run starts, so the watcher's status names both. A
+// run the step had already started has ended.
 func (f *Factory) runsAgent(issue int, agent, out string) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
 	run := filepath.Base(out)
 	if s, ok := f.running.steps[issue]; ok && (s.Agent != agent || s.Run != run) {
+		if s.Run != run {
+			f.finished(s, f.now())
+		}
 		s.Agent, s.Run = agent, run
 		f.running.steps[issue] = s
 		f.tell()

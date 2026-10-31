@@ -408,7 +408,12 @@ func TestActShellCommandsFollowWholeEventsAndCurrentStep(t *testing.T) {
 				return len(e.Steps) == 1 && e.Steps[0].Since != nil && e.Steps[0].Since.Equal(f.at(20)) &&
 					len(e.Steps[0].Commands) == 1 && e.Steps[0].Commands[0].Command == "git diff --stat"
 			})
-			f.status(t)
+			// The watcher records the step's end as it ends (#269).
+			at := f.at(30)
+			done := act236WithRun(t, Step{Issue: 236, Doing: "building", Since: f.at(20), Agent: provider, Ended: &at}, filepath.Base(filepath.Dir(f.path)))
+			if err := WriteStatus(StatusPath(f.work, "owner/app"), Status{PID: os.Getpid(), Repo: "owner/app", Started: f.since, Finished: []Step{done}}); err != nil {
+				t.Fatal(err)
+			}
 			ended := f.eventually(t, "step ending", func(e act236Envelope) bool {
 				return len(e.Steps) == 1 && e.Steps[0].Ended != nil
 			})
