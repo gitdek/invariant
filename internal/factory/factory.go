@@ -605,7 +605,8 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		case kind == KindFailed && state.Marker.Rebuilds():
 			// A retry builds the plan again, replacing #n (#271).
 			n := state.Marker.PR
-			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n), rebuildInstead(n))
+			_, trusted, _ := trustedOf(state.Marker)
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n), "\n\n"+rebuildOffer(n, trusted))
 		case kind == KindFailed && state.Marker.PR != 0:
 			// A retry only watches #n again (#263). The note says a person
 			// merges it whenever the failure or the plan shows it changes

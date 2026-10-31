@@ -87,19 +87,25 @@ func replacedSentence(m Marker) string {
 // which the factory closed: it builds the plan again, as a new pull request
 // (#271). m is the build's marker, on the retry's own branch.
 func rebuildingComment(by string, old int, m Marker) string {
-	return post("building again", fmt.Sprintf("Building the plan @%s ratified again (plan `%s`), as a new pull request that replaces #%d. "+
+	return post("building again", fmt.Sprintf("@%s retried, so I'm building the ratified plan `%s` again, as a new pull request that replaces #%d. "+
 		"I closed #%d without merging it, so its work stays there to read. The new build starts from the plan's ratification, on branch `%s`, "+
 		"and its checks and review run afresh.", by, short(m.Hash), old, old, m.Branch), m)
 }
 
-// rebuildInstead says what a writer's retry of a plan's failed draft, pr,
-// does, and how to change the plan instead (#271): a retry closes the draft
-// and builds the same ratified plan again, and the factory drafts again
-// only once the draft is closed (#218, D-0156).
-func rebuildInstead(pr int) string {
-	return fmt.Sprintf("\n\nComment `/invariant retry` to have me build the plan again, in a new pull request that replaces #%d: I'll close #%d first, so its work stays there to read, "+
-		"and the new build's checks and review run afresh. To change the plan instead, close #%d, say what to change, and comment `/invariant revise`. "+
-		"I'll draft it for you to ratify again before I build it.", pr, pr, pr)
+// rebuildOffer says what a writer's retry of a plan's failed draft, pr,
+// does, and what else a person can do (#271): a retry closes the draft and
+// builds the same ratified plan again, review included, and the factory
+// drafts again only once the draft is closed (#218, D-0156). A plan that
+// changes the trusted base still has a person merge what it builds, so
+// trusted says so (D-0105).
+func rebuildOffer(pr int, trusted bool) string {
+	s := fmt.Sprintf("Comment `/invariant retry` to have me close #%d and build the plan again, from its ratification, in a new pull request: "+
+		"its checks and review run afresh, and #%d's work stays there to read.", pr, pr)
+	if trusted {
+		s += " The plan changes the trusted base, so a person merges the new pull request once its checks, review and CI's `invariant/gate` pass."
+	}
+	return s + fmt.Sprintf(" To keep #%d instead, push any fixes it needs, mark it ready and merge it yourself. To change the plan, close #%d, say what to change, "+
+		"and comment `/invariant revise`. I'll draft it for you to ratify again before I build it.", pr, pr)
 }
 
 // retriedComment answers a writer's retry of a pull request that failed, and
@@ -150,10 +156,7 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	if len(files) > 0 {
 		fmt.Fprintf(&b, " It changes these files in the trusted base: %s.", codeList(files))
 	}
-	closing := "\n\nA person needs to look at this." + rebuildInstead(pr.Number)
-	if trusted {
-		closing += " It changes the trusted base, so once the new build's checks, review and CI's `invariant/gate` pass, a person merges it."
-	}
+	closing := "\n\nA person needs to look at this. " + rebuildOffer(pr.Number, trusted)
 	return post("needs a person", b.String(), m, closing)
 }
 
