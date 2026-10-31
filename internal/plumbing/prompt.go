@@ -53,6 +53,8 @@ You have no shell and no network. Don't change the acceptance tests, the plan's 
 func ReviewPrompt(plan *Plan, n int) string {
 	return fmt.Sprintf(`You're reviewing a change a coding agent made for issue #%d of Invariant, a Go project, before it merges. You can only read.
 
+This directory is readable, although it sits in the temporary directory your sandbox otherwise denies, and its real path may begin with /private on macOS. Read its files by the relative paths below. Report an access problem only if reading one of them actually fails.
+
 In this directory:
 - plan.json: the plan a person ratified. It says what changes, which files the build may write, and the acceptance tests that show it works.
 - change.diff: the whole candidate's changes and additions against the original checkout, including after a repair.

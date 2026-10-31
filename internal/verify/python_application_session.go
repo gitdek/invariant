@@ -26,6 +26,9 @@ import (
 //go:embed python_application_runner.py
 var pythonApplicationRunner []byte
 
+//go:embed python_application_observer.py
+var pythonApplicationObserver []byte
+
 type PythonApplicationInvocationKey struct {
 	Target string `json:"target"`
 	Check  string `json:"check"`
@@ -40,10 +43,11 @@ type PythonApplicationInvocation struct {
 }
 
 type PythonApplicationProvenance struct {
-	Files        []project.ComponentFile       `json:"files"`
-	Dependencies *toolchain.PythonDependencies `json:"dependencies,omitempty"`
-	RunnerSHA256 string                        `json:"runner_sha256"`
-	Fingerprint  string                        `json:"fingerprint"`
+	Files          []project.ComponentFile       `json:"files"`
+	Dependencies   *toolchain.PythonDependencies `json:"dependencies,omitempty"`
+	RunnerSHA256   string                        `json:"runner_sha256"`
+	ObserverSHA256 string                        `json:"observer_sha256"`
+	Fingerprint    string                        `json:"fingerprint"`
 }
 
 type PythonApplicationSessionOptions struct {
@@ -181,7 +185,7 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, err
 	}
 	s.driver = path.Join(filepath.ToSlash(rel), w.Project.Manifest.Conformance)
-	s.provenance = PythonApplicationProvenance{Files: files, RunnerSHA256: pythonApplicationHash(pythonApplicationRunner)}
+	s.provenance = PythonApplicationProvenance{Files: files, RunnerSHA256: pythonApplicationHash(pythonApplicationRunner), ObserverSHA256: pythonApplicationHash(pythonApplicationObserver)}
 	selectImage := options.SelectImage
 	if selectImage == nil {
 		selectImage = selectPythonApplicationImage
@@ -208,6 +212,10 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, err
 	}
 	if err := os.WriteFile(filepath.Join(s.runtime, "runner.py"), pythonApplicationRunner, 0o644); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(s.runtime, "invariant_observe.py"), pythonApplicationObserver, 0o644); err != nil {
 		s.Close()
 		return nil, err
 	}
