@@ -28,6 +28,10 @@ type Sandbox struct {
 	// Cache is a build cache kept between one build's runs, so each run
 	// doesn't compile everything again. Empty, each run starts cold.
 	Cache string
+	// Original is the checkout a build started from, which tells the tests
+	// the build added from the ones it may not edit. Empty, gofmt checks
+	// every test in the packages the change touches.
+	Original string
 }
 
 // Result is what one run found.
@@ -99,6 +103,10 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 	if err := copyCheckout(ctx, root, src); err != nil {
 		return Result{}, err
 	}
+	formatted, err := goFiles(ctx, s.Original, src, plan)
+	if err != nil {
+		return Result{}, err
+	}
 	var pkgs, names []string
 	seen := map[string]bool{}
 	for _, t := range plan.Tests {
@@ -119,7 +127,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
-		"-e", "GOFMT_FILES=" + strings.Join(goFiles(src, plan), " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
+		"-e", "GOFMT_FILES=" + strings.Join(formatted, " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
 	// The code runs as the user who runs the sandbox, not as root, so what
 	// it leaves in the build cache stays that user's to remove.
@@ -146,8 +154,9 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 }
 
 // packages is every Go package the change touches, as ./dir: each file's
-// nearest directory holding Go files, so a change to a page a package
-// embeds tests that package. CI runs every test before anything merges;
+// nearest directory holding Go files in the candidate, so a change to a
+// page a package embeds tests that package, and a package the change
+// deletes isn't tested (#298). CI runs every test before anything merges;
 // the sandbox runs these, which is quick enough to build against.
 func packages(src string, plan *Plan) []string {
 	files, _ := walk(src)
@@ -156,23 +165,51 @@ func packages(src string, plan *Plan) []string {
 		names = append(names, f)
 	}
 	var out []string
-	for _, dir := range plan.GoPackages(names) {
+	for _, dir := range plan.packagesIn(names) {
 		out = append(out, "./"+dir)
 	}
 	return out
 }
 
-// goFiles checks named Go files and tests in every touched package. The
-// staged checkout includes allowed regression tests without adding them
-// to the ratified plan.
-func goFiles(src string, plan *Plan) []string {
+// goFiles checks named Go files, the acceptance tests and the regression
+// tests the build added in the plan's packages. The staged checkout
+// includes those tests without adding them to the ratified plan. A test
+// the original checkout holds is one the build may not edit, so it never
+// blocks a build (#298). Without the original checkout to tell them apart,
+// every test in a touched package is checked.
+func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
-	for f := range plan.Touches(0) {
-		if strings.HasSuffix(f, ".go") {
+	add := func(f string) {
+		if !seen[f] {
 			seen[f] = true
 			out = append(out, f)
 		}
+	}
+	for f := range plan.Touches(0) {
+		if strings.HasSuffix(f, ".go") {
+			add(f)
+		}
+	}
+	if original != "" {
+		base, err := checkoutNames(ctx, original)
+		if err != nil {
+			return nil, err
+		}
+		files, err := walk(src)
+		if err != nil {
+			return nil, err
+		}
+		var names []string
+		for f := range files {
+			names = append(names, f)
+		}
+		// As staging admits them, against the same original inventory.
+		for _, f := range plan.RegressionFiles(base, names) {
+			add(f)
+		}
+		sort.Strings(out)
+		return out, nil
 	}
 	for _, pkg := range packages(src, plan) {
 		matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(pkg), "*_test.go"))
@@ -182,15 +219,11 @@ func goFiles(src string, plan *Plan) []string {
 				continue
 			}
 			rel, _ := filepath.Rel(src, name)
-			f := filepath.ToSlash(rel)
-			if !seen[f] {
-				seen[f] = true
-				out = append(out, f)
-			}
+			add(filepath.ToSlash(rel))
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // parse reads a run's output.

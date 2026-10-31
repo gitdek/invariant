@@ -526,6 +526,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		return err
 	}
 	state, started := t.State()
+	// open is a failed build's pull request while it's open, which a writer's
+	// retry has the factory watch again.
+	var open github.PullRequest
 	switch state.Marker.Kind {
 	case KindPR:
 		return f.watch(ctx, t, state)
@@ -549,6 +552,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			if pr.Merged || pr.State == "closed" {
 				return f.watch(ctx, t, state)
 			}
+			open = pr
 		}
 	}
 	// A stop is for a ratified plan of issues, and WorkPlan answers it on the
@@ -579,10 +583,13 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
 		case kind == KindFailed && state.Marker.PR != 0:
-			n := state.Marker.PR
+			// A retry only watches #n again (#263). The note says a person
+			// merges it whenever the failure or the plan shows it changes
+			// the trusted base, even for an older failure with no plan.
+			n, m := state.Marker.PR, state.Marker
+			_, trusted, unsure := trustedOf(m)
 			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
-				fmt.Sprintf(" To change what must be true, close #%d and comment `/invariant revise` again. "+
-					"To build the same statements again, once the cause is fixed, comment `/invariant retry`.", n))
+				fmt.Sprintf("\n\nComment `/invariant retry` to have me watch #%d again. %s %s", n, watchedAgain(open, trusted, unsure), buildAgainInstead(n, isPlan(m.Project))))
 		case kind == KindPR:
 			n := state.Marker.PR
 			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n),
@@ -617,7 +624,8 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
 		// on its current head, it stays in scope, and its lock is still the
-		// ratified proposal.
+		// ratified proposal. It runs no build and no review, so the answer
+		// says what merges then (#263).
 		m := state.Marker.carried()
 		m.Kind, m.ReplyTo, m.Failure = KindPR, []int64{c.Comment}, ""
 		from, to := f.retryStep(t, c)
@@ -633,7 +641,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(noting(), recovery.Note)); err != nil {
 			return err
 		}
-		return f.say(ctx, t.Issue.Number, retriedComment(m.PR, trusted, m), LabelPR)
+		return f.say(ctx, t.Issue.Number, retriedComment(open, trusted, m), LabelPR)
 	case Ratify:
 		if kind != KindProposal {
 			return f.note(ctx, t, c, "There's no proposal waiting for ratification right now.")

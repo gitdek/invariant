@@ -372,8 +372,68 @@ func buildFailedComment(pr *github.PullRequest, res *synth.Result, runErr error,
 	return post("needs a person", b.String(), m, end)
 }
 
+// trustedOf is what a failed build's marker shows of whether its pull
+// request changes the trusted base, which only a person merges (D-0105):
+// the trusted files its plan names, and whether those, or a failure
+// recorded as one in the trusted base, show that it does. Either is enough,
+// so an older failure whose post carries no plan still counts (#263). A
+// plan's marker with neither can't tell, and unsure says so.
+func trustedOf(m Marker) (files []string, trusted, unsure bool) {
+	if p := m.Proposal; p != nil && p.Plan != nil {
+		files = p.Plan.Trusted
+	}
+	trusted = m.Why() == FailTrusted || len(files) > 0
+	unsure = !trusted && isPlan(m.Project) && (m.Proposal == nil || m.Proposal.Plan == nil)
+	return files, trusted, unsure
+}
+
+// watchedAgain says what a writer's retry of pr, a failed build's open pull
+// request, leads to (#263). The factory watches it again and builds nothing
+// (D-0047, D-0064). Once CI's gate passes on its current head, and it can
+// still merge, the factory marks a draft ready and merges it (#145), unless
+// it changes the trusted base, which only a person merges (D-0105, D-0109).
+// It never runs the review again, so a draft whose review asked for changes
+// merges as it is unless someone pushes them. unsure keeps the trusted-base
+// exception for a pull request whose post can't tell. It names no files,
+// since a post's closing is never clipped (D-0167).
+func watchedAgain(pr github.PullRequest, trusted, unsure bool) string {
+	var b strings.Builder
+	if trusted {
+		b.WriteString("It changes the trusted base, so a person merges it once CI's `invariant/gate` passes on its current head.")
+		if pr.Draft {
+			b.WriteString(" I won't mark it ready or merge it.")
+		} else {
+			b.WriteString(" I won't merge it.")
+		}
+	} else {
+		b.WriteString("I'll merge it once CI's `invariant/gate` passes on its current head.")
+		if pr.Draft {
+			b.WriteString(" It's a draft, so I'll mark it ready first.")
+		}
+		if unsure {
+			b.WriteString(" If it changes the trusted base, a person merges it instead.")
+		}
+	}
+	fmt.Fprintf(&b, " I won't review #%d again, so if it needs fixes, including any changes its review asked for, push them first: otherwise it merges as it is.", pr.Number)
+	return b.String()
+}
+
+// buildAgainInstead says how to build again while a failed build's pull
+// request is open, since a retry only watches it: the factory drafts again
+// only once it's closed (#218, D-0156), and builds only what a writer
+// ratifies again.
+func buildAgainInstead(pr int, plan bool) string {
+	if plan {
+		return fmt.Sprintf("To build the plan again instead, close #%d, say \"draft the same plan again\" or what to change, and comment `/invariant revise`. "+
+			"I'll draft it for you to ratify again before I build it.", pr)
+	}
+	return fmt.Sprintf("To build again instead, close #%d and comment `/invariant revise` again, saying what to change or \"draft the same statements again\". "+
+		"I'll draft them for you to ratify again before I build them.", pr)
+}
+
 // ciFailedComment says why CI's gate didn't pass. A gate GitHub never
-// started didn't fail, so it says that instead, and how to go on.
+// started didn't fail, so it says that instead, and how to go on. Each says
+// what a retry does then, apart from re-running CI's job (#263).
 // gateStart is whether CI's gate job ran. GitHub fails a job it never gives
 // a runner, as when the account's Actions minutes run out (D-0081).
 type gateStart int
@@ -385,16 +445,18 @@ const (
 )
 
 func ciFailedComment(pr github.PullRequest, run github.CheckRun, started gateStart, m Marker) string {
+	_, trusted, unsure := trustedOf(m)
+	retry := fmt.Sprintf("comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure))
 	switch started {
 	case gateNeverStarted:
 		return post("needs a person", fmt.Sprintf("CI couldn't start `invariant/gate` on #%d ([run](%s)). GitHub never gave the job a runner, so the gate didn't run, and I won't merge it.",
-			pr.Number, run.URL), m, " Once CI can run, re-run the job, then comment `/invariant retry`.")
+			pr.Number, run.URL), m, " Once CI can run, re-run the job, then "+retry)
 	case gateUnknown:
 		return post("needs a person", fmt.Sprintf("CI's `invariant/gate` failed on #%d ([run](%s)), so I won't merge it. I can't tell whether the job ran, because this App can't read GitHub Actions here:",
-			pr.Number, run.URL), m, " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can, then comment `/invariant retry`. Otherwise, a person needs to look at this.")
+			pr.Number, run.URL), m, " give it the Actions read-only permission to let it tell. If CI couldn't start, re-run the job once it can. Otherwise, a person needs to look at this. Once the cause is fixed, "+retry)
 	}
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` %s on #%d ([run](%s)), so I won't merge it. A person needs to look at this.",
-		gateWords(run.Conclusion), pr.Number, run.URL), m)
+		gateWords(run.Conclusion), pr.Number, run.URL), m, " Once the cause is fixed, "+retry)
 }
 
 // gateWords says how a check run that didn't pass ended.
@@ -421,14 +483,15 @@ func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) stri
 
 // mergeRefusedComment says GitHub refused to merge a pull request whose gate
 // passed, or to mark it ready for review when it was a draft, quoting what
-// GitHub said, and how to go on (#145).
+// GitHub said, and how to go on (#145): a retry watches it again (#263).
 func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Marker) string {
 	what := "GitHub refused to merge it"
 	if unready {
 		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
 	}
+	_, trusted, unsure := trustedOf(m)
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
-		"\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` and I'll try again.")
+		fmt.Sprintf("\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
 }
 
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
