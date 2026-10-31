@@ -482,8 +482,12 @@ func retryCopy(m factory.Marker) *RetryCopy {
 		}
 	}
 	plan := m.Proposal != nil && m.Proposal.Plan != nil
+	trusted := m.Why() == factory.FailTrusted || (plan && len(m.Proposal.Plan.Trusted) > 0)
+	if m.Rebuilds() {
+		return rebuildCopy(pr, trusted)
+	}
 	r := &RetryCopy{}
-	if m.Why() == factory.FailTrusted || (plan && len(m.Proposal.Plan.Trusted) > 0) {
+	if trusted {
 		r.Label = fmt.Sprintf("Have a person merge #%d once CI passes", pr)
 		r.Confirmation = fmt.Sprintf("Have the factory watch #%d again until CI's gate passes on its current head, as you? A person merges #%d because it changes the trusted base. It won't review #%d again.", pr, pr, pr)
 		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again until CI's gate passes on its current head. It changes the trusted base, so a person merges it: the factory won't mark it ready or merge it.", pr)
@@ -504,6 +508,24 @@ func retryCopy(m factory.Marker) *RetryCopy {
 	return r
 }
 
+// rebuildCopy is what a retry of a plan's draft does, when its build failed
+// in the factory's own run: it closes the draft and builds the plan again,
+// review included, and the new build opens a pull request of its own (#271,
+// D-0191).
+func rebuildCopy(pr int, trusted bool) *RetryCopy {
+	merge := " If it changes the trusted base, a person merges it."
+	if trusted {
+		merge = " It changes the trusted base, so a person merges it."
+	}
+	return &RetryCopy{
+		Label:        fmt.Sprintf("Build the plan again, replacing #%d", pr),
+		Confirmation: fmt.Sprintf("Have the factory close #%d and build the ratified plan again, as you? The new build is checked and reviewed again, and opens a pull request of its own.", pr) + merge,
+		Guidance: fmt.Sprintf("Retrying has the factory close #%d, the draft its build left when it failed in the factory's own run, and build the ratified plan again from its ratification, on a branch of its own, with a new review. #%d stays closed, with its work there to read. The new build opens its own pull request: ready once its checks and review pass, or a draft again.", pr, pr) + merge +
+			fmt.Sprintf(" To merge #%d as it is instead, push any changes it needs, mark it ready and merge it yourself, and the factory records the merge.", pr),
+		Posted: fmt.Sprintf("Asked for a retry. The factory closes #%d and builds the ratified plan again, and the new build opens its own pull request.", pr) + merge,
+	}
+}
+
 func postText(m factory.Marker, previous string) string {
 	switch m.Kind {
 	case factory.KindForks:
@@ -518,6 +540,9 @@ func postText(m factory.Marker, previous string) string {
 		}
 		return fmt.Sprintf("proposed %d statements, checked by TLC", n)
 	case factory.KindRatified:
+		if m.Replaces != 0 {
+			return fmt.Sprintf("closed #%d and started building the plan again", m.Replaces)
+		}
 		return "committed the ratification, and started writing the code"
 	case factory.KindPR:
 		if previous == factory.KindFailed {
@@ -566,7 +591,7 @@ func commandText(cmds []factory.Command, answered *factory.Marker) string {
 		}
 		r := retryCopy(*answered)
 		said := "asked to " + strings.ToLower(r.Label[:1]) + r.Label[1:]
-		if answered.PR != 0 {
+		if answered.PR != 0 && !answered.Rebuilds() {
 			said += fmt.Sprintf(", and the factory won't review #%d again", answered.PR)
 		}
 		return said
