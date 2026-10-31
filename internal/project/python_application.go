@@ -110,6 +110,19 @@ func ResolvePythonApplication(p *Project) (*PythonApplication, error) {
 				names = append(names, v.Inputs...)
 			}
 		}
+		for _, c := range cfg.TrustedContracts {
+			names = append(names, c.Contract.Source)
+			if c.Operation.Kind == OperationApplication {
+				names = append(names, c.Operation.Source)
+			}
+			for _, ref := range c.Tests {
+				names = append(names, ref.Source)
+			}
+			for _, v := range c.Invocations {
+				names = append(names, v.Check.Source, v.WorkingDir)
+				names = append(names, v.Inputs...)
+			}
+		}
 		for _, name := range names {
 			if err := pythonApplicationPath(name); err != nil {
 				return nil, err
@@ -140,6 +153,9 @@ func pythonApplicationSelection(root, name string) error {
 	full := filepath.Join(root, filepath.FromSlash(name))
 	info, err := os.Lstat(full)
 	if err != nil {
+		return err
+	}
+	if err := exactName(filepath.Dir(full), filepath.Base(full)); err != nil {
 		return err
 	}
 	if info.Mode().IsRegular() && strings.HasSuffix(name, ".py") {

@@ -112,26 +112,36 @@ func (r *componentResolver) assumptions(declarations []ComponentAssumption) ([]R
 }
 
 func (r *componentResolver) invocations(declarations []ComponentInvocation, check ResolvedComponentCheck) ([]ResolvedComponentInvocation, error) {
+	return r.invocationsFor(declarations, func(kind string) (string, []string, error) {
+		switch kind {
+		case "proof":
+			var selections []string
+			if check.Proof != nil {
+				selections = []string{check.Target}
+			}
+			return "target", selections, nil
+		case "test":
+			return "test", check.Tests, nil
+		case "conformance":
+			return "conformance", check.Conformance, nil
+		}
+		return "", nil, fmt.Errorf("unknown kind %q", kind)
+	})
+}
+
+// invocationsFor resolves declarations against what selected says each kind
+// may invoke: the reference kind its check resolves as, and the selections
+// that check must be among.
+func (r *componentResolver) invocationsFor(declarations []ComponentInvocation, selected func(kind string) (string, []string, error)) ([]ResolvedComponentInvocation, error) {
 	var resolved []ResolvedComponentInvocation
 	seen := map[[3]string]bool{}
 	for _, v := range declarations {
 		if strings.TrimSpace(v.ID) == "" || strings.TrimSpace(v.Command) == "" {
 			return nil, fmt.Errorf("invocation requires nonblank id and command")
 		}
-		var selections []string
-		kind := v.Kind
-		switch kind {
-		case "proof":
-			kind = "target"
-			if check.Proof != nil {
-				selections = []string{check.Target}
-			}
-		case "test":
-			selections = check.Tests
-		case "conformance":
-			selections = check.Conformance
-		default:
-			return nil, fmt.Errorf("invocation %q: unknown kind %q", v.ID, v.Kind)
+		kind, selections, err := selected(v.Kind)
+		if err != nil {
+			return nil, fmt.Errorf("invocation %q: %w", v.ID, err)
 		}
 		c, err := r.resolve(v.Check, kind)
 		if err != nil {

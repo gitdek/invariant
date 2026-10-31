@@ -91,7 +91,7 @@ func Markdown(r *verify.Report) string {
 		writeRow("Build", r.Build.Passed, render.buildResult(r.Build), "sandboxed, no network")
 	}
 	if explicit {
-		componentEvidence(&b, r.Components)
+		componentEvidence(&b, r)
 		componentViews(&b, r)
 	}
 	if r.Application != nil {
@@ -198,10 +198,13 @@ func (render renderer) value(s string) string {
 
 // componentEvidence reports every scoped declaration, even when it was only
 // a contract input or had no selected check. Package-wide results cannot
-// supply a component's proof status.
-func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
+// supply a component's proof status, and a decoded status counts only when
+// its own result qualifies again, as attribution qualifies it.
+func componentEvidence(b *strings.Builder, r *verify.Report) {
+	evidence := r.Components
 	proofs := make(map[string]verify.ComponentProof, len(evidence.Proofs))
 	for _, p := range evidence.Proofs {
+		p.Status = componentProofQualification(r, p)
 		proofs[p.Target] = p
 	}
 	contracts := make(map[string][]string)
@@ -248,6 +251,7 @@ func componentEvidence(b *strings.Builder, evidence *verify.ComponentEvidence) {
 			details = append(details, fmt.Sprintf("supplied proof passed: %t", result.Passed),
 				"verified IDs: "+componentStrings(result.Verified), "checked contracts: "+componentStrings(result.Contracts),
 				componentInputs(result.Inputs, result.FileInputs), componentInvocation(result.Invocation), componentTool(result.Tool))
+			details = append(details, componentBoundary(result)...)
 		} else if _, ok := contracts[c.ID]; ok {
 			details = append(details, "no verifier result")
 		}
