@@ -124,3 +124,34 @@ func TestGitNamesACommitterQuickly(t *testing.T) {
 		t.Fatalf("git was slow in the sandbox:\n%s", r.Output)
 	}
 }
+
+// The sandbox's python3 is the pinned image's own: toolchain.PythonVersion
+// names what both really run (#332).
+func TestTheSandboxRunsThePinnedPython(t *testing.T) {
+	image, err := toolchain.PlumbingImage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, img := range []string{image, toolchain.PythonImage} {
+		// Only stdout: a pull reports its progress on stderr.
+		cmd := exec.Command("docker", "run", "--rm", "--network", "none", img,
+			"python3", "-c", "import platform; print(platform.python_version())")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", img, err, stderr.String())
+		}
+		if got := strings.TrimSpace(string(out)); got != toolchain.PythonVersion {
+			t.Errorf("%s runs Python %s, but toolchain.PythonVersion is %s", img, got, toolchain.PythonVersion)
+		}
+	}
+	out, err := exec.Command("docker", "run", "--rm", "--network", "none", image,
+		"sh", "-c", `go version && git --version && echo "pinned=$INVARIANT_PYTHON_PINNED"`).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "go1.27.1") || !strings.Contains(string(out), "git version") || !strings.Contains(string(out), "pinned=1") {
+		t.Errorf("the sandbox lacks the pinned Go, git or INVARIANT_PYTHON_PINNED:\n%s", out)
+	}
+}

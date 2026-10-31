@@ -41,6 +41,11 @@ const (
 	// PythonImage runs Python code, its tests and its conformance driver.
 	// python:3.13-alpine (Python 3.13.15), multi-arch digest.
 	PythonImage = "python@sha256:79e7a9b9ff1cbceff819f856fb374477792a5967759d94df266de7b7b4120e6f"
+
+	// PythonVersion is the Python that PythonImage runs, so the two move
+	// together. The plumbing sandbox is built from PythonImage, and CI runs
+	// the Python tests again under this minor version (#332).
+	PythonVersion = "3.13.15"
 )
 
 // Toolchain is a ready-to-use set of pinned verifiers.
@@ -122,9 +127,10 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// PlumbingDockerfile is the recipe for the plumbing sandbox: GoImage with
-// git added, since the repository's tests build git repositories, and
-// Python 3, which Python component discovery parses source with (D-0108).
+// PlumbingDockerfile is the recipe for the plumbing sandbox: PythonImage,
+// so a build tests collector code under the Python it runs under in
+// production (#332), with GoImage's toolchain, and git, since the
+// repository's tests build git repositories (D-0108).
 //
 //go:embed plumbing.Dockerfile
 var PlumbingDockerfile []byte
