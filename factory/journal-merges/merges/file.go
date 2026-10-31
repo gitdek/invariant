@@ -157,31 +157,35 @@ func missing(m []Line, mlen int, b []Line, blen int) (kept []bool) {
 
 // appendKept writes into dst, after its first n0 lines, each of the first
 // blen lines of b that kept marks, in order, and returns how many lines dst
-// then holds.
+// then holds. It records where each line it wrote came from in b, in from,
+// and where each line it took went in dst, in to.
 // @ requires 0 <= n0 && 0 <= blen && blen <= len(b) && len(b) <= MaxSize
 // @ requires n0 + blen <= len(dst) && len(dst) <= MaxSize && len(kept) == blen
+// @ requires len(from) == len(dst) && len(to) == len(b)
 // @ requires forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
 // @ requires forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
 // @ requires forall q int :: { &kept[q] } 0 <= q && q < len(kept) ==> acc(&kept[q], 1/4)
+// @ requires forall k int :: { &from[k] } 0 <= k && k < len(from) ==> acc(&from[k])
+// @ requires forall k int :: { &to[k] } 0 <= k && k < len(to) ==> acc(&to[k])
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
 // @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
 // @ ensures forall q int :: { &kept[q] } 0 <= q && q < len(kept) ==> acc(&kept[q], 1/4)
+// @ ensures forall k int :: { &from[k] } 0 <= k && k < len(from) ==> acc(&from[k])
+// @ ensures forall k int :: { &to[k] } 0 <= k && k < len(to) ==> acc(&to[k])
 // @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> b[k] == old(b[k])
 // @ ensures forall q int :: { &kept[q] } 0 <= q && q < len(kept) ==> kept[q] == old(kept[q])
 // @ ensures n0 <= n && n <= n0 + blen
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < n0 ==> dst[k] == old(dst[k])
-// @ ensures forall k int, l Line :: n0 <= k && k < n && dst[k] == l ==> (exists j int :: { &b[j] } 0 <= j && j < blen && kept[j] && b[j] == l)
-// @ ensures forall j int, l Line :: 0 <= j && j < blen && kept[j] && b[j] == l ==> (exists k int :: { &dst[k] } n0 <= k && k < n && dst[k] == l)
+// @ ensures forall k int :: { &from[k] } n0 <= k && k < n ==> 0 <= from[k] && from[k] < blen
+// @ ensures forall k int :: { &from[k] } n0 <= k && k < n ==> kept[from[k]]
+// @ ensures forall k int :: { &dst[k] } n0 <= k && k < n ==> dst[k] == b[from[k]]
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && kept[q] ==> n0 <= to[q] && to[q] < n
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && kept[q] ==> dst[to[q]] == b[q]
 // @ decreases
-func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool) (n int) {
-	// For the proof: where each line it takes came from in b, and where it
-	// went in dst.
-	from := make([]int, len(dst))
-	to := make([]int, blen)
+func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool, from, to []int) (n int) {
 	n = n0
 	j := 0
 	// @ invariant 0 <= j && j <= blen && n0 <= n && n <= n0 + j
-	// @ invariant len(from) == len(dst) && len(to) == blen
 	// @ invariant forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
 	// @ invariant forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
 	// @ invariant forall q int :: { &kept[q] } 0 <= q && q < len(kept) ==> acc(&kept[q], 1/4)
@@ -193,8 +197,8 @@ func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool) (n int) {
 	// @ invariant forall k int :: { &from[k] } n0 <= k && k < n ==> 0 <= from[k] && from[k] < j
 	// @ invariant forall k int :: { &from[k] } n0 <= k && k < n ==> kept[from[k]]
 	// @ invariant forall k int :: { &dst[k] } n0 <= k && k < n ==> dst[k] == b[from[k]]
-	// @ invariant forall q int :: { &to[q] } { &kept[q] } 0 <= q && q < j && kept[q] ==> n0 <= to[q] && to[q] < n
-	// @ invariant forall q int :: { &to[q] } { &b[q] } 0 <= q && q < j && kept[q] ==> dst[to[q]] == b[q]
+	// @ invariant forall q int :: { &to[q] } 0 <= q && q < j && kept[q] ==> n0 <= to[q] && to[q] < n
+	// @ invariant forall q int :: { &to[q] } 0 <= q && q < j && kept[q] ==> dst[to[q]] == b[q]
 	// @ decreases blen - j
 	for j < blen {
 		if kept[j] {
@@ -210,26 +214,35 @@ func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool) (n int) {
 
 // takeIn writes into dst main's first mlen lines, where they are, then each
 // of the branch's first blen lines that main's don't have, in order, and
-// returns how many lines dst then holds.
+// returns how many lines dst then holds. Each line it writes after main's is
+// the branch's line from[k], and each of the branch's lines that main's lack
+// is dst's line to[q].
 // @ requires 0 <= mlen && mlen <= len(m) && len(m) <= MaxSize
 // @ requires 0 <= blen && blen <= len(b) && len(b) <= MaxSize
 // @ requires mlen + blen <= len(dst) && len(dst) <= MaxSize
+// @ requires len(from) == len(dst) && len(to) == len(b)
 // @ requires forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
 // @ requires forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], 1/4)
 // @ requires forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
+// @ requires forall k int :: { &from[k] } 0 <= k && k < len(from) ==> acc(&from[k])
+// @ requires forall k int :: { &to[k] } 0 <= k && k < len(to) ==> acc(&to[k])
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < len(dst) ==> acc(&dst[k])
 // @ ensures forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], 1/4)
 // @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
+// @ ensures forall k int :: { &from[k] } 0 <= k && k < len(from) ==> acc(&from[k])
+// @ ensures forall k int :: { &to[k] } 0 <= k && k < len(to) ==> acc(&to[k])
 // @ ensures forall k int :: { &m[k] } 0 <= k && k < len(m) ==> m[k] == old(m[k])
 // @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> b[k] == old(b[k])
 // @ ensures mlen <= n && n <= mlen + blen
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < mlen ==> dst[k] == m[k]
-// @ ensures forall k int, l Line :: mlen <= k && k < n && dst[k] == l ==> (exists j int :: { &b[j] } 0 <= j && j < blen && b[j] == l)
+// @ ensures forall k int :: { &from[k] } mlen <= k && k < n ==> 0 <= from[k] && from[k] < blen
+// @ ensures forall k int :: { &dst[k] } mlen <= k && k < n ==> dst[k] == b[from[k]]
 // @ ensures forall k, i int :: { &dst[k], &m[i] } mlen <= k && k < n && 0 <= i && i < mlen ==> dst[k] != m[i]
-// @ ensures forall j int, l Line :: 0 <= j && j < blen && b[j] == l && (forall i int :: { &m[i] } 0 <= i && i < mlen ==> m[i] != l) ==> (exists k int :: { &dst[k] } mlen <= k && k < n && dst[k] == l)
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && !(exists i int :: { &m[i] } 0 <= i && i < mlen && m[i] == b[q]) ==> mlen <= to[q] && to[q] < n
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && !(exists i int :: { &m[i] } 0 <= i && i < mlen && m[i] == b[q]) ==> dst[to[q]] == b[q]
 // @ decreases
-func takeIn(dst []Line, m []Line, mlen int, b []Line, blen int) (n int) {
+func takeIn(dst []Line, m []Line, mlen int, b []Line, blen int, from, to []int) (n int) {
 	copyPrefix(dst, m, mlen)
 	kept := missing(m, mlen, b, blen)
-	return appendKept(dst, mlen, b, blen, kept)
+	return appendKept(dst, mlen, b, blen, kept, from, to)
 }

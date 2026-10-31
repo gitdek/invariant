@@ -73,7 +73,9 @@ func (s *Core) Merge(b *Branch) (ran bool) {
 // isn't the start of the branch's and each of the branch's files has room
 // for main's lines beside its own. Each of the branch's files is then main's
 // lines, where they are, followed by the branch's own lines that main's file
-// doesn't have, in order. Otherwise it changes nothing.
+// doesn't have, in order. Otherwise it changes nothing. For the proof, it
+// says where each of those lines was in the branch's file, in from, and
+// where each of the branch's lines that main's file lacked went, in to.
 // @ requires acc(&s.Lines, 1/2) && acc(&s.Len, 1/2) && acc(&s.Room, 1/2) && 0 <= s.Room && s.Room <= MaxSize
 // @ requires len(s.Len) == len(s.Lines) && len(s.Lines) <= MaxSize
 // @ requires forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> acc(&s.Len[g], 1/2) && 0 <= s.Len[g] && s.Len[g] <= s.Room
@@ -99,18 +101,25 @@ func (s *Core) Merge(b *Branch) (ran bool) {
 // @ ensures ran == (!(forall f int :: { old(s.Len[f]) } 0 <= f && f < len(s.Len) ==> old(s.Len[f]) <= old(b.Len[f]) && (forall k int :: { old(s.Lines[f][k]) } 0 <= k && k < old(s.Len[f]) ==> old(s.Lines[f][k]) == old(b.Lines[f][k]))) && (forall f int :: { old(s.Len[f]) } 0 <= f && f < len(s.Len) ==> old(s.Len[f]) + old(b.Len[f]) <= s.Room))
 // @ ensures !ran ==> forall f int :: { &b.Len[f] } 0 <= f && f < len(b.Len) ==> b.Len[f] == old(b.Len[f])
 // @ ensures !ran ==> forall f, k int :: { &b.Lines[f][k] } 0 <= f && f < len(b.Lines) && 0 <= k && k < s.Room ==> b.Lines[f][k] == old(b.Lines[f][k])
+// @ ensures ran ==> len(from) == len(s.Lines) && len(to) == len(s.Lines)
+// @ ensures ran ==> forall f int :: { &from[f] } 0 <= f && f < len(from) ==> acc(&from[f], 1/2) && len(from[f]) == s.Room
+// @ ensures ran ==> forall f, k int :: { &from[f][k] } 0 <= f && f < len(from) && 0 <= k && k < s.Room ==> acc(&from[f][k])
+// @ ensures ran ==> forall f int :: { &to[f] } 0 <= f && f < len(to) ==> acc(&to[f], 1/2) && len(to[f]) == s.Room
+// @ ensures ran ==> forall f, k int :: { &to[f][k] } 0 <= f && f < len(to) && 0 <= k && k < s.Room ==> acc(&to[f][k])
 // @ ensures ran ==> forall f int :: { &b.Len[f] } 0 <= f && f < len(b.Len) ==> s.Len[f] <= b.Len[f] && b.Len[f] <= s.Len[f] + old(b.Len[f])
 // @ ensures ran ==> forall f, k int :: { &b.Lines[f][k] } 0 <= f && f < len(b.Lines) && 0 <= k && k < s.Len[f] ==> b.Lines[f][k] == s.Lines[f][k]
-// @ ensures ran ==> forall f, k int, l Line :: 0 <= f && f < len(b.Lines) && s.Len[f] <= k && k < b.Len[f] && b.Lines[f][k] == l ==> (exists j int :: { old(b.Lines[f][j]) } 0 <= j && j < old(b.Len[f]) && old(b.Lines[f][j]) == l)
+// @ ensures ran ==> forall f, k int :: { &from[f][k] } 0 <= f && f < len(b.Lines) && s.Len[f] <= k && k < b.Len[f] ==> 0 <= from[f][k] && from[f][k] < old(b.Len[f])
+// @ ensures ran ==> forall f, k, j int :: { &b.Lines[f][k], old(b.Lines[f][j]) } 0 <= f && f < len(b.Lines) && s.Len[f] <= k && k < b.Len[f] && j == from[f][k] ==> b.Lines[f][k] == old(b.Lines[f][j])
 // @ ensures ran ==> forall f, k, i int :: { &b.Lines[f][k], &s.Lines[f][i] } 0 <= f && f < len(b.Lines) && s.Len[f] <= k && k < b.Len[f] && 0 <= i && i < s.Len[f] ==> b.Lines[f][k] != s.Lines[f][i]
-// @ ensures ran ==> forall f, j int, l Line :: 0 <= f && f < len(b.Lines) && 0 <= j && j < old(b.Len[f]) && old(b.Lines[f][j]) == l && (forall i int :: { &s.Lines[f][i] } 0 <= i && i < s.Len[f] ==> s.Lines[f][i] != l) ==> (exists k int :: { &b.Lines[f][k] } s.Len[f] <= k && k < b.Len[f] && b.Lines[f][k] == l)
-func (s *Core) TakeMainIn(b *Branch) (ran bool) {
+// @ ensures ran ==> forall f, q int :: { &to[f][q] } 0 <= f && f < len(b.Lines) && 0 <= q && q < old(b.Len[f]) && !(exists i int :: { &s.Lines[f][i] } 0 <= i && i < s.Len[f] && s.Lines[f][i] == old(b.Lines[f][q])) ==> s.Len[f] <= to[f][q] && to[f][q] < b.Len[f]
+// @ ensures ran ==> forall f, q int :: { &to[f][q] } 0 <= f && f < len(b.Lines) && 0 <= q && q < old(b.Len[f]) && !(exists i int :: { &s.Lines[f][i] } 0 <= i && i < s.Len[f] && s.Lines[f][i] == old(b.Lines[f][q])) ==> b.Lines[f][to[f][q]] == old(b.Lines[f][q])
+func (s *Core) TakeMainIn(b *Branch) (ran bool, from, to [][]int) {
 	if s.startsEvery(b) || !s.fits(b) {
-		return false
+		return false, nil, nil
 	}
-	out, n := s.takeEvery(b)
+	out, n, from, to := s.takeEvery(b)
 	s.replace(b, out, n)
-	return true
+	return true, from, to
 }
 
 // startsEvery says whether each of main's files is the start of the
@@ -291,7 +300,8 @@ func (s *Core) copyFrom(b *Branch) {
 
 // takeEvery works out, for each file, what taking main in leaves in the
 // branch's: main's lines, where they are, then the branch's own lines that
-// main's file doesn't have, in order. It changes neither journal.
+// main's file doesn't have, in order, with where each came from and went.
+// It changes neither journal.
 // @ requires acc(&s.Lines, 1/4) && acc(&s.Len, 1/4) && acc(&s.Room, 1/4) && 0 <= s.Room && s.Room <= MaxSize
 // @ requires len(s.Len) == len(s.Lines) && len(s.Lines) <= MaxSize
 // @ requires forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> acc(&s.Len[g], 1/4) && 0 <= s.Len[g] && s.Len[g] <= s.Room
@@ -317,17 +327,25 @@ func (s *Core) copyFrom(b *Branch) {
 // @ ensures forall f, k int :: { &s.Lines[f][k] } 0 <= f && f < len(s.Lines) && 0 <= k && k < s.Room ==> s.Lines[f][k] == old(s.Lines[f][k])
 // @ ensures forall f int :: { &b.Len[f] } 0 <= f && f < len(b.Len) ==> b.Len[f] == old(b.Len[f])
 // @ ensures forall f, k int :: { &b.Lines[f][k] } 0 <= f && f < len(b.Lines) && 0 <= k && k < s.Room ==> b.Lines[f][k] == old(b.Lines[f][k])
-// @ ensures len(out) == len(s.Lines) && len(n) == len(s.Lines)
+// @ ensures len(out) == len(s.Lines) && len(n) == len(s.Lines) && len(from) == len(s.Lines) && len(to) == len(s.Lines)
 // @ ensures forall f int :: { &n[f] } 0 <= f && f < len(n) ==> acc(&n[f])
 // @ ensures forall f int :: { &out[f] } 0 <= f && f < len(out) ==> acc(&out[f]) && len(out[f]) == s.Room
 // @ ensures forall f, k int :: { &out[f][k] } 0 <= f && f < len(out) && 0 <= k && k < s.Room ==> acc(&out[f][k])
-// @ ensures forall f int :: { &n[f] } 0 <= f && f < len(n) ==> old(s.Len[f]) <= n[f] && n[f] <= old(s.Len[f]) + old(b.Len[f])
-// @ ensures forall f, k int :: { &out[f][k] } 0 <= f && f < len(out) && 0 <= k && k < old(s.Len[f]) ==> out[f][k] == old(s.Lines[f][k])
-// @ ensures forall f, k int, l Line :: 0 <= f && f < len(out) && old(s.Len[f]) <= k && k < n[f] && out[f][k] == l ==> (exists j int :: { old(b.Lines[f][j]) } 0 <= j && j < old(b.Len[f]) && old(b.Lines[f][j]) == l)
-// @ ensures forall f, k, i int :: { &out[f][k], old(s.Lines[f][i]) } 0 <= f && f < len(out) && old(s.Len[f]) <= k && k < n[f] && 0 <= i && i < old(s.Len[f]) ==> out[f][k] != old(s.Lines[f][i])
-// @ ensures forall f, j int, l Line :: 0 <= f && f < len(out) && 0 <= j && j < old(b.Len[f]) && old(b.Lines[f][j]) == l && (forall i int :: { old(s.Lines[f][i]) } 0 <= i && i < old(s.Len[f]) ==> old(s.Lines[f][i]) != l) ==> (exists k int :: { &out[f][k] } old(s.Len[f]) <= k && k < n[f] && out[f][k] == l)
-func (s *Core) takeEvery(b *Branch) (out [][]Line, n []int) {
+// @ ensures forall f int :: { &from[f] } 0 <= f && f < len(from) ==> acc(&from[f]) && len(from[f]) == s.Room
+// @ ensures forall f, k int :: { &from[f][k] } 0 <= f && f < len(from) && 0 <= k && k < s.Room ==> acc(&from[f][k])
+// @ ensures forall f int :: { &to[f] } 0 <= f && f < len(to) ==> acc(&to[f]) && len(to[f]) == s.Room
+// @ ensures forall f, k int :: { &to[f][k] } 0 <= f && f < len(to) && 0 <= k && k < s.Room ==> acc(&to[f][k])
+// @ ensures forall f int :: { &n[f] } 0 <= f && f < len(n) ==> s.Len[f] <= n[f] && n[f] <= s.Len[f] + b.Len[f]
+// @ ensures forall f, k int :: { &out[f][k] } 0 <= f && f < len(out) && 0 <= k && k < s.Len[f] ==> out[f][k] == s.Lines[f][k]
+// @ ensures forall f, k int :: { &from[f][k] } 0 <= f && f < len(out) && s.Len[f] <= k && k < n[f] ==> 0 <= from[f][k] && from[f][k] < b.Len[f]
+// @ ensures forall f, k int :: { &out[f][k] } 0 <= f && f < len(out) && s.Len[f] <= k && k < n[f] ==> out[f][k] == b.Lines[f][from[f][k]]
+// @ ensures forall f, k, i int :: { &out[f][k], &s.Lines[f][i] } 0 <= f && f < len(out) && s.Len[f] <= k && k < n[f] && 0 <= i && i < s.Len[f] ==> out[f][k] != s.Lines[f][i]
+// @ ensures forall f, q int :: { &to[f][q] } 0 <= f && f < len(out) && 0 <= q && q < b.Len[f] && !(exists i int :: { &s.Lines[f][i] } 0 <= i && i < s.Len[f] && s.Lines[f][i] == b.Lines[f][q]) ==> s.Len[f] <= to[f][q] && to[f][q] < n[f]
+// @ ensures forall f, q int :: { &to[f][q] } 0 <= f && f < len(out) && 0 <= q && q < b.Len[f] && !(exists i int :: { &s.Lines[f][i] } 0 <= i && i < s.Len[f] && s.Lines[f][i] == b.Lines[f][q]) ==> out[f][to[f][q]] == b.Lines[f][q]
+func (s *Core) takeEvery(b *Branch) (out [][]Line, n []int, from, to [][]int) {
 	out = rows(len(s.Lines), s.Room)
+	from = positions(len(s.Lines), s.Room)
+	to = positions(len(s.Lines), s.Room)
 	n = make([]int, len(s.Lines))
 	f := 0
 	// @ invariant acc(&s.Lines, 1/4) && acc(&s.Len, 1/4) && acc(&s.Room, 1/4) && 0 <= s.Room && s.Room <= MaxSize
@@ -341,26 +359,33 @@ func (s *Core) takeEvery(b *Branch) (out [][]Line, n []int) {
 	// @ invariant forall g int :: { &b.Len[g] } 0 <= g && g < len(b.Len) ==> acc(&b.Len[g], 1/4) && 0 <= b.Len[g] && b.Len[g] <= s.Room
 	// @ invariant forall g int :: { &b.Lines[g] } 0 <= g && g < len(b.Lines) ==> acc(&b.Lines[g], 1/4) && len(b.Lines[g]) == s.Room
 	// @ invariant forall g, k int :: { &b.Lines[g][k] } 0 <= g && g < len(b.Lines) && 0 <= k && k < s.Room ==> acc(&b.Lines[g][k], 1/4)
-	// @ invariant 0 <= f && f <= len(s.Lines) && len(out) == len(s.Lines) && len(n) == len(s.Lines)
+	// @ invariant 0 <= f && f <= len(s.Lines)
+	// @ invariant len(out) == len(s.Lines) && len(n) == len(s.Lines) && len(from) == len(s.Lines) && len(to) == len(s.Lines)
 	// @ invariant forall g int :: { &n[g] } 0 <= g && g < len(n) ==> acc(&n[g])
 	// @ invariant forall g int :: { &out[g] } 0 <= g && g < len(out) ==> acc(&out[g]) && len(out[g]) == s.Room
 	// @ invariant forall g, k int :: { &out[g][k] } 0 <= g && g < len(out) && 0 <= k && k < s.Room ==> acc(&out[g][k])
+	// @ invariant forall g int :: { &from[g] } 0 <= g && g < len(from) ==> acc(&from[g]) && len(from[g]) == s.Room
+	// @ invariant forall g, k int :: { &from[g][k] } 0 <= g && g < len(from) && 0 <= k && k < s.Room ==> acc(&from[g][k])
+	// @ invariant forall g int :: { &to[g] } 0 <= g && g < len(to) ==> acc(&to[g]) && len(to[g]) == s.Room
+	// @ invariant forall g, k int :: { &to[g][k] } 0 <= g && g < len(to) && 0 <= k && k < s.Room ==> acc(&to[g][k])
 	// @ invariant forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> s.Len[g] == old(s.Len[g])
 	// @ invariant forall g, k int :: { &s.Lines[g][k] } 0 <= g && g < len(s.Lines) && 0 <= k && k < s.Room ==> s.Lines[g][k] == old(s.Lines[g][k])
 	// @ invariant forall g int :: { &b.Len[g] } 0 <= g && g < len(b.Len) ==> b.Len[g] == old(b.Len[g])
 	// @ invariant forall g, k int :: { &b.Lines[g][k] } 0 <= g && g < len(b.Lines) && 0 <= k && k < s.Room ==> b.Lines[g][k] == old(b.Lines[g][k])
-	// @ invariant forall g int :: { old(s.Len[g]) } 0 <= g && g < len(s.Len) ==> 0 <= old(s.Len[g]) && 0 <= old(b.Len[g]) && old(s.Len[g]) + old(b.Len[g]) <= s.Room
-	// @ invariant forall g int :: { &n[g] } 0 <= g && g < f ==> old(s.Len[g]) <= n[g] && n[g] <= old(s.Len[g]) + old(b.Len[g])
-	// @ invariant forall g, k int :: { &out[g][k] } 0 <= g && g < f && 0 <= k && k < old(s.Len[g]) ==> out[g][k] == old(s.Lines[g][k])
-	// @ invariant forall g, k int, l Line :: 0 <= g && g < f && old(s.Len[g]) <= k && k < n[g] && out[g][k] == l ==> (exists j int :: { old(b.Lines[g][j]) } 0 <= j && j < old(b.Len[g]) && old(b.Lines[g][j]) == l)
-	// @ invariant forall g, k, i int :: { &out[g][k], old(s.Lines[g][i]) } 0 <= g && g < f && old(s.Len[g]) <= k && k < n[g] && 0 <= i && i < old(s.Len[g]) ==> out[g][k] != old(s.Lines[g][i])
-	// @ invariant forall g, j int, l Line :: 0 <= g && g < f && 0 <= j && j < old(b.Len[g]) && old(b.Lines[g][j]) == l && (forall i int :: { old(s.Lines[g][i]) } 0 <= i && i < old(s.Len[g]) ==> old(s.Lines[g][i]) != l) ==> (exists k int :: { &out[g][k] } old(s.Len[g]) <= k && k < n[g] && out[g][k] == l)
+	// @ invariant forall g int :: { &s.Len[g] } 0 <= g && g < len(s.Len) ==> s.Len[g] + b.Len[g] <= s.Room
+	// @ invariant forall g int :: { &n[g] } 0 <= g && g < f ==> s.Len[g] <= n[g] && n[g] <= s.Len[g] + b.Len[g]
+	// @ invariant forall g, k int :: { &out[g][k] } 0 <= g && g < f && 0 <= k && k < s.Len[g] ==> out[g][k] == s.Lines[g][k]
+	// @ invariant forall g, k int :: { &from[g][k] } 0 <= g && g < f && s.Len[g] <= k && k < n[g] ==> 0 <= from[g][k] && from[g][k] < b.Len[g]
+	// @ invariant forall g, k int :: { &out[g][k] } 0 <= g && g < f && s.Len[g] <= k && k < n[g] ==> out[g][k] == b.Lines[g][from[g][k]]
+	// @ invariant forall g, k, i int :: { &out[g][k], &s.Lines[g][i] } 0 <= g && g < f && s.Len[g] <= k && k < n[g] && 0 <= i && i < s.Len[g] ==> out[g][k] != s.Lines[g][i]
+	// @ invariant forall g, q int :: { &to[g][q] } 0 <= g && g < f && 0 <= q && q < b.Len[g] && !(exists i int :: { &s.Lines[g][i] } 0 <= i && i < s.Len[g] && s.Lines[g][i] == b.Lines[g][q]) ==> s.Len[g] <= to[g][q] && to[g][q] < n[g]
+	// @ invariant forall g, q int :: { &to[g][q] } 0 <= g && g < f && 0 <= q && q < b.Len[g] && !(exists i int :: { &s.Lines[g][i] } 0 <= i && i < s.Len[g] && s.Lines[g][i] == b.Lines[g][q]) ==> out[g][to[g][q]] == b.Lines[g][q]
 	// @ decreases len(s.Lines) - f
 	for f < len(s.Lines) {
-		n[f] = takeIn(out[f], s.Lines[f], s.Len[f], b.Lines[f], b.Len[f])
+		n[f] = takeIn(out[f], s.Lines[f], s.Len[f], b.Lines[f], b.Len[f], from[f], to[f])
 		f++
 	}
-	return out, n
+	return out, n, from, to
 }
 
 // replace makes each of the branch's files what takeEvery worked out for it.

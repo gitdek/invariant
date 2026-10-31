@@ -78,3 +78,24 @@ func rows(n, room int) (r [][]Line) {
 	}
 	return r
 }
+
+// positions allocates n rows of room positions each, for saying where lines
+// came from and went.
+// @ requires 0 <= n && n <= MaxSize && 0 <= room && room <= MaxSize
+// @ ensures len(r) == n
+// @ ensures forall f int :: { &r[f] } 0 <= f && f < n ==> acc(&r[f]) && len(r[f]) == room
+// @ ensures forall f, k int :: { &r[f][k] } 0 <= f && f < n && 0 <= k && k < room ==> acc(&r[f][k])
+func positions(n, room int) (r [][]int) {
+	r = make([][]int, n)
+	i := 0
+	// @ invariant 0 <= i && i <= n && len(r) == n
+	// @ invariant forall f int :: { &r[f] } 0 <= f && f < n ==> acc(&r[f])
+	// @ invariant forall f int :: { &r[f] } 0 <= f && f < i ==> len(r[f]) == room
+	// @ invariant forall f, k int :: { &r[f][k] } 0 <= f && f < i && 0 <= k && k < room ==> acc(&r[f][k])
+	// @ decreases n - i
+	for i < n {
+		r[i] = make([]int, room)
+		i++
+	}
+	return r
+}
