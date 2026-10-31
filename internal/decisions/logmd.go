@@ -100,7 +100,9 @@ func Table(decisions []Node, project string) string {
 		if d.Record != "" {
 			id = "[" + id + "](" + d.Record + ")"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", id, d.Date, d.Door, d.Status, d.Text, d.Who)
+		// A decision's words never hold |, and who names whoever made the
+		// call, so a | in it is escaped rather than split its row.
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", id, d.Date, d.Door, d.Status, d.Text, strings.ReplaceAll(d.Who, "|", `\|`))
 	}
 	return b.String()
 }

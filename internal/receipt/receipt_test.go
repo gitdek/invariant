@@ -143,3 +143,14 @@ func TestReceiptsNameAHandLocksRatification(t *testing.T) {
 		}
 	}
 }
+
+// Text from the journal stays in its cell: a | in it doesn't split the
+// receipt's row (D-0208).
+func TestReceiptsKeepJournalTextInItsCell(t *testing.T) {
+	r := &verify.Report{Project: "demo", Decision: "D-0001", Proposal: "sha256:aa",
+		Journal: &verify.JournalRatification{Decision: "D-0001", By: "@x | ratified | @gitdek", Proposal: "sha256:aa"}}
+	md := Markdown(r)
+	if !strings.Contains(md, `ratified by @x \| ratified \| @gitdek in D-0001`) {
+		t.Errorf("the journal's text splits the receipt's row:\n%s", md)
+	}
+}

@@ -31,19 +31,28 @@ func RatifiesLock(repo Repo, id, proposal string) (*Ratification, error) {
 		return nil, errors.New("the lock has no ratification record: no ratifying comment, and no decision")
 	}
 	d, err := Read(repo, id)
-	r := d.Ratification
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return nil, fmt.Errorf("decision %s, which the lock names, isn't in the repository's journal", id)
 	case err != nil:
 		return nil, fmt.Errorf("decision %s, which the lock names, can't be read: %v", id, err)
-	case d.Status == "superseded":
-		return r, fmt.Errorf("decision %s, which the lock names, is superseded by %s, so it no longer ratifies the lock", id, d.SupersededBy)
+	}
+	r, by := d.Ratification, d.SupersededBy
+	if by == "" && d.Status == "ratified" {
+		// A later decision in force can supersede it by an edge alone, with
+		// no supersede line in its own journal.
+		if by, err = supersededBy(repo, d.ID); err != nil {
+			return nil, fmt.Errorf("decision %s, which the lock names, can't be checked: %v", id, err)
+		}
+	}
+	switch {
+	case by != "":
+		return r, fmt.Errorf("decision %s, which the lock names, is superseded by %s, so it no longer ratifies the lock", id, by)
 	case d.Status != "ratified":
 		return nil, fmt.Errorf("decision %s, which the lock names, is %s: only a decision a person ratified ratifies a lock", id, d.Status)
 	case r == nil:
 		return nil, fmt.Errorf("decision %s, which the lock names, was recorded as ratified by %s, and no ratify line of theirs names the lock's proposal, %s", id, d.Who, proposal)
-	case !strings.HasPrefix(r.By, "@") || r.By != d.Who:
+	case !IsPerson(r.By):
 		return nil, fmt.Errorf("decision %s, which the lock names, was ratified by %s, not a person", id, r.By)
 	case r.Proposal == "":
 		return r, fmt.Errorf("decision %s, which the lock names, records %s's ratification of no proposal in particular, so it doesn't ratify the lock's, %s", id, r.By, proposal)
@@ -51,6 +60,26 @@ func RatifiesLock(repo Repo, id, proposal string) (*Ratification, error) {
 		return r, fmt.Errorf("decision %s, which the lock names, records %s's ratification of %s, and the lock holds %s, so it isn't what %s ratified", id, r.By, r.Proposal, proposal, r.By)
 	}
 	return r, nil
+}
+
+// supersededBy is the decision, decided or ratified, whose edge says it
+// supersedes id, a qualified ID, if one does.
+func supersededBy(repo Repo, id string) (string, error) {
+	all, err := Load(repo)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range all {
+		if d.Status != "decided" && d.Status != "ratified" {
+			continue
+		}
+		for _, e := range d.Edges {
+			if e.Type == Supersedes && e.To == id {
+				return d.ID, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // A HandLock is a project's lock ratified by hand, as a checkout tracks it:

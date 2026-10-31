@@ -189,12 +189,7 @@ func pinCmd(args []string) int {
 	// A lock ratified by hand holds only for the proposal its decision's
 	// ratify line names, so the person needs its hash (D-0208).
 	if p.Lock.Ratified == nil {
-		id := p.Lock.Decision
-		if id == "" {
-			id = "D-NNNN"
-		}
-		proposal := project.ProposalHash(p.Lock.Bounds, p.Lock.Statements)
-		fmt.Printf("The lock's proposal is %s. A person ratifies exactly that with `invariant decisions ratify -by @PERSON -proposal %s %s`.\n", proposal, proposal, id)
+		fmt.Println(pinHint(context.Background(), args[0], p.Lock.Decision, project.ProposalHash(p.Lock.Bounds, p.Lock.Statements)))
 	}
 	return 0
 }

@@ -125,6 +125,37 @@ func handRatified(ctx context.Context, dir string, lock project.Lock) (*decision
 	return r, nil
 }
 
+// pinHint says what a lock ratified by hand needs, whose proposal is
+// proposal now its statements are pinned: nothing, when the decision it
+// names ratifies exactly that; that decision's ratification, when it waits
+// for one; or a new decision, when there's none, or the one it names is
+// ratified already or superseded, since a decision is ratified once
+// (D-0208).
+func pinHint(ctx context.Context, dir, id, proposal string) string {
+	ratify := func(id string) string {
+		return fmt.Sprintf("`invariant decisions ratify -by @PERSON -proposal %s %s`", proposal, id)
+	}
+	fresh := "Record a new decision for it with `invariant decisions decide`, name that decision in the lock, and have the person who ratifies it run " + ratify("D-NNNN") + "."
+	if id == "" {
+		return fmt.Sprintf("The lock's proposal is %s, and it names no decision. %s", proposal, fresh)
+	}
+	repo, err := checkout(ctx, dir, "")
+	if err != nil {
+		return fmt.Sprintf("The lock's proposal is %s. A person ratifies exactly that with %s.", proposal, ratify(id))
+	}
+	if _, err := decisions.RatifiesLock(repo, id, proposal); err == nil {
+		return fmt.Sprintf("The lock's proposal is %s, which %s ratifies.", proposal, id)
+	}
+	d, err := decisions.Read(repo, id)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("The lock's proposal is %s, and %s isn't a decision in the repository's journal. %s", proposal, id, fresh)
+	case d.Status == "proposed" || d.Status == "decided":
+		return fmt.Sprintf("The lock's proposal is %s. A person ratifies exactly that with %s.", proposal, ratify(id))
+	}
+	return fmt.Sprintf("The lock's proposal is %s, and %s is %s already, so it can't ratify this one. %s", proposal, id, d.Status, fresh)
+}
+
 func (f decisionFlags) open() (*decisions.Store, error) {
 	path := *f.store
 	if path == "" {
@@ -275,8 +306,8 @@ func changeCmd(ctx context.Context, sub string, args []string) error {
 	}
 	switch {
 	case sub == "ratify" && fs.NArg() == 1:
-		if !strings.HasPrefix(*by, "@") {
-			return errors.New("ratify names the person ratifying, as -by @gitdek. Ratifying is theirs: record it only when they ask")
+		if !decisions.IsPerson(*by) {
+			return errors.New("ratify names the person ratifying by their GitHub login, as -by @gitdek, and never a bot. Ratifying is theirs: record it only when they ask")
 		}
 		err = s.RatifyProposal(repo, fs.Arg(0), *by, *proposal)
 	case sub == "supersede" && fs.NArg() == 1 && *with != "":

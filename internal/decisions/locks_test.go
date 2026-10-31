@@ -37,6 +37,14 @@ func TestOnlyARatificationNamesAProposal(t *testing.T) {
 		t.Fatalf("the ratify line isn't the decision's ratification: %+v, %+v", d.Node, d.Ratification)
 	}
 
+	// Only a person ratifies, by their GitHub login: never a bot, and never
+	// anything that would split a row of decisions/log.md.
+	for _, by := range []string{"@invariant-code-factory[bot]", "@x | ratified | @gitdek", "@", "@-gitdek", "@git--dek"} {
+		if err := s.RatifyProposal(repo, "D-0002", by, proposal); err == nil || !strings.Contains(err.Error(), "only a person ratifies") {
+			t.Errorf("a ratification by %q was taken: %v", by, err)
+		}
+	}
+
 	// A line that isn't a ratification, sealed as the store seals one, can't
 	// name a proposal.
 	path := filepath.Join(repo.JournalDir(), "D-0002.jsonl")
@@ -50,6 +58,70 @@ func TestOnlyARatificationNamesAProposal(t *testing.T) {
 	}
 	if _, err := fold(repo.Name, append(events, e)); err == nil || !strings.Contains(err.Error(), "only a ratify line names a proposal") {
 		t.Errorf("a link named a proposal: %v", err)
+	}
+	// Nor can a ratify line record what a decision does, such as who made it.
+	r := Event{At: "2026-10-31T00:00:00Z", By: "@gitdek", Op: OpRatify, ID: "D-0002", Who: "@someone"}
+	if err := r.chain(events); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fold(repo.Name, append(events, r)); err == nil || !strings.Contains(err.Error(), "nothing a decision records") {
+		t.Errorf("a ratify line recorded who made the decision: %v", err)
+	}
+}
+
+// A decision in force can supersede another by an edge alone, with no
+// supersede line in the other's journal, and a lock ratified by hand holds
+// for neither form of superseded decision (D-0208).
+func TestALockHoldsForNoSupersededDecision(t *testing.T) {
+	proposal := "sha256:" + strings.Repeat("0f", 32)
+	for _, c := range []struct {
+		name   string
+		status string // the later decision's
+		link   bool   // supersede by an edge, not a line
+		holds  bool
+	}{
+		{"by a supersede line", "decided", false, false},
+		{"by a decided decision's edge", "decided", true, false},
+		{"by a ratified decision's edge", "ratified", true, false},
+		{"not by a proposed decision's edge", "proposed", true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, repo := fixture(t)
+			if _, err := s.Decide(repo, NewDecision{Door: "two-way", Status: "proposed", Who: "agent", Text: "The lock."}, "agent"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RatifyProposal(repo, "D-0001", "@gitdek", proposal); err != nil {
+				t.Fatal(err)
+			}
+			who := "agent"
+			if c.status == "ratified" {
+				who = "@gitdek"
+			}
+			if _, err := s.Decide(repo, NewDecision{Door: "two-way", Status: c.status, Who: who, Text: "A later call."}, "agent"); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if c.link {
+				err = s.Link(repo, "D-0002", Edge{Type: Supersedes, To: "D-0001"}, "agent")
+			} else {
+				err = s.Supersede(repo, "D-0001", "D-0002", "agent")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = RatifiesLock(repo, "D-0001", proposal)
+			if (err == nil) != c.holds || (!c.holds && !strings.Contains(err.Error(), "superseded by demo/D-0002")) {
+				t.Fatalf("the lock holds = %v, want %v: %v", err == nil, c.holds, err)
+			}
+		})
+	}
+}
+
+// decisions/log.md keeps a | in who made a call within its cell.
+func TestTheLogEscapesWho(t *testing.T) {
+	table := Table([]Node{{ID: "demo/D-0001", Date: "2026-10-31", Door: "two-way", Status: "decided", Who: "agent | x", Text: "A call."}}, "demo")
+	if !strings.Contains(table, `| A call. | agent \| x |`) {
+		t.Errorf("the log's row splits who made the call:\n%s", table)
 	}
 }
 
