@@ -256,7 +256,9 @@ else:
     raise AssertionError('network available')
 `
 			} else if fault == "memory" {
-				driver += "\nprint('allocating beyond limit', flush=True)\nallocation = bytearray(768 * 1024 * 1024)\n"
+				// --memory 512m lets a container swap as much again where the
+				// host has swap, so allocate past both.
+				driver += "\nprint('allocating beyond limit', flush=True)\nallocation = bytearray(1536 * 1024 * 1024)\n"
 			}
 			root, p := pa318Fixture(t, false, driver, false)
 			before := pa315Tree(t, root)

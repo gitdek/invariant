@@ -121,7 +121,9 @@ if __name__ == '__main__': drive()
 					s := pa315Prepare(t, p, pa318Options(t, real, &selected))
 					r, err := s.Run(context.Background(), pa318Driver(t, s).Key)
 					pa318Reject(t, r, err)
-					if r == nil || !strings.Contains(strings.Join(r.Diagnostics, "\n"), "receiver binding") {
+					// Handles hold no bindings since #318's last review, so the
+					// switch fails at the handle, before any call or read-back.
+					if r == nil || !strings.Contains(strings.Join(r.Diagnostics, "\n"), "lifecycle handles expose no state") {
 						t.Fatalf("receiver mutation rejected for unrelated reason: %+v, %v", r, err)
 					}
 					if selected != 1 || !reflect.DeepEqual(before, pa315Tree(t, root)) {

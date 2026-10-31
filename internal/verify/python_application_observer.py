@@ -1,4 +1,12 @@
-"""Sample selected calls without changing application source or functions."""
+"""Sample selected calls without changing application source or functions.
+
+A driver gets stateless handles. Every binding, read-back and continuity check
+uses records only the collector holds, so nothing a driver is given can
+substitute evidence. Code in the same process can still reach this module's
+own objects, frames and closures; a driver that does is tampering with the
+gate, which no in-process collector can rule out, and its bytes are bound to
+every observation it makes.
+"""
 
 import ast
 import _thread
@@ -151,7 +159,11 @@ class Collector:
         self.count = 0
         self.thread = threading.get_ident()
         self.driver_codes = set()
-        self.writers = (Lifecycle.__enter__.__wrapped__.__code__, Lifecycle.step.__wrapped__.__code__)
+        self.handles = {}
+        # The first reason a handle was misused, kept for the diagnostic in
+        # case the driver catches the error.
+        self.misuse = None
+        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__)
 
     def lexical(self, code):
         filename = os.path.abspath(code.co_filename)
@@ -177,7 +189,7 @@ class Collector:
 
     def driver(self):
         if self.failed or threading.get_ident() != self.thread or sys.gettrace() != self.trace:
-            raise ValueError("observation execution is poisoned or tracing changed")
+            raise ValueError("observation execution is poisoned or tracing changed" + (": " + self.misuse if self.misuse else ""))
         frame = sys._getframe(1)
         while frame is not None:
             if os.path.abspath(frame.f_code.co_filename) == os.path.join(self.request["root"], self.request["check"]["source"]):
@@ -228,7 +240,7 @@ class Collector:
             raise ValueError("concurrent execution is unsupported")
 
 
-class Lifecycle:
+class _Lifecycle:
     def __init__(self, target, initializer, argument, fields, expected):
         c = _collector
         c.driver()
@@ -380,16 +392,66 @@ class Lifecycle:
             self.entry_frame = self.target_frame = None
 
 
+def _poison(message):
+    _collector.failed = True
+    _collector.misuse = _collector.misuse or message
+    raise AttributeError(message)
+
+
+class Lifecycle:
+    """A driver's handle on one lifecycle: a context manager with step().
+
+    It has no state of its own. Reading, writing or deleting any other
+    attribute poisons the execution, even if the driver catches the error.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        _poison("lifecycle handles expose no state; drive the application through step()")
+
+    def __setattr__(self, name, value):
+        _poison("lifecycle handles are read-only")
+
+    def __delattr__(self, name):
+        _poison("lifecycle handles are read-only")
+
+    def __enter__(self):
+        _record(self).__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return _record(self).__exit__(exc_type, exc, tb)
+
+    def step(self, entry, *, expected_before=None, expected_after=None):
+        _record(self).step(entry, expected_before=expected_before, expected_after=expected_after)
+
+
+def _handle(record):
+    handle = object.__new__(Lifecycle)
+    _collector.handles[handle] = record
+    return handle
+
+
+def _record(handle):
+    record = _collector.handles.get(handle)
+    if type(handle) is not Lifecycle or record is None:
+        _collector.failed = True
+        _collector.misuse = _collector.misuse or "unknown lifecycle handle"
+        raise ValueError("unknown lifecycle handle")
+    return record
+
+
 @guarded
 def functional(target, initializer, *, argument, field, expected_initial=None):
     if type(field) is not str or not field:
         raise ValueError("functional read-back requires a state field")
-    return Lifecycle(target, initializer, argument, {field: "$return"}, expected_initial)
+    return _handle(_Lifecycle(target, initializer, argument, {field: "$return"}, expected_initial))
 
 
 @guarded
 def instance(target, *, fields, expected_initial=None):
-    return Lifecycle(target, None, None, fields, expected_initial)
+    return _handle(_Lifecycle(target, None, None, fields, expected_initial))
 
 
 def run(request, emit, locations, codes, argv):
