@@ -367,6 +367,9 @@ func TestPythonApplicationGateExplorationFingerprints(t *testing.T) {
 			name   string
 			change func(pa342Fixture)
 		}{
+			{"model", func(f pa342Fixture) {
+				pa342Edit(t, f, pa342ModelPath, "Overflow == count' = Limit + 1\n", "Overflow == count' = Limit + 1\n\\* Explored by the gate's harness.\n")
+			}},
 			{"model include", func(f pa342Fixture) {
 				pa342Write(t, f.root, pa342Project+"/.invariant/specs/Local.tla", "---- MODULE Local ----\nHelper == TRUE /\\ TRUE\n====\n")
 			}},
