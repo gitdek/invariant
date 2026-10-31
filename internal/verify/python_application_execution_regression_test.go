@@ -22,6 +22,11 @@ func pa315LocalPython(t *testing.T, libraries string) func(context.Context, Pyth
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The runner starts with -P, which Python added in 3.11. Production runs
+	// it in the pinned image; a host with an older python3 can't stand in.
+	if out, err := exec.Command(python, "-c", "import sys; print(sys.version_info >= (3, 11))").Output(); err != nil || strings.TrimSpace(string(out)) != "True" {
+		t.Skip("the runner needs Python 3.11 or newer on the host")
+	}
 	return func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
 		b, err := os.ReadFile(filepath.Join(c.RuntimeDir, "request.json"))
 		if err != nil {
