@@ -690,10 +690,33 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 		}
 		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: tests})
 	}
+	// What the gate's own processes run beside the module: the selected
+	// tests and conformance, and the trusted contracts' backing tests, whose
+	// loads the scan follows to the production modules they reach (#359).
+	var roots []string
+	if s.inventory != nil {
+		seen := map[string]bool{}
+		add := func(ids []string) {
+			for _, id := range ids {
+				if _, source, ok := strings.Cut(id, "@"); ok && !seen[source] {
+					seen[source] = true
+					roots = append(roots, source)
+				}
+			}
+		}
+		for _, c := range s.inventory.Checks {
+			add(c.Tests)
+			add(c.Conformance)
+		}
+		for _, c := range s.inventory.TrustedContracts {
+			add(c.Tests)
+		}
+		sort.Strings(roots)
+	}
 	var reply struct {
 		Writes []pythonProofWrite `json:"writes"`
 	}
-	if err := runPythonProofAnalyzer(map[string]any{"writes": true, "module": module, "files": files}, &reply); err != nil {
+	if err := runPythonProofAnalyzer(map[string]any{"writes": true, "module": module, "files": files, "roots": roots}, &reply); err != nil {
 		return nil, err
 	}
 	return reply.Writes, nil

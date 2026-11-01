@@ -149,6 +149,46 @@ func TestPythonApplicationGateRefusesArithmeticNaginiModelsApart(t *testing.T) {
 	})
 }
 
+// #359's fourth review: a production module only the gate's own processes
+// load, here through the conformance driver, runs beside the module in the
+// gate as surely as one the module loads, so the scan refuses its import
+// machinery, exec and reflection the same way. What ordinary code does
+// beside it still passes.
+func TestPythonApplicationGateRefusesWhatItsOwnProcessesLoad(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		for _, c := range []struct{ name, plug, want string }{
+			{"sys.meta_path", "import sys\n\nsys.meta_path.insert(0, object())\n", "counter/plug.py:3 uses sys.meta_path"},
+			{"sys.path_hooks", "import sys\n\nsys.path_hooks.insert(0, len)\n", "counter/plug.py:3 uses sys.path_hooks"},
+			{"an opaque exec", "exec('import builtins')\n", "counter/plug.py:1 runs or compiles code from a string"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				calls := gp359Verifier(t, real)
+				f := gp359New(t, real)
+				pa342Write(t, f.root, "counter/plug.py", c.plug)
+				gp359Edit(t, f, pa342DriverPath, "from counter import service\n", "from counter import plug, service\n")
+				gp359Refused(t, f, tc, c.want)
+				if *calls != 0 {
+					t.Fatal("Nagini ran beside a module the scan can't follow")
+				}
+			})
+		}
+	})
+}
+
+func TestPythonApplicationGateProvesBesideOrdinaryCode(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		gp359Verifier(t, real)
+		f := gp359New(t, real)
+		pa342Write(t, f.root, "counter/plug.py", "import logging\n\n\ndef build(compile):\n    return compile('x')\n\n\nlogging.getLogger('plug').info('__globals__')\n")
+		gp359Edit(t, f, pa342DriverPath, "from counter import service\n", "from counter import plug, service\n")
+		pa342Write(t, f.root, "setup.py", "exec(open('counter/_version.py').read())\n")
+		r := pa342Run(t, f, tc)
+		if !r.Passed || gp359Proof(t, r).Status != "proved" {
+			t.Fatalf("ordinary code beside the module held the proof back: %s", gp359Dump(t, r))
+		}
+	})
+}
+
 // gp359Kept is the counter's module with a contract that holds only what
 // Python can evaluate where the module runs without failing: comparisons, and,
 // or and not, a conditional expression, +, - and *, // and % by a positive

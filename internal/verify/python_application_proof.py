@@ -695,6 +695,24 @@ def contracts(node, names, kinds):
             what = CONTRACT_REFUSED.get(type(e.op) if isinstance(e, ast.BinOp) else type(e), "an expression of its own kind")
         refuse(e, what, statement)
 
+    # A default is one of a parameter's values, so it must be of the type its
+    # annotation names, which is the type the rule above reads the parameter
+    # as: limit: int = None would have a contract order None.
+    args = node.args
+    positional = args.posonlyargs + args.args
+    defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+    defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+    for a, d in defaults:
+        declared = kinds.env.get(a.arg)
+        try:
+            given = value_kind(ast.literal_eval(d))
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            given = kinds.constants.get(d.id) if isinstance(d, ast.Name) and d.id not in kinds.bound and d.id not in kinds.params else None
+        if declared in (None, "?", "optional") or given is None or given == declared or given == "bool" and declared == "int":
+            continue
+        shown = ast.unparse(d) if hasattr(ast, "unparse") else given
+        problem(d, "defaults %s to %s, which isn't the %s its annotation names, and the gate reads a parameter's type from its annotation" % (a.arg, shown, declared))
+
     block(node.body, params - deleted)
     return sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))
 
@@ -1204,18 +1222,12 @@ def writes(request):
                 if prefix in unread:
                     unread[prefix] = unread[prefix][:3] + (False,)
         loads[module_of(s[0])] = mods
-    # A compiled module where the module or a package on its way would be
-    # is what runs in its place.
-    for prefix in above | {target}:
-        if prefix in unread:
-            unread[prefix] = unread[prefix][:3] + (False,)
-    for path, line, why, tests in unread.values():
-        if not tests:
-            report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
 
     # What runs beside the module: it, the packages on its way, every
     # production source that loads one of those, directly or through others,
-    # and everything those load.
+    # what the gate's own processes load, through the selected tests,
+    # conformance and backing tests the request names and any source they
+    # load, and everything all those load.
     running = above | {target}
     changed = True
     while changed:
@@ -1224,6 +1236,19 @@ def writes(request):
             if module not in running and mods & running:
                 running.add(module)
                 changed = True
+    every = {}
+    for s in sources:
+        every[module_of(s[0])] = {".".join(l.split(".")[:i]) for l in s[4] + by_name(s) for i in range(1, len(l.split(".")) + 1)}
+    stack = [module_of(r) for r in request.get("roots", []) if module_of(r) in every]
+    seen = set(stack)
+    while stack:
+        for loaded in every.get(stack.pop(), ()):
+            if loaded in unread:
+                unread[loaded] = unread[loaded][:3] + (False,)
+            if loaded in every and loaded not in seen:
+                seen.add(loaded)
+                stack.append(loaded)
+                running.add(loaded)
     changed = True
     while changed:
         changed = False
@@ -1232,6 +1257,14 @@ def writes(request):
                 if loaded in loads and loaded not in running:
                     running.add(loaded)
                     changed = True
+    # A compiled module where the module or a package on its way would be
+    # is what runs in its place.
+    for prefix in above | {target}:
+        if prefix in unread:
+            unread[prefix] = unread[prefix][:3] + (False,)
+    for path, line, why, tests in unread.values():
+        if not tests:
+            report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
 
     # The module and the rest of what the scan protects, the packages on the
     # module's path, and every application module whose imports bind one of

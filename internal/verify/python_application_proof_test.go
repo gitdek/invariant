@@ -1061,6 +1061,38 @@ func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testin
 	}
 }
 
+// #359's fourth review: the type rule reads a parameter's type from its
+// annotation, so a default the annotation doesn't admit is refused, as
+// limit: int = None is, where the contract would order None.
+func TestPythonApplicationProofReadsDefaultsAgainstTheirAnnotations(t *testing.T) {
+	head := "from nagini_contracts.contracts import *\nfrom typing import Optional\n\nLIMIT = 3\n\n\ndef compute() -> int:\n    return 1\n\n\n"
+	for _, c := range []struct{ signature, want string }{
+		{"limit: int = None", "line 11 defaults limit to None, which isn't the int its annotation names"},
+		{"name: str = 0", "line 11 defaults name to 0, which isn't the str its annotation names"},
+		{"name: str = LIMIT", "line 11 defaults name to LIMIT, which isn't the str its annotation names"},
+		{"*, limit: int = None", "line 11 defaults limit to None, which isn't the int its annotation names"},
+		{"limit: Optional[int] = None", ""},
+		{"flag: int = True", ""},
+		{"n: int = LIMIT", ""},
+		{"n: int = -1", ""},
+		{"n: int = compute()", ""},
+	} {
+		t.Run(c.signature, func(t *testing.T) {
+			source := head + "def admit(count: int, " + c.signature + ") -> int:\n    Requires(count >= 0)\n    return count\n"
+			d, err := analyzePythonProof([]byte(source), "admit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := slices.ContainsFunc(d.Contracts, func(p pythonProofDynamic) bool {
+				return c.want != "" && strings.Contains(fmt.Sprintf("line %d %s", p.Line, p.What), c.want)
+			})
+			if c.want == "" && len(d.Contracts) != 0 || c.want != "" && !found {
+				t.Fatalf("got %+v, want %q", d.Contracts, c.want)
+			}
+		})
+	}
+}
+
 // What ordinary code does beside the module may pass the scan: a parameter
 // or a module's own function named like a builtin, a log string that names a
 // namespace, a plain object's attribute named like a function's part, and
