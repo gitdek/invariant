@@ -248,8 +248,11 @@ CONTRACT_STATEMENTS = frozenset(("Requires", "Ensures", "Exsures", "Decreases", 
 CONTRACT_BUILTINS = {"len": 1, "abs": 1, "isinstance": 2}
 
 # What a contract's argument may hold besides names, literals, tuples of
-# them, the stand-in's calls and those builtins' calls: nothing here can
-# raise on the types Nagini checks, Result()'s inert value included.
+# them, the stand-in's calls and those builtins' calls: Nagini reads none of
+# these lazily, and none raises on the types it checks, Result()'s inert
+# value included, but where its model of the builtins, assumed like the rest
+# of it, leaves an exception out, as float arithmetic does an int too large
+# for a float.
 CONTRACT_OPERATORS = (ast.Add, ast.Sub, ast.Mult)
 CONTRACT_FORMS = (ast.BoolOp, ast.UnaryOp, ast.Compare, ast.IfExp)
 
@@ -760,6 +763,11 @@ def writes(request):
     for path, tree, names, stars, _, _ in scanned:
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         held = {r for bs in names.values() for b in bs for r in reach & resolve(b)} | {r for s in stars for r in reach & resolve(s)}
+        # What the source binds at its top level other than by an import,
+        # which a bare name there reads instead of the builtin.
+        own = {s.name for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))} | {
+            n.id for s in tree.body if isinstance(s, (ast.Assign, ast.AnnAssign))
+            for t in (s.targets if isinstance(s, ast.Assign) else [s.target]) for n in ast.walk(t) if isinstance(n, ast.Name)}
 
         def candidates(expr, names=names, stars=stars):
             return candidates_of(names, stars, expr)
@@ -835,7 +843,7 @@ def writes(request):
             # Running code from a string or reaching modules through objects
             # is refused wherever the function is reached, not only called.
             if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and not (
-                    isinstance(parents.get(node), ast.Attribute) and parents[node].value is node):
+                    isinstance(parents.get(node), ast.Attribute) and parents[node].value is node) and getattr(node, "id", None) not in own:
                 reached = candidates(node)
                 if reached & FROM_STRING:
                     report(path, line, "runs or compiles code from a string, and the scan for writes can't follow it")

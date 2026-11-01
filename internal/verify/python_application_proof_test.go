@@ -893,6 +893,13 @@ func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
 	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
 		t.Fatal(err)
 	}
+	// So may a neighbor read the stand-in and the builtins, and call a
+	// function of its own that shares a builtin's name (#359).
+	pa310Write(t, root, "tasks/templates.py", "import builtins\nfrom nagini_contracts import contracts\nfrom nagini_contracts.contracts import Requires\n\n\n"+
+		"def compile(text):\n    return text.strip()\n\n\nPAGE = compile(' page ')\nSHOW = builtins.print, contracts.Ensures, Requires, contracts.__all__\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
+		t.Fatalf("a neighbor that only reads the stand-in and the builtins: %v", err)
+	}
 }
 
 // The proof covers the module as production code leaves it. Tests and the
