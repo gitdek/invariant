@@ -119,6 +119,18 @@ const (
 	// merge, or to mark ready for review when it was a draft (#145). The
 	// protocol counts it as one the factory can't merge.
 	FailMerge = "merge"
+	// FailUnready is a build that passed, but found a draft open from its
+	// branch that GitHub refused to mark ready for review. The protocol
+	// counts it as a build that left a draft, which a writer's retry
+	// watches again, as for a modeled project's failed draft, and never
+	// builds again (#369's review).
+	FailUnready = "unready"
+	// FailDraft is a pull request whose gate passed that is a draft no
+	// writer's retry watches, such as one a person made of the factory's
+	// pull request, which the factory won't mark ready until a retry asks it
+	// to. The protocol counts it as one the factory can't merge (#369's
+	// review).
+	FailDraft = "draft"
 )
 
 // maxStops is how many builds of an issue can stop before it makes a pull
