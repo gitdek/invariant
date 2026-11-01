@@ -47,6 +47,7 @@ type PythonApplicationInvocation struct {
 }
 
 type PythonApplicationProvenance struct {
+	FileSelection  string                        `json:"file_selection"`
 	Files          []project.ComponentFile       `json:"files"`
 	Dependencies   *toolchain.PythonDependencies `json:"dependencies,omitempty"`
 	RunnerSHA256   string                        `json:"runner_sha256"`
@@ -171,11 +172,14 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, fmt.Errorf("Python application project is required")
 	}
 	// Validate the caller's declarations as well as the reloaded staged ones.
-	inv, err := project.ResolveComponents(p)
+	app, err := project.ResolvePythonApplication(p)
 	if err != nil {
 		return nil, err
 	}
-	app, err := project.ResolvePythonApplication(p)
+	if err := pythonApplicationIgnored(p, app); err != nil {
+		return nil, err
+	}
+	inv, err := project.ResolveComponents(p)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +240,7 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, err
 	}
 	s.driver = path.Join(filepath.ToSlash(rel), w.Project.Manifest.Conformance)
-	s.provenance = PythonApplicationProvenance{Files: files, RunnerSHA256: pythonApplicationHash(pythonApplicationRunner), ObserverSHA256: pythonApplicationHash(pythonApplicationObserver)}
+	s.provenance = PythonApplicationProvenance{FileSelection: w.FileSelection, Files: files, RunnerSHA256: pythonApplicationHash(pythonApplicationRunner), ObserverSHA256: pythonApplicationHash(pythonApplicationObserver)}
 	selectImage := options.SelectImage
 	if selectImage == nil {
 		selectImage = selectPythonApplicationImage
