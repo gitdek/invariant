@@ -372,21 +372,31 @@ func tlapsNames(toks []tlaToken) []string {
 // operator, which prefix the term it hashes to name a backend atom.
 var tlapsCryptKinds = []string{"CONSTANT", "STATE", "ACTION", "TEMPORAL"}
 
+// tlapsAtom is the name the pinned tlapm gives the atom for definition name,
+// primed, at level kind: "h" + the first five hex digits of the MD5 of its
+// print, "<kind>_<name>_'", whatever the definition's arity. MD5 is used only
+// because tlapm names its atoms that way; it is no security use of MD5.
+func tlapsAtom(kind, name string) string {
+	sum := md5.Sum([]byte(kind + "_" + name + "_'"))
+	return "h" + hex.EncodeToString(sum[:])[:5]
+}
+
 // tlapsColliding finds two distinct names whose primed abstractions tlapm
-// would name alike. tlapm names the atom it hands a backend "h" + the first
-// five hex digits of the MD5 of the term's print, and never checks that two
-// terms of one obligation got distinct names (tlaplus/tlapm#310). A hidden
-// definition D primed prints as "<kind>_D_'", so two names that collide there
-// are one symbol to SMT, Zenon or Isabelle, which proves a false theorem with
-// no temporal operator in sight. The gate refuses the pair. The check is over
-// the MD5 only because the pinned tlapm names its atoms that way; it is no
-// security use of MD5.
+// could name alike. tlapm never checks that two terms of one obligation got
+// distinct atoms (tlaplus/tlapm#310), and a hidden definition primed is such
+// a term, so two names that share an atom are one symbol to SMT, Zenon or
+// Isabelle, which proves a false theorem with no temporal operator in sight.
+// The gate doesn't know which level tlapm gives each definition, so it
+// compares every name's atom at every level against every other name's, in
+// one map: a collision across levels is refused too, though only STATE yields
+// a primed atom the pinned tlapm hashes, so a later pin can't make one live.
+// A false alarm only refuses a proof, and the message names both definitions,
+// so renaming one clears it.
 func tlapsColliding(names []string) (string, string, bool) {
+	seen := map[string]string{}
 	for _, kind := range tlapsCryptKinds {
-		seen := map[string]string{}
 		for _, n := range names {
-			sum := md5.Sum([]byte(kind + "_" + n + "_'"))
-			atom := hex.EncodeToString(sum[:])[:5]
+			atom := tlapsAtom(kind, n)
 			if other, ok := seen[atom]; ok && other != n {
 				return other, n, true
 			}

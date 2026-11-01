@@ -182,8 +182,25 @@ func TestTLAPSCollisionCheckNamesTlapmsAtoms(t *testing.T) {
 	// proved P1320' => P1797' BY SMT for two false-related definitions whose
 	// prints share an atom. The check must catch that pair, and must pass the
 	// pool's own model and proof, whose names share none.
+	if got := tlapsAtom("STATE", "A"); got != "h5914f" {
+		t.Errorf("tlapsAtom(STATE, A) = %s, but the pinned tlapm named that atom h5914f", got)
+	}
 	if a, b, bad := tlapsColliding([]string{"P1320", "P1797"}); !bad || a != "P1320" || b != "P1797" {
 		t.Errorf("tlapsColliding missed the pair the pinned tlapm proves false theorems about: %q %q %v", a, b, bad)
+	}
+	// A collision across levels counts too, since the gate can't know which
+	// level tlapm gives a definition: STATE_P874_' and CONSTANT_P3903_'
+	// share an atom, and no same-level pair of the two does.
+	if tlapsAtom("STATE", "P874") != "hef0d5" || tlapsAtom("CONSTANT", "P3903") != "hef0d5" {
+		t.Fatalf("the cross-level pair no longer shares an atom: %s, %s", tlapsAtom("STATE", "P874"), tlapsAtom("CONSTANT", "P3903"))
+	}
+	for _, kind := range tlapsCryptKinds {
+		if tlapsAtom(kind, "P874") == tlapsAtom(kind, "P3903") {
+			t.Fatalf("P874 and P3903 share an atom at %s, so they don't test a collision across levels", kind)
+		}
+	}
+	if a, b, bad := tlapsColliding([]string{"P874", "P3903"}); !bad || !(a == "P874" && b == "P3903" || a == "P3903" && b == "P874") {
+		t.Errorf("tlapsColliding missed a collision across levels: %q %q %v", a, b, bad)
 	}
 	model, err := lexTLA(tlapsPool)
 	if err != nil {
