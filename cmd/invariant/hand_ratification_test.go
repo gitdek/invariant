@@ -398,3 +398,47 @@ func TestPinSaysWhatAHandLockNeeds(t *testing.T) {
 		})
 	}
 }
+
+// pinPrints runs invariant pin with args, and returns its exit code and
+// everything it printed.
+func pinPrints(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	printed := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		printed <- string(b)
+	}()
+	stdout, stderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	code := func() int {
+		defer func() { os.Stdout, os.Stderr = stdout, stderr }()
+		return pinCmd(args)
+	}()
+	w.Close()
+	return code, <-printed
+}
+
+// pin names the command that records the decision a ratification ratifies,
+// `invariant decisions decide`, and never sends a person to edit
+// decisions/log.md, whose table the journal writes (#373). Its lock names a
+// decision waiting for its ratification, so the hint after it names only
+// `invariant decisions ratify`.
+func TestPinNamesTheCommandThatRecordsADecision(t *testing.T) {
+	dir, repo, store := handProject(t, "D-0001")
+	decide(t, store, repo, "proposed", "agent")
+	code, out := pinPrints(t, dir)
+	var said string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Pinning records a ratification.") {
+			said = line
+		}
+	}
+	if code != 0 || !strings.Contains(out, "Pinned the current text of: Spec, Zero.") || !strings.Contains(said, "`invariant decisions decide`") ||
+		strings.Contains(out, "decisions/log.md") || strings.Contains(strings.Replace(out, said, "", 1), "invariant decisions decide") {
+		t.Fatalf("pin exited %d and printed:\n%s", code, out)
+	}
+}

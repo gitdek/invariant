@@ -1,6 +1,7 @@
 package verify_test
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -89,41 +90,52 @@ func TestComponentEvidenceRejectsInvalidRecordsAtomically(t *testing.T) {
 		ce274Unchanged(t, &r, func() error { return ce274Proofs(t, &r, f.Inv, []ce274Proof{first, second, first}) })
 	})
 
+	// A record naming its own target and a declared assumption whose contents
+	// changed is stale (D-0253); an unknown or duplicate one is only invalid.
 	assumptionCases := []struct {
-		name string
-		edit func(*ce274AssumptionRecord)
+		name  string
+		stale bool
+		edit  func(*ce274AssumptionRecord)
 	}{
-		{"unknown target", func(a *ce274AssumptionRecord) { a.Target = "missing" }},
-		{"bare target", func(a *ce274AssumptionRecord) { a.Target = "Assumed" }},
-		{"unconfigured production target", func(a *ce274AssumptionRecord) { a.Target = f.Same }},
-		{"unselected assumption target", func(a *ce274AssumptionRecord) { a.Target = f.Helper }},
-		{"selected test is not production target", func(a *ce274AssumptionRecord) { a.Target = ce274ExternalDeclaration(t, f.Inv).ID }},
-		{"unknown assumption", func(a *ce274AssumptionRecord) { a.Assumption.ID = "unknown" }},
-		{"empty assumption identity", func(a *ce274AssumptionRecord) { a.Assumption.ID = "" }},
-		{"same local ID belongs to different target", func(a *ce274AssumptionRecord) { a.Input = ce274Component(t, f.Inv, f.Target) }},
-		{"missing target snapshot", func(a *ce274AssumptionRecord) { a.Input = project.Component{} }},
-		{"wrong target snapshot identity", func(a *ce274AssumptionRecord) { a.Input.Symbol = "Other" }},
-		{"stale target source", func(a *ce274AssumptionRecord) { a.Input.SourceSHA256 = ce274ChangedHash() }},
-		{"stale target contract", func(a *ce274AssumptionRecord) { a.Input.ContractSHA256 = ce274ChangedHash() }},
-		{"changed assumption statement", func(a *ce274AssumptionRecord) { a.Assumption.Statement += " Changed." }},
-		{"changed assumption reason", func(a *ce274AssumptionRecord) { a.Assumption.Reason += " Changed." }},
-		{"different known assumption source", func(a *ce274AssumptionRecord) { a.Assumption.Source = ce274File(t, f.Inv, "policy.txt") }},
-		{"unknown assumption source", func(a *ce274AssumptionRecord) { a.Assumption.Source.Path = "missing.md" }},
-		{"stale assumption source", func(a *ce274AssumptionRecord) { a.Assumption.Source.SHA256 = ce274ChangedHash() }},
+		{"unknown target", false, func(a *ce274AssumptionRecord) { a.Target = "missing" }},
+		{"bare target", false, func(a *ce274AssumptionRecord) { a.Target = "Assumed" }},
+		{"unconfigured production target", false, func(a *ce274AssumptionRecord) { a.Target = f.Same }},
+		{"unselected assumption target", false, func(a *ce274AssumptionRecord) { a.Target = f.Helper }},
+		{"selected test is not production target", false, func(a *ce274AssumptionRecord) { a.Target = ce274ExternalDeclaration(t, f.Inv).ID }},
+		{"unknown assumption", false, func(a *ce274AssumptionRecord) { a.Assumption.ID = "unknown" }},
+		{"empty assumption identity", false, func(a *ce274AssumptionRecord) { a.Assumption.ID = "" }},
+		{"same local ID belongs to different target", false, func(a *ce274AssumptionRecord) { a.Input = ce274Component(t, f.Inv, f.Target) }},
+		{"missing target snapshot", false, func(a *ce274AssumptionRecord) { a.Input = project.Component{} }},
+		{"wrong target snapshot identity", true, func(a *ce274AssumptionRecord) { a.Input.Symbol = "Other" }},
+		{"stale target source", true, func(a *ce274AssumptionRecord) { a.Input.SourceSHA256 = ce274ChangedHash() }},
+		{"stale target contract", true, func(a *ce274AssumptionRecord) { a.Input.ContractSHA256 = ce274ChangedHash() }},
+		{"changed assumption statement", true, func(a *ce274AssumptionRecord) { a.Assumption.Statement += " Changed." }},
+		{"changed assumption reason", true, func(a *ce274AssumptionRecord) { a.Assumption.Reason += " Changed." }},
+		{"different known assumption source", true, func(a *ce274AssumptionRecord) { a.Assumption.Source = ce274File(t, f.Inv, "policy.txt") }},
+		{"unknown assumption source", true, func(a *ce274AssumptionRecord) { a.Assumption.Source.Path = "missing.md" }},
+		{"stale assumption source", true, func(a *ce274AssumptionRecord) { a.Assumption.Source.SHA256 = ce274ChangedHash() }},
 	}
 	for _, tc := range assumptionCases {
 		t.Run("assumption/"+tc.name, func(t *testing.T) {
 			r := cpClone(t, baseline)
 			records := ce274Records(t, f)
 			tc.edit(&records[1])
-			ce274Unchanged(t, &r, func() error { return ce274Assumptions(t, &r, f.Inv, records) })
+			var err error
+			ce274Unchanged(t, &r, func() error { err = ce274Assumptions(t, &r, f.Inv, records); return err })
+			if errors.Is(err, verify.ErrStaleComponentEvidence) != tc.stale {
+				t.Fatalf("stale = %t for %v, want %t", errors.Is(err, verify.ErrStaleComponentEvidence), err, tc.stale)
+			}
 		})
 	}
 	t.Run("assumption/late duplicate target and local ID", func(t *testing.T) {
 		r := cpClone(t, baseline)
 		records := ce274Records(t, f)
 		records = append(records, records[0])
-		ce274Unchanged(t, &r, func() error { return ce274Assumptions(t, &r, f.Inv, records) })
+		var err error
+		ce274Unchanged(t, &r, func() error { err = ce274Assumptions(t, &r, f.Inv, records); return err })
+		if errors.Is(err, verify.ErrStaleComponentEvidence) {
+			t.Fatalf("a duplicate record is invalid, not stale: %v", err)
+		}
 	})
 	for _, operation := range []string{"proof", "assumption"} {
 		for _, invalid := range []string{"nil inventory", "legacy inventory", "model-only report"} {
@@ -409,7 +421,13 @@ func TestComponentEvidenceRevalidatesRetainedKindsOnReplaceAndClear(t *testing.T
 				if err := ce274Proofs(t, &probe, inv, proofs); err != nil {
 					t.Fatalf("replacement inventory and incoming proofs must be independently valid: %v", err)
 				}
-				ce274Unchanged(t, &r, func() error { return ce274Proofs(t, &r, inv, proofs) })
+				// A retained record whose target or assumption changed or went
+				// away is stale (D-0253).
+				var err error
+				ce274Unchanged(t, &r, func() error { err = ce274Proofs(t, &r, inv, proofs); return err })
+				if !errors.Is(err, verify.ErrStaleComponentEvidence) {
+					t.Fatalf("a retained assumption whose anchors changed isn't stale evidence: %v", err)
+				}
 			})
 		}
 	}
@@ -464,6 +482,63 @@ func TestComponentEvidenceRevalidatesRetainedKindsOnReplaceAndClear(t *testing.T
 				t.Fatal("successful clears failed to finalize independent evidence")
 			}
 		})
+	}
+}
+
+// Every other kind's attribution replays the retained assumptions, and one
+// whose target or assumption changed is stale evidence whichever kind replays
+// it, with the record's message, leaving the report as it was (D-0253).
+func TestEveryKindReplaysAStaleAssumptionAsStaleEvidence(t *testing.T) {
+	f := ce274Fixture(t)
+	kinds := []struct {
+		name      string
+		attribute func(*verify.Report, *project.ComponentInventory) error
+	}{
+		{"proofs", func(r *verify.Report, inv *project.ComponentInventory) error {
+			return r.AttributeComponentProofs(inv, nil)
+		}},
+		{"conformance", func(r *verify.Report, inv *project.ComponentInventory) error {
+			return r.AttributeComponentConformance(inv, nil)
+		}},
+		{"runtime", func(r *verify.Report, inv *project.ComponentInventory) error {
+			return r.AttributeComponentRuntime(inv, nil)
+		}},
+		{"contract tests", func(r *verify.Report, inv *project.ComponentInventory) error {
+			return r.AttributeComponentContractTests(inv, nil)
+		}},
+	}
+	changes := []struct {
+		name string
+		edit func(*project.ComponentInventory)
+	}{
+		{"target source", func(i *project.ComponentInventory) { ce274ChangeFile(i, "core/core.go", ce274ChangedHash()) }},
+		{"assumption statement", func(i *project.ComponentInventory) {
+			ce274Check(t, i, f.Target).Assumptions[0].Statement += " Changed."
+		}},
+		{"assumption removed", func(i *project.ComponentInventory) {
+			c := ce274Check(t, i, f.Target)
+			c.Assumptions = slices.DeleteFunc(c.Assumptions, func(a project.ResolvedComponentAssumption) bool { return a.ID == "clock" })
+		}},
+	}
+	for _, kind := range kinds {
+		for _, change := range changes {
+			t.Run(kind.name+"/"+change.name, func(t *testing.T) {
+				r := ce274Seed()
+				if err := ce274Assumptions(t, &r, f.Inv, ce274Records(t, f)); err != nil {
+					t.Fatal(err)
+				}
+				if same := cpClone(t, r); kind.attribute(&same, f.Inv) != nil {
+					t.Fatal("the same clear fails against the unchanged inventory")
+				}
+				inv := cpClone(t, f.Inv)
+				change.edit(inv)
+				var err error
+				ce274Unchanged(t, &r, func() error { err = kind.attribute(&r, inv); return err })
+				if !errors.Is(err, verify.ErrStaleComponentEvidence) || !strings.Contains(err.Error(), "component assumptions: invalid, stale or duplicate record") {
+					t.Fatalf("replaying a stale assumption: %v", err)
+				}
+			})
+		}
 	}
 }
 
