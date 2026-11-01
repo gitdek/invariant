@@ -19,28 +19,29 @@ package merges
 // @ ensures ok == (len(main) <= len(branch) && forall k int :: { &main[k] } 0 <= k && k < len(main) ==> main[k] == branch[k])
 // @ decreases
 func StartsWith(main, branch []Line) (ok bool) {
-	return startsWith(main, len(main), branch, len(branch))
+	return startsWith(main, len(main), branch, len(branch) /*@, 1/4 @*/)
 }
 
 // startsWith says whether the first mlen lines of m are the start of the
-// first blen lines of b.
-// @ requires 0 <= mlen && mlen <= len(m) && len(m) <= MaxSize && 0 <= blen && blen <= len(b) && len(b) <= MaxSize
-// @ requires forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], 1/4)
-// @ requires forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
-// @ ensures forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], 1/4)
-// @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
+// first blen lines of b. It reads both with the share q of permission it's
+// given.
+// @ requires q > 0 && 0 <= mlen && mlen <= len(m) && len(m) <= MaxSize && 0 <= blen && blen <= len(b) && len(b) <= MaxSize
+// @ requires forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], q)
+// @ requires forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], q)
+// @ ensures forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], q)
+// @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], q)
 // @ ensures forall k int :: { &m[k] } 0 <= k && k < len(m) ==> m[k] == old(m[k])
 // @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> b[k] == old(b[k])
 // @ ensures ok == (mlen <= blen && forall k int :: { &m[k] } 0 <= k && k < mlen ==> m[k] == b[k])
 // @ decreases
-func startsWith(m []Line, mlen int, b []Line, blen int) (ok bool) {
+func startsWith(m []Line, mlen int, b []Line, blen int /*@, ghost q perm @*/) (ok bool) {
 	if mlen > blen {
 		return false
 	}
 	i := 0
 	// @ invariant 0 <= i && i <= mlen
-	// @ invariant forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], 1/4)
-	// @ invariant forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], 1/4)
+	// @ invariant forall k int :: { &m[k] } 0 <= k && k < len(m) ==> acc(&m[k], q)
+	// @ invariant forall k int :: { &b[k] } 0 <= k && k < len(b) ==> acc(&b[k], q)
 	// @ invariant forall k int :: { &m[k] } 0 <= k && k < len(m) ==> m[k] == old(m[k])
 	// @ invariant forall k int :: { &b[k] } 0 <= k && k < len(b) ==> b[k] == old(b[k])
 	// @ invariant forall k int :: { &m[k] } 0 <= k && k < i ==> m[k] == b[k]
