@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -560,7 +561,7 @@ func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
 	// image, which the attempt records beside them.
 	tag := "invariant-nagini:" + strings.TrimPrefix(toolchain.NaginiRecipe(), "sha256:")[:12]
 	if r.Tool == nil || r.Tool.Name != "Nagini" || r.Tool.Version != NaginiVersion || r.Tool.Pins["recipe"] != toolchain.NaginiRecipe() ||
-		r.Tool.Pins["platform"] != "linux/amd64" || r.Tool.Pins["input"] != proof.Input.Fingerprint || len(r.Tool.Pins) != 3 ||
+		r.Tool.Pins["platform"] != "linux/amd64" || r.Tool.Pins[InPlaceInputPin] != proof.Input.Fingerprint || len(r.Tool.Pins) != 3 ||
 		proof.Image != tag || proof.Recipe != toolchain.NaginiRecipe() {
 		t.Fatalf("the tool's identity: %+v, image %q", r.Tool, proof.Image)
 	}
@@ -589,12 +590,12 @@ func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
 	if proof.Result.Passed || len(proof.Result.Verified) != 0 || !reflect.DeepEqual(proof.Result.Errors, []string{want}) {
 		t.Fatalf("errors: %q", proof.Result.Errors)
 	}
-	// Assume is an assumption nothing accounts for: Nagini runs, and the
-	// attempt covers nothing.
+	// Assume has Nagini take a fact nothing proves, so a selection that
+	// reads it is refused before Nagini runs (#359).
 	_, p = ppFixture(t, strings.Replace(ppModule, "    return admitted\n\n", "    Assume(admitted < 2)\n    return admitted\n\n", 1))
 	n = &ppNagini{output: ppVerified}
 	proof, err = ppSession(t, p, n).Prove(context.Background(), ppAdmitID())
-	if err != nil || n.calls != 1 || len(proof.Result.Unaccounted) != 1 || proof.Result.Unaccounted[0].Kind != UnaccountedAssumption {
+	if err == nil || proof != nil || n.calls != 0 || !strings.Contains(err.Error(), "calls Assume") {
 		t.Fatalf("Assume: %v %+v", err, proof)
 	}
 }
@@ -630,10 +631,13 @@ func TestPythonApplicationProofAttributesWithItsBackingTests(t *testing.T) {
 	}
 }
 
-func TestPythonApplicationProofTheGateStillRefuses(t *testing.T) {
+func TestPythonApplicationProofTheGateNeedsConformanceOnTheFunction(t *testing.T) {
+	// ppFixture's proof check selects no conformance, and the gate qualifies
+	// an in-place proof only beside conformance on the same function (#359):
+	// every route refuses it before any tool runs.
 	_, p := ppFixture(t, ppModule)
 	assertNoTools := pa315TrapTools(t)
-	if err := Check(p.Dir); err == nil || !strings.Contains(err.Error(), "doesn't prove Python in place yet") {
+	if err := Check(p.Dir); err == nil || !strings.Contains(err.Error(), "selects a proof and no conformance") {
 		t.Fatalf("Check: %v", err)
 	}
 	if r, err := Run(context.Background(), p.Dir, "", toolchain.Toolchain{}); err == nil || r != nil {
@@ -780,10 +784,10 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 		{name: "importlib with its name in production", module: same,
 			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks.admission').LIMIT = 1\n"}, want: "tasks/config.py:3 imports tasks.admission by name"},
 		{name: "runpy.run_path in production", module: same,
-			other: map[string]string{"tests/test_helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/config.py": "import runpy\n\nrunpy.run_path('tests/test_helpers.py')\n"},
+			other: map[string]string{"tests/test_helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/__init__.py": "from . import config\n", "tasks/config.py": "import runpy\n\nrunpy.run_path('tests/test_helpers.py')\n"},
 			want:  "tasks/config.py:3 runs code from a path or a code object"},
 		{name: "runpy.run_code in production", module: same,
-			other: map[string]string{"tasks/config.py": "from runpy import run_code\n\nrun_code(compile('x = 1', 'x', 'exec'))\n"}, want: "tasks/config.py:3 runs code from a path or a code object"},
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "from runpy import run_code\n\nrun_code(compile('x = 1', 'x', 'exec'))\n"}, want: "tasks/config.py:3 runs code from a path or a code object"},
 		// The helper reaches the module by name, so importing it by name
 		// reaches nothing the scan refuses in production code itself.
 		{name: "a test module production code imports by name", module: same,
@@ -796,6 +800,71 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__globals__['LIMIT'] = 100\n"}, want: "reads __globals__"},
 		{name: "rebinding the module in its package", module: same,
 			other: map[string]string{"tasks/config.py": "import tasks\n\ntasks.admission = None\n"}, want: "rebinds tasks's attribute admission"},
+		// What the proof takes as it ships besides the module (#359): the
+		// stand-in for nagini_contracts and the builtins, and the ways to
+		// reach any of them a parse can't follow.
+		{name: "writing the stand-in", module: same,
+			other: map[string]string{"tasks/config.py": "from nagini_contracts import contracts\n\ncontracts.Requires = print\n"},
+			want:  "tasks/config.py:3 writes nagini_contracts.contracts.Requires, which changes Invariant's runtime stand-in for nagini_contracts"},
+		{name: "the stand-in in sys.modules", module: same,
+			other: map[string]string{"tasks/config.py": "import sys\n\nsys.modules['nagini_contracts.contracts'] = sys\n"}, want: "tasks/config.py:3 looks nagini_contracts.contracts up in sys.modules"},
+		{name: "patching the stand-in by name in production", module: same,
+			other: map[string]string{"tasks/config.py": "from unittest import mock\n\nmock.patch('nagini_contracts.contracts.Result', list).start()\n"},
+			want:  "tasks/config.py:3 patches nagini_contracts.contracts.Result by name"},
+		{name: "rebinding a builtin", module: same,
+			other: map[string]string{"tasks/config.py": "import builtins\n\nbuiltins.len = abs\n"}, want: "tasks/config.py:3 writes builtins.len, which changes what every module's builtins bind"},
+		{name: "__builtins__", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "__builtins__['len'] = abs\n"}, want: "tasks/config.py:1 reads __builtins__, which holds a module's names"},
+		{name: "a namespace named in a string", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\ngetattr(admit, '__globals__')['LIMIT'] = 100\n"},
+			want:  "tasks/config.py:3 takes __globals__ by name"},
+		{name: "a function's code", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__code__ = (lambda text, admitted: 0).__code__\n"},
+			want:  "tasks/config.py:3 writes __code__, which changes what a function runs"},
+		{name: "exec in production", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "exec('import tasks.admission as a; a.LIMIT = 100')\n"}, want: "tasks/config.py:1 runs or compiles code from a string"},
+		{name: "exec by another name", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "run = exec\nrun('x = 1')\n"}, want: "tasks/config.py:1 runs or compiles code from a string"},
+		{name: "a module through an object", module: same,
+			other: map[string]string{"tasks/config.py": "import inspect\nfrom tasks.admission import admit\n\ninspect.getmodule(admit).LIMIT = 100\n"},
+			want:  "tasks/config.py:4 reaches modules through objects"},
+		// #359's third review: a builtin function's __self__ is the builtins
+		// module, the import hooks can load another module in place of one
+		// the proof takes as it ships, and a compiled module can't be read.
+		{name: "a builtin's __self__", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "m = len.__self__\nm.len = abs\n"},
+			want:  "tasks/config.py:1 reads __self__, which holds a module's names"},
+		{name: "a builtin's __self__ by name", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "m = getattr(len, '__self__')\n"},
+			want:  "tasks/config.py:1 takes __self__ by name"},
+		{name: "sys.meta_path in production", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "import sys\n\nsys.meta_path.insert(0, object())\n"},
+			want:  "tasks/config.py:3 uses sys.meta_path, which can load another module in place of one the proof takes as it ships"},
+		{name: "sys.path_hooks in production", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import config\n", "tasks/config.py": "from sys import path_hooks\n\npath_hooks.append(len)\n"},
+			want:  "tasks/config.py:3 uses sys.path_hooks"},
+		{name: "a compiled module production code loads", module: same,
+			other: map[string]string{"tasks/__init__.py": "from . import fast\n", "tasks/fast.pyc": "not a source\n"},
+			want:  "tasks/fast.pyc can't be read by the host's Python (it's compiled)"},
+		{name: "an extension where the module would be", module: same,
+			other: map[string]string{"tasks/admission.cpython-312-x86_64-linux-gnu.so": "not a source\n"},
+			want:  "tasks/admission.cpython-312-x86_64-linux-gnu.so can't be read by the host's Python (it's compiled)"},
+		// Arithmetic the pinned Nagini models apart from Python (#359).
+		{name: "a floor division by a constant", module: replace("        return admitted + 1\n", "        return admitted + 1 // LIMIT\n"),
+			want: "line 16 holds a floor division by other than a positive integer literal, which the pinned Nagini divides as Viper does"},
+		{name: "a float in the function", module: replace("        return admitted + 1\n", "        return admitted + int(0.5)\n"),
+			want: "line 16 deals in floats"},
+		{name: "an abstraction that divides by a name", module: same, contract: func(t *testing.T, root string, _ *project.Project) {
+			b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
+			pa310Write(t, root, ptcContracts, strings.Replace(string(b), ppAbstraction,
+				strings.Replace(ppAbstraction, "    Requires(len(text) > 0)\n", "    Requires(len(text) > 0)\n    Ensures(Result() == len(text) // len(text))\n", 1), 1))
+		}, want: "trusted contract tinyver.parse's abstraction on line"},
+		// Contracts Python runs eagerly where the module runs (#359).
+		{name: "a contract that divides", module: replace("    Ensures(Result() >= admitted)\n",
+			"    Ensures(Result() >= admitted)\n    Ensures(Implies(len(text) > 0, Result() - admitted <= len(text) // len(text)))\n"),
+			want: "line 13 Ensures holds a floor division by other than a positive integer literal, which Python evaluates when the statement runs"},
+		{name: "Implies as a value", module: replace("    if len(text) > 0:\n", "    if Implies(admitted > 1, False) and len(text) > 0:\n"),
+			want: "line 14 reads Nagini's Implies outside a contract statement"},
 		{name: "a source the host's Python can't read", module: same,
 			other: map[string]string{"tools/broken.py": "def (:\n"}, want: "tools/broken.py:1 can't be read by the host's Python"},
 		// What the module itself binds, and how the function reads builtins.
@@ -855,6 +924,194 @@ func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
 	pa310Write(t, root, "tasks/api.py", strings.Replace(string(b), ", getattr(a, '__doc__')", ", getattr(sys, 'path')", 1))
 	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
 		t.Fatal(err)
+	}
+	// So may a neighbor read the stand-in and the builtins, and call a
+	// function of its own that shares a builtin's name (#359).
+	pa310Write(t, root, "tasks/templates.py", "import builtins\nfrom nagini_contracts import contracts\nfrom nagini_contracts.contracts import Requires\n\n\n"+
+		"def compile(text):\n    return text.strip()\n\n\nPAGE = compile(' page ')\nSHOW = builtins.print, contracts.Ensures, Requires, contracts.__all__\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
+		t.Fatalf("a neighbor that only reads the stand-in and the builtins: %v", err)
+	}
+}
+
+// A selected function's contract runs where the application runs, with the
+// stand-in, and Python evaluates every argument when the statement runs
+// (#359). The analyzer takes what can't fail so, and says where the rest is.
+func TestPythonApplicationProofReadsContractsAsPythonRunsThem(t *testing.T) {
+	head := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\ndef admit(name: str, count: int) -> int:\n    Requires(count >= 0)\n"
+	for _, c := range []struct{ name, body, want string }{
+		{"every form a contract may hold", "    Requires(isinstance(name, str) and abs(-count) == count and len(name) < LIMIT * 2)\n" +
+			"    Ensures(Result() in (count, count + 1) and Result() not in (-1,))\n    Ensures(Result() >= Old(count) if len(name) > 0 else not Result() < count)\n" +
+			"    Ensures(Implies(Result() > count, Result() - count == 1))\n    Exsures(Exception, True)\n    Decreases(None)\n    Ensures(Acc(list_pred(name), 1))\n" +
+			"    Requires(count % 2 == 0 or count // 10 >= 0 or LIMIT % 2 == 1)\n" +
+			"    Ensures(Result() % 2 >= 0 and (Result() - count) // 2 <= 1 and len(name) % 3 >= 0 and Old(count) % 2 >= 0 and abs(count) % 2 >= 0)\n" +
+			"    total = count\n    i = 0\n    while i < 2:\n        Invariant(0 <= i and i <= 2 and total >= count and i % 2 >= 0 and (total + i) % 2 >= 0)\n        i += 1\n" +
+			"    for j in range(2):\n        Invariant(j >= 0 and Implies(i > 0, total >= 0) and j % 2 >= 0)\n    Assert(total == count)\n    return count\n", ""},
+		// // and % take only a positive integer literal, written as a plain
+		// int constant: Python's floor division by a negative one isn't what
+		// the pinned Nagini reads, and % formats a string.
+		{"a zero divisor", "    Requires(count % 0 == 0)\n    return count\n", "line 8 Requires holds a modulo by other than a positive integer literal"},
+		{"a bool divisor", "    Ensures(Result() // True >= 0)\n    return count\n", "line 8 Ensures holds a floor division by other than a positive integer literal"},
+		{"a divisor a name holds", "    Ensures(Result() % LIMIT == 0)\n    return count\n", "line 8 Ensures holds a modulo by other than a positive integer literal"},
+		{"a negative divisor", "    Ensures(Result() // -2 <= 0)\n    return count\n", "line 8 Ensures holds a floor division by other than a positive integer literal"},
+		{"a true division", "    Ensures(Result() / 2 >= 0)\n    return count\n", "line 8 Ensures holds a division, which Python evaluates when the statement runs"},
+		{"a modulo of a string", "    Ensures(Implies(len(name) > 0, name % 2 != name))\n    return count\n", "line 8 Ensures holds a modulo of what the gate can't tell is an int, and % formats a string"},
+		{"a modulo of a local a string binds", "    seen = name\n    Assert(seen % 2 == seen)\n    return count\n", "line 9 Assert holds a modulo of what the gate can't tell is an int, and % formats a string"},
+		{"a contract call the stand-in can't take", "    Ensures(Implies(count > 0))\n    return count\n", "line 8 Ensures calls Implies with arguments Invariant's runtime stand-in doesn't take"},
+		{"a builtin a contract may not call", "    Ensures(Result() <= max(count, 1))\n    return count\n", "line 8 Ensures calls max, and a contract may call only"},
+		{"a builtin called as it can't be", "    Ensures(len(name, count) > 0)\n    return count\n", "line 8 Ensures calls len with other than its 1 argument"},
+		{"isinstance with a computed type", "    Ensures(isinstance(Result(), (int, str)))\n    return count\n", "line 8 Ensures's isinstance tests other than int, bool, str, bytes, list, tuple, dict, set or object"},
+		{"a builtin the module rebinds", "    Ensures(len(name) >= 0)\n    return count\n\n\ndef len(x: str) -> int:\n    return 0\n", "line 8 Ensures calls len, and a contract may call only"},
+		{"an attribute read", "    Ensures(Result() == name.count('a'))\n    return count\n", "line 8 Ensures holds a method call, which Python evaluates when the statement runs"},
+		{"a list", "    Ensures(Result() in [count])\n    return count\n", "line 8 Ensures tests Result() for membership in something other than a tuple it lists"},
+		{"a local bound later", "    Ensures(Result() == total)\n    total = count\n    return total\n", "line 8 Ensures reads total, which the function may not have bound"},
+		{"a loop variable after its loop", "    for j in range(2):\n        pass\n    Assert(Implies(count > 0, j >= 0))\n    return count\n", "line 10 Assert reads j, which the function may not have bound"},
+		{"Result() as a value", "    seen = Result()\n    return count\n", "line 8 reads Nagini's Result outside a contract statement"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := analyzePythonProof([]byte(head+c.body), "admit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := slices.ContainsFunc(d.Contracts, func(p pythonProofDynamic) bool {
+				return strings.Contains(fmt.Sprintf("line %d %s", p.Line, p.What), c.want)
+			})
+			switch {
+			case c.want == "" && len(d.Contracts) != 0:
+				t.Fatalf("refused a contract Python runs as Nagini reads it: %+v", d.Contracts)
+			case c.want != "" && !found:
+				t.Fatalf("got %+v, want %q", d.Contracts, c.want)
+			}
+		})
+	}
+}
+
+// #359's third review: a contract may order, do arithmetic on, and take the
+// len or abs of only what the gate can tell has one builtin type, and read
+// an Optional or a Union only in is, is not and isinstance tests, since
+// Python evaluates the contract eagerly. The body and contract alike may hold
+// only the arithmetic the pinned Nagini models as Python does.
+func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testing.T) {
+	head := "from nagini_contracts.contracts import *\nfrom typing import List, Optional, Union\n\nLIMIT = 3\nDIV = -2\nRATE = 1.5\n\n\n" +
+		"def admit(name: str, count: int, limit: Optional[int], mixed: Union[int, str], xs: List[int]) -> int:\n    Requires(count >= 0)\n"
+	for _, c := range []struct{ name, body, contracts, arithmetic string }{
+		{"what the gate can tell the types of", "    Requires(limit is None or isinstance(limit, int))\n    Requires(isinstance(mixed, str) or mixed is not None)\n" +
+			"    Requires(len(xs) >= 0 and count + len(xs) >= 0 and name + name != name and -count <= 0 and abs(count) == count)\n" +
+			"    Requires(count in xs and name in name and count in (1, 2) and xs + xs == xs)\n" +
+			"    total = count\n    i = 0\n    while i < 2:\n        Invariant(i <= 2 and total >= count and total % 2 >= 0)\n        total = total + i\n        i += 1\n" +
+			"    for x in xs:\n        Invariant(x >= 0 or x < 0)\n    return count\n", "", ""},
+		// The review's repro, then its // and + variants: Nagini proves each,
+		// and Python raises TypeError for limit=None on entry.
+		{"an Optional ordered under an Implies", "    Requires(Implies(limit is not None, limit >= 0))\n    return count\n",
+			"line 11 Requires reads limit, an Optional or a Union, other than in an is, is not or isinstance test", ""},
+		{"an Optional divided under an Implies", "    Requires(Implies(limit is not None, limit // 2 >= 0))\n    return count\n",
+			"line 11 Requires reads limit, an Optional or a Union", ""},
+		{"an Optional added to under an Implies", "    Requires(Implies(limit is not None, limit + 1 > 0))\n    return count\n",
+			"line 11 Requires reads limit, an Optional or a Union", ""},
+		{"a Union under an isinstance guard", "    Requires(Implies(isinstance(mixed, int), mixed >= 0))\n    return count\n",
+			"line 11 Requires reads mixed, an Optional or a Union", ""},
+		{"an Optional compared for equality", "    Requires(limit == 5)\n    return count\n", "line 11 Requires reads limit, an Optional or a Union", ""},
+		{"lists ordered", "    Requires(xs < xs)\n    return count\n", "line 11 Requires orders what the gate can't tell are both ints, both strings or both sets", ""},
+		{"a str added to an int", "    Requires(name + count != name)\n    return count\n", "line 11 Requires holds an addition of what the gate can't tell are builtin values", ""},
+		{"membership in what may not hold it", "    Requires(count in name)\n    return count\n", "line 11 Requires tests membership in what the gate can't tell is a builtin container", ""},
+		{"isinstance of a typing name", "    Requires(isinstance(count, Optional))\n    return count\n", "line 11 Requires's isinstance tests other than int", ""},
+		{"a sequence repeated in a contract", "    Requires(len(xs * count) >= 0)\n    return count\n", "line 11 Requires repeats a sequence by other than an int literal",
+			"line 11 multiplies what the gate can't tell are both ints by other than an int literal"},
+		// The review's body repro: Nagini divides by DIV as Viper does, so
+		// admit('counter', 500) would return 499 where it proves >= count.
+		{"a body floor division by a negative constant", "    Ensures(Result() >= count)\n    if count > 100:\n        return count + 1 // DIV\n    return count\n",
+			"", "line 13 holds a floor division by other than a positive integer literal, which the pinned Nagini divides as Viper does"},
+		{"a body modulo by a name", "    r = count % DIV\n    return count\n", "", "line 11 holds a modulo by other than a positive integer literal"},
+		{"a body floor division by a negative literal", "    r = count // -2\n    return count\n", "", "line 11 holds a floor division by other than a positive integer literal"},
+		{"/", "    r = count / 2\n    return count\n", "", "line 11 divides with /, which makes a float"},
+		{"&", "    r = count & 3\n    return count\n", "", "line 11 holds a bitwise operator, which the pinned Nagini models apart from Python on negative ints"},
+		{"|", "    r = count | 1\n    return count\n", "", "line 11 holds a bitwise operator"},
+		{"^", "    r = count ^ 1\n    return count\n", "", "line 11 holds a bitwise operator"},
+		{"~", "    r = ~count\n    return count\n", "", "line 11 holds a bitwise operator"},
+		{"an augmented floor division and or", "    r = count\n    r //= DIV\n    r |= 1\n    return count\n", "", "line 12 holds a floor division by other than a positive integer literal"},
+		{"a float literal", "    r = count + 0.5\n    return count\n", "", "line 11 deals in floats"},
+		{"float() of a name", "    r = float(count)\n    return count\n", "", "line 11 deals in floats"},
+		{"a float constant", "    r = RATE\n    return count\n", "", "line 11 deals in floats"},
+		{"a float annotation", "    r: float = 1\n    return count\n", "", "line 11 deals in floats"},
+		{"a sequence repeated by a parameter", "    r = [0] * count\n    return count\n", "", "line 11 multiplies what the gate can't tell are both ints by other than an int literal"},
+		{"arithmetic Nagini models as Python does", "    r = [0] * 3\n    s = name * 2\n    q = count * count + len(xs) * count\n    for x in xs:\n        q = q + x * count\n" +
+			"    m = count % 2 + count // 10 + 7 // 2 + (count << 2) + count ** 2\n    return count\n", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := analyzePythonProof([]byte(head+c.body), "admit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, check := range []struct {
+				kind     string
+				want     string
+				problems []pythonProofDynamic
+			}{{"contract", c.contracts, d.Contracts}, {"arithmetic", c.arithmetic, d.Arithmetic}} {
+				found := slices.ContainsFunc(check.problems, func(p pythonProofDynamic) bool {
+					return strings.Contains(fmt.Sprintf("line %d %s", p.Line, p.What), check.want)
+				})
+				switch {
+				case check.want == "" && len(check.problems) != 0:
+					t.Errorf("refused for its %s: %+v", check.kind, check.problems)
+				case check.want != "" && !found:
+					t.Errorf("%s problems %+v, want %q", check.kind, check.problems, check.want)
+				}
+			}
+		})
+	}
+}
+
+// #359's fourth review: the type rule reads a parameter's type from its
+// annotation, so a default the annotation doesn't admit is refused, as
+// limit: int = None is, where the contract would order None.
+func TestPythonApplicationProofReadsDefaultsAgainstTheirAnnotations(t *testing.T) {
+	head := "from nagini_contracts.contracts import *\nfrom typing import Optional\n\nLIMIT = 3\n\n\ndef compute() -> int:\n    return 1\n\n\n"
+	for _, c := range []struct{ signature, want string }{
+		{"limit: int = None", "line 11 defaults limit to None, which isn't the int its annotation names"},
+		{"name: str = 0", "line 11 defaults name to 0, which isn't the str its annotation names"},
+		{"name: str = LIMIT", "line 11 defaults name to LIMIT, which isn't the str its annotation names"},
+		{"*, limit: int = None", "line 11 defaults limit to None, which isn't the int its annotation names"},
+		{"limit: Optional[int] = None", ""},
+		{"flag: int = True", ""},
+		{"n: int = LIMIT", ""},
+		{"n: int = -1", ""},
+		{"n: int = compute()", ""},
+	} {
+		t.Run(c.signature, func(t *testing.T) {
+			source := head + "def admit(count: int, " + c.signature + ") -> int:\n    Requires(count >= 0)\n    return count\n"
+			d, err := analyzePythonProof([]byte(source), "admit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := slices.ContainsFunc(d.Contracts, func(p pythonProofDynamic) bool {
+				return c.want != "" && strings.Contains(fmt.Sprintf("line %d %s", p.Line, p.What), c.want)
+			})
+			if c.want == "" && len(d.Contracts) != 0 || c.want != "" && !found {
+				t.Fatalf("got %+v, want %q", d.Contracts, c.want)
+			}
+		})
+	}
+}
+
+// What ordinary code does beside the module may pass the scan: a parameter
+// or a module's own function named like a builtin, a log string that names a
+// namespace, a plain object's attribute named like a function's part, and
+// exec, eval or sys.meta_path in sources production code never loads beside
+// the module, as setup.py, docs/conf.py and a standalone tool are, with a
+// compiled module nothing loads.
+func TestPythonApplicationProofPassesOrdinaryCode(t *testing.T) {
+	root, p := ppFixture(t, ppModule)
+	pa310Write(t, root, "tasks/__init__.py", "from . import names\n")
+	pa310Write(t, root, "tasks/names.py", "import logging\n\n\ndef build(compile):\n    return compile('x')\n\n\n"+
+		"class Query:\n    def run(self, eval):\n        return eval(1)\n\n\ndef exec(text):\n    return text\n\n\nexec('page')\n"+
+		"logging.getLogger('names').info('__globals__')\nNAME = '__self__'\n\n\nclass Item:\n    pass\n\n\n"+
+		"item = Item()\nitem.__code__ = 'A1'\nsetattr(item, '__code__', 'B2')\n")
+	pa310Write(t, root, "setup.py", "exec(open('tasks/_version.py').read())\n")
+	pa310Write(t, root, "docs/conf.py", "import sys\n\nexec('x = 1')\nsys.meta_path\n")
+	pa310Write(t, root, "tools/report.py", "print(eval('1 + 1'))\n")
+	pa310Write(t, root, "tools/fast.pyc", "not a source\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
+		t.Fatalf("ordinary code beside the module: %v", err)
 	}
 }
 

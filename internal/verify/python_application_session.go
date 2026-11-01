@@ -304,8 +304,9 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 			}
 		}
 		// A session admits a proof selection in the form in-place proof
-		// supports, for PythonApplicationSession.Prove; the gate itself
-		// refuses it until #294's step 6 connects proof (#353).
+		// supports, which PythonApplicationSession.Prove runs (#353), and
+		// the gate qualifies it beside conformance on the same function
+		// (#359).
 		if check.Proof != nil {
 			if err := pythonApplicationProofCheck(check, target); err != nil {
 				return nil, err

@@ -271,7 +271,7 @@ func componentKnownOutcome(outcome string) string {
 // componentProofQualification qualifies a decoded proof row's own result on a
 // detached report, so an edited status can't claim a proof.
 func componentProofQualification(r *verify.Report, row verify.ComponentProof) string {
-	if row.Result == nil || row.Result.Target != row.Target {
+	if row.Result == nil || row.Result.Target != row.Target || !componentInPlaceRecorded(r, row.Result) {
 		return "unchecked"
 	}
 	qualified := verify.Report{Bounds: r.Bounds, Toolchain: r.Toolchain}

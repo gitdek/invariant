@@ -20,6 +20,11 @@ type PythonApplicationReport struct {
 	// Larger is each explored invocation run again one size past the
 	// ratified bounds, apart from the ordinary results (#342).
 	Larger []PythonApplicationLarger `json:"larger,omitempty"`
+	// Proofs is each selected function's in-place proof attempt: the
+	// verifier input built from its original bytes, the pinned recipe it ran
+	// in and what Nagini said (#359). Component proof evidence attributes
+	// their results.
+	Proofs []PythonApplicationProof `json:"proofs,omitempty"`
 }
 
 type PythonApplicationConformance struct {
@@ -105,6 +110,13 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 			x.Actual.Image = ""
 			x.Fingerprint, x.Provenance.Fingerprint = "", ""
 		}
+	}
+	// A proof's local image and the command naming it differ by machine, and
+	// Nagini's output carries its timing: the recipe, the input and the
+	// result are what the attempt certifies.
+	for i := range out.Proofs {
+		p := &out.Proofs[i]
+		p.Image, p.Command, p.Output = "", nil, ""
 	}
 	return &out
 }

@@ -35,7 +35,7 @@ import (
 // from and checked against them before Nagini runs, so a rewritten or
 // detached implementation can't stand for the application's. The pinned
 // Nagini runs in its own image, where no application requirement is
-// installed. The gate doesn't use this yet (#294's step 6 connects it).
+// installed. The gate runs it on every selected function (#359).
 
 //go:embed python_application_proof.py
 var pythonApplicationProofAnalyzer string
@@ -102,6 +102,12 @@ const NaginiVersion = "1.3.1"
 // PythonApplicationProofMain is the verifier input's own module, which holds
 // the selected function.
 const PythonApplicationProofMain = "invariant_target.py"
+
+// InPlaceInputPin is the tool pin that marks an in-place proof's result,
+// holding its verifier input's fingerprint. Receipts count the result only
+// beside the attempt that input records, and a supplied result's own pins
+// don't name it unless it claims to be one (#359).
+const InPlaceInputPin = "in_place_input"
 
 // PythonApplicationProofFile is one file of a verifier input, by its name in
 // Nagini's working directory, with its exact contents.
@@ -342,7 +348,14 @@ type pythonProofDeclaration struct {
 	Globals      []string                        `json:"globals"`
 	Future       []pythonProofBinding            `json:"future"`
 	Dynamic      []pythonProofDynamic            `json:"dynamic"`
-	source       []byte
+	// Contracts are where the function's contract couldn't run as Nagini
+	// reads it: one of Nagini's names outside a contract statement, or a
+	// contract argument Python could fail evaluating eagerly (#359).
+	Contracts []pythonProofDynamic `json:"contracts"`
+	// Arithmetic is where the function, its signature, body and contract
+	// alike, holds arithmetic the pinned Nagini models apart from Python.
+	Arithmetic []pythonProofDynamic `json:"arithmetic"`
+	source     []byte
 }
 
 func runPythonProofAnalyzer(request any, out any) error {
@@ -370,7 +383,9 @@ func runPythonProofAnalyzer(request any, out any) error {
 // isolated mode, which parses the source and never imports or runs it.
 func analyzePythonProof(source []byte, symbol string) (*pythonProofDeclaration, error) {
 	var d pythonProofDeclaration
-	if err := runPythonProofAnalyzer(map[string]string{"source": base64.StdEncoding.EncodeToString(source), "symbol": symbol}, &d); err != nil {
+	request := map[string]string{"source": base64.StdEncoding.EncodeToString(source), "symbol": symbol,
+		"standin": base64.StdEncoding.EncodeToString(naginiStandInSource)}
+	if err := runPythonProofAnalyzer(request, &d); err != nil {
 		return nil, err
 	}
 	inside := func(start, end int) bool { return 0 <= start && start <= end && end <= len(source) }
@@ -453,7 +468,7 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	result := ComponentProofResult{Target: target, Verifier: "Nagini", Contracts: slices.Clone(check.Proof.Contracts),
 		Inputs: s.proofInputs(in, check), FileInputs: slices.Clone(in.Sources), Assumed: copyComponentContractUses(in.Assumed),
 		Unaccounted: copyComponentUnaccounted(in.Unaccounted),
-		Tool:        &ComponentProofTool{Name: "Nagini", Version: NaginiVersion, Pins: map[string]string{"recipe": proof.Recipe, "platform": "linux/amd64", "input": in.Fingerprint}}}
+		Tool:        &ComponentProofTool{Name: "Nagini", Version: NaginiVersion, Pins: map[string]string{"recipe": proof.Recipe, "platform": "linux/amd64", InPlaceInputPin: in.Fingerprint}}}
 	// An input that binds nothing to a name the function reaches is
 	// incomplete, so Nagini doesn't run on it.
 	var incomplete []string
@@ -522,7 +537,7 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	if result.Passed {
 		result.Verified = []string{target}
 	} else {
-		result.Errors = mapNaginiErrors(in, naginiErrors(in.Main, output))
+		result.Errors = withoutNaginiTiming(mapNaginiErrors(in, naginiErrors(in.Main, output)))
 	}
 	proof.Result = result
 	return proof, nil
@@ -641,12 +656,15 @@ func (s *PythonApplicationSession) moduleDistributions(ctx context.Context) (map
 }
 
 // moduleWrites finds every place a staged source writes one of module's
-// attributes, which no binding in the module itself shows.
+// attributes, which no binding in the module itself shows. Compiled modules
+// go to the scan by their paths, which it refuses where production code
+// loads one, since it can't read them (#359).
 func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWrite, error) {
 	type file struct {
-		Path   string `json:"path"`
-		Source string `json:"source"`
-		Tests  bool   `json:"tests,omitempty"`
+		Path     string `json:"path"`
+		Source   string `json:"source"`
+		Tests    bool   `json:"tests,omitempty"`
+		Compiled bool   `json:"compiled,omitempty"`
 	}
 	verification, err := filepath.Rel(s.root, s.project.Dir)
 	if err != nil {
@@ -655,25 +673,59 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 	var files []file
 	names := make([]string, 0, len(s.snapshot))
 	for name := range s.snapshot {
-		if strings.HasSuffix(name, ".py") {
+		if strings.HasSuffix(name, ".py") || pythonCompiled(name) {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		tests := !s.production(name, filepath.ToSlash(verification))
+		if pythonCompiled(name) {
+			files = append(files, file{Path: name, Tests: tests, Compiled: true})
+			continue
+		}
 		b, err := s.stagedSource(name, "", name)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: !s.production(name, filepath.ToSlash(verification))})
+		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: tests})
+	}
+	// What the gate's own processes run beside the module: the selected
+	// tests and conformance, and the trusted contracts' backing tests, whose
+	// loads the scan follows to the production modules they reach (#359).
+	var roots []string
+	if s.inventory != nil {
+		seen := map[string]bool{}
+		add := func(ids []string) {
+			for _, id := range ids {
+				if _, source, ok := strings.Cut(id, "@"); ok && !seen[source] {
+					seen[source] = true
+					roots = append(roots, source)
+				}
+			}
+		}
+		for _, c := range s.inventory.Checks {
+			add(c.Tests)
+			add(c.Conformance)
+		}
+		for _, c := range s.inventory.TrustedContracts {
+			add(c.Tests)
+		}
+		sort.Strings(roots)
 	}
 	var reply struct {
 		Writes []pythonProofWrite `json:"writes"`
 	}
-	if err := runPythonProofAnalyzer(map[string]any{"writes": true, "module": module, "files": files}, &reply); err != nil {
+	if err := runPythonProofAnalyzer(map[string]any{"writes": true, "module": module, "files": files, "roots": roots}, &reply); err != nil {
 		return nil, err
 	}
 	return reply.Writes, nil
+}
+
+// pythonCompiled says whether a staged file is a module Python can import
+// without its source: sourceless bytecode or an extension.
+func pythonCompiled(name string) bool {
+	return strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".so") || strings.HasSuffix(name, ".pyd")
 }
 
 // production says whether a staged source is the application's production
@@ -810,6 +862,9 @@ func (b *pythonProofBuilder) build() error {
 		}
 		operations = append(operations, ops...)
 	}
+	if err := pythonProofContracts(d, b.target.Symbol); err != nil {
+		return err
+	}
 	if err := b.boundaries(operations); err != nil {
 		return err
 	}
@@ -840,6 +895,26 @@ func (b *pythonProofBuilder) submodules(module string) error {
 		child := strings.TrimSuffix(strings.SplitN(rest, "/", 2)[0], ".py")
 		if _, read := b.d.Free[child]; read || child == b.target.Symbol {
 			return b.unsupported("%s is in a submodule of %s, and importing it rebinds %s.%s", name, module, module, child)
+		}
+	}
+	return nil
+}
+
+// pythonProofContracts refuses a selected function whose contract couldn't
+// run where the application runs as Nagini reads it, or that holds
+// arithmetic the pinned Nagini models apart from Python. The module runs
+// with Invariant's runtime stand-in, so Python calls each contract statement
+// where it stands and evaluates its arguments then: a postcondition on
+// entry, which Nagini reads at exit, and an Implies' consequent whether or
+// not its antecedent holds. A contract may hold only what can't fail so,
+// and Nagini's names mean nothing outside one (#359).
+func pythonProofContracts(d *pythonProofDeclaration, symbol string) error {
+	if _, ok := d.Free["Assume"]; ok {
+		return fmt.Errorf("unsupported: %s calls Assume, which has Nagini take a fact nothing proves", symbol)
+	}
+	for _, problems := range [][]pythonProofDynamic{d.Contracts, d.Arithmetic} {
+		if len(problems) > 0 {
+			return fmt.Errorf("unsupported: line %d %s", problems[0].Line, problems[0].What)
 		}
 	}
 	return nil
@@ -992,6 +1067,18 @@ func (b *pythonProofBuilder) nagini(name string, row pythonProofBinding) error {
 	if name == "ContractOnly" {
 		return b.unsupported("%s is ContractOnly, which Nagini doesn't verify", b.target.Symbol)
 	}
+	// Assume has Nagini take a fact nothing proves, so a proof that reads it
+	// proves nothing (#359).
+	if name == "Assume" {
+		return b.unsupported("%s calls Assume, which has Nagini take a fact nothing proves", b.target.Symbol)
+	}
+	// The module runs with the application's nagini_contracts, which the
+	// gate requires to be Invariant's runtime stand-in, byte for byte: a
+	// name the stand-in doesn't define wouldn't be bound where the
+	// application runs, whatever Nagini reads it as (#359).
+	if !slices.Contains(naginiStandIn, name) {
+		return b.unsupported("%s reads Nagini's %s, which Invariant's runtime stand-in for nagini_contracts doesn't provide, so the module couldn't run where the application runs", b.target.Symbol, name)
+	}
 	if row.Kind == "star" {
 		for _, s := range b.d.Star {
 			if s.Module == "nagini_contracts.contracts" && s.Level == 0 {
@@ -1003,9 +1090,6 @@ func (b *pythonProofBuilder) nagini(name string, row pythonProofBinding) error {
 		return err
 	}
 	b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "nagini"})
-	if name == "Assume" {
-		b.unaccounted(ComponentUnaccounted{Kind: UnaccountedAssumption, Detail: "the function calls Assume, so Nagini takes a fact that nothing proves"})
-	}
 	return nil
 }
 
@@ -1300,6 +1384,13 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 	}
 	if contracts == 0 {
 		return nil, nil, fail("holds no contract")
+	}
+	// Nagini assumes the contract as its own model reads it, so arithmetic
+	// it models apart from Python would have it assume what the operation
+	// doesn't do, and a float in its signature would reach the function's
+	// arithmetic (#359).
+	if len(d.Arithmetic) > 0 {
+		return nil, nil, fail("on line %d %s", d.Arithmetic[0].Line, d.Arithmetic[0].What)
 	}
 	// What the operation raises is what the inventory read from the
 	// contract's own Exsures (D-0221), the bytes its stub copies to Nagini,
@@ -1668,6 +1759,23 @@ var naginiLocation = regexp.MustCompile(`^([\w./-]+\.py):(\d+):(\d+): (.*)$`)
 
 // mapNaginiErrors names each error's place in the original source where the
 // input copies it, keeping the verifier input's place beside it.
+// withoutNaginiTiming drops the lines Nagini prints about how long it took,
+// which an error copies from its output when Nagini lists no errors, so a
+// result, which the fingerprint binds, holds no timing (#359).
+func withoutNaginiTiming(errs []string) []string {
+	out := make([]string, len(errs))
+	for i, e := range errs {
+		var keep []string
+		for _, line := range strings.Split(e, "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "Verification took") {
+				keep = append(keep, line)
+			}
+		}
+		out[i] = strings.Join(keep, "\n")
+	}
+	return out
+}
+
 func mapNaginiErrors(in *PythonApplicationProofInput, errs []string) []string {
 	out := make([]string, 0, len(errs))
 	for _, e := range errs {

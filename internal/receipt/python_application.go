@@ -55,6 +55,7 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		raw, _ := json.MarshalIndent(larger, "", "  ")
 		fmt.Fprintf(b, "\nOne size larger, overall: %s\n", componentLiteral(string(raw)))
 	}
+	pythonApplicationProofs(b, a)
 }
 
 // pythonApplicationFailures names an explored check's failed claims, which

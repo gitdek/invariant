@@ -445,6 +445,7 @@ func (index *componentIndex) assumptions(records []ComponentAssumptionRecord, re
 // requalification must preserve their existing claims before a commit is allowed.
 func (index *componentIndex) retainedProofs(inv project.ComponentInventory, old *ComponentEvidence) ([]ComponentProof, error) {
 	var results []ComponentProofResult
+	unqualified := map[string]bool{}
 	if old != nil {
 		prior := copyComponentEvidence(*old)
 		for _, row := range prior.Proofs {
@@ -457,10 +458,21 @@ func (index *componentIndex) retainedProofs(inv project.ComponentInventory, old 
 			if err := index.retainProof(prior.Inventory, row); err != nil {
 				return nil, err
 			}
+			unqualified[row.Target] = row.Status == Unqualified
 			results = append(results, *row.Result)
 		}
 	}
-	return index.proofs(inv, results)
+	rows, err := index.proofs(inv, results)
+	if err != nil {
+		return nil, err
+	}
+	// The gate's mark on a proof it didn't qualify stays with the proof.
+	for i, row := range rows {
+		if unqualified[row.Target] && row.Status == "proved" {
+			rows[i].Status = Unqualified
+		}
+	}
+	return rows, nil
 }
 
 func (index *componentIndex) retainedAssumptions(old *ComponentEvidence) ([]ComponentAssumptionEvidence, error) {
@@ -534,7 +546,10 @@ func (index *componentIndex) retainProof(old project.ComponentInventory, row Com
 	if row.Result.covers(check.Proof.Contracts) {
 		status = "proved"
 	}
-	if row.Status != status {
+	// An in-place proof the gate didn't qualify keeps its mark: its result
+	// still covers the contracts, and why it falls short is the gate's to say
+	// (#359).
+	if row.Status != status && (status != "proved" || row.Status != Unqualified) {
 		return fmt.Errorf("component proofs: retained coverage changed for %q", row.Target)
 	}
 	return nil
