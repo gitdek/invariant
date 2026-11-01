@@ -82,11 +82,14 @@ func hasLine(src, want string) bool {
 // contracts without proving their bodies, so the gate refuses, the same way,
 // a marked file that imports a module of its package other than another
 // marked file proved in the same run, and one whose proof would rest on a
-// marked file the gate refuses (#383). Each file then runs in a directory of
-// its own, holding only that file and the marked files it imports, so
-// Nagini can read no other module of the project, and the gate says so of a
-// proof that rests on a file Nagini didn't prove. The image is acquired only
-// once a file needs Nagini.
+// marked file the gate refuses (#383). It refuses a marked file, and so
+// every core that imports it, where Python may load something else in its
+// place: a compiled module of its name, its cached bytecode or a package,
+// as D-0260 refuses a compiled module in place. Each file then runs in a
+// directory of its own, holding only that file and the marked files it
+// imports, so Nagini can read no other module of the project, and the gate
+// says so of a proof that rests on a file Nagini didn't prove. The image is
+// acquired only once a file needs Nagini.
 func runNagini(ctx context.Context, acquire func(context.Context) (string, error), pkg string, proved, plain []string) (*Code, error) {
 	stage, err := os.MkdirTemp("", "invariant-nagini-")
 	if err != nil {
@@ -113,6 +116,9 @@ func runNagini(ctx context.Context, acquire func(context.Context) (string, error
 		}
 		m := &naginiFile{src: src, refused: refused}
 		m.fns, m.contracts = pythonFunctions(string(src))
+		if what := held.shadowed(strings.TrimSuffix(f, ".py")); what != "" {
+			m.refused = append(m.refused, fmt.Sprintf("%s: refused before Nagini runs: Python may load the package's %s, in place of %s, so what runs needn't be what Nagini proves", f, what, f))
+		}
 		for _, imp := range imports {
 			switch file, why := held.resolve(imp); {
 			case why != "":
@@ -269,10 +275,16 @@ type naginiImport struct {
 // which looks for a module in Nagini's working directory before it looks in
 // the standard library or the image's own packages: for a directory name/,
 // a package or a namespace, a stub package name-stubs/, a stub name.pyi,
-// and a module name.py.
+// and a module name.py. Python, where the code runs, looks for a package
+// name/, then an extension, then name.py, and runs the bytecode
+// __pycache__ caches for name.py when it validates, or always, when it's
+// unchecked.
 type naginiPackage struct {
+	dir     string
 	name    string
+	names   []string        // what the directory holds, in order
 	entries map[string]bool // whether each name the directory holds is a directory
+	cached  []string        // what its __pycache__ holds
 	proved  map[string]bool
 }
 
@@ -285,14 +297,65 @@ func naginiHolds(pkg string, proved []string) (naginiPackage, error) {
 	if err != nil {
 		return naginiPackage{}, err
 	}
-	p := naginiPackage{name: filepath.Base(abs), entries: map[string]bool{}, proved: map[string]bool{}}
+	p := naginiPackage{dir: pkg, name: filepath.Base(abs), entries: map[string]bool{}, proved: map[string]bool{}}
 	for _, e := range entries {
+		p.names = append(p.names, e.Name())
 		p.entries[e.Name()] = e.IsDir()
+	}
+	if p.entries["__pycache__"] {
+		cached, err := os.ReadDir(filepath.Join(pkg, "__pycache__"))
+		if err != nil {
+			return naginiPackage{}, err
+		}
+		for _, e := range cached {
+			p.cached = append(p.cached, e.Name())
+		}
 	}
 	for _, f := range proved {
 		p.proved[f] = true
 	}
 	return p, nil
+}
+
+// compiled is a compiled module the package holds by a module's name, an
+// extension or sourceless bytecode, by the rule D-0260's scan reads one by:
+// a compiled module's name runs to its first dot, so core.abi3.so and
+// core.cpython-313-x86_64-linux-gnu.so are both core.
+func (p naginiPackage) compiled(module string) string {
+	for _, n := range p.names {
+		if first, _, _ := strings.Cut(n, "."); first == module && !p.entries[n] && pythonCompiled(n) {
+			return n
+		}
+	}
+	return ""
+}
+
+// shadowed says what Python may load in place of the package's module.py,
+// which the gate can't read or never proves: a compiled module of that
+// name, the bytecode __pycache__ holds for it, or a package of that name,
+// a directory holding an __init__ module. A namespace directory doesn't
+// shadow the file, so it's left alone. The gate refuses each, as D-0260
+// refuses a compiled module where an in-place proof's module would be.
+func (p naginiPackage) shadowed(module string) string {
+	if n := p.compiled(module); n != "" {
+		return n + ", a compiled module the gate can't read"
+	}
+	for _, n := range p.cached {
+		if first, _, _ := strings.Cut(n, "."); first == module && strings.HasSuffix(n, ".pyc") {
+			return "__pycache__/" + n + ", bytecode the gate can't read"
+		}
+	}
+	if p.entries[module] {
+		inside, err := os.ReadDir(filepath.Join(p.dir, module))
+		// A directory the gate can't list may be a package.
+		if err != nil || slices.ContainsFunc(inside, func(e fs.DirEntry) bool {
+			first, _, _ := strings.Cut(e.Name(), ".")
+			return first == "__init__" && !e.IsDir() && (strings.HasSuffix(e.Name(), ".py") || pythonCompiled(e.Name()))
+		}) {
+			return "directory " + module + ", a package the gate never proves"
+		}
+	}
+	return ""
 }
 
 // naginiOwn is why the gate refuses a relative import and an import of the
@@ -314,6 +377,9 @@ func (p naginiPackage) resolve(imp naginiImport) (file, why string) {
 	top, _, _ := strings.Cut(imp.Module, ".")
 	if top == "nagini_contracts" || slices.Contains(strings.Fields(pythonStdlibModules), top) {
 		return "", ""
+	}
+	if n := p.compiled(top); n != "" {
+		return "", fmt.Sprintf("imports %s, which Python may load from the package's %s, a compiled module the gate can't read", imp.Module, n)
 	}
 	module := top + ".py"
 	dir, found := p.entries[module]

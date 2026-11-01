@@ -305,3 +305,92 @@ func TestNaginiRunsTodaysCoresAlone(t *testing.T) {
 		t.Fatalf("found %d marked cores in testdata, want both two-phase commits", marked)
 	}
 }
+
+// naginiAlone is a marked core that imports nothing of its package.
+const naginiAlone = "# +nagini\nfrom nagini_contracts.contracts import *\n\n\ndef two() -> int:\n    Ensures(Result() == 2)\n    return 2\n"
+
+// What Python may load in place of a marked file, and so run where the gate
+// claims the file is proved: an extension, which Python's finder takes
+// before the source, cached bytecode, which CPython 3.13 runs in place of
+// the source when it's unchecked, a package, which it takes before the
+// file, and, as D-0260 refuses where an in-place proof's module would be,
+// sourceless bytecode. The gate refuses each before Nagini runs, for a core
+// and for the marked file a core imports, so a core that imports one is
+// refused too. A namespace directory doesn't shadow the file, and another
+// module's compiled forms don't either.
+func TestNaginiRefusesWhatPythonMayLoadInAMarkedFilesPlace(t *testing.T) {
+	const elf = "\x7fELF\x02\x01\x01"
+	shadowed := func(file, what string) string {
+		return file + ": refused before Nagini runs: Python may load the package's " + what + ", in place of " + file +
+			", so what runs needn't be what Nagini proves"
+	}
+	for _, c := range []struct {
+		name         string
+		files        map[string]string
+		errors, runs []string
+	}{
+		{name: "an extension", files: map[string]string{"core.py": naginiAlone, "core.cpython-313-x86_64-linux-gnu.so": elf},
+			errors: []string{shadowed("core.py", "core.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read")}},
+		{name: "a stable ABI extension", files: map[string]string{"core.py": naginiAlone, "core.abi3.so": elf},
+			errors: []string{shadowed("core.py", "core.abi3.so, a compiled module the gate can't read")}},
+		{name: "a bare extension", files: map[string]string{"core.py": naginiAlone, "core.so": elf},
+			errors: []string{shadowed("core.py", "core.so, a compiled module the gate can't read")}},
+		{name: "a Windows extension", files: map[string]string{"core.py": naginiAlone, "core.cp313-win_amd64.pyd": "MZ"},
+			errors: []string{shadowed("core.py", "core.cp313-win_amd64.pyd, a compiled module the gate can't read")}},
+		{name: "a bare Windows extension", files: map[string]string{"core.py": naginiAlone, "core.pyd": "MZ"},
+			errors: []string{shadowed("core.py", "core.pyd, a compiled module the gate can't read")}},
+		{name: "sourceless bytecode", files: map[string]string{"core.py": naginiAlone, "core.pyc": "\xf3\r\r\n"},
+			errors: []string{shadowed("core.py", "core.pyc, a compiled module the gate can't read")}},
+		{name: "cached bytecode", files: map[string]string{"core.py": naginiAlone, "__pycache__/core.cpython-313.pyc": "\xf3\r\r\n\x01"},
+			errors: []string{shadowed("core.py", "__pycache__/core.cpython-313.pyc, bytecode the gate can't read")}},
+		{name: "cached bytecode for another Python", files: map[string]string{"core.py": naginiAlone, "__pycache__/core.cpython-312.opt-1.pyc": "\xcb\r\r\n"},
+			errors: []string{shadowed("core.py", "__pycache__/core.cpython-312.opt-1.pyc, bytecode the gate can't read")}},
+		{name: "a package", files: map[string]string{"core.py": naginiAlone, "core/__init__.py": "TWO = 2\n"},
+			errors: []string{shadowed("core.py", "directory core, a package the gate never proves")}},
+		{name: "a compiled package", files: map[string]string{"core.py": naginiAlone, "core/__init__.cpython-313-x86_64-linux-gnu.so": elf},
+			errors: []string{shadowed("core.py", "directory core, a package the gate never proves")}},
+		// The marked file a core imports is held to the same, so the core
+		// is refused with it.
+		{name: "an extension beside the marked file a core imports", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
+			"helper.cpython-313-x86_64-linux-gnu.so": elf},
+			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Python may load from the package's helper.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read",
+				shadowed("helper.py", "helper.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read")}},
+		{name: "cached bytecode for the marked file a core imports", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
+			"__pycache__/helper.cpython-313.pyc": "\xf3\r\r\n\x01"},
+			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, the package's helper.py, which the gate refuses, so the proof would rest on contracts nothing proves",
+				shadowed("helper.py", "__pycache__/helper.cpython-313.pyc, bytecode the gate can't read")}},
+		{name: "a package beside the marked file a core imports", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
+			"helper/__init__.py": "def inc(n):\n    return n\n"},
+			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Nagini would read from the package's directory helper",
+				shadowed("helper.py", "directory helper, a package the gate never proves")}},
+		{name: "a module the package holds only compiled", files: map[string]string{"core.py": naginiProbeBody, "helper.cpython-313-x86_64-linux-gnu.so": elf},
+			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Python may load from the package's helper.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read"}},
+		{name: "a module the package holds only as sourceless bytecode", files: map[string]string{"core.py": naginiProbeBody, "helper.pyc": "\xf3\r\r\n"},
+			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Python may load from the package's helper.pyc, a compiled module the gate can't read"}},
+		// What doesn't stand where a marked file loads from.
+		{name: "a namespace directory", files: map[string]string{"core.py": naginiAlone, "core/data.txt": "2\n"},
+			runs: []string{"core.py: core.py"}},
+		{name: "another module's compiled forms", files: map[string]string{"core.py": naginiAlone, "explore.py": "import json\n",
+			"explore.cpython-313-x86_64-linux-gnu.so": elf, "__pycache__/explore.cpython-313.pyc": "\xf3\r\r\n", "coreutils.so": elf, "core_test.pyc": "\xf3\r\r\n"},
+			runs: []string{"core.py: core.py"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			log := naginiFakeDocker(t)
+			code := naginiPackageOf(t, c.files, naginiFakeImage)
+			if len(code.Errors) != len(c.errors) {
+				t.Fatalf("errors %q, want %q", code.Errors, c.errors)
+			}
+			for i, want := range c.errors {
+				if !strings.HasPrefix(code.Errors[i], want) {
+					t.Fatalf("errors %q, want %q", code.Errors, c.errors)
+				}
+			}
+			if code.Passed != (len(c.errors) == 0) || (len(c.errors) > 0 && len(code.Functions) != 0) {
+				t.Fatalf("code = %+v", code)
+			}
+			if runs := naginiRuns(t, log); !reflect.DeepEqual(runs, c.runs) {
+				t.Fatalf("Nagini ran %q, want %q", runs, c.runs)
+			}
+		})
+	}
+}
