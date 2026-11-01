@@ -107,6 +107,11 @@ type PullRequest struct {
 	MergedAt       string `json:"merged_at,omitempty"`
 	MergedBy       *User  `json:"merged_by,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
+	// Mergeable says whether GitHub can merge it, as when it doesn't
+	// conflict with its base. It's nil until GitHub has worked that out,
+	// which it starts once asked for this one pull request, and it's always
+	// nil in a list of them.
+	Mergeable *bool `json:"mergeable"`
 }
 
 // NewPullRequest is a pull request to open.

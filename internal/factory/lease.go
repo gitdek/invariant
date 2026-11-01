@@ -257,17 +257,19 @@ func (f *Factory) mayAct(ctx context.Context) error {
 }
 
 // errResumed is an agent run that outlived its step's tenure: the watcher
-// recorded what the run left, its result on the run's own ref or why its
-// provider stopped it beside that, and its next step goes on from there.
+// recorded what the run left, its result on the run's own ref or, beside
+// that, why its provider stopped it or the error it ended with, and its
+// next step goes on from there.
 var errResumed = errors.New("this watcher took the lease back while the agent ran, so it recorded what the run left and leaves the rest to its next step")
 
 // resumed is ctx for recording what an agent run left once the run ends:
 // as it was, or, when this watcher took the lease back in a new tenure while
 // the run went, in that tenure, with resumed set. A run's ref only moves
-// from the commit the watcher recorded there, and the record of why its
-// provider stopped it beside that is the run's watcher's alone, so no
-// other watcher writes either, and they can be recorded in any tenure,
-// unlike any other effect of a step from an earlier one (D-0237, D-0245).
+// from the commit the watcher recorded there, and the records beside it, of
+// why its provider stopped it or the error it ended with, are the run's
+// watcher's alone, so no other watcher writes any of them, and they can be
+// recorded in any tenure, unlike any other effect of a step from an earlier
+// one (D-0237, D-0245).
 func (f *Factory) resumed(ctx context.Context) (context.Context, bool) {
 	if f.holdsFor(ctx) {
 		return ctx, false

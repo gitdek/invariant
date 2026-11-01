@@ -94,3 +94,18 @@ func TestTheRebuildCardChangesThePlanAsThePostSays(t *testing.T) {
 		t.Errorf("the card's way to change the plan isn't the post's: %q", w.Retry.Guidance)
 	}
 }
+
+// The card for a modeled core's failed draft, under factory/, which lies in
+// the trusted base, says a person merges it once a retry watches it again,
+// as the factory does, and an example's still says the factory merges it
+// (D-0109, #369's review).
+func TestACoresCardLeavesTheMergeToAPerson(t *testing.T) {
+	core := waitingFor(factory.Marker{Kind: factory.KindFailed, Failure: factory.FailGate, PR: 7, Project: "factory/protocol"}, time.Now())
+	if core == nil || core.Retry == nil || !strings.HasPrefix(core.Retry.Label, "Have a person merge #7") || !strings.Contains(core.Retry.Guidance, "won't mark it ready or merge it") {
+		t.Fatalf("a core's card must leave the merge to a person: %+v", core.Retry)
+	}
+	example := waitingFor(factory.Marker{Kind: factory.KindFailed, Failure: factory.FailGate, PR: 7, Project: "examples/02-twophase-commit"}, time.Now())
+	if example == nil || example.Retry == nil || !strings.HasPrefix(example.Retry.Label, "Merge #7") {
+		t.Fatalf("an example's card must have the factory merge it: %+v", example.Retry)
+	}
+}

@@ -478,9 +478,10 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 // proposal again (D-0064). With one, it watches that pull request again
 // (D-0047): once CI's gate passes on its current head, the factory marks it
 // ready and merges it, without another review (#145, D-0105), unless it
-// changes the trusted base, which only a person merges (D-0109). The failure
-// or the plan's trusted files show that it does. Neither can rule out what a
-// later push changes, so the factory's merge keeps that exception.
+// changes the trusted base, which only a person merges (D-0109). The
+// failure, the plan's trusted files or a project in the trusted base show
+// that it does. None can rule out what a later push changes, so the
+// factory's merge keeps that exception.
 func retryCopy(m factory.Marker) *RetryCopy {
 	pr := m.PR
 	if pr == 0 {
@@ -492,7 +493,7 @@ func retryCopy(m factory.Marker) *RetryCopy {
 		}
 	}
 	plan := m.Proposal != nil && m.Proposal.Plan != nil
-	trusted := m.Why() == factory.FailTrusted || (plan && len(m.Proposal.Plan.Trusted) > 0)
+	trusted := m.ChangesTrustedBase()
 	if m.Rebuilds() {
 		return rebuildCopy(pr, trusted)
 	}

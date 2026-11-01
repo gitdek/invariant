@@ -44,6 +44,13 @@ func (f *Factory) plansPlumbing() bool {
 // isPlan says whether a marker's project is a plumbing plan's record.
 func isPlan(project string) bool { return strings.HasPrefix(project, plumbing.LockDir+"/") }
 
+// trustedProject says a project's directory lies in the trusted base, so
+// everything its pull request changes does too, as with the factory's own
+// proved cores under factory/, and only a person merges it (D-0109).
+func trustedProject(dir string) bool {
+	return dir != "" && !isPlan(dir) && plumbing.Trusted(dir+"/")
+}
+
 // kindLine reads an issue's Kind: line, such as Kind: plumbing.
 func kindLine(body string) string {
 	fenced := false
@@ -252,6 +259,9 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	runErr = localError(runErr, f.Work)
 	if res == nil {
 		if resumed {
+			if err := f.recordWhy(ctx, n, stoppedStep(step), unavailable{Error: noResultError(runErr), Agent: agent}); err != nil {
+				return "", "", nil, nil, err
+			}
 			return "", "", nil, nil, errResumed
 		}
 		return "", agent, nil, runErr, nil
@@ -385,7 +395,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 			return err
 		}
 	} else if ok && pr.State == "open" {
-		if err := f.markReady(ctx, n, pr); err != nil {
+		if pr, err = f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
 	}
@@ -393,9 +403,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if still, err := f.stillBuilding(ctx, n, ratified); err != nil || !still {
 		return err
 	}
-	opened := building(RunDone, true, true)
-	opened.draft = pr.Draft
-	if err := f.recovers(ctx, n, "say how the build went", f.canPost(opened, recovery.Build)); err != nil {
+	if err := f.recovers(ctx, n, "say how the build went", f.canPost(openedAs(pr), recovery.Build)); err != nil {
 		return err
 	}
 	if !ok {
@@ -409,8 +417,9 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	return f.say(ctx, n, planPRComment(pr, res, sc.Trusted, next), LabelPR)
 }
 
-// waitForPerson says a plan's pull request passed everything, but changes
-// the trusted base, so a person merges it (D-0105).
+// waitForPerson says a pull request passed everything, but changes the
+// trusted base, so a person merges it, whether it builds a plan or a
+// project (D-0105, D-0109).
 func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, trusted []string, next Marker) error {
 	n := t.Issue.Number
 	from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
@@ -418,20 +427,17 @@ func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr gi
 	if err := f.allowed(ctx, n, fmt.Sprintf("say #%d waits for a person to merge it", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(pr, false, false), recovery.Merge)); err != nil {
+	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(t, pr, false, false), recovery.Merge)); err != nil {
 		return err
 	}
 	next.Failure = FailTrusted
 	return f.say(ctx, n, trustedComment(pr, trusted, next), LabelHumanReview)
 }
 
-// trustedAt is what a plan's pull request changes in the trusted base, as
-// the scope check the watcher runs before a merge reads its branch now. A
-// project's pull request isn't checked: only a plan's waits for a person.
+// trustedAt is what a pull request changes in the trusted base, as the
+// scope check the watcher runs before a merge reads its branch now, whether
+// it builds a plan or a project (D-0109).
 func (f *Factory) trustedAt(ctx context.Context, n int, m Marker) ([]string, error) {
-	if !isPlan(m.Project) {
-		return nil, nil
-	}
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return nil, err
 	}

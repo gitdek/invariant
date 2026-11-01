@@ -504,7 +504,43 @@ func TestARunWithNoResultThatOutlivesItsTenureEndsItsStep(t *testing.T) {
 	now, logs := leasedWatcher(t, r)
 	ratified := startHeldPlanBuild(t, r, held)
 	posts := outliveTheTenure(t, r, now, held.release)
-	endedCleanly(t, r, ratified, posts, logs, "stopped partway")
+	if what, err := r.f.Repo.Recorded(context.Background(), 1, stoppedStep(buildStepName(ratified))); err != nil || !strings.Contains(what, "without a build") {
+		t.Fatalf("the record of how the build stopped is %q, %v", what, err)
+	}
+	endedCleanly(t, r, ratified, posts, logs, "the agent ended its run without a build")
+}
+
+// noFinal is a modeled project's build whose agent run ends with what it
+// spent but no code.
+type noFinal struct{}
+
+func (noFinal) Build(context.Context, string, string, bool) (*synth.Result, error) {
+	return &synth.Result{Usage: synth.Usage{CostUSD: 0.42}}, errors.New("the agent ended its run without code")
+}
+
+// A modeled project's build whose run gave no result, with what it spent,
+// and outlived its tenure, ends its step posting nothing, and the next step
+// says it stopped with the run's own error and spend (#369's review).
+func TestAProjectRunWithNoResultThatOutlivesItsTenureKeepsItsCause(t *testing.T) {
+	r := newRig(t)
+	r.form.forks = nil
+	held := &heldModeled{inner: noFinal{}, started: make(chan struct{}), release: make(chan struct{})}
+	r.f.Builder = held
+	now, logs := leasedWatcher(t, r)
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
+	r.poll()
+	r.f.Wait()
+	proposal := r.expect(1, KindProposal, LabelProposal)
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(proposal.Marker.Proposal.Hash, "sha256:"))
+	held.block = true
+	r.poll()
+	<-held.started
+	ratified := r.gh.last(1)
+	posts := outliveTheTenure(t, r, now, held.release)
+	endedCleanly(t, r, ratified, posts, logs, "the agent ended its run without code")
+	if last := r.gh.last(1); last.Marker.Spend != 0.42 {
+		t.Errorf("the post must count what the run spent: %+v", last.Marker)
+	}
 }
 
 // As for a plan: a modeled project's build its provider stopped, in a run

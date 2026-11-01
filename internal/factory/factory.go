@@ -1432,6 +1432,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if said, err := f.sayUnavailable(ctx, n, step, next, failed); said || err != nil {
 			return err
 		}
+		if said, err := f.sayStopped(ctx, n, step, next, failed); said || err != nil {
+			return err
+		}
 		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the watcher running it stopped or lost the repository's lease"), withFailure(next, FailStopped)))
 	case RunNone:
 		// Each build costs an agent run, so after two stop, a writer decides
@@ -1500,7 +1503,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 // provider, or its review's, stayed unavailable through every retry (#261),
 // with what the build spent. The factory records it beside the run, which
 // stays recorded with no result, before it says so, so whichever watcher
-// says so, after a restart too, says why.
+// says so, after a restart too, says why. A run that gave no result after
+// its step's tenure ended leaves the same record of its own error, as
+// stoppedStep names it.
 type unavailable struct {
 	Error    string  `json:"error"`
 	Agent    string  `json:"agent,omitempty"`
@@ -1512,17 +1517,60 @@ type unavailable struct {
 // run's own.
 func unavailableStep(step string) string { return step + "-unavailable" }
 
+// stoppedStep names the record of what a build's run left when it gave no
+// result after its step's tenure ended: its error and what it spent. Only
+// the watcher back in the later tenure records it, so the next step's post
+// says why the run stopped, as the earlier step's would have (#369's
+// review).
+func stoppedStep(step string) string { return step + "-stopped" }
+
 // recordUnavailable records why a build's run stopped, unless it's already
 // recorded.
 func (f *Factory) recordUnavailable(ctx context.Context, n int, step string, u unavailable) error {
+	return f.recordWhy(ctx, n, unavailableStep(step), u)
+}
+
+// recordWhy records u beside a build's run, in the record named name,
+// unless it's already recorded.
+func (f *Factory) recordWhy(ctx context.Context, n int, name string, u unavailable) error {
 	b, err := json.Marshal(u)
 	if err != nil {
 		return err
 	}
-	if err := f.Repo.Record(ctx, n, unavailableStep(step), string(b)); err != nil && !errors.Is(err, ErrRecorded) {
+	if err := f.Repo.Record(ctx, n, name, string(b)); err != nil && !errors.Is(err, ErrRecorded) {
 		return err
 	}
 	return nil
+}
+
+// sayStopped says a build stopped partway with the error its run left, when
+// a watcher back in a later tenure recorded it, and says whether it did.
+func (f *Factory) sayStopped(ctx context.Context, n int, step string, next Marker, failed func(why, body string) error) (bool, error) {
+	what, err := f.Repo.Recorded(ctx, n, stoppedStep(step))
+	if err != nil || what == "" {
+		return false, err
+	}
+	var u unavailable
+	if err := json.Unmarshal([]byte(what), &u); err != nil {
+		return false, fmt.Errorf("the record of how #%d's build stopped can't be read: %w", n, err)
+	}
+	next.Spend, next.GateRuns = u.Spend, u.GateRuns
+	if u.Agent != "" {
+		next.Agent = u.Agent
+	}
+	runErr, next := errors.New(u.Error), withFailure(next, FailStopped)
+	if isPlan(next.Project) {
+		return true, failed(FailStopped, planFailedComment(nil, nil, runErr, next))
+	}
+	return true, failed(FailStopped, buildFailedComment(nil, nil, runErr, next))
+}
+
+// noResultError is what a run that gave no result left as its error.
+func noResultError(runErr error) string {
+	if runErr == nil {
+		return "the build's agent run gave no result"
+	}
+	return runErr.Error()
 }
 
 // sayUnavailable says a build stopped because its provider stayed
@@ -1632,6 +1680,13 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	}
 	if res == nil || res.Final == nil {
 		if resumed {
+			u := unavailable{Error: noResultError(runErr), Agent: agent}
+			if res != nil {
+				u.Spend, u.GateRuns = res.Spend(), len(res.GateRuns)
+			}
+			if err := f.recordWhy(ctx, n, stoppedStep(step), u); err != nil {
+				return "", "", nil, nil, err
+			}
 			return "", "", nil, nil, errResumed
 		}
 		return "", agent, res, runErr, nil
@@ -1836,12 +1891,12 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
 			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
-			Body: pullRequestBody(t, next, res, m.Proposal),
+			Body: pullRequestBody(t, next, res, m.Proposal, sc.Trusted),
 		}); err != nil {
 			return err
 		}
 	} else if res.Final.Passed && pr.State == "open" {
-		if err := f.markReady(ctx, n, pr); err != nil {
+		if pr, err = f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
 	}
@@ -1849,9 +1904,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
 		return err
 	}
-	opened := building(RunDone, true, true)
-	opened.draft = pr.Draft
-	if err := f.recovers(ctx, n, "say how the build went", f.canPost(opened, recovery.Build)); err != nil {
+	if err := f.recovers(ctx, n, "say how the build went", f.canPost(openedAs(pr), recovery.Build)); err != nil {
 		return err
 	}
 	if !res.Final.Passed {
@@ -1862,7 +1915,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
-	return f.say(ctx, n, prComment(pr, res, next), LabelPR)
+	return f.say(ctx, n, prComment(pr, res, sc.Trusted, next), LabelPR)
 }
 
 // removeOwned deletes the files in a project that the agent owns, before
@@ -2026,14 +2079,16 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
 			return err
 		}
-		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(mergingPR(pr, false, false), recovery.Merge)); err != nil {
+		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(mergingPR(t, pr, false, false), recovery.Merge)); err != nil {
 			return err
 		}
 		next.Failure = FailUnmergeable
 		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
 	}
-	// Only a person merges a change to the trusted base (D-0105).
-	if sc.Plumbing && len(sc.Trusted) > 0 {
+	// Only a person merges a change to the trusted base, a plan's or a
+	// project's, such as one of the factory's own proved cores (D-0105,
+	// D-0109).
+	if len(sc.Trusted) > 0 {
 		return f.waitForPerson(ctx, t, state, pr, at, sc.Trusted, next)
 	}
 	// The protocol has the last word on merging.
@@ -2041,10 +2096,19 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if err := f.allowed(ctx, n, fmt.Sprintf("merge #%d", pr.Number), from, to); err != nil {
 		return err
 	}
-	// A draft is a failed one a writer's retry watches again, which the
-	// factory marks ready before it merges it (#354).
+	// The factory marks ready only a failed draft a writer's retry watches
+	// again (#354), and only once GitHub says it can merge it: it waits for
+	// GitHub to work that out, and reports one it can't merge without
+	// marking it ready. The core refuses any other draft, such as one a
+	// person made of the factory's pull request to stop it, for a person.
 	if pr.Draft {
-		if err := f.recovers(ctx, n, fmt.Sprintf("mark #%d ready", pr.Number), f.canMarkReady(watchedMerging(true))); err != nil {
+		switch {
+		case pr.Mergeable == nil:
+			return nil
+		case !*pr.Mergeable:
+			return f.refusedMerge(ctx, t, state, pr, at, false, errCantMerge, next)
+		}
+		if err := f.recovers(ctx, n, fmt.Sprintf("mark #%d ready", pr.Number), f.canMarkReady(mergingPR(t, pr, true, false))); err != nil {
 			return err
 		}
 	}
@@ -2059,10 +2123,22 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	// GitHub won't merge a draft, such as a failed build's that a writer
 	// retried, so the factory marks it ready for review first, and merges it
-	// only if GitHub did (#145).
+	// only if GitHub did (#145). It reads the draft's head again just
+	// before, so a push since it checked can't have it mark ready a head
+	// whose gate hasn't passed, and reads the pull request again after.
 	if pr.Draft {
+		now, err := f.GitHub.PullRequest(ctx, pr.Number)
+		if err != nil {
+			return err
+		}
+		if now.State != "open" || now.Head.SHA != pr.Head.SHA {
+			return nil
+		}
 		if err := f.GitHub.MarkReady(ctx, pr.Number); err != nil {
 			return f.refusedMerge(ctx, t, state, pr, at, true, err, next)
+		}
+		if pr, err = f.GitHub.PullRequest(ctx, pr.Number); err != nil {
+			return err
 		}
 	}
 	sha, err := f.GitHub.Merge(ctx, pr.Number, pr.Head.SHA, "merge")
@@ -2108,12 +2184,16 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 	if err := f.allowed(ctx, n, fmt.Sprintf("say GitHub refused the merge of #%d", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.recovers(ctx, n, "say GitHub refused the merge", f.canPost(mergingPR(pr, false, false), recovery.Merge)); err != nil {
+	if err := f.recovers(ctx, n, "say GitHub refused the merge", f.canPost(mergingPR(t, pr, false, false), recovery.Merge)); err != nil {
 		return err
 	}
 	next.Kind, next.Failure = KindFailed, FailMerge
 	return f.say(ctx, n, mergeRefusedComment(pr, unready, answer, next), LabelHumanReview)
 }
+
+// errCantMerge is GitHub's answer for a draft it says it can't merge, which
+// the factory reports without marking it ready.
+var errCantMerge = errors.New("GitHub says it can't merge it as it is, as when it conflicts with its base branch, so I haven't marked it ready for review")
 
 // refused says whether err is GitHub's answer to a request, rather than this
 // watcher losing its lease, or its context ending, before GitHub answered.
@@ -2123,18 +2203,27 @@ func refused(ctx context.Context, err error) bool {
 
 // markReady marks a draft ready for review when a build that passed finds it
 // open from its branch, opened without the build's result, before the build
-// says the pull request is open (#145). A refusal is logged, and the build
-// goes on, since the merge marks it ready again.
-func (f *Factory) markReady(ctx context.Context, n int, pr github.PullRequest) error {
+// says the pull request is open (#145). The core has the build open its
+// pull request ready, so it checks that. A refusal is logged, and the build
+// goes on: the draft stays one, which no retry watches, so the factory
+// leaves it for a person rather than merge it (#369's review).
+// It returns the pull request as GitHub has it then.
+func (f *Factory) markReady(ctx context.Context, n int, pr github.PullRequest) (github.PullRequest, error) {
 	if !pr.Draft {
-		return nil
+		return pr, nil
+	}
+	if err := f.recovers(ctx, n, fmt.Sprintf("mark #%d ready", pr.Number), f.canOpenPullRequest(building(RunDone, true, false), true)); err != nil {
+		return pr, err
 	}
 	err := f.GitHub.MarkReady(ctx, pr.Number)
-	if err != nil && refused(ctx, err) {
+	switch {
+	case err != nil && refused(ctx, err):
 		f.logf("#%d: GitHub refused to mark draft #%d ready for review: %v", n, pr.Number, err)
-		return nil
+		return pr, nil
+	case err != nil:
+		return pr, err
 	}
-	return err
+	return f.GitHub.PullRequest(ctx, pr.Number)
 }
 
 // mergeRecordJSON is a pull request as the protocol saw it just before the

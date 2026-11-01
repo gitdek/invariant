@@ -46,11 +46,12 @@ const (
 )
 
 // step is the step in hand, as every watcher can see it. draft says the
-// pull request the build opened is a draft. pred and intent are a retry's
-// replacement: the draft it replaces, as a recovery.Pred value, and whether
-// its record is stored. attempt is the latest build's attempt: 0 for the
-// ratification's build, and one more for each retry's, as the core counts
-// them.
+// pull request the build opened is a draft, and closedAs, when someone else
+// closed or merged it since, says which, as a recovery.PR value. pred and
+// intent are a retry's replacement: the draft it replaces, as a
+// recovery.Pred value, and whether its record is stored. attempt is the
+// latest build's attempt: 0 for the ratification's build, and one more for
+// each retry's, as the core counts them.
 type step struct {
 	given     []int // the commands a writer gave for it: recovery.Solve, Ratify, Note, Retry or Watch
 	posted    []int // the steps already answered
@@ -62,9 +63,10 @@ type step struct {
 	merged,
 	gatePassed,
 	mergeable bool
-	pred    int
-	intent  bool
-	attempt int
+	closedAs int
+	pred     int
+	intent   bool
+	attempt  int
 }
 
 // repo is the step in the core's terms, with the lease as this watcher
@@ -89,6 +91,8 @@ func (f *Factory) repo(s step) recovery.Repo {
 	switch {
 	case s.merged:
 		r.PR = recovery.PRMerged
+	case s.closedAs != recovery.PRNone:
+		r.PR = s.closedAs
 	case s.prOpen && s.draft:
 		r.PR = recovery.PRDraft
 	case s.prOpen:
@@ -198,12 +202,33 @@ func alreadyWatched(t Thread, pr int) bool {
 	return false
 }
 
-// mergingPR is merging for pr: a watched draft until it's marked ready.
-func mergingPR(pr github.PullRequest, mergeable, merged bool) step {
-	if pr.Draft && !merged {
+// mergingPR is merging for pr, as GitHub has it: ready, a draft a writer's
+// retry watches again, or any other draft, such as one a person made of the
+// factory's pull request to stop it, which no retry watches, and which the
+// core never marks ready or reports on (#369's review).
+func mergingPR(t Thread, pr github.PullRequest, mergeable, merged bool) step {
+	switch {
+	case !pr.Draft || merged:
+		return merging(mergeable, merged)
+	case alreadyWatched(t, pr.Number):
 		return watchedMerging(mergeable)
 	}
-	return merging(mergeable, merged)
+	return drafted(merging(mergeable, false))
+}
+
+// openedAs is the build's step once its pull request is opened, as GitHub
+// has pr now: open, as a draft or ready, or closed or merged by someone
+// else.
+func openedAs(pr github.PullRequest) step {
+	s := building(RunDone, true, true)
+	s.draft = pr.Draft
+	switch {
+	case pr.Merged:
+		s.closedAs = recovery.PRMerged
+	case pr.State == "closed":
+		s.closedAs = recovery.PRClosed
+	}
+	return s
 }
 
 // noting is a command that changes nothing, answered by a post.
