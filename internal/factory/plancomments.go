@@ -131,12 +131,17 @@ func rebuildOffer(pr int, trusted bool) string {
 // reads it. When the factory will merge it, the answer says how a person
 // stops it: closing it or the issue, or turning a ready one into a draft,
 // since the factory marks ready only a draft a retry watched as that draft
-// (#371).
-func retriedComment(pr github.PullRequest, trusted []string, m Marker) string {
+// (#371). stopped says someone turned it into a draft after the retry, so
+// the factory won't mark it ready, which the answer says instead (#389's
+// review).
+func retriedComment(pr github.PullRequest, trusted []string, stopped bool, m Marker) string {
 	body := fmt.Sprintf("Watching #%d again. %s", pr.Number, watchedAgain(pr, len(trusted) > 0, false))
 	switch {
 	case len(trusted) > 0:
 		body += fmt.Sprintf("\n\nIt changes these files in the trusted base: %s.", codeList(trusted))
+	case stopped:
+		body = fmt.Sprintf("Watching #%d again, but someone turned it into a draft after the retry I'm answering, so I won't mark it ready or merge it. "+
+			"Once CI's `invariant/gate` passes on its current head, I'll say so, and a writer's `/invariant retry` after that has me watch the draft and merge it.", pr.Number)
 	case pr.Draft:
 		body += fmt.Sprintf(" To stop me, close #%d or this issue.", pr.Number)
 	default:

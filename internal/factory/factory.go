@@ -687,24 +687,22 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		// or a second watch of the same draft once CI failed on it, is
 		// outside the core's model, as CI's failures are, and is answered as
 		// a note. The answer records whether the pull request is a draft or
-		// ready, so the factory marks ready only a draft a retry watched as
-		// that draft (#371).
+		// ready, and when the writer retried, so the factory marks ready
+		// only a draft a retry watched as that draft (#371, #389's review).
 		answered, key := noting(), recovery.Note
-		m.Watched = WatchedReady
+		m.Watched, m.RetriedAt = WatchedReady, c.At
+		stopped := false
 		if open.Draft {
 			m.Watched = WatchedDraft
-			watched, err := f.alreadyWatched(ctx, t, open)
-			if err != nil {
-				return err
-			}
-			if !watched {
+			var watched bool
+			if watched, stopped = f.retriedDraft(ctx, t, open, c); !watched {
 				answered, key = watching(false), recovery.Watch
 			}
 		}
 		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(answered, key)); err != nil {
 			return err
 		}
-		return f.say(ctx, t.Issue.Number, retriedComment(open, trusted, m), LabelPR)
+		return f.say(ctx, t.Issue.Number, retriedComment(open, trusted, stopped, m), LabelPR)
 	case Ratify:
 		if kind != KindProposal {
 			return f.note(ctx, t, c, "There's no proposal waiting for ratification right now.")
@@ -2076,16 +2074,25 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	// A draft no writer's retry watches as that draft, such as one a person
 	// made of the factory's pull request to stop it, before any retry
-	// watched it or after a retry watched it ready, the factory never marks
-	// ready, and says so once (#369's review, #371).
+	// watched it or after a writer's retry, the factory never marks ready,
+	// and says so once (#369's review, #371). GitHub failing for a moment to
+	// show the draft's events is asked again on the next poll, under #376's
+	// bound, and past it, or when GitHub refuses, the factory can't tell the
+	// draft is the one a retry watched, so it says so once in the same post
+	// (#389's review).
 	watched := false
 	if pr.Draft {
 		w, err := f.watchOf(ctx, t, pr)
+		var unread error
 		if err != nil {
-			return err
+			var retry error
+			if unread, retry = f.gitHubsAnswer(ctx, n, failingEventsStep(state, pr.Number, pr.Head.SHA), pr, err); retry != nil {
+				return retry
+			}
+			f.logf("#%d: GitHub didn't show draft #%d's events, so I won't mark it ready: %v", n, pr.Number, unread)
 		}
 		if watched = w == watchDraft; !watched {
-			return f.unwatched(ctx, t, state, pr, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, w, next)
+			return f.unwatched(ctx, t, state, pr, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, w, unread, next)
 		}
 	}
 	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
@@ -2300,13 +2307,14 @@ func (f *Factory) unready(ctx context.Context, t Thread, ratified Post, stops in
 
 // unwatched posts once that CI's gate passed on a draft no writer's retry
 // watches as that draft, such as one a person made of the factory's pull
-// request, before any retry watched it or, as w says, after one did: the
-// factory won't mark it ready. The issue leaves the pull request's state,
-// so the factory hears a writer's commands again, and a retry watches the
-// draft. The post is the protocol's alone, since the core's model has no
-// draft a retry didn't leave, as it has no CI failure (#369's review,
-// #371).
-func (f *Factory) unwatched(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, w watchState, next Marker) error {
+// request, before any retry watched it or, as w says, after a retry: the
+// factory won't mark it ready. When GitHub didn't show its events, unread
+// is GitHub's answer, a refusal or its having kept failing (#389's review).
+// The issue leaves the pull request's state, so the factory hears a
+// writer's commands again, and a retry watches the draft. The post is the
+// protocol's alone, since the core's model has no draft a retry didn't
+// leave, as it has no CI failure (#369's review, #371).
+func (f *Factory) unwatched(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, w watchState, unread error, next Marker) error {
 	n := t.Issue.Number
 	at.scopeMany = true
 	from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
@@ -2315,7 +2323,7 @@ func (f *Factory) unwatched(ctx context.Context, t Thread, state Post, pr github
 		return err
 	}
 	next.Kind, next.Failure = KindFailed, FailDraft
-	return f.say(ctx, n, unwatchedComment(pr, w, next), LabelHumanReview)
+	return f.say(ctx, n, unwatchedComment(pr, w, unread, next), LabelHumanReview)
 }
 
 // waitingToMerge logs once, for each draft and head, that the factory waits

@@ -166,10 +166,13 @@ type Marker struct {
 	Replaces int    `json:"replaces,omitempty"`
 	From     string `json:"from,omitempty"`
 	// Watched is what the factory's answer to a writer's retry that watches
-	// the pull request saw it as: WatchedDraft or WatchedReady (#371). Only
-	// that answer records it, and one from before answers recorded it has
-	// neither, which the factory takes as watching no draft.
-	Watched string `json:"watched,omitempty"`
+	// the pull request saw it as: WatchedDraft or WatchedReady, and RetriedAt
+	// is when the writer made that retry, as GitHub gave it, so the time
+	// stays when the retry is deleted (#371, #389's review). Only that answer
+	// records them, and one from before answers recorded them has neither,
+	// which the factory takes as watching no draft.
+	Watched   string `json:"watched,omitempty"`
+	RetriedAt string `json:"retried_at,omitempty"`
 	// Gone says a retry's build couldn't start, since the commit holding the
 	// plan's ratification that it starts from is gone, so a person drafts the
 	// plan again (D-0220, D-0238).
@@ -193,9 +196,10 @@ type Marker struct {
 }
 
 // carried is the marker a later post carries forward: the same issue state,
-// without the step's own numbers or agent, or what a retry's answer watched.
+// without the step's own numbers or agent, or what a retry's answer watched,
+// and when.
 func (m Marker) carried() Marker {
-	m.Spend, m.GateRuns, m.Agent, m.Numbers, m.Watched = 0, 0, "", nil, ""
+	m.Spend, m.GateRuns, m.Agent, m.Numbers, m.Watched, m.RetriedAt = 0, 0, "", nil, "", ""
 	return m
 }
 
