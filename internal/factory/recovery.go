@@ -179,24 +179,16 @@ func watchedMerging(mergeable bool) step {
 }
 
 // alreadyWatched says whether a writer's retry already watched pr, the latest
-// build's failed draft, again: a post answering a retry says the factory
-// watches it (#354). The core's model has one watch per build, so a second,
-// after CI failed on the draft, is the protocol's alone.
+// build's failed draft, again: the factory answered a retry of it with a
+// post that says it watches it (#354). Only that answer says so: a build's
+// own post answers no command. It goes by the factory's answer, which
+// stays, rather than the retry, which its writer may delete, or lose the
+// right to give (#369's review). The core's model has one watch per build,
+// so a second, after CI failed on the draft, is the protocol's alone.
 func alreadyWatched(t Thread, pr int) bool {
-	retries := map[int64]bool{}
-	for _, c := range t.Commands {
-		if c.Verb == Retry {
-			retries[c.Comment] = true
-		}
-	}
 	for _, p := range t.Posts {
-		if p.Marker.Kind != KindPR || p.Marker.PR != pr {
-			continue
-		}
-		for _, id := range p.Marker.ReplyTo {
-			if retries[id] {
-				return true
-			}
+		if p.Marker.Kind == KindPR && p.Marker.PR == pr && len(p.Marker.ReplyTo) > 0 {
+			return true
 		}
 	}
 	return false

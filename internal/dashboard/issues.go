@@ -78,7 +78,7 @@ type Issue struct {
 // Waiting is what an open issue needs from a person.
 type Waiting struct {
 	Kind       string     `json:"kind"`                 // forks, proposal or failed
-	Failure    string     `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci or unmergeable
+	Failure    string     `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
 	Forks      []Question `json:"forks,omitempty"`      // the questions to answer
 	Name       string     `json:"name,omitempty"`       // the proposal's project
 	Hash       string     `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
@@ -507,7 +507,7 @@ func retryCopy(m factory.Marker) *RetryCopy {
 		const exception = " If it changes the trusted base, a person merges it."
 		r.Label = fmt.Sprintf("Merge #%d once CI passes", pr)
 		r.Confirmation = fmt.Sprintf("Have the factory merge #%d once CI's gate passes on its current head, as you? It won't review #%d again.", pr, pr) + exception
-		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again. Once CI's gate passes on its current head, and it's in scope with its ratified lock, the factory marks it ready, if it's a draft, and merges it.", pr) + exception
+		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again. Once CI's gate passes on its current head, and it's in scope with its ratified lock, the factory marks it ready, if it's a draft, once GitHub says it can merge it, and merges it.", pr) + exception
 		r.Posted = fmt.Sprintf("Asked for a retry. The factory watches #%d again, then marks it ready and merges it once CI's gate passes on its current head. It won't review #%d again.", pr, pr) + exception
 	}
 	r.Guidance += fmt.Sprintf(" The factory won't review #%d again, even if its review asked for changes, so push any changes it needs before you retry.", pr)

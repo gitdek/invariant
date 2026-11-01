@@ -161,12 +161,15 @@ type Factory struct {
 	// mu guards the cache of who can write, which steps share: writers is
 	// what GitHub last said of each login, and asked is whom the latest poll
 	// has asked. Each poll asks again, and a step that runs across polls
-	// keeps the answers it read.
-	mu      sync.Mutex
-	writers map[string]bool
-	asked   map[string]bool
-	running running
-	lease   lease
+	// keeps the answers it read. It guards mergeWait too: the drafts, at
+	// their heads, whose wait for GitHub to say it can merge them was
+	// logged.
+	mu        sync.Mutex
+	writers   map[string]bool
+	asked     map[string]bool
+	mergeWait map[string]bool
+	running   running
+	lease     lease
 }
 
 // Labels show where each issue is. The factory keeps exactly one status
@@ -1895,8 +1898,10 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}); err != nil {
 			return err
 		}
-	} else if res.Final.Passed && pr.State == "open" {
-		if pr, err = f.markReady(ctx, n, pr); err != nil {
+	}
+	var refusal error
+	if found && res.Final.Passed && pr.State == "open" {
+		if pr, refusal, err = f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
 	}
@@ -1906,6 +1911,9 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	}
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(openedAs(pr), recovery.Build)); err != nil {
 		return err
+	}
+	if refusal != nil {
+		return f.unready(ctx, t, ratified, stops, at, pr, refusal, next)
 	}
 	if !res.Final.Passed {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
@@ -2055,6 +2063,12 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	} else if sha != pr.Head.SHA {
 		return nil // the branch moved; wait for CI on its new head
 	}
+	// A draft no writer's retry watches, such as one a person made of the
+	// factory's pull request to stop it before any retry watched it, the
+	// factory never marks ready, and says so once (#369's review).
+	if pr.Draft && !alreadyWatched(t, pr.Number) {
+		return f.unwatched(ctx, t, state, pr, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, next)
+	}
 	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
 	if err != nil {
 		return err
@@ -2104,6 +2118,7 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	if pr.Draft {
 		switch {
 		case pr.Mergeable == nil:
+			f.waitingToMerge(n, pr)
 			return nil
 		case !*pr.Mergeable:
 			return f.refusedMerge(ctx, t, state, pr, at, false, errCantMerge, next)
@@ -2137,11 +2152,13 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		if err := f.GitHub.MarkReady(ctx, pr.Number); err != nil {
 			return f.refusedMerge(ctx, t, state, pr, at, true, err, next)
 		}
-		if pr, err = f.GitHub.PullRequest(ctx, pr.Number); err != nil {
-			return err
+		if pr, err = f.GitHub.PullRequest(ctx, pr.Number); err != nil || pr.Head.SHA != at.head {
+			return err // a push while it was marked ready waits for CI on its new head
 		}
 	}
-	sha, err := f.GitHub.Merge(ctx, pr.Number, pr.Head.SHA, "merge")
+	// The merge is pinned to the head whose gate, scope, lock and trusted
+	// files the factory checked, so GitHub merges nothing pushed since.
+	sha, err := f.GitHub.Merge(ctx, pr.Number, at.head, "merge")
 	if err != nil {
 		return f.refusedMerge(ctx, t, state, pr, at, false, err, next)
 	}
@@ -2196,34 +2213,91 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 var errCantMerge = errors.New("GitHub says it can't merge it as it is, as when it conflicts with its base branch, so I haven't marked it ready for review")
 
 // refused says whether err is GitHub's answer to a request, rather than this
-// watcher losing its lease, or its context ending, before GitHub answered.
+// watcher losing its lease, or its context ending, before GitHub answered,
+// or GitHub failing for a moment, as with a 502, which the next poll tries
+// again (#369's review).
 func refused(ctx context.Context, err error) bool {
-	return !errors.Is(err, errLeaseLost) && !errors.Is(err, errStaleTenure) && !errors.Is(err, errNoStep) && ctx.Err() == nil
+	return !errors.Is(err, errLeaseLost) && !errors.Is(err, errStaleTenure) && !errors.Is(err, errNoStep) && !github.Transient(err) && ctx.Err() == nil
 }
 
 // markReady marks a draft ready for review when a build that passed finds it
 // open from its branch, opened without the build's result, before the build
 // says the pull request is open (#145). The core has the build open its
-// pull request ready, so it checks that. A refusal is logged, and the build
-// goes on: the draft stays one, which no retry watches, so the factory
-// leaves it for a person rather than merge it (#369's review).
-// It returns the pull request as GitHub has it then.
-func (f *Factory) markReady(ctx context.Context, n int, pr github.PullRequest) (github.PullRequest, error) {
+// pull request ready, so it checks that. It returns the pull request as
+// GitHub has it then, and GitHub's answer when GitHub refused, which the
+// build posts as a failure that names the draft, so a writer's retry
+// watches it again, rather than leave it a draft no retry watches. An
+// error GitHub may not repeat, such as a 502, the next poll tries again
+// (#369's review).
+func (f *Factory) markReady(ctx context.Context, n int, pr github.PullRequest) (github.PullRequest, error, error) {
 	if !pr.Draft {
-		return pr, nil
+		return pr, nil, nil
 	}
 	if err := f.recovers(ctx, n, fmt.Sprintf("mark #%d ready", pr.Number), f.canOpenPullRequest(building(RunDone, true, false), true)); err != nil {
-		return pr, err
+		return pr, nil, err
 	}
 	err := f.GitHub.MarkReady(ctx, pr.Number)
 	switch {
 	case err != nil && refused(ctx, err):
 		f.logf("#%d: GitHub refused to mark draft #%d ready for review: %v", n, pr.Number, err)
-		return pr, nil
+		return pr, err, nil
 	case err != nil:
-		return pr, err
+		return pr, nil, err
 	}
-	return f.GitHub.PullRequest(ctx, pr.Number)
+	pr, err = f.GitHub.PullRequest(ctx, pr.Number)
+	return pr, nil, err
+}
+
+// unready posts that a build that passed found a draft open from its branch
+// that GitHub refused to mark ready, as the protocol's build that left a
+// draft, which a writer's retry watches again (#369's review).
+func (f *Factory) unready(ctx context.Context, t Thread, ratified Post, stops int, at pullRequest, pr github.PullRequest, answer error, next Marker) error {
+	n := t.Issue.Number
+	from, to := buildStep(ratified, stops, at)
+	to.kind, to.failure = protocol.KindFailed, FailUnready
+	if err := f.allowed(ctx, n, fmt.Sprintf("say GitHub refused to mark #%d ready", pr.Number), from, to); err != nil {
+		return err
+	}
+	if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
+		return err
+	}
+	next.Kind, next.Failure = KindFailed, FailUnready
+	return f.say(ctx, n, unreadyComment(pr, answer, next), LabelHumanReview)
+}
+
+// unwatched posts once that CI's gate passed on a draft no writer's retry
+// watches, such as one a person made of the factory's pull request: the
+// factory won't mark it ready. The issue leaves the pull request's state,
+// so the factory hears a writer's commands again, and a retry watches the
+// draft. The post is the protocol's alone, since the core's model has no
+// draft a retry didn't leave, as it has no CI failure (#369's review).
+func (f *Factory) unwatched(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, next Marker) error {
+	n := t.Issue.Number
+	at.scopeMany = true
+	from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
+	to.failure = FailDraft
+	if err := f.allowed(ctx, n, fmt.Sprintf("say #%d is a draft no retry watches", pr.Number), from, to); err != nil {
+		return err
+	}
+	next.Kind, next.Failure = KindFailed, FailDraft
+	return f.say(ctx, n, unwatchedComment(pr, next), LabelHumanReview)
+}
+
+// waitingToMerge logs once, for each draft and head, that the factory waits
+// for GitHub to work out whether it can merge a watched draft before it
+// marks it ready (#369's review).
+func (f *Factory) waitingToMerge(n int, pr github.PullRequest) {
+	key := fmt.Sprintf("%d@%s", pr.Number, pr.Head.SHA)
+	f.mu.Lock()
+	if f.mergeWait == nil {
+		f.mergeWait = map[string]bool{}
+	}
+	said := f.mergeWait[key]
+	f.mergeWait[key] = true
+	f.mu.Unlock()
+	if !said {
+		f.logf("#%d: waiting for GitHub to say whether it can merge draft #%d before I mark it ready", n, pr.Number)
+	}
 }
 
 // mergeRecordJSON is a pull request as the protocol saw it just before the

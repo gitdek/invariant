@@ -394,8 +394,10 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		}); err != nil {
 			return err
 		}
-	} else if ok && pr.State == "open" {
-		if pr, err = f.markReady(ctx, n, pr); err != nil {
+	}
+	var refusal error
+	if found && ok && pr.State == "open" {
+		if pr, refusal, err = f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
 	}
@@ -405,6 +407,9 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	}
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(openedAs(pr), recovery.Build)); err != nil {
 		return err
+	}
+	if refusal != nil {
+		return f.unready(ctx, t, ratified, stops, at, pr, refusal, next)
 	}
 	if !ok {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {

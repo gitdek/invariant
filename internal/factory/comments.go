@@ -448,7 +448,7 @@ func watchedAgain(pr github.PullRequest, trusted, unsure bool) string {
 	} else {
 		b.WriteString("I'll merge it once CI's `invariant/gate` passes on its current head.")
 		if pr.Draft {
-			b.WriteString(" It's a draft, so I'll mark it ready first.")
+			b.WriteString(" It's a draft, so I'll mark it ready first, once GitHub says it can merge it.")
 		}
 		if unsure {
 			b.WriteString(" If it changes the trusted base, a person merges it instead.")
@@ -532,6 +532,28 @@ func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Ma
 	_, trusted, unsure := trustedOf(m)
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
 		fmt.Sprintf("\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
+}
+
+// unreadyComment says a build that passed found a draft open from its
+// branch, which GitHub refused to mark ready for review, quoting GitHub's
+// answer, and how to go on: a writer's retry watches it again, as for a
+// failed draft (#369's review).
+func unreadyComment(pr github.PullRequest, answer error, m Marker) string {
+	_, trusted, unsure := trustedOf(m)
+	return post("needs a person", fmt.Sprintf("The build passed, but #%d, the draft open from its branch that it took as its pull request, is still a draft: GitHub refused to mark it ready for review:\n\n%s", pr.Number, quote(answer.Error(), 20)), m,
+		fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
+}
+
+// unwatchedComment says CI's gate passed on a draft no writer's retry
+// watches, such as one a person made of the factory's pull request, so the
+// factory hasn't marked it ready, and how to go on: a writer's retry
+// watches it, and closing it or the issue stops the factory (#369's
+// review).
+func unwatchedComment(pr github.PullRequest, m Marker) string {
+	_, trusted, unsure := trustedOf(m)
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but it's a draft, and no retry asked me to watch it, so I haven't marked it ready or merged it. "+
+		"If someone made it a draft to stop me, close #%d or this issue.", pr.Number, pr.Number), m,
+		fmt.Sprintf("\n\nA person needs to look at this. To have me merge it after all, comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
 }
 
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
