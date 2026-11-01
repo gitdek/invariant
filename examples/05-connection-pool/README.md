@@ -16,7 +16,7 @@ Written by Invariant for [#18](https://github.com/gitdek/invariant/issues/18): A
 | `AcquireWhenFull` | bug | When every connection is out, the pool hands a client one that is already out. |
 | `AcquireTwice` | bug | A client that already holds a connection is given a second one. |
 
-Checked within `Clients = {c1, c2, c3}`, `Size = 2`. To run the gate yourself:
+Checked within `Clients = {c1, c2, c3}`, `Size = 2`. `NoSharedConnection` is also proved of the model at every size, for any pool size and any set of clients, by TLAPS ([#360](https://github.com/gitdek/invariant/issues/360)). Its proof is [`.invariant/proofs/NoSharedConnection.tla`](.invariant/proofs/NoSharedConnection.tla), and the gate writes the theorem it proves. That proof covers the model, not the code. To run the gate yourself:
 
 ```bash
 go run ./cmd/invariant verify examples/05-connection-pool

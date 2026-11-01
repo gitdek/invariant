@@ -38,6 +38,11 @@ func Markdown(r *verify.Report) string {
 	b.WriteString("| Check | Result | Evidence |\n| :-- | :-- | :-- |\n")
 	writeRow("Pinned statements", pinsOK(r) && r.RatificationMatches(), pinsResult(r), render.provenance(r))
 	writeRow("Design · TLC", r.Design.Passed, render.designResult(r.Design), designEvidence(r.Design))
+	if len(r.TLAPS) > 0 {
+		// A proof of the model at every size, on a row of its own: it
+		// says nothing of the code, and TLC's row stands beside it (#360).
+		writeRow("Design · TLAPS", tlapsOK(r), tlapsResult(r), render.tlapsEvidence(r))
+	}
 	writeRow("Reachability", witnessesOK(r), fmt.Sprintf("%d of %d witnesses reached", count(r.Witnesses, func(w verify.Witness) bool { return w.Reached }), len(r.Witnesses)), render.witnessEvidence(r))
 	if len(r.Properties) > 0 {
 		writeRow("Liveness · TLC", propertiesOK(r), fmt.Sprintf("%d of %d properties hold", count(r.Properties, func(p verify.Property) bool { return p.Holds }), len(r.Properties)), render.propertyEvidence(r))
@@ -103,10 +108,17 @@ func Markdown(r *verify.Report) string {
 		pythonApplication(&b, r.Application, larger)
 	}
 
+	proved := render.tlapsProved(r)
 	if explicit {
-		fmt.Fprintf(&b, "\nDesign checked within %s. Within these bounds TLC's search is exhaustive. Independent component evidence and input provenance are listed above; supplied results and declarations do not change the recorded gate outcome.\n", render.bounds(r.Bounds))
+		fmt.Fprintf(&b, "\nDesign checked within %s. Within these bounds TLC's search is exhaustive.%s Independent component evidence and input provenance are listed above; supplied results and declarations do not change the recorded gate outcome.\n", render.bounds(r.Bounds), proved)
 	} else if r.EverySize() {
-		fmt.Fprintf(&b, "\nChecked within %s, and again one size larger, within %s. Within each, TLC's search is exhaustive. %s proves the code against its contracts at every size, and the design's rules are claimed only within the sizes checked.\n", render.bounds(r.Bounds), render.bounds(r.Larger.Bounds), r.Code.Verifier)
+		rules := "the design's rules are claimed only within the sizes checked"
+		if proved != "" {
+			rules = "the design's other rules are claimed only within the sizes checked"
+		}
+		fmt.Fprintf(&b, "\nChecked within %s, and again one size larger, within %s. Within each, TLC's search is exhaustive. %s proves the code against its contracts at every size, and %s.%s\n", render.bounds(r.Bounds), render.bounds(r.Larger.Bounds), r.Code.Verifier, rules, proved)
+	} else if proved != "" {
+		fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive.%s Nothing else is claimed outside them.\n", render.bounds(r.Bounds), proved)
 	} else {
 		fmt.Fprintf(&b, "\nChecked within %s. Within these bounds TLC's search is exhaustive. Nothing is claimed outside them.\n", render.bounds(r.Bounds))
 	}
@@ -153,6 +165,16 @@ func Markdown(r *verify.Report) string {
 	}
 	if t.Go != "" {
 		fmt.Fprintf(&b, "| Go | %s |\n", render.value(t.Go))
+	}
+	if p := t.TLAPS; p != nil {
+		var backends []string
+		for _, name := range []string{"z3", "zenon", "isabelle", "ls4"} {
+			if v := p.Backends[name]; v != "" {
+				backends = append(backends, name+" "+v)
+			}
+		}
+		fmt.Fprintf(&b, "| TLAPS | tlapm %s (%s), tarball %s, recipe %s · %s |\n", render.value(p.Release), render.literal(p.Version),
+			render.literal(short(p.Tarball)), render.literal(short(p.Recipe)), render.text(strings.Join(backends, ", ")))
 	}
 	sources := "tool output only"
 	qualification := ""
@@ -584,6 +606,11 @@ func (render renderer) failures(r *verify.Report) []string {
 	}
 	if !r.Design.Passed && r.Design.Message != "" {
 		out = append(out, "TLC: "+render.text(r.Design.Message))
+	}
+	for _, t := range r.TLAPS {
+		if !t.Proved {
+			out = append(out, fmt.Sprintf("TLAPS didn't prove %s at every size: %s", render.literal(t.Invariant), render.text(t.Message)))
+		}
 	}
 	for _, w := range r.Witnesses {
 		if !w.Reached {
