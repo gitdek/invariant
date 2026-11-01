@@ -178,13 +178,13 @@ func missing(m []Line, mlen int, b []Line, blen int) (kept []bool) {
 // @ ensures forall q int :: { &kept[q] } 0 <= q && q < len(kept) ==> kept[q] == old(kept[q])
 // @ ensures n0 <= n && n <= n0 + blen
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < n0 ==> dst[k] == old(dst[k])
-// @ ensures forall k int :: { &from[k] } n0 <= k && k < n ==> 0 <= from[k] && from[k] < blen
-// @ ensures forall k int :: { &from[k] } n0 <= k && k < n ==> kept[from[k]]
-// @ ensures forall k int :: { &dst[k] } n0 <= k && k < n ==> dst[k] == b[from[k]]
-// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && kept[q] ==> n0 <= to[q] && to[q] < n
-// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && kept[q] ==> dst[to[q]] == b[q]
+// @ ensures forall k int :: { &from[k] } n0 <= k && k < n ==> 0 <= from[k].At && from[k].At < blen
+// @ ensures forall k int :: { &from[k] } n0 <= k && k < n ==> kept[from[k].At]
+// @ ensures forall k int :: { &dst[k] } n0 <= k && k < n ==> dst[k] == b[from[k].At]
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && kept[q] ==> n0 <= to[q].At && to[q].At < n
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && kept[q] ==> dst[to[q].At] == b[q]
 // @ decreases
-func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool, from, to []int) (n int) {
+func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool, from, to []Spot) (n int) {
 	n = n0
 	j := 0
 	// @ invariant 0 <= j && j <= blen && n0 <= n && n <= n0 + j
@@ -196,17 +196,17 @@ func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool, from, to []
 	// @ invariant forall k int :: { &b[k] } 0 <= k && k < len(b) ==> b[k] == old(b[k])
 	// @ invariant forall q int :: { &kept[q] } 0 <= q && q < len(kept) ==> kept[q] == old(kept[q])
 	// @ invariant forall k int :: { &dst[k] } 0 <= k && k < n0 ==> dst[k] == old(dst[k])
-	// @ invariant forall k int :: { &from[k] } n0 <= k && k < n ==> 0 <= from[k] && from[k] < j
-	// @ invariant forall k int :: { &from[k] } n0 <= k && k < n ==> kept[from[k]]
-	// @ invariant forall k int :: { &dst[k] } n0 <= k && k < n ==> dst[k] == b[from[k]]
-	// @ invariant forall q int :: { &to[q] } 0 <= q && q < j && kept[q] ==> n0 <= to[q] && to[q] < n
-	// @ invariant forall q int :: { &to[q] } 0 <= q && q < j && kept[q] ==> dst[to[q]] == b[q]
+	// @ invariant forall k int :: { &from[k] } n0 <= k && k < n ==> 0 <= from[k].At && from[k].At < j
+	// @ invariant forall k int :: { &from[k] } n0 <= k && k < n ==> kept[from[k].At]
+	// @ invariant forall k int :: { &dst[k] } n0 <= k && k < n ==> dst[k] == b[from[k].At]
+	// @ invariant forall q int :: { &to[q] } 0 <= q && q < j && kept[q] ==> n0 <= to[q].At && to[q].At < n
+	// @ invariant forall q int :: { &to[q] } 0 <= q && q < j && kept[q] ==> dst[to[q].At] == b[q]
 	// @ decreases blen - j
 	for j < blen {
 		if kept[j] {
 			dst[n] = b[j]
-			from[n] = j
-			to[j] = n
+			from[n] = Spot{j}
+			to[j] = Spot{n}
 			n++
 		}
 		j++
@@ -237,13 +237,13 @@ func appendKept(dst []Line, n0 int, b []Line, blen int, kept []bool, from, to []
 // @ ensures forall k int :: { &b[k] } 0 <= k && k < len(b) ==> b[k] == old(b[k])
 // @ ensures mlen <= n && n <= mlen + blen
 // @ ensures forall k int :: { &dst[k] } 0 <= k && k < mlen ==> dst[k] == m[k]
-// @ ensures forall k int :: { &from[k] } mlen <= k && k < n ==> 0 <= from[k] && from[k] < blen
-// @ ensures forall k int :: { &dst[k] } mlen <= k && k < n ==> dst[k] == b[from[k]]
+// @ ensures forall k int :: { &from[k] } mlen <= k && k < n ==> 0 <= from[k].At && from[k].At < blen
+// @ ensures forall k int :: { &dst[k] } mlen <= k && k < n ==> dst[k] == b[from[k].At]
 // @ ensures forall k, i int :: { &dst[k], &m[i] } mlen <= k && k < n && 0 <= i && i < mlen ==> dst[k] != m[i]
-// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && !(exists i int :: { &m[i] } 0 <= i && i < mlen && m[i] == b[q]) ==> mlen <= to[q] && to[q] < n
-// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && !(exists i int :: { &m[i] } 0 <= i && i < mlen && m[i] == b[q]) ==> dst[to[q]] == b[q]
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && !(exists i int :: { &m[i] } 0 <= i && i < mlen && m[i] == b[q]) ==> mlen <= to[q].At && to[q].At < n
+// @ ensures forall q int :: { &to[q] } 0 <= q && q < blen && !(exists i int :: { &m[i] } 0 <= i && i < mlen && m[i] == b[q]) ==> dst[to[q].At] == b[q]
 // @ decreases
-func takeIn(dst []Line, m []Line, mlen int, b []Line, blen int, from, to []int) (n int) {
+func takeIn(dst []Line, m []Line, mlen int, b []Line, blen int, from, to []Spot) (n int) {
 	copyPrefix(dst, m, mlen)
 	kept := missing(m, mlen, b, blen)
 	return appendKept(dst, mlen, b, blen, kept, from, to)

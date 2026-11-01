@@ -14,6 +14,11 @@ type Line struct {
 	N  int
 }
 
+// Spot is a position in a journal file.
+type Spot struct {
+	At int
+}
+
 // Core is main's journal. File f holds its lines, in order, in Lines[f][0]
 // to Lines[f][Len[f]-1], and every file, main's and each branch's, has room
 // for Room lines. Capacity is how many lines each branch may add. Room and
