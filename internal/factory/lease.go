@@ -202,8 +202,10 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	pushed, err := f.Repo.PushLease(ctx, sha, next)
 	if err != nil {
 		f.lease.until = time.Time{}
+		// A push refused as moved never landed, but one it tried before,
+		// whose answer it lost, may have landed since its last read and
+		// moved the lease, so it still remembers that one (D-0245).
 		if errors.Is(err, ErrLeaseMoved) {
-			f.lease.tried = nil
 			return false, nil
 		}
 		f.lease.tried = &triedLease{rec: next, takeover: sha != f.lease.sha}
@@ -255,15 +257,17 @@ func (f *Factory) mayAct(ctx context.Context) error {
 }
 
 // errResumed is an agent run that outlived its step's tenure: the watcher
-// recorded its result on the run's own ref, and its next step publishes it.
-var errResumed = errors.New("this watcher took the lease back while the agent ran, so it recorded the run's result and leaves the rest to its next step")
+// recorded what the run left, its result on the run's own ref or why its
+// provider stopped it beside that, and its next step goes on from there.
+var errResumed = errors.New("this watcher took the lease back while the agent ran, so it recorded what the run left and leaves the rest to its next step")
 
-// resumed is ctx for recording an agent run's result once the run ends: as
-// it was, or, when this watcher took the lease back in a new tenure while
+// resumed is ctx for recording what an agent run left once the run ends:
+// as it was, or, when this watcher took the lease back in a new tenure while
 // the run went, in that tenure, with resumed set. A run's ref only moves
-// from the commit the watcher recorded there, which no other watcher
-// writes, so its result can be recorded in any tenure, unlike any other
-// effect of a step from an earlier one (D-0237).
+// from the commit the watcher recorded there, and the record of why its
+// provider stopped it beside that is the run's watcher's alone, so no
+// other watcher writes either, and they can be recorded in any tenure,
+// unlike any other effect of a step from an earlier one (D-0237, D-0245).
 func (f *Factory) resumed(ctx context.Context) (context.Context, bool) {
 	if f.holdsFor(ctx) {
 		return ctx, false

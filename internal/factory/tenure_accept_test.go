@@ -3,12 +3,15 @@ package factory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/synth"
 )
 
 // A watcher's lease has tenures (D-0237): a step it started before it took
@@ -264,4 +267,266 @@ func TestARunThatOutlivesItsTenureIsPublishedByTheNextStep(t *testing.T) {
 	if last := r.gh.last(1); last.Marker.Kind != KindPR || len(r.gh.prs) != 1 {
 		t.Fatalf("the next step must publish the build: %+v, %d pull requests", last.Marker, len(r.gh.prs))
 	}
+}
+
+// lateLanding loses one push of the lease, which lands only once the
+// watcher pushes the lease again, just before that push, as a push the
+// server applied late.
+type lateLanding struct {
+	Repo
+	s *lateState
+}
+
+type lateState struct {
+	armed bool
+	late  *latePush
+}
+
+type latePush struct {
+	old string
+	rec LeaseRecord
+}
+
+func (r lateLanding) PushLease(ctx context.Context, old string, rec LeaseRecord) (string, error) {
+	if r.s.armed {
+		r.s.armed = false
+		r.s.late = &latePush{old, rec}
+		return "", errors.New("git push: the remote end hung up unexpectedly")
+	}
+	if p := r.s.late; p != nil {
+		r.s.late = nil
+		if _, err := r.Repo.PushLease(ctx, p.old, p.rec); err != nil {
+			return "", err
+		}
+	}
+	return r.Repo.PushLease(ctx, old, rec)
+}
+
+// A push of the lease whose answer is lost, and which lands only once the
+// watcher's next push is refused as moved, is still the watcher's own: the
+// renewal after that starts no tenure (#357's review).
+func TestAPushThatLandsLateIsStillTheWatchers(t *testing.T) {
+	ctx := context.Background()
+	origin, _ := gitRepos(t)
+	now := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	a := leaseFactory(t, origin, "watcher-a", &now)
+	late := &lateState{}
+	a.Repo = lateLanding{Repo: a.Repo, s: late}
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	tenure := a.lease.tenure
+	// A renewal past half the lease, whose answer is lost, and which hasn't
+	// landed when the next renewal reads the lease.
+	now = now.Add(3 * time.Minute)
+	late.armed = true
+	a.hold(ctx)
+	now = now.Add(20 * time.Second)
+	if held, _ := a.hold(ctx); held {
+		t.Fatal("a renewal refused as moved holds the lease")
+	}
+	now = now.Add(20 * time.Second)
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	if a.lease.tenure != tenure {
+		t.Fatalf("a push that landed late started a new tenure: %d, was %d", a.lease.tenure, tenure)
+	}
+}
+
+// logLines keeps what a watcher logs, as its steps log their errors.
+type logLines struct {
+	t     *testing.T
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) add(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	l.mu.Lock()
+	l.lines = append(l.lines, line)
+	l.mu.Unlock()
+	l.t.Log(line)
+}
+
+func (l *logLines) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// leasedWatcher has r's watcher hold the lease on a clock of its own,
+// running up to two steps at once, and keeps what it logs.
+func leasedWatcher(t *testing.T, r *rig) (*time.Time, *logLines) {
+	t.Helper()
+	now := new(time.Time)
+	*now = time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	logs := &logLines{t: t}
+	a := r.f
+	a.Holder, a.LeaseFor, a.Parallel, a.Log = "watcher-a", 5*time.Minute, 2, logs.add
+	a.Now = func() time.Time { return *now }
+	a.GitHub, a.Repo = leasedGitHub{r.gh, a}, leasedRepo{a.Repo, a}
+	if held, err := a.hold(context.Background()); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	return now, logs
+}
+
+// outliveTheTenure has another watcher hold the lease, taking no step,
+// while r's watcher's build is held, then has r's watcher take the lease
+// back in a new tenure and lets the build end. It returns how many posts
+// issue 1 had before the build ended.
+func outliveTheTenure(t *testing.T, r *rig, now *time.Time, release chan struct{}) int {
+	t.Helper()
+	ctx := context.Background()
+	nowB := now.Add(7 * time.Minute)
+	b := leaseFactory(t, r.origin, "watcher-b", &nowB)
+	*now = nowB
+	if held, err := b.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	*now = now.Add(7 * time.Minute)
+	if held, err := r.f.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	posts := len(r.gh.posts(1))
+	close(release)
+	r.f.Wait()
+	return posts
+}
+
+// startHeldPlanBuild has a writer solve issue 1 and ratify its plan, and
+// returns the ratification, once the build it starts is held.
+func startHeldPlanBuild(t *testing.T, r *rig, held *heldBuild) Post {
+	t.Helper()
+	r.gh.open(1, "gitdek", "Explain retries", "Kind: plumbing\n\n/invariant solve")
+	r.poll()
+	r.f.Wait()
+	proposal := r.expect(1, KindProposal, LabelProposal)
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(proposal.Marker.Proposal.Hash, "sha256:")[:hashChars])
+	held.block = true
+	r.poll()
+	<-held.started
+	return r.gh.last(1)
+}
+
+// endedCleanly checks that a build whose run outlived its tenure and gave
+// no result ended its step with nothing posted and no effect refused, and
+// that the next step says, once, that the build stopped, with said.
+func endedCleanly(t *testing.T, r *rig, ratified Post, posts int, logs *logLines, said string) {
+	t.Helper()
+	if state, _, err := r.f.Repo.Run(context.Background(), 1, buildStepName(ratified)); err != nil || state != RunRecorded {
+		t.Fatalf("the run must stay recorded with no result: state %d, %v", state, err)
+	}
+	if n := len(r.gh.posts(1)); n != posts {
+		t.Fatalf("the step from the earlier tenure posted: %d posts, was %d", n, posts)
+	}
+	for _, line := range logs.all() {
+		if strings.Contains(line, errStaleTenure.Error()) || strings.Contains(line, errNoStep.Error()) {
+			t.Errorf("the step from the earlier tenure tried an effect: %s", line)
+		}
+	}
+	r.poll()
+	r.f.Wait()
+	var stopped []Post
+	for _, p := range r.gh.posts(1)[posts:] {
+		if p.Marker.Kind == KindFailed && p.Marker.Failure == FailStopped {
+			stopped = append(stopped, p)
+		}
+	}
+	if len(stopped) != 1 || !strings.Contains(stopped[0].Comment.Body, said) {
+		t.Fatalf("the next step must say once that the build stopped, with %q: %+v", said, stopped)
+	}
+}
+
+// providerDown is a plan's build whose provider stayed unavailable (#261).
+type providerDown struct {
+	PlanBuilder
+	why string
+}
+
+func (p providerDown) Build(ctx context.Context, root string, n int, out string) (*plumbing.BuildResult, error) {
+	res, err := p.PlanBuilder.Build(ctx, root, n, out)
+	if res != nil {
+		res.ProviderError = p.why
+	}
+	return res, err
+}
+
+// noResult is a plan's build whose agent run ends without one.
+type noResult struct{}
+
+func (noResult) Build(context.Context, string, int, string) (*plumbing.BuildResult, error) {
+	return nil, errors.New("the agent ended its run without a build")
+}
+
+// heldModeled holds a modeled project's build until the test lets it go.
+type heldModeled struct {
+	inner   Builder
+	block   bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *heldModeled) Build(ctx context.Context, dir, out string, amend bool) (*synth.Result, error) {
+	if g.block {
+		g.block = false
+		close(g.started)
+		<-g.release
+	}
+	return g.inner.Build(ctx, dir, out, amend)
+}
+
+// A plan's build its provider stopped, in a run that outlived its tenure,
+// ends its step once the watcher records why beside the run, posting
+// nothing, and the next step says the build stopped, quoting that record
+// (#357's review).
+func TestAProviderStoppedRunThatOutlivesItsTenureEndsItsStep(t *testing.T) {
+	const why = "codex stopped: we're currently experiencing high demand, which may cause temporary errors"
+	r, base := plumbingRig(t, "page/page.go")
+	held := &heldBuild{inner: providerDown{PlanBuilder: base, why: why}, started: make(chan struct{}), release: make(chan struct{})}
+	r.f.Plumbing = held
+	now, logs := leasedWatcher(t, r)
+	ratified := startHeldPlanBuild(t, r, held)
+	posts := outliveTheTenure(t, r, now, held.release)
+	if what, err := r.f.Repo.Recorded(context.Background(), 1, unavailableStep(buildStepName(ratified))); err != nil || !strings.Contains(what, "high demand") {
+		t.Fatalf("the record of why the build stopped is %q, %v", what, err)
+	}
+	endedCleanly(t, r, ratified, posts, logs, "high demand")
+}
+
+// A plan's build whose run gave no result, and outlived its tenure, ends
+// its step posting nothing, and the next step says it stopped.
+func TestARunWithNoResultThatOutlivesItsTenureEndsItsStep(t *testing.T) {
+	r, _ := plumbingRig(t, "page/page.go")
+	held := &heldBuild{inner: noResult{}, started: make(chan struct{}), release: make(chan struct{})}
+	r.f.Plumbing = held
+	now, logs := leasedWatcher(t, r)
+	ratified := startHeldPlanBuild(t, r, held)
+	posts := outliveTheTenure(t, r, now, held.release)
+	endedCleanly(t, r, ratified, posts, logs, "stopped partway")
+}
+
+// As for a plan: a modeled project's build its provider stopped, in a run
+// that outlived its tenure, ends its step once the watcher records why, and
+// the next step says the build stopped, quoting it.
+func TestAProviderStoppedProjectRunThatOutlivesItsTenureEndsItsStep(t *testing.T) {
+	const last = "Selected model is at capacity. Please try a different model. (last attempt)"
+	r := newRig(t)
+	r.form.forks = nil
+	held := &heldModeled{inner: providerFailedBuilder{fakeBuilder: r.build, err: errors.New("codex provider unavailable after 4 attempts: " + last)},
+		started: make(chan struct{}), release: make(chan struct{})}
+	r.f.Builder = held
+	now, logs := leasedWatcher(t, r)
+	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
+	r.poll()
+	r.f.Wait()
+	proposal := r.expect(1, KindProposal, LabelProposal)
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(proposal.Marker.Proposal.Hash, "sha256:"))
+	held.block = true
+	r.poll()
+	<-held.started
+	ratified := r.gh.last(1)
+	posts := outliveTheTenure(t, r, now, held.release)
+	endedCleanly(t, r, ratified, posts, logs, "at capacity")
 }

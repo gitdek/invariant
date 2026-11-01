@@ -1622,9 +1622,18 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 		if res != nil {
 			u.Spend, u.GateRuns = res.Spend(), len(res.GateRuns)
 		}
-		return "", agent, res, runErr, f.recordUnavailable(ctx, n, step, u)
+		if err := f.recordUnavailable(ctx, n, step, u); err != nil {
+			return "", "", nil, nil, err
+		}
+		if resumed {
+			return "", "", nil, nil, errResumed
+		}
+		return "", agent, res, runErr, nil
 	}
 	if res == nil || res.Final == nil {
+		if resumed {
+			return "", "", nil, nil, errResumed
+		}
 		return "", agent, res, runErr, nil
 	}
 	// The receipt the pull request carries names the agent that built the

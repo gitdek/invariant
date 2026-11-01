@@ -251,6 +251,9 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	// error.
 	runErr = localError(runErr, f.Work)
 	if res == nil {
+		if resumed {
+			return "", "", nil, nil, errResumed
+		}
 		return "", agent, nil, runErr, nil
 	}
 	res.Summary, res.Review = localPaths(res.Summary, f.Work), localPaths(res.Review, f.Work)
@@ -263,7 +266,13 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	if why != "" {
 		res.ProviderError = why
-		return "", agent, res, runErr, f.recordUnavailable(ctx, n, step, unavailable{Error: why, Agent: agent, Spend: res.Spend, GateRuns: len(res.TestRuns)})
+		if err := f.recordUnavailable(ctx, n, step, unavailable{Error: why, Agent: agent, Spend: res.Spend, GateRuns: len(res.TestRuns)}); err != nil {
+			return "", "", nil, nil, err
+		}
+		if resumed {
+			return "", "", nil, nil, errResumed
+		}
+		return "", agent, res, runErr, nil
 	}
 	verdict := "It passed every test, and the review approves it."
 	switch {
