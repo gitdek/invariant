@@ -397,7 +397,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	}
 	var refusal error
 	if found && ok && pr.State == "open" {
-		if pr, refusal, err = f.markReady(ctx, n, pr); err != nil {
+		if pr, refusal, err = f.markReady(ctx, n, ratified, pr); err != nil {
 			return err
 		}
 	}
