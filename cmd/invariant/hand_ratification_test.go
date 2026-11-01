@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -293,6 +294,12 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The ratification check finds the journal through git, so a copy
+	// without .git, as the plumbing sandbox makes, can't check these locks.
+	// CI checks them (#362).
+	if exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Run() != nil {
+		t.Skip(root + " isn't a git checkout, so the ratification check can't find its journal")
 	}
 	for _, dir := range []string{"factory/protocol", "factory/recovery"} {
 		p, err := project.Load(filepath.Join(root, dir))
