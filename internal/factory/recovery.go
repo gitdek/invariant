@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gitdek/invariant/factory/recovery/recovery"
 	"github.com/gitdek/invariant/internal/github"
@@ -34,7 +35,9 @@ import (
 // core's Watch (#354): its answer, the draft's mark ready and the merge or
 // the report that it can't merge are the core's steps too. Each pull
 // request is the core's as GitHub has it: a draft is a draft, and only a
-// ready one is ready.
+// ready one is ready. A draft is watched only as the draft the factory's
+// answer saw (#371), so one a person made to stop the factory, after a retry
+// watched it ready, is the core's draft no retry watches.
 
 // errOutsideRecovery is what an effect the core doesn't allow fails with.
 var errOutsideRecovery = errors.New("the factory's recovery rules don't allow this effect")
@@ -178,31 +181,155 @@ func watchedMerging(mergeable bool) step {
 	return s
 }
 
+// watchState is how the factory's answers to writers' retries watch a draft
+// (#371).
+type watchState int
+
+const (
+	watchNone      watchState = iota // no answer to a retry watches it
+	watchUnknown                     // the latest answer is from before answers recorded what they watched
+	watchReady                       // the latest answer watched it ready, so someone turned it into a draft since
+	watchRedrafted                   // the latest answer watched it as a draft, but someone turned it into one at or after the retry it answers
+	watchUnread                      // GitHub didn't show its events, so the factory can't tell
+	watchDraft                       // the latest answer watched it as the draft it still is
+)
+
+// convertToDraft is GitHub's event for a pull request someone turned into a
+// draft.
+const convertToDraft = "convert_to_draft"
+
 // alreadyWatched says whether a writer's retry already watched pr, the latest
-// build's failed draft, again: the factory answered a retry of it with a
-// post that says it watches it (#354). Only that answer says so: a build's
-// own post answers no command. It goes by the factory's answer, which
-// stays, rather than the retry, which its writer may delete, or lose the
-// right to give (#369's review). The core's model has one watch per build,
-// so a second, after CI failed on the draft, is the protocol's alone.
-func alreadyWatched(t Thread, pr int) bool {
-	for _, p := range t.Posts {
-		if p.Marker.Kind == KindPR && p.Marker.PR == pr && len(p.Marker.ReplyTo) > 0 {
+// build's failed draft, as that draft: the factory answered a retry of it
+// with a post that says it watches it (#354), recording it as a draft, and
+// it's still that draft (#371).
+func (f *Factory) alreadyWatched(ctx context.Context, t Thread, pr github.PullRequest) (bool, error) {
+	if !pr.Draft {
+		return false, nil
+	}
+	w, err := f.watchOf(ctx, t, pr)
+	return w == watchDraft, err
+}
+
+// watchOf is how the factory's answers watch pr, a draft. Only its latest
+// answer to a retry that watches pr counts, which records whether pr was a
+// draft or ready then, and when the writer made the retry (#371). Only that
+// answer says so: a build's own post answers no command. It goes by the
+// factory's answer, which stays, rather than the retry, which its writer may
+// delete, or lose the right to give (#369's review). A draft the answer saw
+// ready, someone turned into a draft since. One it saw as a draft is still
+// that draft only if GitHub shows no one turned it into a draft at or after
+// the retry: one made after the retry and before the factory answered it,
+// as a person stopping the factory would while the watcher is busy or away,
+// or after it was made ready since, by a person or by the factory as it
+// began a merge that didn't finish, is a person's (#389's review). GitHub
+// gives both times to the second, so a draft made in the retry's second
+// counts as made after, as does one whose time doesn't read: a person
+// decides. An answer from before answers recorded what they watched watches
+// no draft, so a person decides that too. When GitHub doesn't show pr's
+// events, it returns watchUnread and why. The core's model has one watch per
+// build, so a second, after CI failed on the draft, is the protocol's alone.
+func (f *Factory) watchOf(ctx context.Context, t Thread, pr github.PullRequest) (watchState, error) {
+	answer, ok := latestWatch(t, pr.Number)
+	if w, known := answerWatch(answer, ok); known {
+		return w, nil
+	}
+	events, err := f.GitHub.Events(ctx, pr.Number)
+	if err != nil {
+		return watchUnread, err
+	}
+	return draftWatch(answer, events), nil
+}
+
+// answerWatch is how answer, the latest answer to a retry that watches a
+// draft, if ok, watches it, when that's plain without GitHub's events.
+func answerWatch(answer Post, ok bool) (watchState, bool) {
+	switch {
+	case !ok:
+		return watchNone, true
+	case answer.Marker.Watched == WatchedReady:
+		return watchReady, true
+	case answer.Marker.Watched != WatchedDraft:
+		return watchUnknown, true
+	}
+	return watchDraft, false
+}
+
+// draftWatch is how answer, which saw a draft, watches it, as events, GitHub's
+// for it, show.
+func draftWatch(answer Post, events []github.Event) watchState {
+	if draftedSince(events, answer.Marker.RetriedAt) {
+		return watchRedrafted
+	}
+	return watchDraft
+}
+
+// draftedSince says whether GitHub's events show someone turned the pull
+// request into a draft at or after since, a time as GitHub gives it, to the
+// second. A draft made at a time that doesn't read counts, and when since
+// doesn't read, every draft made counts.
+func draftedSince(events []github.Event, since string) bool {
+	from, err := time.Parse(time.RFC3339, since)
+	for _, e := range events {
+		if e.Event != convertToDraft {
+			continue
+		}
+		if at, atErr := time.Parse(time.RFC3339, e.CreatedAt); err != nil || atErr != nil || !at.Before(from) {
 			return true
 		}
 	}
 	return false
 }
 
+// retriedDraft is what the factory makes of c, a writer's retry of pr, a
+// draft, as it answers it (#371): whether its latest answer to a retry
+// already watched pr as that draft, so this retry is a second watch, outside
+// the core's model, and whether someone turned pr into a draft at or after
+// c, as a person stopping the factory would, which the answer says, since
+// the factory won't mark that draft ready (#389's review). A draft someone
+// made since an answer that saw a draft, or since one that saw it ready, is
+// no draft that answer watched, so a retry of it is the core's watch again,
+// though in the model's terms it's a second watch of the build. When GitHub
+// doesn't show pr's events, the factory says so in its log and takes it as
+// no watch yet, and as no draft made since c: only the core's step and that
+// sentence of the answer rest on them, and the factory reads them again
+// before it marks pr ready.
+func (f *Factory) retriedDraft(ctx context.Context, t Thread, pr github.PullRequest, c Command) (watched, stopped bool) {
+	events, err := f.GitHub.Events(ctx, pr.Number)
+	if err != nil {
+		f.logf("#%d: GitHub didn't show #%d's events, so I'm answering the retry as a watch of the draft: %v", t.Issue.Number, pr.Number, err)
+		return false, false
+	}
+	answer, ok := latestWatch(t, pr.Number)
+	w, known := answerWatch(answer, ok)
+	if !known {
+		w = draftWatch(answer, events)
+	}
+	return w == watchDraft, draftedSince(events, c.At)
+}
+
+// latestWatch is the factory's latest answer to a writer's retry that
+// watches pr, if it answered one: the pull request's post that answers a
+// command.
+func latestWatch(t Thread, pr int) (Post, bool) {
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		if p := t.Posts[i]; p.Marker.Kind == KindPR && p.Marker.PR == pr && len(p.Marker.ReplyTo) > 0 {
+			return p, true
+		}
+	}
+	return Post{}, false
+}
+
 // mergingPR is merging for pr, as GitHub has it: ready, a draft a writer's
-// retry watches again, or any other draft, such as one a person made of the
-// factory's pull request to stop it, which no retry watches, and which the
-// core never marks ready or reports on (#369's review).
-func mergingPR(t Thread, pr github.PullRequest, mergeable, merged bool) step {
+// retry watches again as that draft, as watched says, or any other draft,
+// such as one a person made of the factory's pull request to stop it,
+// before any retry watched it or after a retry watched it ready, which no
+// retry watches, and which the core never marks ready or reports on (#369's
+// review, #371).
+func mergingPR(watched bool, pr github.PullRequest, mergeable, merged bool) step {
 	switch {
 	case !pr.Draft || merged:
 		return merging(mergeable, merged)
-	case alreadyWatched(t, pr.Number):
+	case watched:
 		return watchedMerging(mergeable)
 	}
 	return drafted(merging(mergeable, false))

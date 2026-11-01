@@ -70,9 +70,9 @@ func TestACoresPullRequestWaitsForAPerson(t *testing.T) {
 
 // A draft no writer's retry watches, as when a person made the factory's
 // pull request a draft to stop it, is theirs: once CI's gate passes, the
-// factory says once that it won't mark it ready, asks GitHub for nothing,
-// and hears commands again, so a writer's retry has it watch the draft and
-// merge it after all (#369's review).
+// factory says once that it won't mark it ready, and that it stays stopped,
+// asks GitHub for nothing, and hears commands again, so a writer's retry
+// has it watch the draft and merge it after all (#369's review, #371).
 func TestADraftAPersonMadeOfTheFactorysPullRequestStaysTheirs(t *testing.T) {
 	r, g := draftRig(t)
 	n := ratified(t, r).Marker.PR
@@ -81,7 +81,8 @@ func TestADraftAPersonMadeOfTheFactorysPullRequestStaysTheirs(t *testing.T) {
 	r.gh.ci(n, "success")
 	pollOK(t, r, "after CI's gate passed on a draft a person made")
 	said := r.expect(1, KindFailed, LabelHumanReview)
-	if said.Marker.Why() != FailDraft || !strings.Contains(retry263Visible(said.Comment.Body), fmt.Sprintf("close #%d or this issue", n)) {
+	if said.Marker.Why() != FailDraft || !strings.Contains(retry263Visible(said.Comment.Body), "no retry asked me to watch it") ||
+		!strings.Contains(retry263Visible(said.Comment.Body), "it stays stopped") {
 		t.Fatalf("the factory must say once that it won't mark the draft ready: %+v\n%s", said.Marker, said.Comment.Body)
 	}
 	posts := len(r.gh.posts(1))

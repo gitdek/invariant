@@ -1323,7 +1323,7 @@
       case "trusted": return `${pr} passed CI's gate, and it changes the trusted base, so a person merges it. Review it and merge it on GitHub.`;
       case "merge": return `CI's gate passed on ${pr}, but GitHub refused to merge it, or to mark its draft ready, or kept failing to for half an hour, or an hour and a half under its primary rate limit.`;
       case "unready": return `The build passed, but GitHub refused to mark ${pr}, the draft open from its branch, ready for review, or kept failing to for half an hour, or an hour and a half under its primary rate limit.`;
-      case "draft": return `CI's gate passed on ${pr}, but it's a draft no retry asked the factory to watch, so the factory hasn't marked it ready. Closing it, or the issue, stops the factory.`;
+      case "draft": return `CI's gate passed on ${pr}, but it's a draft no retry has the factory watch, as when a person turned it into one to stop the factory, so the factory hasn't marked it ready. It stays stopped until a writer's retry has the factory watch it.`;
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look.`;
   }
