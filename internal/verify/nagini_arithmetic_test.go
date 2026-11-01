@@ -2,9 +2,11 @@ package verify
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -94,6 +96,92 @@ func TestNaginiRefusesArithmeticItModelsApartFromPython(t *testing.T) {
 				t.Fatalf("refused %q, want one refusal starting %q", refused, c.want)
 			}
 		})
+	}
+}
+
+// naginiOtherNames is a marked core that imports what reaches arithmetic by
+// other names, with line put on line 15, in a function.
+func naginiOtherNames(line string) string {
+	return "# +nagini\nimport builtins\nimport functools\nimport operator\nimport operator as op\nfrom typing import List\n\n" +
+		"from nagini_contracts.contracts import *\n\nNAME = '__floordiv__'\nFLOAT = 'float'\n\n\n" +
+		"def step(n: int, xs: List[int]) -> int:\n" +
+		line +
+		"    return n\n"
+}
+
+// #380's review: the pinned Nagini can't translate these other names for
+// the arithmetic the rule refuses, so today they fail closed, but a later
+// Nagini could model them as it models the operators. The gate refuses
+// each, in a marked file as in place: the operator module's functions for
+// those operators, read, imported, aliased, handed to functools.reduce or
+// handed on with the module; divmod; pow but as pow(x, y); the builtins
+// module's float and divmod; and those names looked up by a string or a
+// module's string constant, by a getattr-style call or a namespace's key.
+func TestNaginiRefusesArithmeticByOtherNames(t *testing.T) {
+	const (
+		function = "holds operator.%s, the operator module's function for an operator, which the gate checks only written as the operator"
+		module   = "holds the operator module other than to read one of its functions by name"
+		divmod   = "holds divmod, a floor division and modulo by a divisor the gate can't tell is a positive integer literal"
+		pow      = "holds pow other than as pow(x, y), and its three-argument form takes a modulo by a modulus the gate can't tell is a positive integer literal"
+		lookup   = "looks '%s' up by name, which reaches arithmetic the gate checks only written as an operator"
+		floats   = "deals in floats, which the pinned Nagini leaves uninterpreted"
+	)
+	at := func(line int, what string, args ...any) string {
+		return fmt.Sprintf("core.py:%d: refused before Nagini runs: the line "+what, append([]any{line}, args...)...)
+	}
+	for _, c := range []struct{ name, src, want string }{
+		{"operator.floordiv", naginiOtherNames("    r = operator.floordiv(7, n)\n"), at(15, function, "floordiv")},
+		{"operator.or_", naginiOtherNames("    r = operator.or_(n, 1)\n"), at(15, function, "or_")},
+		{"operator.mod", naginiOtherNames("    r = operator.mod(7, n)\n"), at(15, function, "mod")},
+		{"operator.truediv", naginiOtherNames("    r = operator.truediv(n, 3)\n"), at(15, function, "truediv")},
+		{"operator.and_", naginiOtherNames("    r = operator.and_(n, 3)\n"), at(15, function, "and_")},
+		{"operator.xor", naginiOtherNames("    r = operator.xor(n, 1)\n"), at(15, function, "xor")},
+		{"operator.invert", naginiOtherNames("    r = operator.invert(n)\n"), at(15, function, "invert")},
+		{"operator.inv", naginiOtherNames("    r = operator.inv(n)\n"), at(15, function, "inv")},
+		{"operator.mul", naginiOtherNames("    r = operator.mul(xs, n)\n"), at(15, function, "mul")},
+		{"operator.ifloordiv", naginiOtherNames("    r = operator.ifloordiv(n, -2)\n"), at(15, function, "ifloordiv")},
+		{"an aliased operator module", naginiOtherNames("    r = op.mod(7, n)\n"), at(15, function, "mod")},
+		{"functools.reduce with operator.floordiv", naginiOtherNames("    r = functools.reduce(operator.floordiv, xs)\n"), at(15, function, "floordiv")},
+		{"the operator module handed on", naginiOtherNames("    r = getattr(operator, 'floordiv')(7, n)\n"), at(15, module)},
+		{"divmod", naginiOtherNames("    r = divmod(7, n)\n"), at(15, divmod)},
+		{"builtins.divmod", naginiOtherNames("    r = builtins.divmod(7, n)\n"), at(15, divmod)},
+		{"three-argument pow", naginiOtherNames("    r = pow(7, n, 3)\n"), at(15, pow)},
+		{"pow's modulus by keyword", naginiOtherNames("    r = pow(7, n, mod=3)\n"), at(15, pow)},
+		{"pow handed on", naginiOtherNames("    r = functools.reduce(pow, xs)\n"), at(15, pow)},
+		{"getattr of a method behind an operator", naginiOtherNames("    r = getattr(n, '__floordiv__')(2)\n"), at(15, lookup, "__floordiv__")},
+		{"__getattribute__ of one", naginiOtherNames("    r = n.__getattribute__('__or__')(1)\n"), at(15, lookup, "__or__")},
+		{"operator.methodcaller of one", naginiOtherNames("    r = operator.methodcaller('__mod__', 3)(n)\n"), at(15, lookup, "__mod__")},
+		{"a namespace's key", naginiOtherNames("    r = vars(int)['__floordiv__']\n"), at(15, lookup, "__floordiv__")},
+		{"a module constant's name", naginiOtherNames("    r = getattr(n, NAME)(2)\n"), at(15, lookup, "__floordiv__")},
+		{"getattr(builtins, 'float')", naginiOtherNames("    r = getattr(builtins, 'float')(n)\n"), at(15, "looks 'float' up by name, so it "+floats)},
+		{"a module constant naming float", naginiOtherNames("    r = getattr(builtins, FLOAT)(n)\n"), at(15, "looks 'float' up by name, so it "+floats)},
+		{"builtins.float", naginiOtherNames("    r = builtins.float(n)\n"), at(15, floats)},
+		{"from operator import", "# +nagini\nfrom operator import floordiv as fd\n\n\ndef step(n: int) -> int:\n    return fd(7, n)\n", at(2, function, "floordiv")},
+		{"a name from operator", "# +nagini\nfrom operator import floordiv as fd\n\n\ndef step(n: int) -> int:\n    return fd(7, n)\n", at(6, function, "floordiv")},
+		{"from operator import *", "# +nagini\nfrom operator import *\n", at(2, "star-imports the operator module")},
+		{"from builtins import float", "# +nagini\nfrom builtins import float as real\n\n\ndef step(n: int) -> int:\n    r = real(n)\n    return n\n", at(6, floats)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			refused, err := naginiRefusals("core.py", []byte(c.src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.ContainsFunc(refused, func(r string) bool { return strings.HasPrefix(r, c.want) }) {
+				t.Fatalf("refused %q, want one starting %q", refused, c.want)
+			}
+		})
+	}
+	// What those modules offer that isn't that arithmetic, and pow as
+	// pow(x, y), which is x ** y, stay, and so does a string naming float
+	// that no lookup takes.
+	refused, err := naginiRefusals("core.py", []byte(strings.Replace(naginiOtherNames(
+		"    r = operator.add(n, 1) + operator.neg(n) + pow(n, 2) + functools.reduce(operator.add, xs) + len(getattr(xs, 'copy')())\n"),
+		"NAME = '__floordiv__'\n", "", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refused) != 0 {
+		t.Fatalf("refused %q", refused)
 	}
 }
 

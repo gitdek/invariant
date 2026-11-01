@@ -356,14 +356,30 @@ class Kinds:
         self.typing = {n: rows[0].get("name") for n, rows in bindings.items()
                        if len(rows) == 1 and rows[0]["kind"] == "from" and rows[0]["module"] == "typing" and rows[0]["level"] == 0}
         self.returns = {s.name: s.returns for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.returns is not None}
-        self.constants = {}
+        self.constants, self.strings = {}, {}
         for s in tree.body:
             targets = s.targets if isinstance(s, ast.Assign) else [s.target] if isinstance(s, ast.AnnAssign) else []
             if len(targets) == 1 and isinstance(targets[0], ast.Name) and s.value is not None:
                 try:
-                    self.constants[targets[0].id] = value_kind(ast.literal_eval(s.value))
+                    value = ast.literal_eval(s.value)
                 except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-                    pass
+                    continue
+                self.constants[targets[0].id] = value_kind(value)
+                if isinstance(value, str) and len(bindings.get(targets[0].id, ())) == 1:
+                    self.strings[targets[0].id] = value
+        # What an import anywhere in the module binds each name to, by
+        # dotted name: import operator as op binds op to operator, and from
+        # operator import floordiv binds floordiv to operator.floordiv (#380).
+        self.imports = {}
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Import):
+                for a in sub.names:
+                    top = a.name.split(".")[0]
+                    self.imports.setdefault(a.asname or top, set()).add(a.name if a.asname else top)
+            elif isinstance(sub, ast.ImportFrom) and sub.level == 0 and sub.module:
+                for a in sub.names:
+                    if a.name != "*":
+                        self.imports.setdefault(a.asname or a.name, set()).add(sub.module + "." + a.name)
         self.env, self.elements = {}, {}
         for name, a in self.params.items():
             self.env[name], self.elements[name] = self.annotation(a.annotation)
@@ -747,6 +763,40 @@ OPERATOR_METHODS = frozenset((
 METHODS = ("reads %s, the method behind an operator, which the gate checks only written as the operator, since the pinned "
            "Nagini can model its arithmetic apart from Python")
 
+# The other names for that arithmetic, which the pinned Nagini can't
+# translate today but a later one could model as it models the operators,
+# so the rule refuses them rather than rest on that (#380): the operator
+# module's functions for those operators, divmod, pow but as pow(x, y),
+# which is x ** y, the builtins module's float, complex, divmod and pow,
+# and any of their names looked up by a string.
+OPERATOR_FUNCTIONS = frozenset((
+    "truediv", "floordiv", "mod", "and_", "or_", "xor", "inv", "invert", "mul",
+    "itruediv", "ifloordiv", "imod", "iand", "ior", "ixor", "imul", "__inv__",
+)) | OPERATOR_METHODS
+FUNCTIONS = ("holds operator.%s, the operator module's function for an operator, which the gate checks only written as the "
+             "operator, since the pinned Nagini can model its arithmetic apart from Python")
+MODULE = ("holds the operator module other than to read one of its functions by name, and its functions for operators "
+          "are arithmetic the gate checks only written as the operator, since the pinned Nagini can model it apart from Python")
+STAR = ("star-imports the operator module, whose functions for operators are arithmetic the gate checks only written as "
+        "the operator, since the pinned Nagini can model it apart from Python")
+DIVMOD = ("holds divmod, a floor division and modulo by a divisor the gate can't tell is a positive integer literal, which "
+          "the pinned Nagini could divide as Viper does, apart from Python for a negative divisor")
+POW = ("holds pow other than as pow(x, y), and its three-argument form takes a modulo by a modulus the gate can't tell is "
+       "a positive integer literal, which the pinned Nagini could take as Viper does, apart from Python for a negative one")
+BUILTINS = {"builtins.float": FLOATS, "builtins.complex": FLOATS, "builtins.divmod": DIVMOD, "builtins.pow": POW}
+REFUSED_NAMES = {**BUILTINS, **{"operator." + f: FUNCTIONS % f for f in OPERATOR_FUNCTIONS}}
+# What a lookup by name takes, by the name it's called by, and what holds a
+# module's or a type's names by key.
+LOOKUPS = frozenset(("getattr", "hasattr", "setattr", "delattr", "getattr_static", "attrgetter", "methodcaller",
+                     "__getattribute__", "__getattr__", "__setattr__", "__delattr__"))
+NAMESPACE_CALLS = frozenset(("vars", "globals", "locals"))
+LOOKED_UP = OPERATOR_FUNCTIONS | frozenset(("float", "complex", "divmod", "pow"))
+LOOKUP = ("looks %r up by name, which reaches arithmetic the gate checks only written as an operator, or the builtin it "
+          "refuses, since the pinned Nagini can model it apart from Python")
+LOOKUP_FLOAT = "looks %r up by name, so it " + FLOATS
+# Python 3.8 wraps a subscript's key in an Index, which later versions drop.
+INDEX = (ast.Index,) if sys.version_info < (3, 9) else ()
+
 
 def arithmetic(node, kinds, nodes=None, fractions=False):
     """Each place a function, its signature, body and contract alike, holds
@@ -757,7 +807,14 @@ def arithmetic(node, kinds, nodes=None, fractions=False):
     it divides as Viper does, multiplication by other than an int literal
     unless both sides are ints, which could repeat a sequence past what
     Python can index, and the methods behind them, read by name. Shifts and
-    ** stay: Nagini's preconditions on them are where Python raises.
+    ** stay: Nagini's preconditions on them are where Python raises. So do
+    the other names for that arithmetic, though the pinned Nagini can't
+    translate them, since a later one could: the operator module's
+    functions for those operators, read, imported or handed on with the
+    module, divmod, pow but as pow(x, y), the builtins module's float,
+    complex, divmod and pow, and any of their names, or the methods', in a
+    string or a module's string constant a lookup by name takes, or as a
+    namespace's key, and any string that's one of the methods' names.
 
     For a file marked # +nagini (#380), nodes are one of its scopes, a
     function's own or the rest of the file's, read by that scope's kinds,
@@ -792,6 +849,25 @@ def arithmetic(node, kinds, nodes=None, fractions=False):
                     and positive(n.args[1].left) and positive(n.args[1].right) and n.args[1].left.value <= n.args[1].right.value):
                 permissions.add(id(n.args[1]))
 
+    # The names that are an attribute's base, and the calls of pow that are
+    # pow(x, y), for the other names of that arithmetic (#380).
+    bases = {id(x.value) for x in nodes if isinstance(x, ast.Attribute)}
+    pows = {id(x.func) for x in nodes if isinstance(x, ast.Call) and isinstance(x.func, ast.Name) and x.func.id == "pow"
+            and len(x.args) == 2 and not x.keywords and not any(isinstance(a, ast.Starred) for a in x.args)}
+
+    def named(x):
+        """The string x is, or the module's string constant it reads."""
+        if isinstance(x, ast.Constant) and isinstance(x.value, str):
+            return x.value
+        if isinstance(x, ast.Name) and x.id in kinds.strings and x.id not in kinds.bound and x.id not in kinds.params:
+            return kinds.strings[x.id]
+        return None
+
+    def looked_up(x):
+        value = named(x)
+        if value in LOOKED_UP:
+            problem(x, (LOOKUP_FLOAT if value in ("float", "complex") else LOOKUP) % value)
+
     for n in nodes:
         if isinstance(n, ast.Constant) and type(n.value) in (float, complex):
             problem(n, FLOATS)
@@ -800,6 +876,39 @@ def arithmetic(node, kinds, nodes=None, fractions=False):
             problem(n, FLOATS)
         elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and n.attr in OPERATOR_METHODS:
             problem(n, METHODS % n.attr)
+        # The other names for that arithmetic, wherever they stand.
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            imported = kinds.imports.get(n.id, set())
+            for target in sorted(imported & set(REFUSED_NAMES)):
+                problem(n, REFUSED_NAMES[target])
+            if "operator" in imported and id(n) not in bases:
+                problem(n, MODULE)
+            if n.id == "divmod" and kinds.builtin("divmod"):
+                problem(n, DIVMOD)
+            if n.id == "pow" and kinds.builtin("pow") and id(n) not in pows:
+                problem(n, POW)
+        elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name) and n.attr not in OPERATOR_METHODS:
+            modules = kinds.imports.get(n.value.id, set()) | ({"builtins"} if n.value.id == "__builtins__" else set())
+            for target in sorted({m + "." + n.attr for m in modules} & set(REFUSED_NAMES)):
+                problem(n, REFUSED_NAMES[target])
+        elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module in ("operator", "builtins"):
+            for a in n.names:
+                if n.module == "operator" and a.name == "*":
+                    problem(n, STAR)
+                elif n.module + "." + a.name in REFUSED_NAMES:
+                    problem(n, REFUSED_NAMES[n.module + "." + a.name])
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in OPERATOR_METHODS:
+            looked_up(n)
+        elif isinstance(n, ast.Call):
+            f = n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else None
+            if f in LOOKUPS:
+                for a in n.args + [k.value for k in n.keywords]:
+                    looked_up(a)
+        elif isinstance(n, ast.Subscript) and (
+                isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id in NAMESPACE_CALLS
+                or isinstance(n.value, ast.Attribute) and n.value.attr == "__dict__"
+                or isinstance(n.value, ast.Name) and n.value.id == "__builtins__"):
+            looked_up(n.slice.value if isinstance(n.slice, INDEX) else n.slice)
         if id(n) in inside:
             continue
         if isinstance(n, (ast.BinOp, ast.AugAssign)):
