@@ -184,7 +184,7 @@ func pinCmd(args []string) int {
 		fmt.Println("Every pin already matches the statements' text.")
 	} else {
 		fmt.Printf("Pinned the current text of: %s.\n", strings.Join(changed, ", "))
-		fmt.Println("Pinning records a ratification. Log it in decisions/log.md.")
+		fmt.Println("Pinning records a ratification. The decision it ratifies is recorded with `invariant decisions decide`.")
 	}
 	// A lock ratified by hand holds only for the proposal its decision's
 	// ratify line names, so the person needs its hash (D-0208).

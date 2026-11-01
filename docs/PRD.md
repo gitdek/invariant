@@ -132,7 +132,7 @@ Each requirement serves one goal.
 - **5.2 Effort is bounded.** Each agent run has a timeout, and Claude Code's a cost budget and a turn limit, or Codex's a cap on steps, and synthesis gets at most four gate runs. Built. `D-0000` `D-0026` `D-0134`
 - **5.3 The checker's memory stays flat** as models grow. Built. `D-0047`
 - **5.4 The factory records its numbers:** each issue's factory time, the comments people made, agent spend and gate runs, in its merge comment and its hidden marker. Built. `D-0048`
-- **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Built: an issue picks its coding agent with an `Agent:` line, else its project's manifest does, and the draft settles it (#173). Codex runs under its own permission profile, and its first build passed the gate with proof (#189). Since 2026-10-29 the factory runs on Codex by default, and Claude Code only where its operator turns it on (#207); its first Codex build, #225, merged that day. `D-0028` `D-0052` `D-0130` `D-0138` `D-0150` `D-0153`
+- **5.5 Any coding agent.** The factory's agents run on Codex as well as Claude Code, and the working rules live in `AGENTS.md`, which any agent reads. Built: an issue picks its coding agent with an `Agent:` line, else its project's manifest does, and the draft settles it (#173). Codex runs under its own permission profile, and its first build passed the gate with proof (#189). Since 2026-10-29 the factory runs on Codex by default, and Claude Code only where its operator turns it on (#207); its first Codex build, #225, merged that day, and since #374 Codex builds have the loop guard too. `D-0028` `D-0052` `D-0130` `D-0138` `D-0150` `D-0153` `D-0257`
 - **5.6 Other repositories and existing code.** `invariant init` sets up a repository, and existing-code projects check code that's already there, without changing it. Built: copythis-ad's lease protocol was checked on every pull request, and the check caught a real bug, until that repository started over and left Invariant on 2026-10-02. `D-0053` `D-0054` `D-0059` `D-0149`
 - **5.7 A hosted factory** that runs on an API key. Later. `D-0028`
 
@@ -172,7 +172,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 11 | A driver can't skip a step (3.11) | Done `D-0059` `D-0082` `D-0090` |
 | 12 | One decision graph for every project (3.12) | Done `D-0096` |
 | 13 | The factory takes every change, and a whole PRD (2.8) | In progress `D-0105` `D-0153` |
-| 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | In progress: what's left is the loop guard D-0151 gives Codex builds `D-0129` `D-0151` |
+| 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | Done: #153's eight steps merged, and the loop guard #374 gave Codex builds closed the last gap against the same rules and limits `D-0129` `D-0151` `D-0257` |
 | 15 | Verification inside ordinary code (goal 6): prove critical components in place, and check the code around them | In progress `D-0152` |
 | Later | Type checking, a TypeScript proof path, a hosted factory | Later |
 
