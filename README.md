@@ -926,6 +926,8 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
    Codex's commands then run under a permission profile of Codex's own: they see only the workspace, the system and Go's toolchain, reach no network, and can't read your home directory. The watcher checks that before it runs Codex, and runs one Codex run at a time.
 
+   The watcher keeps its clone and every run's transcript, checks and records in its work directory, `-work`, by default `invariant/watch` in your user cache directory. A plan's draft and build each give their checks a Go build cache of their own and remove it when they end, and a watcher removes any a stopped watcher left when it starts ([D-0233](decisions/journal/D-0233.jsonl)).
+
 5. **Open an issue** that describes a component and what must always be true of it, and label it `invariant` or comment `/invariant solve`. [#18](https://github.com/gitdek/invariant/issues/18) is a good model. The factory asks about anything it can't settle, proposes statements, and builds once a writer ratifies them.
 
 `Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).
@@ -969,7 +971,7 @@ The slice plan and slice 1's acceptance criteria are in [D-0013](decisions/D-001
 
 This repository runs on its own rule: **a decision that isn't written down didn't happen.**
 
-- [`decisions/`](decisions/) is the record of what was decided, when, and by whom: a journal with one file per decision, and [`log.md`](decisions/log.md), its table. Decisions that are hard to reverse also record the options considered, the reasoning, and what would reopen them. `invariant decisions` writes them, and answers what rests on each one.
+- [`decisions/`](decisions/) is the record of what was decided, when, and by whom: a journal with one file per decision, and [`log.md`](decisions/log.md), its table. Decisions that are hard to reverse also record the options considered, the reasoning, and what would reopen them. `invariant decisions` writes them, and answers what rests on each one. `invariant decisions show` and the `decision` MCP tool also print the exact proposal a person ratified, when the ratification names one, as one for a lock ratified by hand does.
 - A coding agent asks the record through MCP tools, which `invariant mcp -decisions -write` serves for the checkout. [`.mcp.json`](.mcp.json) starts them for agents that read it. Codex reads [`.codex/config.toml`](.codex/config.toml) instead, once you trust the checkout, and starts the server where Codex starts, so start Codex at the checkout's root. To give Codex the tools wherever it starts, add this to `~/.codex/config.toml`, with your checkout's path:
 
   ```toml
