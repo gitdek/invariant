@@ -211,6 +211,13 @@ func ctDeclaration(t *testing.T, inv *project.ComponentInventory, id string) pro
 	return project.Component{}
 }
 
+// ctAsserted is one passing assertion in the backing tests' file.
+func ctAsserted(t *testing.T, inv *project.ComponentInventory) []verify.ComponentRuntimeAssertionResult {
+	t.Helper()
+	source := ctFile(t, inv, ctTests)
+	return []verify.ComponentRuntimeAssertionResult{{ID: "assertEqual:1", Source: &source, Exercised: true, Outcome: "passed"}}
+}
+
 func ctFile(t *testing.T, inv *project.ComponentInventory, name string) project.ComponentFile {
 	t.Helper()
 	for _, f := range append(append([]project.ComponentFile(nil), inv.Files...), inv.Provenance.Files...) {
@@ -261,9 +268,12 @@ func ctPassing(t *testing.T, inv *project.ComponentInventory, r *verify.Report) 
 		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), ctFile(t, inv, ctProject+"/fixture.json")},
 		Outcome:    "passed",
 		Tests: []verify.ComponentRuntimeTestResult{
-			{Check: parses, Exercised: true, Outcome: "passed"},
-			{Check: rejects, Exercised: true, Outcome: "passed"},
+			{Check: parses, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)},
+			{Check: rejects, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)},
 		},
+		Implementation: &verify.ComponentContractImplementation{Kind: "standard_library", Callable: "python",
+			File: &project.ComponentFile{Path: "json/__init__.py", SHA256: ctHash("the runtime's json")}, Python: "3.13.15"},
+		Exercise: []verify.ComponentContractExercise{{Check: parses, Calls: 1}, {Check: rejects, Calls: 2}},
 	}
 }
 
@@ -379,6 +389,12 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 		{"no contract snapshot", func(x *verify.ComponentContractTestResult) { x.Inputs = x.Inputs[1:] }, "unchecked"},
 		{"no contract file", func(x *verify.ComponentContractTestResult) { x.FileInputs = x.FileInputs[1:] }, "unchecked"},
 		{"no invocation input", func(x *verify.ComponentContractTestResult) { x.FileInputs = x.FileInputs[:2] }, "unchecked"},
+		{"no implementation", func(x *verify.ComponentContractTestResult) { x.Implementation = nil }, "unchecked"},
+		{"another implementation", func(x *verify.ComponentContractTestResult) {
+			x.Implementation.Distribution, x.Implementation.Version, x.Implementation.Recorded = "simplejson", "3.19", true
+		}, "unchecked"},
+		{"stub only", func(x *verify.ComponentContractTestResult) { x.Exercise[1].Calls = 0 }, "tested"},
+		{"no exercise", func(x *verify.ComponentContractTestResult) { x.Exercise = nil }, "unchecked"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := ctReport(t, inv, ctToolchain(ctWheel()))
@@ -398,11 +414,14 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 	// An application operation's tests also need its declaration's snapshot.
 	r = ctReport(t, inv, ctToolchain(ctWheel()))
 	test := ctID(ctTests, "SaveTests.test_returns")
+	store := ctFile(t, inv, "app/storage/store.py")
 	save := verify.ComponentContractTestResult{Contract: "store.save", Check: test, Invocation: ctInvocation(t, inv, "store.save"),
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: ctRuntime}, Binding: ctContract(t, r, "store.save").Binding,
 		Inputs:     []project.Component{ctDeclaration(t, inv, ctID(ctContracts, "save")), ctDeclaration(t, inv, test)},
-		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), ctFile(t, inv, "app/storage/store.py")},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed"}}}
+		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests), store},
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: test, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)}},
+		Implementation: &verify.ComponentContractImplementation{Kind: "application", Callable: "python", File: &store},
+		Exercise:       []verify.ComponentContractExercise{{Check: test, Calls: 1}}}
 	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{save}); err != nil {
 		t.Fatal(err)
 	}
@@ -415,6 +434,17 @@ func TestTrustedContractTestsSupportOnlyFromCompleteRuns(t *testing.T) {
 	}
 	if ctContract(t, r, "store.save").Support != "tested" {
 		t.Fatalf("complete application support: %+v", r.Components.ContractTests)
+	}
+	// And the implementation its run resolved must be the declaration's own
+	// source as the inventory holds it.
+	other := store
+	other.SHA256 = ctHash("an edited store")
+	save.Implementation.File = &other
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{save}); err != nil {
+		t.Fatal(err)
+	}
+	if ctContract(t, r, "store.save").Support != "untested" {
+		t.Fatal("another source's implementation supported the application operation")
 	}
 }
 
@@ -503,7 +533,7 @@ func TestTrustedContractTestsAnUnsuccessfulRunVetoesSupport(t *testing.T) {
 	second := func(r *verify.Report, process, outcome string, exercised bool) verify.ComponentContractTestResult {
 		x := ctPassing(t, inv, r)
 		x.Check, x.Invocation, x.Outcome = rejects, ctInvocationOf(t, inv, "json.loads", "rejects"), process
-		x.Tests = []verify.ComponentRuntimeTestResult{{Check: rejects, Exercised: exercised, Outcome: outcome}}
+		x.Tests = []verify.ComponentRuntimeTestResult{{Check: rejects, Exercised: exercised, Outcome: outcome, Assertions: ctAsserted(t, inv)}}
 		return x
 	}
 	for _, c := range []struct {
@@ -667,7 +697,10 @@ func TestTrustedContractRetentionRejectsStaleAssociationsAtomically(t *testing.T
 		Runner: &verify.ComponentProofTool{Name: "Python unittest", Version: ctRuntime}, Binding: ctContract(t, r, "packaging.Version").Binding,
 		Inputs:     []project.Component{ctDeclaration(t, inv, ctID(ctContracts, "version")), ctDeclaration(t, inv, version)},
 		FileInputs: []project.ComponentFile{ctFile(t, inv, ctContracts), ctFile(t, inv, ctTests)},
-		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: version, Exercised: true, Outcome: "passed"}}}
+		Outcome:    "passed", Tests: []verify.ComponentRuntimeTestResult{{Check: version, Exercised: true, Outcome: "passed", Assertions: ctAsserted(t, inv)}},
+		Implementation: &verify.ComponentContractImplementation{Kind: "dependency", Callable: "python", Distribution: "packaging", Version: "24.2", Recorded: true,
+			File: &project.ComponentFile{Path: "packaging/version.py", SHA256: ctHash("packaging/version.py")}},
+		Exercise: []verify.ComponentContractExercise{{Check: version, Calls: 3}}}
 	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{supported, ctPassing(t, inv, r)}); err != nil {
 		t.Fatal(err)
 	}
@@ -896,17 +929,86 @@ func TestTrustedContractEvidenceOwnsItsValues(t *testing.T) {
 	}
 }
 
-func TestGateRefusesTrustedContractsBeforeTools(t *testing.T) {
+func TestGateRefusesABackingTestWithNoInvocationBeforeTools(t *testing.T) {
 	_, p := ctFixture(t)
-	// Without the proof selection the sampled gate would admit the target.
+	// Leave json.loads's second backing test with nothing to run it.
+	loads := &p.Manifest.Components.TrustedContracts[0]
+	loads.Invocations = loads.Invocations[:1]
 	p.Manifest.Components.Checks = nil
 	ctSave(t, p)
-	if err := verify.Check(p.Dir); err == nil || !strings.Contains(err.Error(), "trusted contracts") {
-		t.Fatalf("the gate admitted trusted contracts it can't test: %v", err)
+	if err := verify.Check(p.Dir); err == nil || !strings.Contains(err.Error(), `trusted contract "json.loads"'s backing test`) {
+		t.Fatalf("the gate admitted a backing test nothing runs: %v", err)
 	}
-	p.Manifest.Components.TrustedContracts = nil
-	ctSave(t, p)
-	if err := verify.Check(p.Dir); err != nil && strings.Contains(err.Error(), "trusted contracts") {
-		t.Fatalf("the refusal outlived the contracts: %v", err)
+}
+
+// A contract that declares no Exsures for an exception says its operation
+// never raises it under its precondition, so a backing test that saw one
+// escape found the contract wrong, and supports nothing.
+func TestTrustedContractTestsRefuseExceptionsTheContractDoesntDeclare(t *testing.T) {
+	_, p := ctFixture(t)
+	inv := ctInventory(t, p.Dir)
+	parses, rejects := ctID(ctTests, "LoadsTests.test_parses"), ctID(ctTests, "LoadsTests.test_rejects_empty")
+	raising := func(r *verify.Report, raised ...verify.ComponentContractRaise) verify.ComponentContractTestResult {
+		x := ctPassing(t, inv, r)
+		x.Exercise[1].Raised = raised
+		return x
+	}
+	// A declared exception supports it.
+	r := ctReport(t, inv, ctToolchain(ctWheel()))
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{raising(r, verify.ComponentContractRaise{Exception: "json.decoder.JSONDecodeError", Calls: 1, Declared: true})}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "tested" || len(r.Components.ContractDiagnostics) != 0 {
+		t.Fatalf("a declared exception: %+v, %+v", got, r.Components.ContractDiagnostics)
+	}
+	// An undeclared one doesn't, and says which operation raised what.
+	r = ctReport(t, inv, ctToolchain(ctWheel()))
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{raising(r, verify.ComponentContractRaise{Exception: "builtins.KeyError", Calls: 2})}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "untested" {
+		t.Fatalf("an undeclared exception supported its contract: %+v", got)
+	}
+	found := false
+	for _, d := range r.Components.ContractDiagnostics {
+		found = found || d.Kind == verify.UnsupportedContract && d.Contract == "json.loads" &&
+			strings.Contains(d.Detail, rejects+": json.loads raised builtins.KeyError, which its contract's Exsures doesn't declare")
+	}
+	if !found {
+		t.Fatalf("no diagnostic names the operation, the test and the exception: %+v", r.Components.ContractDiagnostics)
+	}
+	for _, row := range r.Components.ContractTests {
+		for _, test := range row.Tests {
+			if test.Check == parses && test.Status != "tested" {
+				t.Fatalf("a test that saw nothing escape lost its support: %+v", row)
+			}
+		}
+	}
+	// A second run that saw one vetoes another's pass.
+	r = ctReport(t, inv, ctToolchain(ctWheel()))
+	second := raising(r, verify.ComponentContractRaise{Exception: "builtins.KeyError", Calls: 1})
+	second.Check, second.Invocation = rejects, ctInvocationOf(t, inv, "json.loads", "rejects")
+	second.Tests = second.Tests[1:]
+	if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{ctPassing(t, inv, r), second}); err != nil {
+		t.Fatal(err)
+	}
+	vetoed := false
+	for _, d := range r.Components.ContractDiagnostics {
+		vetoed = vetoed || d.Kind == verify.ConflictingSupport && strings.Contains(d.Detail, "saw its operation raise builtins.KeyError, which its contract's Exsures doesn't declare")
+	}
+	if got := ctContract(t, r, "json.loads"); got.Support != "untested" || !vetoed {
+		t.Fatalf("a run that saw an undeclared exception didn't veto: %+v, %+v", got, r.Components.ContractDiagnostics)
+	}
+	// Raised exceptions are counted calls, each named once.
+	for _, bad := range [][]verify.ComponentContractRaise{
+		{{Exception: "", Calls: 1}},
+		{{Exception: "builtins.KeyError", Calls: 0}},
+		{{Exception: "builtins.KeyError", Calls: 1}, {Exception: "builtins.KeyError", Calls: 1}},
+		{{Exception: "builtins.KeyError", Calls: 3}},
+	} {
+		r := ctReport(t, inv, ctToolchain(ctWheel()))
+		if err := r.AttributeComponentContractTests(inv, []verify.ComponentContractTestResult{raising(r, bad...)}); err == nil {
+			t.Fatalf("invalid raised exceptions accepted: %+v", bad)
+		}
 	}
 }

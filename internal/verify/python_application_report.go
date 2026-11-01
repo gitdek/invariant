@@ -123,7 +123,11 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 	for _, c := range append(slices.Clone(inv.Components), inv.Provenance.Declarations...) {
 		declarations[c.ID] = c
 	}
+	contracts := pythonApplicationContracts(inv)
 	for _, x := range r.Application.Executions {
+		if _, ok := contracts[x.Key.Target]; ok {
+			continue
+		}
 		inputs := []project.Component{declarations[x.Key.Target], declarations[x.Key.Check]}
 		outcome := "failed"
 		if x.Success {
@@ -245,11 +249,21 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 	if err := r.AttributeComponentAssumptions(inv, assumptions); err != nil {
 		return err
 	}
+	tests, err := r.pythonApplicationContractTests(inv, declarations)
+	if err != nil {
+		return err
+	}
+	if err := r.AttributeComponentContractTests(inv, tests); err != nil {
+		return err
+	}
 	for i := range r.Components.Conformance {
 		r.Components.Conformance[i].Origin = "gate"
 	}
 	for i := range r.Components.Runtime {
 		r.Components.Runtime[i].Origin = "gate"
+	}
+	for i := range r.Components.ContractTests {
+		r.Components.ContractTests[i].Origin = "gate"
 	}
 	return nil
 }
