@@ -50,6 +50,16 @@ type BuildResult struct {
 	// its review's, stayed unavailable (#261). Nothing it left reached the
 	// checkout, and a retry builds it again, review included.
 	ProviderError string `json:"provider_error,omitempty"`
+	// AgentError is the error the agent's last run ended with, after any
+	// fallback. The build failed then, whatever its checks found, and what
+	// it left is kept, checked but not reviewed, for a person to read (#271).
+	AgentError string `json:"agent_error,omitempty"`
+}
+
+// Built says the build succeeded: its agent's last run finished, its checks
+// passed and the review approves it.
+func (r *BuildResult) Built() bool {
+	return r.Passed && r.Approved && r.AgentError == ""
 }
 
 // Build implements issue n's ratified plan in the checkout at root, which
@@ -148,7 +158,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 			r.Fallback = fb
 		}
 		r.Final = Result{}
-		r.Summary = ""
+		r.Summary, r.AgentError = "", ""
 		if runErr != nil {
 			r.Summary = fmt.Sprintf("The agent's run ended with an error: %v\n", runErr)
 		}
@@ -187,6 +197,13 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		r.Passed = final.Passed() && len(r.Changes.Written) > 0
 		if len(r.Changes.Written) == 0 {
 			r.Summary = "The build changed none of the permitted files.\n" + r.Summary
+		}
+		// An agent whose last run ended with an error left unfinished work,
+		// however its checks did: the build failed, and its work is kept for
+		// a person, unreviewed (#271).
+		if runErr != nil {
+			r.AgentError = runErr.Error()
+			return r, nil
 		}
 		if !r.Passed {
 			return r, nil
