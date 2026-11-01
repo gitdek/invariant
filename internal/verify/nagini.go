@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -37,7 +38,7 @@ func naginiSources(pkg string) (proved, plain []string, err error) {
 	}
 	for _, e := range entries {
 		n := e.Name()
-		if !strings.HasSuffix(n, ".py") || strings.HasPrefix(n, "test_") || strings.HasSuffix(n, "_test.py") {
+		if !strings.HasSuffix(n, ".py") || naginiTestFile(n) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(pkg, n))
@@ -55,6 +56,12 @@ func naginiSources(pkg string) (proved, plain []string, err error) {
 	return proved, plain, nil
 }
 
+// naginiTestFile says whether a Python file's name makes it a test, which
+// the gate runs and never proves.
+func naginiTestFile(name string) bool {
+	return strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.py")
+}
+
 func hasLine(src, want string) bool {
 	for _, line := range strings.Split(src, "\n") {
 		if strings.TrimSpace(line) == want {
@@ -70,33 +77,78 @@ func hasLine(src, want string) bool {
 // pinned Nagini models apart from Python, by the rule an in-place proof
 // applies (#359), and refuses one that holds any before Nagini runs: the
 // code fails, saying where and why, and Nagini never sees the file (#380).
-// The image is acquired only once a file needs Nagini.
+//
+// Nagini also reads the modules a marked file imports, and takes their
+// contracts without proving their bodies, so the gate refuses, the same way,
+// a marked file that imports a module of its package other than another
+// marked file proved in the same run, and one whose proof would rest on a
+// marked file the gate refuses (#383). Each file then runs in a directory of
+// its own, holding only that file and the marked files it imports, so
+// Nagini can read no other module of the project, and the gate says so of a
+// proof that rests on a file Nagini didn't prove. The image is acquired only
+// once a file needs Nagini.
 func runNagini(ctx context.Context, acquire func(context.Context) (string, error), pkg string, proved, plain []string) (*Code, error) {
-	work, err := os.MkdirTemp("", "invariant-nagini-")
+	stage, err := os.MkdirTemp("", "invariant-nagini-")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(work)
-	if err := copyTree(pkg, work); err != nil {
+	defer os.RemoveAll(stage)
+	if err := copyTree(pkg, stage); err != nil {
 		return nil, err
+	}
+	held, err := naginiHolds(pkg, proved)
+	if err != nil {
+		return nil, err
+	}
+	files := make(map[string]*naginiFile, len(proved))
+	for _, f := range proved {
+		// The copy holds the very bytes Nagini reads.
+		src, err := os.ReadFile(filepath.Join(stage, f))
+		if err != nil {
+			return nil, err
+		}
+		refused, imports, err := naginiRead(f, src)
+		if err != nil {
+			return nil, err
+		}
+		m := &naginiFile{src: src, refused: refused}
+		m.fns, m.contracts = pythonFunctions(string(src))
+		for _, imp := range imports {
+			switch file, why := held.resolve(imp); {
+			case why != "":
+				m.refused = append(m.refused, fmt.Sprintf("%s:%d: refused before Nagini runs: the line %s", f, imp.Line, why))
+			case file != "":
+				m.imports = append(m.imports, naginiEdge{line: imp.Line, module: imp.Module, file: file})
+			}
+		}
+		files[f] = m
+	}
+	// A proof that would rest on a marked file the gate refuses is refused
+	// too, and so is every proof on the way to it.
+	for changed := true; changed; {
+		changed = false
+		for _, f := range proved {
+			m := files[f]
+			if len(m.refused) > 0 {
+				continue
+			}
+			for _, e := range m.imports {
+				if len(files[e.file].refused) > 0 {
+					m.refused = append(m.refused, fmt.Sprintf("%s:%d: refused before Nagini runs: the line imports %s, the package's %s, which the gate refuses, so the proof would rest on contracts nothing proves", f, e.line, e.module, e.file))
+				}
+			}
+			changed = changed || len(m.refused) > 0
+		}
 	}
 	code := &Code{Verifier: "Nagini", Passed: true}
 	image := ""
+	failed := map[string]bool{}
 	for _, f := range proved {
-		// The copy holds the very bytes Nagini would read.
-		src, err := os.ReadFile(filepath.Join(work, f))
-		if err != nil {
-			return nil, err
-		}
-		fns, contracts := pythonFunctions(string(src))
-		refused, err := naginiRefusals(f, src)
-		if err != nil {
-			return nil, err
-		}
-		if len(refused) > 0 {
+		m := files[f]
+		if len(m.refused) > 0 {
 			code.Passed = false
-			code.Errors = append(code.Errors, refused...)
-			code.Unverified = append(code.Unverified, fns...)
+			code.Errors = append(code.Errors, m.refused...)
+			code.Unverified = append(code.Unverified, m.fns...)
 			continue
 		}
 		if image == "" {
@@ -104,24 +156,28 @@ func runNagini(ctx context.Context, acquire func(context.Context) (string, error
 				return nil, err
 			}
 		}
-		code.Functions = append(code.Functions, fns...)
-		code.Contracts = append(code.Contracts, contracts...)
-
-		var out bytes.Buffer
-		cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--platform", "linux/amd64",
-			"-v", work+":/work", "-w", "/work", image, f)
-		cmd.Stdout, cmd.Stderr = &out, &out
-		exit := 0
-		if err := cmd.Run(); err != nil {
-			var e *exec.ExitError
-			if !errors.As(err, &e) {
-				return nil, err
-			}
-			exit = e.ExitCode()
+		code.Functions = append(code.Functions, m.fns...)
+		code.Contracts = append(code.Contracts, m.contracts...)
+		out, exit, err := naginiProve(ctx, image, f, files)
+		if err != nil {
+			return nil, err
 		}
-		if exit != 0 || !strings.Contains(out.String(), "Verification successful") {
+		if exit != 0 || !strings.Contains(out, "Verification successful") {
 			code.Passed = false
-			code.Errors = append(code.Errors, naginiErrors(f, out.String())...)
+			failed[f] = true
+			code.Errors = append(code.Errors, naginiErrors(f, out)...)
+		}
+	}
+	// Nagini proved each file against the contracts of the marked files it
+	// imports, so a proof stands only where Nagini proved those too.
+	for _, f := range proved {
+		if len(files[f].refused) > 0 || failed[f] {
+			continue
+		}
+		for _, g := range naginiReach(f, files) {
+			if failed[g] {
+				code.Errors = append(code.Errors, fmt.Sprintf("%s: its proof rests on %s's contracts, which Nagini didn't prove", f, g))
+			}
 		}
 	}
 	for _, f := range plain {
@@ -135,10 +191,189 @@ func runNagini(ctx context.Context, acquire func(context.Context) (string, error
 	return code, nil
 }
 
-// naginiRefusals reads a marked file with the host's isolated Python, which
+// naginiFile is a marked file as the gate read it: its bytes, its functions
+// and those with contracts, why the gate refuses it, if it does, and the
+// marked files of its package it imports.
+type naginiFile struct {
+	src            []byte
+	fns, contracts []string
+	refused        []string
+	imports        []naginiEdge
+}
+
+// naginiEdge is one import of another marked file of the package, by the
+// line that holds it and the module it names.
+type naginiEdge struct {
+	line         int
+	module, file string
+}
+
+// naginiReach is every other marked file whose contracts Nagini reads when
+// it proves f, through the files f imports and the ones they import, in
+// order.
+func naginiReach(f string, files map[string]*naginiFile) []string {
+	seen := map[string]bool{f: true}
+	var out []string
+	for queue := []string{f}; len(queue) > 0; queue = queue[1:] {
+		for _, e := range files[queue[0]].imports {
+			if !seen[e.file] {
+				seen[e.file] = true
+				out = append(out, e.file)
+				queue = append(queue, e.file)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// naginiProve runs the pinned Nagini on f in a directory holding only f and
+// the marked files it reaches, each with the bytes the gate read, and
+// returns what Nagini said and its exit code.
+func naginiProve(ctx context.Context, image, f string, files map[string]*naginiFile) (string, int, error) {
+	work, err := os.MkdirTemp("", "invariant-nagini-")
+	if err != nil {
+		return "", 0, err
+	}
+	defer os.RemoveAll(work)
+	for _, g := range append([]string{f}, naginiReach(f, files)...) {
+		if err := os.WriteFile(filepath.Join(work, g), files[g].src, 0o644); err != nil {
+			return "", 0, err
+		}
+	}
+	var out bytes.Buffer
+	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--platform", "linux/amd64",
+		"-v", work+":/work", "-w", "/work", image, f)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	exit := 0
+	if err := cmd.Run(); err != nil {
+		var e *exec.ExitError
+		if !errors.As(err, &e) {
+			return "", 0, err
+		}
+		exit = e.ExitCode()
+	}
+	return out.String(), exit, nil
+}
+
+// naginiImport is one import a marked file holds, as the analyzer reads it:
+// the module it names and the levels a relative import climbs.
+type naginiImport struct {
+	Line   int    `json:"line"`
+	Module string `json:"module"`
+	Level  int    `json:"level"`
+}
+
+// naginiPackage is what a package directory holds, by name, beside the
+// marked files the gate proves in the run. Nagini type-checks with mypy,
+// which looks for a module in Nagini's working directory before it looks in
+// the standard library or the image's own packages: for a directory name/,
+// a package or a namespace, a stub package name-stubs/, a stub name.pyi,
+// and a module name.py.
+type naginiPackage struct {
+	name    string
+	entries map[string]bool // whether each name the directory holds is a directory
+	proved  map[string]bool
+}
+
+func naginiHolds(pkg string, proved []string) (naginiPackage, error) {
+	entries, err := os.ReadDir(pkg)
+	if err != nil {
+		return naginiPackage{}, err
+	}
+	abs, err := filepath.Abs(pkg)
+	if err != nil {
+		return naginiPackage{}, err
+	}
+	p := naginiPackage{name: filepath.Base(abs), entries: map[string]bool{}, proved: map[string]bool{}}
+	for _, e := range entries {
+		p.entries[e.Name()] = e.IsDir()
+	}
+	for _, f := range proved {
+		p.proved[f] = true
+	}
+	return p, nil
+}
+
+// naginiOwn is why the gate refuses a relative import and an import of the
+// package by its own name: the pinned Nagini resolves neither.
+const naginiOwn = "which the pinned Nagini can't resolve: it proves each marked file as a top-level module of its own, so it finds another marked file only by that file's own name, as import helper finds helper.py"
+
+// resolve says which marked file of the package an import of a marked file
+// reaches, or why the gate refuses it (#383). An import of a module the
+// package doesn't hold reaches neither: the standard library, Nagini's own
+// contracts, or what the pinned image installs. A top-level name the
+// standard library or nagini_contracts provides is theirs whatever the
+// package holds, since that's the module Python loads, and it's the one
+// Nagini reads too, since the package's file of that name never joins the
+// directory Nagini runs in.
+func (p naginiPackage) resolve(imp naginiImport) (file, why string) {
+	if imp.Level > 0 {
+		return "", fmt.Sprintf("imports from %s, relative to its package, %s", strings.Repeat(".", imp.Level)+imp.Module, naginiOwn)
+	}
+	top, _, _ := strings.Cut(imp.Module, ".")
+	if top == "nagini_contracts" || slices.Contains(strings.Fields(pythonStdlibModules), top) {
+		return "", ""
+	}
+	module := top + ".py"
+	dir, found := p.entries[module]
+	isModule := found && !dir
+	// What mypy would read in the module's place, or where there's no
+	// module, in the order it looks: a package or a namespace, a stub
+	// package and a stub.
+	for _, other := range []struct {
+		name string
+		dir  bool
+		what string
+	}{
+		{top, true, "directory " + top + ", whose modules the gate never proves"},
+		{top + "-stubs", true, "directory " + top + "-stubs, a stub package the gate never proves"},
+		{top + ".pyi", false, top + ".pyi, a stub the gate never proves"},
+	} {
+		if dir, ok := p.entries[other.name]; ok && dir == other.dir {
+			return "", fmt.Sprintf("imports %s, which Nagini would read from the package's %s, and take its contracts", imp.Module, other.what)
+		}
+	}
+	switch {
+	case isModule && p.proved[module]:
+		return module, ""
+	case isModule && naginiTestFile(module):
+		return "", fmt.Sprintf("imports %s, the package's %s, a test, which the gate never proves, so Nagini would take its contracts without proving its bodies", imp.Module, module)
+	case isModule:
+		return "", fmt.Sprintf("imports %s, the package's %s, which isn't marked %s, so Nagini would take its contracts without proving its bodies", imp.Module, module, NaginiHeader)
+	case top == p.name:
+		return "", fmt.Sprintf("imports %s, its own package by name, %s", imp.Module, naginiOwn)
+	}
+	return "", ""
+}
+
+// naginiRead reads a marked file with the host's isolated Python, which
 // parses it and never runs it, and returns, as file:line: why, each place
-// it holds arithmetic the pinned Nagini models apart from Python (#380): in
-// any function or method, and in the module's and its classes' own
+// it holds arithmetic the pinned Nagini models apart from Python (#380),
+// and every import it holds, wherever it stands (#383).
+func naginiRead(file string, src []byte) ([]string, []naginiImport, error) {
+	var reply struct {
+		Arithmetic []pythonProofDynamic `json:"arithmetic"`
+		Imports    []naginiImport       `json:"imports"`
+		Unreadable string               `json:"unreadable"`
+	}
+	request := map[string]string{"marked": base64.StdEncoding.EncodeToString(src),
+		"standin": base64.StdEncoding.EncodeToString(naginiStandInSource)}
+	if err := runPythonProofAnalyzer(request, &reply); err != nil {
+		return nil, nil, err
+	}
+	if reply.Unreadable != "" {
+		return []string{fmt.Sprintf("%s: refused before Nagini runs: the host's python3 can't parse it, so the gate can't check its arithmetic: %s", file, reply.Unreadable)}, nil, nil
+	}
+	refused := make([]string, 0, len(reply.Arithmetic))
+	for _, p := range reply.Arithmetic {
+		refused = append(refused, fmt.Sprintf("%s:%d: refused before Nagini runs: the line %s", file, p.Line, p.What))
+	}
+	return refused, reply.Imports, nil
+}
+
+// naginiRefusals is naginiRead's refusals for a marked file's arithmetic:
+// in any function or method, and in the module's and its classes' own
 // statements, which Nagini reads too. That's the rule an in-place proof
 // applies (#359), except that Acc may take a permission fraction, a
 // positive int literal over one at least as large, as Acc(x, 1/2), which
@@ -146,23 +381,8 @@ func runNagini(ctx context.Context, acquire func(context.Context) (string, error
 // host's Python can't parse is refused too, since the gate couldn't check
 // it.
 func naginiRefusals(file string, src []byte) ([]string, error) {
-	var reply struct {
-		Arithmetic []pythonProofDynamic `json:"arithmetic"`
-		Unreadable string               `json:"unreadable"`
-	}
-	request := map[string]string{"marked": base64.StdEncoding.EncodeToString(src),
-		"standin": base64.StdEncoding.EncodeToString(naginiStandInSource)}
-	if err := runPythonProofAnalyzer(request, &reply); err != nil {
-		return nil, err
-	}
-	if reply.Unreadable != "" {
-		return []string{fmt.Sprintf("%s: refused before Nagini runs: the host's python3 can't parse it, so the gate can't check its arithmetic: %s", file, reply.Unreadable)}, nil
-	}
-	refused := make([]string, 0, len(reply.Arithmetic))
-	for _, p := range reply.Arithmetic {
-		refused = append(refused, fmt.Sprintf("%s:%d: refused before Nagini runs: the line %s", file, p.Line, p.What))
-	}
-	return refused, nil
+	refused, _, err := naginiRead(file, src)
+	return refused, err
 }
 
 // naginiError is one of Nagini's errors: the message, then where it is, as

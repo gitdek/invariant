@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -259,5 +260,44 @@ func TestNaginiNeverProvesArithmeticItModelsApartFromPython(t *testing.T) {
 	}
 	if !r.Build.Passed || !r.Conformance.Passed {
 		t.Error("the tests and conformance should pass; only the refusal fails the gate")
+	}
+}
+
+// #383, against the pinned Nagini: the issue's probes are refused before
+// Nagini runs. A core that imports another marked core proves both, each in
+// a directory of its own, and the receipt counts both. When the core it
+// imports breaks its own contract, Nagini says so, and the gate says the
+// core's proof, which Nagini verified against that contract, rests on it.
+func TestNaginiProvesACoreAndTheMarkedCoreItImports(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	verify := func(t *testing.T, files map[string]string) *Code {
+		t.Helper()
+		pkg := filepath.Join(t.TempDir(), "twophase")
+		for name, body := range files {
+			pa310Write(t, pkg, name, body)
+		}
+		code, err := Python{}.Verify(ctx, pkg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code
+	}
+	for core, helper := range map[string]string{naginiProbeDivision: naginiDivisionHelper, naginiProbeBody: naginiBrokenHelper} {
+		code := verify(t, map[string]string{"core.py": core, "helper.py": helper})
+		want := "core.py:3: refused before Nagini runs: the line imports helper, the package's helper.py" + naginiUnmarked
+		if code.Passed || len(code.Errors) != 1 || code.Errors[0] != want || len(code.Functions) != 0 {
+			t.Fatalf("code = %+v; want only %q", code, want)
+		}
+	}
+	code := verify(t, map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper})
+	if !code.Passed || !reflect.DeepEqual(code.Functions, []string{"two", "inc"}) || !reflect.DeepEqual(code.Contracts, []string{"two", "inc"}) {
+		t.Fatalf("code = %+v, want both cores proved", code)
+	}
+	code = verify(t, map[string]string{"core.py": naginiProbeBody, "helper.py": "# +nagini\n" + naginiBrokenHelper})
+	want := []string{"helper.py:6:12: Postcondition of inc might not hold. Assertion Result() == n + 1 might not hold.",
+		"core.py: its proof rests on helper.py's contracts, which Nagini didn't prove"}
+	if code.Passed || !reflect.DeepEqual(code.Errors, want) {
+		t.Fatalf("passed %v, errors %q; want %q", code.Passed, code.Errors, want)
 	}
 }

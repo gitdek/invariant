@@ -934,6 +934,80 @@ func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
 	}
 }
 
+// #383: a marked core's proof can rest on a sibling module's own contracts,
+// which Nagini reads without proving the sibling. An in-place proof's can't:
+// its verifier input copies the function, the module's imports of Nagini's
+// contracts and typing and its literal constants, and nothing else of the
+// module, and binds every other name the function reads only to a trusted
+// contract's abstraction, in a module the gate writes, and Nagini runs in a
+// directory holding only the input's files. So a sibling's own contract,
+// here one that divides as Viper does and one its body breaks, never
+// reaches Nagini: without a trusted contract the operation is missing and
+// Nagini doesn't run, and with one Nagini reads the trusted contract, which
+// the receipt names as assumed and its backing tests hold to what the
+// operation does (D-0260).
+func TestPythonApplicationProofNeverReadsASiblingsOwnContract(t *testing.T) {
+	const own = "Result() == a // b"
+	module := strings.Replace(ppModule, "from .helper import next_state\n", "from .helper import next_state\nfrom .arith import fdiv\n", 1)
+	module = strings.Replace(module, "        version = tinyver.parse(text)\n", "        version = fdiv(7, -2)\n", 1)
+	root, p := ppFixture(t, module)
+	pa310Write(t, root, "tasks/arith.py", "from nagini_contracts.contracts import *\n\n\n"+
+		"def fdiv(a: int, b: int) -> int:\n    Requires(b != 0)\n    Ensures("+own+")\n    return a // b\n")
+	n := &ppNagini{output: ppVerified}
+	proof, err := ppSession(t, p, n).Prove(context.Background(), ppAdmitID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := project.ResolvedComponentOperation{Kind: "application", Declaration: pa310ID("tasks/arith.py", "fdiv")}
+	if u := proof.Result.Unaccounted; len(u) != 1 || u[0].Kind != MissingContract || u[0].Operation == nil || *u[0].Operation != op {
+		t.Fatalf("unaccounted: %+v", u)
+	}
+	if proof.Ran || n.calls != 0 || proof.Result.Passed {
+		t.Fatalf("Nagini ran on an input that reaches a sibling no trusted contract binds: %+v", proof.Result)
+	}
+	for _, f := range proof.Input.Files {
+		if strings.Contains(f.Content, own) || strings.Contains(f.Content, "arith") {
+			t.Fatalf("the input's %s holds the sibling:\n%s", f.Path, f.Content)
+		}
+	}
+
+	// The application's store.save carries a contract of its own, which its
+	// body breaks; the function reaches it through its trusted contract.
+	module = strings.Replace(ppModule, "        version = tinyver.parse(text)\n", "        version = save({})\n", 1)
+	root, p = ppFixture(t, module)
+	pa310Write(t, root, "store/state.py", "from nagini_contracts.contracts import *\n\n\n"+
+		"def save(task: dict) -> dict:\n    Ensures(Result() is not task)\n    task['saved'] = True\n    return task\n")
+	var held []string
+	n = &ppNagini{output: ppVerified, during: func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			held = append(held, e.Name())
+		}
+	}}
+	proof, err = ppSession(t, p, n).Prove(context.Background(), ppAdmitID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proof.Ran || len(proof.Result.Assumed) != 1 || proof.Result.Assumed[0].Contract != "store.save" {
+		t.Fatalf("ran %v, assumed %+v", proof.Ran, proof.Result.Assumed)
+	}
+	if !reflect.DeepEqual(held, []string{"invariant_boundary_0.py", PythonApplicationProofMain}) {
+		t.Fatalf("Nagini's directory held %q", held)
+	}
+	boundary := ppFile(t, &proof.Input, "invariant_boundary_0.py")
+	if !strings.Contains(boundary, "@ContractOnly\ndef save(task: dict) -> dict:\n    Ensures(Result() is task)\n") || strings.Contains(boundary, "is not task") {
+		t.Fatalf("the boundary holds other than the trusted contract:\n%s", boundary)
+	}
+	for _, f := range proof.Input.Files {
+		if strings.Contains(f.Content, "store") || strings.Contains(f.Content, "is not task") {
+			t.Fatalf("the input's %s holds the application's own save:\n%s", f.Path, f.Content)
+		}
+	}
+}
+
 // A selected function's contract runs where the application runs, with the
 // stand-in, and Python evaluates every argument when the statement runs
 // (#359). The analyzer takes what can't fail so, and says where the rest is.

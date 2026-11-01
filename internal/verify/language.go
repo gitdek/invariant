@@ -497,7 +497,8 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 // Python runs a project's tests and its conformance driver in a Python
 // container, with its admitted application libraries. Files marked # +nagini are
 // proved with Nagini (D-0031), once the gate has refused any that holds
-// arithmetic the pinned Nagini models apart from Python (#380); the rest are
+// arithmetic the pinned Nagini models apart from Python (#380), or imports a
+// module of its package other than another marked file (#383); the rest are
 // tested against the model.
 type Python struct {
 	Image    string
