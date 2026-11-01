@@ -127,14 +127,19 @@ def identity(test):
 # application's own declaration, or the standard library's or an installed
 # distribution's code. A call counts only when the test method makes it,
 # directly or through code it calls, and never when unittest or the runner
-# does, except a callable the test hands an assertion, such as
-# assertRaises(E, f, x). setUp and tearDown don't count. Each exception type
-# that escapes a counted call to code outside the implementation is recorded
+# does, except what the callable form of assertRaises or assertWarns calls
+# for the test, as assertRaises(E, f, x) does. setUp, tearDown and cleanups
+# don't count. Each exception type that escapes any call into the
+# implementation during a test, from any caller in any thread, is recorded
 # with whether the contract's Exsures declares it. Assertions are the
-# runner's own records of unittest's checks. None of it runs for other tests.
+# runner's own records of the unittest checks the test method makes. None of
+# it runs for other tests, and a test that tampers with the runner in its own
+# process is out of scope.
 boundary = request.get("boundary")
 boundary_python = {}
 boundary_receivers = {}
+boundary_globals = {}
+boundary_source = [None]
 boundary_equal = False
 boundary_c = []
 boundary_exsures = []
@@ -143,9 +148,22 @@ handed = [[], []]
 runner_globals = globals()
 
 
-def boundary_implementation(target):
-    """The code a call into target runs, or the C callable it is, and its file:
-    the file that code is in, or for a C callable its extension's, if any."""
+def own_method(function, cls, name=None):
+    """Whether a function is compiled in a class's own body, by the qualified
+    name its code was compiled under, which no assignment changes: code from
+    elsewhere, a base class's, total_ordering's, a factory's or a dataclass's
+    generated methods, isn't the class's own."""
+    if not inspect.isfunction(function):
+        return False
+    qualname = function.__code__.co_qualname
+    return qualname == cls.__qualname__ + "." + name if name else qualname.rpartition(".")[0] == cls.__qualname__
+
+
+def boundary_implementation(target, owner, name):
+    """What a call into target runs, read through the owner the symbol names
+    it on: its Python functions, each with the receiver its calls must have,
+    or the C callable it is, and its file, the one that code is in, or for a
+    C callable its extension's, if any."""
     if inspect.isclass(target):
         functions = []
         for value in vars(target).values():
@@ -157,45 +175,59 @@ def boundary_implementation(target):
             candidates = [value.fget, value.fset, value.fdel] if isinstance(value, property) else [value]
             for candidate in candidates:
                 candidate = inspect.unwrap(candidate) if candidate is not None else None
-                # Only methods compiled in the class body, by the qualified
-                # name their code was compiled under, which no assignment
-                # changes: code installed from elsewhere, such as an Enum's
-                # __new__, total_ordering's comparisons or a dataclass's
-                # generated methods, isn't the class's own.
-                if (inspect.isfunction(candidate) and candidate.__code__.co_argcount > 0
-                        and candidate.__code__.co_qualname.rpartition(".")[0] == target.__qualname__
-                        and candidate not in functions):
+                if own_method(candidate, target) and candidate.__code__.co_argcount > 0 and candidate not in functions:
                     functions.append(candidate)
         if not functions:
             raise TypeError("the class has no Python method written in its own body whose calls the runner can observe; generated methods, such as a dataclass's, aren't its own, and a type written in C has none")
         files = {f.__code__.co_filename for f in functions}
         if len(files) != 1:
             raise TypeError("the class's methods are written in more than one file")
-        return "python", [f.__code__ for f in functions], [], files.pop()
+        return "python", functions, [], files.pop(), {f.__code__: ("class", target) for f in functions}
     if isinstance(target, (types.WrapperDescriptorType, types.MethodWrapperType)):
         raise TypeError("slot wrappers and method-wrappers are reached through syntax, whose calls the runner can't observe")
+    if inspect.isclass(owner):
+        # A method named on its class is the class's own, and is called on
+        # it, an instance or a subclass; a staticmethod has no receiver.
+        raw = inspect.getattr_static(owner, name, None)
+        if isinstance(raw, (staticmethod, classmethod)) or inspect.isfunction(raw):
+            function = inspect.unwrap(raw.__func__ if isinstance(raw, (staticmethod, classmethod)) else raw)
+            if not own_method(function, owner, name):
+                raise TypeError("%s isn't compiled in %s's own body under that name: it's inherited, assigned or made by a factory, so other classes share its code" % (name, owner.__qualname__))
+            if isinstance(raw, staticmethod):
+                return "python", [function], [], function.__code__.co_filename, {}
+            if function.__code__.co_argcount == 0:
+                raise TypeError("%s takes no receiver the runner can check" % name)
+            return "python", [function], [], function.__code__.co_filename, {function.__code__: ("class", owner)}
+        if isinstance(target, types.BuiltinFunctionType) and target.__self__ is owner and isinstance(raw, types.ClassMethodDescriptorType):
+            # A C class method, which each access binds anew, is its descriptor.
+            target = raw
+        if isinstance(target, (types.MethodDescriptorType, types.ClassMethodDescriptorType)):
+            if target.__name__.startswith("__") and target.__name__.endswith("__"):
+                raise TypeError("a C special method is reached through syntax, whose calls the runner can't observe")
+            if target.__objclass__ is not owner:
+                raise TypeError("%s belongs to %s, not %s" % (name, target.__objclass__.__qualname__, owner.__qualname__))
+            return "c", [], [target], c_origin(target.__objclass__), {}
+        raise TypeError("%s.%s is neither a method of the class's own nor a C method" % (owner.__qualname__, name))
     function = inspect.unwrap(target)
+    receivers = {}
     if inspect.ismethod(function):
-        function = function.__func__
+        # A bound method shares its code with every instance; only calls on
+        # the very one bound count.
+        receivers, function = {function.__func__.__code__: ("object", function.__self__)}, function.__func__
     if inspect.isfunction(function):
-        return "python", [function.__code__], [], function.__code__.co_filename
-    if isinstance(target, types.BuiltinFunctionType) and isinstance(target.__self__, type):
-        # A C class method, which each access binds anew, is its descriptor.
-        descriptor = inspect.getattr_static(target.__self__, target.__name__, None)
-        if isinstance(descriptor, types.ClassMethodDescriptorType):
-            target = descriptor
-    if isinstance(target, (types.MethodDescriptorType, types.ClassMethodDescriptorType)):
-        if target.__name__.startswith("__") and target.__name__.endswith("__"):
-            raise TypeError("a C special method is reached through syntax, whose calls the runner can't observe")
-        return "c", [], [target], c_origin(target.__objclass__)
+        if "<locals>" in function.__code__.co_qualname:
+            raise TypeError("the operation's code is a closure's, which other functions made the same way share")
+        return "python", [function], [], function.__code__.co_filename, receivers
     if isinstance(target, types.BuiltinFunctionType):
-        owner = target.__self__
-        if inspect.ismodule(owner) and c_module(owner):
-            return "c", [], [target], getattr(owner, "__file__", None)
+        module = target.__self__
+        if inspect.ismodule(module) and c_module(module):
+            if target.__name__.startswith("__") and target.__name__.endswith("__"):
+                raise TypeError("%s is reached through import or class statements, whose calls the runner can't observe" % target.__name__)
+            return "c", [], [target], getattr(module, "__file__", None), {}
         # A C method bound to an instance, as random.random is, is its type's.
-        descriptor = inspect.getattr_static(type(owner), target.__name__, None)
-        if owner is not None and not inspect.ismodule(owner) and isinstance(descriptor, types.MethodDescriptorType):
-            return "c", [], [target], c_origin(descriptor.__objclass__)
+        descriptor = inspect.getattr_static(type(module), target.__name__, None)
+        if module is not None and not inspect.ismodule(module) and isinstance(descriptor, types.MethodDescriptorType):
+            return "c", [], [target], c_origin(descriptor.__objclass__), {}
         raise TypeError("the runner can't find the C module that defines the operation")
     raise TypeError("the operation is neither a Python function or class nor a C function")
 
@@ -269,18 +301,21 @@ def resolve_boundary(spec):
                          if (code.co_firstlineno, code.co_name) == places[0]]
             if len(codes) != 1:
                 raise LookupError("the operation's declaration isn't one function in its source")
+            # Its code runs only in the module the staged source defines.
+            boundary_source[0] = os.path.realpath(filename)
             record.update(callable="python", file=dict(path=declaration["source"], sha256="sha256:" + hashlib.sha256(raw).hexdigest()))
         else:
             import importlib
             name = spec["module"] + "." + spec["symbol"]
             if spec["kind"] == "standard_library" and spec["module"].split(".")[0] not in sys.stdlib_module_names:
                 raise LookupError("%s isn't in the runtime's standard library" % spec["module"])
-            target = importlib.import_module(spec["module"])
+            owner, target = None, importlib.import_module(spec["module"])
             for part in spec["symbol"].split("."):
-                target = getattr(target, part)
-            form, codes, callables, origin = boundary_implementation(target)
-            if inspect.isclass(target):
-                receivers = {code: target for code in codes}
+                owner, target = target, getattr(target, part)
+            form, functions, callables, origin, receivers = boundary_implementation(target, owner, spec["symbol"].split(".")[-1])
+            codes = [f.__code__ for f in functions]
+            # Its code runs only with the globals it was defined with.
+            boundary_globals.update((f.__code__, f.__globals__) for f in functions)
             record["callable"] = form
             frozen = origin is None or origin.startswith("<frozen ")
             if spec["kind"] == "standard_library":
@@ -313,6 +348,8 @@ def resolve_boundary(spec):
     except Exception as error:
         record["diagnostics"].append("".join(traceback.format_exception_only(type(error), error)).strip())
         record["callable"], codes, callables, receivers, declared = "", [], [], {}, []
+        boundary_globals.clear()
+        boundary_source[0] = None
     return record, codes, callables, receivers, declared
 
 
@@ -365,10 +402,24 @@ def boundary_declares(kind):
     return False
 
 
-def boundary_code(code):
-    """Whether code is the bound implementation's own."""
+def boundary_frame(frame):
+    """Whether a frame runs the bound implementation itself: its very code,
+    or for an application declaration its code compiled anew, with the globals
+    of the module it was defined in, and on a receiver it accepts. A copy run
+    with other globals, as exec of the staged source makes, isn't it."""
+    code = frame.f_code
     known = boundary_python.get((code.co_filename, code.co_firstlineno, code.co_name))
-    return known is not None and (known is code or boundary_equal and known == code)
+    if known is None or not (known is code or boundary_equal and known == code):
+        return False
+    scope = frame.f_globals
+    if boundary_equal:
+        module = sys.modules.get(scope.get("__name__"))
+        if getattr(module, "__dict__", None) is not scope or os.path.realpath(str(scope.get("__file__"))) != boundary_source[0]:
+            return False
+    elif boundary_globals.get(known) is not scope:
+        return False
+    receiver = boundary_receivers.get(known)
+    return receiver is None or boundary_receiver(frame, receiver)
 
 
 def boundary_called(function):
@@ -388,12 +439,19 @@ def boundary_called(function):
     return False
 
 
-def boundary_receiver(frame, target):
-    """Whether a class's method was called on the class, a subclass or an
-    instance: methods that share code with other classes count only there."""
+def boundary_receiver(frame, expected):
+    """Whether a method was called on the receiver it's bound to: for a
+    class's, the class, a subclass or an instance of one, by the real type's
+    method resolution order, which no __class__ property or registration
+    changes; for a bound method's, the very object."""
     code = frame.f_code
-    value = frame.f_locals.get(code.co_varnames[0]) if code.co_argcount > 0 else None
-    return value is target or isinstance(value, target) or isinstance(value, type) and issubclass(value, target)
+    if code.co_argcount == 0:
+        return False
+    value = frame.f_locals.get(code.co_varnames[0])
+    kind, owner = expected
+    if kind == "object":
+        return value is owner
+    return owner in type(value).__mro__ or issubclass(type(value), type) and owner in value.__mro__
 
 
 def unittest_frame(frame):
@@ -435,11 +493,29 @@ def handed_codes(value):
     return codes
 
 
+def suspended_codes(values):
+    """The code of each generator or coroutine among values, which a handed
+    callable runs when it resumes one, as next(g) and list(g) do."""
+    codes = []
+    for value in values:
+        if inspect.isgenerator(value):
+            codes.append(value.gi_code)
+        elif inspect.iscoroutine(value):
+            codes.append(value.cr_code)
+        elif inspect.isasyncgen(value):
+            codes.append(value.ag_code)
+    return codes
+
+
 def watch_assertions():
-    """Wrap unittest's assertions so each outermost one records its outcome."""
+    """Wrap unittest's assertions so each outermost one the test method makes
+    records its outcome."""
     import functools
     contexts = tuple(c for c in (getattr(unittest.case, name, None) for name in ("_AssertRaisesBaseContext", "_AssertLogsContext")) if isinstance(c, type))
     depth = [0]
+    # The callable forms that call what they're handed, by where the callable
+    # comes after self.
+    calling = {"assertRaises": 2, "assertWarns": 2, "assertRaisesRegex": 3, "assertWarnsRegex": 3}
 
     def wrap(name, function, exit=False):
         @functools.wraps(function)
@@ -447,29 +523,35 @@ def watch_assertions():
             records = assertions[0]
             if records is None:
                 return function(*args, **kwargs)
-            if depth[0] == 0:
-                # A callable the test hands an assertion, as to
-                # assertRaises(E, f, x), is the test's own call when
-                # unittest makes it.
-                for value in list(args[1:]) + list(kwargs.values()):
-                    if callable(value):
-                        handed[0].extend(handed_codes(value))
-                        handed[1].append(value)
+            outermost = depth[0] == 0
+            # Only an assertion the test method makes, directly or through
+            # code it calls, is its own: setUp's, tearDown's and a cleanup's
+            # aren't.
+            own = outermost and result.by_test(sys._getframe(1), None)
+            at = calling.get(name)
+            if own and at is not None and len(args) > at and callable(args[at]):
+                # While it runs, the callable a callable form of assertRaises
+                # or assertWarns calls, and a generator handed it to resume,
+                # are the test's own calls when unittest makes them.
+                handed[0], handed[1] = handed_codes(args[at]) + suspended_codes(list(args[at + 1:]) + list(kwargs.values())), [args[at]]
             depth[0] += 1
             try:
                 value = function(*args, **kwargs)
             except BaseException as error:
                 depth[0] -= 1
-                if depth[0] == 0:
-                    records.append(dict(id="%s:%d" % (name, len(records) + 1), outcome="failed" if isinstance(error, AssertionError) else "error"))
+                if outermost:
+                    handed[0], handed[1] = [], []
+                    if own:
+                        records.append(dict(id="%s:%d" % (name, len(records) + 1), outcome="failed" if isinstance(error, AssertionError) else "error"))
                 raise
             depth[0] -= 1
-            if depth[0] == 0:
-                if exit:
+            if outermost:
+                handed[0], handed[1] = [], []
+                if own and exit:
                     # A with-block's exception the context didn't accept means its
                     # expectation failed.
                     records.append(dict(id="%s:%d" % (name, len(records) + 1), outcome="failed" if len(args) > 1 and args[1] is not None and not value else "passed"))
-                elif not isinstance(value, contexts):
+                elif own and not isinstance(value, contexts):
                     records.append(dict(id="%s:%d" % (name, len(records) + 1), outcome="passed"))
             return value
         return checked
@@ -493,11 +575,15 @@ class Observations(unittest.TestResult):
         self.calling()
 
     def calling(self):
-        # Counted calls in flight: a Python call by its own frame, a C call
-        # by its caller's. The profiler sees a call end before the monitor
-        # sees what it raised, so each ending call waits a moment for it.
-        self.open, self.c_open, self.raises = {}, set(), {}
-        self.closing = self.raising = None
+        # What escapes the implementation is checked for every call into it
+        # during a test, from any caller in any thread, though only the test's
+        # own calls count. A C call that raised waits, by its caller's frame,
+        # for the monitor to say what. The last counted call waits to learn
+        # whether it was a throw into a generator, which counts nothing.
+        self.raising, self.raises, self.counted = {}, {}, None
+        if boundary is not None:
+            import threading
+            self.lock = threading.Lock()
 
     def row(self, test):
         check, digest, code = identity(test)
@@ -509,59 +595,46 @@ class Observations(unittest.TestResult):
             row.update(boundary_calls=0, boundary_raised=[], assertions=[])
         return row, code
 
-    def settle(self):
-        """End the moment an ending call waits: a counted C call that raised
-        without the monitor saying what still raised something."""
-        if self.raising is not None:
-            self.raising = None
-            self.escaped(None)
-        self.closing = None
-
     def profile(self, frame, event, arg):
         if self.pending is None:
             return
-        self.settle()
+        self.counted = None
+        if self.raising and self.raising.pop(frame, None):
+            # A C call raised, and nothing said what.
+            self.escaped(None)
         if event == "call":
             code = frame.f_code
             if code is self.method_code:
                 self.pending["exercised"] = True
-            if boundary_python:
-                known = boundary_python.get((code.co_filename, code.co_firstlineno, code.co_name))
-                # Only the application's own source compiles anew; any other
-                # implementation is the very code object resolved.
-                if (known is not None and (known is code or boundary_equal and known == code)
-                        and (known not in boundary_receivers or boundary_receiver(frame, boundary_receivers[known]))
-                        and self.by_test(frame.f_back, code)):
-                    self.pending["boundary_calls"] += 1
-                    self.open[frame] = True
-        elif event == "return":
-            if self.open.pop(frame, None):
-                self.closing = frame
+            if boundary_python and boundary_frame(frame) and self.by_test(frame.f_back, code):
+                self.pending["boundary_calls"] += 1
+                self.counted = frame
         elif event == "c_call":
             if boundary_c and boundary_called(arg) and self.by_test(frame, arg):
                 self.pending["boundary_calls"] += 1
-                self.c_open.add(frame)
-        elif event == "c_return":
-            self.c_open.discard(frame)
-        elif event == "c_exception" and frame in self.c_open:
-            self.c_open.discard(frame)
-            self.raising = frame
+        elif event == "c_exception" and boundary_c and boundary_called(arg):
+            self.raising[frame] = True
+
+    def threw(self, code, offset, exception):
+        """An exception is thrown into a generator, as close() and throw() do:
+        the profiler's call for it resumed nothing the test called."""
+        if self.pending is not None and self.counted is not None and sys._getframe(1) is self.counted:
+            self.counted = None
+            self.pending["boundary_calls"] -= 1
 
     def unwound(self, code, offset, exception):
-        """A frame unwinds with an exception: a counted Python call raised,
-        unless the implementation called itself and gets the exception back."""
-        if self.pending is None:
+        """A frame unwinds with an exception: if it runs the bound
+        implementation, called from outside it, the exception escaped."""
+        if self.pending is None or boundary_python.get((code.co_filename, code.co_firstlineno, code.co_name)) is None:
             return
         frame = sys._getframe(1)
-        if frame is self.closing or self.open.pop(frame, None):
-            self.closing = None
-            if frame.f_back is None or not boundary_code(frame.f_back.f_code):
-                self.escaped(exception)
+        if boundary_frame(frame) and (frame.f_back is None or not boundary_frame(frame.f_back)):
+            self.escaped(exception)
 
     def raised(self, code, offset, exception):
-        """An exception reaches a frame: a counted C call there raised it."""
-        if self.pending is not None and self.raising is not None and sys._getframe(1) is self.raising:
-            self.raising = None
+        """An exception reaches a frame: a call into the bound C callable
+        there raised it."""
+        if self.pending is not None and self.raising and self.raising.pop(sys._getframe(1), None):
             self.escaped(exception)
 
     def escaped(self, exception):
@@ -570,13 +643,15 @@ class Observations(unittest.TestResult):
         if kind is GeneratorExit:
             return
         name = "%s.%s" % (getattr(kind, "__module__", None), kind.__qualname__) if kind else "an exception the runner couldn't identify"
-        entry = self.raises.get(name)
-        if entry is None:
-            entry = self.raises[name] = dict(exception=name, calls=0, declared=True)
-            self.pending["boundary_raised"].append(entry)
-        # Two classes can share a name; it's declared only if both are.
-        entry["declared"] = entry["declared"] and kind is not None and boundary_declares(kind)
-        entry["calls"] += 1
+        declared = kind is not None and boundary_declares(kind)
+        with self.lock:
+            entry = self.raises.get(name)
+            if entry is None:
+                entry = self.raises[name] = dict(exception=name, calls=0, declared=True)
+                self.pending["boundary_raised"].append(entry)
+            # Two classes can share a name; it's declared only if both are.
+            entry["declared"] = entry["declared"] and declared
+            entry["calls"] += 1
 
     def by_test(self, caller, callee):
         """Whether the test method made this call, directly or through code it
@@ -601,10 +676,13 @@ class Observations(unittest.TestResult):
         self.current = test
         self.pending, self.method_code = self.row(test)
         if boundary is not None:
+            import threading
             assertions[0] = self.pending["assertions"]
             handed[0], handed[1] = [], []
             self.calling()
-        sys.setprofile(self.profile)
+            threading.setprofile_all_threads(self.profile)
+        else:
+            sys.setprofile(self.profile)
 
     def record(self, test, outcome, diagnostic=None):
         if test is self.current:
@@ -627,10 +705,15 @@ class Observations(unittest.TestResult):
         count += 1
 
     def stopTest(self, test):
-        sys.setprofile(None)
-        assertions[0] = None
         if boundary is not None:
-            self.settle()
+            import threading
+            threading.setprofile_all_threads(None)
+            assertions[0] = None
+            # A C call that raised, with nothing to say what, still raised.
+            for _ in list(self.raising):
+                self.escaped(None)
+        else:
+            sys.setprofile(None)
         self.write(self.pending)
         self.current = self.pending = self.method_code = None
         self.calling()
@@ -725,17 +808,25 @@ if boundary is not None:
     emit(resolved)
     watch_assertions()
     if resolved["resolved"]:
-        # The profiler can't say what a call raised; the monitor can.
+        # The profiler can't say what a call raised, or that a generator was
+        # thrown into; the monitor can, in every thread.
         monitoring = sys.monitoring
         tool = next(t for t in range(6) if monitoring.get_tool(t) is None)
         monitoring.use_tool_id(tool, "invariant")
         monitoring.register_callback(tool, monitoring.events.PY_UNWIND, result.unwound)
         monitoring.register_callback(tool, monitoring.events.RAISE, result.raised)
-        monitoring.set_events(tool, monitoring.events.PY_UNWIND | monitoring.events.RAISE)
+        monitoring.register_callback(tool, monitoring.events.PY_THROW, result.threw)
+        monitoring.set_events(tool, monitoring.events.PY_UNWIND | monitoring.events.RAISE | monitoring.events.PY_THROW)
 if request.get("legacy"):
     suite = unittest.defaultTestLoader.discover(root, pattern="test_*.py", top_level_dir=root)
 else:
     suite = unittest.defaultTestLoader.loadTestsFromNames(selections)
+if boundary is not None:
+    # Each declared exception class its tests' modules loaded is pinned
+    # before any test runs, so no test can swap what an Exsures names.
+    for entry in boundary_exsures:
+        if entry[1] is None:
+            entry[1] = loaded_exception(entry[0])
 suite.run(result)
 emit(dict(type="end", count=count))
 events.close()
