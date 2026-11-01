@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -524,10 +525,19 @@ func scopeFailedComment(pr github.PullRequest, problems []string, m Marker) stri
 // mergeRefusedComment says GitHub refused to merge a pull request whose gate
 // passed, or to mark it ready for review when it was a draft, quoting what
 // GitHub said, and how to go on (#145): a retry watches it again (#263).
+// When GitHub kept failing to instead, it says that, for how long, and
+// GitHub's last answer (#376).
 func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Marker) string {
 	what := "GitHub refused to merge it"
 	if unready {
 		what = "it's a draft, and GitHub refused to mark it ready for review, so I haven't merged it"
+	}
+	var kept keptFailing
+	switch {
+	case errors.As(answer, &kept) && unready:
+		what = fmt.Sprintf("it's a draft, and GitHub kept failing to mark it ready for review: it failed each time I asked, for %s, so I've stopped asking, and I haven't merged it. It last said", kept.span())
+	case errors.As(answer, &kept):
+		what = fmt.Sprintf("GitHub kept failing to merge it: it failed each time I asked, for %s, so I've stopped asking. It last said", kept.span())
 	}
 	_, trusted, unsure := trustedOf(m)
 	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
@@ -535,12 +545,17 @@ func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Ma
 }
 
 // unreadyComment says a build that passed found a draft open from its
-// branch, which GitHub refused to mark ready for review, quoting GitHub's
-// answer, and how to go on: a writer's retry watches it again, as for a
-// failed draft (#369's review).
+// branch, which GitHub refused to mark ready for review, or kept failing to,
+// quoting GitHub's last answer, and how to go on: a writer's retry watches
+// it again, as for a failed draft (#369's review, #376).
 func unreadyComment(pr github.PullRequest, answer error, m Marker) string {
+	what := "GitHub refused to mark it ready for review"
+	var kept keptFailing
+	if errors.As(answer, &kept) {
+		what = fmt.Sprintf("GitHub kept failing to mark it ready for review: it failed each time I asked, for %s, so I've stopped asking. It last said", kept.span())
+	}
 	_, trusted, unsure := trustedOf(m)
-	return post("needs a person", fmt.Sprintf("The build passed, but #%d, the draft open from its branch that it took as its pull request, is still a draft: GitHub refused to mark it ready for review:\n\n%s", pr.Number, quote(answer.Error(), 20)), m,
+	return post("needs a person", fmt.Sprintf("The build passed, but #%d, the draft open from its branch that it took as its pull request, is still a draft: %s:\n\n%s", pr.Number, what, quote(answer.Error(), 20)), m,
 		fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
 }
 
