@@ -14,7 +14,8 @@ one of that module's attributes, or what the stand-in or the builtins bind,
 or reaches one of them in a way the scan can't follow. With "marked", it
 names a file marked # +nagini, which Nagini proves whole as a core: the
 reply gives every place the file holds arithmetic the pinned Nagini models
-apart from Python, by the rule an in-place proof applies (#380).
+apart from Python, by the rule an in-place proof applies (#380), and every
+import the file holds, which the gate checks against its package (#383).
 """
 
 import ast
@@ -1086,22 +1087,39 @@ def top_level(tree, raw):
 OUTSIDE = ast.parse("def _():\n    pass\n").body[0]
 
 
+def marked_imports(tree):
+    """Every import a file marked # +nagini holds, wherever it stands, as the
+    module it names and the levels a relative import climbs. Nagini reads
+    the modules a marked file imports and takes their contracts without
+    proving their bodies, so the gate reads every import, in a function, a
+    branch or a try as at the top, and decides which of them the package
+    provides (#383)."""
+    out = []
+    for sub in ast.walk(tree):
+        if isinstance(sub, ast.Import):
+            out += [{"line": sub.lineno, "module": alias.name, "level": 0} for alias in sub.names]
+        elif isinstance(sub, ast.ImportFrom):
+            out.append({"line": sub.lineno, "module": sub.module or "", "level": sub.level or 0})
+    return sorted(out, key=lambda r: (r["line"], r["level"], r["module"]))
+
+
 def marked(request):
     """Each place a file marked # +nagini holds arithmetic the pinned Nagini
-    models apart from Python (#380). Nagini proves the file whole, and reads
-    its module's and classes' own statements, constants among them, with its
-    own arithmetic, so the rule an in-place proof applies to its function
-    applies here to every function and method, by the kinds the gate can
-    tell in each, and to the rest of the file, by the module's constants. A
-    permission fraction in Acc is Nagini's, not Python's division. A file
-    the host's Python can't parse is unreadable, so the gate refuses it
-    rather than prove what it couldn't check. Nagini reads the file as
-    Python decodes it, and the gate copies none of its bytes, so it's
-    parsed as it is."""
+    models apart from Python (#380), and every import it holds (#383).
+    Nagini proves the file whole, and reads its module's and classes' own
+    statements, constants among them, with its own arithmetic, so the rule
+    an in-place proof applies to its function applies here to every
+    function and method, by the kinds the gate can tell in each, and to the
+    rest of the file, by the module's constants. A permission fraction in
+    Acc is Nagini's, not Python's division. A file the host's Python can't
+    parse is unreadable, so the gate refuses it rather than prove what it
+    couldn't check. Nagini reads the file as Python decodes it, and the gate
+    hands Nagini its bytes unchanged, so it's parsed as it is."""
     raw = base64.b64decode(request["marked"])
     standin = standin_of(base64.b64decode(request["standin"]))
     try:
         tree = ast.parse(raw)
+        imports = marked_imports(tree)
         bindings = top_level(tree, raw)[0]
         # Each node's scope is the innermost function that holds it, a
         # nested function's signature and decorators included, or None.
@@ -1118,8 +1136,9 @@ def marked(request):
             names = {n: standin[n] for n in standin if n not in bound}
             out += arithmetic(node, Kinds(node, tree, bindings, names), nodes, fractions=True)
     except (SyntaxError, ValueError, RecursionError, MemoryError) as error:
-        return {"arithmetic": [], "unreadable": str(error) or type(error).__name__}
-    return {"arithmetic": sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))}
+        return {"arithmetic": [], "imports": [], "unreadable": str(error) or type(error).__name__}
+    return {"arithmetic": sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"])),
+            "imports": imports}
 
 
 # What a source may read of a module the scan for writes follows, besides

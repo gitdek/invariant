@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -259,5 +260,36 @@ func TestNaginiNeverProvesArithmeticItModelsApartFromPython(t *testing.T) {
 	}
 	if !r.Build.Passed || !r.Conformance.Passed {
 		t.Error("the tests and conformance should pass; only the refusal fails the gate")
+	}
+}
+
+// #390's review, on the real gate: the one local import D-0271 let through,
+// a bare import of a sibling marked core, binds where the code runs to
+// whatever the launcher's path finds first, the project root before the
+// package. With a plain root helper.py whose inc returns n + 2, the gate
+// passed and counted bump proved, though bump(0) == 2 where the code runs.
+// The gate now refuses the core before Nagini runs, so the code check fails
+// though the tests and conformance pass, and Nagini proves the package's
+// marked helper.py alone (#383).
+func TestNaginiRefusesACoreThatImportsItsPackage(t *testing.T) {
+	t.Parallel()
+	dir := copyProject(t, provedPython, map[string]func(string) string{
+		"twophase/core.py": func(src string) string {
+			src = replace(t, "from nagini_contracts.contracts import *\n", "from nagini_contracts.contracts import *\nimport helper\n")(src)
+			return src + "\n\ndef bump(n: int) -> int:\n    Ensures(Result() == n + 1)\n    return helper.inc(n)\n"
+		},
+	})
+	pa310Write(t, dir, "twophase/helper.py", naginiHelper)
+	pa310Write(t, dir, "helper.py", "def inc(n: int) -> int:\n    return n + 2\n")
+	r := run(t, dir)
+	want := []string{naginiImportRefused("core.py", "17", "helper", "helper.py")}
+	if r.Passed || !contains(Failed(r), "code") || !reflect.DeepEqual(r.Code.Errors, want) {
+		t.Fatalf("failed = %v, errors = %q; want only %q", Failed(r), r.Code.Errors, want)
+	}
+	if !reflect.DeepEqual(r.Code.Functions, []string{"inc"}) || !contains(r.Code.Unverified, "bump") {
+		t.Errorf("functions = %v, unverified = %v; want only helper.py's inc proved", r.Code.Functions, r.Code.Unverified)
+	}
+	if !r.Build.Passed || !r.Conformance.Passed {
+		t.Error("the tests and conformance pass, since the root helper.py binds where the code runs; only the refusal fails the gate")
 	}
 }
