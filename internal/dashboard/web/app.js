@@ -1312,11 +1312,12 @@
   // does then is the server's to say, in retryText (#263).
   function why(w, repo) {
     if (w.kind === "stuck") return "The factory couldn't make a draft that checks out. Say what to change in a comment on the issue, then have it draft again.";
+    if (w.gone) return "The factory can't build the plan again: the commit holding its ratification is gone. Draft the plan again, and ratify the new draft before it's built.";
     const pr = w.pr ? `<a href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener"><strong>${esc(ref(repo, w.pr))}</strong></a>` : "the pull request";
     switch (w.failure) {
       case "stopped": return "The build stopped before it made a pull request. Build it again, or draft again from the comments.";
       case "limit": return "Two builds stopped before they made a pull request, so the factory won't start another on its own. Build it again, or draft again.";
-      case "gate": return `The code didn't pass the factory's own checks, or the second agent's review asked for changes. Its last attempt is in draft ${pr}.`;
+      case "gate": return `The build failed in the factory's own run: its agent stopped with an error, its code didn't pass the factory's checks, or the second agent's review asked for changes. Its last attempt is in draft ${pr}.`;
       case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified.`;
       case "ci": return `CI's gate didn't pass on ${pr}.`;
       case "trusted": return `${pr} passed CI's gate, and it changes the trusted base, so a person merges it. Review it and merge it on GitHub.`;
@@ -1333,8 +1334,9 @@
   const fixes = (w) => (w.takes || []).filter((v) => v === "retry" || v === "revise")
     .map((v) => (v === "retry" ? [w.retry?.label || "Retry", "/invariant retry"] : ["Draft again", "/invariant revise"]));
   // retryText is what the retry a card offers leads to: building the
-  // ratified proposal again, or watching its pull request again until CI's
-  // gate passes, with no other review, and who merges it then.
+  // ratified proposal again, building a plan's failed draft again in a new
+  // pull request that replaces it (#271), or watching its pull request again
+  // until CI's gate passes, with no other review, and who merges it then.
   const retryText = (w) => (takes(w, "retry") && w.retry ? `<p class="ask">${esc(w.retry.guidance)}</p>` : "");
   const closedText = (w, repo) => `${w.pr ? `<strong>${esc(ref(repo, w.pr))}</strong>` : "The pull request"} was closed without merging, so the factory stopped. To go on, have it draft again from the comments on the issue.`;
   // said is what a proposal's statements, or a plan's tests, say. A plan of

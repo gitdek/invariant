@@ -80,11 +80,23 @@ type PythonApplicationTest struct {
 	Outcome      string   `json:"outcome"`
 	Diagnostics  []string `json:"diagnostics"`
 	// A trusted contract's backing test also records how many of the test's
-	// own calls reached the implementation its run resolved, and each
-	// outermost unittest assertion it made, in order (#294): both always, zero
-	// and none included. Other tests' records have neither.
-	BoundaryCalls *int64                       `json:"boundary_calls,omitempty"`
-	Assertions    []PythonApplicationAssertion `json:"assertions,omitempty"`
+	// own calls reached the implementation its run resolved, which exception
+	// types escaped those calls, and each outermost unittest assertion it
+	// made, in order (#294): all always, zero and none included. Other tests'
+	// records have none of them.
+	BoundaryCalls  *int64                       `json:"boundary_calls,omitempty"`
+	BoundaryRaised []PythonApplicationRaise     `json:"boundary_raised,omitempty"`
+	Assertions     []PythonApplicationAssertion `json:"assertions,omitempty"`
+}
+
+// PythonApplicationRaise is the runner's record of one exception type that
+// escaped a backing test's calls into the resolved implementation to code
+// outside it: how many calls raised it, and whether it's a subclass of an
+// exception its contract's Exsures declares.
+type PythonApplicationRaise struct {
+	Exception string `json:"exception"`
+	Calls     int64  `json:"calls"`
+	Declared  bool   `json:"declared"`
 }
 
 // Calls is a backing test's call count, zero for any other test.
@@ -95,20 +107,25 @@ func (t PythonApplicationTest) Calls() int64 {
 	return *t.BoundaryCalls
 }
 
-// MarshalJSON writes a backing test's assertions even when it made none.
+// MarshalJSON writes a backing test's raised exceptions and assertions even
+// when there were none.
 func (t PythonApplicationTest) MarshalJSON() ([]byte, error) {
 	type plain PythonApplicationTest
 	if t.BoundaryCalls == nil {
 		return json.Marshal(plain(t))
 	}
-	assertions := t.Assertions
+	raised, assertions := t.BoundaryRaised, t.Assertions
+	if raised == nil {
+		raised = []PythonApplicationRaise{}
+	}
 	if assertions == nil {
 		assertions = []PythonApplicationAssertion{}
 	}
 	return json.Marshal(struct {
 		plain
-		Assertions []PythonApplicationAssertion `json:"assertions"`
-	}{plain(t), assertions})
+		BoundaryRaised []PythonApplicationRaise     `json:"boundary_raised"`
+		Assertions     []PythonApplicationAssertion `json:"assertions"`
+	}{plain(t), raised, assertions})
 }
 
 // PythonApplicationAssertion is the runner's record of one unittest assertion:
@@ -145,6 +162,8 @@ type pythonApplicationContractRequest struct {
 	Symbol       string             `json:"symbol,omitempty"`
 	Distribution string             `json:"distribution,omitempty"`
 	Declaration  *project.Component `json:"declaration,omitempty"`
+	// Exsures are the contract's declared exceptions, by dotted path.
+	Exsures []string `json:"exsures"`
 }
 
 type PythonApplicationExecutionResult struct {
@@ -323,7 +342,8 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	}
 	if contract, ok := s.contracts[key.Target]; ok {
 		o := contract.Operation
-		req.Boundary = &pythonApplicationContractRequest{Contract: contract.ID, Kind: o.Kind, Module: o.Module, Symbol: o.Symbol, Distribution: o.Distribution}
+		req.Boundary = &pythonApplicationContractRequest{Contract: contract.ID, Kind: o.Kind, Module: o.Module, Symbol: o.Symbol, Distribution: o.Distribution,
+			Exsures: append([]string{}, contract.Exsures...)}
 		if o.Kind == project.OperationApplication {
 			d := s.declarations[o.Declaration]
 			req.Boundary.Declaration = &d
@@ -610,7 +630,7 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary 
 	begun, ended := false, false
 	testFields := []string{"type", "id", "check", "source_sha256", "exercised", "outcome", "diagnostics"}
 	if boundary != nil {
-		testFields = append(testFields, "boundary_calls", "assertions")
+		testFields = append(testFields, "boundary_calls", "boundary_raised", "assertions")
 	}
 	for len(events) > 0 {
 		n := bytes.IndexByte(events, '\n')

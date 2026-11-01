@@ -113,15 +113,17 @@ func componentPython(source string, input componentInput) (componentSource, erro
 		return componentSource{}, fmt.Errorf("isolated Python 3 syntax parser: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	var declarations []struct {
-		Symbol    string   `json:"symbol"`
-		Contracts [][2]int `json:"contracts"`
+		Symbol    string             `json:"symbol"`
+		Contracts [][2]int           `json:"contracts"`
+		Exsures   []componentExsures `json:"exsures"`
 	}
 	if err := json.Unmarshal(b, &declarations); err != nil {
 		return componentSource{}, fmt.Errorf("Python syntax parser output: %w", err)
 	}
 	pkg := strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".")
-	out := componentSource{file: input.file}
+	out := componentSource{file: input.file, exsures: map[string][]componentExsures{}}
 	for _, d := range declarations {
+		out.exsures[d.Symbol] = d.Exsures
 		var contract []byte
 		for _, span := range d.Contracts {
 			if span[0] < 0 || span[1] <= span[0] || span[1] > len(input.bytes) {

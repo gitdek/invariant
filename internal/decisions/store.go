@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS node (
 	status  TEXT NOT NULL DEFAULT '',
 	who     TEXT NOT NULL DEFAULT '',
 	text    TEXT NOT NULL DEFAULT '',
-	record  TEXT NOT NULL DEFAULT ''
+	record  TEXT NOT NULL DEFAULT '',
+	proposal TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS node_project ON node (project, kind);
 CREATE TABLE IF NOT EXISTS edge (
@@ -78,9 +79,13 @@ CREATE TABLE IF NOT EXISTS repo (
 );
 `
 
-// schemaVersion is the schema's version. A store with another has its
+// schemaVersion is the schema's version. A store with an older one has its
 // nodes, edges and checkouts dropped, since a rebuild brings them back, and
-// keeps its journal, which only grows.
+// keeps its journal and reserved IDs, which only grow. A store with a newer
+// one is refused, since a newer binary wrote it and this one would drop
+// what it doesn't know. The node's proposal column (#358) is added in place
+// without a new version, so a binary from before it still opens the store
+// and ignores the column, and many checkouts share one store safely.
 const schemaVersion = 3
 
 // Store is the decision graph in one SQLite file. Every process that needs
@@ -111,41 +116,89 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := migrate(db); err != nil {
+	added, err := migrate(db)
+	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("the decision store at %s: %w", path, err)
 	}
-	return &Store{db: db, Path: path}, nil
+	s := &Store{db: db, Path: path}
+	if added {
+		s.backfill()
+	}
+	return s, nil
+}
+
+// backfill rebuilds every project the store holds from the checkout it was
+// last rebuilt from, once the proposal column is added to a store made
+// before it, so a ratification's proposal shows without a rebuild by hand.
+// A checkout that's gone, or doesn't rebuild, is left for the next rebuild:
+// until then its decisions show no proposal, never a wrong one.
+func (s *Store) backfill() {
+	held, err := s.Checkouts()
+	if err != nil {
+		return
+	}
+	for _, r := range held {
+		if info, err := os.Stat(r.JournalDir()); err != nil || !info.IsDir() {
+			continue
+		}
+		_ = s.Rebuild([]Repo{r})
+	}
 }
 
 // migrate brings the store to this schema, in one transaction, so two
-// processes opening it at once don't both change it.
-func migrate(db *sql.DB) error {
+// processes opening it at once don't both change it. It says whether it
+// added the proposal column to a store of this version made before it, so
+// the store's projects can be rebuilt to fill it.
+func migrate(db *sql.DB) (bool, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	var version int
 	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		return err
+		return false, err
 	}
-	if version == schemaVersion {
-		return nil
+	switch {
+	case version > schemaVersion:
+		return false, fmt.Errorf("its schema is version %d, newer than this binary's version %d, so this binary would lose what it doesn't know: use an invariant at least as new as the one that wrote it", version, schemaVersion)
+	case version == schemaVersion:
+		added, err := addProposal(tx)
+		if err != nil || !added {
+			return false, err
+		}
+		return true, tx.Commit()
 	}
 	if _, err := tx.Exec(`DROP TABLE IF EXISTS edge; DROP TABLE IF EXISTS node; DROP TABLE IF EXISTS repo`); err != nil {
-		return err
+		return false, err
 	}
 	if err := perProject(tx); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tx.Exec(schema); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	return false, tx.Commit()
+}
+
+// addProposal adds the node table's proposal column (#358) in place to a
+// store made before it, and says whether it did.
+func addProposal(tx *sql.Tx) (bool, error) {
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('node') WHERE name = 'proposal'`).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(`ALTER TABLE node ADD COLUMN proposal TEXT NOT NULL DEFAULT ''`); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // perProject moves a journal whose lines were unique by hash alone, as
@@ -199,9 +252,15 @@ func put(tx *sql.Tx, project string, events []Event, d Decision) error {
 	if err := journalLines(tx, project, d.ID, events); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record`,
-		d.ID, project, d.Date, d.Door, d.Status, d.Who, d.Text, d.Record); err != nil {
+	// Project only this checkout's current ratification, never retained
+	// journal lines from another branch or a proposal mentioned in text.
+	proposal := ""
+	if d.Status == "ratified" && d.Ratification != nil {
+		proposal = d.Ratification.Proposal
+	}
+	if _, err := tx.Exec(`INSERT INTO node (id, kind, project, date, door, status, who, text, record, proposal) VALUES (?, 'decision', ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET date = excluded.date, door = excluded.door, status = excluded.status, who = excluded.who, text = excluded.text, record = excluded.record, proposal = excluded.proposal`,
+		d.ID, project, d.Date, d.Door, d.Status, d.Who, d.Text, d.Record, proposal); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM edge WHERE src = ? AND project = ? AND derived = 0`, d.ID, project); err != nil {
@@ -460,8 +519,8 @@ func (s *Store) Decide(repo Repo, d NewDecision, by string) (string, error) {
 		return "", errors.New("a one-way door has a full record: name it with its slug, for decisions/D-NNNN-slug.md")
 	case d.Record != "" && !slug.MatchString(d.Record):
 		return "", fmt.Errorf("a record's slug is lowercase words joined by hyphens, not %q", d.Record)
-	case d.Status == "ratified" && !strings.HasPrefix(d.Who, "@"):
-		return "", errors.New("only a person ratifies, so a ratified decision's who is a person, such as @gitdek")
+	case d.Status == "ratified" && !IsPerson(d.Who):
+		return "", errors.New("only a person ratifies, so a ratified decision's who is a person's GitHub login, such as @gitdek")
 	case text == "":
 		return "", errors.New("a decision says what was decided")
 	case strings.Contains(text, "|"):
@@ -641,11 +700,17 @@ func exists(repo Repo, id string) error {
 
 // Ratify records a person's ratification of a proposed or decided decision.
 func (s *Store) Ratify(repo Repo, id, by string) error {
+	return s.RatifyProposal(repo, id, by, "")
+}
+
+// RatifyProposal is Ratify, naming the exact proposal the person ratified,
+// such as a lock's ProposalHash, when proposal isn't empty (D-0208).
+func (s *Store) RatifyProposal(repo Repo, id, by, proposal string) error {
 	return s.update(repo, id, by, func(d Decision) (Event, error) {
 		if d.Status == "ratified" || d.Status == "superseded" {
 			return Event{}, fmt.Errorf("%s is %s already", id, d.Status)
 		}
-		return Event{Op: OpRatify}, nil
+		return Event{Op: OpRatify, Proposal: proposal}, nil
 	})
 }
 
@@ -780,15 +845,16 @@ func putFile(tx *sql.Tx, repo Repo, short string) error {
 
 // Node is one node of the graph.
 type Node struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Project string `json:"project"`
-	Date    string `json:"date,omitempty"`
-	Door    string `json:"door,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Who     string `json:"who,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Record  string `json:"record,omitempty"`
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Project  string `json:"project"`
+	Date     string `json:"date,omitempty"`
+	Door     string `json:"door,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Who      string `json:"who,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Record   string `json:"record,omitempty"`
+	Proposal string `json:"proposal,omitempty"`
 }
 
 const nodeColumns = `n.id, n.kind, n.project, n.date, n.door, n.status, n.who, n.text, n.record`
@@ -806,16 +872,23 @@ func scanNodes(rows *sql.Rows) ([]Node, error) {
 	return out, rows.Err()
 }
 
-// Get is one node.
+// Get is one node, with the proposal its current ratification names, if it
+// names one (#358). Only Get carries the proposal: every list of nodes and
+// every neighbor stays as it was. The proposal shows only while the node's
+// status is ratified, so a binary from before the column, which re-records
+// a decision without it, can leave it empty but never shows a stale one on
+// a decision that's no longer ratified.
 func (s *Store) Get(id string) (Node, error) {
-	nodes, err := s.nodes(`SELECT `+nodeColumns+` FROM node n WHERE n.id = ?`, id)
+	var n Node
+	err := s.db.QueryRow(`SELECT `+nodeColumns+`, CASE WHEN n.status = 'ratified' THEN COALESCE(n.proposal, '') ELSE '' END FROM node n WHERE n.id = ?`, id).
+		Scan(&n.ID, &n.Kind, &n.Project, &n.Date, &n.Door, &n.Status, &n.Who, &n.Text, &n.Record, &n.Proposal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Node{}, fmt.Errorf("there's no %s", id)
+	}
 	if err != nil {
 		return Node{}, err
 	}
-	if len(nodes) == 0 {
-		return Node{}, fmt.Errorf("there's no %s", id)
-	}
-	return nodes[0], nil
+	return n, nil
 }
 
 // A Neighbor is a node at the other end of an edge: the edge's type, and

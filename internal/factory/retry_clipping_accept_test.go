@@ -11,7 +11,9 @@ import (
 )
 
 // Trusted paths are detail, not instructions. A long list must be shortened
-// without losing the commands or the consequences of retrying this draft.
+// without losing the commands or the consequences of retrying this draft:
+// since #271, a retry closes it and builds the plan again, and a person
+// merges what that build opens, since it changes the trusted base.
 // Repetitive paths keep the marker small, so it is the visible list alone
 // that needs clipping; neither the failure evidence nor the review is long.
 func TestClippedTrustedDraftRetryKeepsClosingCommands(t *testing.T) {
@@ -47,10 +49,8 @@ func TestClippedTrustedDraftRetryKeepsClosingCommands(t *testing.T) {
 	}
 	checkGuidance := func(body string) {
 		t.Helper()
-		retry263WatchWords(t, body, pr.Number, true)
-		retry263MergeWords(t, body, pr.Number, true, true)
-		retry263RejectedReviewWords(t, body)
-		retry263RedraftWords(t, body, pr.Number)
+		retry271RebuildWords(t, body, pr.Number, true)
+		retry271ReviseWords(t, body, pr.Number)
 		visible, _, _ := strings.Cut(body, "<!-- invariant:")
 		for _, command := range []string{"`/invariant retry`", "`/invariant revise`"} {
 			if strings.Count(visible, command) != 1 {

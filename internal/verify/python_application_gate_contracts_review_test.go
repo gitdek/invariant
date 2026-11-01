@@ -15,13 +15,15 @@ import (
 )
 
 // #355's review at the gate: backing tests that exercise only a substitute or
-// nothing, call without asserting, swallow a failed assertion or run twice
-// fail the gate, on its route and the direct one alike, and leave the rest of
-// its evidence standing.
+// nothing, call without asserting, swallow a failed assertion, run twice or
+// see the operation raise what its contract doesn't declare fail the gate, on
+// its route and the direct one alike, and leave the rest of its evidence
+// standing.
 
 const gtcSubstituteTests = `
 
 import base64
+import binascii
 import dataclasses
 import enum
 import html
@@ -64,6 +66,12 @@ class EncodeTests(unittest.TestCase):
 
 class MoreEncodeTests(EncodeTests):
     pass
+
+
+class DecodeTests(unittest.TestCase):
+    def test_rejects_padding(self):
+        with self.assertRaises(binascii.Error):
+            base64.b64decode('a')
 `
 
 const gtcSubstituteContracts = `
@@ -94,11 +102,15 @@ def escape(text: str) -> str:
 def encode(data: bytes) -> bytes:
     Requires(True)
     ...
+
+def decode(text: str) -> bytes:
+    Requires(True)
+    ...
 `
 
 func TestPythonApplicationGateTrustedContractsRefuseSubstitutes(t *testing.T) {
 	t.Run("local Python", func(t *testing.T) {
-		tc, _ := pa327Fake(t)
+		tc := gtcFake(t)
 		gtcSubstitutes(t, tc)
 	})
 	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") == "1" {
@@ -130,6 +142,7 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		gtcContract("pstats.StatsProfile", std("pstats", "StatsProfile"), "profile", "SubstituteTests.test_fake_profile"),
 		gtcContract("json.dumps", std("json", "dumps"), "dumps", "SubstituteTests.test_unasserted"),
 		gtcContract("html.escape", std("html", "escape"), "escape", "SubstituteTests.test_swallowed"),
+		gtcContract("base64.b64decode", std("base64", "b64decode"), "decode", "DecodeTests.test_rejects_padding"),
 		encode,
 	)
 	pa327Save(t, f)
@@ -143,6 +156,12 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		t.Fatalf("supported contracts lost their standing: %+v; diagnostics %+v", standing, r.Components.ContractDiagnostics)
 	}
 	md := receipt.Markdown(r)
+	for _, w := range []string{"may raise, by its Exsures: <code>builtins.ValueError</code>", "may raise no exception, by its Exsures",
+		"<code>binascii.Error</code> escaped 1 of them, which its contract doesn't declare"} {
+		if !strings.Contains(md, w) {
+			t.Errorf("the receipt lacks %q", w)
+		}
+	}
 	failed := strings.Split(md[strings.Index(md, "**What failed**"):], "\n")
 	for id, reason := range map[string]string{
 		"builtins.getattr":    "the test itself made no call into the bound implementation",
@@ -152,6 +171,7 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		"json.dumps":          "it made no assertion that passed, or one failed",
 		"html.escape":         "it made no assertion that passed, or one failed",
 		"base64.b64encode":    "EncodeTests.test_encodes@tests/test_contracts.py: failed",
+		"base64.b64decode":    "base64.b64decode raised binascii.Error, which its contract's Exsures doesn't declare",
 	} {
 		if standing[id].Support != "untested" {
 			t.Errorf("%s: %+v", id, standing[id])
@@ -192,7 +212,111 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 			direct[s.Name] = s.Passed
 		}
 	}
-	if len(steps) != 11 || !reflect.DeepEqual(steps, direct) {
+	if len(steps) != 12 || !reflect.DeepEqual(steps, direct) {
 		t.Fatalf("the routes disagree:\ngate   %v\ndirect %v", steps, direct)
+	}
+}
+
+// #355's second review at the gate: a method named on its class whose code
+// Enum shares, an assertion only setUp makes, and a generator whose raise
+// escapes through unittest's next fail the gate.
+
+const gtcBypassTests = gtcTestSource + `
+
+import enum
+
+from tasks import gen
+
+
+class SharedNewTests(unittest.TestCase):
+    def test_fake_status(self):
+        class FakeStatus(enum.IntEnum):
+            OK = 200
+        self.assertEqual(FakeStatus(200), 200)
+
+
+class FixtureAssertTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(True)
+
+    def test_only_calls(self):
+        json.dumps({'task': 'pending'})
+
+
+class GeneratorTests(unittest.TestCase):
+    def test_walk_fail(self):
+        g = gen.walk_fail(1)
+        self.assertEqual(next(g), 1)
+        self.assertRaises(gen.StoreError, next, g)
+`
+
+const gtcBypassContracts = gtcContractSource + `
+def status_new(cls: object, value: int) -> object:
+    Requires(value >= 100)
+    ...
+
+def dumps(value: object) -> str:
+    Requires(True)
+    ...
+
+def walk_fail(n: int) -> object:
+    Requires(n >= 0)
+    ...
+`
+
+func TestPythonApplicationGateTrustedContractsRefuseBypasses(t *testing.T) {
+	t.Run("local Python", func(t *testing.T) {
+		tc := gtcFake(t)
+		gtcBypasses(t, tc)
+	})
+	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") == "1" {
+		t.Run("real Docker Python TLC", func(t *testing.T) {
+			tc, err := toolchain.Ensure(context.Background())
+			if err != nil {
+				t.Fatalf("requested real prerequisites: %v", err)
+			}
+			gtcBypasses(t, tc)
+		})
+	}
+}
+
+func gtcBypasses(t *testing.T, tc toolchain.Toolchain) {
+	t.Helper()
+	f := gtcNew(t, false)
+	pa327Write(t, f.root, "tasks/gen.py", "class StoreError(Exception):\n    pass\n\n\ndef walk_fail(n):\n    yield n\n    raise StoreError('walk failed')\n")
+	pa327Write(t, f.root, gtcTests, gtcBypassTests)
+	pa327Write(t, f.root, gtcContracts, gtcBypassContracts)
+	f.p.Manifest.Components.TrustedContracts = append(f.p.Manifest.Components.TrustedContracts,
+		gtcContract("http.HTTPStatus.__new__", project.ComponentOperation{Kind: "standard_library", Module: "http", Symbol: "HTTPStatus.__new__"}, "status_new", "SharedNewTests.test_fake_status"),
+		gtcContract("json.dumps", project.ComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}, "dumps", "FixtureAssertTests.test_only_calls"),
+		gtcContract("tasks.walk_fail", project.ComponentOperation{Kind: "application", Source: "tasks/gen.py", Symbol: "walk_fail"}, "walk_fail", "GeneratorTests.test_walk_fail"),
+	)
+	pa327Save(t, f)
+	pa327Admit(t, f)
+	r := pa327Run(t, f, tc)
+	if r.Passed {
+		t.Fatalf("contracts no test supports passed the gate: %s", pa327JSON(t, r))
+	}
+	standing := gtcStanding(t, r)
+	if standing["json.loads"].Support != "tested" || standing["tasks.next_state"].Support != "tested" {
+		t.Fatalf("supported contracts lost their standing: %+v; diagnostics %+v", standing, r.Components.ContractDiagnostics)
+	}
+	md := receipt.Markdown(r)
+	failed := strings.Split(md[strings.Index(md, "**What failed**"):], "\n")
+	for id, reason := range map[string]string{
+		"http.HTTPStatus.__new__": "didn't resolve the operation's implementation",
+		"json.dumps":              "it made no assertion that passed, or one failed",
+		"tasks.walk_fail":         "raised tasks.gen.StoreError, which its contract's Exsures doesn't declare",
+	} {
+		if standing[id].Support != "untested" {
+			t.Errorf("%s: %+v", id, standing[id])
+		}
+		literal := strings.ReplaceAll(id, "_", "&#95;")
+		n := slices.IndexFunc(failed, func(line string) bool { return strings.Contains(line, "Trusted contract <code>"+literal+"</code>") })
+		if n < 0 {
+			t.Errorf("the receipt doesn't list %s as failed", id)
+		} else if !strings.Contains(strings.ReplaceAll(failed[n], "&#95;", "_"), reason) {
+			t.Errorf("the receipt doesn't say why %s failed, %q: %s", id, reason, failed[n])
+		}
 	}
 }

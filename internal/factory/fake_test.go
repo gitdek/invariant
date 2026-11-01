@@ -34,6 +34,7 @@ type fakeGitHub struct {
 	// noActions is an App without the Actions permission: it can't read jobs.
 	noActions bool
 	merged    []int
+	closed    []int // pull requests the factory closed
 	deleted   []string
 	bodies    map[int]string
 	nextID    int64
@@ -188,7 +189,7 @@ func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullReque
 	}
 	g.nextPR++
 	out := &github.PullRequest{Number: g.nextPR, State: "open", Draft: pr.Draft, URL: fmt.Sprintf("https://github.com/o/r/pull/%d", g.nextPR),
-		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}}
+		Head: github.Ref{Ref: pr.Head, SHA: g.head(pr.Head)}, Base: github.Ref{Ref: pr.Base}, CreatedAt: "2026-09-25T12:00:00Z"}
 	g.prs[out.Number] = out
 	g.bodies[out.Number] = pr.Body
 	return *out, nil
@@ -197,11 +198,54 @@ func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullReque
 func (g *fakeGitHub) OpenPullRequest(_ context.Context, branch string) (github.PullRequest, bool, error) {
 	for _, pr := range g.prs {
 		if pr.State == "open" && pr.Head.Ref == branch {
-			pr.Head.SHA = g.head(branch)
+			pr.Head.SHA = g.headOr(branch, pr.Head.SHA)
 			return *pr, true, nil
 		}
 	}
 	return github.PullRequest{}, false, nil
+}
+
+// PullRequestFrom finds the newest pull request from a branch, in any
+// state.
+func (g *fakeGitHub) PullRequestFrom(_ context.Context, branch string) (github.PullRequest, bool, error) {
+	newest := 0
+	for n, pr := range g.prs {
+		if pr.Head.Ref == branch && n > newest {
+			newest = n
+		}
+	}
+	if newest == 0 {
+		return github.PullRequest{}, false, nil
+	}
+	pr := g.prs[newest]
+	if pr.State == "open" {
+		pr.Head.SHA = g.headOr(branch, pr.Head.SHA)
+	}
+	return *pr, true, nil
+}
+
+// ClosePullRequest closes a pull request without merging it, as GitHub
+// does: a closed one stays closed and a merged one stays merged.
+func (g *fakeGitHub) ClosePullRequest(_ context.Context, n int) (github.PullRequest, error) {
+	pr, ok := g.prs[n]
+	if !ok {
+		return github.PullRequest{}, github.ErrNotFound
+	}
+	if !pr.Merged && pr.State == "open" {
+		pr.State = "closed"
+		g.closed = append(g.closed, n)
+	}
+	return *pr, nil
+}
+
+// headOr is branch's head in origin, or sha, a pull request's last head,
+// once someone deleted its branch: GitHub keeps the head a pull request had.
+func (g *fakeGitHub) headOr(branch, sha string) string {
+	out, err := exec.Command("git", "-C", g.origin, "rev-parse", "refs/heads/"+branch).Output()
+	if err != nil {
+		return sha
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (g *fakeGitHub) head(branch string) string {
@@ -218,7 +262,7 @@ func (g *fakeGitHub) PullRequest(_ context.Context, n int) (github.PullRequest, 
 		return github.PullRequest{}, github.ErrNotFound
 	}
 	if pr.State == "open" {
-		pr.Head.SHA = g.head(pr.Head.Ref)
+		pr.Head.SHA = g.headOr(pr.Head.Ref, pr.Head.SHA)
 	}
 	return *pr, nil
 }

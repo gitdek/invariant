@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -67,14 +68,37 @@ const ppTarget = `def admit(text: str, admitted: int) -> int:
 `
 
 // ppAbstraction is the trusted contract tinyver.parse stands for, under its
-// own name, which the input renames to the operation's.
+// own name, which the input renames to the operation's. Its backing tests see
+// tinyver.parse raise ValueError, which Exception covers.
 const ppAbstraction = `
 
 def version_of(text: str) -> object:
     """The version a non-empty text names."""
     Requires(len(text) > 0)
+    Exsures(Exception, True)
     ...
 `
+
+// ppLoads rewrites step 4's json.loads contract to declare that its operation
+// raises exception, or with exception empty, nothing.
+func ppLoads(exception string) func(*testing.T, string, *project.Project) {
+	return func(t *testing.T, root string, _ *project.Project) {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, ptcContracts))
+		if err != nil {
+			t.Fatal(err)
+		}
+		loads := regexp.MustCompile(`(?s)def loads\(text: str\) -> object:\n.*?\n\n`)
+		if !loads.Match(b) {
+			t.Fatal("step 4's fixture has no json.loads contract")
+		}
+		contract := "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n"
+		if exception != "" {
+			contract += "    Exsures(" + exception + ", True)\n"
+		}
+		pa310Write(t, root, ptcContracts, string(loads.ReplaceAllLiteral(b, []byte(contract+"    ...\n\n"))))
+	}
+}
 
 func ppAdmitID() string { return pa310ID(ppSource, "admit") }
 
@@ -186,7 +210,7 @@ func TestPythonApplicationProofInputKeepsTheFunctionAsWritten(t *testing.T) {
 		}
 	}
 	boundary := ppFile(t, in, "invariant_boundary_0.py")
-	if want := "from nagini_contracts.contracts import *\n\n\n@ContractOnly\ndef parse(text: str) -> object:\n    Requires(len(text) > 0)\n"; boundary != want {
+	if want := "from nagini_contracts.contracts import *\n\n\n@ContractOnly\ndef parse(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(Exception, True)\n"; boundary != want {
 		t.Fatalf("the abstraction's module:\n%s\nwant:\n%s", boundary, want)
 	}
 	// Every span maps to the original bytes it copies, the function's
@@ -650,6 +674,7 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 	replace := func(from, to string) func(string) string {
 		return func(m string) string { return strings.Replace(m, from, to, 1) }
 	}
+	same := func(m string) string { return m }
 	dumps := func(t *testing.T, root string, p *project.Project) {
 		ppContract(t, root, p, "json.dumps", project.ComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"},
 			"\n\ndef dumps_of(value: object) -> str:\n    Ensures(len(Result()) >= 0)\n    ...\n", "dumps_of", "DumpsTests.test_dumps",
@@ -659,6 +684,16 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 		return func(t *testing.T, root string, p *project.Project) {
 			ppContract(t, root, p, "admission."+symbol, project.ComponentOperation{Kind: "application", Source: ppSource, Symbol: symbol},
 				abstraction, symbol+"_of", "Of"+symbol+".test_of", "\n\nclass Of"+symbol+"(unittest.TestCase):\n    def test_of(self):\n        pass\n")
+		}
+	}
+	// handler is a module whose function calls json.loads inside a try with
+	// one handler, "except" followed by caught.
+	handler := func(caught string) func(string) string {
+		return func(string) string {
+			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
+				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
+				"    try:\n        json.loads(text)\n    except" + caught + ":\n        return admitted\n    return admitted + 1\n\n\n" +
+				"async def report(text: str) -> str:\n    return text\n"
 		}
 	}
 	for _, c := range []struct {
@@ -705,18 +740,14 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			return strings.Replace(m, "    Requires(admitted >= 0)\n", "    Pre(admitted >= 0)\n", 1)
 		}, want: ""},
 		// What a trusted contract says its operation raises.
-		{name: "a bare except around a boundary call", module: func(string) string {
-			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
-				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
-				"    try:\n        json.loads(text)\n    except:\n        return admitted\n    return admitted + 1\n\n\n" +
-				"async def report(text: str) -> str:\n    return text\n"
-		}, want: "bare except"},
-		{name: "an except Exception the contract doesn't declare", module: func(string) string {
-			return "from nagini_contracts.contracts import *\nimport json\n\n\n" +
-				"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(text) > 0)\n    Ensures(Result() == admitted + 1)\n" +
-				"    try:\n        json.loads(text)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
-				"async def report(text: str) -> str:\n    return text\n"
-		}, want: "doesn't declare with Exsures"},
+		{name: "a bare except around a boundary call", module: handler(""), contract: ppLoads("Exception"), want: "bare except"},
+		{name: "an except Exception around a contract with no Exsures", module: handler(" Exception"), contract: ppLoads(""), want: "doesn't declare with Exsures"},
+		{name: "an except Exception around a narrower Exsures", module: handler(" Exception"), contract: ppLoads("ConnectionRefusedError"), want: "doesn't declare with Exsures"},
+		{name: "an Exsures Nagini doesn't model", module: handler(" Exception"), contract: ppLoads("ValueError"), want: "raises builtins.ValueError, which the pinned Nagini doesn't model"},
+		{name: "an abstraction beside another star import", module: func(m string) string { return m }, contract: func(t *testing.T, root string, _ *project.Project) {
+			b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
+			pa310Write(t, root, ptcContracts, "from os.path import *\n"+string(b))
+		}, want: "which may come from a star import"},
 		{name: "an exception Nagini doesn't model", module: replace("    return admitted\n\n\nasync", "    raise ValueError('empty')\n\n\nasync"), want: "an exception class the pinned Nagini doesn't model"},
 		// Writes the module's bindings don't show.
 		{name: "globals()", module: replace("LIMIT = 3\n", "LIMIT = 3\nglobals()['LIMIT'] = 100\n"), want: "with globals"},
@@ -727,6 +758,53 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			other: map[string]string{"tasks/config.py": "import tasks.admission as adm\n\nadm.admit = None\n"}, want: "writes tasks.admission.admit"},
 		{name: "another module writing through a relative import", module: func(m string) string { return m },
 			other: map[string]string{"tasks/config.py": "from . import admission\n\ndel admission.LIMIT\n"}, want: "writes tasks.admission.LIMIT"},
+		// Ways to reach the module that the scan can't follow, refused where
+		// they reach it.
+		{name: "an alias of the module", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import admission\nm = admission\nm.LIMIT = 100\n"}, want: "tasks/config.py:2 binds tasks.admission to a name other than by an import"},
+		{name: "an alias of an as-import", module: same,
+			other: map[string]string{"tasks/config.py": "import tasks.admission as a\nz = a\nz.LIMIT = 100\n"}, want: "tasks/config.py:2 binds tasks.admission to a name other than by an import"},
+		{name: "a del through an alias", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import admission\nm = admission\ndel m.LIMIT\n"}, want: "tasks/config.py:2 binds tasks.admission to a name other than by an import"},
+		{name: "sys.modules by the module's name", module: same,
+			other: map[string]string{"tasks/config.py": "import sys\n\nsys.modules['tasks.admission'].LIMIT = 100\n"}, want: "tasks/config.py:3 looks tasks.admission up in sys.modules"},
+		{name: "sys.modules by its package's name", module: same,
+			other: map[string]string{"tasks/config.py": "import sys\n\nsys.modules['tasks'].admission.LIMIT = 100\n"}, want: "looks tasks up in sys.modules"},
+		{name: "the module passed to a function", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import admission\n\n\ndef poke(m):\n    m.LIMIT = 100\n\n\npoke(admission)\n"}, want: "tasks/config.py:8 passes tasks.admission to a call"},
+		{name: "a module that re-exports it", module: same,
+			other: map[string]string{"tasks/reexport.py": "from tasks import admission\n", "tasks/config.py": "from tasks.reexport import admission\n\nadmission.LIMIT = 100\n"}, want: "tasks/config.py:3 writes tasks.admission.LIMIT"},
+		{name: "a star import of its package", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import *\n\nadmission.LIMIT = 100\n"}, want: "tasks/config.py:3 writes tasks.admission.LIMIT"},
+		{name: "importlib with its package's name", module: same,
+			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks').admission.LIMIT = 100\n"}, want: "imports tasks by name"},
+		{name: "patching it by name in production", module: same,
+			other: map[string]string{"tasks/config.py": "from unittest import mock\n\nmock.patch('tasks.admission.LIMIT', 100).start()\n"}, want: "tasks/config.py:3 patches tasks.admission.LIMIT by name"},
+		{name: "importlib with its name in production", module: same,
+			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks.admission').LIMIT = 1\n"}, want: "tasks/config.py:3 imports tasks.admission by name"},
+		{name: "runpy.run_path in production", module: same,
+			other: map[string]string{"tests/test_helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/config.py": "import runpy\n\nrunpy.run_path('tests/test_helpers.py')\n"},
+			want: "tasks/config.py:3 runs code from a path or a code object"},
+		{name: "runpy.run_code in production", module: same,
+			other: map[string]string{"tasks/config.py": "from runpy import run_code\n\nrun_code(compile('x = 1', 'x', 'exec'))\n"}, want: "tasks/config.py:3 runs code from a path or a code object"},
+		// The helper reaches the module by name, so importing it by name
+		// reaches nothing the scan refuses in production code itself.
+		{name: "a test module production code imports by name", module: same,
+			other: map[string]string{"tests/test_helpers.py": "import sys\n\nsys.modules['tasks.admission'].LIMIT = 100\n", "tasks/config.py": "import importlib\n\nimportlib.import_module('tests.test_helpers')\n"},
+			want: "tests/test_helpers.py:3 looks tasks.admission up in sys.modules"},
+		{name: "a helper production code imports", module: same,
+			other: map[string]string{pa315Project + "/helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/config.py": "from verification.lifecycle import helpers\n"},
+			want: pa315Project + "/helpers.py:3 writes tasks.admission.LIMIT"},
+		{name: "the function's __globals__", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__globals__['LIMIT'] = 100\n"}, want: "reads __globals__"},
+		{name: "rebinding the module in its package", module: same,
+			other: map[string]string{"tasks/config.py": "import tasks\n\ntasks.admission = None\n"}, want: "rebinds tasks's attribute admission"},
+		{name: "a source the host's Python can't read", module: same,
+			other: map[string]string{"tools/broken.py": "def (:\n"}, want: "tools/broken.py:1 can't be read by the host's Python"},
+		// What the module itself binds, and how the function reads builtins.
+		{name: "a star import beside the function", module: replace("LIMIT = 3\n", "LIMIT = 3\nfrom os.path import *\n"), want: "star import of os.path could rebind what the input copies"},
+		{name: "an attribute of a builtin Nagini models", module: replace("        return admitted + 1\n", "        return admitted + 1 + len(str.maketrans('a', 'b'))\n"),
+			want: "reads attributes of the builtin str"},
 		// Operations an abstraction can't stand for, and imports that fail.
 		{name: "an async application operation", module: func(m string) string {
 			m = strings.Replace(m, "        version = tinyver.parse(text)\n", "        version = tinyver.parse(text)\n        pending = fetch(text)\n", 1)
@@ -765,40 +843,114 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 	}
 }
 
-// A trusted contract says what its operation raises with Exsures, with an
-// exception Nagini models, and a handler may catch only what the contract
-// declares.
-func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
-	module := "from nagini_contracts.contracts import *\nimport json\nfrom typing import Final\n\nLIMIT: Final = 3\n\n\n" +
-		"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Requires(len(text) > 0)\n" +
-		"    Ensures(Result() >= admitted)\n    Exsures(Exception, True)\n" +
-		"    try:\n        json.loads(text)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
-		"async def report(text: str) -> str:\n    return text\n"
-	root, p := ppFixture(t, module)
-	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
-	pa310Write(t, root, ptcContracts, strings.Replace(string(b), "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n",
-		"def loads(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(Exception, True)\n", 1))
-	in, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID())
-	if err != nil {
+// A neighbor may import the module and read it: call its functions, read its
+// values and its name, and look an unrelated module up by name. It may not
+// hand the module itself to a call, even getattr.
+func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
+	root, p := ppFixture(t, ppModule)
+	pa310Write(t, root, "tasks/api.py", "import importlib\nimport sys\n\nimport tasks.admission as a\nfrom tasks import admission\n\n\n"+
+		"def handle(text):\n    '''Calls tasks.admission.admit.'''\n    loaded = importlib.import_module('json')\n"+
+		"    return admission.admit(text, a.LIMIT - 1), admission.__name__, sys.modules['json'] is loaded, 'json' in sys.modules, getattr(a, '__doc__')\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil || !strings.Contains(err.Error(), "passes tasks.admission to a call") {
+		t.Fatalf("getattr on the module itself: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "tasks/api.py"))
+	pa310Write(t, root, "tasks/api.py", strings.Replace(string(b), ", getattr(a, '__doc__')", ", getattr(sys, 'path')", 1))
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
 		t.Fatal(err)
 	}
-	main := ppFile(t, in, PythonApplicationProofMain)
-	for _, want := range []string{"from typing import Final\n", "LIMIT: Final = 3\n", "import invariant_boundary_0 as json\n"} {
-		if !strings.Contains(main, want) {
-			t.Fatalf("the input lacks %q:\n%s", want, main)
-		}
+}
+
+// The proof covers the module as production code leaves it. Tests and the
+// verification project's own driver and helpers may patch it, by name or
+// otherwise, and a production string that merely names it, as a logger's
+// does, reaches nothing.
+func TestPythonApplicationProofLeavesTestsOutOfTheScan(t *testing.T) {
+	root, p := ppFixture(t, ppModule)
+	pa310Write(t, root, "tests/test_admission.py", "from unittest import mock\n\nfrom tasks import admission\n\n\n"+
+		"@mock.patch('tasks.admission.LIMIT', 100)\ndef test_admits_more():\n    with mock.patch.object(admission, 'LIMIT', 5):\n        admission.LIMIT = 7\n")
+	pa310Write(t, root, pa315Project+"/helpers.py", "import sys\n\nfrom tasks import admission\n\nadmission.LIMIT = 9\nsys.modules['tasks.admission'].LIMIT = 9\n")
+	pa310Write(t, root, "tasks/log.py", "import logging\n\nlog = logging.getLogger('tasks.admission')\n")
+	// A file named like a test is one, even in a production package, until
+	// production code imports it.
+	pa310Write(t, root, "tasks/test_helpers.py", "from tasks import admission\n\nadmission.LIMIT = 11\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
+		t.Fatal(err)
 	}
-	if got := ppFile(t, in, "invariant_boundary_0.py"); !strings.Contains(got, "    Exsures(Exception, True)\n") {
-		t.Fatalf("the contract's Exsures didn't reach its stub:\n%s", got)
+	// A test file production code imports runs in production too.
+	pa310Write(t, root, "tasks/config.py", "from tests import test_admission\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil ||
+		!strings.Contains(err.Error(), "tests/test_admission.py:6 patches tasks.admission.LIMIT by name") {
+		t.Fatalf("a test production code imports: %v", err)
 	}
-	if bs := ppBoundaries(in); bs["Exception"].Kind != "native" || bs["json"].Contract != "json.loads" {
-		t.Fatalf("boundaries: %+v", in.Boundaries)
+}
+
+// When the module is a package's own, importing a submodule binds its name
+// in the package, so no submodule may share a name the function reads.
+func TestPythonApplicationProofRefusesASubmoduleNamedForWhatItReads(t *testing.T) {
+	const source = "tasks/admission/__init__.py"
+	module := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\n" +
+		"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Ensures(Result() < 3)\n    return admitted\n"
+	root, p := ppFixture(t, module)
+	if err := os.Remove(filepath.Join(root, ppSource)); err != nil {
+		t.Fatal(err)
 	}
-	// A contract may declare only exceptions Nagini models.
-	pa310Write(t, root, ptcContracts, strings.Replace(string(b), "def loads(text: str) -> object:\n    Requires(len(text) > 0)\n",
-		"def loads(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(ValueError, True)\n", 1))
-	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil || !strings.Contains(err.Error(), "raises ValueError, which the pinned Nagini doesn't model") {
-		t.Fatalf("an unmodeled exception in a contract: %v", err)
+	pa310Write(t, root, source, module)
+	p.Manifest.Existing = append(slices.DeleteFunc(p.Manifest.Existing, func(s string) bool { return s == ppSource }), source)
+	p.Manifest.Components.Scope = append(p.Manifest.Components.Scope, "tasks/admission")
+	check := &p.Manifest.Components.Checks[len(p.Manifest.Components.Checks)-1]
+	check.Target = pa310Ref(source, "admit")
+	check.Proof.Contracts = []project.ComponentRef{check.Target}
+	pa310Save(t, p)
+	id := pa310ID(source, "admit")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	pa310Write(t, root, "tasks/admission/LIMIT.py", "")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), id); err == nil ||
+		!strings.Contains(err.Error(), "tasks/admission/LIMIT.py is in a submodule of tasks.admission, and importing it rebinds tasks.admission.LIMIT") {
+		t.Fatalf("a submodule named for a constant: %v", err)
+	}
+}
+
+// A trusted contract says what its operation raises with Exsures, as the
+// inventory reads it (D-0221), with an exception Nagini models, and a handler
+// may catch only what the contract declares.
+func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
+	module := func(caught string) string {
+		return "from nagini_contracts.contracts import *\nimport json\nfrom typing import Final\n\nLIMIT: Final = 3\n\n\n" +
+			"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Requires(len(text) > 0)\n" +
+			"    Ensures(Result() >= admitted)\n    Exsures(Exception, True)\n" +
+			"    try:\n        json.loads(text)\n    except " + caught + ":\n        return admitted\n    return admitted + 1\n\n\n" +
+			"async def report(text: str) -> str:\n    return text\n"
+	}
+	for _, c := range []struct{ caught, declared string }{{"Exception", "Exception"}, {"ConnectionRefusedError", "Exception"}, {"ConnectionRefusedError", "ConnectionRefusedError"}} {
+		t.Run("except "+c.caught+" around "+c.declared, func(t *testing.T) {
+			root, p := ppFixture(t, module(c.caught))
+			ppLoads(c.declared)(t, root, p)
+			s := ppSession(t, p, &ppNagini{})
+			if got := s.inventory.TrustedContracts; !slices.ContainsFunc(got, func(tc project.ResolvedComponentContract) bool {
+				return tc.ID == "json.loads" && slices.Equal(tc.Exsures, []string{"builtins." + c.declared})
+			}) {
+				t.Fatalf("the inventory's exsures: %+v", got)
+			}
+			in, err := s.ProofInput(context.Background(), ppAdmitID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			main := ppFile(t, in, PythonApplicationProofMain)
+			for _, want := range []string{"from typing import Final\n", "LIMIT: Final = 3\n", "import invariant_boundary_0 as json\n"} {
+				if !strings.Contains(main, want) {
+					t.Fatalf("the input lacks %q:\n%s", want, main)
+				}
+			}
+			if got := ppFile(t, in, "invariant_boundary_0.py"); !strings.Contains(got, "    Exsures("+c.declared+", True)\n") {
+				t.Fatalf("the contract's Exsures didn't reach its stub:\n%s", got)
+			}
+			if bs := ppBoundaries(in); bs[c.caught].Kind != "native" || bs["json"].Contract != "json.loads" {
+				t.Fatalf("boundaries: %+v", in.Boundaries)
+			}
+		})
 	}
 }
 
@@ -870,22 +1022,30 @@ func TestPythonApplicationProofReadsDistributionsFromRecords(t *testing.T) {
 // the pinned image's minor version (INVARIANT_PYTHON_PINNED=1, as in CI's
 // second run of the Python tests), they must be its own.
 func TestPythonApplicationProofKnowsThePinnedRuntime(t *testing.T) {
-	for name, list := range map[string]string{"standard library": pythonStdlibModules, "builtins": pythonBuiltins} {
-		if fields := strings.Fields(list); len(fields) < 100 || !slices.IsSorted(fields) {
+	for name, list := range map[string]string{"standard library": pythonStdlibModules, "builtins": pythonBuiltins, "builtin exceptions": pythonBuiltinExceptions,
+		"Nagini's names": naginiNamesList, "Nagini's calls": naginiCallsList} {
+		if fields := strings.Fields(list); len(fields) < 50 || !slices.IsSorted(fields) {
 			t.Fatalf("the %s list: %d names, sorted %v", name, len(fields), slices.IsSorted(fields))
+		}
+	}
+	for _, name := range naginiCalls {
+		if !slices.Contains(naginiNames, name) {
+			t.Fatalf("Nagini's call %s isn't among its names", name)
 		}
 	}
 	if os.Getenv("INVARIANT_PYTHON_PINNED") != "1" {
 		t.Log("INVARIANT_PYTHON_PINNED isn't set, so python3 may be any version here")
 		return
 	}
-	out, err := exec.Command("python3", "-I", "-c", "import builtins, sys\nprint(' '.join(sorted(sys.stdlib_module_names)))\nprint(' '.join(sorted(n for n in dir(builtins) if not n.startswith('_'))))").Output()
+	out, err := exec.Command("python3", "-I", "-c", "import builtins, sys\nprint(' '.join(sorted(sys.stdlib_module_names)))\nprint(' '.join(sorted(n for n in dir(builtins) if not n.startswith('_'))))\n"+
+		"print(' '.join(sorted(n for n in dir(builtins) if not n.startswith('_') and isinstance(getattr(builtins, n), type) and issubclass(getattr(builtins, n), BaseException))))").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 || !slices.Equal(strings.Fields(lines[0]), strings.Fields(pythonStdlibModules)) || !slices.Equal(strings.Fields(lines[1]), strings.Fields(pythonBuiltins)) {
-		t.Fatalf("the pinned runtime's names changed: refresh python_stdlib_modules.txt and python_builtins.txt from toolchain.PythonImage")
+	if len(lines) != 3 || !slices.Equal(strings.Fields(lines[0]), strings.Fields(pythonStdlibModules)) || !slices.Equal(strings.Fields(lines[1]), strings.Fields(pythonBuiltins)) ||
+		!slices.Equal(strings.Fields(lines[2]), strings.Fields(pythonBuiltinExceptions)) {
+		t.Fatalf("the pinned runtime's names changed: refresh python_stdlib_modules.txt, python_builtins.txt and python_builtin_exceptions.txt from toolchain.PythonImage")
 	}
 }
 
@@ -1049,6 +1209,86 @@ func TestPythonApplicationProofReal(t *testing.T) {
 		if proof.Ran || proof.Result.Passed || len(u) != 1 || u[0].Kind != MissingContract || u[0].Operation == nil ||
 			*u[0].Operation != (project.ResolvedComponentOperation{Kind: "dependency", Distribution: "packaging", Module: "packaging.utils", Symbol: "is_normalized_name"}) {
 			t.Fatalf("an omitted contract: %+v", proof.Result)
+		}
+	})
+	// Nagini proves the function as the input copies it, so a neighbor that
+	// writes the module's constant through an alias is refused before
+	// Nagini runs: at run time admit(50) would return 50.
+	t.Run("a write through an alias", func(t *testing.T) {
+		module := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\n" +
+			"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Ensures(Result() < 3)\n    return admitted\n\n\n" +
+			"async def report(text: str) -> str:\n    return text\n"
+		root, p := ppRealFixture(t, module, false)
+		proof, err := pa315Prepare(t, p, PythonApplicationSessionOptions{}).Prove(ctx, ppAdmitID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Nagini: %s", strings.TrimSpace(proof.Output))
+		if !proof.Ran || !proof.Result.Passed {
+			t.Fatalf("the function as the input copies it wasn't proved: %+v", proof.Result)
+		}
+		pa310Write(t, root, "tasks/config.py", "from tasks import admission\nm = admission\nm.LIMIT = 100\n")
+		if proof, err := pa315Prepare(t, p, PythonApplicationSessionOptions{}).Prove(ctx, ppAdmitID()); err == nil ||
+			!strings.Contains(err.Error(), "tasks/config.py:2 binds tasks.admission to a name other than by an import") {
+			t.Fatalf("got %v, %+v; want the alias refused before Nagini runs", err, proof)
+		}
+	})
+	// A contract that declares what its operation raises reaches Nagini:
+	// a handler for it is code Nagini checks, so a postcondition that
+	// forgets the handler's path fails.
+	for _, c := range []struct {
+		name, ensures string
+		passes        bool
+	}{
+		{"a handler the contract declares", "Result() >= admitted", true},
+		{"a postcondition the handler breaks", "Result() == admitted + 1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			module := "from nagini_contracts.contracts import *\nimport json\n\n\n" +
+				"def admit(name: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(len(name) > 0)\n    Ensures(" + c.ensures + ")\n" +
+				"    try:\n        json.loads(name)\n    except Exception:\n        return admitted\n    return admitted + 1\n\n\n" +
+				"async def report(name: str) -> str:\n    return name\n"
+			root, p := ppRealFixture(t, module, false)
+			pa310Write(t, root, ptcContracts, strings.Replace(ppRealContracts, "    Requires(len(text) > 0)\n", "    Requires(len(text) > 0)\n    Exsures(Exception, True)\n", 1))
+			proof, err := pa315Prepare(t, p, PythonApplicationSessionOptions{}).Prove(ctx, ppAdmitID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("Nagini: %s", strings.TrimSpace(proof.Output))
+			if !proof.Ran || proof.Result.Passed != c.passes || len(proof.Result.Assumed) != 1 || proof.Result.Assumed[0].Contract != "json.loads" {
+				t.Fatalf("passed %v, want %v: %+v", proof.Result.Passed, c.passes, proof.Result)
+			}
+		})
+	}
+	// The names the input treats as Nagini's are the pinned image's own.
+	t.Run("Nagini's names", func(t *testing.T) {
+		image, err := toolchain.NaginiImage(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		script := `import inspect, re
+import nagini_translation.translators.call as call
+import nagini_translation.lib.constants as c
+import nagini_translation.analyzer as a
+import nagini_contracts.contracts as k, nagini_contracts.io_contracts as io, nagini_contracts.obligations as ob, nagini_contracts.thread as th
+calls = set(call.CONTRACT_WRAPPER_FUNCS) | set(call.CONTRACT_FUNCS) | set(call.IO_CONTRACT_FUNCS) | set(call.OBLIGATION_CONTRACT_FUNCS)
+calls |= set(c.BUILTINS) | set(c.THREADING) | set(c.BUILTIN_PREDICATES)
+calls |= set(re.findall(r"'(IOExists\d*)'", inspect.getsource(call))) | {'IOExists'}
+names = set(calls) | set(re.findall(r"has_decorator\([^,]+, '([A-Za-z_]+)'\)", inspect.getsource(a)))
+names |= {n for n in re.findall(r"\.id\s*==\s*'([A-Za-z_]+)'", inspect.getsource(a)) if n != '_'}
+for m in (k, io, ob, th):
+    names |= set(getattr(m, '__all__', None) or [n for n in dir(m) if not n.startswith('_')])
+print(' '.join(sorted(names)))
+print(' '.join(sorted(calls)))
+print(' '.join(sorted(k.__all__)))
+`
+		out, err := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--platform", "linux/amd64", "--entrypoint", "python", image, "-I", "-c", script).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) != 3 || !slices.Equal(strings.Fields(lines[0]), naginiNames) || !slices.Equal(strings.Fields(lines[1]), naginiCalls) || !slices.Equal(strings.Fields(lines[2]), naginiExports) {
+			t.Fatalf("the pinned Nagini's names changed: refresh nagini_names.txt, nagini_calls.txt and naginiExports from its sources")
 		}
 	})
 }

@@ -280,7 +280,6 @@ type pythonProofLines struct {
 	End     int    `json:"end"`
 	Line    int    `json:"line"`
 	EndLine int    `json:"end_line"`
-	Exsures string `json:"exsures"`
 }
 
 type pythonProofBinding struct {
@@ -647,6 +646,11 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 	type file struct {
 		Path   string `json:"path"`
 		Source string `json:"source"`
+		Tests  bool   `json:"tests,omitempty"`
+	}
+	verification, err := filepath.Rel(s.root, s.project.Dir)
+	if err != nil {
+		return nil, err
 	}
 	var files []file
 	names := make([]string, 0, len(s.snapshot))
@@ -661,7 +665,7 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b)})
+		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: !s.production(name, filepath.ToSlash(verification))})
 	}
 	var reply struct {
 		Writes []pythonProofWrite `json:"writes"`
@@ -670,6 +674,27 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 		return nil, err
 	}
 	return reply.Writes, nil
+}
+
+// production says whether a staged source is the application's production
+// code, which is what a proof covers. Test files, by the project's rule, are
+// not, and neither is the verification project's own code, its driver and
+// helpers among it, unless the application selects it. The scan for writes
+// still reads what production code imports of either.
+func (s *PythonApplicationSession) production(name, verification string) bool {
+	base := path.Base(name)
+	if strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") {
+		return false
+	}
+	if !strings.HasPrefix(name, verification+"/") {
+		return true
+	}
+	m := s.project.Manifest
+	selected := slices.ContainsFunc(m.Existing, func(e string) bool { return name == e || strings.HasPrefix(name, e+"/") })
+	if m.Components != nil {
+		selected = selected || slices.Contains(m.Components.Scope, path.Dir(name))
+	}
+	return selected
 }
 
 type pythonProofBuilder struct {
@@ -741,14 +766,27 @@ func (b *pythonProofBuilder) build() error {
 			return b.unsupported("%s binds %s, which Nagini reads as its own", b.target.Symbol, name)
 		}
 	}
+	// A star import could rebind what the input copies, whatever the
+	// function reads.
+	for _, s := range d.Star {
+		if s.Module != "nagini_contracts.contracts" || s.Level != 0 {
+			return b.unsupported("line %d's star import of %s%s could rebind what the input copies from the module", s.Line, strings.Repeat(".", s.Level), s.Module)
+		}
+	}
 	module := strings.TrimSuffix(b.target.Package, ".__init__")
+	if err := b.submodules(module); err != nil {
+		return err
+	}
 	writes, err := b.s.moduleWrites(module)
 	if err != nil {
 		return err
 	}
 	if len(writes) > 0 {
 		w := writes[0]
-		return b.unsupported("%s:%d writes %s, which no binding in the module shows", w.Path, w.Line, w.What)
+		if w.Line == 0 {
+			return b.unsupported("%s %s", w.Path, w.What)
+		}
+		return b.unsupported("%s:%d %s", w.Path, w.Line, w.What)
 	}
 	b.sources = map[string]bool{b.target.Source: true}
 	if b.s.inventory != nil {
@@ -781,6 +819,32 @@ func (b *pythonProofBuilder) build() error {
 	return b.write()
 }
 
+// submodules refuses a package's own module when one of its submodules has
+// a name the function reads, or the function's own: importing the submodule
+// rebinds that name in the package.
+func (b *pythonProofBuilder) submodules(module string) error {
+	dir, ok := strings.CutSuffix(b.target.Source, "__init__.py")
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(b.s.snapshot))
+	for name := range b.s.snapshot {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		rest, ok := strings.CutPrefix(name, dir)
+		if !ok || rest == "__init__.py" {
+			continue
+		}
+		child := strings.TrimSuffix(strings.SplitN(rest, "/", 2)[0], ".py")
+		if _, read := b.d.Free[child]; read || child == b.target.Symbol {
+			return b.unsupported("%s is in a submodule of %s, and importing it rebinds %s.%s", name, module, module, child)
+		}
+	}
+	return nil
+}
+
 // naginiStar says the module star-imports Nagini's contracts.
 func (d *pythonProofDeclaration) naginiStar() bool {
 	return slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module == "nagini_contracts.contracts" && s.Level == 0 })
@@ -798,10 +862,6 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 	rows := d.Bindings[name]
 	if len(rows) > 1 {
 		return nil, b.unsupported("%s is bound more than once at its module's top level", name)
-	}
-	// Any other star import could bind an unbound name, Nagini's included.
-	if len(rows) == 0 && slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module != "nagini_contracts.contracts" || s.Level != 0 }) {
-		return nil, b.unsupported("%s may come from a star import", name)
 	}
 	// Nagini reads some names as its own wherever they appear, so the
 	// function may read one only as what Nagini takes it for.
@@ -822,6 +882,11 @@ func (b *pythonProofBuilder) bind(name string, use pythonProofName) ([]*pythonPr
 			return nil, b.nagini(name, pythonProofBinding{Kind: "star"})
 		}
 		if naginiNative[name] || naginiExceptions[name] {
+			// Nagini models the builtin itself, not what it holds, as
+			// str.maketrans: that needs a contract, as other builtins do.
+			if use.Deep || len(use.Attributes) > 0 {
+				return nil, b.unsupported("the function reads attributes of the builtin %s", name)
+			}
 			b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "native"})
 			return nil, nil
 		}
@@ -1224,19 +1289,10 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 		}
 	}
 	contracts := 0
-	var raises []string
 	for _, s := range d.Body {
 		switch s.Kind {
 		case "contract":
 			contracts++
-			if s.Exsures != "" {
-				if !naginiExceptions[s.Exsures] {
-					return nil, nil, fail("declares that its operation raises %s, which the pinned Nagini doesn't model: it models Exception and ConnectionRefusedError", s.Exsures)
-				}
-				if !slices.Contains(raises, s.Exsures) {
-					raises = append(raises, s.Exsures)
-				}
-			}
 		case "docstring", "ellipsis", "pass":
 		default:
 			return nil, nil, fail("holds a statement that isn't a contract, on line %d", s.Line)
@@ -1245,6 +1301,17 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 	if contracts == 0 {
 		return nil, nil, fail("holds no contract")
 	}
+	// What the operation raises is what the inventory read from the
+	// contract's own Exsures (D-0221), the bytes its stub copies to Nagini,
+	// which models only these classes.
+	var raises []string
+	for _, path := range c.Exsures {
+		name, builtin := strings.CutPrefix(path, "builtins.")
+		if !builtin || !naginiExceptions[name] {
+			return nil, nil, fail("declares that its operation raises %s, which the pinned Nagini doesn't model: it models Exception and ConnectionRefusedError", path)
+		}
+		raises = append(raises, name)
+	}
 	for _, name := range d.Bound {
 		if slices.Contains(naginiCalls, name) {
 			return nil, nil, fail("binds %s, which Nagini reads as its own", name)
@@ -1252,8 +1319,15 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 	}
 	var typing []pythonProofBinding
 	naginiStar := d.naginiStar()
+	// The stub holds none of the module's other imports, so a name that may
+	// come from another star import may not mean in the stub what it means
+	// where the contract's tests read it.
+	otherStar := slices.ContainsFunc(d.Star, func(s pythonProofBinding) bool { return s.Module != "nagini_contracts.contracts" || s.Level != 0 })
 	for name, use := range d.Free {
 		rows := d.Bindings[name]
+		if len(rows) == 0 && otherStar {
+			return nil, nil, fail("reads %s, which may come from a star import", name)
+		}
 		switch {
 		case len(rows) == 1 && rows[0].Kind == "from" && rows[0].Module == "nagini_contracts.contracts" && rows[0].Level == 0 && rows[0].Name == name,
 			len(rows) == 0 && naginiStar && slices.Contains(naginiExports, name):

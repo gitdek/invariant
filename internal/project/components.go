@@ -213,6 +213,16 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 type componentSource struct {
 	file       ComponentFile
 	components []Component
+	// exsures holds each Python declaration's Exsures calls, from the same
+	// bytes its contract hash covers.
+	exsures map[string][]componentExsures
+}
+
+// componentExsures is one Exsures call: the exception as written, and the
+// dotted path it resolves to without running the module, or none.
+type componentExsures struct {
+	Expression string `json:"expression"`
+	Path       string `json:"path"`
 }
 
 type componentResolver struct {

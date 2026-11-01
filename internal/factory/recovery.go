@@ -21,8 +21,14 @@ import (
 //
 // The core knows each step's effects, not the issue protocol's rules. The
 // protocol still decides which steps there are (D-0064). The posts the
-// core's model leaves out, a CI failure, a closed pull request and the limit
-// on stopped builds, are the protocol's alone.
+// core's model leaves out, a CI failure and the limit on stopped builds, are
+// the protocol's alone. A writer's retry that builds a plan's failed draft
+// again is the core's replacement (#271, D-0203): its record, the draft's
+// close and its answer are the core's own steps. Someone else closing or
+// merging a pull request is still the protocol's alone: the posts that say
+// so take no step of the core. Each build is an attempt
+// with its own run, so a watcher still in the run of a build a later retry
+// replaced is in a stale run, which the core records as its own (D-0212).
 
 // errOutsideRecovery is what an effect the core doesn't allow fails with.
 var errOutsideRecovery = errors.New("the factory's recovery rules don't allow this effect")
@@ -33,7 +39,12 @@ const (
 	another = 1
 )
 
-// step is the step in hand, as every watcher can see it.
+// step is the step in hand, as every watcher can see it. A pull request the
+// build opened is a ready one, as far as these steps are concerned. pred and
+// intent are a retry's replacement: the draft it replaces, as a
+// recovery.Pred value, and whether its record is stored. attempt is the
+// latest build's attempt: 0 for the ratification's build, and one more for
+// each retry's, as the core counts them.
 type step struct {
 	given     []int // the commands a writer gave for it: recovery.Solve, Ratify, Note or Retry
 	posted    []int // the steps already answered
@@ -44,6 +55,9 @@ type step struct {
 	merged,
 	gatePassed,
 	mergeable bool
+	pred    int
+	intent  bool
+	attempt int
 }
 
 // repo is the step in the core's terms, with the lease as this watcher
@@ -64,8 +78,15 @@ func (f *Factory) repo(s step) recovery.Repo {
 			r.Runs[k] = recovery.RunDone
 		}
 	}
-	r.RatPushed, r.CodePushed, r.PROpen, r.Merged = s.ratPushed, s.codePushed, s.prOpen, s.merged
+	r.RatPushed, r.CodePushed, r.Opened, r.Merged = s.ratPushed, s.codePushed, s.prOpen, s.merged
+	switch {
+	case s.merged:
+		r.PR = recovery.PRMerged
+	case s.prOpen:
+		r.PR = recovery.PRReady
+	}
 	r.GatePassed, r.Mergeable = s.gatePassed, s.mergeable
+	r.Pred, r.Intent, r.Attempt = s.pred, s.intent, s.attempt
 	r.Lease = another
 	if f.holds() {
 		r.Lease = me
@@ -121,52 +142,87 @@ func noting() step {
 	return step{given: []int{recovery.Note}}
 }
 
+// replacing is a writer's retry of a plan's failed draft (#271): its build
+// has been answered, and the retry starts a new one, which replaces the
+// draft, pred, with intent its record that it does, stored or not.
+func replacing(pred int, intent bool) step {
+	return step{given: []int{recovery.Solve, recovery.Ratify, recovery.Retry}, posted: []int{recovery.Solve, recovery.Ratify},
+		ratPushed: true, pred: pred, intent: intent}
+}
+
 // watcher is this watcher in the core's terms, in the agent run for key,
-// or in none.
-func watcher(inRun int) recovery.Watcher {
+// or in none, which the build of attempt started. The watcher's attempt is
+// never ahead of the step's: it's the step's own, or, for a run a later
+// retry replaced, the one before (D-0212).
+func watcher(inRun, attempt int) recovery.Watcher {
 	w := recovery.NewWatcher(me)
-	w.InRun = inRun
+	w.InRun, w.Attempt = inRun, attempt
 	return w
 }
 
 // Each effect, as the core has it.
 
 func (f *Factory) canStartRun(s step, k int) bool {
-	_, _, ok := f.repo(s).StartRun(watcher(recovery.NoRun), k)
+	_, _, ok := f.repo(s).StartRun(watcher(recovery.NoRun, s.attempt), k)
 	return ok
 }
 
 func (f *Factory) canFinishRun(s step, k int) bool {
-	_, _, ok := f.repo(s).FinishRun(watcher(k))
+	_, _, ok := f.repo(s).FinishRun(watcher(k, s.attempt))
+	return ok
+}
+
+// canFinishStaleRun says whether a watcher may record the run of a build
+// that a later retry's build replaced, the attempt before s's latest: the
+// core records it as its own, and nothing of the latest build changes.
+func (f *Factory) canFinishStaleRun(s step) bool {
+	if s.attempt == 0 {
+		return false
+	}
+	r := f.repo(s)
+	w := watcher(recovery.Build, s.attempt-1)
+	t, _, ok := r.FinishRun(w)
+	return ok && r.Stale(w) && t.Runs == r.Runs
+}
+
+func (f *Factory) canRecordIntent(s step) bool {
+	_, ok := f.repo(s).RecordIntent(watcher(recovery.NoRun, s.attempt))
+	return ok
+}
+
+func (f *Factory) canRetire(s step) bool {
+	_, ok := f.repo(s).Retire(watcher(recovery.NoRun, s.attempt))
 	return ok
 }
 
 func (f *Factory) canReportStopped(s step, k int) bool {
-	_, ok := f.repo(s).ReportStopped(watcher(recovery.NoRun), k)
+	_, ok := f.repo(s).ReportStopped(watcher(recovery.NoRun, s.attempt), k)
 	return ok
 }
 
 func (f *Factory) canPushRatification(s step) bool {
-	_, ok := f.repo(s).PushRatification(watcher(recovery.NoRun), recovery.Ratify)
+	_, ok := f.repo(s).PushRatification(watcher(recovery.NoRun, s.attempt), recovery.Ratify)
 	return ok
 }
 
 func (f *Factory) canPushCode(s step) bool {
-	_, ok := f.repo(s).PushCode(watcher(recovery.NoRun), recovery.Build)
+	_, ok := f.repo(s).PushCode(watcher(recovery.NoRun, s.attempt), recovery.Build)
 	return ok
 }
 
+// canOpenPullRequest says whether the build may open its pull request. The
+// core allows a draft exactly when it allows a ready one.
 func (f *Factory) canOpenPullRequest(s step) bool {
-	_, ok := f.repo(s).OpenPullRequest(watcher(recovery.NoRun), recovery.Build)
+	_, ok := f.repo(s).OpenPullRequest(watcher(recovery.NoRun, s.attempt), recovery.Build, true)
 	return ok
 }
 
 func (f *Factory) canMerge(s step) bool {
-	_, ok := f.repo(s).MergePullRequest(watcher(recovery.NoRun), recovery.Merge)
+	_, ok := f.repo(s).MergePullRequest(watcher(recovery.NoRun, s.attempt), recovery.Merge)
 	return ok
 }
 
 func (f *Factory) canPost(s step, k int) bool {
-	_, ok := f.repo(s).Post(watcher(recovery.NoRun), k)
+	_, ok := f.repo(s).Post(watcher(recovery.NoRun, s.attempt), k)
 	return ok
 }

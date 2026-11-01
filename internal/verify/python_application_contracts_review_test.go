@@ -145,9 +145,13 @@ class CTests(unittest.TestCase):
 `
 
 var prvContracts = ptcContractSource + func() string {
-	var b strings.Builder
+	// What the real-use tests see escape: re.compile('(') raises re.error,
+	// and Version('x.y') a ValueError.
+	raises := map[string]string{"regex": "    Exsures(re.error, True)\n", "version": "    Exsures(ValueError, True)\n"}
+	b := strings.Builder{}
+	b.WriteString("\nimport re\n")
 	for _, name := range []string{"counter", "length", "attr", "pop", "get", "regex", "dumps", "channel", "rank", "config", "version", "ordered", "add", "getitem", "stdparse", "settings", "quantize", "fromkeys"} {
-		fmt.Fprintf(&b, "\ndef %s(x: object) -> object:\n    Requires(True)\n    ...\n", name)
+		fmt.Fprintf(&b, "\ndef %s(x: object) -> object:\n    Requires(True)\n%s    ...\n", name, raises[name])
 	}
 	return b.String()
 }()
@@ -201,9 +205,15 @@ const prvImpl = "class Version:\n    def __init__(self, text):\n        self.par
 // replaces _impl.py's comparison after installation.
 func prvLibraries(t *testing.T, edited bool) string {
 	t.Helper()
+	return prvLibrariesWith(t, prvInit, edited)
+}
+
+// prvLibrariesWith installs tinyver with init as its __init__.py.
+func prvLibrariesWith(t *testing.T, init string, edited bool) string {
+	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"tinyver/__init__.py":            prvInit,
+		"tinyver/__init__.py":            init,
 		"tinyver/_impl.py":               prvImpl,
 		"tinyver-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: tinyver\nVersion: 1.0\n",
 	}

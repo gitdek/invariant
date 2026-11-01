@@ -8,14 +8,17 @@ module binds each name at its top level, so the gate can build Nagini's
 input around the original bytes. It serves a selected function and a trusted
 contract's declaration alike. With "writes", it names a module and the
 application's sources: the reply gives every place a source writes one of
-that module's attributes.
+that module's attributes, or reaches the module in a way the scan can't
+follow.
 """
 
 import ast
 import base64
+import io
 import json
 import re
 import sys
+import tokenize
 
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 TRY = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t is not None)
@@ -255,24 +258,19 @@ def declaration(request):
 
     body = []
     for statement in node.body:
-        kind, exsures = "other", None
+        kind = "other"
         if isinstance(statement, ast.Expr):
             value = statement.value
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in ("Requires", "Ensures", "Exsures", "Decreases"):
                 kind = "contract"
-                if value.func.id == "Exsures":
-                    exsures = value.args[0].id if value.args and isinstance(value.args[0], ast.Name) else "?"
             elif isinstance(value, ast.Constant) and value.value is Ellipsis:
                 kind = "ellipsis"
             elif isinstance(value, ast.Constant) and isinstance(value.value, str):
                 kind = "docstring"
         elif isinstance(statement, ast.Pass):
             kind = "pass"
-        row = {"kind": kind, "start": offset(statement.lineno, 0), "end": line_end(statement.end_lineno),
-               "line": statement.lineno, "end_line": statement.end_lineno}
-        if exsures is not None:
-            row["exsures"] = exsures
-        body.append(row)
+        body.append({"kind": kind, "start": offset(statement.lineno, 0), "end": line_end(statement.end_lineno),
+                     "line": statement.lineno, "end_line": statement.end_lineno})
 
     defline = raw[offset(node.lineno, 0):line_end(node.lineno)]
     m = re.match(rb"(async[ \t]+)?def[ \t]+" + re.escape(node.name.encode()) + rb"\b", defline)
@@ -370,62 +368,269 @@ def declaration(request):
     }
 
 
+# What a source may read of a module the scan for writes follows, besides
+# the module's own functions and values.
+PLAIN_DUNDERS = frozenset(("__name__", "__file__", "__doc__", "__path__", "__all__", "__version__"))
+
+# Calls that reach a module, or what's in one, by a dotted name.
+BY_NAME = frozenset(("importlib.import_module", "importlib.__import__", "builtins.__import__", "runpy.run_module",
+                     "pkgutil.resolve_name", "pkgutil.get_loader", "pkgutil.find_loader", "pydoc.locate"))
+
+# mock's patchers that take their target by a dotted name.
+PATCHERS = frozenset(("unittest.mock.patch", "unittest.mock.patch.dict", "unittest.mock.patch.multiple",
+                      "mock.patch", "mock.patch.dict", "mock.patch.multiple"))
+
+# Calls that run code from a path or a code object, which no import shows.
+BY_PATH = frozenset(("runpy.run_path", "runpy.run_code", "importlib.util.spec_from_file_location",
+                     "importlib.machinery.SourceFileLoader", "importlib.machinery.SourcelessFileLoader"))
+
+
+def module_of(path):
+    """The module a source is, by its path from the application's root."""
+    name = path[:-3] if path.endswith(".py") else path
+    if name == "__init__" or name.endswith("/__init__"):
+        name = name[:-len("__init__")].rstrip("/")
+    return name.replace("/", ".")
+
+
+def imports_of(tree, package):
+    """What each name a source's imports bind, at any scope, may name, as
+    dotted paths; the modules it star-imports; and every module its imports
+    may load."""
+    names, stars, loads = {}, [], []
+    for sub in ast.walk(tree):
+        if isinstance(sub, ast.Import):
+            for alias in sub.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                names.setdefault(bound, set()).add(alias.name if alias.asname else bound)
+                loads.append(alias.name)
+        elif isinstance(sub, ast.ImportFrom):
+            base = sub.module or ""
+            if sub.level:
+                parts = package.split(".") if package else []
+                if sub.level - 1 > len(parts):
+                    continue
+                parts = parts[:len(parts) - (sub.level - 1)]
+                base = ".".join(p for p in parts + ([sub.module] if sub.module else []) if p)
+            loads.append(base)
+            for alias in sub.names:
+                if alias.name == "*":
+                    stars.append(base)
+                else:
+                    names.setdefault(alias.asname or alias.name, set()).add((base + "." if base else "") + alias.name)
+                    loads.append((base + "." if base else "") + alias.name)
+    return names, stars, loads
+
+
 def writes(request):
-    """Every place the application's sources write one of a module's
-    attributes: by assignment, augmented assignment or del through any name
-    bound to it, or through setattr, delattr or vars."""
+    """Every place the application's production sources could change what
+    the module's names hold, or reach the module in a way a parse can't
+    follow. Test sources, which the request marks, are scanned only where
+    production code imports them; the proof covers the module as production
+    code leaves it. A reference to the module, to a package above it, or to
+    an application module whose imports bind one of those, through an
+    import, a relative import, a module that imports it or a star import,
+    may only read attributes, and writing one is refused where it's the
+    module's own or rebinds a module on the way to it. So are reaching one
+    of them by name, through sys.modules, importlib, __import__, runpy,
+    pkgutil, pydoc or mock's patchers, running code from a path or a code
+    object, reading __globals__ or f_globals, reading the namespace of a
+    source that holds one, and a source the host's Python can't read. A
+    test source production code loads, by an import or by a constant name,
+    is production code."""
     target = request["module"]
-    out = []
+    out, sources, unread = [], [], {}
+
+    def report(path, line, what):
+        out.append({"path": path, "line": line, "what": what})
+
     for f in request["files"]:
         path = f["path"]
         try:
-            tree = ast.parse(decode(base64.b64decode(f["source"])))
-        except (SyntaxError, UnicodeError, ValueError, RecursionError):
+            raw = base64.b64decode(f["source"])
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+            tree = ast.parse(raw.decode(encoding))
+        except (SyntaxError, UnicodeError, ValueError, LookupError, RecursionError) as error:
+            unread[module_of(path)] = (path, getattr(error, "lineno", None) or 0, error.msg if isinstance(error, SyntaxError) else str(error), f.get("tests", False))
             continue
         package = path.rsplit("/", 1)[0].replace("/", ".") if "/" in path else ""
-        modules = {}
-        for sub in ast.walk(tree):
-            if isinstance(sub, ast.Import):
-                for alias in sub.names:
-                    if alias.asname:
-                        modules[alias.asname] = alias.name
-                    else:
-                        modules[alias.name.split(".")[0]] = alias.name.split(".")[0]
-            elif isinstance(sub, ast.ImportFrom):
-                base = sub.module or ""
-                if sub.level:
-                    parts = package.split(".") if package else []
-                    parts = parts[:len(parts) - (sub.level - 1)] if sub.level - 1 <= len(parts) else None
-                    if parts is None:
+        names, stars, loads = imports_of(tree, package)
+        sources.append((path, tree, names, stars, loads, f.get("tests", False)))
+    exported = {module_of(s[0]): s[2] for s in sources}
+    starred = {module_of(s[0]): s[3] for s in sources}
+
+    def resolve(dotted, seen=()):
+        """The dotted paths a path may name, the path itself among them,
+        following what the staged modules' imports bind."""
+        found = {dotted}
+        if dotted in seen or len(seen) > 32:
+            return found
+        parts = dotted.split(".")
+        for i in range(len(parts) - 1, 0, -1):
+            owner = ".".join(parts[:i])
+            if owner in exported:
+                bound = exported[owner].get(parts[i]) or {(s + "." if s else "") + parts[i] for s in starred[owner]}
+                for b in bound:
+                    found |= resolve(".".join([b] + parts[i + 1:]), seen + (dotted,))
+                break
+        return found
+
+    def candidates_of(names, stars, expr):
+        """The dotted paths a source's expression may name."""
+        attrs = []
+        while isinstance(expr, ast.Attribute):
+            attrs.append(expr.attr)
+            expr = expr.value
+        if not isinstance(expr, ast.Name):
+            return set()
+        heads = set(names.get(expr.id, ())) | {(s + "." if s else "") + expr.id for s in stars}
+        if expr.id not in names:
+            heads.add("builtins." + expr.id)
+        found = set()
+        for h in heads:
+            found |= resolve(".".join([h] + attrs[::-1]))
+        return found
+
+    def by_name(source):
+        """What a source loads by a constant name: through importlib and its
+        kin, or as a patcher's target, which mock imports."""
+        _, tree, names, stars = source[:4]
+        return [node.args[0].value.replace(":", ".") for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+                and candidates_of(names, stars, node.func) & (BY_NAME | PATCHERS)]
+
+    # Production sources, and what they load, by an import or by a constant
+    # name, which runs in production too, whether or not it's a test helper,
+    # with each package on its way.
+    by_module = {module_of(s[0]): s for s in sources}
+    scanned = [s for s in sources if not s[5]]
+    included = {s[0] for s in scanned}
+    for s in scanned:
+        for loaded in s[4] + by_name(s):
+            parts = loaded.split(".")
+            for i in range(1, len(parts) + 1):
+                prefix = ".".join(parts[:i])
+                other = by_module.get(prefix)
+                if other is not None and other[0] not in included:
+                    included.add(other[0])
+                    scanned.append(other)
+                if prefix in unread:
+                    unread[prefix] = unread[prefix][:3] + (False,)
+    for path, line, why, tests in unread.values():
+        if not tests:
+            report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
+
+    # The module, the packages on its path, and every application module
+    # whose imports bind one of them, so it's reached by attribute too.
+    segments = target.split(".")
+    above = {".".join(segments[:i]) for i in range(1, len(segments))}
+    reach = above | {target}
+    changed = True
+    while changed:
+        changed = False
+        for module in exported:
+            bound = [b for bs in exported[module].values() for b in bs] + starred[module]
+            if module not in reach and any(reach & resolve(b) for b in bound):
+                reach.add(module)
+                changed = True
+
+    def reaches(name):
+        """Whether a dotted name, as a by-name call takes it, names one of
+        those modules or something in the module."""
+        return any(r in reach or r.startswith(target + ".") for r in resolve(name.replace(":", ".")))
+
+    for path, tree, names, stars, _, _ in scanned:
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        holds = any(reach & resolve(b) for bs in names.values() for b in bs) or any(reach & resolve(s) for s in stars)
+
+        def candidates(expr, names=names, stars=stars):
+            return candidates_of(names, stars, expr)
+
+        def shown(refs):
+            return target if target in refs else max(sorted(refs), key=len)
+
+        def use(node, refs, line):
+            parent = parents.get(node)
+            if isinstance(parent, ast.Attribute) and parent.value is node:
+                if isinstance(parent.ctx, ast.Load):
+                    if reach & candidates(parent):
+                        return
+                    if parent.attr.startswith("__") and parent.attr.endswith("__") and parent.attr not in PLAIN_DUNDERS:
+                        report(path, line, "reads %s.%s, which reaches the module's names" % (shown(refs), parent.attr))
+                    return
+                if target in refs:
+                    report(path, line, "writes %s.%s, which no binding in the module shows" % (target, parent.attr))
+                    return
+                for r in sorted(refs & above):
+                    if (above | {target}) & resolve(r + "." + parent.attr):
+                        report(path, line, "rebinds %s's attribute %s, through which code reaches %s" % (r, parent.attr, target))
+                        return
+                return
+            call = parent if isinstance(parent, ast.Call) and node is not parent.func else None
+            if isinstance(parent, (ast.keyword, ast.Starred)) and isinstance(parents.get(parent), ast.Call):
+                call = parents[parent]
+            if call is not None and target not in refs and node in call.args[:1] and len(call.args) > 1:
+                # getattr and its kin may take a package or module on the
+                # way to the module, by a constant naming something else in it.
+                name = call.args[1]
+                if (candidates(call.func) & {"builtins.getattr", "builtins.hasattr", "builtins.setattr", "builtins.delattr"}
+                        and isinstance(name, ast.Constant) and isinstance(name.value, str)
+                        and not any(reach & resolve(r + "." + name.value) for r in refs)):
+                    return
+            if call is not None:
+                what = "passes %s to a call"
+            elif isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                what = "binds %s to a name other than by an import"
+            else:
+                what = "uses %s other than to read its attributes"
+            report(path, line, (what % shown(refs)) + ", and the scan for writes can't follow it")
+
+        for node in ast.walk(tree):
+            line = getattr(node, "lineno", 0)
+            if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
+                found = candidates(node)
+                if reach & found:
+                    use(node, reach & found, line)
+                if "sys.modules" in found:
+                    parent, key = parents.get(node), None
+                    if isinstance(parent, ast.Subscript) and parent.value is node:
+                        key = parent.slice
+                    elif (isinstance(parent, ast.Attribute) and parent.attr == "get" and isinstance(parents.get(parent), ast.Call)
+                          and parents[parent].func is parent and parents[parent].args):
+                        key = parents[parent].args[0]
+                    elif isinstance(parent, ast.Compare) and node in parent.comparators and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops):
                         continue
-                    base = ".".join(p for p in parts + ([sub.module] if sub.module else []) if p)
-                for alias in sub.names:
-                    if alias.name != "*":
-                        modules[alias.asname or alias.name] = (base + "." if base else "") + alias.name
-
-        def dotted(expr):
-            names = []
-            while isinstance(expr, ast.Attribute):
-                names.append(expr.attr)
-                expr = expr.value
-            if not isinstance(expr, ast.Name) or expr.id not in modules:
-                return None
-            return ".".join([modules[expr.id]] + list(reversed(names)))
-
-        def written(expr, line):
-            if isinstance(expr, ast.Attribute) and dotted(expr.value) == target:
-                out.append({"path": path, "line": line, "what": target + "." + expr.attr})
-            elif isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Attribute) and expr.value.attr == "__dict__" and dotted(expr.value.value) == target:
-                out.append({"path": path, "line": line, "what": target + ".__dict__"})
-
-        for sub in ast.walk(tree):
-            if isinstance(sub, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
-                targets = sub.targets if isinstance(sub, (ast.Assign, ast.Delete)) else [sub.target]
-                for t in targets:
-                    for part in ast.walk(t):
-                        written(part, sub.lineno)
-            elif isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in ("setattr", "delattr", "vars") and sub.args and dotted(sub.args[0]) == target:
-                out.append({"path": path, "line": sub.lineno, "what": sub.func.id + "(" + target + ")"})
+                    else:
+                        report(path, line, "uses sys.modules other than to look a module up by its name, and the scan for writes can't follow it")
+                        continue
+                    if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                        report(path, line, "looks a module up in sys.modules by a name it computes, and the scan for writes can't follow it")
+                    elif reaches(key.value):
+                        report(path, line, "looks %s up in sys.modules, and the scan for writes can't follow it" % key.value)
+            if isinstance(node, ast.Attribute) and node.attr in ("__globals__", "f_globals"):
+                report(path, line, "reads %s, which holds a module's names" % node.attr)
+            if not isinstance(node, ast.Call):
+                continue
+            # A string names a module only where it's handed to something
+            # that reaches modules by name; a logger's name is just a name.
+            funcs, arg = candidates(node.func), node.args[0] if node.args else None
+            constant = isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            if holds and (funcs & {"builtins.globals", "builtins.locals"} or "builtins.vars" in funcs and not node.args and not node.keywords):
+                report(path, line, "reads its own namespace, which holds a module on the way to %s" % target)
+            if funcs & BY_PATH:
+                report(path, line, "runs code from a path or a code object, and the scan for writes can't follow it")
+            if funcs & BY_NAME:
+                if not constant or arg.value.startswith("."):
+                    report(path, line, "imports a module by a name it computes, and the scan for writes can't follow it")
+                elif reaches(arg.value) or funcs & {"builtins.__import__", "importlib.__import__"} and arg.value.split(".")[0] in reach:
+                    report(path, line, "imports %s by name, and the scan for writes can't follow it" % arg.value)
+            if funcs & PATCHERS:
+                # patch.dict also takes the dict itself, which the rules
+                # above follow.
+                if constant and (arg.value == "sys.modules" or reaches(arg.value)):
+                    report(path, line, "patches %s by name, and the scan for writes can't follow it" % arg.value)
+                elif not constant and not funcs & {"unittest.mock.patch.dict", "mock.patch.dict"}:
+                    report(path, line, "patches a target it computes, and the scan for writes can't follow it")
     return {"writes": sorted(out, key=lambda r: (r["path"], r["line"], r["what"]))}
 
 

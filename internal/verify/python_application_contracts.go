@@ -79,10 +79,12 @@ func (s *PythonApplicationSession) boundary(c PythonApplicationCommand, spec *py
 }
 
 // pythonApplicationBoundaryTest validates a backing test's calls into the
-// resolved implementation and its assertion records.
+// resolved implementation, the exceptions that escaped them and its
+// assertion records.
 func pythonApplicationBoundaryTest(line []byte, b *PythonApplicationBoundary, row *PythonApplicationTest) error {
 	var raw struct {
 		Calls      json.Number       `json:"boundary_calls"`
+		Raised     []json.RawMessage `json:"boundary_raised"`
 		Assertions []json.RawMessage `json:"assertions"`
 	}
 	d := json.NewDecoder(bytes.NewReader(line))
@@ -91,11 +93,30 @@ func pythonApplicationBoundaryTest(line []byte, b *PythonApplicationBoundary, ro
 		return err
 	}
 	calls, err := raw.Calls.Int64()
-	if err != nil || calls < 0 || row.BoundaryCalls == nil || calls != *row.BoundaryCalls || raw.Assertions == nil {
-		return fmt.Errorf("invalid backing test calls or assertions")
+	if err != nil || calls < 0 || row.BoundaryCalls == nil || calls != *row.BoundaryCalls || raw.Raised == nil || raw.Assertions == nil {
+		return fmt.Errorf("invalid backing test calls, raised exceptions or assertions")
 	}
 	if calls > 0 && !b.Resolved {
 		return fmt.Errorf("calls reached an implementation that didn't resolve")
+	}
+	var raising int64
+	exceptions := map[string]bool{}
+	for i, r := range raw.Raised {
+		if _, err := pythonApplicationJSON(r, "exception", "calls", "declared"); err != nil {
+			return err
+		}
+		e := row.BoundaryRaised[i]
+		if strings.TrimSpace(e.Exception) == "" || exceptions[e.Exception] || e.Calls < 1 {
+			return fmt.Errorf("invalid or duplicate backing test exception")
+		}
+		exceptions[e.Exception] = true
+		raising += e.Calls
+	}
+	if raising > calls {
+		return fmt.Errorf("more backing test calls raised than were made")
+	}
+	if row.BoundaryRaised == nil {
+		row.BoundaryRaised = []PythonApplicationRaise{}
 	}
 	seen := map[string]bool{}
 	for i, assertion := range raw.Assertions {
@@ -181,7 +202,11 @@ func (r *Report) pythonApplicationContractTests(inv *project.ComponentInventory,
 				row.Assertions = append(row.Assertions, assertion)
 			}
 			result.Tests = append(result.Tests, row)
-			result.Exercise = append(result.Exercise, ComponentContractExercise{Check: t.Check, Calls: t.Calls()})
+			exercise := ComponentContractExercise{Check: t.Check, Calls: t.Calls()}
+			for _, r := range t.BoundaryRaised {
+				exercise.Raised = append(exercise.Raised, ComponentContractRaise{Exception: r.Exception, Calls: r.Calls, Declared: r.Declared})
+			}
+			result.Exercise = append(result.Exercise, exercise)
 		}
 		if b := x.Boundary; b != nil {
 			result.Diagnostics = append(result.Diagnostics, b.Diagnostics...)

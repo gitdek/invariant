@@ -12,6 +12,9 @@ import (
 // The refused-revise note must use both sources of known trusted-base
 // evidence. Older failure markers can lack a proposal, and a recorded
 // FailTrusted remains evidence even when a proposal lists no trusted files.
+// A trusted plan's draft whose review asked for changes is one a retry
+// builds again, so its note offers that, and still leaves merging the new
+// pull request to a person (#271).
 func TestRefusedReviseKeepsKnownTrustedBaseEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, file, failure string
@@ -64,8 +67,13 @@ func TestRefusedReviseKeepsKnownTrustedBaseEvidence(t *testing.T) {
 			if !slices.Equal(note.Marker.ReplyTo, []int64{command.ID}) || len(r.gh.posts(1)) != posts+1 {
 				t.Fatal("revise must be answered exactly once with a note")
 			}
-			retry263WatchWords(t, note.Comment.Body, pr, true)
-			retry263MergeWords(t, note.Comment.Body, pr, true, true)
+			rebuilds := tc.failure == FailGate
+			if rebuilds {
+				retry271RebuildWords(t, note.Comment.Body, pr, true)
+			} else {
+				retry263WatchWords(t, note.Comment.Body, pr, true)
+				retry263MergeWords(t, note.Comment.Body, pr, true, true)
+			}
 			said := strings.NewReplacer("`", "", "’", "'").Replace(retry263Visible(note.Comment.Body))
 			// mergePromise alone misses the reported promise: "I'll mark it
 			// ready and merge it". Known trusted-base changes get neither.
@@ -74,7 +82,10 @@ func TestRefusedReviseKeepsKnownTrustedBaseEvidence(t *testing.T) {
 			if readyPromise.MatchString(said) || factoryMerge.MatchString(said) {
 				t.Errorf("refused revise promises the factory will ready or merge a known trusted-base change:\n%s", note.Comment.Body)
 			}
-			if !tc.withoutProposal {
+			switch {
+			case rebuilds:
+				retry271ReviseWords(t, note.Comment.Body, pr)
+			case !tc.withoutProposal:
 				retry263RedraftWords(t, note.Comment.Body, pr)
 			}
 			if b.calls != builds || len(r.form.requests) != drafts || len(r.gh.prs) != 1 || len(g.calls) != 0 || len(r.gh.merged) != 0 || !reflect.DeepEqual(*r.gh.prs[pr], before) || r.gh.prBody(pr) != prBody {
