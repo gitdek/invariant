@@ -1,8 +1,8 @@
 # Watcher crash recovery
 
-Written by Invariant for [#23](https://github.com/gitdek/invariant/issues/23): Prove the factory recovers from a crash at any point, and from a second watcher. The factory rebuilt its explorer for [#68](https://github.com/gitdek/invariant/issues/68), and a coding agent amended it by hand for [#271](https://github.com/gitdek/invariant/issues/271), so a writer's retry can replace a failed draft with a new pull request.
+Written by Invariant for [#23](https://github.com/gitdek/invariant/issues/23): Prove the factory recovers from a crash at any point, and from a second watcher. The factory rebuilt its explorer for [#68](https://github.com/gitdek/invariant/issues/68), and a coding agent amended it by hand for [#271](https://github.com/gitdek/invariant/issues/271), so a writer's retry can replace a failed draft with a new pull request, and for [#354](https://github.com/gitdek/invariant/issues/354), so a writer's retry can watch a failed draft again.
 
-@gitdek ratified these statements by hand, as [D-0203](../../decisions/journal/D-0203.jsonl), and their exact proposal as [D-0210](../../decisions/journal/D-0210.jsonl), which the lock names in place of a comment on the issue: they amend the statements he ratified [on #68](https://github.com/gitdek/invariant/issues/68#issuecomment-5875564945). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/WatcherRecovery.tla`](.invariant/specs/WatcherRecovery.tla).
+@gitdek ratified these statements by hand, for their exact proposal, as [D-0225](../../decisions/journal/D-0225.jsonl), which the lock names in place of a comment on the issue: they amend the statements of [D-0210](../../decisions/journal/D-0210.jsonl), which amend those of [D-0203](../../decisions/journal/D-0203.jsonl) and of the statements he ratified [on #68](https://github.com/gitdek/invariant/issues/68#issuecomment-5875564945). They're pinned by hash in [`ratified.lock`](.invariant/ratified.lock), and their text is in [`.invariant/specs/WatcherRecovery.tla`](.invariant/specs/WatcherRecovery.tla).
 
 | Statement | Kind | Says |
 | :-- | :-- | :-- |
@@ -18,6 +18,8 @@ Written by Invariant for [#23](https://github.com/gitdek/invariant/issues/23): P
 | `OwnRun` | invariant | The latest build's result comes only from its own agent run, never from an earlier build's. |
 | `OneMerge` | invariant | The pull request is merged at most once. |
 | `MergeOnlyAfterGate` | invariant | The factory merges only after CI's gate passes on a pull request GitHub can merge. |
+| `ReadiedOnlyWhenWatched` | invariant | The factory marks a failed draft ready only once it has answered a writer's retry that watches it again. |
+| `ReadiedOnlyAfterGate` | invariant | The factory marks a draft ready only once CI's gate has passed on it and the factory can merge it: GitHub can merge it, and it doesn't change the trusted base. |
 | `TypeOK` | invariant | Every part of the state always has the expected kind of value. |
 | `Merged` | witness | The pull request can be merged and the merge reported. |
 | `ReportedUnmergeable` | witness | A pull request whose gate passed can be reported as one that can't merge. |
@@ -30,9 +32,13 @@ Written by Invariant for [#23](https://github.com/gitdek/invariant/issues/23): P
 | `StoppedAfterRetiring` | witness | A retry's build can stop after the draft it replaces was closed, and be reported as stopped, keeping the record the next retry builds on. |
 | `MergedDraftKept` | witness | A retry whose draft someone merged is answered without replacing it. |
 | `ClosedDraftNoted` | witness | A retry whose draft someone else closed before its record was stored is answered without a build. |
+| `WatchedBeforeGate` | witness | A writer's retry can watch a failed draft again before CI's gate passes on it, and is answered while the factory waits for the gate. |
+| `WatchedAndMerged` | witness | A writer's retry can watch a failed draft again, and the factory marks it ready and merges it once CI's gate passes. |
+| `WatchedButUnmergeable` | witness | A watched draft the factory can't merge, such as one that changes the trusted base, is reported without being marked ready. |
 | `CommandsAnswered` | property | Every command and retry a writer gives is eventually answered by a factory post. |
 | `BuildsAnswered` | property | Every build a ratification or a retry starts is eventually answered: by its pull request, or by a report that it stopped. |
 | `GatedPullRequestsSettled` | property | Once CI's gate passes on a pull request that isn't a failed draft, the factory eventually merges it or reports it: as one that can't merge, or as merged or closed by someone else. |
+| `WatchedDraftsSettled` | property | Once CI's gate passes on a failed draft a writer's retry watches again, the factory eventually merges it or reports it: as one that can't merge, or as merged or closed by someone else. |
 | `FairAcquire` | fairness | A running watcher eventually takes a lease that nobody holds. |
 | `FairExpire` | fairness | A lease whose holder has crashed eventually runs out. |
 | `FairAct` | fairness | A watcher holding the lease eventually takes the next effect that's due. |
@@ -48,6 +54,10 @@ Written by Invariant for [#23](https://github.com/gitdek/invariant/issues/23): P
 | `KeepGateAcrossRetry` | bug | A writer's retry keeps CI's result from the draft it replaces. |
 | `FinishStaleRun` | bug | A watcher whose agent run a retry made stale records it as the latest build's. |
 | `CloseWithoutLease` | bug | A watcher that woke after its lease ran out closes the draft without checking the lease. |
+| `MarkReadyWithoutWatch` | bug | The factory marks a failed draft ready when no writer's retry watches it again. |
+| `MarkReadyBeforeGate` | bug | The factory marks a watched draft ready before CI's gate passes on it. |
+| `MarkUnmergeableReady` | bug | The factory marks ready a watched draft it can't merge, such as one that changes the trusted base. |
+| `AnswerWatchWithoutLooking` | bug | A watcher answers a retry that watches a failed draft again without looking for an answer already there. |
 
 Checked within `MaxCrashes = 2`, `Watchers = {w1, w2}`. To run the gate yourself:
 

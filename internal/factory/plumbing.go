@@ -402,7 +402,7 @@ func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr gi
 	if err := f.allowed(ctx, n, fmt.Sprintf("say #%d waits for a person to merge it", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(merging(false, false), recovery.Merge)); err != nil {
+	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(pr, false, false), recovery.Merge)); err != nil {
 		return err
 	}
 	next.Failure = FailTrusted

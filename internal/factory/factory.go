@@ -668,7 +668,15 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if err != nil {
 			return err
 		}
-		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(noting(), recovery.Note)); err != nil {
+		// A retry that watches the latest build's failed draft again is the
+		// recovery core's watch (#354). Any other, of a ready pull request,
+		// or a second watch once CI failed on the draft, is outside the
+		// core's model, as CI's failures are, and is answered as a note.
+		answered, key := noting(), recovery.Note
+		if open.Draft && !alreadyWatched(t, m.PR) {
+			answered, key = watching(false), recovery.Watch
+		}
+		if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(answered, key)); err != nil {
 			return err
 		}
 		return f.say(ctx, t.Issue.Number, retriedComment(open, trusted, m), LabelPR)
@@ -1982,7 +1990,7 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
 			return err
 		}
-		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(merging(false, false), recovery.Merge)); err != nil {
+		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(mergingPR(pr, false, false), recovery.Merge)); err != nil {
 			return err
 		}
 		next.Failure = FailUnmergeable
@@ -1996,6 +2004,13 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
 	if err := f.allowed(ctx, n, fmt.Sprintf("merge #%d", pr.Number), from, to); err != nil {
 		return err
+	}
+	// A draft is a failed one a writer's retry watches again, which the
+	// factory marks ready before it merges it (#354).
+	if pr.Draft {
+		if err := f.recovers(ctx, n, fmt.Sprintf("mark #%d ready", pr.Number), f.canMarkReady(watchedMerging(true))); err != nil {
+			return err
+		}
 	}
 	if err := f.recovers(ctx, n, fmt.Sprintf("merge #%d", pr.Number), f.canMerge(merging(true, false))); err != nil {
 		return err
@@ -2057,7 +2072,7 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 	if err := f.allowed(ctx, n, fmt.Sprintf("say GitHub refused the merge of #%d", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.recovers(ctx, n, "say GitHub refused the merge", f.canPost(merging(false, false), recovery.Merge)); err != nil {
+	if err := f.recovers(ctx, n, "say GitHub refused the merge", f.canPost(mergingPR(pr, false, false), recovery.Merge)); err != nil {
 		return err
 	}
 	next.Kind, next.Failure = KindFailed, FailMerge

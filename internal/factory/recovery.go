@@ -174,6 +174,30 @@ func watchedMerging(mergeable bool) step {
 	return s
 }
 
+// alreadyWatched says whether a writer's retry already watched pr, the latest
+// build's failed draft, again: a post answering a retry says the factory
+// watches it (#354). The core's model has one watch per build, so a second,
+// after CI failed on the draft, is the protocol's alone.
+func alreadyWatched(t Thread, pr int) bool {
+	retries := map[int64]bool{}
+	for _, c := range t.Commands {
+		if c.Verb == Retry {
+			retries[c.Comment] = true
+		}
+	}
+	for _, p := range t.Posts {
+		if p.Marker.Kind != KindPR || p.Marker.PR != pr {
+			continue
+		}
+		for _, id := range p.Marker.ReplyTo {
+			if retries[id] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // mergingPR is merging for pr: a watched draft until it's marked ready.
 func mergingPR(pr github.PullRequest, mergeable, merged bool) step {
 	if pr.Draft && !merged {
