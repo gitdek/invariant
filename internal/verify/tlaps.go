@@ -277,6 +277,71 @@ func unsound(tok tlaToken) string {
 	return ""
 }
 
+// setEnumBinders begin an expression whose own ":" ends a quantifier or
+// CHOOSE, so a "\in" within it is that binder's bound, not a dropped set
+// element.
+var setEnumBinders = map[string]bool{`\E`: true, `\A`: true, `\EE`: true, `\AA`: true, `\exists`: true, `\forall`: true, "CHOOSE": true}
+
+// tlapsSetEnum finds a set enumeration one of whose elements is a bare
+// membership L \in R, and returns the line of that membership. tlapm's
+// parser reads such an element as a bound and drops it, so it reads
+// {e \in S} as the empty set and proves false theorems about it
+// (tlaplus/tlapm#235). An element that carries its own top-level ":" (a
+// comprehension {x \in S : p} or {e : x \in S}, or a quantifier) or that
+// parenthesises the membership is read correctly, and is left alone.
+func tlapsSetEnum(toks []tlaToken) (int, bool) {
+	for i, t := range toks {
+		if t.text != "{" || t.str || t.label {
+			continue
+		}
+		// Walk this brace's own tokens (nest 0), splitting its elements at
+		// nest-0 commas. An element is dropped when it holds a nest-0 "\in"
+		// but no nest-0 ":" and doesn't begin with a binder.
+		nest, line := 0, 0
+		var hasColon, hasIn, startsBinder, first bool
+		first = true
+		dropped := func() (int, bool) { return line, hasIn && !hasColon && !startsBinder }
+		for j := i + 1; j < len(toks); j++ {
+			tok := toks[j]
+			if nest == 0 && tok.text == "}" && !tok.str {
+				if ln, bad := dropped(); bad {
+					return ln, true
+				}
+				break
+			}
+			if nest == 0 && !tok.str && !tok.label {
+				switch tok.text {
+				case ",":
+					if ln, bad := dropped(); bad {
+						return ln, true
+					}
+					hasColon, hasIn, startsBinder, first = false, false, false, true
+				case ":":
+					hasColon = true
+				case `\in`:
+					if !hasIn {
+						hasIn, line = true, tok.line
+					}
+				default:
+					if first && setEnumBinders[tok.text] {
+						startsBinder = true
+					}
+				}
+			}
+			switch tok.text {
+			case "(", "[", "{", "<<":
+				nest++
+			case ")", "]", ">>", "}":
+				nest--
+			}
+			if !(nest == 0 && tok.text == ",") {
+				first = false
+			}
+		}
+	}
+	return 0, false
+}
+
 // tlapsModel checks the model a TLAPS proof rests on, and returns the
 // standard modules it extends. Its spec must be the gate's, Init /\
 // [][Next]_vars, and nothing else in it may use a construct tlapm's open
@@ -294,6 +359,9 @@ func tlapsModel(src, specName string) error {
 	toks, err := lexTLA(src)
 	if err != nil {
 		return fmt.Errorf("the model: %v", err)
+	}
+	if line, bad := tlapsSetEnum(toks); bad {
+		return fmt.Errorf("the model writes a set enumeration whose element is a membership at line %d, which tlapm reads as the empty set (tlaplus/tlapm#235)", line)
 	}
 	for i, tok := range toks {
 		if tok.offset >= start && tok.offset < start+len(spec) || tok.str {
@@ -358,6 +426,9 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 	if err != nil {
 		return tlapsBody{}, err
 	}
+	if line, bad := tlapsSetEnum(toks); bad {
+		return tlapsBody{}, fmt.Errorf("line %d: the proof writes a set enumeration whose element is a membership, which tlapm reads as the empty set (tlaplus/tlapm#235)", line)
+	}
 	extends, rest := []string{}, toks
 	if len(toks) > 0 && toks[0].text == "EXTENDS" {
 		i := 1
@@ -380,7 +451,24 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 			b.libraries = append(b.libraries, m)
 		}
 	}
+	// defined collects every name the proof introduces, so a local one that
+	// happens to match a library fact isn't recorded as citing it. A plain
+	// definition is "<name> ==" with the name first on its line; a named
+	// lemma or theorem is "<kind> <name> ==". Both are gathered up front, so
+	// the citation scan sees them whatever order they appear in.
+	defKinds := map[string]bool{"LEMMA": true, "THEOREM": true, "PROPOSITION": true, "COROLLARY": true}
 	defined := map[string]bool{}
+	for i, tok := range rest {
+		if tok.str || tok.label {
+			continue
+		}
+		switch {
+		case tok.text == "==" && i > 0 && rest[i-1].first:
+			defined[rest[i-1].text] = true
+		case defKinds[tok.text] && tok.first && i+2 < len(rest) && rest[i+2].text == "==":
+			defined[rest[i+1].text] = true
+		}
+	}
 	for i, tok := range rest {
 		prev := ""
 		if i > 0 {
@@ -411,10 +499,13 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 			return tlapsBody{}, fmt.Errorf("line %d: the proof omits a proof", tok.line)
 		case "INSTANCE", "LOCAL", "RECURSIVE", "MODULE", "EXTENDS":
 			return tlapsBody{}, fmt.Errorf("line %d: the proof uses %s, which a proof the gate accepts can't", tok.line, tok.text)
-		case "==":
-			if i > 0 && rest[i-1].first {
-				defined[rest[i-1].text] = true
-			}
+		case "PTL", "LS4":
+			// The temporal backend names the atoms it decides by 20 bits of
+			// a hash it never checks for collision, which proves false
+			// theorems (tlaplus/tlapm#310). The gate takes the only temporal
+			// step itself, on a fixed obligation whose atoms are the ratified
+			// model's and invariant's, so a proof never drives that backend.
+			return tlapsBody{}, fmt.Errorf("line %d: the proof names the %s backend, which the gate alone takes (tlaplus/tlapm#310)", tok.line, tok.text)
 		}
 		switch {
 		case strings.HasPrefix(tok.text, "----") || strings.HasPrefix(tok.text, "===="):
@@ -529,6 +620,15 @@ func parseTLAPS(out string) tlapsRun {
 					if block["prover"] != "" {
 						r.prover[id] = block["prover"]
 					}
+				}
+			case "error":
+				// A parse or backend error. Strict mode also exits non-zero,
+				// but the block alone fails the proof, whatever the
+				// obligations say.
+				if msg := strings.TrimSpace(block["msg"]); msg != "" {
+					r.errors = append(r.errors, msg)
+				} else {
+					r.errors = append(r.errors, "tlapm reported an error")
 				}
 			}
 			block = nil

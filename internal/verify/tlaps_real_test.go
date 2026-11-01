@@ -2,9 +2,13 @@ package verify
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -12,6 +16,10 @@ import (
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/toolchain"
 )
+
+// tlapsCommit is the full hash of the pinned tlapm, whose short form is
+// toolchain.TLAPSVersion. The soundness tests are read at this commit.
+const tlapsCommit = "4744c0f30eb8705f52092230bfc6ec8e8956ba6c"
 
 // These run the pinned tlapm (#360). It's a linux/amd64 image, emulated on
 // an ARM laptop, so they run only with INVARIANT_TLAPS_REAL=1, as CI's
@@ -143,6 +151,92 @@ func TestTLAPSRealGatesTheExample(t *testing.T) {
 	if r.Claim() != "proved at every size" {
 		t.Errorf("the code's claim changed: %q", r.Claim())
 	}
+}
+
+func TestTLAPSRealRefusesTheAdversarialModel(t *testing.T) {
+	tlapsReal(t)
+	// The review's attack, through the gate's real path: a set enumeration
+	// tlapm drops hides an unsafe step, so a proof would go through, but the
+	// gate turns the model away (#235, D-0231).
+	got, _ := tlapsProve(t, tlapsEvilPool(), tlapsPoolProof)
+	if got.Proved || !strings.Contains(got.Message, "#235") {
+		t.Fatalf("the gate didn't refuse the adversarial model: %+v", got)
+	}
+}
+
+func TestTLAPSRealKnownSoundnessTestsMatch(t *testing.T) {
+	tlapsReal(t)
+	// The completeness test (TestTLAPSClosesEveryKnownSoundnessIssue) rests on
+	// the embedded list of the pinned tlapm's known unsoundnesses. Read that
+	// suite at the pin and check the list still names exactly the tests marked
+	// "known", so a newly known unsoundness can't slip past unmapped.
+	if !strings.HasPrefix(tlapsCommit, toolchain.TLAPSVersion) {
+		t.Fatalf("the pin is tlapm %s, but this test reads commit %s", toolchain.TLAPSVersion, tlapsCommit)
+	}
+	known := regexp.MustCompile(`known:\s*https://github\.com/tlaplus/tlapm/issues/(\d+)`)
+	var got []string
+	for _, name := range tlapsSoundnessDir(t) {
+		if !strings.HasSuffix(name, "_stest.tla") {
+			continue
+		}
+		body := tlapsFetch(t, "https://raw.githubusercontent.com/tlaplus/tlapm/"+tlapsCommit+"/test/soundness_tests/"+name)
+		if m := known.FindStringSubmatch(body); m != nil {
+			got = append(got, m[1]+" "+strings.TrimSuffix(name, "_stest.tla"))
+		}
+	}
+	sort.Strings(got)
+	var want []string
+	for _, line := range strings.Split(strings.TrimSpace(tlapsKnownSoundness), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			want = append(want, line)
+		}
+	}
+	sort.Strings(want)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the pinned tlapm's known-soundness tests have changed; update tlaps_soundness.txt and the completeness map:\ngot:\n%s\n\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// tlapsFetch GETs a URL, with a GITHUB_TOKEN if one is set.
+func tlapsFetch(t *testing.T, url string) string {
+	t.Helper()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: %s", url, resp.Status)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// tlapsSoundnessDir lists the pinned tlapm's soundness-test filenames.
+func tlapsSoundnessDir(t *testing.T) []string {
+	t.Helper()
+	body := tlapsFetch(t, "https://api.github.com/repos/tlaplus/tlapm/contents/test/soundness_tests?ref="+tlapsCommit)
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(body), &entries); err != nil {
+		t.Fatalf("listing the soundness tests: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	return names
 }
 
 func TestTLAPSRealStdlibMatchesTheImage(t *testing.T) {

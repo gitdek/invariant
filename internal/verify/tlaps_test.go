@@ -1,6 +1,7 @@
 package verify
 
 import (
+	_ "embed"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,6 +56,119 @@ BY DEF IndInv_NoSharedConnection, TypeOK, NoSharedConnection, Next, vars, Acquir
 LEMMA NoSharedConnection_Implies == IndInv_NoSharedConnection => NoSharedConnection
 BY DEF IndInv_NoSharedConnection
 `
+
+// tlapsEvilPool is the review's adversarial model: an unsafe Evil step
+// guarded by \E z \in {Size \in Clients}. That set enumeration is one tlapm
+// reads as the empty set (#235), so to the prover the guard is false and the
+// step is dead, and a proof of NoSharedConnection goes through; TLC, which
+// parses the set correctly, finds two clients sharing a connection at Size 4.
+// The gate must turn the model away before any proof of it is checked.
+func tlapsEvilPool() string {
+	return strings.Replace(tlapsPool,
+		"Next == \\E c \\in Clients : Acquire(c) \\/ Refuse(c) \\/ Release(c)",
+		"Evil(c) ==\n    /\\ Size >= 4\n    /\\ \\E z \\in {Size \\in Clients} : held' = [held EXCEPT ![c] = Conns]\n\n"+
+			"Next == (\\E c \\in Clients : Acquire(c) \\/ Refuse(c) \\/ Release(c)) \\/ (\\E c \\in Clients : Evil(c))", 1)
+}
+
+//go:embed tlaps_soundness.txt
+var tlapsKnownSoundness string
+
+// tlapsSoundness parses the embedded known-soundness list into issue → tests.
+func tlapsSoundness(t *testing.T) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, line := range strings.Split(strings.TrimSpace(tlapsKnownSoundness), "\n") {
+		if line = strings.TrimSpace(line); line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		issue, test, ok := strings.Cut(line, " ")
+		if !ok {
+			t.Fatalf("a soundness line without an issue: %q", line)
+		}
+		out[issue] = append(out[issue], test)
+	}
+	return out
+}
+
+// TestTLAPSClosesEveryKnownSoundnessIssue checks that every unsoundness the
+// pinned tlapm marks "known" is one the gate rules out, each by a refusal a
+// representative triggers or by a reason it can't arise that this test
+// checks (#360, D-0231). TestTLAPSRealKnownSoundnessTestsMatch keeps the list
+// itself honest against the pinned tlapm's own suite.
+func TestTLAPSClosesEveryKnownSoundnessIssue(t *testing.T) {
+	known := tlapsSoundness(t)
+	refuse := func(body, want string) func(*testing.T) {
+		return func(t *testing.T) {
+			_, err := tlapsModule("ConnectionPool", "Spec", "NoSharedConnection", tlapsPoolProof+"\n"+body+"\n")
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("tlapsModule accepted %q: %v (want a refusal naming %q)", body, err, want)
+			}
+		}
+	}
+	closed := map[string]func(*testing.T){
+		// The len/DOMAIN unsoundness needs the old SMT encoding, reached only
+		// by "--debug oldsmt"; the gate passes neither flag, and no proof
+		// pragma selects the old encoding.
+		"51": func(t *testing.T) {
+			if slices.Contains(tlapsOptions, "--debug") || slices.Contains(tlapsOptions, "oldsmt") {
+				t.Fatalf("the gate's tlapm options could reach the old SMT encoding: %v", tlapsOptions)
+			}
+		},
+		"235": func(t *testing.T) {
+			refuse("Bad == {x \\in Clients}", "#235")(t)
+			if err := tlapsModel(strings.Replace(tlapsPool, "Conns == 1..Size", "Conns == {x \\in 1..Size}", 1), "Spec"); err == nil || !strings.Contains(err.Error(), "#235") {
+				t.Fatalf("tlapsModel accepted a dropped set element: %v", err)
+			}
+		},
+		"300": refuse("Bad == 2 ^ Size", "exponent"),
+		"304": refuse("Bad == CASE TRUE -> 1 [] OTHER -> 2", "CASE"),
+		"306": refuse("Bad == CASE TRUE -> 1 [] OTHER -> 2", "CASE"),
+		"309": refuse("Bad == ENABLED Next", "ENABLED"),
+		"310": func(t *testing.T) {
+			// SMT, Zenon and capture all need a temporal operator in the
+			// obligation; the PTL route needs the temporal backend. The gate
+			// refuses both.
+			refuse("Bad == []TypeOK", "temporal operator")(t)
+			refuse("LEMMA Bad == TypeOK => TypeOK\nBY PTL", "#310")(t)
+		},
+		"320": refuse("I == INSTANCE Naturals", "INSTANCE"),
+	}
+	for issue := range known {
+		if closed[issue] == nil {
+			t.Errorf("tlapm issue %s is a known unsoundness with no gate refusal or checked reason", issue)
+		}
+	}
+	for issue, check := range closed {
+		if known[issue] == nil {
+			t.Errorf("issue %s is mapped but no longer in the known-soundness list", issue)
+		}
+		t.Run(issue, check)
+	}
+}
+
+func TestTLAPSRefusesTheAdversarialModel(t *testing.T) {
+	// The review's attack, through the real gate: the model is turned away
+	// for its dropped set element before any proof of it runs (#235, D-0231).
+	if err := tlapsModel(tlapsEvilPool(), "Spec"); err == nil || !strings.Contains(err.Error(), "#235") {
+		t.Fatalf("tlapsModel accepted the adversarial model: %v", err)
+	}
+	got, _ := tlapsProve(t, tlapsEvilPool(), tlapsPoolProof)
+	if got.Proved || !strings.Contains(got.Message, "#235") {
+		t.Fatalf("proveTLAPS didn't refuse the adversarial model: %+v", got)
+	}
+}
+
+func TestTLAPSDoesNotCiteALocalLemma(t *testing.T) {
+	// A helper lemma named like a library fact is the proof's own, and the
+	// gate records it as such, not as a fact the proof rests on.
+	b, err := tlapsModule("ConnectionPool", "Spec", "NoSharedConnection", tlapsPoolProof+"\nLEMMA SetExtensionality == TypeOK => TypeOK\nOBVIOUS\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(b.cites, "TLAPS SetExtensionality") {
+		t.Errorf("the proof's own lemma was recorded as a library citation: %v", b.cites)
+	}
+}
 
 func tlapsTexts(t *testing.T, src string) []string {
 	t.Helper()
@@ -162,6 +276,11 @@ func TestTLAPSRefusesWhatAProofMayNotDo(t *testing.T) {
 		{"a CASE expression", "C == CASE TRUE -> 1 [] OTHER -> 2", "CASE"},
 		{"an exponent", "P == 2^3", "exponent"},
 		{"a temporal rule", "LEMMA R == TRUE\nBY RuleINV1", "temporal rule"},
+		{"the PTL backend", "LEMMA R == TypeOK => TypeOK\nBY PTL", "#310"},
+		{"the LS4 backend", "LEMMA R == TypeOK => TypeOK\nBY LS4", "#310"},
+		{"a dropped set element", "Bad == {x \\in Clients}", "#235"},
+		{"a dropped set element among others", "Bad == {held, x \\in Clients}", "#235"},
+		{"a dropped tuple element", "Bad == {<<x, y>> \\in Clients}", "#235"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tlapsModule("ConnectionPool", "Spec", "NoSharedConnection", tlapsPoolProof+"\n"+tc.extra+"\n")
@@ -209,6 +328,15 @@ LEMMA Steps == TypeOK => TypeOK
 <1>. QED BY <1>1
 \* AXIOM ENABLED [] CASE in a comment, (* and ^ in a block *)
 Name == "AXIOM [] CASE ^"
+
+\* Ordinary set constructs the parser reads correctly, so the gate leaves
+\* them alone: a comprehension, a replacement, a quantified element, a
+\* parenthesised membership, the empty set, and a nested enumeration.
+Sets == /\ {c \in Clients : held[c] = {}} = {}
+        /\ {held[c] : c \in Clients} = {}
+        /\ {\E k \in Conns : k \in held[c]} = {}
+        /\ {(k \in Conns)} = {}
+        /\ {{k} : k \in Conns} = {}
 `
 	if _, err := tlapsModule("ConnectionPool", "Spec", "NoSharedConnection", tlapsPoolProof+"\n"+extra); err != nil {
 		t.Fatal(err)
@@ -230,6 +358,9 @@ func TestTLAPSChecksTheModelItRestsOn(t *testing.T) {
 		{"an unproved theorem", "VARIABLES held", "VARIABLES held\nTHEOREM Size \\in Nat", "states a fact"},
 		{"another module", "EXTENDS Naturals, FiniteSets", "EXTENDS Naturals, FiniteSets, Helpers", "extends Helpers"},
 		{"an instance", "VARIABLES held", "VARIABLES held\nH == INSTANCE Naturals", "INSTANCE"},
+		{"a dropped set element", "Conns == 1..Size", "Conns == {x \\in 1..Size}", "#235"},
+		{"the adversarial Evil step", "Next == \\E c \\in Clients : Acquire(c) \\/ Refuse(c) \\/ Release(c)",
+			"Evil(c) == Size >= 4 /\\ \\E z \\in {Size \\in Clients} : held' = [held EXCEPT ![c] = Conns]\nNext == (\\E c \\in Clients : Acquire(c) \\/ Refuse(c) \\/ Release(c)) \\/ (\\E c \\in Clients : Evil(c))", "#235"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tlapsModel(strings.Replace(tlapsPool, tc.old, tc.new, 1), "Spec")
@@ -266,6 +397,7 @@ func TestTLAPSAcceptsOnlyEveryObligationProved(t *testing.T) {
 	}{
 		{"a failed obligation", parseTLAPS(tlapsOutput(3, [][3]string{{"1", "proved", "smt"}, {"2", "trivial", "tlapm"}, {"3", "failed", "isabelle"}})), "obligation 3 failed"},
 		{"a missing proof", parseTLAPS(tlapsOutput(3, proved, "Missing proof at File \"./M.tla\", line 11, character 59", "[ERROR]: Proof incomplete in module \"M\": 1 missing, 0 omitted proof step(s).")), "Missing proof"},
+		{"a reported error, even with every obligation proved", parseTLAPS(tlapsOutput(3, proved) + "@!!BEGIN\n@!!type:error\n@!!url:http://x\n@!!msg:a parse error\n@!!END\n"), "a parse error"},
 		{"an obligation it never settled", parseTLAPS(tlapsOutput(4, proved)), "3 of its 4"},
 		{"no obligations", parseTLAPS(tlapsOutput(0, nil)), "no obligations"},
 		{"a nonzero exit", func() tlapsRun { r := parseTLAPS(tlapsOutput(3, proved)); r.exit = 10; return r }(), "status 10"},
