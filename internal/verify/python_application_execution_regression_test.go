@@ -22,10 +22,12 @@ func pa315LocalPython(t *testing.T, libraries string) func(context.Context, Pyth
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The runner starts with -P, which Python added in 3.11. Production runs
-	// it in the pinned image; a host with an older python3 can't stand in.
-	if out, err := exec.Command(python, "-c", "import sys; print(sys.version_info >= (3, 11))").Output(); err != nil || strings.TrimSpace(string(out)) != "True" {
-		t.Skip("the runner needs Python 3.11 or newer on the host")
+	// The runner starts with -P, which Python added in 3.11, and watches what
+	// escapes a backing test's calls with sys.monitoring, added in 3.12.
+	// Production runs it in the pinned image; a host with an older python3
+	// can't stand in.
+	if out, err := exec.Command(python, "-c", "import sys; print(sys.version_info >= (3, 12))").Output(); err != nil || strings.TrimSpace(string(out)) != "True" {
+		t.Skip("the runner needs Python 3.12 or newer on the host: it starts with -P, from 3.11, and watches backing tests with sys.monitoring, from 3.12")
 	}
 	return func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
 		b, err := os.ReadFile(filepath.Join(c.RuntimeDir, "request.json"))
