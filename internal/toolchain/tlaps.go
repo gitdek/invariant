@@ -13,11 +13,14 @@ import (
 // TLAPS, the TLA+ Proof System, proves a ratified invariant of a model at
 // every size (#360). Its only current builds are a rolling pre-release, so
 // the tarball's SHA-256 pins the exact build, and TLAPSVersion is the tlapm
-// commit it reports. Changing any of them is a decision.
+// commit it reports. The release replaces its asset, so the gate fetches an
+// unmodified copy of the validated tarball from a release of Invariant's own,
+// named for the tlapm release and commit (#387). Changing any of them is a
+// decision.
 const (
 	TLAPSRelease       = "1.6.0-pre"
 	TLAPSVersion       = "eef4b65"
-	TLAPSTarballURL    = "https://github.com/tlaplus/tlapm/releases/download/1.6.0-pre/tlapm-1.6.0-pre-x86_64-linux-gnu.tar.gz"
+	TLAPSTarballURL    = "https://github.com/gitdek/invariant/releases/download/tlapm-1.6.0-pre-eef4b65/tlapm-1.6.0-pre-x86_64-linux-gnu.tar.gz"
 	TLAPSTarballSHA256 = "b0038e59a6bddc9aa9a75e7c3320e20333f02fd7ba745ea64f1cc1c9800e43e8"
 )
 
