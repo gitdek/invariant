@@ -84,11 +84,12 @@ func (c Comment) Issue() int {
 }
 
 // Event is one entry in an issue's timeline of events, such as a label
-// being added.
+// being added, or a pull request turned into a draft, and when it happened.
 type Event struct {
-	Event string `json:"event"`
-	Actor User   `json:"actor"`
-	Label *Label `json:"label,omitempty"`
+	Event     string `json:"event"`
+	Actor     User   `json:"actor"`
+	Label     *Label `json:"label,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 type Ref struct {

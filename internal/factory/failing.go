@@ -79,6 +79,20 @@ func failingStep(state Post, ready bool, pr int, head string) string {
 	if ready {
 		what = "ready"
 	}
+	return failingName(state, what, pr, head)
+}
+
+// failingEventsStep names the record of when GitHub first failed to show
+// pr's events at head, which the factory reads before it marks a watched
+// draft ready, to tell that no one turned it into a draft since the retry
+// (#371, #389's review).
+func failingEventsStep(state Post, pr int, head string) string {
+	return failingName(state, "events", pr, head)
+}
+
+// failingName names the record of when GitHub first failed the request
+// what, on pr at head, in the issue's state as state left it.
+func failingName(state Post, what string, pr int, head string) string {
 	if len(head) > 12 {
 		head = head[:12]
 	}
@@ -93,8 +107,9 @@ func fromGitHub(ctx context.Context, err error) bool {
 }
 
 // gitHubsAnswer is what the factory makes of err, from a request whose
-// refusal it says on the issue: marking pr ready, or merging it, which the
-// record named step counts. It returns the answer to say: GitHub's refusal,
+// refusal it says on the issue: marking pr ready, or merging it, or reading
+// a watched draft's events before it marks it ready (#371), which the record
+// named step counts. It returns the answer to say: GitHub's refusal,
 // or, once GitHub has kept failing the request for longer than the factory
 // asks for, that it did. Otherwise it returns the error to end the step
 // with, so the next poll asks again: the watcher lost its lease or its
