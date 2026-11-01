@@ -127,11 +127,14 @@ def identity(test):
 # application's own declaration, or the standard library's or an installed
 # distribution's code. A call counts only when the test method makes it,
 # directly or through code it calls, and never when unittest or the runner
-# does, except a callable the test hands an assertion, such as
-# assertRaises(E, f, x). setUp and tearDown don't count. Each exception type
-# that escapes a counted call to code outside the implementation is recorded
+# does, except what the callable form of assertRaises or assertWarns calls
+# for the test, as assertRaises(E, f, x) does. setUp, tearDown and cleanups
+# don't count. Each exception type that escapes any call into the
+# implementation during a test, from any caller in any thread, is recorded
 # with whether the contract's Exsures declares it. Assertions are the
-# runner's own records of unittest's checks. None of it runs for other tests.
+# runner's own records of the unittest checks the test method makes. None of
+# it runs for other tests, and a test that tampers with the runner in its own
+# process is out of scope.
 boundary = request.get("boundary")
 boundary_python = {}
 boundary_receivers = {}
