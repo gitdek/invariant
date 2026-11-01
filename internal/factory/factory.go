@@ -46,6 +46,13 @@ type GitHub interface {
 	PullRequest(ctx context.Context, n int) (github.PullRequest, error)
 	// OpenPullRequest finds the open pull request from a branch, if there is one.
 	OpenPullRequest(ctx context.Context, branch string) (github.PullRequest, bool, error)
+	// PullRequestFrom finds the newest pull request from a branch, in any
+	// state, if there is one.
+	PullRequestFrom(ctx context.Context, branch string) (github.PullRequest, bool, error)
+	// ClosePullRequest closes a pull request without merging it, and
+	// returns it as it is then: closing a closed one changes nothing, and a
+	// merged one stays merged.
+	ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error)
 	CheckRuns(ctx context.Context, sha, name string) ([]github.CheckRun, error)
 	// Job reads the job behind a check run, to tell a gate that failed from
 	// one GitHub never started.
@@ -94,6 +101,9 @@ type Repo interface {
 	Load(ctx context.Context, commit, dir string) error
 	Holds(ctx context.Context, ref, commit string) (bool, error)
 	PushCommit(ctx context.Context, commit, branch string) error
+	// FirstCommit is the first commit on head, past base, that touched
+	// path, or "" when none did.
+	FirstCommit(ctx context.Context, base, head, path string) (string, error)
 }
 
 // Factory turns issues into merged pull requests.
@@ -206,7 +216,8 @@ func (f *Factory) Prepare(ctx context.Context) error {
 // there is left over from a watcher that stopped mid-build. It clears them
 // only then, since after that its steps run across polls, each in a
 // worktree of its own (D-0113). A one-off run doesn't clear them, since it
-// may share the clone with a running watcher.
+// may share the clone with a running watcher. Then, for the same reasons,
+// it clears the Go build caches runs in its work directory left (#366).
 func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 	if f.LeaseFor > 0 {
 		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
@@ -228,6 +239,15 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		}
 		err := f.Repo.ClearWorktrees(ctx)
 		cleared = err == nil
+		if cleared {
+			// A cache it can't remove now waits for the next start; it
+			// holds nothing a run needs.
+			if n, err := f.clearRunCaches(); err != nil {
+				f.logf("run caches: %v", err)
+			} else if n > 0 {
+				f.logf("cleared the Go build caches %d ended runs left", n)
+			}
+		}
 		return err
 	}
 	for {
@@ -538,7 +558,8 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if isIssuePlan(state.Marker) {
 			return f.workRatified(ctx, t, state)
 		}
-		// A build that stopped partway, when the factory stopped. Pick it up.
+		// No post has answered the ratification's build yet: start it, or
+		// take up what its run left, whichever watcher ran it.
 		return f.build(ctx, t, state)
 	case KindFailed:
 		// A person can merge or close the pull request of a build that
@@ -550,6 +571,16 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 				return err
 			}
 			if pr.Merged || pr.State == "closed" {
+				// A draft closed for a writer's retry that recorded it
+				// replaces it is the factory's own replacement under way,
+				// not someone else's close, so the retry goes on (#271).
+				if !pr.Merged {
+					if c, ok, err := f.replacement(ctx, t, state); err != nil {
+						return err
+					} else if ok {
+						return f.rebuild(ctx, t, state, c)
+					}
+				}
 				return f.watch(ctx, t, state)
 			}
 			open = pr
@@ -582,6 +613,11 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		switch {
 		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
 			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
+		case kind == KindFailed && state.Marker.Rebuilds():
+			// A retry builds the plan again, replacing #n (#271).
+			n := state.Marker.PR
+			_, trusted, _ := trustedOf(state.Marker)
+			return f.note(ctx, t, c, fmt.Sprintf("#%d is still open, so I can't draft again yet.", n), "\n\n"+rebuildOffer(n, trusted))
 		case kind == KindFailed && state.Marker.PR != 0:
 			// A retry only watches #n again (#263). The note says a person
 			// merges it whenever the failure or the plan shows it changes
@@ -609,7 +645,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			// The build stopped before it made a pull request. Build the
 			// ratified proposal again, and start counting stops afresh.
 			m := state.Marker.carried()
-			m.Kind, m.ReplyTo, m.Failure = KindRatified, []int64{c.Comment}, ""
+			m.Kind, m.ReplyTo, m.Failure, m.Gone = KindRatified, []int64{c.Comment}, "", false
 			from, to := f.retryStep(t, c)
 			if err := f.allowed(ctx, t.Issue.Number, "build the ratified proposal again", from, to); err != nil {
 				return err
@@ -621,6 +657,11 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 				return err
 			}
 			return f.say(ctx, t.Issue.Number, post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m), LabelBuilding)
+		}
+		// A plan's build that failed in the factory's own run is built
+		// again, replacing its draft (#271).
+		if state.Marker.Rebuilds() {
+			return f.rebuild(ctx, t, state, c)
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
 		// on its current head, it stays in scope, and its lock is still the
@@ -817,6 +858,9 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// watcher sees it (D-0069). One recorded and never finished stopped
 	// partway, and only a writer's command starts another.
 	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req)
+	if errors.Is(err, errResumed) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -827,7 +871,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// The issue's agent ran the draft that stopped, so its post names it
 		// (#179).
 		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Agent: agent}
-		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the factory stopped.", m,
+		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the watcher running it stopped or lost the repository's lease.", m,
 			" Comment `/invariant revise` to draft again."), LabelHumanReview)
 	}
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
@@ -922,10 +966,12 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	f.runsAgent(n, agent, out)
 	res, runErr := form.Formalize(ctx, req, out)
 	// A watcher that lost the lease during the run drops it. The holder will
-	// find it recorded, and say it stopped.
+	// find it recorded, and say it stopped. One that took it back since, in
+	// a new tenure, records the run's result, and its next step posts it.
 	if !f.holds() {
 		return nil, errLeaseLost
 	}
+	ctx, resumed := f.resumed(ctx)
 	switch {
 	case runErr != nil:
 		spent := synth.Usage{}
@@ -947,7 +993,13 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	if err := f.recovers(ctx, n, "record the draft's result", f.canFinishRun(drafting(RunRecorded), recovery.Solve)); err != nil {
 		return nil, err
 	}
-	return res, f.Repo.Finish(ctx, n, step, saved)
+	if err := f.Repo.Finish(ctx, n, step, saved); err != nil {
+		return nil, err
+	}
+	if resumed {
+		return nil, errResumed
+	}
+	return res, nil
 }
 
 // drafted posts what the formalizer made of an issue, once the protocol
@@ -1340,7 +1392,8 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
 	f.logf("#%d: building %s", n, m.Project)
 	f.doing(n, "building")
-	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash}
+	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
+		Replaces: m.Replaces, From: m.From}
 	stops := t.Stops()
 	// failed posts that the build failed before it made a pull request: it
 	// stopped, or the factory wouldn't start it (#13).
@@ -1371,7 +1424,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		if said, err := f.sayUnavailable(ctx, n, step, next, failed); said || err != nil {
 			return err
 		}
-		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the factory stopped"), withFailure(next, FailStopped)))
+		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the watcher running it stopped or lost the repository's lease"), withFailure(next, FailStopped)))
 	case RunNone:
 		// Each build costs an agent run, so after two stop, a writer decides
 		// whether to try again.
@@ -1381,6 +1434,9 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		}
 		if isPlan(m.Project) {
 			built, agent, res, runErr, err := f.runPlanBuild(ctx, t, ratified, step)
+			if errors.Is(err, errSuperseded) || errors.Is(err, errResumed) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -1394,11 +1450,19 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 						return err
 					}
 				}
+				var gone ratificationGone
+				if errors.As(runErr, &gone) {
+					next.Gone = true
+					return failed(FailStopped, post("needs a person", "I can't build the plan again: "+gone.missing+".", withFailure(next, FailStopped), cantRebuildFrom()))
+				}
 				return failed(FailStopped, planFailedComment(nil, res, runErr, withFailure(next, FailStopped)))
 			}
 			return f.publish(ctx, t, ratified, built, next, stops)
 		}
 		built, agent, res, runErr, err := f.runBuild(ctx, t, ratified, step)
+		if errors.Is(err, errSuperseded) || errors.Is(err, errResumed) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -1529,10 +1593,13 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	amend := m.Proposal != nil && m.Proposal.Target != nil
 	res, runErr := run.Builder.Build(ctx, root, out, amend)
 	// A watcher that lost the lease during the run drops it. The holder will
-	// find it recorded, and say it stopped.
+	// find it recorded, and say it stopped. One that took it back since, in
+	// a new tenure, records the run's result, and its next step publishes
+	// it, if the build still stands.
 	if !f.holds() {
 		return "", "", nil, nil, errLeaseLost
 	}
+	ctx, resumed := f.resumed(ctx)
 	// Anyone can read the run's error and review, in a post or the record, so
 	// they name the paths on this machine as localPaths does.
 	runErr = localError(runErr, f.Work)
@@ -1597,11 +1664,19 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if err != nil {
 		return "", "", nil, nil, err
 	}
+	if why, err := f.superseded(ctx, n, ratified); err != nil {
+		return "", "", nil, nil, err
+	} else if why != current {
+		return "", "", nil, nil, f.finishSuperseded(ctx, n, why, step, result)
+	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
 		return "", "", nil, nil, err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
 		return "", "", nil, nil, err
+	}
+	if resumed {
+		return "", "", nil, nil, errResumed
 	}
 	return result, agent, res, runErr, nil
 }
@@ -1664,13 +1739,20 @@ func (f *Factory) loadResult(ctx context.Context, commit string, v any) error {
 }
 
 // publish takes a finished build to its post: it pushes the build's code,
-// unless the branch has it, opens the pull request, unless one is open from
-// the branch, and says how the build went. Whichever watcher ran the build,
-// its record holds everything this needs.
+// unless the branch has it, opens the pull request, unless the build opened
+// one from its branch already, open, closed or merged, and says how the
+// build went. Whichever watcher ran the build, its record holds everything
+// this needs, and a build a later post answered or replaced publishes
+// nothing.
 func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result string, next Marker, stops int) error {
 	n, m := t.Issue.Number, ratified.Marker
 	var built builtResult
 	if err := f.loadResult(ctx, result, &built); err != nil {
+		return err
+	}
+	// A watcher back from a pause publishes nothing of a build a later post
+	// answered or replaced (#271).
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
 		return err
 	}
 	if built.Plumbing != nil {
@@ -1724,11 +1806,14 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	pr, open, err := f.GitHub.OpenPullRequest(ctx, m.Branch)
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
+		return err
+	}
+	pr, found, err := f.buildPullRequest(ctx, m.Branch, ratified)
 	if err != nil {
 		return err
 	}
-	if !open {
+	if !found {
 		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
 			return err
 		}
@@ -1738,12 +1823,15 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		}); err != nil {
 			return err
 		}
-	} else if res.Final.Passed {
+	} else if res.Final.Passed && pr.State == "open" {
 		if err := f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
 	}
 	next.PR = pr.Number
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
+		return err
+	}
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
 		return err
 	}
@@ -2004,7 +2092,7 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 // refused says whether err is GitHub's answer to a request, rather than this
 // watcher losing its lease, or its context ending, before GitHub answered.
 func refused(ctx context.Context, err error) bool {
-	return !errors.Is(err, errLeaseLost) && ctx.Err() == nil
+	return !errors.Is(err, errLeaseLost) && !errors.Is(err, errStaleTenure) && !errors.Is(err, errNoStep) && ctx.Err() == nil
 }
 
 // markReady marks a draft ready for review when a build that passed finds it
@@ -2135,6 +2223,7 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 			err = fmt.Errorf("the factory's step panicked: %v\n%s", r, debug.Stack())
 		}
 	}()
+	ctx = f.inTenure(ctx)
 	issue, err := f.GitHub.Issue(ctx, n)
 	if err != nil {
 		return err

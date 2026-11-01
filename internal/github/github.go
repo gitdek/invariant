@@ -106,6 +106,7 @@ type PullRequest struct {
 	MergeCommitSHA string `json:"merge_commit_sha"`
 	MergedAt       string `json:"merged_at,omitempty"`
 	MergedBy       *User  `json:"merged_by,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
 }
 
 // NewPullRequest is a pull request to open.
@@ -253,6 +254,50 @@ func (c Client) OpenPullRequest(ctx context.Context, branch string) (PullRequest
 		return PullRequest{}, false, nil
 	}
 	return out[0], true, nil
+}
+
+// PullRequestFrom finds the newest pull request from branch, in this
+// repository, open, closed or merged, if there is one.
+func (c Client) PullRequestFrom(ctx context.Context, branch string) (PullRequest, bool, error) {
+	owner, _, _ := strings.Cut(c.Repo, "/")
+	var out []PullRequest
+	if err := c.call(ctx, "GET", c.path("pulls?state=all&sort=created&direction=desc&head="+url.QueryEscape(owner+":"+branch)), nil, &out); err != nil {
+		return PullRequest{}, false, err
+	}
+	if len(out) == 0 {
+		return PullRequest{}, false, nil
+	}
+	newest := out[0]
+	for _, pr := range out[1:] {
+		if pr.Number > newest.Number {
+			newest = pr
+		}
+	}
+	// A list of pull requests says when one merged, not whether it did.
+	newest.Merged = newest.MergedAt != ""
+	return newest, true, nil
+}
+
+// ClosePullRequest closes pull request n without merging it, and returns it
+// as it is then. Closing one that's already closed changes nothing, and one
+// that's merged stays merged: the caller reads Merged to tell, as when
+// someone merges it just before the close.
+func (c Client) ClosePullRequest(ctx context.Context, n int) (PullRequest, error) {
+	pr, err := c.PullRequest(ctx, n)
+	if err != nil || pr.Merged || pr.State == "closed" {
+		return pr, err
+	}
+	var out PullRequest
+	err = c.call(ctx, "PATCH", c.path(fmt.Sprintf("pulls/%d", n)), map[string]string{"state": "closed"}, &out)
+	if err == nil {
+		return out, nil
+	}
+	// GitHub refuses to close one that was merged or closed meanwhile. What
+	// it is now says which.
+	if now, readErr := c.PullRequest(ctx, n); readErr == nil && (now.Merged || now.State == "closed") {
+		return now, nil
+	}
+	return pr, err
 }
 
 // CheckRuns lists the check runs with the given name on a commit.
