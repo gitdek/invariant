@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -342,6 +343,59 @@ func tlapsSetEnum(toks []tlaToken) (int, bool) {
 	return 0, false
 }
 
+// tlapsNames returns the names a module's definitions introduce: an operator,
+// with or without arguments, and a named lemma or theorem.
+func tlapsNames(toks []tlaToken) []string {
+	kinds := map[string]bool{"LEMMA": true, "THEOREM": true, "PROPOSITION": true, "COROLLARY": true}
+	var names []string
+	seen := map[string]bool{}
+	add := func(n string) {
+		if !seen[n] {
+			seen[n], names = true, append(names, n)
+		}
+	}
+	for i, tok := range toks {
+		if tok.str || tok.label || !tok.first || tok.text == "" || !(isLetter(tok.text[0]) || tok.text[0] == '_') {
+			continue
+		}
+		if i+1 < len(toks) && (toks[i+1].text == "==" || toks[i+1].text == "(") {
+			add(tok.text) // name == ...  or  name(args) == ...
+		}
+		if kinds[tok.text] && i+2 < len(toks) && toks[i+2].text == "==" {
+			add(toks[i+1].text) // kind name == ...
+		}
+	}
+	return names
+}
+
+// tlapsCryptKinds are the levels tlapm's printer can give a coalesced
+// operator, which prefix the term it hashes to name a backend atom.
+var tlapsCryptKinds = []string{"CONSTANT", "STATE", "ACTION", "TEMPORAL"}
+
+// tlapsColliding finds two distinct names whose primed abstractions tlapm
+// would name alike. tlapm names the atom it hands a backend "h" + the first
+// five hex digits of the MD5 of the term's print, and never checks that two
+// terms of one obligation got distinct names (tlaplus/tlapm#310). A hidden
+// definition D primed prints as "<kind>_D_'", so two names that collide there
+// are one symbol to SMT, Zenon or Isabelle, which proves a false theorem with
+// no temporal operator in sight. The gate refuses the pair. The check is over
+// the MD5 only because the pinned tlapm names its atoms that way; it is no
+// security use of MD5.
+func tlapsColliding(names []string) (string, string, bool) {
+	for _, kind := range tlapsCryptKinds {
+		seen := map[string]string{}
+		for _, n := range names {
+			sum := md5.Sum([]byte(kind + "_" + n + "_'"))
+			atom := hex.EncodeToString(sum[:])[:5]
+			if other, ok := seen[atom]; ok && other != n {
+				return other, n, true
+			}
+			seen[atom] = n
+		}
+	}
+	return "", "", false
+}
+
 // tlapsModel checks the model a TLAPS proof rests on, and returns the
 // standard modules it extends. Its spec must be the gate's, Init /\
 // [][Next]_vars, and nothing else in it may use a construct tlapm's open
@@ -468,6 +522,9 @@ func tlapsModule(model, specName, inv, body string) (tlapsBody, error) {
 		case defKinds[tok.text] && tok.first && i+2 < len(rest) && rest[i+2].text == "==":
 			defined[rest[i+1].text] = true
 		}
+	}
+	if n1, n2, bad := tlapsColliding(tlapsNames(rest)); bad {
+		return tlapsBody{}, fmt.Errorf("the proof defines %s and %s, whose abstractions tlapm could name alike and so prove a false lemma about (tlaplus/tlapm#310)", n1, n2)
 	}
 	for i, tok := range rest {
 		prev := ""
@@ -721,6 +778,8 @@ func proveTLAPS(ctx context.Context, work string, p *project.Project, src string
 	model := sha(src)
 	var proofs []TLAPSProof
 	modelErr := tlapsModel(src, p.SpecName())
+	modelToks, _ := lexTLA(src)
+	modelNames := tlapsNames(modelToks)
 	image, tool := "", (*TLAPSTool)(nil)
 	for _, inv := range p.Manifest.TLAPS {
 		out := TLAPSProof{Invariant: inv, Model: model}
@@ -742,6 +801,11 @@ func proveTLAPS(ctx context.Context, work string, p *project.Project, src string
 			continue
 		}
 		at.Theorem, at.Libraries, at.Cites = b.theorem, b.libraries, b.cites
+		proofToks, _ := lexTLA(string(body))
+		if n1, n2, bad := tlapsColliding(append(append([]string{}, modelNames...), tlapsNames(proofToks)...)); bad {
+			at.Message = fmt.Sprintf("the proof and model define %s and %s, whose abstractions tlapm could name alike and so prove a false theorem about (tlaplus/tlapm#310)", n1, n2)
+			continue
+		}
 		if image == "" {
 			if image, err = toolchain.TLAPSImage(ctx); err != nil {
 				return nil, nil, err

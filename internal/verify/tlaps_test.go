@@ -125,11 +125,15 @@ func TestTLAPSClosesEveryKnownSoundnessIssue(t *testing.T) {
 		"306": refuse("Bad == CASE TRUE -> 1 [] OTHER -> 2", "CASE"),
 		"309": refuse("Bad == ENABLED Next", "ENABLED"),
 		"310": func(t *testing.T) {
-			// SMT, Zenon and capture all need a temporal operator in the
-			// obligation; the PTL route needs the temporal backend. The gate
-			// refuses both.
+			// The known SMT, Zenon and capture tests need a temporal operator
+			// in the obligation, and the known PTL test the temporal backend.
+			// A collision also needs neither: two hidden definitions whose
+			// primed prints hash alike (STATE_P1320_' and STATE_P1797_') are
+			// one atom to SMT, and the pinned tlapm proves a false theorem
+			// about them. The gate refuses all three routes.
 			refuse("Bad == []TypeOK", "temporal operator")(t)
 			refuse("LEMMA Bad == TypeOK => TypeOK\nBY PTL", "#310")(t)
+			refuse("P1320 == held = held\nP1797 == held = held", "#310")(t)
 		},
 		"320": refuse("I == INSTANCE Naturals", "INSTANCE"),
 	}
@@ -155,6 +159,48 @@ func TestTLAPSRefusesTheAdversarialModel(t *testing.T) {
 	got, _ := tlapsProve(t, tlapsEvilPool(), tlapsPoolProof)
 	if got.Proved || !strings.Contains(got.Message, "#235") {
 		t.Fatalf("proveTLAPS didn't refuse the adversarial model: %+v", got)
+	}
+}
+
+func TestTLAPSRefusesCollidingNamesAcrossModelAndProof(t *testing.T) {
+	// A hidden definition primed is abstracted to an atom named by 20 bits of
+	// a hash tlapm never checks for collision (tlaplus/tlapm#310).
+	// STATE_P1320_' and STATE_P1797_' hash alike, so a proof naming one to
+	// collide with a model definition could prove a false lemma by SMT, with
+	// no temporal operator in sight. The gate's union check turns it away
+	// before any proof runs.
+	model := strings.Replace(tlapsPool, "vars == <<held>>", "vars == <<held>>\n\nP1320 == held = held", 1)
+	got, _ := tlapsProve(t, model, tlapsPoolProof+"\nP1797 == held = held\n")
+	if got.Proved || !strings.Contains(got.Message, "#310") {
+		t.Fatalf("proveTLAPS didn't refuse the colliding names: %+v", got)
+	}
+}
+
+func TestTLAPSCollisionCheckNamesTlapmsAtoms(t *testing.T) {
+	// The pinned tlapm abstracted A' (A == x = 1, hidden) to the SMT atom
+	// h5914f, the first five hex digits of the MD5 of "STATE_A_'", and it
+	// proved P1320' => P1797' BY SMT for two false-related definitions whose
+	// prints share an atom. The check must catch that pair, and must pass the
+	// pool's own model and proof, whose names share none.
+	if a, b, bad := tlapsColliding([]string{"P1320", "P1797"}); !bad || a != "P1320" || b != "P1797" {
+		t.Errorf("tlapsColliding missed the pair the pinned tlapm proves false theorems about: %q %q %v", a, b, bad)
+	}
+	model, err := lexTLA(tlapsPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := lexTLA(tlapsPoolProof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := append(tlapsNames(model), tlapsNames(proof)...)
+	for _, want := range []string{"Acquire", "TypeOK", "NoSharedConnection", "IndInv_NoSharedConnection", "NoSharedConnection_Step"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("tlapsNames missed %s: %v", want, names)
+		}
+	}
+	if a, b, bad := tlapsColliding(names); bad {
+		t.Errorf("the pool's own names collide: %s and %s", a, b)
 	}
 }
 
@@ -281,6 +327,7 @@ func TestTLAPSRefusesWhatAProofMayNotDo(t *testing.T) {
 		{"a dropped set element", "Bad == {x \\in Clients}", "#235"},
 		{"a dropped set element among others", "Bad == {held, x \\in Clients}", "#235"},
 		{"a dropped tuple element", "Bad == {<<x, y>> \\in Clients}", "#235"},
+		{"two definitions tlapm would name alike", "P1320 == held = held\nP1797 == held = held", "#310"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tlapsModule("ConnectionPool", "Spec", "NoSharedConnection", tlapsPoolProof+"\n"+tc.extra+"\n")
