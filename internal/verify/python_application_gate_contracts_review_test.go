@@ -216,3 +216,107 @@ func gtcSubstitutes(t *testing.T, tc toolchain.Toolchain) {
 		t.Fatalf("the routes disagree:\ngate   %v\ndirect %v", steps, direct)
 	}
 }
+
+// #355's second review at the gate: a method named on its class whose code
+// Enum shares, an assertion only setUp makes, and a generator whose raise
+// escapes through unittest's next fail the gate.
+
+const gtcBypassTests = gtcTestSource + `
+
+import enum
+
+from tasks import gen
+
+
+class SharedNewTests(unittest.TestCase):
+    def test_fake_status(self):
+        class FakeStatus(enum.IntEnum):
+            OK = 200
+        self.assertEqual(FakeStatus(200), 200)
+
+
+class FixtureAssertTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(True)
+
+    def test_only_calls(self):
+        json.dumps({'task': 'pending'})
+
+
+class GeneratorTests(unittest.TestCase):
+    def test_walk_fail(self):
+        g = gen.walk_fail(1)
+        self.assertEqual(next(g), 1)
+        self.assertRaises(gen.StoreError, next, g)
+`
+
+const gtcBypassContracts = gtcContractSource + `
+def status_new(cls: object, value: int) -> object:
+    Requires(value >= 100)
+    ...
+
+def dumps(value: object) -> str:
+    Requires(True)
+    ...
+
+def walk_fail(n: int) -> object:
+    Requires(n >= 0)
+    ...
+`
+
+func TestPythonApplicationGateTrustedContractsRefuseBypasses(t *testing.T) {
+	t.Run("local Python", func(t *testing.T) {
+		tc, _ := pa327Fake(t)
+		gtcBypasses(t, tc)
+	})
+	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") == "1" {
+		t.Run("real Docker Python TLC", func(t *testing.T) {
+			tc, err := toolchain.Ensure(context.Background())
+			if err != nil {
+				t.Fatalf("requested real prerequisites: %v", err)
+			}
+			gtcBypasses(t, tc)
+		})
+	}
+}
+
+func gtcBypasses(t *testing.T, tc toolchain.Toolchain) {
+	t.Helper()
+	f := gtcNew(t, false)
+	pa327Write(t, f.root, "tasks/gen.py", "class StoreError(Exception):\n    pass\n\n\ndef walk_fail(n):\n    yield n\n    raise StoreError('walk failed')\n")
+	pa327Write(t, f.root, gtcTests, gtcBypassTests)
+	pa327Write(t, f.root, gtcContracts, gtcBypassContracts)
+	f.p.Manifest.Components.TrustedContracts = append(f.p.Manifest.Components.TrustedContracts,
+		gtcContract("http.HTTPStatus.__new__", project.ComponentOperation{Kind: "standard_library", Module: "http", Symbol: "HTTPStatus.__new__"}, "status_new", "SharedNewTests.test_fake_status"),
+		gtcContract("json.dumps", project.ComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"}, "dumps", "FixtureAssertTests.test_only_calls"),
+		gtcContract("tasks.walk_fail", project.ComponentOperation{Kind: "application", Source: "tasks/gen.py", Symbol: "walk_fail"}, "walk_fail", "GeneratorTests.test_walk_fail"),
+	)
+	pa327Save(t, f)
+	pa327Admit(t, f)
+	r := pa327Run(t, f, tc)
+	if r.Passed {
+		t.Fatalf("contracts no test supports passed the gate: %s", pa327JSON(t, r))
+	}
+	standing := gtcStanding(t, r)
+	if standing["json.loads"].Support != "tested" || standing["tasks.next_state"].Support != "tested" {
+		t.Fatalf("supported contracts lost their standing: %+v; diagnostics %+v", standing, r.Components.ContractDiagnostics)
+	}
+	md := receipt.Markdown(r)
+	failed := strings.Split(md[strings.Index(md, "**What failed**"):], "\n")
+	for id, reason := range map[string]string{
+		"http.HTTPStatus.__new__": "didn't resolve the operation's implementation",
+		"json.dumps":              "it made no assertion that passed, or one failed",
+		"tasks.walk_fail":         "raised tasks.gen.StoreError, which its contract's Exsures doesn't declare",
+	} {
+		if standing[id].Support != "untested" {
+			t.Errorf("%s: %+v", id, standing[id])
+		}
+		literal := strings.ReplaceAll(id, "_", "&#95;")
+		n := slices.IndexFunc(failed, func(line string) bool { return strings.Contains(line, "Trusted contract <code>"+literal+"</code>") })
+		if n < 0 {
+			t.Errorf("the receipt doesn't list %s as failed", id)
+		} else if !strings.Contains(strings.ReplaceAll(failed[n], "&#95;", "_"), reason) {
+			t.Errorf("the receipt doesn't say why %s failed, %q: %s", id, reason, failed[n])
+		}
+	}
+}
