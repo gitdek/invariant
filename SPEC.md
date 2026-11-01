@@ -2,7 +2,7 @@
 
 This file describes the current state only. It's rolled up from the ratified and decided decisions in the [decision journal](decisions/journal/), whose table is [`decisions/log.md`](decisions/log.md), and every line cites the decisions behind it. A line that no ratified or decided decision supports is a bug in this file. History and reasoning live in the journal and the decisions' records.
 
-**Rolled up through** D-0261 · 2026-11-01 (every entry is ratified, decided or superseded)
+**Rolled up through** D-0269 · 2026-11-01 (every entry is ratified, decided or superseded)
 
 ## What Invariant is
 
