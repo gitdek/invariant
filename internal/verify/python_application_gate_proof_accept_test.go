@@ -16,10 +16,10 @@ package verify
 // the function unless its input holds the planted violation. With
 // INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 the same cases also run with real
 // Docker, the pinned Python image, TLC, the pinned Nagini and the installed
-// packaging wheel:
+// packaging wheel, with the second review's cases beside them:
 //
 //	INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify \
-//	  -run '^TestPythonApplicationGateProves' -count=1 -timeout 60m
+//	  -run '^TestPythonApplicationGate(Proves|Refuses)' -count=1 -timeout 60m
 
 import (
 	"context"
