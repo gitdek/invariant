@@ -424,3 +424,43 @@ func TestTrustedContractsOwnTheirResolvedValues(t *testing.T) {
 		t.Fatal("a resolved trusted contract retained the manifest's slices or maps")
 	}
 }
+
+// A contract's Exsures says what its operation may raise, read from the same
+// bytes its contract hash covers and resolved without running the module.
+func TestTrustedContractsReadWhatTheirOperationsMayRaise(t *testing.T) {
+	root, p := tcFixture(t)
+	contracts := tcProject + "/contracts.py"
+	py304Write(t, root, contracts, "import json\nimport json.decoder as decoder\nfrom packaging.version import InvalidVersion as Invalid\n"+strings.Replace(strings.Replace(tcContracts,
+		"    Requires(len(text) > 0)\n    ...\n\ndef version",
+		"    Requires(len(text) > 0)\n    Exsures(ValueError, len(text) > 1)\n    Exsures(json.JSONDecodeError, True)\n    Exsures(decoder.JSONDecodeError, True)\n    Exsures(ValueError, True)\n    ...\n\ndef version", 1),
+		"def version(text: str) -> object:\n    Requires(len(text) > 0)\n",
+		"def version(text: str) -> object:\n    Requires(len(text) > 0)\n    Exsures(Invalid, True)\n", 1))
+	inv := tcResolve(t, p.Dir)
+	want := map[string][]string{
+		"json.loads":        {"builtins.ValueError", "json.JSONDecodeError", "json.decoder.JSONDecodeError"},
+		"packaging.Version": {"packaging.version.InvalidVersion"},
+		"store.save":        nil,
+	}
+	for _, c := range inv.TrustedContracts {
+		if !reflect.DeepEqual(c.Exsures, want[c.ID]) {
+			t.Errorf("%s may raise %q, want %q", c.ID, c.Exsures, want[c.ID])
+		}
+	}
+	for _, c := range []struct{ name, prefix, exsures string }{
+		{"defined in the contract's module", "class StoreError(Exception):\n    pass\n", "StoreError"},
+		{"imported conditionally", "try:\n    from simplejson import JSONDecodeError\nexcept ImportError:\n    from json import JSONDecodeError\n", "JSONDecodeError"},
+		{"imported relatively", "from .errors import StoreError\n", "StoreError"},
+		{"not imported", "", "StoreError"},
+		{"not a name", "", "errors()[0]"},
+		{"a builtin that isn't an exception", "", "len"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, p := tcFixture(t)
+			py304Write(t, root, contracts, c.prefix+strings.Replace(tcContracts, "    Ensures(Result() is task)\n", "    Ensures(Result() is task)\n    Exsures("+c.exsures+", True)\n", 1))
+			// Loading resolves the inventory.
+			if _, err := project.Load(p.Dir); err == nil || !strings.Contains(err.Error(), "Exsures("+c.exsures+", ...) must name an exception class") {
+				t.Fatalf("an Exsures the inventory can't resolve: %v", err)
+			}
+		})
+	}
+}

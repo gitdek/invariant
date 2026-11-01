@@ -5,5 +5,8 @@
   "language": "go",
   "parameters": [
     "Size"
+  ],
+  "tlaps": [
+    "NoSharedConnection"
   ]
 }
