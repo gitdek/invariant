@@ -28,5 +28,7 @@ reconstructs an independent journal for each attempt, and converts state to
 the TLA+ vocabulary. It attempts disabled actions too. `MaxLines` is marked
 as a constructor parameter in the manifest.
 
-This standalone factory checkout does not contain the `invariant decisions`
-command. Its journal reader can integrate the core through `Fold` or `Apply`.
+`invariant decisions` folds every journal on this core:
+`internal/decisions/state.go` takes each line as a `Decide`, `Ratify` or
+`Supersede` step, and refuses a line the core refuses. Another reader can use
+`Fold` or `Apply`.

@@ -1,6 +1,6 @@
 # Example: two-phase commit
 
-In two-phase commit, a transaction manager commits only after every resource manager has prepared. Until it prepares, any resource manager may abort. This is slice 1's proving ground: a hand-built project that the gate checks end to end.
+In two-phase commit, a transaction manager commits only after every resource manager has prepared. Until it prepares, any resource manager may abort. This is slice 1's proving ground: a project built by hand, whose code the factory rebuilt for [#65](https://github.com/gitdek/invariant/issues/65) so its explorer tries every step, and that the gate checks end to end.
 
 ## What was ratified
 
@@ -28,9 +28,11 @@ TLC checks them with three resource managers, `RM = {r1, r2, r3}`. Each pin cove
    - r2 aborts on its own.
    - The buggy coordinator commits anyway, on r1's vote alone.
    - r1 commits, while r2 has aborted.
-5. Agreement: exploring the Go code from `Init()` through `Successors()` reaches exactly the 288 states TLC found, at the same depth.
-6. Gobra verifies all ten functions in [`twophase.go`](twophase/twophase.go). Each step function's contract restates one TLA+ action. Gobra also checks that every array index is in range and that no integer operation overflows. `Successors`, in [`explore.go`](twophase/explore.go), is plain Go. Gobra can't verify `append`, so the agreement check covers it instead.
-7. `go vet` and `go test` pass in a sandbox with no network.
+5. Agreement: exploring the Go code from `Init()` through `Try()` reaches exactly the 288 states TLC found, at the same depth.
+6. One size larger, within `RM = {r1, r2, r3, r4}`, the code reaches exactly TLC's 1,568 states there too, at the same depth.
+7. Every step tried: in each of the 288 states, `Try` tries every step `Next` names, for every resource manager, and TLC checks all 4,896 attempts, refusals included.
+8. Gobra verifies all ten functions in [`twophase.go`](twophase/twophase.go). Each step function's contract restates one TLA+ action. Gobra also checks that every array index is in range and that no integer operation overflows. [`explore.go`](twophase/explore.go), with `Init`, `Try` and `Abstract`, is plain Go, which Gobra doesn't check, so the agreement and conformance checks cover it instead.
+9. `go vet` and `go test` pass in a sandbox with no network.
 
 ## Run it
 

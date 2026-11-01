@@ -28,9 +28,11 @@ What the factory wrote:
 
 Everything else came from the ratified project unchanged.
 
+The factory rebuilt it for [#66](https://github.com/gitdek/invariant/issues/66), so its explorer tries every step. That run took claude-code 22 turns and passed on gate run 4, and the code here is its: Gobra verifies all 7 of its functions.
+
 Two-phase commit is a textbook protocol, so passing on the first try is easier here than it would be for a less familiar system.
 
-To reproduce it, run this from the repository root with Docker running. It uses your Claude account.
+To reproduce it, run this from the repository root with Docker running. It runs Codex on your own Codex sign-in, `synthesize`'s default; this run was Claude Code's, which `-agent claude-code` picks.
 
 ```bash
 go run ./cmd/invariant synthesize examples/02-twophase-commit
