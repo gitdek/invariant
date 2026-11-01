@@ -88,6 +88,12 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	// edit, never blocks the build.
 	b.Sandbox.Cache = filepath.Join(out, "gocache")
 	b.Sandbox.Original = root
+	// The cache is the build's own, so another build can't read what this
+	// one wrote. Every check, repair, fallback and review that uses it has
+	// ended by the time Build returns, whatever its outcome, and the run's
+	// records stay (#366). Deferred before the build's record is written,
+	// it's removed after it.
+	defer RemoveCache(b.Sandbox.Cache)
 	job := synth.Job{
 		Workspace: ws,
 		Prompt:    BuildPrompt(plan, n, b.TestRuns),

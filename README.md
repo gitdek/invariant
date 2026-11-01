@@ -926,6 +926,8 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
    Codex's commands then run under a permission profile of Codex's own: they see only the workspace, the system and Go's toolchain, reach no network, and can't read your home directory. The watcher checks that before it runs Codex, and runs one Codex run at a time.
 
+   The watcher keeps its clone and every run's transcript, checks and records in its work directory, `-work`, by default `invariant/watch` in your user cache directory. A plan's draft and build each give their checks a Go build cache of their own and remove it when they end, and a watcher removes any a stopped watcher left when it starts ([D-0233](decisions/journal/D-0233.jsonl)).
+
 5. **Open an issue** that describes a component and what must always be true of it, and label it `invariant` or comment `/invariant solve`. [#18](https://github.com/gitdek/invariant/issues/18) is a good model. The factory asks about anything it can't settle, proposes statements, and builds once a writer ratifies them.
 
 `Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).

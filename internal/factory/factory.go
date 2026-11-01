@@ -206,7 +206,8 @@ func (f *Factory) Prepare(ctx context.Context) error {
 // there is left over from a watcher that stopped mid-build. It clears them
 // only then, since after that its steps run across polls, each in a
 // worktree of its own (D-0113). A one-off run doesn't clear them, since it
-// may share the clone with a running watcher.
+// may share the clone with a running watcher. Then, for the same reasons,
+// it clears the Go build caches runs in its work directory left (#366).
 func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 	if f.LeaseFor > 0 {
 		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
@@ -228,6 +229,15 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		}
 		err := f.Repo.ClearWorktrees(ctx)
 		cleared = err == nil
+		if cleared {
+			// A cache it can't remove now waits for the next start; it
+			// holds nothing a run needs.
+			if n, err := f.clearRunCaches(); err != nil {
+				f.logf("run caches: %v", err)
+			} else if n > 0 {
+				f.logf("cleared the Go build caches %d ended runs left", n)
+			}
+		}
 		return err
 	}
 	for {
