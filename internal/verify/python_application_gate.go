@@ -272,6 +272,8 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	all := true
+	contracts := pythonApplicationContracts(s.inventory)
+	var contractSteps [][2]int
 	for i, v := range s.Invocations() {
 		x, runErr := s.Run(ctx, v.Key)
 		if ctx.Err() != nil {
@@ -283,7 +285,11 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		r.Application.Executions = append(r.Application.Executions, *x)
 		all = all && x.Success
 		if v.Key.Kind == "test" {
-			r.Build.Steps = append(r.Build.Steps, BuildStep{Name: v.Key.ID, Passed: x.Success})
+			name, contract := pythonApplicationContractStep(contracts, v.Key)
+			if contract {
+				contractSteps = append(contractSteps, [2]int{len(r.Build.Steps), len(r.Application.Executions) - 1})
+			}
+			r.Build.Steps = append(r.Build.Steps, BuildStep{Name: name, Passed: x.Success})
 			r.Build.Passed = r.Build.Passed && x.Success
 			continue
 		}
@@ -368,11 +374,14 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		if err := r.attributePythonApplication(s.inventory); err != nil {
 			return nil, err
 		}
+		r.Build.Passed = r.pythonApplicationContractSteps(contractSteps) && r.Build.Passed
 	}
 	// Code that agrees one size larger only when TLC can say what that is
 	// carries no bound; code that disagrees there fails (D-0068, D-0076).
+	// Every declared trusted contract's backing tests are required, whether
+	// or not a proof uses it yet.
 	larger := r.Larger == nil || !r.Larger.Required || r.Larger.Passed
-	r.Passed = r.Passed && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0
+	r.Passed = r.Passed && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested()
 	r.Assurance = r.CodeAssurance()
 	r.Fingerprint = Fingerprint(*r)
 	r.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
@@ -567,6 +576,9 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 	b, evidence := Build{Passed: true}, Evidence{}
 	var combined conformance.Traces
 	var explored [][]byte
+	contracts := pythonApplicationContracts(s.inventory)
+	var contractSteps [][2]int
+	var executions []PythonApplicationExecutionResult
 	for _, v := range s.Invocations() {
 		x, e := s.Run(ctx, v.Key)
 		if ctx.Err() != nil {
@@ -575,8 +587,13 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 		if x == nil {
 			return b, evidence, e
 		}
+		executions = append(executions, *x)
+		name, contract := pythonApplicationContractStep(contracts, v.Key)
+		if contract {
+			contractSteps = append(contractSteps, [2]int{len(b.Steps), len(executions) - 1})
+		}
 		b.Passed = b.Passed && x.Success
-		b.Steps = append(b.Steps, BuildStep{Name: v.Key.ID, Passed: x.Success})
+		b.Steps = append(b.Steps, BuildStep{Name: name, Passed: x.Success})
 		if v.Key.Kind == "conformance" && v.Explored {
 			raw, e := pythonApplicationAttempts(*x)
 			if e != nil {
@@ -600,6 +617,18 @@ func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evi
 			}
 			combined.Traces = append(combined.Traces, t.Traces...)
 		}
+	}
+	// Backing-test runs pass here as they pass the gate: each run's own row
+	// tested, against the binding its session records, and every declared
+	// contract tested.
+	if len(contracts) > 0 {
+		r, e := pythonApplicationContractRows(s.inventory, s.Provenance(), executions)
+		if e != nil {
+			return b, evidence, e
+		}
+		r.Build.Steps = b.Steps
+		b.Passed = r.pythonApplicationContractSteps(contractSteps) && b.Passed && r.pythonApplicationContractsTested()
+		b.Steps = r.Build.Steps
 	}
 	if len(combined.Traces) > 0 {
 		evidence.Traces, err = json.Marshal(combined)

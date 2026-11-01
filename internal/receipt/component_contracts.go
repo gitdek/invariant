@@ -54,7 +54,11 @@ func componentContractViews(b *strings.Builder, r *verify.Report, standing map[s
 		if d, ok := declarations[c.Contract]; ok {
 			contract = componentDeclaration(d)
 		}
-		parts := []string{"contract: " + contract, "identity: " + componentBinding(row.Binding), "backing tests: " + componentStrings(c.Tests)}
+		raises := "may raise no exception, by its Exsures"
+		if len(c.Exsures) > 0 {
+			raises = "may raise, by its Exsures: " + componentStrings(c.Exsures)
+		}
+		parts := []string{"contract: " + contract, raises, "identity: " + componentBinding(row.Binding), "backing tests: " + componentStrings(c.Tests)}
 		for _, v := range c.Invocations {
 			parts = append(parts, "declared "+componentInvocation(&v))
 		}
@@ -65,14 +69,24 @@ func componentContractViews(b *strings.Builder, r *verify.Report, standing map[s
 	if len(e.ContractTests) == 0 {
 		b.WriteString("\nno supplied results\n")
 	}
-	b.WriteString("\nSupplied results describe runs the component API didn't make. A backing test supports its contract only when it was exercised and passed in a process that passed, with the contract's snapshots and its operation's identity present.\n\n")
+	b.WriteString("\nThe gate runs each backing test in the application's environment, with origin gate; supplied results describe runs the component API didn't make. A backing test supports its contract only when it was exercised and passed in a process that passed, made calls into the real implementation its run resolved, the one the report binds, with the contract's snapshots present, and had one of the test method's own assertions pass and none fail. A test that reached only a stub or substitute supports nothing, and one that saw the operation raise an exception its contract's Exsures doesn't declare shows the contract is wrong. Nothing ties a passing assertion to the call it checks, so a test that asserts the wrong thing can still support its contract.\n\n")
 	b.WriteString("| Contract | Check | Status | Evidence |\n| :-- | :-- | :-- | :-- |\n")
 	for _, row := range e.ContractTests {
 		qualified := componentContractTestQualification(r, row)
 		result := row.Result
 		parts := []string{"Origin: " + componentOrigin(row.Origin), "Process outcome: " + componentOutcome(result.Outcome), componentInvocation(result.Invocation),
-			componentTool(result.Runner), "identity: " + componentBinding(result.Binding), componentInputs(result.Inputs, result.FileInputs),
-			"diagnostics: " + componentStrings(result.Diagnostics)}
+			componentTool(result.Runner), "identity: " + componentBinding(result.Binding), "implementation: " + componentImplementation(result.Implementation)}
+		for _, e := range result.Exercise {
+			parts = append(parts, fmt.Sprintf("calls into it from %s: %d", componentLiteral(e.Check), e.Calls))
+			for _, raised := range e.Raised {
+				declared := "which its contract doesn't declare"
+				if raised.Declared {
+					declared = "declared"
+				}
+				parts = append(parts, fmt.Sprintf("%s escaped %d of them, %s", componentLiteral(raised.Exception), raised.Calls, declared))
+			}
+		}
+		parts = append(parts, componentInputs(result.Inputs, result.FileInputs), "diagnostics: "+componentStrings(result.Diagnostics))
 		if len(result.Tests) == 0 {
 			parts = append(parts, "no supplied test results")
 		}
@@ -178,6 +192,48 @@ func componentBinding(b *verify.ComponentContractBinding) string {
 		parts = append(parts, "wheel "+componentLiteral(w.Name)+" "+componentLiteral(w.Version)+" · "+componentLiteral(w.Filename)+" · "+componentLiteral(short(w.SHA256)))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func componentImplementation(i *verify.ComponentContractImplementation) string {
+	if i == nil {
+		return "not resolved"
+	}
+	parts := []string{componentLiteral(i.Kind), componentLiteral(i.Callable)}
+	if i.File != nil {
+		parts = append(parts, "file "+componentFile(*i.File))
+	} else {
+		parts = append(parts, "built into the runtime")
+	}
+	if i.Distribution != "" {
+		parts = append(parts, "installed "+componentLiteral(i.Distribution)+" "+componentLiteral(i.Version), fmt.Sprintf("listed in its RECORD: %t", i.Recorded))
+	}
+	if i.Python != "" {
+		parts = append(parts, "Python "+componentLiteral(i.Python))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// componentContractFailures lists, for a gate's application receipt, each
+// declared contract that lacks tested support and why.
+func componentContractFailures(r *verify.Report) []string {
+	if r.Application == nil || r.Components == nil || len(r.Components.Inventory.TrustedContracts) == 0 {
+		return nil
+	}
+	standing, diagnostics := componentContractStanding(r)
+	var out []string
+	for _, c := range r.Components.Inventory.TrustedContracts {
+		if standing[c.ID].Support == "tested" {
+			continue
+		}
+		why := "not every backing test supports it"
+		for _, d := range diagnostics {
+			if d.Contract == c.ID && (d.Kind == verify.UnsupportedContract || d.Kind == verify.UnresolvedOperation) {
+				why = d.Detail
+			}
+		}
+		out = append(out, fmt.Sprintf("Trusted contract %s: %s", componentLiteral(c.ID), componentText(why)))
+	}
+	return out
 }
 
 // componentBoundary renders a proof attempt's account of its trusted boundary,
