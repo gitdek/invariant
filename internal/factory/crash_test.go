@@ -62,6 +62,11 @@ func (g crashGitHub) Merge(ctx context.Context, n int, sha, method string) (stri
 	return g.GitHub.Merge(ctx, n, sha, method)
 }
 
+func (g crashGitHub) ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error) {
+	g.c.effect(fmt.Sprintf("close #%d", n))
+	return g.GitHub.ClosePullRequest(ctx, n)
+}
+
 func (g crashGitHub) DeleteBranch(ctx context.Context, branch string) error {
 	g.c.effect("delete the branch")
 	return g.GitHub.DeleteBranch(ctx, branch)

@@ -67,10 +67,60 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 	}
 	body := fmt.Sprintf("The change is built: gofmt, go vet, the tests of every package it touches and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
 		res.Tests, pr.Number, merge)
+	body += replacedSentence(m)
 	if res.Fallback != nil {
 		body += "\n\n" + fellBack(res.Fallback)
 	}
 	return post("pull request", body, m)
+}
+
+// replacedSentence says which failed draft a retry's build replaced, if it
+// did (#271).
+func replacedSentence(m Marker) string {
+	if m.Replaces == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" It replaces #%d, the failed draft I closed when you retried.", m.Replaces)
+}
+
+// rebuildingComment answers a writer's retry of a plan's failed draft, old,
+// which the factory closed: it builds the plan again, as a new pull request
+// (#271). m is the build's marker, on the retry's own branch.
+func rebuildingComment(by string, old int, m Marker) string {
+	return post("building again", fmt.Sprintf("@%s retried, so I'm building the ratified plan `%s` again, as a new pull request that replaces #%d. "+
+		"I closed #%d without merging it, so its work stays there to read. The new build starts from the plan's ratification, on branch `%s`, "+
+		"and its checks and review run afresh.", by, short(m.Hash), old, old, m.Branch), m)
+}
+
+// cantRebuild says what a person does when a retry can't build a plan's
+// failed draft, pr, again, since the branch holding the plan's ratification
+// is gone: close the draft, and draft the plan again (#271).
+func cantRebuild(pr int) string {
+	return fmt.Sprintf("\n\nA person needs to look at this. Close #%d, then comment `/invariant revise` to draft the plan again, "+
+		"and I'll build it once you ratify the new draft.", pr)
+}
+
+// cantRebuildFrom says what a person does when a retry's build can't start,
+// since what holds the plan's ratification is gone: draft the plan again,
+// as the draft it replaced is closed already (D-0220).
+func cantRebuildFrom() string {
+	return "\n\nA person needs to look at this. Comment `/invariant revise` to draft the plan again, and I'll build it once you ratify the new draft."
+}
+
+// rebuildOffer says what a writer's retry of a plan's failed draft, pr,
+// does, and what else a person can do (#271, D-0218): a retry closes the draft and
+// builds the same ratified plan again, review included, and the factory
+// drafts again only once the draft is closed (#218, D-0156). A plan that
+// changes the trusted base still has a person merge what it builds, so
+// trusted says so (D-0105).
+func rebuildOffer(pr int, trusted bool) string {
+	s := fmt.Sprintf("Comment `/invariant retry` to have me close #%d and build the plan again, from its ratification, in a new pull request: "+
+		"its checks and review run afresh, and #%d's work stays there to read.", pr, pr)
+	if trusted {
+		s += " The plan changes the trusted base, so a person merges the new pull request once its checks, review and CI's `invariant/gate` pass."
+	}
+	return s + fmt.Sprintf(" To keep #%d instead, push any fixes it needs, mark it ready and merge it yourself. To change the plan, close #%d, say what to change, "+
+		"and comment `/invariant revise`. I'll draft it for you to ratify again before I build it.", pr, pr)
 }
 
 // retriedComment answers a writer's retry of a pull request that failed, and
@@ -91,6 +141,9 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	switch {
 	case res == nil:
 		fmt.Fprintf(&b, "I couldn't build the plan: %v", runErr)
+	case res.AgentError != "":
+		fmt.Fprintf(&b, "The build's agent stopped with an error, so the build failed, whatever its checks found. Its last run's error:\n\n%s\n\nWhat the factory's own run found of the work it left:\n\n%s",
+			quote(res.AgentError, 20), quote(res.Summary, 60))
 	case res.Passed && !res.Approved:
 		b.WriteString("The change passes its checks, but the second agent's review asks for changes:\n\n" + quote(clip(res.Review, accountLimit), 120))
 	default:
@@ -109,17 +162,16 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 		return post("needs a person", b.String(), m,
 			"\n\nA person needs to look at this. Comment `/invariant retry` to build again, or say what to change and comment `/invariant revise`.")
 	}
-	// A retry watches the pull request again, and the factory drafts again
-	// only once it's closed (#218, #263). The trusted files are detail in the
-	// body, which a long post clips, while its closing keeps the commands and
-	// what they do whole (D-0167).
-	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.", pr.Number)
-	files, trusted, unsure := trustedOf(m)
+	// A retry closes the draft and builds the plan again, and the factory
+	// drafts again only once the draft is closed (#218, #271). The trusted
+	// files are detail in the body, which a long post clips, while its
+	// closing keeps the commands and what they do whole (D-0167).
+	fmt.Fprintf(&b, "\n\nThe build is in draft pull request #%d.%s", pr.Number, replacedSentence(m))
+	files, trusted, _ := trustedOf(m)
 	if len(files) > 0 {
 		fmt.Fprintf(&b, " It changes these files in the trusted base: %s.", codeList(files))
 	}
-	closing := fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to have me watch #%d again. %s %s",
-		pr.Number, watchedAgain(*pr, trusted, unsure), buildAgainInstead(pr.Number, true))
+	closing := "\n\nA person needs to look at this. " + rebuildOffer(pr.Number, trusted)
 	return post("needs a person", b.String(), m, closing)
 }
 
@@ -143,6 +195,9 @@ func planPullRequestBody(t Thread, m Marker, res *plumbing.BuildResult, trusted 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Closes #%d.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "◉ Built by Invariant for #%d, to the plan ratified there. It's plumbing: tested, not proved (D-0105).\n\n", t.Issue.Number)
+	if m.Replaces != 0 {
+		fmt.Fprintf(&b, "It replaces #%d, a failed draft of the same plan, which a writer's retry had the factory close and build again (#271).\n\n", m.Replaces)
+	}
 	fmt.Fprintf(&b, "- **Plan:** `%s`, `%s`\n", m.Project, short(m.Hash))
 	b.WriteString(agentsLine(t, m, res.Review != ""))
 	fmt.Fprintf(&b, "- **Build:** %s, %d turns, %d test runs\n", res.Usage.Backend, res.Usage.Turns, len(res.TestRuns))

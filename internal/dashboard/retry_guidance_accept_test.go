@@ -56,9 +56,14 @@ func TestRetryCardsDescribeTheExistingAction(t *testing.T) {
 				}
 				return
 			}
-			for _, want := range []string{fmt.Sprintf("watch #%d again", c.marker.PR), "ci", "gate", "current head", "merge", fmt.Sprintf("won't review #%d again", c.marker.PR), "push", "changes"} {
-				if !strings.Contains(guidance, want) {
-					t.Errorf("PR guidance %q does not say %q", w.Retry.Guidance, want)
+			rebuilds := c.marker.Rebuilds()
+			if rebuilds {
+				retry271CardRebuilds(t, c, w.Retry.Guidance)
+			} else {
+				for _, want := range []string{fmt.Sprintf("watch #%d again", c.marker.PR), "ci", "gate", "current head", "merge", fmt.Sprintf("won't review #%d again", c.marker.PR), "push", "changes"} {
+					if !strings.Contains(guidance, want) {
+						t.Errorf("PR guidance %q does not say %q", w.Retry.Guidance, want)
+					}
 				}
 			}
 			if retry263Trusted(c) {
@@ -77,7 +82,7 @@ func TestRetryCardsDescribeTheExistingAction(t *testing.T) {
 					}
 				}
 			}
-			if !strings.Contains(guidance, "review asked for changes") {
+			if !rebuilds && !strings.Contains(guidance, "review asked for changes") {
 				t.Errorf("guidance must say a rejected review will not prevent merging the current changes: %q", w.Retry.Guidance)
 			}
 			if c.marker.Proposal != nil && c.marker.Proposal.Plan != nil {
@@ -192,9 +197,22 @@ func TestRetryHistoryExplainsMergeWithoutAnotherReview(t *testing.T) {
 				}
 				return
 			}
-			for _, want := range []string{fmt.Sprintf("#%d", c.marker.PR), "merge", "ci", "passes", fmt.Sprintf("won't review #%d again", c.marker.PR)} {
-				if !strings.Contains(text, want) {
-					t.Errorf("retry history must explain merge without another review (%q): %q", want, text)
+			// A plan's draft that failed in the factory's own run is built
+			// again, review included (#271).
+			if c.marker.Rebuilds() {
+				for _, want := range []string{"build the plan again", fmt.Sprintf("replacing #%d", c.marker.PR)} {
+					if !strings.Contains(text, want) {
+						t.Errorf("rebuild retry history must say it builds the plan again, replacing the draft (%q): %q", want, text)
+					}
+				}
+				if strings.Contains(text, "won't review") {
+					t.Errorf("rebuild retry history must not promise no review: %q", text)
+				}
+			} else {
+				for _, want := range []string{fmt.Sprintf("#%d", c.marker.PR), "merge", "ci", "passes", fmt.Sprintf("won't review #%d again", c.marker.PR)} {
+					if !strings.Contains(text, want) {
+						t.Errorf("retry history must explain merge without another review (%q): %q", want, text)
+					}
 				}
 			}
 			if strings.Contains(text, "#900") {
@@ -256,12 +274,50 @@ func retry263Cases() []retry263Case {
 	}
 }
 
+// retry271CardRebuilds checks a card's guidance for retrying a plan's draft
+// whose build failed in the factory's own run (#271): the retry closes it
+// and builds the ratified plan again, with a new review, and the new build
+// opens its own pull request; a person merges a trusted-base change; and it
+// says how to merge the draft as it is instead. The checks after it in the
+// card's test, on the trusted base and on changing the plan, apply as they
+// do to every plan's card.
+func retry271CardRebuilds(t *testing.T, c retry263Case, guidance string) {
+	t.Helper()
+	g := strings.ToLower(guidance)
+	pr := c.marker.PR
+	for _, want := range []string{fmt.Sprintf("close #%d", pr), "build the ratified plan again", "review", "its own pull request", "trusted base", "a person merges"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("rebuild guidance %q does not say %q", guidance, want)
+		}
+	}
+	if strings.Contains(g, fmt.Sprintf("watch #%d again", pr)) || strings.Contains(g, "won't review") {
+		t.Errorf("rebuild guidance says the retry watches the draft, or won't review: %q", guidance)
+	}
+	if retry263Trusted(c) && (strings.Contains(g, "factory merges") || strings.Contains(g, "factory will merge")) {
+		t.Errorf("trusted rebuild guidance makes a false merge promise: %q", guidance)
+	}
+	if !strings.Contains(g, fmt.Sprintf("merge #%d as it is", pr)) {
+		t.Errorf("rebuild guidance must say how to merge #%d as it is instead: %q", pr, guidance)
+	}
+}
+
 func retry263Trusted(c retry263Case) bool {
 	return c.failure == factory.FailTrusted || (c.marker.Proposal != nil && c.marker.Proposal.Plan != nil && len(c.marker.Proposal.Plan.Trusted) != 0)
 }
 
 func retry263Copy(c retry263Case) (label, confirmation, posted string) {
 	pr := c.marker.PR
+	if c.marker.Rebuilds() {
+		// A plan's draft whose build failed in the factory's own run is
+		// closed and built again (#271).
+		label, merge := fmt.Sprintf("Build the plan again, replacing #%d", pr), " If it changes the trusted base, a person merges it."
+		if retry263Trusted(c) {
+			label, merge = label+", for a person to merge", " It changes the trusted base, so a person merges it."
+		}
+		return label,
+			fmt.Sprintf("Have the factory close #%d and build the ratified plan again, as you? The new build is checked and reviewed again, and opens a pull request of its own.", pr) + merge,
+			fmt.Sprintf("Asked for a retry. The factory closes #%d and builds the ratified plan again, and the new build opens its own pull request.", pr) + merge
+	}
 	if pr != 0 {
 		if retry263Trusted(c) {
 			return fmt.Sprintf("Have a person merge #%d once CI passes", pr),
