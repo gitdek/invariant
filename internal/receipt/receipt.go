@@ -248,18 +248,31 @@ func componentEvidence(b *strings.Builder, r *verify.Report) {
 	if len(evidence.Inventory.TrustedContracts) > 0 {
 		standing, _ = componentContractStanding(r)
 	}
-	proved := 0
+	// An in-place proof Nagini verified that falls short of an effective
+	// guarantee isn't counted as proved (#359).
+	unqualified := componentUnqualified(r)
+	proved, notQualified := 0, 0
 	for _, c := range evidence.Inventory.Components {
-		if proofs[c.ID].Status == "proved" {
+		switch {
+		case proofs[c.ID].Status == "proved" && unqualified[c.ID]:
+			notQualified++
+		case proofs[c.ID].Status == "proved":
 			proved++
 		}
 	}
-	fmt.Fprintf(b, "\nComponent proofs: **%d proved; %d unchecked**.\n\n", proved, len(evidence.Inventory.Components)-proved)
+	if notQualified > 0 {
+		fmt.Fprintf(b, "\nComponent proofs: **%d proved; %d not qualified; %d unchecked**.\n\n", proved, notQualified, len(evidence.Inventory.Components)-proved-notQualified)
+	} else {
+		fmt.Fprintf(b, "\nComponent proofs: **%d proved; %d unchecked**.\n\n", proved, len(evidence.Inventory.Components)-proved)
+	}
 	b.WriteString("| Component | Proof | Source | Contract | Evidence |\n| :-- | :-- | :-- | :-- | :-- |\n")
 	for _, c := range evidence.Inventory.Components {
 		proof := proofs[c.ID]
 		status := "unchecked"
-		if proof.Status == "proved" {
+		switch {
+		case proof.Status == "proved" && unqualified[c.ID]:
+			status = "not qualified"
+		case proof.Status == "proved":
 			status = "proved"
 		}
 		contract := "none"
@@ -287,7 +300,10 @@ func componentEvidence(b *strings.Builder, r *verify.Report) {
 				"verified IDs: "+componentStrings(result.Verified), "checked contracts: "+componentStrings(result.Contracts),
 				componentInputs(result.Inputs, result.FileInputs), componentInvocation(result.Invocation), componentTool(result.Tool))
 			details = append(details, componentBoundary(result)...)
-			if status == "proved" && len(result.Assumed) > 0 {
+			if status == "not qualified" {
+				details = append(details, "Nagini verified it, but the proof isn't an effective guarantee, as the failures below say")
+			}
+			if status != "unchecked" && len(result.Assumed) > 0 {
 				details = append(details, componentConditional(result, standing))
 			}
 		} else if _, ok := contracts[c.ID]; ok {

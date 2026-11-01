@@ -61,6 +61,18 @@ func pythonApplicationAdmit(p *project.Project) (*project.ComponentInventory, er
 	if _, err := pythonApplicationInvocations(p, app.Root, inv); err != nil {
 		return nil, err
 	}
+	for _, check := range inv.Checks {
+		if check.Proof == nil {
+			continue
+		}
+		i := slices.IndexFunc(inv.Components, func(c project.Component) bool { return c.ID == check.Target })
+		if i < 0 {
+			return nil, fmt.Errorf("%s selects a proof and isn't in the inventory", check.Target)
+		}
+		if err := pythonApplicationProofShape(app.Root, inv.Components[i]); err != nil {
+			return nil, err
+		}
+	}
 	return inv, nil
 }
 
@@ -442,6 +454,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			if err := r.AttributeComponentProofs(s.inventory, proofs); err != nil {
 				return nil, err
 			}
+			r.qualifyPythonApplicationProofs()
 		}
 		r.Build.Passed = r.pythonApplicationContractSteps(contractSteps) && r.Build.Passed
 	}

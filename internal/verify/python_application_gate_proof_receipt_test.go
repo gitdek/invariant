@@ -56,4 +56,17 @@ func TestInPlaceProofReceiptsSayWhatIsProvedAndWhatIsTested(t *testing.T) {
 	if failed.Passed || !strings.Contains(md, "In-place proof: ") || !strings.Contains(md, "keyword.iskeyword, which isn") {
 		t.Errorf("a failed required contract isn't named among the failures:\n%s", md)
 	}
+	// Nagini verified it, and it isn't counted as proved (#359's review).
+	if !strings.Contains(md, "Component proofs: **0 proved; 1 not qualified;") || !strings.Contains(md, "| not qualified |") {
+		t.Errorf("a proof without its condition is counted as proved:\n%s", md)
+	}
+
+	// A receipt whose in-place attempts are gone can't show the proof.
+	stripped := *r
+	application := *r.Application
+	application.Proofs = nil
+	stripped.Application = &application
+	if md := receipt.Markdown(&stripped); !strings.Contains(md, "Component proofs: **0 proved;") {
+		t.Errorf("a proof whose attempt the receipt lacks still counts:\n%s", md)
+	}
 }

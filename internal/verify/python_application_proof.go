@@ -522,7 +522,7 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	if result.Passed {
 		result.Verified = []string{target}
 	} else {
-		result.Errors = mapNaginiErrors(in, naginiErrors(in.Main, output))
+		result.Errors = withoutNaginiTiming(mapNaginiErrors(in, naginiErrors(in.Main, output)))
 	}
 	proof.Result = result
 	return proof, nil
@@ -1677,6 +1677,23 @@ var naginiLocation = regexp.MustCompile(`^([\w./-]+\.py):(\d+):(\d+): (.*)$`)
 
 // mapNaginiErrors names each error's place in the original source where the
 // input copies it, keeping the verifier input's place beside it.
+// withoutNaginiTiming drops the lines Nagini prints about how long it took,
+// which an error copies from its output when Nagini lists no errors, so a
+// result, which the fingerprint binds, holds no timing (#359).
+func withoutNaginiTiming(errs []string) []string {
+	out := make([]string, len(errs))
+	for i, e := range errs {
+		var keep []string
+		for _, line := range strings.Split(e, "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "Verification took") {
+				keep = append(keep, line)
+			}
+		}
+		out[i] = strings.Join(keep, "\n")
+	}
+	return out
+}
+
 func mapNaginiErrors(in *PythonApplicationProofInput, errs []string) []string {
 	out := make([]string, 0, len(errs))
 	for _, e := range errs {

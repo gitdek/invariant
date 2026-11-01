@@ -3,8 +3,13 @@ package verify
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/project"
 )
 
 // The gate proves selected Python functions in place (#359, #294's step 6).
@@ -35,6 +40,34 @@ func (s *PythonApplicationSession) preparePythonApplicationProofs(ctx context.Co
 		if _, err := s.ProofInput(ctx, target); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// pythonApplicationProofShape refuses, at admission, what the selected
+// function's own source shows the gate can't prove in place: what the
+// verifier input can't preserve of the function itself, and a decorator,
+// since conformance, which the gate needs beside the proof, binds only
+// undecorated functions (#359). What depends on the rest of the application,
+// its bindings, its trusted contracts and its production sources, is refused
+// once the session has staged it, before any test, conformance, backing test
+// or Nagini runs.
+func pythonApplicationProofShape(root string, target project.Component) error {
+	source, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(target.Source)))
+	if err != nil {
+		return err
+	}
+	d, err := analyzePythonProof(source, target.Symbol)
+	if err != nil {
+		return fmt.Errorf("in-place proof of %s: %w", target.ID, err)
+	}
+	switch {
+	case d.Async:
+		return fmt.Errorf("in-place proof of %s: unsupported: %s is an async function", target.ID, target.Symbol)
+	case len(d.Unsupported) > 0:
+		return fmt.Errorf("in-place proof of %s: unsupported: %s holds %s", target.ID, target.Symbol, strings.Join(d.Unsupported, ", "))
+	case len(d.Decorators) > 0:
+		return fmt.Errorf("in-place proof of %s: unsupported: %s is decorated with @%s, and conformance, which the gate needs beside the proof, binds only undecorated functions", target.ID, target.Symbol, d.Decorators[0])
 	}
 	return nil
 }
@@ -113,42 +146,65 @@ func (r *Report) pythonApplicationProofProblems() []string {
 // statuses as they stand; none means every one qualifies. A receipt passes
 // evidence it has qualified again, so an edited status can't pass here.
 func PythonApplicationProofProblems(e *ComponentEvidence) []string {
+	var out []string
+	for _, target := range pythonApplicationProofTargets(&e.Inventory) {
+		out = append(out, PythonApplicationTargetProblems(e, target)...)
+	}
+	return out
+}
+
+// Unqualified is a selected in-place proof Nagini verified that still falls
+// short of an effective guarantee, as an assumed contract that isn't tested,
+// or no passing conformance on the same function, leaves it (#359). The
+// gate marks its row so, and receipts don't count it as proved.
+const Unqualified = "unqualified"
+
+// qualifyPythonApplicationProofs marks each proved row whose proof falls
+// short of an effective guarantee as Unqualified.
+func (r *Report) qualifyPythonApplicationProofs() {
+	if r.Components == nil || r.Application == nil {
+		return
+	}
+	for i, row := range r.Components.Proofs {
+		if row.Status == "proved" && len(PythonApplicationTargetProblems(r.Components, row.Target)) > 0 &&
+			slices.Contains(pythonApplicationProofTargets(&r.Components.Inventory), row.Target) {
+			r.Components.Proofs[i].Status = Unqualified
+		}
+	}
+}
+
+// PythonApplicationTargetProblems says why the proof selected on target falls
+// short of an effective guarantee.
+func PythonApplicationTargetProblems(e *ComponentEvidence, target string) []string {
 	standing := map[string]ComponentContractEvidence{}
 	for _, c := range e.Contracts {
 		standing[c.Contract] = c
 	}
-	rows := map[string]ComponentProof{}
-	for _, row := range e.Proofs {
-		rows[row.Target] = row
+	i := slices.IndexFunc(e.Proofs, func(row ComponentProof) bool { return row.Target == target })
+	if i < 0 || e.Proofs[i].Result == nil {
+		return []string{fmt.Sprintf("%s has no proof attempt", target)}
 	}
+	row := e.Proofs[i]
 	var out []string
-	for _, target := range pythonApplicationProofTargets(&e.Inventory) {
-		row, ok := rows[target]
-		if !ok || row.Result == nil {
-			out = append(out, fmt.Sprintf("%s has no proof attempt", target))
-			continue
-		}
-		if row.Status != "proved" {
-			var why []string
-			why = append(why, row.Result.Errors...)
-			for _, u := range row.Result.Unaccounted {
-				if u.Kind != MissingContract || u.Operation == nil {
-					why = append(why, unaccountedText(u))
-				}
-			}
-			if len(why) == 0 {
-				why = []string{"Nagini didn't verify it"}
-			}
-			out = append(out, fmt.Sprintf("%s isn't proved: %s", target, strings.Join(why, "; ")))
-		}
-		for _, use := range row.Result.Assumed {
-			if standing[use.Contract].Support != "tested" {
-				out = append(out, fmt.Sprintf("%s assumes trusted contract %s, which isn't tested, so it can't support the proof", target, use.Contract))
+	if row.Status != "proved" && row.Status != Unqualified {
+		why := slices.Clone(row.Result.Errors)
+		for _, u := range row.Result.Unaccounted {
+			if u.Kind != MissingContract || u.Operation == nil {
+				why = append(why, unaccountedText(u))
 			}
 		}
-		if !pythonApplicationProofExercised(e, target, row.Result) {
-			out = append(out, fmt.Sprintf("%s has no passing conformance on the same declaration, so nothing shows the application runs the function Nagini proved", target))
+		if len(why) == 0 {
+			why = []string{"Nagini didn't verify it"}
 		}
+		out = append(out, fmt.Sprintf("%s isn't proved: %s", target, strings.Join(why, "; ")))
+	}
+	for _, use := range row.Result.Assumed {
+		if standing[use.Contract].Support != "tested" {
+			out = append(out, fmt.Sprintf("%s assumes trusted contract %s, which isn't tested, so it can't support the proof", target, use.Contract))
+		}
+	}
+	if !pythonApplicationProofExercised(e, target, row.Result) {
+		out = append(out, fmt.Sprintf("%s has no passing conformance on the same declaration, so nothing shows the application runs the function Nagini proved", target))
 	}
 	return out
 }

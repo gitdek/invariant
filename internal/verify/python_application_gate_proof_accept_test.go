@@ -424,6 +424,26 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			}) {
 				t.Fatalf("a failed required contract still supports the proof: %v", p)
 			}
+			// Nagini verified it, and the proof still isn't proved.
+			if row := gp359Proof(t, r); row.Status != Unqualified {
+				t.Fatalf("a proof without its condition counts as %s", row.Status)
+			}
+		})
+		t.Run("failing conformance on the function", func(t *testing.T) {
+			gp359Verifier(t, real)
+			f := gp359New(t, real)
+			// A third step takes the counter past Limit, which Next forbids.
+			gp359Edit(t, f, pa342DriverPath, "        life.step(service.inc)\n        life.step(service.inc)\n",
+				"        life.step(service.inc)\n        life.step(service.inc)\n        life.step(service.inc)\n")
+			r := pa342Run(t, f, tc)
+			row := gp359Proof(t, r)
+			if r.Passed || row.Status != Unqualified || r.Components.Conformance[0].Status == "tested" {
+				t.Fatalf("a proof beside failing conformance qualified: %s, conformance %+v", row.Status, r.Components.Conformance)
+			}
+			p := PythonApplicationProofProblems(r.Components)
+			if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "no passing conformance on the same declaration") }) {
+				t.Fatalf("problems: %v", p)
+			}
 		})
 	})
 }
@@ -468,6 +488,41 @@ func TestPythonApplicationGateProofEvidenceFollowsItsInputs(t *testing.T) {
 	}
 }
 
+// The assumed contract binds the resolved wheel it was tested against, so a
+// changed dependency changes the binding and the fingerprint. It needs the
+// real dependency image, so it runs with the real suite.
+func TestPythonApplicationGateProvesAgainstItsDependency(t *testing.T) {
+	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") != "1" {
+		t.Skip("set INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 to build the application's dependency image with two versions of packaging")
+	}
+	tc, err := toolchain.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("requested real prerequisites: %v", err)
+	}
+	b := gp359Of(true)
+	run := func(version string) (*Report, ComponentContractEvidence) {
+		t.Helper()
+		f := gp359New(t, true)
+		gp359Edit(t, f, "deps/constraints.txt", "packaging==24.2\n", "packaging=="+version+"\n")
+		r := pa342Run(t, f, tc)
+		if !r.Passed {
+			t.Fatalf("packaging %s: the gate failed: %s", version, gp359Dump(t, r))
+		}
+		return r, gp359Standing(t, r, b.id)
+	}
+	r1, s1 := run("24.2")
+	r2, s2 := run("24.1")
+	if s1.Binding == nil || s1.Binding.Wheel == nil || s2.Binding == nil || s2.Binding.Wheel == nil {
+		t.Fatalf("the dependency contract binds no wheel: %+v %+v", s1.Binding, s2.Binding)
+	}
+	if s1.Binding.Wheel.Version != "24.2" || s2.Binding.Wheel.Version != "24.1" || reflect.DeepEqual(s1.Binding, s2.Binding) {
+		t.Fatalf("the binding didn't follow the wheel: %+v and %+v", s1.Binding.Wheel, s2.Binding.Wheel)
+	}
+	if r1.Fingerprint == r2.Fingerprint {
+		t.Fatal("a changed dependency left the fingerprint as it was")
+	}
+}
+
 func TestPythonApplicationGateRefusesWhatInPlaceProofNeeds(t *testing.T) {
 	t.Run("an application without nagini_contracts", func(t *testing.T) {
 		tc, _ := pa342Fake(t)
@@ -490,6 +545,21 @@ func TestPythonApplicationGateRefusesWhatInPlaceProofNeeds(t *testing.T) {
 			t.Fatalf("the direct route ran a proof: %v", err)
 		}
 	})
+	// What the function's own source shows the gate can't prove, Check
+	// refuses as Run does, before any tool runs (#359's review).
+	for _, c := range []struct{ name, old, new, want string }{
+		{"a decorated function", "def admit(", "@Pure\ndef admit(", "is decorated with @Pure"},
+		{"a lambda in the function", "    if " + gp359Of(false).admits + ":\n", "    pick = lambda n: n\n    if " + gp359Of(false).admits + ":\n", "holds"},
+		{"an async function", "def admit(", "async def admit(", "is an async function"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := gp359New(t, false)
+			gp359Edit(t, f, gp359Source, c.old, c.new)
+			if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Check: %v", err)
+			}
+		})
+	}
 	t.Run("a proof without conformance", func(t *testing.T) {
 		f := gp359New(t, false)
 		f.p.Manifest.Components.Checks[0].Conformance = nil

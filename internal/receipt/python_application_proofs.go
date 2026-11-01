@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/verify"
 )
 
@@ -24,12 +25,12 @@ func componentConditional(result *verify.ComponentProofResult, standing map[stri
 	return "proved only on the condition that these trusted contracts hold: " + strings.Join(parts, ", ")
 }
 
-// componentProofFailures lists each selected in-place proof that falls short
-// of an effective guarantee, and why (#359). It qualifies the receipt's own
-// proof, contract and conformance results again first, so an edited status
-// can't hide a failure.
-func componentProofFailures(r *verify.Report) []string {
-	if r.Application == nil || r.Components == nil || len(r.Application.Proofs) == 0 {
+// componentInPlace is a gate application report's component evidence with
+// its proof, contract and conformance results qualified again by the
+// receipt, so an edited status can't pass or hide a shortfall, or nil for a
+// report that selects no in-place proof (#359).
+func componentInPlace(r *verify.Report) *verify.ComponentEvidence {
+	if r.Application == nil || r.Components == nil || !slices.ContainsFunc(r.Components.Inventory.Checks, func(c project.ResolvedComponentCheck) bool { return c.Proof != nil }) {
 		return nil
 	}
 	e := *r.Components
@@ -48,11 +49,53 @@ func componentProofFailures(r *verify.Report) []string {
 	for i := range e.Conformance {
 		e.Conformance[i].Status = componentConformanceQualification(r, e.Conformance[i]).Status
 	}
+	return &e
+}
+
+// componentUnqualified says which proved components' in-place proofs fall
+// short of an effective guarantee, which the receipt doesn't count as proved.
+func componentUnqualified(r *verify.Report) map[string]bool {
+	e := componentInPlace(r)
+	if e == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, row := range e.Proofs {
+		if row.Status == "proved" && len(verify.PythonApplicationTargetProblems(e, row.Target)) > 0 {
+			out[row.Target] = true
+		}
+	}
+	return out
+}
+
+// componentProofFailures lists each selected in-place proof that falls short
+// of an effective guarantee, and why (#359).
+func componentProofFailures(r *verify.Report) []string {
+	e := componentInPlace(r)
+	if e == nil {
+		return nil
+	}
 	var out []string
-	for _, problem := range verify.PythonApplicationProofProblems(&e) {
+	for _, problem := range verify.PythonApplicationProofProblems(e) {
 		out = append(out, "In-place proof: "+componentText(problem))
 	}
 	return out
+}
+
+// componentInPlaceRecorded says whether a result that names an in-place
+// verifier input, by its "input" pin, has that attempt in the report's
+// application proofs. One that doesn't proves nothing, since nothing in the
+// receipt shows what Nagini read (#359).
+func componentInPlaceRecorded(r *verify.Report, result *verify.ComponentProofResult) bool {
+	if result.Tool == nil || result.Tool.Pins["input"] == "" {
+		return true
+	}
+	if r.Application == nil {
+		return false
+	}
+	return slices.ContainsFunc(r.Application.Proofs, func(p verify.PythonApplicationProof) bool {
+		return p.Result.Target == result.Target && p.Input.Fingerprint == result.Tool.Pins["input"]
+	})
 }
 
 // pythonApplicationProofs renders each in-place proof attempt (#359): what
@@ -69,6 +112,8 @@ func pythonApplicationProofs(b *strings.Builder, a *verify.PythonApplicationRepo
 		switch {
 		case !p.Ran:
 			verdict = "not run, since no trusted contract binds something the function reaches"
+		case p.Result.Passed && slices.Contains(p.Result.Verified, p.Result.Target) && len(p.Result.Unaccounted) > 0:
+			verdict = "verified by Nagini only under an assumption nothing accounts for, so it proves nothing"
 		case p.Result.Passed && slices.Contains(p.Result.Verified, p.Result.Target):
 			verdict = "verified by Nagini"
 		}
