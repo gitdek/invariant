@@ -240,30 +240,46 @@ def decode(raw):
 CONTRACT_STATEMENTS = frozenset(("Requires", "Ensures", "Exsures", "Decreases", "Assert", "Invariant"))
 
 # The builtins a contract may call, by how many arguments each takes: the
-# ones the pinned Nagini models whose call can't raise on the types it
-# checks. Its translator reads len through the argument's __len__ and
-# isinstance as a type check, and its builtins define abs on ints. min and
-# max are left out: their one-argument form fails on an empty list where
+# ones the pinned Nagini models whose call can't raise on an argument of the
+# type each takes. Its translator reads len through the argument's __len__
+# and isinstance as a type check, and its builtins define abs on ints. min
+# and max are left out: their one-argument form fails on an empty list where
 # Nagini only requires one that isn't.
 CONTRACT_BUILTINS = {"len": 1, "abs": 1, "isinstance": 2}
 
 # What a contract's argument may hold besides names, literals, tuples of
-# them, the stand-in's calls and those builtins' calls: Nagini reads none of
-# these lazily, and none raises on the types it checks, Result()'s inert
-# value included, but where its model of the builtins, assumed like the rest
-# of it, leaves an exception out, as float arithmetic does an int too large
-# for a float. // and % take only a positive integer literal, a plain int
-# constant and not a bool, which neither can fail on a number with, and
-# which the pinned Nagini divides by as Python does, though it reads a
-# negative divisor differently. % takes only what the gate can tell is a
-# number, since it formats a string, which can fail where Nagini's model of
-# it can't (#359).
+# them, the stand-in's calls and those builtins' calls. Nagini reads none of
+# these lazily, and none fails on operands of the builtin types the gate can
+# tell they have, Result()'s inert value included. // and % take only a
+# positive integer literal, a plain int constant and not a bool, which the
+# pinned Nagini divides by as Python does; it divides by a negative one as
+# Viper's Euclidean division, which isn't Python's (#359).
 CONTRACT_OPERATORS = (ast.Add, ast.Sub, ast.Mult)
 CONTRACT_DIVISIONS = (ast.FloorDiv, ast.Mod)
 CONTRACT_FORMS = (ast.BoolOp, ast.UnaryOp, ast.Compare, ast.IfExp)
+ORDERINGS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 
-# The types whose values % reads as numbers, never as a string to format.
-NUMBERS = frozenset(("int", "float", "bool"))
+# The builtin types the gate can tell a value has: by an annotation, a
+# literal, a display or the builtin that makes it, and for a local by every
+# binding of it. "inert" is what Result() stands for where Python evaluates
+# a contract, which answers every operator. "optional" is an Optional or a
+# Union, whose names a contract may read only in is, is not and isinstance
+# tests, since Python would apply anything else to None or another type.
+INTEGERS = frozenset(("bool", "int"))
+SEQUENCES = frozenset(("str", "bytes", "list", "tuple"))
+SIZED = SEQUENCES | {"dict", "set", "range"}
+HASHABLE = INTEGERS | {"str", "bytes", "none"}
+TYPE_NAMES = frozenset(("int", "bool", "str", "bytes", "list", "tuple", "dict", "set", "range", "float", "complex"))
+GENERICS = {"List": "list", "Dict": "dict", "Set": "set", "Tuple": "tuple", "list": "list", "dict": "dict", "set": "set", "tuple": "tuple"}
+UNIONS = frozenset(("Optional", "Union"))
+CONSTRUCTORS = {"len": "int", "int": "int", "bool": "bool", "str": "str", "bytes": "bytes", "list": "list", "tuple": "tuple",
+                "dict": "dict", "set": "set", "range": "range", "sorted": "list", "isinstance": "bool", "float": "float"}
+
+# The types isinstance may test in a contract: builtins it can't fail on.
+ISINSTANCE_TYPES = frozenset(("int", "bool", "str", "bytes", "list", "tuple", "dict", "set", "object"))
+
+# The largest count a sequence may be repeated by, which CPython can index.
+REPEATS = 2 ** 63
 
 # What the rest is called where a contract is refused for holding it.
 CONTRACT_REFUSED = {
@@ -310,23 +326,222 @@ def binds(call, signature):
     return filled >= set(params)
 
 
-def contracts(node, standin, module, constants):
+def value_kind(value):
+    """The builtin type a literal value has."""
+    if isinstance(value, bool):
+        return "bool"
+    for t, k in ((int, "int"), (float, "float"), (complex, "complex"), (str, "str"), (bytes, "bytes"), (tuple, "tuple")):
+        if type(value) is t:
+            return k
+    return "none" if value is None else None
+
+
+class Kinds:
+    """What builtin type the gate can tell each expression of a function has
+    (#359): one of TYPE_NAMES' kinds, "inert", "optional", "none", or None
+    where it can't tell. Parameters take their annotations', the module's
+    literal constants their values', and a local the one every binding of it
+    gives, or "optional" where the others are None."""
+
+    def __init__(self, node, tree, bindings, names):
+        args = node.args
+        self.params = {a.arg: a for a in args.posonlyargs + args.args + args.kwonlyargs}
+        bound = Bound()
+        for statement in node.body:
+            bound.visit(statement)
+        self.bound, self.bindings, self.names = bound.names, bindings, names
+        self.typing = {n: rows[0].get("name") for n, rows in bindings.items()
+                       if len(rows) == 1 and rows[0]["kind"] == "from" and rows[0]["module"] == "typing" and rows[0]["level"] == 0}
+        self.returns = {s.name: s.returns for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.returns is not None}
+        self.constants = {}
+        for s in tree.body:
+            targets = s.targets if isinstance(s, ast.Assign) else [s.target] if isinstance(s, ast.AnnAssign) else []
+            if len(targets) == 1 and isinstance(targets[0], ast.Name) and s.value is not None:
+                try:
+                    self.constants[targets[0].id] = value_kind(ast.literal_eval(s.value))
+                except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                    pass
+        self.env, self.elements = {}, {}
+        for name, a in self.params.items():
+            self.env[name], self.elements[name] = self.annotation(a.annotation)
+        for name, k in self.constants.items():
+            if name not in self.bound and name not in self.params and len(bindings.get(name, ())) == 1:
+                self.env[name] = k
+        # Every binding of each local, and its annotation where it has one.
+        parents = {child: n for n in ast.walk(node) for child in ast.iter_child_nodes(n)}
+        binders, declared = {}, {}
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)) or sub.id in self.params:
+                continue
+            parent = parents.get(sub)
+            if isinstance(parent, ast.AnnAssign) and parent.target is sub:
+                declared[sub.id] = self.annotation(parent.annotation)
+                continue
+            if isinstance(parent, ast.Assign) and sub in parent.targets:
+                b = ("value", parent.value)
+            elif isinstance(parent, ast.AugAssign):
+                b = ("value", ast.BinOp(left=ast.Name(id=sub.id, ctx=ast.Load()), op=parent.op, right=parent.value))
+            elif isinstance(parent, (ast.For, ast.AsyncFor)) and parent.target is sub:
+                b = ("element", parent.iter)
+            else:
+                b = None
+            binders.setdefault(sub.id, []).append(b)
+        for name, (k, element) in declared.items():
+            self.env[name], self.elements[name] = k, element
+        pending = {n: bs for n, bs in binders.items() if n not in declared}
+        for n in pending:
+            self.env[n] = "?"
+        for _ in range(len(pending) + 2):
+            changed = False
+            for n, bs in sorted(pending.items()):
+                new = self.join({None if b is None else self.kind(b[1]) if b[0] == "value" else self.element(b[1]) for b in bs})
+                if new != self.env[n]:
+                    self.env[n], changed = new, True
+            if not changed:
+                break
+        for n in pending:
+            if self.env[n] == "?":
+                self.env[n] = None
+
+    def builtin(self, name):
+        """Whether a name the function reads is the builtin of that name."""
+        return name not in self.bound and name not in self.params and name not in self.bindings
+
+    @staticmethod
+    def join(kinds):
+        kinds = kinds - {"?"}
+        if not kinds:
+            return "?"
+        if None in kinds:
+            return None
+        if len(kinds) == 1:
+            return next(iter(kinds))
+        return "optional" if len(kinds - {"none", "optional"}) <= 1 else None
+
+    def annotation(self, a):
+        """The kind an annotation names, and its elements' kind."""
+        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+            try:
+                a = ast.parse(a.value, mode="eval").body
+            except SyntaxError:
+                return None, None
+        if a is None:
+            return None, None
+        if isinstance(a, ast.Constant) and a.value is None:
+            return "none", None
+        if isinstance(a, ast.BinOp) and isinstance(a.op, ast.BitOr):
+            return "optional", None
+        base, args = (a.value, a.slice.elts if isinstance(a.slice, ast.Tuple) else [a.slice]) if isinstance(a, ast.Subscript) else (a, [])
+        if not isinstance(base, ast.Name):
+            return None, None
+        t = base.id if base.id in TYPE_NAMES and self.builtin(base.id) else self.typing.get(base.id)
+        if t in UNIONS:
+            return "optional", None
+        if t in GENERICS:
+            k = GENERICS[t]
+            if not args:
+                return k, None
+            if k == "dict":
+                return k, self.annotation(args[-1])[0] if len(args) == 2 else None
+            if k == "tuple":
+                ellipsis = len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis
+                return k, self.annotation(args[0])[0] if ellipsis else None
+            return k, self.annotation(args[0])[0]
+        if t in TYPE_NAMES and not args:
+            return t, {"str": "str", "bytes": "int", "range": "int"}.get(t)
+        return None, None
+
+    def element(self, e):
+        """The kind of what iterating over e gives."""
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "range" and self.builtin("range"):
+            return "int"
+        if isinstance(e, ast.Name) and self.elements.get(e.id):
+            return self.elements[e.id]
+        if isinstance(e, (ast.List, ast.Tuple, ast.Set)) and e.elts:
+            return self.join({self.kind(x) for x in e.elts})
+        return {"str": "str", "bytes": "int", "range": "int"}.get(self.kind(e))
+
+    def kind(self, e):
+        """The builtin type the gate can tell e has, or None."""
+        if isinstance(e, ast.Constant):
+            return value_kind(e.value)
+        if isinstance(e, ast.Name):
+            return self.env.get(e.id)
+        if isinstance(e, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
+            return {ast.Tuple: "tuple", ast.List: "list", ast.Set: "set", ast.Dict: "dict"}[type(e)]
+        if isinstance(e, (ast.ListComp, ast.SetComp, ast.DictComp)):
+            return {ast.ListComp: "list", ast.SetComp: "set", ast.DictComp: "dict"}[type(e)]
+        if isinstance(e, ast.JoinedStr):
+            return "str"
+        if isinstance(e, ast.Compare):
+            return "bool"
+        if isinstance(e, ast.UnaryOp):
+            if isinstance(e.op, ast.Not):
+                return "bool"
+            k = self.kind(e.operand)
+            return "int" if k in INTEGERS else k if k in ("?", "inert") else None
+        if isinstance(e, ast.BoolOp):
+            return self.join({self.kind(v) for v in e.values})
+        if isinstance(e, ast.IfExp):
+            return self.join({self.kind(e.body), self.kind(e.orelse)})
+        if isinstance(e, ast.BinOp):
+            left, right = self.kind(e.left), self.kind(e.right)
+            if "inert" in (left, right):
+                return "inert"
+            if left == "?" or right == "?":
+                left = right if left == "?" else left
+                right = left if right == "?" else right
+                if left == "?":
+                    return "?"
+            if left in INTEGERS and right in INTEGERS and isinstance(e.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.Pow, ast.LShift, ast.RShift)):
+                return "int"
+            if isinstance(e.op, ast.Add) and left == right and left in SEQUENCES:
+                return left
+            if isinstance(e.op, ast.Mult) and {left, right} & SEQUENCES and {left, right} & INTEGERS:
+                return left if left in SEQUENCES else right
+            if isinstance(e.op, ast.Sub) and left == right == "set":
+                return "set"
+            return None
+        if isinstance(e, ast.Subscript):
+            base = self.kind(e.value)
+            if isinstance(e.slice, ast.Slice):
+                return base if base in SEQUENCES else None
+            if base in ("str", "bytes"):
+                return "str" if base == "str" else "int"
+            if isinstance(e.value, ast.Name):
+                return self.elements.get(e.value.id)
+            return None
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            f = e.func.id
+            if f in self.names:
+                if f == "Result":
+                    return "inert"
+                return self.kind(e.args[0]) if f == "Old" and len(e.args) == 1 else None
+            if f in CONSTRUCTORS and self.builtin(f):
+                return CONSTRUCTORS[f]
+            if f in ("abs", "min", "max") and self.builtin(f) and e.args:
+                k = self.join({self.kind(a) for a in e.args})
+                return "int" if k in INTEGERS else k if k == "?" else None
+            rows = self.bindings.get(f, ())
+            if f in self.returns and len(rows) == 1 and rows[0]["kind"] == "function" and f not in self.bound and f not in self.params:
+                return self.annotation(self.returns[f])[0]
+        return None
+
+
+def contracts(node, names, kinds):
     """Each place the function uses one of Nagini's names other than in a
     contract statement, where Invariant's runtime stand-in gives back nothing
     Nagini's does, and each contract argument Python could fail evaluating
     where Nagini reads it lazily. A contract may read the function's
     parameters, the module's names, and its locals only where every path to
     it binds them first: Nagini checks a local is bound only where it reads
-    it, and an Implies' consequent only where its antecedent holds. constants
-    are the module's names for literal numbers."""
-    args = node.args
-    params = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
-    bound = Bound()
-    for statement in node.body:
-        bound.visit(statement)
+    it, and an Implies' consequent only where its antecedent holds. It may
+    order, do arithmetic on, and take the len or abs of only what the gate
+    can tell has one builtin type that operation can't fail on, and read an
+    Optional or a Union only in is, is not and isinstance tests."""
+    params = set(kinds.params)
     deleted = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Del)}
-    local = (bound.names - params) | (params & deleted)
-    names = {n: standin[n] for n in standin if n not in bound.names and n not in params}
+    local = (kinds.bound - params) | (params & deleted)
     out = []
 
     def problem(sub, what):
@@ -335,68 +550,12 @@ def contracts(node, standin, module, constants):
     def refuse(e, what, statement):
         problem(e, "%s holds %s, which Python evaluates when the statement runs, even where Nagini reads it lazily, so a contract may hold only names, literals, Result(), Old(), Nagini's other names Invariant's runtime stand-in provides, comparisons, and, or, not, conditional expressions, +, -, *, // and %% by a positive integer literal, unary operators and calls of len, abs and isinstance" % (statement, what))
 
-    def builtin(f):
-        return f not in bound.names and f not in params and f not in module
+    def optional(x):
+        return isinstance(x, ast.Name) and kinds.kind(x) == "optional"
 
-    def numeric(e, known):
-        """Whether e is surely a number where Python evaluates it, so % on it
-        is arithmetic and never a string's formatting."""
-        if isinstance(e, ast.Constant):
-            return type(e.value) in (int, float, bool)
-        if isinstance(e, ast.Name):
-            return e.id in known
-        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not e.keywords:
-            f = e.func.id
-            if f in ("Result", "Old") and f in names:
-                # Result()'s value is inert where Python evaluates it, and
-                # Old() gives back what it's handed.
-                return f == "Result" or all(numeric(a, known) for a in e.args)
-            if f in NUMBERS | {"len"} and builtin(f):
-                return True
-            return f in ("abs", "min", "max") and builtin(f) and bool(e.args) and all(numeric(a, known) for a in e.args)
-        if isinstance(e, ast.UnaryOp):
-            return isinstance(e.op, ast.Not) or numeric(e.operand, known)
-        if isinstance(e, ast.BinOp):
-            return isinstance(e.op, CONTRACT_OPERATORS + CONTRACT_DIVISIONS + (ast.Div,)) and numeric(e.left, known) and numeric(e.right, known)
-        if isinstance(e, ast.BoolOp):
-            return all(numeric(v, known) for v in e.values)
-        if isinstance(e, ast.IfExp):
-            return numeric(e.body, known) and numeric(e.orelse, known)
-        return isinstance(e, ast.Compare)
-
-    # What's surely a number where a contract reads it: a parameter or local
-    # annotated with a number's type, the module's literal numbers, and a
-    # local every binding of which is a number or a loop over range().
-    parents = {child: n for n in ast.walk(node) for child in ast.iter_child_nodes(n)}
-    declared = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs
-                if isinstance(a.annotation, ast.Name) and a.annotation.id in NUMBERS and builtin(a.annotation.id)}
-    binders = {}
-    for sub in ast.walk(node):
-        if not (isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)):
-            continue
-        parent, value = parents.get(sub), None
-        if (isinstance(parent, ast.AnnAssign) and isinstance(parent.annotation, ast.Name) and parent.annotation.id in NUMBERS
-                and builtin(parent.annotation.id)):
-            declared.add(sub.id)
-            continue
-        if isinstance(parent, ast.Assign) and sub in parent.targets or isinstance(parent, ast.AnnAssign) and parent.value is not None:
-            value = parent.value
-        elif isinstance(parent, ast.AugAssign):
-            value = ast.BinOp(left=ast.Name(id=sub.id, ctx=ast.Load()), op=parent.op, right=parent.value)
-        elif (isinstance(parent, (ast.For, ast.AsyncFor)) and parent.target is sub and isinstance(parent.iter, ast.Call)
-              and isinstance(parent.iter.func, ast.Name) and parent.iter.func.id == "range" and builtin("range")):
-            value = ast.Constant(value=0)
-        binders.setdefault(sub.id, []).append(value)
-    known = declared | (set(constants) - bound.names)
-    counted = {n for n, values in binders.items() if n not in declared and n not in params and None not in values}
-    changed = True
-    while changed:
-        changed = False
-        for n in sorted(counted):
-            if not all(numeric(v, known | counted) for v in binders[n]):
-                counted.discard(n)
-                changed = True
-    numbers = known | counted
+    def involves(x):
+        """Whether x reads an Optional or a Union, which the name rule refuses."""
+        return any(optional(n) for n in ast.walk(x))
 
     def sure_after(statement):
         """What a simple statement binds on every path past it."""
@@ -443,12 +602,17 @@ def contracts(node, standin, module, constants):
     def results(e):
         return any(isinstance(s, ast.Call) and isinstance(s.func, ast.Name) and s.func.id == "Result" and "Result" in names for s in ast.walk(e))
 
-    def argument(e, statement, sure):
+    def literal(x):
+        return isinstance(x, ast.Constant) and type(x.value) is int and abs(x.value) < REPEATS
+
+    def argument(e, statement, sure, may_be_optional=False):
         if isinstance(e, ast.Constant):
             return
         if isinstance(e, ast.Name):
             if e.id in local and e.id not in sure:
                 problem(e, "%s reads %s, which the function may not have bound when Python evaluates the contract" % (statement, e.id))
+            if optional(e) and not may_be_optional:
+                problem(e, "%s reads %s, an Optional or a Union, other than in an is, is not or isinstance test, and Python would apply the rest to None or another type when it evaluates the contract" % (statement, e.id))
             return
         if isinstance(e, ast.Tuple) and not any(isinstance(x, ast.Starred) for x in e.elts):
             for x in e.elts:
@@ -458,31 +622,70 @@ def contracts(node, standin, module, constants):
             divisor = e.right
             if not (isinstance(divisor, ast.Constant) and type(divisor.value) is int and divisor.value > 0):
                 refuse(e, CONTRACT_REFUSED[type(e.op)], statement)
-            elif isinstance(e.op, ast.Mod) and not numeric(e.left, numbers):
-                problem(e, "%s holds a modulo of what may be a string, which %% formats, failing where Nagini's model of it doesn't, so its left side must be a number the gate can see: a parameter or local of a number's type or bound only to numbers, a literal constant, len(), abs(), Old() or Result(), or arithmetic on them" % statement)
+            elif not involves(e.left) and kinds.kind(e.left) not in INTEGERS | {"inert"}:
+                if isinstance(e.op, ast.Mod):
+                    problem(e, "%s holds a modulo of what the gate can't tell is an int, and %% formats a string, failing where Nagini's model of it doesn't, so its left side must be an int the gate can see: a parameter or local of an int's type or bound only to ints, a literal constant, len(), abs(), Old() or Result(), or arithmetic on them" % statement)
+                else:
+                    problem(e, "%s holds a floor division of what the gate can't tell is an int, and Python can fail dividing anything else, None among it, when it evaluates the contract" % statement)
             argument(e.left, statement, sure)
             return
-        if isinstance(e, ast.BinOp) and isinstance(e.op, CONTRACT_OPERATORS) or isinstance(e, CONTRACT_FORMS):
-            if isinstance(e, ast.Compare):
-                for op, left, right in zip(e.ops, [e.left] + e.comparators, e.comparators):
-                    if isinstance(op, (ast.In, ast.NotIn)) and results(left) and not isinstance(right, ast.Tuple):
-                        problem(e, "%s tests Result() for membership in something other than a tuple it lists, and in a string or bytes that fails on the value Result() stands for when Python evaluates the contract" % statement)
+        if isinstance(e, ast.BinOp) and isinstance(e.op, CONTRACT_OPERATORS):
+            left, right = kinds.kind(e.left), kinds.kind(e.right)
+            if "inert" not in (left, right) and not involves(e):
+                result = kinds.kind(e)
+                if result in (None, "?"):
+                    what = {ast.Add: "an addition", ast.Sub: "a subtraction", ast.Mult: "a multiplication"}[type(e.op)]
+                    problem(e, "%s holds %s of what the gate can't tell are builtin values Python can apply it to, and it can fail on others, None among them, when Python evaluates the contract" % (statement, what))
+                elif isinstance(e.op, ast.Mult) and result in SEQUENCES and not (literal(e.left) or literal(e.right)):
+                    problem(e, "%s repeats a sequence by other than an int literal, which Python fails on past what it can index, where Nagini's model doesn't" % statement)
+            argument(e.left, statement, sure)
+            argument(e.right, statement, sure)
+            return
+        if isinstance(e, ast.UnaryOp):
+            if isinstance(e.op, ast.Invert):
+                refuse(e, "a bitwise operator", statement)
+                return
+            if isinstance(e.op, (ast.USub, ast.UAdd)) and not involves(e.operand) and kinds.kind(e.operand) not in INTEGERS | {"inert"}:
+                problem(e, "%s negates what the gate can't tell is an int, and Python can fail negating anything else, None among it, when it evaluates the contract" % statement)
+            argument(e.operand, statement, sure)
+            return
+        if isinstance(e, (ast.BoolOp, ast.IfExp)):
             for child in ast.iter_child_nodes(e):
                 if isinstance(child, ast.expr):
                     argument(child, statement, sure)
+            return
+        if isinstance(e, ast.Compare):
+            identity = all(isinstance(op, (ast.Is, ast.IsNot)) for op in e.ops)
+            for op, left, right in zip(e.ops, [e.left] + e.comparators, e.comparators):
+                kl, kr = kinds.kind(left), kinds.kind(right)
+                if (isinstance(op, ORDERINGS) and "inert" not in (kl, kr) and not involves(left) and not involves(right)
+                        and not (kl in INTEGERS and kr in INTEGERS or kl == kr and kl in ("str", "bytes", "set"))):
+                    problem(e, "%s orders what the gate can't tell are both ints, both strings or both sets, and Python can fail ordering anything else, None among it, when it evaluates the contract" % statement)
+                if isinstance(op, (ast.In, ast.NotIn)) and not isinstance(right, ast.Tuple):
+                    if results(left):
+                        problem(e, "%s tests Result() for membership in something other than a tuple it lists, and in a string or bytes that fails on the value Result() stands for when Python evaluates the contract" % statement)
+                    elif kr != "inert" and not involves(left) and not involves(right) and not (
+                            kr in ("list", "tuple", "range") or kr in ("str", "bytes") and kl == kr or kr in ("set", "dict") and kl in HASHABLE):
+                        problem(e, "%s tests membership in what the gate can't tell is a builtin container that can hold what it tests, and Python can fail testing anything else, None among it, when it evaluates the contract" % statement)
+            for child in [e.left] + e.comparators:
+                argument(child, statement, sure, identity)
             return
         if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
             f = e.func.id
             if f in names:
                 call(e, statement, sure)
                 return
-            if f in CONTRACT_BUILTINS and builtin(f):
+            if f in CONTRACT_BUILTINS and kinds.builtin(f):
                 if len(e.args) != CONTRACT_BUILTINS[f] or e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
                     problem(e, "%s calls %s with other than its %d argument%s" % (statement, f, CONTRACT_BUILTINS[f], "s" if CONTRACT_BUILTINS[f] > 1 else ""))
-                elif f == "isinstance" and not isinstance(e.args[1], ast.Name):
-                    problem(e, "%s's isinstance takes other than a type's name" % statement)
-                for a in e.args:
-                    argument(a, statement, sure)
+                elif f == "isinstance" and not (isinstance(e.args[1], ast.Name) and e.args[1].id in ISINSTANCE_TYPES and kinds.builtin(e.args[1].id)):
+                    problem(e, "%s's isinstance tests other than int, bool, str, bytes, list, tuple, dict, set or object" % statement)
+                elif f == "len" and not involves(e.args[0]) and kinds.kind(e.args[0]) not in SIZED | {"inert"}:
+                    problem(e, "%s takes the len of what the gate can't tell is a sized builtin, and len fails on anything else, None among it, when Python evaluates the contract" % statement)
+                elif f == "abs" and not involves(e.args[0]) and kinds.kind(e.args[0]) not in INTEGERS | {"inert"}:
+                    problem(e, "%s takes the abs of what the gate can't tell is an int, and abs fails on anything else, None among it, when Python evaluates the contract" % statement)
+                for i, a in enumerate(e.args):
+                    argument(a, statement, sure, f == "isinstance" and i == 0)
                 return
             problem(e, "%s calls %s, and a contract may call only Nagini's names Invariant's runtime stand-in provides, len, abs and isinstance" % (statement, f))
             return
@@ -493,6 +696,67 @@ def contracts(node, standin, module, constants):
         refuse(e, what, statement)
 
     block(node.body, params - deleted)
+    return sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))
+
+
+# Why arithmetic the pinned Nagini models apart from Python is refused, in a
+# selected function's body and contract and in a trusted contract's
+# abstraction alike (#359).
+FLOATS = ("deals in floats, which the pinned Nagini leaves uninterpreted, while Python's arithmetic fails on an int too large "
+          "for a float where Nagini's model doesn't")
+DIVISION = "divides with /, which makes a float and fails on an int too large for one where Nagini's model doesn't"
+BITWISE = "holds a bitwise operator, which the pinned Nagini models apart from Python on negative ints"
+DIVIDES = ("holds a %s by other than a positive integer literal, which the pinned Nagini divides as Viper does, apart from "
+           "Python for a negative divisor")
+REPEATED = ("multiplies what the gate can't tell are both ints by other than an int literal, so it may repeat a sequence "
+            "more often than Python can index, which fails where Nagini's model doesn't")
+
+
+def arithmetic(node, kinds):
+    """Each place a function, its signature, body and contract alike, holds
+    arithmetic the pinned Nagini models apart from Python: floats and what
+    makes them, which it leaves uninterpreted while Python fails on an int
+    too large for one, the bitwise operators, which it models apart on
+    negative ints, // and % by other than a positive integer literal, which
+    it divides as Viper does, and multiplication by other than an int
+    literal unless both sides are ints, which could repeat a sequence past
+    what Python can index. Shifts and ** stay: Nagini's preconditions on
+    them are where Python raises."""
+    args = node.args
+    annotations = [a.annotation for a in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]
+                   if a is not None and a.annotation is not None]
+    annotations += [node.returns] if node.returns is not None else []
+    annotations += [s.annotation for s in ast.walk(node) if isinstance(s, ast.AnnAssign)]
+    inside = {id(x) for a in annotations for x in ast.walk(a)}
+    floats = {n for n, k in kinds.constants.items() if k in ("float", "complex")}
+    out = []
+
+    def problem(sub, what):
+        out.append({"line": sub.lineno, "what": what})
+
+    def literal(x):
+        return isinstance(x, ast.Constant) and type(x.value) is int and abs(x.value) < REPEATS
+
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and type(n.value) in (float, complex):
+            problem(n, FLOATS)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and (
+                n.id in ("float", "complex") and kinds.builtin(n.id) or n.id in floats and n.id not in kinds.bound and n.id not in kinds.params):
+            problem(n, FLOATS)
+        if id(n) in inside:
+            continue
+        if isinstance(n, (ast.BinOp, ast.AugAssign)):
+            left, right = (n.left, n.right) if isinstance(n, ast.BinOp) else (n.target, n.value)
+            if isinstance(n.op, ast.Div):
+                problem(n, DIVISION)
+            elif isinstance(n.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
+                problem(n, BITWISE)
+            elif isinstance(n.op, CONTRACT_DIVISIONS) and not (isinstance(right, ast.Constant) and type(right.value) is int and right.value > 0):
+                problem(n, DIVIDES % ("floor division" if isinstance(n.op, ast.FloorDiv) else "modulo"))
+            elif isinstance(n.op, ast.Mult) and not (literal(left) or literal(right) or kinds.kind(left) in INTEGERS and kinds.kind(right) in INTEGERS):
+                problem(n, REPEATED)
+        elif isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Invert):
+            problem(n, BITWISE)
     return sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))
 
 
@@ -624,20 +888,15 @@ def declaration(request):
     if node.col_offset != 0:
         unsupported.append("a declaration that isn't at the module's top level")
     # A selected function's contract, which runs where the application runs,
-    # and the module's names for literal numbers, which % reads as numbers.
-    numbers = set()
-    for statement in tree.body:
-        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target] if isinstance(statement, ast.AnnAssign) else []
-        if len(targets) == 1 and isinstance(targets[0], ast.Name) and statement.value is not None:
-            try:
-                value = ast.literal_eval(statement.value)
-            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-                continue
-            if type(value) in (int, float, bool):
-                numbers.add(targets[0].id)
-    eager = contracts(node, standin_of(base64.b64decode(request["standin"])), bindings, numbers) if "standin" in request else []
+    # and the arithmetic Nagini models apart from Python, in any function.
+    eager, sums = [], []
+    if "standin" in request:
+        standin = standin_of(base64.b64decode(request["standin"]))
+        names = {n: standin[n] for n in standin if n not in bound}
+        kinds = Kinds(node, tree, bindings, names)
+        eager, sums = contracts(node, names, kinds), arithmetic(node, kinds)
     return {
-        "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager,
+        "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager, "arithmetic": sums,
         "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,
         "def_line": node.lineno, "async": isinstance(node, ast.AsyncFunctionDef), "decorators": decorators,
         "header_end": body[0]["start"] if body else line_end(node.end_lineno),
@@ -671,8 +930,19 @@ FROM_STRING = frozenset(("builtins.exec", "builtins.eval", "builtins.compile"))
 REFLECTION = frozenset(("inspect.getmodule", "gc.get_objects", "gc.get_referrers", "gc.get_referents"))
 
 # What holds a module's names, or the builtins', reached through a function,
-# a frame or a module's own namespace.
-NAMESPACES = frozenset(("__globals__", "f_globals", "f_builtins", "__builtins__"))
+# a frame or a module's own namespace, and a builtin function's __self__,
+# which is the builtins module itself.
+NAMESPACES = frozenset(("__globals__", "f_globals", "f_builtins", "__builtins__", "__self__"))
+
+# What takes an attribute by a name it's given, and a namespace to look a
+# name up in, where a string can reach those.
+GETATTRS = frozenset(("builtins.getattr", "builtins.setattr", "builtins.delattr", "builtins.hasattr", "operator.attrgetter"))
+DUNDER_ACCESS = frozenset(("__getattribute__", "__getattr__", "__setattr__", "__delattr__"))
+NAMESPACE_LOOKUPS = frozenset(("builtins.vars", "builtins.globals", "builtins.locals"))
+
+# What decides what an import loads, which can put another module in place of
+# one the proof takes as it ships.
+IMPORT_STATE = frozenset(("sys.meta_path", "sys.path_hooks", "sys.path_importer_cache"))
 
 # What a function runs, which writing changes whatever binds the function.
 FUNCTION_PARTS = frozenset(("__code__", "__defaults__", "__kwdefaults__"))
@@ -682,6 +952,104 @@ FUNCTION_PARTS = frozenset(("__code__", "__defaults__", "__kwdefaults__"))
 # with, and the builtins, which the function and its contract read. The scan
 # protects both as it does the module (#359).
 SHARED = ("nagini_contracts.contracts", "nagini_contracts", "builtins")
+
+
+def scope_bindings(body, params=()):
+    """The names a scope binds, from its statements, other than by an import,
+    which the scan for writes reads itself: assignments, loops, handlers,
+    patterns, and nested functions' and classes' own names, but not what
+    they bind, with what the scope declares global left out."""
+    names, declared, stack = set(params), set(), list(body)
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+            stack.extend(n.decorator_list)
+            stack.extend(n.bases + [k.value for k in n.keywords] if isinstance(n, ast.ClassDef)
+                         else n.args.defaults + [d for d in n.args.kw_defaults if d is not None])
+            continue
+        if isinstance(n, ast.Lambda):
+            stack.extend(n.args.defaults + [d for d in n.args.kw_defaults if d is not None])
+            continue
+        if isinstance(n, COMPREHENSIONS):
+            stack.append(n.generators[0].iter)
+            names |= {s.target.id for s in ast.walk(n) if isinstance(s, ast.NamedExpr) and isinstance(s.target, ast.Name)}
+            continue
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            declared |= set(n.names)
+        elif isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            names.add(n.id)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+        elif getattr(ast, "MatchAs", None) and isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
+            names.add(n.name)
+        elif getattr(ast, "MatchMapping", None) and isinstance(n, ast.MatchMapping) and n.rest:
+            names.add(n.rest)
+        stack.extend(ast.iter_child_nodes(n))
+    return names - declared
+
+
+def builtin_reader(tree, parents):
+    """A test of whether a bare name in tree reads the builtin of that name:
+    whether no scope around it, its module's top level included, binds the
+    name other than by an import."""
+    cache = {}
+
+    def bindings(scope):
+        if scope not in cache:
+            if isinstance(scope, ast.Module):
+                cache[scope] = scope_bindings(scope.body)
+            elif isinstance(scope, ast.Lambda):
+                args = scope.args
+                cache[scope] = scope_bindings([scope.body], [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+                                              + [a.arg for a in (args.vararg, args.kwarg) if a is not None])
+            elif isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                args = scope.args
+                cache[scope] = scope_bindings(scope.body, [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+                                              + [a.arg for a in (args.vararg, args.kwarg) if a is not None])
+            elif isinstance(scope, ast.ClassDef):
+                cache[scope] = scope_bindings(scope.body)
+            else:
+                cache[scope] = comprehension_targets(scope)
+        return cache[scope]
+
+    def reads_builtin(name):
+        child, scope, in_function = name, parents.get(name), False
+        while scope is not None:
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Defaults, annotations and decorators run in the scope around.
+                if child in scope.body:
+                    if name.id in bindings(scope):
+                        return False
+                    in_function = True
+            elif isinstance(scope, ast.Lambda):
+                if child is scope.body:
+                    if name.id in bindings(scope):
+                        return False
+                    in_function = True
+            elif isinstance(scope, ast.ClassDef):
+                # A class's body is no scope for the functions in it.
+                if child in scope.body and not in_function and name.id in bindings(scope):
+                    return False
+            elif isinstance(scope, COMPREHENSIONS):
+                if child is not scope.generators[0] and name.id in bindings(scope):
+                    return False
+            elif isinstance(scope, ast.Module):
+                return name.id not in bindings(scope)
+            child, scope = scope, parents.get(scope)
+        return True
+
+    return reads_builtin
+
+
+def compiled_module_of(path):
+    """The module a compiled file is, by its path from the application's
+    root: an extension's name runs to its first dot."""
+    folder, _, base = path.rpartition("/")
+    name = base.split(".", 1)[0]
+    if name == "__init__":
+        return folder.replace("/", ".")
+    return (folder + "/" + name if folder else name).replace("/", ".")
 
 
 def module_of(path):
@@ -734,13 +1102,18 @@ def writes(request):
     writing one is refused where it's one of theirs or rebinds a module on
     the way to them. So are reaching one of them by name, through
     sys.modules, importlib, __import__, runpy, pkgutil, pydoc or mock's
-    patchers, running code from a path, a string or a code object, reaching
-    modules through objects with inspect or gc, reading __globals__,
-    f_globals, f_builtins or __builtins__, or naming one of them in a string,
-    writing what a function runs, reading the namespace of a source that
-    holds one, and a source the host's Python can't read. A test source
-    production code loads, by an import or by a constant name, is production
-    code."""
+    patchers, reading the namespace of a source that holds one, and a source
+    the host's Python can't read, a compiled module among them, that
+    production code loads. A test source production code loads, by an import
+    or by a constant name, is production code. The refusals that don't rest
+    on reaching one of those modules by name apply where production code
+    runs beside the module: in it, the packages on its way, every production
+    source that loads one of them and all those load. There, running code
+    from a path, a string or a code object, reaching modules through objects
+    with inspect or gc, reading __globals__, f_globals, f_builtins,
+    __builtins__ or __self__, or taking one by name, writing what a function
+    runs, changing what an import loads, and reaching a module by a name the
+    source computes are refused too (#359)."""
     target = request["module"]
     protected = (target,) + SHARED
     out, sources, unread = [], [], {}
@@ -750,6 +1123,11 @@ def writes(request):
 
     for f in request["files"]:
         path = f["path"]
+        if f.get("compiled"):
+            # Reported only if production code loads it, or it stands in
+            # for the module or a package on its way.
+            unread[compiled_module_of(path)] = (path, 0, "it's compiled", True)
+            continue
         try:
             raw = base64.b64decode(f["source"])
             encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
@@ -809,26 +1187,55 @@ def writes(request):
     by_module = {module_of(s[0]): s for s in sources}
     scanned = [s for s in sources if not s[5]]
     included = {s[0] for s in scanned}
+    segments = target.split(".")
+    above = {".".join(segments[:i]) for i in range(1, len(segments))} - set(protected)
+    loads = {}
     for s in scanned:
+        mods = set()
         for loaded in s[4] + by_name(s):
             parts = loaded.split(".")
             for i in range(1, len(parts) + 1):
                 prefix = ".".join(parts[:i])
+                mods.add(prefix)
                 other = by_module.get(prefix)
                 if other is not None and other[0] not in included:
                     included.add(other[0])
                     scanned.append(other)
                 if prefix in unread:
                     unread[prefix] = unread[prefix][:3] + (False,)
+        loads[module_of(s[0])] = mods
+    # A compiled module where the module or a package on its way would be
+    # is what runs in its place.
+    for prefix in above | {target}:
+        if prefix in unread:
+            unread[prefix] = unread[prefix][:3] + (False,)
     for path, line, why, tests in unread.values():
         if not tests:
             report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
 
+    # What runs beside the module: it, the packages on its way, every
+    # production source that loads one of those, directly or through others,
+    # and everything those load.
+    running = above | {target}
+    changed = True
+    while changed:
+        changed = False
+        for module, mods in loads.items():
+            if module not in running and mods & running:
+                running.add(module)
+                changed = True
+    changed = True
+    while changed:
+        changed = False
+        for module in list(running):
+            for loaded in loads.get(module, ()):
+                if loaded in loads and loaded not in running:
+                    running.add(loaded)
+                    changed = True
+
     # The module and the rest of what the scan protects, the packages on the
     # module's path, and every application module whose imports bind one of
     # them, so it's reached by attribute too.
-    segments = target.split(".")
-    above = {".".join(segments[:i]) for i in range(1, len(segments))} - set(protected)
     reach = above | set(protected)
     changed = True
     while changed:
@@ -859,14 +1266,28 @@ def writes(request):
     for path, tree, names, stars, _, _ in scanned:
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         held = {r for bs in names.values() for b in bs for r in reach & resolve(b)} | {r for s in stars for r in reach & resolve(s)}
-        # What the source binds at its top level other than by an import,
-        # which a bare name there reads instead of the builtin.
-        own = {s.name for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))} | {
-            n.id for s in tree.body if isinstance(s, (ast.Assign, ast.AnnAssign))
-            for t in (s.targets if isinstance(s, ast.Assign) else [s.target]) for n in ast.walk(t) if isinstance(n, ast.Name)}
+        # Whether the refusals that rest on no reference apply here.
+        wide = module_of(path) in running
+        reads_builtin = builtin_reader(tree, parents)
 
-        def candidates(expr, names=names, stars=stars):
-            return candidates_of(names, stars, expr)
+        def candidates(expr, names=names, stars=stars, reads_builtin=reads_builtin):
+            # A bare name a scope around it binds is that binding, not the
+            # builtin of its name.
+            found = candidates_of(names, stars, expr)
+            root = expr
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id not in names and not reads_builtin(root):
+                found = {f for f in found if not f.startswith("builtins." + root.id)}
+            return found
+
+        def literal_store(node):
+            """Whether an attribute store writes a literal string or number,
+            which no function runs."""
+            parent = parents.get(node)
+            if isinstance(parent, ast.Assign) and node in parent.targets or isinstance(parent, ast.AnnAssign) and parent.target is node:
+                return isinstance(parent.value, ast.Constant) and parent.value.value is not None
+            return False
 
         def use(node, refs, line):
             parent = parents.get(node)
@@ -923,39 +1344,70 @@ def writes(request):
                     elif isinstance(parent, ast.Compare) and node in parent.comparators and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops):
                         continue
                     else:
-                        report(path, line, "uses sys.modules other than to look a module up by its name, and the scan for writes can't follow it")
+                        if wide:
+                            report(path, line, "uses sys.modules other than to look a module up by its name, and the scan for writes can't follow it")
                         continue
                     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-                        report(path, line, "looks a module up in sys.modules by a name it computes, and the scan for writes can't follow it")
+                        if wide:
+                            report(path, line, "looks a module up in sys.modules by a name it computes, and the scan for writes can't follow it")
                     elif reaches(key.value):
                         report(path, line, "looks %s up in sys.modules, and the scan for writes can't follow it" % key.value)
+            if not wide:
+                # Elsewhere only what reaches a protected module by name is
+                # refused, which the rules above and the calls below follow.
+                if isinstance(node, ast.Call):
+                    funcs, arg = candidates(node.func), node.args[0] if node.args else None
+                    constant = isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    if held and (funcs & {"builtins.globals", "builtins.locals"} or "builtins.vars" in funcs and not node.args and not node.keywords):
+                        report(path, line, "reads its own namespace, which holds a module on the way to %s" % (
+                            shown(held & set(protected)) if held & set(protected) else target))
+                    if funcs & BY_NAME and constant and not arg.value.startswith(".") and (
+                            reaches(arg.value) or funcs & {"builtins.__import__", "importlib.__import__"} and arg.value.split(".")[0] in reach):
+                        report(path, line, "imports %s by name, and the scan for writes can't follow it" % arg.value)
+                    if funcs & PATCHERS and constant and (arg.value == "sys.modules" or reaches(arg.value)):
+                        report(path, line, "patches %s by name, and the scan for writes can't follow it" % arg.value)
+                continue
             if isinstance(node, ast.Attribute) and node.attr in NAMESPACES or isinstance(node, ast.Name) and node.id == "__builtins__":
                 what = node.attr if isinstance(node, ast.Attribute) else node.id
                 report(path, line, "%s %s, which holds a module's names" % ("reads" if isinstance(node.ctx, ast.Load) else "writes", what))
-            if isinstance(node, ast.Constant) and node.value in NAMESPACES:
-                report(path, line, "names %s in a string, which reaches what holds a module's names, and the scan for writes can't follow it" % node.value)
-            if isinstance(node, ast.Attribute) and node.attr in FUNCTION_PARTS and not isinstance(node.ctx, ast.Load):
+            if isinstance(node, ast.Attribute) and node.attr in FUNCTION_PARTS and not isinstance(node.ctx, ast.Load) and not literal_store(node):
                 report(path, line, "writes %s, which changes what a function runs, and the scan for writes can't follow it" % node.attr)
-            # Running code from a string or reaching modules through objects
-            # is refused wherever the function is reached, not only called.
+            # A namespace looked up by a constant name, as getattr and a
+            # namespace's subscript take one.
+            if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value in NAMESPACES
+                    and (isinstance(node.value, ast.Call) and candidates(node.value.func) & NAMESPACE_LOOKUPS
+                         or isinstance(node.value, ast.Attribute) and node.value.attr == "__dict__")):
+                report(path, line, "looks %s up in a namespace, which holds a module's names, and the scan for writes can't follow it" % node.slice.value)
+            # Running code from a string, reaching modules through objects and
+            # changing what an import loads are refused wherever the function
+            # or the state is reached, not only called.
             if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and not (
-                    isinstance(parents.get(node), ast.Attribute) and parents[node].value is node) and getattr(node, "id", None) not in own:
+                    isinstance(parents.get(node), ast.Attribute) and parents[node].value is node):
                 reached = candidates(node)
                 if reached & FROM_STRING:
                     report(path, line, "runs or compiles code from a string, and the scan for writes can't follow it")
                 if reached & REFLECTION:
                     report(path, line, "reaches modules through objects, and the scan for writes can't follow it")
+            # The import state is used through its own methods, so its name is
+            # refused where it's an attribute's base too.
+            if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and candidates(node) & IMPORT_STATE:
+                report(path, line, "uses %s, which can load another module in place of one the proof takes as it ships, and the scan for writes can't follow it" % sorted(candidates(node) & IMPORT_STATE)[0])
             if not isinstance(node, ast.Call):
                 continue
             # A string names a module only where it's handed to something
             # that reaches modules by name; a logger's name is just a name.
             funcs, arg = candidates(node.func), node.args[0] if node.args else None
             constant = isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            if funcs & GETATTRS or isinstance(node.func, ast.Attribute) and node.func.attr in DUNDER_ACCESS:
+                for a in node.args:
+                    if isinstance(a, ast.Constant) and a.value in NAMESPACES:
+                        report(path, line, "takes %s by name, which holds a module's names, and the scan for writes can't follow it" % a.value)
             if held and (funcs & {"builtins.globals", "builtins.locals"} or "builtins.vars" in funcs and not node.args and not node.keywords):
                 report(path, line, "reads its own namespace, which holds a module on the way to %s" % (
                     shown(held & set(protected)) if held & set(protected) else target))
             if (funcs & {"builtins.setattr", "builtins.delattr"} and len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
-                    and node.args[1].value in FUNCTION_PARTS):
+                    and node.args[1].value in FUNCTION_PARTS
+                    and not (funcs & {"builtins.setattr"} and len(node.args) > 2 and isinstance(node.args[2], ast.Constant) and node.args[2].value is not None)):
                 report(path, line, "writes %s, which changes what a function runs, and the scan for writes can't follow it" % node.args[1].value)
             if funcs & BY_PATH:
                 report(path, line, "runs code from a path or a code object, and the scan for writes can't follow it")

@@ -97,12 +97,24 @@ func TestPythonApplicationGateRefusesContractsPythonCantRun(t *testing.T) {
 			{"Result() tested for membership in a string", [][2]string{{postcondition,
 				postcondition + "    Ensures(Implies(len(name) > 0, Result() not in name))\n"}},
 				"line 12 Ensures tests Result() for membership in something other than a tuple it lists"},
+			// The third review's repro: real Nagini proves admit, and with the
+			// service passing limit=5 the gate passed, though
+			// admit('counter', 0, None) meets the precondition and raises
+			// TypeError on it.
+			{"an Optional ordered under an Implies", [][2]string{
+				{"from nagini_contracts.contracts import *\n", "from typing import Optional\nfrom nagini_contracts.contracts import *\n"},
+				{"def admit(name: str, count: int) -> int:\n", "def admit(name: str, count: int, limit: Optional[int]) -> int:\n"},
+				{"    Requires(count >= 0)\n", "    Requires(count >= 0)\n    Requires(Implies(limit is not None, limit >= 0))\n"}},
+				"line 11 Requires reads limit, an Optional or a Union, other than in an is, is not or isinstance test"},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				calls := gp359Verifier(t, real)
 				f := gp359New(t, real)
 				for _, e := range c.edits {
 					gp359Edit(t, f, gp359Source, e[0], e[1])
+				}
+				if strings.Contains(c.name, "Optional") {
+					gp359Edit(t, f, "counter/service.py", "admit('counter', count)", "admit('counter', count, 5)")
 				}
 				if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), c.want) {
 					t.Fatalf("Check: want %q, got %v", c.want, err)
@@ -112,6 +124,27 @@ func TestPythonApplicationGateRefusesContractsPythonCantRun(t *testing.T) {
 					t.Fatal("Nagini ran on a contract the application couldn't run as Nagini reads it")
 				}
 			})
+		}
+	})
+}
+
+// The third review's body repro: the pinned Nagini divides by DIV as Viper
+// does, so it proves admit returns at least count, though at runtime
+// admit('counter', 500) returns 499. The gate refuses arithmetic Nagini
+// models apart from Python in the body as in a contract, before any tool runs.
+func TestPythonApplicationGateRefusesArithmeticNaginiModelsApart(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		calls := gp359Verifier(t, real)
+		f := gp359New(t, real)
+		gp359Edit(t, f, gp359Source, "STEP = 1\n", "STEP = 1\nDIV = -2\n")
+		gp359Edit(t, f, gp359Source, "    if ", "    if count > 100:\n        return count + 1 // DIV\n    if ")
+		want := "line 14 holds a floor division by other than a positive integer literal, which the pinned Nagini divides as Viper does"
+		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Check: want %q, got %v", want, err)
+		}
+		gp359Refused(t, f, tc, want)
+		if *calls != 0 {
+			t.Fatal("Nagini ran on arithmetic it models apart from Python")
 		}
 	})
 }

@@ -352,7 +352,10 @@ type pythonProofDeclaration struct {
 	// reads it: one of Nagini's names outside a contract statement, or a
 	// contract argument Python could fail evaluating eagerly (#359).
 	Contracts []pythonProofDynamic `json:"contracts"`
-	source    []byte
+	// Arithmetic is where the function, its signature, body and contract
+	// alike, holds arithmetic the pinned Nagini models apart from Python.
+	Arithmetic []pythonProofDynamic `json:"arithmetic"`
+	source     []byte
 }
 
 func runPythonProofAnalyzer(request any, out any) error {
@@ -653,12 +656,15 @@ func (s *PythonApplicationSession) moduleDistributions(ctx context.Context) (map
 }
 
 // moduleWrites finds every place a staged source writes one of module's
-// attributes, which no binding in the module itself shows.
+// attributes, which no binding in the module itself shows. Compiled modules
+// go to the scan by their paths, which it refuses where production code
+// loads one, since it can't read them (#359).
 func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWrite, error) {
 	type file struct {
-		Path   string `json:"path"`
-		Source string `json:"source"`
-		Tests  bool   `json:"tests,omitempty"`
+		Path     string `json:"path"`
+		Source   string `json:"source"`
+		Tests    bool   `json:"tests,omitempty"`
+		Compiled bool   `json:"compiled,omitempty"`
 	}
 	verification, err := filepath.Rel(s.root, s.project.Dir)
 	if err != nil {
@@ -667,17 +673,22 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 	var files []file
 	names := make([]string, 0, len(s.snapshot))
 	for name := range s.snapshot {
-		if strings.HasSuffix(name, ".py") {
+		if strings.HasSuffix(name, ".py") || pythonCompiled(name) {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		tests := !s.production(name, filepath.ToSlash(verification))
+		if pythonCompiled(name) {
+			files = append(files, file{Path: name, Tests: tests, Compiled: true})
+			continue
+		}
 		b, err := s.stagedSource(name, "", name)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: !s.production(name, filepath.ToSlash(verification))})
+		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: tests})
 	}
 	var reply struct {
 		Writes []pythonProofWrite `json:"writes"`
@@ -686,6 +697,12 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 		return nil, err
 	}
 	return reply.Writes, nil
+}
+
+// pythonCompiled says whether a staged file is a module Python can import
+// without its source: sourceless bytecode or an extension.
+func pythonCompiled(name string) bool {
+	return strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".so") || strings.HasSuffix(name, ".pyd")
 }
 
 // production says whether a staged source is the application's production
@@ -861,8 +878,9 @@ func (b *pythonProofBuilder) submodules(module string) error {
 }
 
 // pythonProofContracts refuses a selected function whose contract couldn't
-// run where the application runs as Nagini reads it. The module runs with
-// Invariant's runtime stand-in, so Python calls each contract statement
+// run where the application runs as Nagini reads it, or that holds
+// arithmetic the pinned Nagini models apart from Python. The module runs
+// with Invariant's runtime stand-in, so Python calls each contract statement
 // where it stands and evaluates its arguments then: a postcondition on
 // entry, which Nagini reads at exit, and an Implies' consequent whether or
 // not its antecedent holds. A contract may hold only what can't fail so,
@@ -871,8 +889,10 @@ func pythonProofContracts(d *pythonProofDeclaration, symbol string) error {
 	if _, ok := d.Free["Assume"]; ok {
 		return fmt.Errorf("unsupported: %s calls Assume, which has Nagini take a fact nothing proves", symbol)
 	}
-	if len(d.Contracts) > 0 {
-		return fmt.Errorf("unsupported: line %d %s", d.Contracts[0].Line, d.Contracts[0].What)
+	for _, problems := range [][]pythonProofDynamic{d.Contracts, d.Arithmetic} {
+		if len(problems) > 0 {
+			return fmt.Errorf("unsupported: line %d %s", problems[0].Line, problems[0].What)
+		}
 	}
 	return nil
 }
@@ -1341,6 +1361,13 @@ func (b *pythonProofBuilder) abstraction(c project.ResolvedComponentContract, d 
 	}
 	if contracts == 0 {
 		return nil, nil, fail("holds no contract")
+	}
+	// Nagini assumes the contract as its own model reads it, so arithmetic
+	// it models apart from Python would have it assume what the operation
+	// doesn't do, and a float in its signature would reach the function's
+	// arithmetic (#359).
+	if len(d.Arithmetic) > 0 {
+		return nil, nil, fail("on line %d %s", d.Arithmetic[0].Line, d.Arithmetic[0].What)
 	}
 	// What the operation raises is what the inventory read from the
 	// contract's own Exsures (D-0221), the bytes its stub copies to Nagini,
