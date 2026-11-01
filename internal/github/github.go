@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -107,6 +108,11 @@ type PullRequest struct {
 	MergedAt       string `json:"merged_at,omitempty"`
 	MergedBy       *User  `json:"merged_by,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
+	// Mergeable says whether GitHub can merge it, as when it doesn't
+	// conflict with its base. It's nil until GitHub has worked that out,
+	// which it starts once asked for this one pull request, and it's always
+	// nil in a list of them.
+	Mergeable *bool `json:"mergeable"`
 }
 
 // NewPullRequest is a pull request to open.
@@ -134,6 +140,20 @@ var ErrNotFound = errors.New("not found")
 // make it, such as reading GitHub Actions without that permission. Waiting
 // won't change that, unlike a rate limit.
 var ErrNoPermission = errors.New("the App isn't allowed to do this")
+
+// Transient says err looks like GitHub failing for a moment, as with a
+// 5xx answer or a dropped connection, rather than refusing the request, so
+// the same request may well succeed if made again.
+func Transient(err error) bool {
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoPermission) {
+		return false
+	}
+	return transient.MatchString(err.Error())
+}
+
+// transient is what gh says of a request GitHub failed for a moment.
+var transient = regexp.MustCompile(`(?i)\(HTTP 5\d\d\)|bad gateway|service unavailable|gateway time-?out|internal server error|` +
+	`connection reset|connection refused|i/o timeout|tls handshake timeout|unexpected eof|server closed idle connection`)
 
 // Viewer is the user gh is logged in as.
 func (c Client) Viewer(ctx context.Context) (User, error) {

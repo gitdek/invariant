@@ -335,9 +335,16 @@ func ratifiedComment(by, dir, branch, hash string, statements int, m Marker) str
 		by, statements, dir, branch, short(hash)), m)
 }
 
-func prComment(pr github.PullRequest, res *synth.Result, m Marker) string {
+// prComment says a project's build passed and opened its pull request. One
+// that changes the trusted base, as one of the factory's own proved cores
+// does, a person merges (D-0109).
+func prComment(pr github.PullRequest, res *synth.Result, trusted []string, m Marker) string {
+	merge := "and I'll merge it once CI's `invariant/gate` passes on it."
+	if len(trusted) > 0 {
+		merge = fmt.Sprintf("and it changes the trusted base (%s), so once CI's `invariant/gate` passes on it, a person merges it.", codeList(trusted))
+	}
 	body := fmt.Sprintf("The code is written, and it passed the gate here: it's **%s**. "+
-		"I opened #%d, and I'll merge it once CI's `invariant/gate` passes on it.", res.Final.Claim(), pr.Number)
+		"I opened #%d, %s", res.Final.Claim(), pr.Number, merge)
 	if res.Fallback != nil {
 		body += "\n\n" + fellBack(res.Fallback)
 	}
@@ -398,17 +405,26 @@ func providerFailedComment(why string, m Marker) string {
 
 // trustedOf is what a failed build's marker shows of whether its pull
 // request changes the trusted base, which only a person merges (D-0105):
-// the trusted files its plan names, and whether those, or a failure
-// recorded as one in the trusted base, show that it does. Either is enough,
-// so an older failure whose post carries no plan still counts (#263). A
-// plan's marker with neither can't tell, and unsure says so.
+// the trusted files its plan names, and whether those, a failure recorded
+// as one in the trusted base, or a project that lies there, such as one of
+// the factory's own proved cores, show that it does (D-0109). Any is
+// enough, so an older failure whose post carries no plan still counts
+// (#263). A plan's marker with none can't tell, and unsure says so.
 func trustedOf(m Marker) (files []string, trusted, unsure bool) {
 	if p := m.Proposal; p != nil && p.Plan != nil {
 		files = p.Plan.Trusted
 	}
-	trusted = m.Why() == FailTrusted || len(files) > 0
+	trusted = m.Why() == FailTrusted || len(files) > 0 || trustedProject(m.Project)
 	unsure = !trusted && isPlan(m.Project) && (m.Proposal == nil || m.Proposal.Plan == nil)
 	return files, trusted, unsure
+}
+
+// ChangesTrustedBase says what a failed build's marker shows: that its pull
+// request changes the trusted base, which only a person merges, as
+// trustedOf has it.
+func (m Marker) ChangesTrustedBase() bool {
+	_, trusted, _ := trustedOf(m)
+	return trusted
 }
 
 // watchedAgain says what a writer's retry of pr, a failed build's open pull
@@ -432,7 +448,7 @@ func watchedAgain(pr github.PullRequest, trusted, unsure bool) string {
 	} else {
 		b.WriteString("I'll merge it once CI's `invariant/gate` passes on its current head.")
 		if pr.Draft {
-			b.WriteString(" It's a draft, so I'll mark it ready first.")
+			b.WriteString(" It's a draft, so I'll mark it ready first, once GitHub says it can merge it.")
 		}
 		if unsure {
 			b.WriteString(" If it changes the trusted base, a person merges it instead.")
@@ -518,6 +534,28 @@ func mergeRefusedComment(pr github.PullRequest, unready bool, answer error, m Ma
 		fmt.Sprintf("\n\nA person needs to look at this. Once the cause is fixed, comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
 }
 
+// unreadyComment says a build that passed found a draft open from its
+// branch, which GitHub refused to mark ready for review, quoting GitHub's
+// answer, and how to go on: a writer's retry watches it again, as for a
+// failed draft (#369's review).
+func unreadyComment(pr github.PullRequest, answer error, m Marker) string {
+	_, trusted, unsure := trustedOf(m)
+	return post("needs a person", fmt.Sprintf("The build passed, but #%d, the draft open from its branch that it took as its pull request, is still a draft: GitHub refused to mark it ready for review:\n\n%s", pr.Number, quote(answer.Error(), 20)), m,
+		fmt.Sprintf("\n\nA person needs to look at this. Comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
+}
+
+// unwatchedComment says CI's gate passed on a draft no writer's retry
+// watches, such as one a person made of the factory's pull request, so the
+// factory hasn't marked it ready, and how to go on: a writer's retry
+// watches it, and closing it or the issue stops the factory (#369's
+// review).
+func unwatchedComment(pr github.PullRequest, m Marker) string {
+	_, trusted, unsure := trustedOf(m)
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but it's a draft, and no retry asked me to watch it, so I haven't marked it ready or merged it. "+
+		"If someone made it a draft to stop me, close #%d or this issue.", pr.Number, pr.Number), m,
+		fmt.Sprintf("\n\nA person needs to look at this. To have me merge it after all, comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
+}
+
 func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Marker) string {
 	body := fmt.Sprintf("CI's `invariant/gate` passed on #%d ([run](%s)), and I merged it as %s.", pr.Number, run.URL, sha)
 	if r.Numbers != nil {
@@ -533,12 +571,15 @@ func closedComment(pr github.PullRequest, m Marker) string {
 
 // pullRequestBody is a project's pull request. m is the marker of the
 // build's post: its project, the ratified proposal's hash, and the agent
-// that built it.
-func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.Proposal) string {
+// that built it. trusted is what it changes in the trusted base.
+func pullRequestBody(t Thread, m Marker, res *synth.Result, proposal *formalize.Proposal, trusted []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Closes #%d.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "◉ Written by Invariant for #%d, against the statements ratified there.\n\n", t.Issue.Number)
 	fmt.Fprintf(&b, "- **Project:** `%s`\n- **Ratified proposal:** `%s`\n", m.Project, short(m.Hash))
+	if len(trusted) > 0 {
+		fmt.Fprintf(&b, "- **Trusted base:** it changes %s, so a person merges it\n", codeList(trusted))
+	}
 	b.WriteString(agentsLine(t, m, res != nil && res.Review != nil && res.Review.Text != ""))
 	if res != nil {
 		gate := fmt.Sprintf("the gate never passed in %d runs", len(res.GateRuns))
