@@ -25,8 +25,8 @@ func TestTLAPSRecipeUsesThePinnedTarball(t *testing.T) {
 	if len(add) != 4 || add[1] != "--checksum=sha256:"+TLAPSTarballSHA256 || add[2] != TLAPSTarballURL {
 		t.Errorf("the recipe adds %v, want the tarball %s pinned by sha256:%s", add, TLAPSTarballURL, TLAPSTarballSHA256)
 	}
-	if !strings.Contains(TLAPSTarballURL, "/"+TLAPSRelease+"/") || !strings.Contains(recipe, "FROM --platform=linux/amd64 ") {
-		t.Errorf("the tarball %s isn't release %s's, or the image isn't linux/amd64", TLAPSTarballURL, TLAPSRelease)
+	if !strings.Contains(TLAPSTarballURL, "/tlapm-"+TLAPSRelease+"-"+TLAPSVersion+"/") || !strings.Contains(recipe, "FROM --platform=linux/amd64 ") {
+		t.Errorf("the tarball %s isn't the mirror of release %s at %s, or the image isn't linux/amd64", TLAPSTarballURL, TLAPSRelease, TLAPSVersion)
 	}
 	if !strings.HasPrefix(TLAPSRecipe(), "sha256:") || len(TLAPSRecipe()) != len("sha256:")+64 {
 		t.Errorf("TLAPSRecipe() = %q, want the recipe's SHA-256", TLAPSRecipe())
