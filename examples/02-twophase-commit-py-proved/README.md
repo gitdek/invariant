@@ -2,8 +2,8 @@
 
 The ratified two-phase commit from [the Go example](../02-twophase-commit), written as a Python core for [Nagini](https://github.com/marcoeilers/nagini). It's **proved**, and it's tested against the model as well.
 
-- [`twophase/core.py`](twophase/core.py) is marked `# +nagini`. It holds the state and one function for `Init` and for each of the seven actions. Each function's contract restates its action. `Requires` is the action's enabling condition. `Ensures` is its effect, including everything the action leaves unchanged. Nagini proves all 8 contracts and every list index, and checks that each function touches only what its permissions allow.
-- [`twophase/explore.py`](twophase/explore.py) is plain Python that lists a state's successors. Nagini doesn't check it, and the receipt says so.
+- [`twophase/core.py`](twophase/core.py) is marked `# +nagini`. It holds the state, whose constructor mirrors `Init`, one function for each of the seven actions, and `all_prepared`, which the coordinator's commit uses. Each action's contract restates it: where the core can tell the action isn't enabled, it refuses and leaves the state as it was, and `Ensures` says both outcomes, including everything the action leaves unchanged. Nagini proves all 9 contracts and every list index, and checks that each function touches only what its permissions allow.
+- [`twophase/explore.py`](twophase/explore.py) is plain Python: the environment, which holds the messages and gives the harness every step to try. Nagini doesn't check it, and the receipt says so.
 - [`conformance.py`](conformance.py) explores the core completely, breadth first, and records a run for every step the code can take. TLC checks that each step is one the model allows. The runs visit all 288 of the model's states.
 - [`test_core.py`](test_core.py) runs with `unittest`.
 
@@ -11,16 +11,17 @@ Together these say two things. The proof says each function meets its contract, 
 
 ## A bug only the proof can see
 
-A proof covers states that no run reaches. The integration tests plant a `tm_commit` that sends the Commit message only if no Abort was sent:
+A proof covers states that no run reaches. The integration tests plant an `rm_rcv_commit_msg` that commits only a resource manager that hasn't aborted:
 
 ```python
-s.commit_msg = not s.abort_msg
+if s.rm[r] != ABORTED:
+    s.rm[r] = COMMITTED
 ```
 
-Every run gets the same result as the correct code, because the coordinator can't have aborted before it commits. The tests pass, and conformance finds no step outside the model. But the precondition doesn't rule an abort out, so the contract doesn't hold, and Nagini rejects it:
+Every run gets the same result as the correct code, because a Commit is only ever sent once every resource manager has prepared, so none can have aborted. The tests pass, and conformance finds no step outside the model. But the precondition doesn't rule an abort out, so the contract doesn't hold, and Nagini rejects it:
 
 ```
-core.py:78:12: Postcondition of tm_commit might not hold. Assertion s.commit_msg might not hold.
+core.py:189:12: Postcondition of rm_rcv_commit_msg might not hold. Assertion s.rm[r] == COMMITTED might not hold.
 ```
 
 ## The sandbox
