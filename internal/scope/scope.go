@@ -30,8 +30,9 @@ type Result struct {
 	Files    []string `json:"files"`
 	Problems []string `json:"problems,omitempty"`
 	// Plumbing says the pull request builds a ratified plan, not a project
-	// (D-0105), and Trusted is what it changes in the trusted base, which
-	// only a person merges.
+	// (D-0105). Trusted is what it changes in the trusted base, which only a
+	// person merges, whether it builds a plan or a project, such as one of
+	// the factory's own proved cores under factory/ (D-0109).
 	Plumbing bool     `json:"plumbing,omitempty"`
 	Trusted  []string `json:"trusted,omitempty"`
 }
@@ -74,6 +75,9 @@ func Check(ctx context.Context, dir, base, head string, issue int) (Result, erro
 	for _, f := range r.Files {
 		if f == ".github" || strings.HasPrefix(f, ".github/") {
 			r.Problems = append(r.Problems, "it edits CI configuration: "+f)
+		}
+		if plumbing.Trusted(f) {
+			r.Trusted = append(r.Trusted, f)
 		}
 		p, ok := g.projectOf(head, f)
 		if !ok {

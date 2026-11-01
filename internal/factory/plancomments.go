@@ -125,9 +125,10 @@ func rebuildOffer(pr int, trusted bool) string {
 
 // retriedComment answers a writer's retry of a pull request that failed, and
 // says what watching it again leads to (#263). It promises a merge only when
-// the factory will make one: a plan's pull request that changes the trusted
-// base waits for a person (D-0105). trusted is what its branch changes there
-// now, as the scope check before a merge reads it.
+// the factory will make one: a pull request that changes the trusted base
+// waits for a person, a plan's or a project's (D-0105, D-0109). trusted is
+// what its branch changes there now, as the scope check before a merge
+// reads it.
 func retriedComment(pr github.PullRequest, trusted []string, m Marker) string {
 	body := fmt.Sprintf("Watching #%d again. %s", pr.Number, watchedAgain(pr, len(trusted) > 0, false))
 	if len(trusted) > 0 {
@@ -175,10 +176,11 @@ func planFailedComment(pr *github.PullRequest, res *plumbing.BuildResult, runErr
 	return post("needs a person", b.String(), m, closing)
 }
 
-// trustedComment says a plan's pull request passed CI's gate and changes the
-// trusted base, so a person merges it (D-0105). It doesn't say the review
-// passed: a writer's retry of a draft whose review asked for changes gets
-// here too, without another review (#263).
+// trustedComment says a pull request passed CI's gate and changes the
+// trusted base, so a person merges it, a plan's or a project's (D-0105,
+// D-0109). It doesn't say the review passed: a writer's retry of a draft
+// whose review asked for changes gets here too, without another review
+// (#263).
 func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
 	ready := ""
 	if pr.Draft {

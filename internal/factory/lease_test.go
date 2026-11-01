@@ -2,7 +2,9 @@ package factory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -154,5 +156,59 @@ func TestTheLeaseRenewsAtHalfLife(t *testing.T) {
 	}
 	if sha, rec, _ := f.Repo.Lease(ctx); sha == first || !rec.Until.Equal(now.Add(5*time.Minute)) {
 		t.Fatalf("didn't renew with less than half the lease left: %s %+v", sha, rec)
+	}
+}
+
+// A push of the lease that lands though git reports it failed, as when
+// receive-pack stops before it answers, pushed the lease: PushLease's own
+// read shows its commit there, so it says so (#357's review). The origin's
+// reference-transaction hook stops receive-pack once the update is
+// committed, before it can answer.
+func TestALeasePushWhoseAnswerIsLostPushedTheLease(t *testing.T) {
+	ctx := context.Background()
+	origin, clone := gitRepos(t)
+	armed := filepath.Join(t.TempDir(), "armed")
+	hook := "#!/bin/sh\n" +
+		"[ \"$1\" = committed ] || exit 0\n" +
+		"grep -q ' " + leaseRef + "$' || exit 0\n" +
+		"[ -f '" + armed + "' ] || exit 0\n" +
+		"rm -f '" + armed + "'\n" +
+		"kill -9 $PPID\n"
+	if err := os.WriteFile(filepath.Join(origin, "hooks", "reference-transaction"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	arm := func() {
+		t.Helper()
+		if err := os.WriteFile(armed, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The hook does lose git's answer: git says the push failed, and it
+	// landed.
+	first := LeaseRecord{Holder: "watcher-b", Until: time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)}
+	msg, _ := json.Marshal(first)
+	commit, err := clone.emptyCommit(ctx, string(msg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm()
+	if err := clone.pushRef(ctx, leaseRef, "", commit); err == nil {
+		t.Fatal("git says the push it never answered succeeded, so the hook loses no answer")
+	}
+	if sha, _, err := clone.Lease(ctx); err != nil || sha != commit {
+		t.Fatalf("the lease is at %s, %v; the push must have landed at %s", sha, err, commit)
+	}
+	arm()
+	rec := LeaseRecord{Holder: "watcher-a", Until: time.Date(2026, 10, 31, 9, 5, 0, 0, time.UTC)}
+	pushed, err := clone.PushLease(ctx, commit, rec)
+	if _, statErr := os.Stat(armed); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("the hook never stopped the push")
+	}
+	if err != nil {
+		t.Fatalf("PushLease = %v, though its own read shows the push landed", err)
+	}
+	sha, got, err := clone.Lease(ctx)
+	if err != nil || sha != pushed || got.Holder != rec.Holder || !got.Until.Equal(rec.Until) {
+		t.Fatalf("the lease is %s %+v, %v; want %s %+v", sha, got, err, pushed, rec)
 	}
 }

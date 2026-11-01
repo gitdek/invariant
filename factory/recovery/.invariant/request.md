@@ -1,14 +1,14 @@
-# Let a retry build a failed plumbing build again
+# Model a retry that watches a failed draft again
 
-Issue #271 in gitdek/invariant, opened by @gitdek: part 2 of 3, amended by hand and ratified as D-0203, and its exact proposal as D-0210.
+Issue #354 in gitdek/invariant, opened by @gitdek: amended by hand and ratified, for its exact proposal, as D-0225.
 
-A retry that builds again replaces the failed draft with a new pull request (#271). The recovery core pinned one pull request per ratification, so it needs a chain of replacements:
+The recovery model has no step for a writer's retry that watches a failed draft again. Merging needs a ready pull request, the merge is triggered only off one that isn't a draft, and `GatedPullRequestsSettled` leaves drafts out. The watcher still does it, as #145 and #263 have it: after a modeled project's build fails in the factory's own run, a retry marks its draft ready and merges it once CI's gate passes. Since #271 the adapter maps that draft to the model's ready pull request, and only a plumbing build's failed draft to the model's draft, so one GitHub state is mapped two ways, and the watch-again path is outside the proof.
 
-- Each writer's retry starts a new build, with its own agent run, which replaces the failed draft the build before left. At most one of the ratified proposal's pull requests is open at a time, and each build opens at most one.
-- Before it closes that draft, the factory stores a record, where every watcher can read it, that the retry replaces it. Then it closes the draft and answers the retry, and the new build opens its own pull request and is answered apart. So after a crash, the factory's own close is never taken for someone else's.
-- A retry whose draft someone merged, or closed before the record was stored, is answered without a build. A run a retry superseded never counts for the new build, and CI's gate counts only on the latest build's own pull request.
-- Every retry is eventually answered, and so is every build: by its pull request, or by a report that it stopped.
+- A writer's retry can watch the latest build's failed draft again, as a modeled project's does. It starts no build, and a draft a retry watches is never replaced.
+- The factory answers that retry once. Once CI's gate passes on the draft, it marks the draft ready and merges it, or reports one it can't merge: GitHub refuses it, or it changes the trusted base, which only a person merges.
+- The factory marks a draft ready only once it answered a retry that watches it, CI's gate passed on it and it can merge it.
+- Every such retry is eventually answered, and every watched draft whose gate passed is eventually merged or reported.
 
-The watcher runs on this core, so keep every exported name it uses and what it means, except the latest build's pull request, which now has a state: `Opened` says the build opened one, and `PR` whether it's a draft, ready, closed or merged. The watcher maps none of its steps onto a retry's replacement until #271's plumbing connects them.
+The watcher runs on this core, so keep every exported name it uses and what it means. The adapter maps each pull request as GitHub has it, a draft as a draft and a ready one as ready, a modeled project's retry of a failed draft as a watch, and a plan's as a retry that replaces it.
 
 Project: factory/recovery
