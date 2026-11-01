@@ -73,8 +73,11 @@ type PythonApplicationSession struct {
 	invocations                  []PythonApplicationInvocation
 	provenance                   PythonApplicationProvenance
 	declarations                 map[string]project.Component
-	snapshot                     map[string]pythonApplicationFile
-	execute                      func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
+	// contracts holds each trusted contract by its declaration's ID, the
+	// target of its backing tests' invocation keys.
+	contracts map[string]project.ResolvedComponentContract
+	snapshot  map[string]pythonApplicationFile
+	execute   func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error)
 }
 
 type pythonApplicationFile struct {
@@ -186,7 +189,10 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 		return nil, fmt.Errorf("Python application changed during staging")
 	}
 	s := &PythonApplicationSession{root: w.Root, snapshot: snapshot, invocations: prepared,
-		declarations: map[string]project.Component{}, execute: options.Execute}
+		declarations: map[string]project.Component{}, contracts: map[string]project.ResolvedComponentContract{}, execute: options.Execute}
+	for _, c := range w.Inventory.TrustedContracts {
+		s.contracts[c.Contract] = c
+	}
 	s.project, s.inventory = w.Project, w.Inventory
 	s.delegates = map[string][]string{}
 	s.legacy = w.Inventory.Mode == "legacy"
@@ -268,12 +274,6 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 	if inv.Mode != "explicit" || inv.Provenance == nil {
 		return nil, fmt.Errorf("Python application sessions require explicit components")
 	}
-	// The inventory and receipts carry trusted contracts, but nothing here
-	// runs their backing tests yet (#294's next step), so refuse them rather
-	// than let a declaration pass for checked support.
-	if len(inv.TrustedContracts) > 0 {
-		return nil, fmt.Errorf("Python application trusted contracts are inventoried, but the gate doesn't run their backing tests yet")
-	}
 	decls := map[string]project.Component{}
 	for _, c := range inv.Provenance.Declarations {
 		decls[c.ID] = c
@@ -311,33 +311,14 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 			}
 		}
 		for _, v := range check.Invocations {
-			if v.Command != "python" {
-				return nil, fmt.Errorf("invocation %s requires command python", v.ID)
-			}
-			for _, a := range v.Args {
-				if strings.ContainsRune(a, 0) {
-					return nil, fmt.Errorf("NUL in invocation argument")
-				}
-			}
-			for k, value := range v.Env {
-				upper := strings.ToUpper(k)
-				if !pythonApplicationEnv.MatchString(k) || strings.ContainsRune(value, 0) ||
-					strings.HasPrefix(upper, "PYTHON") || strings.HasPrefix(upper, "INVARIANT_") ||
-					strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") ||
-					strings.HasSuffix(upper, "_PROXY") || upper == "DRIVER" || upper == "PATH" || upper == "HOME" {
-					return nil, fmt.Errorf("reserved or invalid environment key/value %q", k)
-				}
+			if err := pythonApplicationCommandLine(v); err != nil {
+				return nil, err
 			}
 			sampling := map[string]string{"runs": "1"}
 			switch v.Kind {
 			case "test":
-				if len(v.Sampling) != 0 || len(v.Args) < 3 || v.Args[0] != "-m" || v.Args[1] != "unittest" {
-					return nil, fmt.Errorf("test invocation requires explicit unittest selections and no sampling")
-				}
-				for _, name := range v.Args[2:] {
-					if name == "discover" || !pythonApplicationName.MatchString(name) {
-						return nil, fmt.Errorf("invalid unittest selection %q", name)
-					}
+				if err := pythonApplicationTestArgs(v); err != nil {
+					return nil, err
 				}
 			case "conformance":
 				if len(v.Args) == 0 {
@@ -382,10 +363,65 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 			out = append(out, clonePythonApplicationInvocation(PythonApplicationInvocation{PythonApplicationInvocationKey{check.Target, v.Check, v.Kind, v.ID}, v, sampling, v.Kind == "conformance" && p.Manifest.Exhaustive}))
 		}
 	}
+	// A trusted contract's backing tests are required: each runs through one
+	// of its declared invocations, keyed by the contract's declaration, which
+	// no check can target since contract declarations lie outside scope.
+	for _, c := range inv.TrustedContracts {
+		for _, id := range c.Tests {
+			if !slices.ContainsFunc(c.Invocations, func(v project.ResolvedComponentInvocation) bool { return v.Check == id }) {
+				return nil, fmt.Errorf("trusted contract %q's backing test %s has no executable invocation", c.ID, id)
+			}
+		}
+		for _, v := range c.Invocations {
+			if err := pythonApplicationCommandLine(v); err != nil {
+				return nil, err
+			}
+			if err := pythonApplicationTestArgs(v); err != nil {
+				return nil, err
+			}
+			out = append(out, clonePythonApplicationInvocation(PythonApplicationInvocation{PythonApplicationInvocationKey{c.Contract, v.Check, v.Kind, v.ID}, v, map[string]string{"runs": "1"}, false}))
+		}
+	}
 	if !slices.ContainsFunc(out, func(v PythonApplicationInvocation) bool { return v.Key.Kind == "conformance" }) {
 		return nil, fmt.Errorf("Python application requires conformance")
 	}
 	return out, nil
+}
+
+// pythonApplicationCommandLine checks what every invocation shares: the
+// literal python command, arguments without NUL, and an environment that
+// leaves the gate's own settings alone.
+func pythonApplicationCommandLine(v project.ResolvedComponentInvocation) error {
+	if v.Command != "python" {
+		return fmt.Errorf("invocation %s requires command python", v.ID)
+	}
+	for _, a := range v.Args {
+		if strings.ContainsRune(a, 0) {
+			return fmt.Errorf("NUL in invocation argument")
+		}
+	}
+	for k, value := range v.Env {
+		upper := strings.ToUpper(k)
+		if !pythonApplicationEnv.MatchString(k) || strings.ContainsRune(value, 0) ||
+			strings.HasPrefix(upper, "PYTHON") || strings.HasPrefix(upper, "INVARIANT_") ||
+			strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") ||
+			strings.HasSuffix(upper, "_PROXY") || upper == "DRIVER" || upper == "PATH" || upper == "HOME" {
+			return fmt.Errorf("reserved or invalid environment key/value %q", k)
+		}
+	}
+	return nil
+}
+
+func pythonApplicationTestArgs(v project.ResolvedComponentInvocation) error {
+	if len(v.Sampling) != 0 || len(v.Args) < 3 || v.Args[0] != "-m" || v.Args[1] != "unittest" {
+		return fmt.Errorf("test invocation requires explicit unittest selections and no sampling")
+	}
+	for _, name := range v.Args[2:] {
+		if name == "discover" || !pythonApplicationName.MatchString(name) {
+			return fmt.Errorf("invalid unittest selection %q", name)
+		}
+	}
+	return nil
 }
 
 func pythonApplicationSnapshot(root string) (map[string]pythonApplicationFile, []project.ComponentFile, error) {

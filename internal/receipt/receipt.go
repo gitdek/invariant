@@ -636,7 +636,7 @@ func (render renderer) failures(r *verify.Report) []string {
 			out = append(out, "Build:\n\n```\n"+r.Build.Output+"\n```")
 		}
 	}
-	return out
+	return append(out, componentContractFailures(r)...)
 }
 
 func count[T any](xs []T, ok func(T) bool) int {
