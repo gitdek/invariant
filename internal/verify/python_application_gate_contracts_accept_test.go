@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -134,9 +135,26 @@ func gtcStanding(t *testing.T, r *verify.Report) map[string]verify.ComponentCont
 	return out
 }
 
+// gtcFake is #327's doubles for the trusted-contract gate tests, which run
+// the real runner on the host's Python as backing tests: the runner starts
+// with -P, which Python added in 3.11, and watches backing tests with
+// sys.monitoring, added in 3.12, so an older host can't stand in.
+func gtcFake(t *testing.T) toolchain.Toolchain {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(python, "-c", "import sys; print(sys.version_info >= (3, 12))").Output(); err != nil || strings.TrimSpace(string(out)) != "True" {
+		t.Skip("the runner needs Python 3.12 or newer on the host: it starts with -P, from 3.11, and watches backing tests with sys.monitoring, from 3.12")
+	}
+	tc, _ := pa327Fake(t)
+	return tc
+}
+
 func TestPythonApplicationGateTrustedContracts(t *testing.T) {
 	t.Run("local Python", func(t *testing.T) {
-		tc, _ := pa327Fake(t)
+		tc := gtcFake(t)
 		gtcPasses(t, tc, false)
 		gtcFailures(t, tc, false)
 	})

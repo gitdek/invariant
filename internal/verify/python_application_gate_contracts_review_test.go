@@ -110,7 +110,7 @@ def decode(text: str) -> bytes:
 
 func TestPythonApplicationGateTrustedContractsRefuseSubstitutes(t *testing.T) {
 	t.Run("local Python", func(t *testing.T) {
-		tc, _ := pa327Fake(t)
+		tc := gtcFake(t)
 		gtcSubstitutes(t, tc)
 	})
 	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") == "1" {
@@ -266,7 +266,7 @@ def walk_fail(n: int) -> object:
 
 func TestPythonApplicationGateTrustedContractsRefuseBypasses(t *testing.T) {
 	t.Run("local Python", func(t *testing.T) {
-		tc, _ := pa327Fake(t)
+		tc := gtcFake(t)
 		gtcBypasses(t, tc)
 	})
 	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") == "1" {
