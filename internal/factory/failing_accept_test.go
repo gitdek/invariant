@@ -341,9 +341,10 @@ func TestAPrimaryRateLimitGetsAnHourMore(t *testing.T) {
 
 // What GitHub says when it fails for a moment, beside a 5xx: a name that
 // didn't resolve, a client's timeout, a connection closed before any
-// answer and a secondary rate limit, is no refusal, and the next poll asks
+// answer, an HTTP/2 stream's internal error, a TLS alert, a secondary rate
+// limit and gh killed by a signal, is no refusal, and the next poll asks
 // again. A 405, a 409, not found and no permission are refusals, said at
-// once.
+// once, and a 405 stays one whatever else its message says.
 func TestGitHubsMomentsAreNoRefusals(t *testing.T) {
 	for _, c := range []struct {
 		kind    string
@@ -355,7 +356,11 @@ func TestGitHubsMomentsAreNoRefusals(t *testing.T) {
 		{"a client's timeout", ghSaid(`Put "https://api.github.com/repos/o/r/pulls/101/merge": net/http: timeout awaiting response headers`), false},
 		{"a dropped connection", ghSaid(`Put "https://api.github.com/repos/o/r/pulls/101/merge": EOF`), false},
 		{"a secondary rate limit", ghSaid("gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)"), false},
+		{"an HTTP/2 stream's internal error", ghSaid(`Put "https://api.github.com/repos/o/r/pulls/101/merge": stream error: stream ID 5; INTERNAL_ERROR; received from peer`), false},
+		{"a TLS alert", ghSaid(`Put "https://api.github.com/repos/o/r/pulls/101/merge": remote error: tls: internal error`), false},
+		{"gh killed by a signal", errors.New("signal: killed: "), false},
 		{"a refusal", ghSaid("gh: Pull Request is not mergeable (HTTP 405)"), true},
+		{"a refusal", ghSaid("gh: Pull Request is not mergeable: a required check ended with an i/o timeout (HTTP 405)"), true},
 		{"a refusal", ghSaid("gh: Head branch was modified. Review and try the merge again. (HTTP 409)"), true},
 		{"a refusal", github.ErrNotFound, true},
 		{"a refusal", fmt.Errorf("%w: gh: Resource not accessible by integration (HTTP 403)", github.ErrNoPermission), true},

@@ -10,9 +10,12 @@ import (
 // A request GitHub failed for a moment can be made again, and one it
 // refused can't, so the factory tries the first again next poll and says
 // the second on the issue (#369's review). Since #376, a client's timeout,
-// a name that didn't resolve and a rate limit count as GitHub failing for a
-// moment too, and a 422, a 405, not found and no permission stay refusals,
-// whatever else they say.
+// a name that didn't resolve, a rate limit, an HTTP/2 stream's internal
+// error, a TLS alert and gh killed by a signal count as GitHub failing for a
+// moment too. The status gh's error carries decides first, so a 422, a 405,
+// a 409 or any other 4xx but a 408, a 429 and a rate limit's 403 stays a
+// refusal, whatever else its message says, as do not found and no
+// permission.
 func TestATransientFailureIsntARefusal(t *testing.T) {
 	for _, c := range []struct {
 		kind      string
@@ -53,6 +56,25 @@ func TestATransientFailureIsntARefusal(t *testing.T) {
 		{"a secondary rate limit", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Too Many Requests (HTTP 429)"), true, false},
 		{"a primary rate limit", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: API rate limit exceeded for installation ID 1. (HTTP 403)"), true, true},
 		{"a primary rate limit", errors.New("POST graphql: exit status 1: gh: API rate limit already exceeded for user ID 7275925."), true, true},
+		{"a primary rate limit", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: API rate limit exceeded for user ID 7275925. (HTTP 429)"), true, true},
+		{"an HTTP/2 stream's internal error", errors.New(`POST graphql: exit status 1: Post "https://api.github.com/graphql": stream error: stream ID 3; INTERNAL_ERROR; received from peer`), true, false},
+		{"an HTTP/2 stream's internal error", errors.New(`PUT repos/o/r/pulls/7/merge: exit status 1: Put "https://api.github.com/repos/o/r/pulls/7/merge": stream error: stream ID 1; INTERNAL_ERROR`), true, false},
+		{"a TLS alert", errors.New(`POST graphql: exit status 1: Post "https://api.github.com/graphql": remote error: tls: internal error`), true, false},
+		{"a TLS alert", errors.New(`PUT repos/o/r/pulls/7/merge: exit status 1: Put "https://api.github.com/repos/o/r/pulls/7/merge": local error: tls: bad record MAC`), true, false},
+		// A certificate that doesn't verify is no alert, and no moment's failure.
+		{"a refusal", errors.New(`PUT repos/o/r/pulls/7/merge: exit status 1: Put "https://api.github.com/repos/o/r/pulls/7/merge": tls: failed to verify certificate: x509: certificate signed by unknown authority`), false, false},
+		{"gh killed by a signal", errors.New("PUT repos/o/r/pulls/7/merge: signal: killed: "), true, false},
+		{"gh killed by a signal", errors.New("POST graphql: signal: terminated: "), true, false},
+		// The status decides before the words: GitHub's refusal stays one,
+		// whatever its message says, and a rate limit's 403 is no refusal.
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Pull Request is not mergeable: a required check ended with an i/o timeout (HTTP 405)"), false, false},
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Head branch was modified after a connection reset. Review and try the merge again. (HTTP 409)"), false, false},
+		{"a refusal's status", errors.New("POST graphql: exit status 1: gh: Validation Failed: the status says bad gateway, service unavailable (HTTP 422)"), false, false},
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: HTTP 422: Unprocessable Entity (https://api.github.com/repos/o/r/pulls/7/merge): EOF"), false, false},
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Must have admin rights to Repository, though a gateway timeout came first (HTTP 403)"), false, false},
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Bad credentials (HTTP 401)"), false, false},
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Too many open pull requests (HTTP 422)"), false, false},
+		{"a refusal's status", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: API rate limit exceeded is no excuse to skip review (HTTP 422)"), false, false},
 		{"a refusal", errors.New("POST graphql: exit status 1: gh: Pull request could not be marked ready for review (HTTP 422)"), false, false},
 		{"a refusal", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Pull Request is not mergeable (HTTP 405)"), false, false},
 		{"a refusal", errors.New("PUT repos/o/r/pulls/7/merge: exit status 1: gh: Head branch was modified. Review and try the merge again. (HTTP 409)"), false, false},
@@ -74,7 +96,7 @@ func TestATransientFailureIsntARefusal(t *testing.T) {
 // What gh writes on its standard error decides, through the client's own
 // errors, as gh writes it: a name that didn't resolve over two lines, and a
 // connection closed before any answer, both GitHub failing for a moment,
-// beside a 422 GitHub answered and a 404, which stay refusals (#376).
+// beside a 405 GitHub answered and a 404, which stay refusals (#376).
 func TestGhsOwnWordsAreClassified(t *testing.T) {
 	for _, c := range []struct {
 		stderr    string
@@ -83,7 +105,10 @@ func TestGhsOwnWordsAreClassified(t *testing.T) {
 		{`error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com`, true},
 		{`Put "https://api.github.com/repos/o/r/pulls/7/merge": EOF`, true},
 		{`gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)`, true},
+		{`Post "https://api.github.com/graphql": stream error: stream ID 3; INTERNAL_ERROR; received from peer`, true},
+		{`Post "https://api.github.com/graphql": remote error: tls: internal error`, true},
 		{`gh: Pull Request is not mergeable (HTTP 405)`, false},
+		{`gh: Pull Request is not mergeable: i/o timeout (HTTP 405)`, false},
 		{`gh: Not Found (HTTP 404)`, false},
 		{`gh: Resource not accessible by integration (HTTP 403)`, false},
 	} {
@@ -93,6 +118,20 @@ exit 1
 		_, err := Client{Repo: "o/r", GH: gh}.Merge(context.Background(), 7, "abc123", "merge")
 		if err == nil || Transient(err) != c.transient {
 			t.Errorf("gh said %q, and Merge = %v, transient %v; want transient %v", c.stderr, err, Transient(err), c.transient)
+		}
+	}
+}
+
+// A gh killed by a signal, while the watcher's own context lasts, never
+// heard GitHub's answer, so the request may well succeed if made again
+// (#376's review): the client's error says how gh ended, and it's
+// transient.
+func TestAKilledGhIsntARefusal(t *testing.T) {
+	for _, sig := range []string{"KILL", "TERM"} {
+		gh := fakeGH(t, "kill -"+sig+" $$\n")
+		_, err := Client{Repo: "o/r", GH: gh}.Merge(context.Background(), 7, "abc123", "merge")
+		if err == nil || !Transient(err) || RateLimited(err) {
+			t.Errorf("gh killed by SIG%s: Merge = %v, transient %v; want a transient error", sig, err, Transient(err))
 		}
 	}
 }
