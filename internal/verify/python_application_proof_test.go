@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -899,6 +900,46 @@ func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
 		"def compile(text):\n    return text.strip()\n\n\nPAGE = compile(' page ')\nSHOW = builtins.print, contracts.Ensures, Requires, contracts.__all__\n")
 	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
 		t.Fatalf("a neighbor that only reads the stand-in and the builtins: %v", err)
+	}
+}
+
+// A selected function's contract runs where the application runs, with the
+// stand-in, and Python evaluates every argument when the statement runs
+// (#359). The analyzer takes what can't fail so, and says where the rest is.
+func TestPythonApplicationProofReadsContractsAsPythonRunsThem(t *testing.T) {
+	head := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\ndef admit(name: str, count: int) -> int:\n    Requires(count >= 0)\n"
+	for _, c := range []struct{ name, body, want string }{
+		{"every form a contract may hold", "    Requires(isinstance(name, str) and abs(-count) == count and len(name) < LIMIT * 2)\n" +
+			"    Ensures(Result() in (count, count + 1) and Result() not in (-1,))\n    Ensures(Result() >= Old(count) if len(name) > 0 else not Result() < count)\n" +
+			"    Ensures(Implies(Result() > count, Result() - count == 1))\n    Exsures(Exception, True)\n    Decreases(None)\n    Ensures(Acc(list_pred(name), 1))\n" +
+			"    total = count\n    i = 0\n    while i < 2:\n        Invariant(0 <= i and i <= 2 and total >= count)\n        i += 1\n" +
+			"    for j in range(2):\n        Invariant(j >= 0 and Implies(i > 0, total >= 0))\n    Assert(total == count)\n    return count\n", ""},
+		{"a contract call the stand-in can't take", "    Ensures(Implies(count > 0))\n    return count\n", "line 8 Ensures calls Implies with arguments Invariant's runtime stand-in doesn't take"},
+		{"a builtin a contract may not call", "    Ensures(Result() <= max(count, 1))\n    return count\n", "line 8 Ensures calls max, and a contract may call only"},
+		{"a builtin called as it can't be", "    Ensures(len(name, count) > 0)\n    return count\n", "line 8 Ensures calls len with other than its 1 argument"},
+		{"isinstance with a computed type", "    Ensures(isinstance(Result(), (int, str)))\n    return count\n", "line 8 Ensures's isinstance takes other than a type's name"},
+		{"a builtin the module rebinds", "    Ensures(len(name) >= 0)\n    return count\n\n\ndef len(x: str) -> int:\n    return 0\n", "line 8 Ensures calls len, and a contract may call only"},
+		{"an attribute read", "    Ensures(Result() == name.count('a'))\n    return count\n", "line 8 Ensures holds a method call, which Python evaluates when the statement runs"},
+		{"a list", "    Ensures(Result() in [count])\n    return count\n", "line 8 Ensures tests Result() for membership in something other than a tuple it lists"},
+		{"a local bound later", "    Ensures(Result() == total)\n    total = count\n    return total\n", "line 8 Ensures reads total, which the function may not have bound"},
+		{"a loop variable after its loop", "    for j in range(2):\n        pass\n    Assert(Implies(count > 0, j >= 0))\n    return count\n", "line 10 Assert reads j, which the function may not have bound"},
+		{"Result() as a value", "    seen = Result()\n    return count\n", "line 8 reads Nagini's Result outside a contract statement"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := analyzePythonProof([]byte(head+c.body), "admit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := slices.ContainsFunc(d.Contracts, func(p pythonProofDynamic) bool {
+				return strings.Contains(fmt.Sprintf("line %d %s", p.Line, p.What), c.want)
+			})
+			switch {
+			case c.want == "" && len(d.Contracts) != 0:
+				t.Fatalf("refused a contract Python runs as Nagini reads it: %+v", d.Contracts)
+			case c.want != "" && !found:
+				t.Fatalf("got %+v, want %q", d.Contracts, c.want)
+			}
+		})
 	}
 }
 
