@@ -1034,6 +1034,10 @@ func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testin
 		{"a float constant", "    r = RATE\n    return count\n", "", "line 11 deals in floats"},
 		{"a float annotation", "    r: float = 1\n    return count\n", "", "line 11 deals in floats"},
 		{"a sequence repeated by a parameter", "    r = [0] * count\n    return count\n", "", "line 11 multiplies what the gate can't tell are both ints by other than an int literal"},
+		// #380: the pinned Nagini models the method behind an operator,
+		// called by name, as it does the operator.
+		{"a floor division called by name", "    r = (7).__floordiv__(count)\n    return count\n", "", "line 11 reads __floordiv__, the method behind an operator"},
+		{"a bitwise or called by name", "    r = count.__or__(1)\n    return count\n", "", "line 11 reads __or__, the method behind an operator"},
 		{"arithmetic Nagini models as Python does", "    r = [0] * 3\n    s = name * 2\n    q = count * count + len(xs) * count\n    for x in xs:\n        q = q + x * count\n" +
 			"    m = count % 2 + count // 10 + 7 // 2 + (count << 2) + count ** 2\n    return count\n", "", ""},
 	} {
@@ -1056,6 +1060,61 @@ func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testin
 				case check.want != "" && !found:
 					t.Errorf("%s problems %+v, want %q", check.kind, check.problems, check.want)
 				}
+			}
+		})
+	}
+}
+
+// #380's review: the other names for the arithmetic the rule refuses, which
+// the pinned Nagini can't translate today but a later one could model as it
+// models the operators, are refused in place as in a marked file.
+func TestPythonApplicationProofRefusesArithmeticByOtherNames(t *testing.T) {
+	head := "from nagini_contracts.contracts import *\nimport builtins\nimport functools\nimport operator\nimport operator as op\n" +
+		"from operator import floordiv as fd\nfrom builtins import float as real\nfrom typing import List\n\n" +
+		"NAME = '__floordiv__'\nFLOAT = 'float'\n\n\ndef admit(count: int, xs: List[int]) -> int:\n    Requires(count >= 0)\n"
+	const (
+		function = "line 16 holds operator.%s, the operator module's function for an operator, which the gate checks only written as the operator"
+		lookup   = "line 16 looks '%s' up by name, which reaches arithmetic the gate checks only written as an operator"
+		floats   = "deals in floats, which the pinned Nagini leaves uninterpreted"
+	)
+	for _, c := range []struct{ name, body, want string }{
+		{"operator.floordiv", "    r = operator.floordiv(7, count)\n", fmt.Sprintf(function, "floordiv")},
+		{"operator.or_", "    r = operator.or_(count, 1)\n", fmt.Sprintf(function, "or_")},
+		{"operator.mod", "    r = operator.mod(7, count)\n", fmt.Sprintf(function, "mod")},
+		{"operator.truediv", "    r = operator.truediv(count, 3)\n", fmt.Sprintf(function, "truediv")},
+		{"an aliased operator module", "    r = op.mul(xs, count)\n", fmt.Sprintf(function, "mul")},
+		{"a name from operator", "    r = fd(7, count)\n", fmt.Sprintf(function, "floordiv")},
+		{"functools.reduce with operator.floordiv", "    r = functools.reduce(operator.floordiv, xs)\n", fmt.Sprintf(function, "floordiv")},
+		{"the operator module handed on", "    r = getattr(operator, 'floordiv')(7, count)\n", "line 16 holds the operator module other than to read one of its functions by name"},
+		{"divmod", "    r = divmod(7, count)\n", "line 16 holds divmod, a floor division and modulo by a divisor the gate can't tell is a positive integer literal"},
+		{"builtins.divmod", "    r = builtins.divmod(7, count)\n", "line 16 holds divmod"},
+		{"three-argument pow", "    r = pow(7, count, 3)\n", "line 16 holds pow other than as pow(x, y), and its three-argument form takes a modulo"},
+		{"pow's modulus by keyword", "    r = pow(7, count, mod=3)\n", "line 16 holds pow other than as pow(x, y)"},
+		{"pow handed on", "    r = functools.reduce(pow, xs)\n", "line 16 holds pow other than as pow(x, y)"},
+		{"getattr of a method behind an operator", "    r = getattr(count, '__floordiv__')(2)\n", fmt.Sprintf(lookup, "__floordiv__")},
+		{"__getattribute__ of one", "    r = count.__getattribute__('__or__')(1)\n", fmt.Sprintf(lookup, "__or__")},
+		{"operator.methodcaller of one", "    r = operator.methodcaller('__mod__', 3)(count)\n", fmt.Sprintf(lookup, "__mod__")},
+		{"a namespace's key", "    r = vars(int)['__floordiv__']\n", fmt.Sprintf(lookup, "__floordiv__")},
+		{"a module constant's name", "    r = getattr(count, NAME)(2)\n", fmt.Sprintf(lookup, "__floordiv__")},
+		{"getattr(builtins, 'float')", "    r = getattr(builtins, 'float')(count)\n", "line 16 looks 'float' up by name, so it " + floats},
+		{"a module constant naming float", "    r = getattr(builtins, FLOAT)(count)\n", "line 16 looks 'float' up by name, so it " + floats},
+		{"builtins.float", "    r = builtins.float(count)\n", "line 16 " + floats},
+		{"a name from builtins", "    r = real(count)\n", "line 16 " + floats},
+		{"what those modules offer besides", "    r = operator.add(count, 1) + pow(count, 2) + functools.reduce(operator.add, xs) + len(getattr(xs, 'copy')())\n", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d, err := analyzePythonProof([]byte(head+c.body+"    return count\n"), "admit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := slices.ContainsFunc(d.Arithmetic, func(p pythonProofDynamic) bool {
+				return strings.HasPrefix(fmt.Sprintf("line %d %s", p.Line, p.What), c.want)
+			})
+			switch {
+			case c.want == "" && len(d.Arithmetic) != 0:
+				t.Errorf("refused: %+v", d.Arithmetic)
+			case c.want != "" && !found:
+				t.Errorf("arithmetic problems %+v, want %q", d.Arithmetic, c.want)
 			}
 		})
 	}

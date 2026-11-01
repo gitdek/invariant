@@ -11,7 +11,10 @@ stand-in for nagini_contracts.contracts, it gives where the function's
 contract couldn't run as Nagini reads it. With "writes", it names a module
 and the application's sources: the reply gives every place a source writes
 one of that module's attributes, or what the stand-in or the builtins bind,
-or reaches one of them in a way the scan can't follow.
+or reaches one of them in a way the scan can't follow. With "marked", it
+names a file marked # +nagini, which Nagini proves whole as a core: the
+reply gives every place the file holds arithmetic the pinned Nagini models
+apart from Python, by the rule an in-place proof applies (#380).
 """
 
 import ast
@@ -353,14 +356,30 @@ class Kinds:
         self.typing = {n: rows[0].get("name") for n, rows in bindings.items()
                        if len(rows) == 1 and rows[0]["kind"] == "from" and rows[0]["module"] == "typing" and rows[0]["level"] == 0}
         self.returns = {s.name: s.returns for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.returns is not None}
-        self.constants = {}
+        self.constants, self.strings = {}, {}
         for s in tree.body:
             targets = s.targets if isinstance(s, ast.Assign) else [s.target] if isinstance(s, ast.AnnAssign) else []
             if len(targets) == 1 and isinstance(targets[0], ast.Name) and s.value is not None:
                 try:
-                    self.constants[targets[0].id] = value_kind(ast.literal_eval(s.value))
+                    value = ast.literal_eval(s.value)
                 except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-                    pass
+                    continue
+                self.constants[targets[0].id] = value_kind(value)
+                if isinstance(value, str) and len(bindings.get(targets[0].id, ())) == 1:
+                    self.strings[targets[0].id] = value
+        # What an import anywhere in the module binds each name to, by
+        # dotted name: import operator as op binds op to operator, and from
+        # operator import floordiv binds floordiv to operator.floordiv (#380).
+        self.imports = {}
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Import):
+                for a in sub.names:
+                    top = a.name.split(".")[0]
+                    self.imports.setdefault(a.asname or top, set()).add(a.name if a.asname else top)
+            elif isinstance(sub, ast.ImportFrom) and sub.level == 0 and sub.module:
+                for a in sub.names:
+                    if a.name != "*":
+                        self.imports.setdefault(a.asname or a.name, set()).add(sub.module + "." + a.name)
         self.env, self.elements = {}, {}
         for name, a in self.params.items():
             self.env[name], self.elements[name] = self.annotation(a.annotation)
@@ -719,7 +738,7 @@ def contracts(node, names, kinds):
 
 # Why arithmetic the pinned Nagini models apart from Python is refused, in a
 # selected function's body and contract and in a trusted contract's
-# abstraction alike (#359).
+# abstraction alike (#359), and anywhere in a file marked # +nagini (#380).
 FLOATS = ("deals in floats, which the pinned Nagini leaves uninterpreted, while Python's arithmetic fails on an int too large "
           "for a float where Nagini's model doesn't")
 DIVISION = "divides with /, which makes a float and fails on an int too large for one where Nagini's model doesn't"
@@ -728,23 +747,87 @@ DIVIDES = ("holds a %s by other than a positive integer literal, which the pinne
            "Python for a negative divisor")
 REPEATED = ("multiplies what the gate can't tell are both ints by other than an int literal, so it may repeat a sequence "
             "more often than Python can index, which fails where Nagini's model doesn't")
+# A marked file may divide in a permission fraction (#380).
+FRACTION = DIVISION + (", and a file marked # +nagini may divide only in Acc's permission fraction, a positive int literal "
+                       "over one at least as large, as Acc(x, 1/2) does")
+# The methods behind the operators above, which a call by name reaches as the
+# operator does: the pinned Nagini proves (7).__floordiv__(n) == -3 and
+# n.__or__(1) != -3 for n = -2 and n = -4, as it does 7 // n and n | 1, so
+# the rule reads that arithmetic only written as the operator (#380).
+OPERATOR_METHODS = frozenset((
+    "__truediv__", "__rtruediv__", "__itruediv__", "__floordiv__", "__rfloordiv__", "__ifloordiv__",
+    "__mod__", "__rmod__", "__imod__", "__divmod__", "__rdivmod__", "__and__", "__rand__", "__iand__",
+    "__or__", "__ror__", "__ior__", "__xor__", "__rxor__", "__ixor__", "__invert__",
+    "__mul__", "__rmul__", "__imul__", "__float__", "__complex__",
+))
+METHODS = ("reads %s, the method behind an operator, which the gate checks only written as the operator, since the pinned "
+           "Nagini can model its arithmetic apart from Python")
+
+# The other names for that arithmetic, which the pinned Nagini can't
+# translate today but a later one could model as it models the operators,
+# so the rule refuses them rather than rest on that (#380): the operator
+# module's functions for those operators, divmod, pow but as pow(x, y),
+# which is x ** y, the builtins module's float, complex, divmod and pow,
+# and any of their names looked up by a string.
+OPERATOR_FUNCTIONS = frozenset((
+    "truediv", "floordiv", "mod", "and_", "or_", "xor", "inv", "invert", "mul",
+    "itruediv", "ifloordiv", "imod", "iand", "ior", "ixor", "imul", "__inv__",
+)) | OPERATOR_METHODS
+FUNCTIONS = ("holds operator.%s, the operator module's function for an operator, which the gate checks only written as the "
+             "operator, since the pinned Nagini can model its arithmetic apart from Python")
+MODULE = ("holds the operator module other than to read one of its functions by name, and its functions for operators "
+          "are arithmetic the gate checks only written as the operator, since the pinned Nagini can model it apart from Python")
+STAR = ("star-imports the operator module, whose functions for operators are arithmetic the gate checks only written as "
+        "the operator, since the pinned Nagini can model it apart from Python")
+DIVMOD = ("holds divmod, a floor division and modulo by a divisor the gate can't tell is a positive integer literal, which "
+          "the pinned Nagini could divide as Viper does, apart from Python for a negative divisor")
+POW = ("holds pow other than as pow(x, y), and its three-argument form takes a modulo by a modulus the gate can't tell is "
+       "a positive integer literal, which the pinned Nagini could take as Viper does, apart from Python for a negative one")
+BUILTINS = {"builtins.float": FLOATS, "builtins.complex": FLOATS, "builtins.divmod": DIVMOD, "builtins.pow": POW}
+REFUSED_NAMES = {**BUILTINS, **{"operator." + f: FUNCTIONS % f for f in OPERATOR_FUNCTIONS}}
+# What a lookup by name takes, by the name it's called by, and what holds a
+# module's or a type's names by key.
+LOOKUPS = frozenset(("getattr", "hasattr", "setattr", "delattr", "getattr_static", "attrgetter", "methodcaller",
+                     "__getattribute__", "__getattr__", "__setattr__", "__delattr__"))
+NAMESPACE_CALLS = frozenset(("vars", "globals", "locals"))
+LOOKED_UP = OPERATOR_FUNCTIONS | frozenset(("float", "complex", "divmod", "pow"))
+LOOKUP = ("looks %r up by name, which reaches arithmetic the gate checks only written as an operator, or the builtin it "
+          "refuses, since the pinned Nagini can model it apart from Python")
+LOOKUP_FLOAT = "looks %r up by name, so it " + FLOATS
+# Python 3.8 wraps a subscript's key in an Index, which later versions drop.
+INDEX = (ast.Index,) if sys.version_info < (3, 9) else ()
 
 
-def arithmetic(node, kinds):
+def arithmetic(node, kinds, nodes=None, fractions=False):
     """Each place a function, its signature, body and contract alike, holds
     arithmetic the pinned Nagini models apart from Python: floats and what
     makes them, which it leaves uninterpreted while Python fails on an int
     too large for one, the bitwise operators, which it models apart on
     negative ints, // and % by other than a positive integer literal, which
-    it divides as Viper does, and multiplication by other than an int
-    literal unless both sides are ints, which could repeat a sequence past
-    what Python can index. Shifts and ** stay: Nagini's preconditions on
-    them are where Python raises."""
+    it divides as Viper does, multiplication by other than an int literal
+    unless both sides are ints, which could repeat a sequence past what
+    Python can index, and the methods behind them, read by name. Shifts and
+    ** stay: Nagini's preconditions on them are where Python raises. So do
+    the other names for that arithmetic, though the pinned Nagini can't
+    translate them, since a later one could: the operator module's
+    functions for those operators, read, imported or handed on with the
+    module, divmod, pow but as pow(x, y), the builtins module's float,
+    complex, divmod and pow, and any of their names, or the methods', in a
+    string or a module's string constant a lookup by name takes, or as a
+    namespace's key, and any string that's one of the methods' names.
+
+    For a file marked # +nagini (#380), nodes are one of its scopes, a
+    function's own or the rest of the file's, read by that scope's kinds,
+    and fractions lets Acc's second argument be a permission fraction: a
+    positive int literal over one at least as large, as Acc(x, 1/2), which
+    Nagini reads as a permission, never as Python's division, and Python
+    evaluates without failing."""
+    nodes = list(ast.walk(node)) if nodes is None else nodes
     args = node.args
     annotations = [a.annotation for a in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]
                    if a is not None and a.annotation is not None]
     annotations += [node.returns] if node.returns is not None else []
-    annotations += [s.annotation for s in ast.walk(node) if isinstance(s, ast.AnnAssign)]
+    annotations += [s.annotation for s in nodes if isinstance(s, ast.AnnAssign)]
     inside = {id(x) for a in annotations for x in ast.walk(a)}
     floats = {n for n, k in kinds.constants.items() if k in ("float", "complex")}
     out = []
@@ -755,18 +838,84 @@ def arithmetic(node, kinds):
     def literal(x):
         return isinstance(x, ast.Constant) and type(x.value) is int and abs(x.value) < REPEATS
 
-    for n in ast.walk(node):
+    def positive(x):
+        return isinstance(x, ast.Constant) and type(x.value) is int and x.value > 0
+
+    permissions = set()
+    if fractions:
+        for n in nodes:
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "Acc" and len(n.args) == 2
+                    and isinstance(n.args[1], ast.BinOp) and isinstance(n.args[1].op, ast.Div)
+                    and positive(n.args[1].left) and positive(n.args[1].right) and n.args[1].left.value <= n.args[1].right.value):
+                permissions.add(id(n.args[1]))
+
+    # The names that are an attribute's base, and the calls of pow that are
+    # pow(x, y), for the other names of that arithmetic (#380).
+    bases = {id(x.value) for x in nodes if isinstance(x, ast.Attribute)}
+    pows = {id(x.func) for x in nodes if isinstance(x, ast.Call) and isinstance(x.func, ast.Name) and x.func.id == "pow"
+            and len(x.args) == 2 and not x.keywords and not any(isinstance(a, ast.Starred) for a in x.args)}
+
+    def named(x):
+        """The string x is, or the module's string constant it reads."""
+        if isinstance(x, ast.Constant) and isinstance(x.value, str):
+            return x.value
+        if isinstance(x, ast.Name) and x.id in kinds.strings and x.id not in kinds.bound and x.id not in kinds.params:
+            return kinds.strings[x.id]
+        return None
+
+    def looked_up(x):
+        value = named(x)
+        if value in LOOKED_UP:
+            problem(x, (LOOKUP_FLOAT if value in ("float", "complex") else LOOKUP) % value)
+
+    for n in nodes:
         if isinstance(n, ast.Constant) and type(n.value) in (float, complex):
             problem(n, FLOATS)
         elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and (
                 n.id in ("float", "complex") and kinds.builtin(n.id) or n.id in floats and n.id not in kinds.bound and n.id not in kinds.params):
             problem(n, FLOATS)
+        elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and n.attr in OPERATOR_METHODS:
+            problem(n, METHODS % n.attr)
+        # The other names for that arithmetic, wherever they stand.
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            imported = kinds.imports.get(n.id, set())
+            for target in sorted(imported & set(REFUSED_NAMES)):
+                problem(n, REFUSED_NAMES[target])
+            if "operator" in imported and id(n) not in bases:
+                problem(n, MODULE)
+            if n.id == "divmod" and kinds.builtin("divmod"):
+                problem(n, DIVMOD)
+            if n.id == "pow" and kinds.builtin("pow") and id(n) not in pows:
+                problem(n, POW)
+        elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name) and n.attr not in OPERATOR_METHODS:
+            modules = kinds.imports.get(n.value.id, set()) | ({"builtins"} if n.value.id == "__builtins__" else set())
+            for target in sorted({m + "." + n.attr for m in modules} & set(REFUSED_NAMES)):
+                problem(n, REFUSED_NAMES[target])
+        elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module in ("operator", "builtins"):
+            for a in n.names:
+                if n.module == "operator" and a.name == "*":
+                    problem(n, STAR)
+                elif n.module + "." + a.name in REFUSED_NAMES:
+                    problem(n, REFUSED_NAMES[n.module + "." + a.name])
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in OPERATOR_METHODS:
+            looked_up(n)
+        elif isinstance(n, ast.Call):
+            f = n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else None
+            if f in LOOKUPS:
+                for a in n.args + [k.value for k in n.keywords]:
+                    looked_up(a)
+        elif isinstance(n, ast.Subscript) and (
+                isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id in NAMESPACE_CALLS
+                or isinstance(n.value, ast.Attribute) and n.value.attr == "__dict__"
+                or isinstance(n.value, ast.Name) and n.value.id == "__builtins__"):
+            looked_up(n.slice.value if isinstance(n.slice, INDEX) else n.slice)
         if id(n) in inside:
             continue
         if isinstance(n, (ast.BinOp, ast.AugAssign)):
             left, right = (n.left, n.right) if isinstance(n, ast.BinOp) else (n.target, n.value)
             if isinstance(n.op, ast.Div):
-                problem(n, DIVISION)
+                if id(n) not in permissions:
+                    problem(n, FRACTION if fractions else DIVISION)
             elif isinstance(n.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
                 problem(n, BITWISE)
             elif isinstance(n.op, CONTRACT_DIVISIONS) and not (isinstance(right, ast.Constant) and type(right.value) is int and right.value > 0):
@@ -803,6 +952,7 @@ def declaration(request):
     if isinstance(node, ast.ClassDef):
         raise LookupError("%s is a class, and in-place proof selects a function" % node.name)
     first = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+    bindings, star, shared = top_level(tree, raw)
 
     body = []
     for statement in node.body:
@@ -830,8 +980,42 @@ def declaration(request):
     for d in node.decorator_list:
         decorators.append(raw[offset(d.lineno, d.col_offset):offset(d.end_lineno, d.end_col_offset)].decode("utf-8"))
 
-    # The gate copies whole lines, so a statement that shares a line with
-    # another can't be copied alone.
+    # Names any function in the module rebinds with a global statement, and
+    # the module's __future__ imports, which change how it compiles.
+    rebound = sorted({name for sub in ast.walk(tree) if isinstance(sub, ast.Global) for name in sub.names})
+    future = [dict(start=offset(s.lineno, 0), end=line_end(s.end_lineno), line=s.lineno, shared=shared(s))
+              for s in tree.body if isinstance(s, ast.ImportFrom) and s.module == "__future__"]
+
+    free, unsupported, bound, tries = function(node)
+    if body and body[0]["line"] == node.lineno:
+        unsupported.append("a body on the def line")
+    if node.col_offset != 0:
+        unsupported.append("a declaration that isn't at the module's top level")
+    # A selected function's contract, which runs where the application runs,
+    # and the arithmetic Nagini models apart from Python, in any function.
+    eager, sums = [], []
+    if "standin" in request:
+        standin = standin_of(base64.b64decode(request["standin"]))
+        names = {n: standin[n] for n in standin if n not in bound}
+        kinds = Kinds(node, tree, bindings, names)
+        eager, sums = contracts(node, names, kinds), arithmetic(node, kinds)
+    return {
+        "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager, "arithmetic": sums,
+        "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,
+        "def_line": node.lineno, "async": isinstance(node, ast.AsyncFunctionDef), "decorators": decorators,
+        "header_end": body[0]["start"] if body else line_end(node.end_lineno),
+        "name_start": name_start, "name_end": name_start + len(node.name.encode()),
+        "body": body, "free": free, "unsupported": unsupported, "bindings": bindings, "star": star,
+        "declarations": sorted(n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))),
+    }
+
+
+def top_level(tree, raw):
+    """How a module binds each name at its top level, by the statement that
+    binds it, its star imports, and whether a top-level statement shares a
+    line with another, which the gate, copying whole lines, can't copy
+    alone."""
+    offset, line_end = lines_of(raw)
     lines = {}
     for statement in tree.body:
         for line in range(statement.lineno, statement.end_lineno + 1):
@@ -893,35 +1077,49 @@ def declaration(request):
                 elif isinstance(sub, (ast.Import, ast.ImportFrom)):
                     for alias in sub.names:
                         bind(alias.asname or alias.name.split(".")[0], dict(where, kind="conditional"))
+    return bindings, star, shared
 
-    # Names any function in the module rebinds with a global statement, and
-    # the module's __future__ imports, which change how it compiles.
-    rebound = sorted({name for sub in ast.walk(tree) if isinstance(sub, ast.Global) for name in sub.names})
-    future = [dict(start=offset(s.lineno, 0), end=line_end(s.end_lineno), line=s.lineno, shared=shared(s))
-              for s in tree.body if isinstance(s, ast.ImportFrom) and s.module == "__future__"]
 
-    free, unsupported, bound, tries = function(node)
-    if body and body[0]["line"] == node.lineno:
-        unsupported.append("a body on the def line")
-    if node.col_offset != 0:
-        unsupported.append("a declaration that isn't at the module's top level")
-    # A selected function's contract, which runs where the application runs,
-    # and the arithmetic Nagini models apart from Python, in any function.
-    eager, sums = [], []
-    if "standin" in request:
-        standin = standin_of(base64.b64decode(request["standin"]))
-        names = {n: standin[n] for n in standin if n not in bound}
-        kinds = Kinds(node, tree, bindings, names)
-        eager, sums = contracts(node, names, kinds), arithmetic(node, kinds)
-    return {
-        "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager, "arithmetic": sums,
-        "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,
-        "def_line": node.lineno, "async": isinstance(node, ast.AsyncFunctionDef), "decorators": decorators,
-        "header_end": body[0]["start"] if body else line_end(node.end_lineno),
-        "name_start": name_start, "name_end": name_start + len(node.name.encode()),
-        "body": body, "free": free, "unsupported": unsupported, "bindings": bindings, "star": star,
-        "declarations": sorted(n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))),
-    }
+# A function with no signature and a body of its own that binds nothing, in
+# whose place the gate reads a marked file's module and classes outside any
+# function: the module's literal constants give the kinds it can tell there.
+OUTSIDE = ast.parse("def _():\n    pass\n").body[0]
+
+
+def marked(request):
+    """Each place a file marked # +nagini holds arithmetic the pinned Nagini
+    models apart from Python (#380). Nagini proves the file whole, and reads
+    its module's and classes' own statements, constants among them, with its
+    own arithmetic, so the rule an in-place proof applies to its function
+    applies here to every function and method, by the kinds the gate can
+    tell in each, and to the rest of the file, by the module's constants. A
+    permission fraction in Acc is Nagini's, not Python's division. A file
+    the host's Python can't parse is unreadable, so the gate refuses it
+    rather than prove what it couldn't check. Nagini reads the file as
+    Python decodes it, and the gate copies none of its bytes, so it's
+    parsed as it is."""
+    raw = base64.b64decode(request["marked"])
+    standin = standin_of(base64.b64decode(request["standin"]))
+    try:
+        tree = ast.parse(raw)
+        bindings = top_level(tree, raw)[0]
+        # Each node's scope is the innermost function that holds it, a
+        # nested function's signature and decorators included, or None.
+        scopes, stack = {}, [(tree, None)]
+        while stack:
+            n, scope = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scope = n
+            scopes.setdefault(scope, []).append(n)
+            stack.extend((child, scope) for child in ast.iter_child_nodes(n))
+        out = []
+        for scope, nodes in scopes.items():
+            node, bound = (OUTSIDE, set(bindings)) if scope is None else (scope, set(function(scope)[2]))
+            names = {n: standin[n] for n in standin if n not in bound}
+            out += arithmetic(node, Kinds(node, tree, bindings, names), nodes, fractions=True)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as error:
+        return {"arithmetic": [], "unreadable": str(error) or type(error).__name__}
+    return {"arithmetic": sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))}
 
 
 # What a source may read of a module the scan for writes follows, besides
@@ -1461,7 +1659,12 @@ def writes(request):
 
 def main():
     request = json.loads(sys.stdin.buffer.read())
-    reply = writes(request) if "writes" in request else declaration(request)
+    if "writes" in request:
+        reply = writes(request)
+    elif "marked" in request:
+        reply = marked(request)
+    else:
+        reply = declaration(request)
     print(json.dumps(reply, sort_keys=True))
 
 
