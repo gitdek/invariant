@@ -162,6 +162,18 @@ func (c Clone) Holds(ctx context.Context, ref, commit string) (bool, error) {
 	return false, err
 }
 
+// FirstCommit is the first commit on head, past base, that touched path, or
+// "" when none did: a plan's ratification, which records it (#271).
+func (c Clone) FirstCommit(ctx context.Context, base, head, path string) (string, error) {
+	defer c.lock()()
+	out, err := c.git(ctx, "rev-list", "--reverse", base+".."+head, "--", path)
+	if err != nil {
+		return "", err
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	return strings.TrimSpace(first), nil
+}
+
 // PushCommit pushes commit to branch. It never forces, so the branch must
 // be behind it.
 func (c Clone) PushCommit(ctx context.Context, commit, branch string) error {

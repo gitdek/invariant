@@ -211,7 +211,18 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
-	wt, err := f.Repo.Worktree(ctx, m.Branch, "origin/"+m.Branch)
+	// A retry's build of a plan starts its own branch from the plan's
+	// ratification, until it has pushed its code there (#271). A clone that
+	// can't reach that commit any more, once the draft's branch is gone,
+	// can't build it, and says so for a person (D-0220).
+	from := "origin/" + m.Branch
+	if _, err := f.Repo.RevParse(ctx, from); err != nil && m.From != "" {
+		if _, err := f.Repo.RevParse(ctx, m.From); err != nil {
+			return "", agent, nil, ratificationGone{fmt.Sprintf("`%s`, the commit with the plan's ratification that this build starts from, is gone", m.From)}, nil
+		}
+		from = m.From
+	}
+	wt, err := f.Repo.Worktree(ctx, m.Branch, from)
 	if err != nil {
 		return "", "", nil, nil, err
 	}
@@ -228,9 +239,13 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	f.runsAgent(n, agent, out)
 	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
+	// As for a project: a watcher that lost the lease drops the run, and one
+	// that took it back in a new tenure records its result, and its next
+	// step publishes it, if the build still stands.
 	if !f.holds() {
 		return "", "", nil, nil, errLeaseLost
 	}
+	ctx, resumed := f.resumed(ctx)
 	// As for a project, the run's error, summary and review name the paths on
 	// this machine as localPaths does. The summary quotes the agent run's
 	// error.
@@ -252,6 +267,8 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	verdict := "It passed every test, and the review approves it."
 	switch {
+	case res.AgentError != "":
+		verdict = "Its agent's last run ended with an error, so the build failed."
 	case !res.Passed:
 		verdict = "It didn't pass every test."
 	case !res.Approved:
@@ -273,11 +290,19 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if err != nil {
 		return "", "", nil, nil, err
 	}
+	if why, err := f.superseded(ctx, n, ratified); err != nil {
+		return "", "", nil, nil, err
+	} else if why != current {
+		return "", "", nil, nil, f.finishSuperseded(ctx, n, why, step, result)
+	}
 	if err := f.recovers(ctx, n, "record the build's result", f.canFinishRun(building(RunRecorded, false, false), recovery.Build)); err != nil {
 		return "", "", nil, nil, err
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
 		return "", "", nil, nil, err
+	}
+	if resumed {
+		return "", "", nil, nil, errResumed
 	}
 	return result, agent, res, runErr, nil
 }
@@ -300,9 +325,14 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		return err
 	}
 	head := "origin/" + m.Branch
-	if has, err := f.Repo.Holds(ctx, head, code); err != nil {
-		return err
-	} else if !has {
+	has := false
+	// A retry's branch is there only once its code is pushed (#271).
+	if _, err := f.Repo.RevParse(ctx, head); err == nil {
+		if has, err = f.Repo.Holds(ctx, head, code); err != nil {
+			return err
+		}
+	}
+	if !has {
 		if err := f.recovers(ctx, n, "push the code", f.canPushCode(building(RunDone, false, false))); err != nil {
 			return err
 		}
@@ -321,7 +351,7 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		return err
 	}
 	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
-	ok := res.Passed && res.Approved
+	ok := res.Built()
 	from, to := buildStep(ratified, stops, at)
 	if !ok {
 		to.kind, to.failure = protocol.KindFailed, FailGate
@@ -329,11 +359,14 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
 		return err
 	}
-	pr, open, err := f.GitHub.OpenPullRequest(ctx, m.Branch)
+	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
+		return err
+	}
+	pr, found, err := f.buildPullRequest(ctx, m.Branch, ratified)
 	if err != nil {
 		return err
 	}
-	if !open {
+	if !found {
 		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false))); err != nil {
 			return err
 		}
@@ -342,12 +375,15 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		}); err != nil {
 			return err
 		}
-	} else if ok {
+	} else if ok && pr.State == "open" {
 		if err := f.markReady(ctx, n, pr); err != nil {
 			return err
 		}
 	}
 	next.PR = pr.Number
+	if still, err := f.stillBuilding(ctx, n, ratified); err != nil || !still {
+		return err
+	}
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(building(RunDone, true, true), recovery.Build)); err != nil {
 		return err
 	}
