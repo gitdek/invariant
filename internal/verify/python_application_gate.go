@@ -32,6 +32,13 @@ func pythonApplicationPreflight(p *project.Project) error {
 	if err != nil {
 		return err
 	}
+	// The gate grants no proof until #294's step 6 connects proof and its
+	// backing tests: PythonApplicationSession.Prove runs on its own (#353).
+	for _, check := range inv.Checks {
+		if check.Proof != nil {
+			return fmt.Errorf("the gate doesn't prove Python in place yet: %s selects a proof, which only PythonApplicationSession.Prove runs until #294's step 6 connects it", check.Target)
+		}
+	}
 	app, err := project.ResolvePythonApplication(p)
 	if err != nil {
 		return err
