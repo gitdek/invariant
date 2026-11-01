@@ -2109,7 +2109,7 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 // refused says whether err is GitHub's answer to a request, rather than this
 // watcher losing its lease, or its context ending, before GitHub answered.
 func refused(ctx context.Context, err error) bool {
-	return !errors.Is(err, errLeaseLost) && !errors.Is(err, errStaleTenure) && ctx.Err() == nil
+	return !errors.Is(err, errLeaseLost) && !errors.Is(err, errStaleTenure) && !errors.Is(err, errNoStep) && ctx.Err() == nil
 }
 
 // markReady marks a draft ready for review when a build that passed finds it
