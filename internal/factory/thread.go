@@ -116,14 +116,15 @@ const (
 	// The protocol counts it as one the factory can't merge.
 	FailTrusted = "trusted"
 	// FailMerge is a pull request whose gate passed that GitHub refused to
-	// merge, or to mark ready for review when it was a draft (#145). The
-	// protocol counts it as one the factory can't merge.
+	// merge, or to mark ready for review when it was a draft (#145), or
+	// kept failing to for longer than the factory asks (#376). The protocol
+	// counts it as one the factory can't merge.
 	FailMerge = "merge"
 	// FailUnready is a build that passed, but found a draft open from its
-	// branch that GitHub refused to mark ready for review. The protocol
-	// counts it as a build that left a draft, which a writer's retry
-	// watches again, as for a modeled project's failed draft, and never
-	// builds again (#369's review).
+	// branch that GitHub refused to mark ready for review, or kept failing
+	// to (#376). The protocol counts it as a build that left a draft, which
+	// a writer's retry watches again, as for a modeled project's failed
+	// draft, and never builds again (#369's review).
 	FailUnready = "unready"
 	// FailDraft is a pull request whose gate passed that is a draft no
 	// writer's retry watches, such as one a person made of the factory's

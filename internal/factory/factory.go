@@ -1901,7 +1901,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	}
 	var refusal error
 	if found && res.Final.Passed && pr.State == "open" {
-		if pr, refusal, err = f.markReady(ctx, n, pr); err != nil {
+		if pr, refusal, err = f.markReady(ctx, n, ratified, pr); err != nil {
 			return err
 		}
 	}
@@ -2189,12 +2189,24 @@ func (f *Factory) saidMerged(ctx context.Context, t Thread, pr github.PullReques
 // pull request the factory can't merge, as it sees a change to the trusted
 // base (D-0105), and the recovery core sees one GitHub can't merge. A lost
 // lease or an ended context isn't GitHub's answer, and is returned instead.
+// GitHub failing for a moment, as with a 502, is returned too, so the next
+// poll tries again, until it has kept failing for longer than the factory
+// asks for, which is said in the refusal's place (#369's review, #376).
 func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, unready bool, answer error, next Marker) error {
-	if !refused(ctx, answer) {
-		return answer
-	}
 	n := t.Issue.Number
-	f.logf("#%d: GitHub refused the merge of #%d: %v", n, pr.Number, answer)
+	answer, retry := f.gitHubsAnswer(ctx, n, failingStep(state, unready, pr.Number, at.head), pr, answer)
+	if retry != nil {
+		return retry
+	}
+	var kept keptFailing
+	switch {
+	case !errors.As(answer, &kept):
+		f.logf("#%d: GitHub refused the merge of #%d: %v", n, pr.Number, answer)
+	case unready:
+		f.logf("#%d: GitHub kept failing to mark #%d ready for review, for %s, so I've stopped asking: %v", n, pr.Number, kept.span(), answer)
+	default:
+		f.logf("#%d: GitHub kept failing to merge #%d, for %s, so I've stopped asking: %v", n, pr.Number, kept.span(), answer)
+	}
 	at.scopeMany = true
 	from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
 	to.failure = FailMerge
@@ -2212,45 +2224,45 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 // the factory reports without marking it ready.
 var errCantMerge = errors.New("GitHub says it can't merge it as it is, as when it conflicts with its base branch, so I haven't marked it ready for review")
 
-// refused says whether err is GitHub's answer to a request, rather than this
-// watcher losing its lease, or its context ending, before GitHub answered,
-// or GitHub failing for a moment, as with a 502, which the next poll tries
-// again (#369's review).
-func refused(ctx context.Context, err error) bool {
-	return !errors.Is(err, errLeaseLost) && !errors.Is(err, errStaleTenure) && !errors.Is(err, errNoStep) && !github.Transient(err) && ctx.Err() == nil
-}
-
 // markReady marks a draft ready for review when a build that passed finds it
 // open from its branch, opened without the build's result, before the build
-// says the pull request is open (#145). The core has the build open its
-// pull request ready, so it checks that. It returns the pull request as
-// GitHub has it then, and GitHub's answer when GitHub refused, which the
-// build posts as a failure that names the draft, so a writer's retry
-// watches it again, rather than leave it a draft no retry watches. An
-// error GitHub may not repeat, such as a 502, the next poll tries again
-// (#369's review).
-func (f *Factory) markReady(ctx context.Context, n int, pr github.PullRequest) (github.PullRequest, error, error) {
+// says the pull request is open (#145). ratified is the post that started
+// the build. The core has the build open its pull request ready, so it
+// checks that. It returns the pull request as GitHub has it then, and
+// GitHub's answer when GitHub refused, which the build posts as a failure
+// that names the draft, so a writer's retry watches it again, rather than
+// leave it a draft no retry watches. An error GitHub may not repeat, such as
+// a 502, the next poll tries again (#369's review), until GitHub has kept
+// failing for longer than the factory asks for, which the build posts in
+// the refusal's place (#376).
+func (f *Factory) markReady(ctx context.Context, n int, ratified Post, pr github.PullRequest) (github.PullRequest, error, error) {
 	if !pr.Draft {
 		return pr, nil, nil
 	}
 	if err := f.recovers(ctx, n, fmt.Sprintf("mark #%d ready", pr.Number), f.canOpenPullRequest(building(RunDone, true, false), true)); err != nil {
 		return pr, nil, err
 	}
-	err := f.GitHub.MarkReady(ctx, pr.Number)
-	switch {
-	case err != nil && refused(ctx, err):
-		f.logf("#%d: GitHub refused to mark draft #%d ready for review: %v", n, pr.Number, err)
-		return pr, err, nil
-	case err != nil:
-		return pr, nil, err
+	if err := f.GitHub.MarkReady(ctx, pr.Number); err != nil {
+		answer, retry := f.gitHubsAnswer(ctx, n, failingStep(ratified, true, pr.Number, pr.Head.SHA), pr, err)
+		if retry != nil {
+			return pr, nil, retry
+		}
+		var kept keptFailing
+		if errors.As(answer, &kept) {
+			f.logf("#%d: GitHub kept failing to mark draft #%d ready for review, for %s, so I've stopped asking: %v", n, pr.Number, kept.span(), answer)
+		} else {
+			f.logf("#%d: GitHub refused to mark draft #%d ready for review: %v", n, pr.Number, answer)
+		}
+		return pr, answer, nil
 	}
-	pr, err = f.GitHub.PullRequest(ctx, pr.Number)
+	pr, err := f.GitHub.PullRequest(ctx, pr.Number)
 	return pr, nil, err
 }
 
 // unready posts that a build that passed found a draft open from its branch
-// that GitHub refused to mark ready, as the protocol's build that left a
-// draft, which a writer's retry watches again (#369's review).
+// that GitHub refused to mark ready, or kept failing to, as the protocol's
+// build that left a draft, which a writer's retry watches again (#369's
+// review, #376).
 func (f *Factory) unready(ctx context.Context, t Thread, ratified Post, stops int, at pullRequest, pr github.PullRequest, answer error, next Marker) error {
 	n := t.Issue.Number
 	from, to := buildStep(ratified, stops, at)

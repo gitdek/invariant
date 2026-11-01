@@ -1321,8 +1321,8 @@
       case "unmergeable": return `${pr} passed CI's gate, but it can't merge: it reaches outside its project, or its lock isn't the one ratified.`;
       case "ci": return `CI's gate didn't pass on ${pr}.`;
       case "trusted": return `${pr} passed CI's gate, and it changes the trusted base, so a person merges it. Review it and merge it on GitHub.`;
-      case "merge": return `CI's gate passed on ${pr}, but GitHub refused to merge it, or to mark its draft ready.`;
-      case "unready": return `The build passed, but GitHub refused to mark ${pr}, the draft open from its branch, ready for review.`;
+      case "merge": return `CI's gate passed on ${pr}, but GitHub refused to merge it, or to mark its draft ready, or kept failing to for half an hour.`;
+      case "unready": return `The build passed, but GitHub refused to mark ${pr}, the draft open from its branch, ready for review, or kept failing to for half an hour.`;
       case "draft": return `CI's gate passed on ${pr}, but it's a draft no retry asked the factory to watch, so the factory hasn't marked it ready. Closing it, or the issue, stops the factory.`;
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look.`;

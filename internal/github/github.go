@@ -141,19 +141,50 @@ var ErrNotFound = errors.New("not found")
 // won't change that, unlike a rate limit.
 var ErrNoPermission = errors.New("the App isn't allowed to do this")
 
-// Transient says err looks like GitHub failing for a moment, as with a
-// 5xx answer or a dropped connection, rather than refusing the request, so
-// the same request may well succeed if made again.
+// Transient says err looks like GitHub failing for a moment, rather than
+// refusing the request, so the same request may well succeed if made
+// again: a 5xx answer or GitHub's own words for timing out, a connection
+// dropped, refused or never made, a request that timed out on the client, a
+// name that didn't resolve, or a rate limit, secondary or primary (#369's
+// review, #376). A refusal, such as a 422, a 405 or a 409, isn't, and
+// neither is ErrNotFound or ErrNoPermission, whatever else they say.
 func Transient(err error) bool {
 	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoPermission) {
 		return false
 	}
-	return transient.MatchString(err.Error())
+	return transient.MatchString(err.Error()) || primaryLimit.MatchString(err.Error())
 }
 
-// transient is what gh says of a request GitHub failed for a moment.
-var transient = regexp.MustCompile(`(?i)\(HTTP 5\d\d\)|bad gateway|service unavailable|gateway time-?out|internal server error|` +
-	`connection reset|connection refused|i/o timeout|tls handshake timeout|unexpected eof|server closed idle connection`)
+// RateLimited says err is GitHub's primary rate limit: the App, or whoever
+// gh is logged in as, has made every request GitHub allows it for the hour,
+// and GitHub serves no more until the limit resets, which it does within
+// the hour. It's transient, since waiting fixes it, and it's GitHub saying
+// when to come back rather than failing. A secondary rate limit, which asks
+// for a wait of minutes, isn't one.
+func RateLimited(err error) bool {
+	return Transient(err) && primaryLimit.MatchString(err.Error())
+}
+
+// transient is what gh says of a request GitHub failed for a moment: a 5xx
+// answer, or GitHub's own words for its REST or GraphQL timing out; a
+// connection dropped, refused or never made, such as one closed before any
+// answer, which leaves a bare EOF; a request that timed out on the client;
+// a name that didn't resolve, of which gh says only that it couldn't
+// connect; and a secondary rate limit, which asks for a wait of minutes.
+var transient = regexp.MustCompile(`(?im)` + strings.Join([]string{
+	`\bHTTP 5\d\d\b`, `bad gateway`, `service unavailable`, `gateway time-?out`, `internal server error`,
+	`couldn't respond to your request in time`, `something went wrong while executing your query`,
+	`connection reset`, `connection refused`, `broken pipe`, `unexpected eof`, `: EOF$`, `server closed idle connection`,
+	`http2: client connection lost`, `server sent GOAWAY`, `network is unreachable`, `no route to host`,
+	`i/o timeout`, `tls handshake timeout`, `timeout awaiting response headers`, `Client\.Timeout exceeded`,
+	`context deadline exceeded`, `operation timed out`, `connection timed out`, `\bHTTP 408\b`,
+	`error connecting to`, `check your internet connection`, `no such host`, `temporary failure in name resolution`, `server misbehaving`,
+	`secondary rate limit`, `abuse detection`, `\bHTTP 429\b`, `too many requests`,
+}, "|"))
+
+// primaryLimit is how GitHub says a primary rate limit ran out, over REST
+// and GraphQL alike.
+var primaryLimit = regexp.MustCompile(`(?i)\bAPI rate limit (already )?exceeded\b`)
 
 // Viewer is the user gh is logged in as.
 func (c Client) Viewer(ctx context.Context) (User, error) {
