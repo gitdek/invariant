@@ -35,7 +35,8 @@ Recording:
                                     record an edge between two decisions
 
 Asking:
-  invariant decisions show ID       a decision, and every edge to and from it
+  invariant decisions show ID       a decision, the exact proposal its ratification names if it names
+                                    one, and every edge to and from it
   invariant decisions dependents ID everything that rests on a decision: what reopening it touches
   invariant decisions implementers ID
                                     the code that implements it, or a decision resting on it

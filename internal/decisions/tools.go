@@ -100,7 +100,7 @@ func (s *Session) Tools(write bool) []mcp.Tool {
 	byID := map[string]any{"type": "object", "properties": map[string]any{"id": id}, "required": []string{"id"}, "additionalProperties": false}
 	tools := []mcp.Tool{
 		{Name: "decision", Schema: byID, Call: s.show,
-			Description: "A decision: what it says, its door, status, date and who made it, its record, and every edge to and from it, with the text at each end."},
+			Description: "A decision: what it says, its door, status, date and who made it, the exact proposal its ratification names if it names one, its record, and every edge to and from it, with the text at each end."},
 		{Name: "dependents", Schema: byID, Call: s.walk("dependents"),
 			Description: "Everything that rests on a decision: what reopening it would touch. That's every decision that refines it, directly or through others, and every decision, SPEC line, doc or piece of code that mentions or implements any of them. Each line cites the node and its text."},
 		{Name: "implementers", Schema: byID, Call: s.walk("implementers"),
@@ -114,7 +114,7 @@ func (s *Session) Tools(write bool) []mcp.Tool {
 			Description: "Decisions whose words contain every one of the given words."},
 		{Name: "query_decisions", Call: s.query,
 			Schema: map[string]any{"type": "object", "properties": map[string]any{
-				"sql": map[string]any{"type": "string", "description": "one SQL query over node(id, kind, project, date, door, status, who, text, record) and edge(src, type, dst, project, derived)"}},
+				"sql": map[string]any{"type": "string", "description": "one SQL query over node(id, kind, project, date, door, status, who, text, record, proposal) and edge(src, type, dst, project, derived), where proposal is what a ratification names, or empty"}},
 				"required": []string{"sql"}, "additionalProperties": false},
 			Description: "Run your own read-only SQL over the graph, for what the other tools don't answer. It stops after 10 seconds and returns at most 200 rows. Prefer the named tools: they're tested, and a traversal you write may not end."},
 	}
