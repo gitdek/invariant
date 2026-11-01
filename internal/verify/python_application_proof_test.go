@@ -775,8 +775,13 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			other: map[string]string{"tasks/config.py": "from tasks import *\n\nadmission.LIMIT = 100\n"}, want: "tasks/config.py:3 writes tasks.admission.LIMIT"},
 		{name: "importlib with its package's name", module: same,
 			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks').admission.LIMIT = 100\n"}, want: "imports tasks by name"},
-		{name: "patching it by name", module: same,
-			other: map[string]string{"tests/test_admission.py": "from unittest import mock\n\n\n@mock.patch('tasks.admission.LIMIT', 100)\ndef test_admits():\n    pass\n"}, want: "names tasks.admission in a string"},
+		{name: "patching it by name in production", module: same,
+			other: map[string]string{"tasks/config.py": "from unittest import mock\n\nmock.patch('tasks.admission.LIMIT', 100).start()\n"}, want: "tasks/config.py:3 patches tasks.admission.LIMIT by name"},
+		{name: "importlib with its name in production", module: same,
+			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks.admission').LIMIT = 1\n"}, want: "tasks/config.py:3 imports tasks.admission by name"},
+		{name: "a helper production code imports", module: same,
+			other: map[string]string{pa315Project + "/helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/config.py": "from verification.lifecycle import helpers\n"},
+			want: pa315Project + "/helpers.py:3 writes tasks.admission.LIMIT"},
 		{name: "the function's __globals__", module: same,
 			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__globals__['LIMIT'] = 100\n"}, want: "reads __globals__"},
 		{name: "rebinding the module in its package", module: same,
@@ -840,6 +845,27 @@ func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
 	pa310Write(t, root, "tasks/api.py", strings.Replace(string(b), ", getattr(a, '__doc__')", ", getattr(sys, 'path')", 1))
 	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The proof covers the module as production code leaves it. Tests and the
+// verification project's own driver and helpers may patch it, by name or
+// otherwise, and a production string that merely names it, as a logger's
+// does, reaches nothing.
+func TestPythonApplicationProofLeavesTestsOutOfTheScan(t *testing.T) {
+	root, p := ppFixture(t, ppModule)
+	pa310Write(t, root, "tests/test_admission.py", "from unittest import mock\n\nfrom tasks import admission\n\n\n"+
+		"@mock.patch('tasks.admission.LIMIT', 100)\ndef test_admits_more():\n    with mock.patch.object(admission, 'LIMIT', 5):\n        admission.LIMIT = 7\n")
+	pa310Write(t, root, pa315Project+"/helpers.py", "import sys\n\nfrom tasks import admission\n\nadmission.LIMIT = 9\nsys.modules['tasks.admission'].LIMIT = 9\n")
+	pa310Write(t, root, "tasks/log.py", "import logging\n\nlog = logging.getLogger('tasks.admission')\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
+		t.Fatal(err)
+	}
+	// A test file production code imports runs in production too.
+	pa310Write(t, root, "tasks/config.py", "from tests import test_admission\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil ||
+		!strings.Contains(err.Error(), "tests/test_admission.py:6 patches tasks.admission.LIMIT by name") {
+		t.Fatalf("a test production code imports: %v", err)
 	}
 }
 

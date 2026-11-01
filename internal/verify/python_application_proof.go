@@ -646,6 +646,11 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 	type file struct {
 		Path   string `json:"path"`
 		Source string `json:"source"`
+		Tests  bool   `json:"tests,omitempty"`
+	}
+	verification, err := filepath.Rel(s.root, s.project.Dir)
+	if err != nil {
+		return nil, err
 	}
 	var files []file
 	names := make([]string, 0, len(s.snapshot))
@@ -660,7 +665,7 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b)})
+		files = append(files, file{Path: name, Source: base64.StdEncoding.EncodeToString(b), Tests: !s.production(name, filepath.ToSlash(verification))})
 	}
 	var reply struct {
 		Writes []pythonProofWrite `json:"writes"`
@@ -669,6 +674,27 @@ func (s *PythonApplicationSession) moduleWrites(module string) ([]pythonProofWri
 		return nil, err
 	}
 	return reply.Writes, nil
+}
+
+// production says whether a staged source is the application's production
+// code, which is what a proof covers. Test files, by the project's rule, are
+// not, and neither is the verification project's own code, its driver and
+// helpers among it, unless the application selects it. The scan for writes
+// still reads what production code imports of either.
+func (s *PythonApplicationSession) production(name, verification string) bool {
+	base := path.Base(name)
+	if strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") {
+		return false
+	}
+	if !strings.HasPrefix(name, verification+"/") {
+		return true
+	}
+	m := s.project.Manifest
+	selected := slices.ContainsFunc(m.Existing, func(e string) bool { return name == e || strings.HasPrefix(name, e+"/") })
+	if m.Components != nil {
+		selected = selected || slices.Contains(m.Components.Scope, path.Dir(name))
+	}
+	return selected
 }
 
 type pythonProofBuilder struct {
