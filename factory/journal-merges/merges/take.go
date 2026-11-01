@@ -120,10 +120,9 @@ func startsFrom(sl [][]Line, sn []int, bl [][]Line, bn []int, f, room int /*@, g
 }
 
 // takeFrom takes main in to each of the branch's files from file f on, as
-// TakeMainIn does, rebuilding each from a copy of itself. Each call keeps
-// its own file, so what it proves of that file holds after the files past it
-// are taken. It reads main with the share p of its permission it's given,
-// and gives each next call half of it.
+// TakeMainIn does. Each call keeps its own file, so what it proves of that
+// file holds after the files past it are taken. It reads main with the share
+// p of its permission it's given, and gives each next call half of it.
 // @ requires p > 0 && 0 <= f && f <= len(sl) && len(sl) <= MaxSize && 0 <= room && room <= MaxSize
 // @ requires len(sn) == len(sl) && len(bl) == len(sl) && len(bn) == len(sl) && len(from) == len(sl) && len(to) == len(sl)
 // @ requires forall g int :: { &sn[g] } 0 <= g && g < len(sn) ==> acc(&sn[g], p) && 0 <= sn[g] && sn[g] <= room
@@ -151,25 +150,45 @@ func takeFrom(sl [][]Line, sn []int, bl [][]Line, bn []int, from, to [][]Spot, f
 	if f == len(sl) {
 		return
 	}
-	// Copies of main's file and the branch's, as they are.
-	ours := make([]Line, room)
-	// @ unfold acc(row(sl[f], room, f), p/2)
-	// @ assert forall k int :: { &sl[f][k] } { old(at(sl[f], room, f, k)) } 0 <= k && k < room ==> sl[f][k] == old(at(sl[f], room, f, k))
-	copyLines(ours, sl[f] /*@, p/2 @*/)
-	// @ fold acc(row(sl[f], room, f), p/2)
-	was := make([]Line, room)
-	// @ unfold row(bl[f], room, f)
-	// @ assert forall k int :: { &bl[f][k] } { old(at(bl[f], room, f, k)) } 0 <= k && k < room ==> bl[f][k] == old(at(bl[f], room, f, k))
-	copyLines(was, bl[f] /*@, 1/2 @*/)
-	// @ unfold spots(from[f], room, f)
-	// @ unfold spots(to[f], room, f)
-	bn[f] = takeIn(bl[f], ours, sn[f], was, bn[f], from[f], to[f])
-	// @ fold spots(to[f], room, f)
-	// @ fold spots(from[f], room, f)
-	// @ fold row(bl[f], room, f)
+	bn[f] = takeOne(sl[f], sn[f], bl[f], bn[f], from[f], to[f], f, room /*@, p/2 @*/)
 	// @ assert forall g, k int :: { at(sl[g], room, g, k) } { old(at(sl[g], room, g, k)) } 0 <= g && g < len(sl) && 0 <= k && k < room ==> at(sl[g], room, g, k) == old(at(sl[g], room, g, k))
 	// @ assert forall g, k int :: { at(bl[g], room, g, k) } { old(at(bl[g], room, g, k)) } f < g && g < len(bl) && 0 <= k && k < room ==> at(bl[g], room, g, k) == old(at(bl[g], room, g, k))
 	takeFrom(sl, sn, bl, bn, from, to, f+1, room /*@, p/2 @*/)
+	// @ assert forall g, k int :: { at(sl[g], room, g, k) } { old(at(sl[g], room, g, k)) } 0 <= g && g < len(sl) && 0 <= k && k < room ==> at(sl[g], room, g, k) == old(at(sl[g], room, g, k))
+}
+
+// takeOne takes main's file m in to the branch's file b, which is file f of
+// each, as TakeMainIn does, rebuilding b from a copy of itself. It reads m
+// with the share p of permission it's given.
+// @ requires p > 0 && 0 <= sn && 0 <= bn && sn + bn <= room && room <= MaxSize
+// @ requires acc(row(m, room, f), p) && row(b, room, f) && spots(from, room, f) && spots(to, room, f)
+// @ ensures acc(row(m, room, f), p) && row(b, room, f) && spots(from, room, f) && spots(to, room, f)
+// @ ensures forall k int :: { at(m, room, f, k) } 0 <= k && k < room ==> at(m, room, f, k) == old(at(m, room, f, k))
+// @ ensures sn <= n && n <= sn + bn && n <= room
+// @ ensures forall k int :: { at(b, room, f, k) } 0 <= k && k < sn ==> at(b, room, f, k) == at(m, room, f, k)
+// @ ensures forall k int :: { spot(from, room, f, k) } sn <= k && k < n ==> 0 <= spot(from, room, f, k).At && spot(from, room, f, k).At < bn
+// @ ensures forall k, j int :: { at(b, room, f, k), old(at(b, room, f, j)) } sn <= k && k < n && j == spot(from, room, f, k).At && 0 <= j && j < bn ==> at(b, room, f, k) == old(at(b, room, f, j))
+// @ ensures forall k, i int :: { at(b, room, f, k), at(m, room, f, i) } sn <= k && k < n && 0 <= i && i < sn ==> at(b, room, f, k) != at(m, room, f, i)
+// @ ensures forall q int :: { spot(to, room, f, q) } 0 <= q && q < bn && !(exists i int :: { at(m, room, f, i) } 0 <= i && i < sn && at(m, room, f, i) == old(at(b, room, f, q))) ==> sn <= spot(to, room, f, q).At && spot(to, room, f, q).At < n && at(b, room, f, spot(to, room, f, q).At) == old(at(b, room, f, q))
+// @ decreases
+func takeOne(m []Line, sn int, b []Line, bn int, from, to []Spot, f, room int /*@, ghost p perm @*/) (n int) {
+	// Copies of main's file and the branch's, as they are.
+	ours := make([]Line, room)
+	// @ unfold acc(row(m, room, f), p)
+	// @ assert forall k int :: { &m[k] } { old(at(m, room, f, k)) } 0 <= k && k < room ==> m[k] == old(at(m, room, f, k))
+	copyLines(ours, m /*@, p @*/)
+	// @ fold acc(row(m, room, f), p)
+	was := make([]Line, room)
+	// @ unfold row(b, room, f)
+	// @ assert forall k int :: { &b[k] } { old(at(b, room, f, k)) } 0 <= k && k < room ==> b[k] == old(at(b, room, f, k))
+	copyLines(was, b /*@, 1/2 @*/)
+	// @ unfold spots(from, room, f)
+	// @ unfold spots(to, room, f)
+	n = takeIn(b, ours, sn, was, bn, from, to)
+	// @ fold spots(to, room, f)
+	// @ fold spots(from, room, f)
+	// @ fold row(b, room, f)
+	return n
 }
 
 // spotRows allocates n files' room positions each, behind spots.
