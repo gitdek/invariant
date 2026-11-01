@@ -144,7 +144,8 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 	long := strings.Repeat("Evidence with café and 界. ", 4000)
 	pr := github.PullRequest{Number: 251}
 	// A retry of #251 watches it again (#263): what that leads to is part of
-	// every instruction to retry it.
+	// every instruction to retry it. A plan's draft whose build failed in the
+	// factory's own run is built again instead (#271).
 	const watching = "`/invariant retry` to have me watch #251 again. I'll merge it once CI's `invariant/gate` passes on its current head. " +
 		"I won't review #251 again, so if it needs fixes, including any changes its review asked for, push them first: otherwise it merges as it is."
 	for _, tc := range []struct {
@@ -178,8 +179,9 @@ func TestClippedPostsKeepClosingCommands(t *testing.T) {
 		{
 			name: "retry and revise with a draft PR", kind: KindFailed,
 			make: func(m Marker) string { return planFailedComment(&pr, nil, fmt.Errorf("%s", long), m) },
-			want: "\n\nA person needs to look at this. Comment " + watching + " To build the plan again instead, close #251, say \"draft the same plan again\" or what to change, " +
-				"and comment `/invariant revise`. I'll draft it for you to ratify again before I build it.",
+			want: "\n\nA person needs to look at this. Comment `/invariant retry` to have me close #251 and build the plan again, from its ratification, in a new pull request: " +
+				"its checks and review run afresh, and #251's work stays there to read. To keep #251 instead, push any fixes it needs, mark it ready and merge it yourself. " +
+				"To change the plan, close #251, say what to change, and comment `/invariant revise`. I'll draft it for you to ratify again before I build it.",
 		},
 		{
 			name: "retry refused merge", kind: KindFailed,

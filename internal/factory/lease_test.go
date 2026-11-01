@@ -117,11 +117,15 @@ func TestNoEffectWithoutTheLease(t *testing.T) {
 	if len(gh.posts(1)) != 0 || len(gh.labelsOf(1)) != 0 {
 		t.Fatalf("a watcher without the lease changed the issue: %v, %v", gh.posts(1), gh.labelsOf(1))
 	}
-	// With the lease, the same post goes through.
+	// With the lease, the same post goes through for a step in its tenure,
+	// and for nothing else (D-0237).
 	if held, err := f.hold(ctx); err != nil || !held {
 		t.Fatal(held, err)
 	}
-	if _, err := g.PostComment(ctx, 1, "hello"); err != nil {
+	if _, err := g.PostComment(ctx, 1, "hello"); !errors.Is(err, errNoStep) {
+		t.Fatalf("PostComment with the lease, outside any step = %v; want errNoStep", err)
+	}
+	if _, err := g.PostComment(f.inTenure(ctx), 1, "hello"); err != nil {
 		t.Fatalf("PostComment with the lease = %v", err)
 	}
 }

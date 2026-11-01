@@ -46,6 +46,10 @@ type view struct {
 	directedBy   int8   // who directed the latest step: protocol.NoActor or By*
 	stops        int    // builds that stopped since a writer last said retry
 	failure      string // why the latest failure happened: Fail*, or "" for none
+	// rebuiltAfter is the failure a writer's retry built the plan again
+	// after, on the step that does (#271, D-0202). Every other step leaves
+	// it "", as the model's history variable is to every step but that one.
+	rebuiltAfter string
 }
 
 // allows says whether the protocol has a step from one view of an issue to
@@ -134,6 +138,7 @@ func (r renaming) state(v view) protocol.State {
 	}
 	s.Stops = int8(min(v.stops, 127))
 	s.Failure = failureValue(v.failure)
+	s.RebuiltAfter = failureValue(v.rebuiltAfter)
 	return s
 }
 
@@ -343,6 +348,20 @@ func (f *Factory) retryStep(t Thread, c Command) (from, to view) {
 	if from.head == "" {
 		to.kind, to.stops = protocol.KindRatified, 0
 	}
+	return from, to
+}
+
+// rebuildStep is a writer's retry of a plan's build that failed in the
+// factory's own run, which builds the plan again (#271): the model's
+// Rebuild, which retires the failed draft's pull request, its head and CI's
+// result there, and counts stops afresh (D-0202). from names the draft as
+// the issue's latest post does, whatever has become of it since.
+func (f *Factory) rebuildStep(t Thread, state Post, c Command) (from, to view) {
+	from = viewOf(state, true, t.Stops())
+	from.head = fmt.Sprintf("#%d", state.Marker.PR)
+	to = from
+	to.kind, to.directedBy, to.failure, to.stops = protocol.KindRatified, f.director(c.By), "", 0
+	to.head, to.rebuiltAfter = "", from.failure
 	return from, to
 }
 
