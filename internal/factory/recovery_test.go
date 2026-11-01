@@ -22,7 +22,8 @@ func TestTheCoreRefusesWhatWouldRepeatAnEffect(t *testing.T) {
 		{"say it's ratified", f.canPost(ratifying(true), recovery.Ratify)},
 		{"start the build's run", f.canStartRun(building(RunNone, false, false), recovery.Build)},
 		{"push the build's code", f.canPushCode(building(RunDone, false, false))},
-		{"open the pull request", f.canOpenPullRequest(building(RunDone, true, false))},
+		{"open the pull request", f.canOpenPullRequest(building(RunDone, true, false), true)},
+		{"open the pull request as a draft", f.canOpenPullRequest(building(RunDone, true, false), false)},
 		{"post the build", f.canPost(building(RunDone, true, true), recovery.Build)},
 		{"merge", f.canMerge(merging(true, false))},
 		{"say it merged", f.canPost(merging(true, true), recovery.Merge)},
@@ -44,8 +45,8 @@ func TestTheCoreRefusesWhatWouldRepeatAnEffect(t *testing.T) {
 		{"say it's ratified before the push", f.canPost(ratifying(false), recovery.Ratify)},
 		{"start the build's run again", f.canStartRun(building(RunDone, false, false), recovery.Build)},
 		{"push code before the run finished", f.canPushCode(building(RunRecorded, false, false))},
-		{"open a second pull request", f.canOpenPullRequest(building(RunDone, true, true))},
-		{"open a pull request before the code is pushed", f.canOpenPullRequest(building(RunDone, false, false))},
+		{"open a second pull request", f.canOpenPullRequest(building(RunDone, true, true), true)},
+		{"open a pull request before the code is pushed", f.canOpenPullRequest(building(RunDone, false, false), true)},
 		{"post the build before its pull request", f.canPost(building(RunDone, true, false), recovery.Build)},
 		{"merge twice", f.canMerge(merging(true, true))},
 		{"merge what GitHub can't", f.canMerge(merging(false, false))},
@@ -69,6 +70,48 @@ func TestTheCoreRefusesWhatWouldRepeatAnEffect(t *testing.T) {
 	} {
 		if c.ok {
 			t.Errorf("the core allowed a watcher without the lease to %s", c.what)
+		}
+	}
+}
+
+// A writer's retry that watches a failed draft again is the core's watch
+// (#354): the core lets the factory answer it, then mark the draft ready
+// only once CI's gate passed on it and it can merge, and report one that
+// can't. It refuses a mark ready that comes early, on a draft nobody
+// watches, or on one the factory can't merge, such as one that changes the
+// trusted base.
+func TestTheCoreMarksOnlyAWatchedDraftReady(t *testing.T) {
+	f := &Factory{}
+	unwatched := drafted(merging(true, false))
+	unanswered := watching(false)
+	unanswered.gatePassed, unanswered.mergeable = true, true
+	for _, c := range []struct {
+		what string
+		ok   bool
+	}{
+		{"answer a retry that watches the draft", f.canPost(watching(false), recovery.Watch)},
+		{"mark the watched draft ready", f.canMarkReady(watchedMerging(true))},
+		{"say the watched draft can't merge", f.canPost(watchedMerging(false), recovery.Merge)},
+		{"post a draft's build", f.canPost(drafted(building(RunDone, true, true)), recovery.Build)},
+	} {
+		if !c.ok {
+			t.Errorf("the core refused to %s", c.what)
+		}
+	}
+	for _, c := range []struct {
+		what string
+		ok   bool
+	}{
+		{"answer the watch twice", f.canPost(watching(true), recovery.Watch)},
+		{"mark a draft ready before CI's gate passes", f.canMarkReady(watching(true))},
+		{"mark ready a draft it can't merge", f.canMarkReady(watchedMerging(false))},
+		{"mark ready a draft nobody watches", f.canMarkReady(unwatched)},
+		{"mark a draft ready before answering its retry", f.canMarkReady(unanswered)},
+		{"merge a draft it hasn't marked ready", f.canMerge(watchedMerging(true))},
+		{"say a draft nobody watches can't merge", f.canPost(drafted(merging(false, false)), recovery.Merge)},
+	} {
+		if c.ok {
+			t.Errorf("the core allowed a watcher to %s", c.what)
 		}
 	}
 }

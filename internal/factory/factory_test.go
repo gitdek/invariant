@@ -1045,7 +1045,7 @@ func TestThePullRequestCarriesTheReview(t *testing.T) {
 	}
 	// A Go project's review read its explorer, and says so (D-0090).
 	res := &synth.Result{Final: &verify.Report{}, Review: &synth.Review{Text: "No problem.", Of: "explorer"}}
-	if body := pullRequestBody(Thread{Issue: github.Issue{Number: 7}}, Marker{Project: "pool"}, res, nil); !strings.Contains(body, "### A second agent's review of the explorer") || !strings.Contains(body, "read the explorer, and changed nothing") {
+	if body := pullRequestBody(Thread{Issue: github.Issue{Number: 7}}, Marker{Project: "pool"}, res, nil, nil); !strings.Contains(body, "### A second agent's review of the explorer") || !strings.Contains(body, "read the explorer, and changed nothing") {
 		t.Errorf("the pull request's body:\n%s", body)
 	}
 }

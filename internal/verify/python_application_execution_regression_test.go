@@ -18,17 +18,7 @@ import (
 // separate request. It tests Python behavior, not Docker isolation.
 func pa315LocalPython(t *testing.T, libraries string) func(context.Context, PythonApplicationCommand) (PythonApplicationProcess, error) {
 	t.Helper()
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The runner starts with -P, which Python added in 3.11, and watches what
-	// escapes a backing test's calls with sys.monitoring, added in 3.12.
-	// Production runs it in the pinned image; a host with an older python3
-	// can't stand in.
-	if out, err := exec.Command(python, "-c", "import sys; print(sys.version_info >= (3, 12))").Output(); err != nil || strings.TrimSpace(string(out)) != "True" {
-		t.Skip("the runner needs Python 3.12 or newer on the host: it starts with -P, from 3.11, and watches backing tests with sys.monitoring, from 3.12")
-	}
+	python := pa315RunnerPython(t)
 	return func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
 		b, err := os.ReadFile(filepath.Join(c.RuntimeDir, "request.json"))
 		if err != nil {
@@ -64,6 +54,23 @@ func pa315LocalPython(t *testing.T, libraries string) func(context.Context, Pyth
 		p.Events, _ = os.ReadFile(req.Output)
 		return p, err
 	}
+}
+
+// pa315RunnerPython is the host's python3, and skips the test when it's too
+// old to run the runner. The runner starts with -P, which Python added in
+// 3.11, and watches what escapes a backing test's calls with sys.monitoring,
+// added in 3.12. Production runs it in the pinned image; a host with an older
+// python3 can't stand in.
+func pa315RunnerPython(t *testing.T) string {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(python, "-c", "import sys; print(sys.version_info >= (3, 12))").Output(); err != nil || strings.TrimSpace(string(out)) != "True" {
+		t.Skip("the runner needs Python 3.12 or newer on the host: it starts with -P, from 3.11, and watches backing tests with sys.monitoring, from 3.12")
+	}
+	return python
 }
 
 func TestPythonApplicationExecutionRealRunnerOutcomes(t *testing.T) {

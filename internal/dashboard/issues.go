@@ -78,7 +78,7 @@ type Issue struct {
 // Waiting is what an open issue needs from a person.
 type Waiting struct {
 	Kind       string     `json:"kind"`                 // forks, proposal or failed
-	Failure    string     `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci or unmergeable
+	Failure    string     `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
 	Forks      []Question `json:"forks,omitempty"`      // the questions to answer
 	Name       string     `json:"name,omitempty"`       // the proposal's project
 	Hash       string     `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
@@ -478,9 +478,10 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 // proposal again (D-0064). With one, it watches that pull request again
 // (D-0047): once CI's gate passes on its current head, the factory marks it
 // ready and merges it, without another review (#145, D-0105), unless it
-// changes the trusted base, which only a person merges (D-0109). The failure
-// or the plan's trusted files show that it does. Neither can rule out what a
-// later push changes, so the factory's merge keeps that exception.
+// changes the trusted base, which only a person merges (D-0109). The
+// failure, the plan's trusted files or a project in the trusted base show
+// that it does. None can rule out what a later push changes, so the
+// factory's merge keeps that exception.
 func retryCopy(m factory.Marker) *RetryCopy {
 	pr := m.PR
 	if pr == 0 {
@@ -492,7 +493,7 @@ func retryCopy(m factory.Marker) *RetryCopy {
 		}
 	}
 	plan := m.Proposal != nil && m.Proposal.Plan != nil
-	trusted := m.Why() == factory.FailTrusted || (plan && len(m.Proposal.Plan.Trusted) > 0)
+	trusted := m.ChangesTrustedBase()
 	if m.Rebuilds() {
 		return rebuildCopy(pr, trusted)
 	}
@@ -506,7 +507,7 @@ func retryCopy(m factory.Marker) *RetryCopy {
 		const exception = " If it changes the trusted base, a person merges it."
 		r.Label = fmt.Sprintf("Merge #%d once CI passes", pr)
 		r.Confirmation = fmt.Sprintf("Have the factory merge #%d once CI's gate passes on its current head, as you? It won't review #%d again.", pr, pr) + exception
-		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again. Once CI's gate passes on its current head, and it's in scope with its ratified lock, the factory marks it ready, if it's a draft, and merges it.", pr) + exception
+		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again. Once CI's gate passes on its current head, and it's in scope with its ratified lock, the factory marks it ready, if it's a draft, once GitHub says it can merge it, and merges it.", pr) + exception
 		r.Posted = fmt.Sprintf("Asked for a retry. The factory watches #%d again, then marks it ready and merges it once CI's gate passes on its current head. It won't review #%d again.", pr, pr) + exception
 	}
 	r.Guidance += fmt.Sprintf(" The factory won't review #%d again, even if its review asked for changes, so push any changes it needs before you retry.", pr)
