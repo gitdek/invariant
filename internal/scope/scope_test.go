@@ -269,3 +269,33 @@ func TestAPlanKeepsAPlumbingPullRequestInScope(t *testing.T) {
 		}
 	}
 }
+
+// A project's pull request lists what it changes in the trusted base, as a
+// plan's does, so a person merges one of the factory's own proved cores
+// under factory/, and the factory still merges an example (D-0109, #369's
+// review).
+func TestAProjectsPullRequestListsWhatItChangesInTheTrustedBase(t *testing.T) {
+	dir := repo(t)
+	files := map[string]string{
+		"factory/core/.invariant/invariant.json": `{"name": "core"}`,
+		"factory/core/.invariant/ratified.lock":  ratifiedLock,
+		"factory/core/go.mod":                    "module example.com/core\n\ngo 1.27.1\n",
+		"factory/core/core/core.go":              "package core\n",
+	}
+	write(t, dir, files)
+	commit(t, dir, "a core")
+	r, err := Check(context.Background(), dir, "main", "HEAD", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"factory/core/.invariant/invariant.json", "factory/core/.invariant/ratified.lock", "factory/core/core/core.go", "factory/core/go.mod"}
+	if !r.OK() || r.Project != "factory/core" || r.Plumbing || !reflect.DeepEqual(r.Trusted, want) {
+		t.Fatalf("a core's pull request: %+v; want it in scope, with trusted files %v", r, want)
+	}
+	example := repo(t)
+	write(t, example, newProject(nil))
+	commit(t, example, "an example")
+	if r, err := Check(context.Background(), example, "main", "HEAD", 7); err != nil || !r.OK() || len(r.Trusted) != 0 {
+		t.Fatalf("an example's pull request: %+v, %v; want it in scope, changing nothing trusted", r, err)
+	}
+}

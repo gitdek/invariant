@@ -67,6 +67,11 @@ func (g crashGitHub) ClosePullRequest(ctx context.Context, n int) (github.PullRe
 	return g.GitHub.ClosePullRequest(ctx, n)
 }
 
+func (g crashGitHub) MarkReady(ctx context.Context, n int) error {
+	g.c.effect(fmt.Sprintf("mark #%d ready", n))
+	return g.GitHub.MarkReady(ctx, n)
+}
+
 func (g crashGitHub) DeleteBranch(ctx context.Context, branch string) error {
 	g.c.effect("delete the branch")
 	return g.GitHub.DeleteBranch(ctx, branch)

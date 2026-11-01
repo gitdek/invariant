@@ -20,6 +20,9 @@ VARIABLES
     merges,      \* number of merges made
     pred,        \* the draft the latest retry replaces: "none", "draft", "retired", "closed" or "merged"
     intent,      \* the latest retry's record that it replaces that draft is stored
+    watched,     \* a writer's retry watches the latest build's failed draft again
+    watchPosts,  \* factory posts answering that retry
+    marked,      \* the factory marked the latest build's draft ready (history)
     lease,       \* the watcher holding the repository's lease, or "nobody"
     up,          \* whether each watcher is running
     inRun,       \* the agent run each watcher is in the middle of, or "none"
@@ -27,11 +30,12 @@ VARIABLES
     unleased     \* watchers that ever took an effect without holding the lease (history)
 
 vars == <<given, posts, retried, retryPosts, buildPosts, runs, runStarts, ratPushed,
-          codePushed, prs, pr, gate, mergeable, merges, pred, intent, lease, up, inRun,
-          crashes, unleased>>
+          codePushed, prs, pr, gate, mergeable, merges, pred, intent, watched, watchPosts,
+          marked, lease, up, inRun, crashes, unleased>>
 
 \* Commands a writer gives once: solve (a draft), ratify and a note. A retry
-\* is apart: a writer can give one after each build that stopped or failed.
+\* is apart: a writer can give one after each build that stopped or failed,
+\* to build again, or to watch the build's failed draft again.
 Cmds == {"solve", "ratify", "note"}
 
 \* Everything else the factory answers with one post: the commands, and the merge.
@@ -60,6 +64,9 @@ TypeOK ==
     /\ merges \in Nat
     /\ pred \in {"none", "draft", "retired", "closed", "merged"}
     /\ intent \in BOOLEAN
+    /\ watched \in BOOLEAN
+    /\ watchPosts \in Nat
+    /\ marked \in BOOLEAN
     /\ lease \in Watchers \cup {NoOne}
     /\ up \in [Watchers -> BOOLEAN]
     /\ inRun \in [Watchers -> RunKeys \cup {"none", "stale"}]
@@ -69,6 +76,7 @@ TypeOK ==
 NoDoubleAnswer ==
     /\ \A k \in Keys : posts[k] <= 1
     /\ retryPosts <= 1
+    /\ watchPosts <= 1
     /\ buildPosts <= 1
 
 NoRunTwice == \A k \in RunKeys : runStarts[k] <= 1
@@ -91,13 +99,18 @@ OnlyHolderActs == unleased = {}
 
 MergeOnlyAfterGate == merges >= 1 => gate = "pass" /\ mergeable
 
+ReadiedOnlyWhenWatched == marked => watched /\ watchPosts >= 1
+
+ReadiedOnlyAfterGate == marked => gate = "pass" /\ mergeable
+
 \* Helpers, computed only from what every watcher can see.
 
 \* The step for k has been asked for: a command was given, or the gate passed
-\* on a pull request that isn't a failed draft.
+\* on a pull request that isn't a failed draft, or on a failed draft that a
+\* writer's retry watches again, once that retry is answered.
 Triggered(k) ==
     CASE k \in Cmds -> k \in given
-      [] k = "merge" -> gate = "pass" /\ pr # "draft"
+      [] k = "merge" -> gate = "pass" /\ (pr # "draft" \/ (watched /\ watchPosts >= 1))
 
 \* A step is open until a post answers it; the post is always its last effect.
 Active(k) == Triggered(k) /\ posts[k] = 0
@@ -111,6 +124,10 @@ EffectsDone(k) ==
 
 \* The latest retry is still to be answered.
 RetryActive == retried /\ retryPosts = 0
+
+\* The retry that watches the latest build's failed draft again is still to
+\* be answered.
+WatchActive == watched /\ watchPosts = 0
 
 \* The latest retry builds again: nothing was left to replace, or its record
 \* says it replaces the draft, which is closed. A retry whose draft someone
@@ -150,15 +167,24 @@ MergedDraftKept == pred = "merged" /\ retryPosts = 1
 
 ClosedDraftNoted == pred = "closed" /\ ~intent /\ retryPosts = 1
 
+WatchedBeforeGate == watched /\ watchPosts = 1 /\ gate = "none"
+
+WatchedAndMerged == watched /\ marked /\ Merged
+
+WatchedButUnmergeable == watched /\ ~marked /\ gate = "pass" /\ ~mergeable /\ posts["merge"] = 1
+
 \* Properties.
 
 CommandsAnswered ==
     /\ \A c \in Cmds : c \in given ~> posts[c] >= 1
     /\ RetryActive ~> retryPosts >= 1
+    /\ WatchActive ~> watchPosts >= 1
 
 BuildsAnswered == BuildActive ~> buildPosts >= 1
 
 GatedPullRequestsSettled == (gate = "pass" /\ pr # "draft") ~> MergeDone
+
+WatchedDraftsSettled == (gate = "pass" /\ pr = "draft" /\ watched) ~> MergeDone
 
 \* The model.
 
@@ -179,6 +205,9 @@ Init ==
     /\ merges = 0
     /\ pred = "none"
     /\ intent = FALSE
+    /\ watched = FALSE
+    /\ watchPosts = 0
+    /\ marked = FALSE
     /\ lease = NoOne
     /\ up = [w \in Watchers |-> TRUE]
     /\ inRun = [w \in Watchers |-> "none"]
@@ -187,7 +216,8 @@ Init ==
 
 \* What the issue, its branch and its pull requests show every watcher.
 Shared == <<given, posts, retried, retryPosts, buildPosts, runs, runStarts, ratPushed,
-            codePushed, prs, pr, gate, mergeable, merges, pred, intent>>
+            codePushed, prs, pr, gate, mergeable, merges, pred, intent, watched, watchPosts,
+            marked>>
 
 \* A writer gives a command the issue protocol allows.
 Give(c) ==
@@ -195,18 +225,20 @@ Give(c) ==
     /\ c = "ratify" => posts["solve"] >= 1
     /\ given' = given \cup {c}
     /\ UNCHANGED <<posts, retried, retryPosts, buildPosts, runs, runStarts, ratPushed,
-                   codePushed, prs, pr, gate, mergeable, merges, pred, intent, lease, up,
-                   inRun, crashes, unleased>>
+                   codePushed, prs, pr, gate, mergeable, merges, pred, intent, watched,
+                   watchPosts, marked, lease, up, inRun, crashes, unleased>>
 
 \* A writer's retry, once the latest build was answered and stopped or left a
 \* failed draft: a new build, with its own agent run, that replaces that
 \* draft. After a build that stopped, the draft an earlier retry replaced is
 \* still the one this retry replaces, as that retry's record says. The
 \* factory takes up an issue's commands in turn, so a retry comes once every
-\* command before it is answered.
+\* command before it is answered. A draft a writer's retry watches again is
+\* never replaced.
 GiveRetry ==
     /\ buildPosts >= 1
     /\ pr \in {"none", "draft"}
+    /\ ~watched
     /\ merges = 0
     /\ \A k \in Keys : ~Active(k)
     /\ retried' = TRUE
@@ -222,7 +254,26 @@ GiveRetry ==
     /\ pr' = "none"
     /\ gate' = "none"
     /\ mergeable' = FALSE
-    /\ UNCHANGED <<given, posts, ratPushed, merges, lease, up, crashes, unleased>>
+    /\ UNCHANGED <<given, posts, ratPushed, merges, watched, watchPosts, marked, lease, up,
+                   crashes, unleased>>
+
+\* A writer's retry that watches the latest build's failed draft again, as a
+\* modeled project's is: it starts no build. Once the retry is answered and
+\* CI's gate passes on the draft, the factory marks the draft ready and
+\* merges it, or reports one it can't merge: GitHub refuses it, or it changes
+\* the trusted base, which only a person merges. The factory takes up an
+\* issue's commands in turn, so the retry comes once every command before it
+\* is answered.
+GiveWatch ==
+    /\ buildPosts >= 1
+    /\ pr = "draft"
+    /\ ~watched
+    /\ merges = 0
+    /\ \A k \in Keys : ~Active(k)
+    /\ watched' = TRUE
+    /\ UNCHANGED <<given, posts, retried, retryPosts, buildPosts, runs, runStarts, ratPushed,
+                   codePushed, prs, pr, gate, mergeable, merges, pred, intent, watchPosts,
+                   marked, lease, up, inRun, crashes, unleased>>
 
 \* CI's gate passes on the latest build's pull request; GitHub may or may not
 \* be able to merge it.
@@ -232,8 +283,8 @@ CIPass ==
     /\ gate' = "pass"
     /\ mergeable' \in BOOLEAN
     /\ UNCHANGED <<given, posts, retried, retryPosts, buildPosts, runs, runStarts,
-                   ratPushed, codePushed, prs, pr, merges, pred, intent, lease, up, inRun,
-                   crashes, unleased>>
+                   ratPushed, codePushed, prs, pr, merges, pred, intent, watched, watchPosts,
+                   marked, lease, up, inRun, crashes, unleased>>
 
 \* Someone else closes an open pull request: the latest build's, or the draft
 \* a retry replaces.
@@ -245,8 +296,8 @@ OthersClose ==
           /\ pred' = "closed"
           /\ UNCHANGED pr
     /\ UNCHANGED <<given, posts, retried, retryPosts, buildPosts, runs, runStarts,
-                   ratPushed, codePushed, prs, gate, mergeable, merges, intent, lease, up,
-                   inRun, crashes, unleased>>
+                   ratPushed, codePushed, prs, gate, mergeable, merges, intent, watched,
+                   watchPosts, marked, lease, up, inRun, crashes, unleased>>
 
 \* Someone else merges an open pull request.
 OthersMerge ==
@@ -257,8 +308,8 @@ OthersMerge ==
           /\ pred' = "merged"
           /\ UNCHANGED pr
     /\ UNCHANGED <<given, posts, retried, retryPosts, buildPosts, runs, runStarts,
-                   ratPushed, codePushed, prs, gate, mergeable, merges, intent, lease, up,
-                   inRun, crashes, unleased>>
+                   ratPushed, codePushed, prs, gate, mergeable, merges, intent, watched,
+                   watchPosts, marked, lease, up, inRun, crashes, unleased>>
 
 Acquire(w) ==
     /\ up[w]
@@ -302,7 +353,7 @@ Restart(w) ==
 \* A watcher may take an effect: it is running, holds the lease, and isn't waiting on a run.
 Holding(w) == up[w] /\ lease = w /\ inRun[w] = "none"
 
-EffectVars == <<given, retried, gate, mergeable, lease, up, crashes, unleased>>
+EffectVars == <<given, retried, gate, mergeable, watched, lease, up, crashes, unleased>>
 
 \* Record the agent run, then start it: the draft's, or the latest build's.
 StartRun(w, k) ==
@@ -315,6 +366,7 @@ StartRun(w, k) ==
     /\ inRun' = [inRun EXCEPT ![w] = k]
     /\ UNCHANGED <<posts, retryPosts, buildPosts, ratPushed, codePushed, prs, pr, merges,
                    pred, intent>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* A run recorded and never finished stopped partway: say so, and start no other.
@@ -331,6 +383,7 @@ ReportStopped(w, k) ==
           /\ UNCHANGED posts
     /\ UNCHANGED <<retryPosts, runs, runStarts, ratPushed, codePushed, prs, pr, merges,
                    pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 PushRatification(w) ==
@@ -340,6 +393,7 @@ PushRatification(w) ==
     /\ ratPushed' = TRUE
     /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, codePushed, prs, pr,
                    merges, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* Before closing the draft a retry replaces, store the retry's record that
@@ -352,6 +406,7 @@ RecordIntent(w) ==
     /\ intent' = TRUE
     /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                    prs, pr, merges, pred, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* Close the draft the retry replaces, as its record says.
@@ -363,6 +418,7 @@ Retire(w) ==
     /\ pred' = "retired"
     /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                    prs, pr, merges, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 PushCode(w) ==
@@ -373,6 +429,7 @@ PushCode(w) ==
     /\ codePushed' = TRUE
     /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, prs, pr,
                    merges, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* Open the latest build's pull request: ready when its checks and review
@@ -387,6 +444,7 @@ OpenPullRequest(w, ready) ==
     /\ pr' = IF ready THEN "ready" ELSE "draft"
     /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                    merges, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 MergePullRequest(w) ==
@@ -399,6 +457,7 @@ MergePullRequest(w) ==
     /\ pr' = "merged"
     /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                    prs, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* The post that answers step k, once no answer is there yet.
@@ -409,6 +468,7 @@ Post(w, k) ==
     /\ posts' = [posts EXCEPT ![k] = @ + 1]
     /\ UNCHANGED <<retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed, prs, pr,
                    merges, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* Answer the latest retry, once the draft it replaces is closed or merged.
@@ -419,6 +479,7 @@ AnswerRetry(w) ==
     /\ retryPosts' = retryPosts + 1
     /\ UNCHANGED <<posts, buildPosts, runs, runStarts, ratPushed, codePushed, prs, pr,
                    merges, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
     /\ UNCHANGED EffectVars
 
 \* Answer the latest build with its pull request.
@@ -431,6 +492,30 @@ PostBuild(w) ==
     /\ buildPosts' = buildPosts + 1
     /\ UNCHANGED <<posts, retryPosts, runs, runStarts, ratPushed, codePushed, prs, pr,
                    merges, pred, intent, inRun>>
+    /\ UNCHANGED <<watchPosts, marked>>
+    /\ UNCHANGED EffectVars
+
+\* Answer a writer's retry that watches the latest build's failed draft
+\* again: the factory watches it, and says what follows once CI's gate passes.
+AnswerWatch(w) ==
+    /\ Holding(w)
+    /\ WatchActive
+    /\ watchPosts' = watchPosts + 1
+    /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed, prs,
+                   pr, merges, pred, intent, inRun, marked>>
+    /\ UNCHANGED EffectVars
+
+\* Mark the watched draft ready, once CI's gate passed on it and the factory
+\* can merge it, so it merges as a ready pull request does.
+MarkReady(w) ==
+    /\ Holding(w)
+    /\ Active("merge")
+    /\ pr = "draft"
+    /\ mergeable
+    /\ pr' = "ready"
+    /\ marked' = TRUE
+    /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed, prs,
+                   merges, pred, intent, inRun, watchPosts>>
     /\ UNCHANGED EffectVars
 
 Act(w) ==
@@ -444,6 +529,8 @@ Act(w) ==
     \/ \E k \in Keys : Post(w, k)
     \/ AnswerRetry(w)
     \/ PostBuild(w)
+    \/ AnswerWatch(w)
+    \/ MarkReady(w)
 
 \* The agent run finishes and the holder records it. A run a retry made stale
 \* is recorded as its own, which no longer counts for the latest build.
@@ -454,8 +541,8 @@ FinishRun(w) ==
     /\ runs' = IF inRun[w] = "stale" THEN runs ELSE [runs EXCEPT ![inRun[w]] = "done"]
     /\ inRun' = [inRun EXCEPT ![w] = "none"]
     /\ UNCHANGED <<given, posts, retried, retryPosts, buildPosts, runStarts, ratPushed,
-                   codePushed, prs, pr, gate, mergeable, merges, pred, intent, lease, up,
-                   crashes, unleased>>
+                   codePushed, prs, pr, gate, mergeable, merges, pred, intent, watched,
+                   watchPosts, marked, lease, up, crashes, unleased>>
 
 \* A watcher that finds it lost the lease drops its run without recording anything.
 DropRun(w) ==
@@ -469,12 +556,14 @@ DropRun(w) ==
 Rest ==
     /\ \A k \in Keys : ~Active(k)
     /\ ~RetryActive
+    /\ ~WatchActive
     /\ ~BuildActive
     /\ UNCHANGED vars
 
 Next ==
     \/ \E c \in Cmds : Give(c)
     \/ GiveRetry
+    \/ GiveWatch
     \/ CIPass
     \/ OthersClose
     \/ OthersMerge
@@ -508,6 +597,7 @@ PostWithoutLooking ==
         /\ posts' = [posts EXCEPT ![k] = @ + 1]
         /\ UNCHANGED <<retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed, prs,
                        pr, merges, pred, intent, inRun>>
+        /\ UNCHANGED <<watchPosts, marked>>
         /\ UNCHANGED EffectVars
 
 \* A watcher that finds a run that stopped partway starts it again.
@@ -522,6 +612,7 @@ RerunStoppedRun ==
         /\ inRun' = [inRun EXCEPT ![w] = k]
         /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, ratPushed, codePushed, prs, pr,
                        merges, pred, intent>>
+        /\ UNCHANGED <<watchPosts, marked>>
         /\ UNCHANGED EffectVars
 
 \* A watcher that woke after its lease ran out posts without checking the lease.
@@ -534,9 +625,9 @@ PostWithoutLease ==
         /\ EffectsDone(k)
         /\ posts' = [posts EXCEPT ![k] = @ + 1]
         /\ unleased' = unleased \cup {w}
-        /\ UNCHANGED <<given, retried, gate, mergeable, lease, up, crashes>>
+        /\ UNCHANGED <<given, retried, gate, mergeable, watched, lease, up, crashes>>
         /\ UNCHANGED <<retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed, prs,
-                       pr, merges, pred, intent, inRun>>
+                       pr, merges, pred, intent, inRun, watchPosts, marked>>
 
 \* A watcher finds no open pull request for the latest build, misses the one
 \* it opened that was since closed or merged, and opens another.
@@ -552,6 +643,7 @@ OpenWithoutLookingClosed ==
         /\ pr' = "draft"
         /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                        merges, pred, intent, inRun>>
+        /\ UNCHANGED <<watchPosts, marked>>
         /\ UNCHANGED EffectVars
 
 \* A retry's build opens its pull request while the draft it replaces is
@@ -566,6 +658,7 @@ OpenBeforeRetiring ==
         /\ pr' = "ready"
         /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                        merges, pred, intent, inRun>>
+        /\ UNCHANGED <<watchPosts, marked>>
         /\ UNCHANGED EffectVars
 
 \* The factory closes the draft before storing the retry's record, so after a
@@ -578,6 +671,7 @@ RetireWithoutRecord ==
         /\ pred' = "retired"
         /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
                        prs, pr, merges, intent, inRun>>
+        /\ UNCHANGED <<watchPosts, marked>>
         /\ UNCHANGED EffectVars
 
 \* A retry whose draft someone merged builds again anyway.
@@ -594,12 +688,14 @@ ReplaceMergedDraft ==
         /\ inRun' = [inRun EXCEPT ![w] = "build"]
         /\ UNCHANGED <<posts, retryPosts, buildPosts, ratPushed, codePushed, prs, pr, merges,
                        pred, intent>>
+        /\ UNCHANGED <<watchPosts, marked>>
         /\ UNCHANGED EffectVars
 
 \* A writer's retry keeps CI's result from the draft it replaces.
 KeepGateAcrossRetry ==
     /\ buildPosts >= 1
     /\ pr \in {"none", "draft"}
+    /\ ~watched
     /\ merges = 0
     /\ \A k \in Keys : ~Active(k)
     /\ retried' = TRUE
@@ -613,8 +709,8 @@ KeepGateAcrossRetry ==
     /\ codePushed' = FALSE
     /\ prs' = 0
     /\ pr' = "none"
-    /\ UNCHANGED <<given, posts, ratPushed, merges, gate, mergeable, lease, up, crashes,
-                   unleased>>
+    /\ UNCHANGED <<given, posts, ratPushed, merges, gate, mergeable, watched, watchPosts,
+                   marked, lease, up, crashes, unleased>>
 
 \* A watcher whose agent run a retry made stale records it as the latest
 \* build's.
@@ -626,8 +722,8 @@ FinishStaleRun ==
         /\ runs' = [runs EXCEPT !["build"] = "done"]
         /\ inRun' = [inRun EXCEPT ![w] = "none"]
         /\ UNCHANGED <<given, posts, retried, retryPosts, buildPosts, runStarts, ratPushed,
-                       codePushed, prs, pr, gate, mergeable, merges, pred, intent, lease, up,
-                       crashes, unleased>>
+                       codePushed, prs, pr, gate, mergeable, merges, pred, intent, watched,
+                       watchPosts, marked, lease, up, crashes, unleased>>
 
 \* A watcher that woke after its lease ran out closes the draft without
 \* checking the lease.
@@ -641,9 +737,66 @@ CloseWithoutLease ==
         /\ intent
         /\ pred' = "retired"
         /\ unleased' = unleased \cup {w}
-        /\ UNCHANGED <<given, retried, gate, mergeable, lease, up, crashes>>
+        /\ UNCHANGED <<given, retried, gate, mergeable, watched, lease, up, crashes>>
         /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
-                       prs, pr, merges, intent, inRun>>
+                       prs, pr, merges, intent, inRun, watchPosts, marked>>
+
+\* The factory marks a failed draft ready when no writer's retry watches it
+\* again.
+MarkReadyWithoutWatch ==
+    \E w \in Watchers :
+        /\ Holding(w)
+        /\ pr = "draft"
+        /\ ~watched
+        /\ gate = "pass"
+        /\ mergeable
+        /\ pr' = "ready"
+        /\ marked' = TRUE
+        /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
+                       prs, merges, pred, intent, inRun, watchPosts>>
+        /\ UNCHANGED EffectVars
+
+\* The factory marks a watched draft ready before CI's gate passes on it.
+MarkReadyBeforeGate ==
+    \E w \in Watchers :
+        /\ Holding(w)
+        /\ pr = "draft"
+        /\ watched
+        /\ watchPosts >= 1
+        /\ gate = "none"
+        /\ pr' = "ready"
+        /\ marked' = TRUE
+        /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
+                       prs, merges, pred, intent, inRun, watchPosts>>
+        /\ UNCHANGED EffectVars
+
+\* The factory marks ready a watched draft it can't merge, such as one that
+\* changes the trusted base.
+MarkUnmergeableReady ==
+    \E w \in Watchers :
+        /\ Holding(w)
+        /\ pr = "draft"
+        /\ watched
+        /\ watchPosts >= 1
+        /\ gate = "pass"
+        /\ ~mergeable
+        /\ pr' = "ready"
+        /\ marked' = TRUE
+        /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
+                       prs, merges, pred, intent, inRun, watchPosts>>
+        /\ UNCHANGED EffectVars
+
+\* A watcher answers a retry that watches a failed draft again without
+\* looking for an answer already there.
+AnswerWatchWithoutLooking ==
+    \E w \in Watchers :
+        /\ Holding(w)
+        /\ watched
+        /\ watchPosts < 2
+        /\ watchPosts' = watchPosts + 1
+        /\ UNCHANGED <<posts, retryPosts, buildPosts, runs, runStarts, ratPushed, codePushed,
+                       prs, pr, merges, pred, intent, inRun, marked>>
+        /\ UNCHANGED EffectVars
 
 Spec == Init /\ [][Next]_vars
 ====

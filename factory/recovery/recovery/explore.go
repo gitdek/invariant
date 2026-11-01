@@ -21,6 +21,7 @@ var keyNames = [NumKeys]string{
 	Ratify: "ratify",
 	Note:   "note",
 	Retry:  "retry",
+	Watch:  "watch",
 	Build:  "build",
 	Merge:  "merge",
 }
@@ -42,7 +43,8 @@ var (
 // State is the model's state at its bounds. Watchers are 0..Watchers-1, a
 // Lease of NoOne is "nobody", and an InRun of NoRun is "none". Given[Retry]
 // is the spec's retried, and Posts[Retry] and Posts[Build] its retryPosts and
-// buildPosts. Attempts count from the latest build's, which is latest, so
+// buildPosts; Given[Watch] is its watched, and Posts[Watch] its watchPosts.
+// Attempts count from the latest build's, which is latest, so
 // Earlier marks a watcher in a build's run that an earlier attempt started:
 // the spec's stale run.
 type State struct {
@@ -59,6 +61,7 @@ type State struct {
 	Merges     int
 	Pred       int
 	Intent     bool
+	Marked     bool
 	Lease      int
 	Up         [Watchers]bool
 	InRun      [Watchers]int
@@ -107,6 +110,7 @@ func repoOf(s State) Repo {
 	r.Merged = s.Merges > 0
 	r.Pred = s.Pred
 	r.Intent = s.Intent
+	r.Marked = s.Marked
 	r.Attempt = latest
 	r.Lease = s.Lease
 	return r
@@ -137,6 +141,7 @@ func withRepo(s State, r Repo) State {
 	s.Merges = b2i(r.Merged)
 	s.Pred = r.Pred
 	s.Intent = r.Intent
+	s.Marked = r.Marked
 	s.Lease = r.Lease
 	return s
 }
@@ -206,6 +211,15 @@ func Try(s State, tried func(step string, args []any, next State)) {
 			n.RunStarts[runIndex(Build)] = 0
 		}
 		tried("GiveRetry", []any{}, n)
+	}
+
+	// A writer's retry watches the latest build's failed draft again.
+	{
+		n := s
+		if t, ok := r.Give(Watch); ok {
+			n = withRepo(s, t)
+		}
+		tried("GiveWatch", []any{}, n)
 	}
 
 	// CI's gate passes, with the pull request mergeable or not.
@@ -320,6 +334,7 @@ func Try(s State, tried func(step string, args []any, next State)) {
 		for _, ready := range []bool{false, true} {
 			act(func() (Repo, bool) { return r.OpenPullRequest(wt, Build, ready) })
 		}
+		act(func() (Repo, bool) { return r.MarkReady(wt) })
 		act(func() (Repo, bool) { return r.MergePullRequest(wt, Merge) })
 		for k := 0; k < NumKeys; k++ {
 			act(func() (Repo, bool) { return r.Post(wt, k) })
@@ -423,6 +438,9 @@ func Abstract(s State) map[string]any {
 		"merges":     s.Merges,
 		"pred":       predNames[s.Pred],
 		"intent":     s.Intent,
+		"watched":    s.Given[Watch],
+		"watchPosts": s.Posts[Watch],
+		"marked":     s.Marked,
 		"lease":      lease,
 		"up":         fn(up),
 		"inRun":      fn(inRun),
