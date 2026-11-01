@@ -90,6 +90,18 @@ func tlapsSoundness(t *testing.T) map[string][]string {
 	return out
 }
 
+// TestTLAPSRunsTlapmsOwnParser checks that the gate runs tlapm's own parser,
+// the one the known soundness tests and the gate's refusals were checked
+// against: it never passes --parser, which picks SANY since eef4b65, or
+// --module-jar (#385, D-0269).
+func TestTLAPSRunsTlapmsOwnParser(t *testing.T) {
+	for _, o := range tlapsOptions {
+		if o == "--parser" || strings.HasPrefix(o, "--parser=") || o == "--module-jar" || strings.HasPrefix(o, "--module-jar=") {
+			t.Fatalf("the gate's tlapm options choose a parser or module jar: %v", tlapsOptions)
+		}
+	}
+}
+
 // TestTLAPSClosesEveryKnownSoundnessIssue checks that every unsoundness the
 // pinned tlapm marks "known" is one the gate rules out, each by a refusal a
 // representative triggers or by a reason it can't arise that this test
