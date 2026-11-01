@@ -40,6 +40,10 @@ type fakeGitHub struct {
 	nextID    int64
 	nextPR    int
 	failPRs   int // pull requests to refuse, as GitHub can
+	// at is when the next comment is made, as GitHub writes it, for a test
+	// that orders comments against a pull request's events (#371). Empty,
+	// every comment is made at 2026-09-25T11:00:00Z.
+	at string
 }
 
 func newFakeGitHub(t *testing.T, origin string) *fakeGitHub {
@@ -65,9 +69,13 @@ func (g *fakeGitHub) say(issue int, by, body string) github.Comment {
 	if strings.HasSuffix(by, "[bot]") {
 		kind = "Bot"
 	}
+	at := g.at
+	if at == "" {
+		at = "2026-09-25T11:00:00Z"
+	}
 	c := github.Comment{ID: g.nextID, Body: body, User: github.User{Login: by, Type: kind},
 		URL:      fmt.Sprintf("https://github.com/o/r/issues/%d#issuecomment-%d", issue, g.nextID),
-		IssueURL: fmt.Sprintf("https://api.github.com/repos/o/r/issues/%d", issue), CreatedAt: "2026-09-25T11:00:00Z"}
+		IssueURL: fmt.Sprintf("https://api.github.com/repos/o/r/issues/%d", issue), CreatedAt: at}
 	g.comments[issue] = append(g.comments[issue], c)
 	return c
 }

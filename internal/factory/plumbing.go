@@ -424,15 +424,16 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 
 // waitForPerson says a pull request passed everything, but changes the
 // trusted base, so a person merges it, whether it builds a plan or a
-// project (D-0105, D-0109).
-func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, trusted []string, next Marker) error {
+// project (D-0105, D-0109). watched says a draft is one a writer's retry
+// watches as that draft (#371).
+func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, watched bool, trusted []string, next Marker) error {
 	n := t.Issue.Number
 	from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
 	to.failure = FailTrusted
 	if err := f.allowed(ctx, n, fmt.Sprintf("say #%d waits for a person to merge it", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(t, pr, false, false), recovery.Merge)); err != nil {
+	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(watched, pr, false, false), recovery.Merge)); err != nil {
 		return err
 	}
 	next.Failure = FailTrusted

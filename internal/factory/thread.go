@@ -127,11 +127,19 @@ const (
 	// draft, and never builds again (#369's review).
 	FailUnready = "unready"
 	// FailDraft is a pull request whose gate passed that is a draft no
-	// writer's retry watches, such as one a person made of the factory's
-	// pull request, which the factory won't mark ready until a retry asks it
-	// to. The protocol counts it as one the factory can't merge (#369's
-	// review).
+	// writer's retry watches as that draft, such as one a person made of the
+	// factory's pull request, before any retry watched it or after a retry
+	// watched it ready, which the factory won't mark ready until a retry asks
+	// it to. The protocol counts it as one the factory can't merge (#369's
+	// review, #371).
 	FailDraft = "draft"
+)
+
+// The states a writer's retry can watch a pull request in, as the factory's
+// answer records them (#371).
+const (
+	WatchedDraft = "draft"
+	WatchedReady = "ready"
 )
 
 // maxStops is how many builds of an issue can stop before it makes a pull
@@ -157,6 +165,11 @@ type Marker struct {
 	// the plan's ratification.
 	Replaces int    `json:"replaces,omitempty"`
 	From     string `json:"from,omitempty"`
+	// Watched is what the factory's answer to a writer's retry that watches
+	// the pull request saw it as: WatchedDraft or WatchedReady (#371). Only
+	// that answer records it, and one from before answers recorded it has
+	// neither, which the factory takes as watching no draft.
+	Watched string `json:"watched,omitempty"`
 	// Gone says a retry's build couldn't start, since the commit holding the
 	// plan's ratification that it starts from is gone, so a person drafts the
 	// plan again (D-0220, D-0238).
@@ -180,9 +193,9 @@ type Marker struct {
 }
 
 // carried is the marker a later post carries forward: the same issue state,
-// without the step's own numbers or agent.
+// without the step's own numbers or agent, or what a retry's answer watched.
 func (m Marker) carried() Marker {
-	m.Spend, m.GateRuns, m.Agent, m.Numbers = 0, 0, "", nil
+	m.Spend, m.GateRuns, m.Agent, m.Numbers, m.Watched = 0, 0, "", nil, ""
 	return m
 }
 

@@ -560,14 +560,24 @@ func unreadyComment(pr github.PullRequest, answer error, m Marker) string {
 }
 
 // unwatchedComment says CI's gate passed on a draft no writer's retry
-// watches, such as one a person made of the factory's pull request, so the
-// factory hasn't marked it ready, and how to go on: a writer's retry
-// watches it, and closing it or the issue stops the factory (#369's
-// review).
-func unwatchedComment(pr github.PullRequest, m Marker) string {
+// watches as that draft, such as one a person made of the factory's pull
+// request, so the factory hasn't marked it ready, and how to go on: a draft
+// stops the factory, and a writer's retry watches it (#369's review). One
+// the factory's answer to a retry saw ready, or saw as a draft before
+// someone made it ready, someone turned into a draft since, which the post
+// says, and one whose answer is from before answers recorded what they
+// watched, the factory can't tell (#371).
+func unwatchedComment(pr github.PullRequest, w watchState, m Marker) string {
+	why := "it's a draft, and no retry asked me to watch it"
+	switch w {
+	case watchReady, watchRedrafted:
+		why = "someone turned it into a draft after I said I'd watch it"
+	case watchUnknown:
+		why = "it's a draft, and I answered the retry that has me watch it before I recorded whether I watched a draft"
+	}
 	_, trusted, unsure := trustedOf(m)
-	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but it's a draft, and no retry asked me to watch it, so I haven't marked it ready or merged it. "+
-		"If someone made it a draft to stop me, close #%d or this issue.", pr.Number, pr.Number), m,
+	return post("needs a person", fmt.Sprintf("CI's `invariant/gate` passed on #%d, but %s, so I haven't marked it ready or merged it. "+
+		"If someone made it a draft to stop me, it stays stopped.", pr.Number, why), m,
 		fmt.Sprintf("\n\nA person needs to look at this. To have me merge it after all, comment `/invariant retry` to have me watch #%d again. %s", pr.Number, watchedAgain(pr, trusted, unsure)))
 }
 

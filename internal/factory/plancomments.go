@@ -128,11 +128,19 @@ func rebuildOffer(pr int, trusted bool) string {
 // the factory will make one: a pull request that changes the trusted base
 // waits for a person, a plan's or a project's (D-0105, D-0109). trusted is
 // what its branch changes there now, as the scope check before a merge
-// reads it.
+// reads it. When the factory will merge it, the answer says how a person
+// stops it: closing it or the issue, or turning a ready one into a draft,
+// since the factory marks ready only a draft a retry watched as that draft
+// (#371).
 func retriedComment(pr github.PullRequest, trusted []string, m Marker) string {
 	body := fmt.Sprintf("Watching #%d again. %s", pr.Number, watchedAgain(pr, len(trusted) > 0, false))
-	if len(trusted) > 0 {
+	switch {
+	case len(trusted) > 0:
 		body += fmt.Sprintf("\n\nIt changes these files in the trusted base: %s.", codeList(trusted))
+	case pr.Draft:
+		body += fmt.Sprintf(" To stop me, close #%d or this issue.", pr.Number)
+	default:
+		body += fmt.Sprintf(" To stop me, turn #%d into a draft, or close it or this issue.", pr.Number)
 	}
 	return post("pull request", body, m)
 }
