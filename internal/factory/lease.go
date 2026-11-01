@@ -30,8 +30,12 @@ import (
 // losing the lease stops every one before its next effect, and each drops
 // its agent run (D-0113). A watcher that takes the lease back after another
 // held it starts a new tenure, and a step it started in an earlier one takes
-// no effect: what it read of the issue may be older than the other watcher's
-// effects (D-0227).
+// no effect, since what it read of the issue may be older than the other
+// watcher's effects, but for recording what its agent run left; nor does an
+// effect outside any step. A push of the lease whose answer was lost is the
+// watcher's own once it reads it back, and starts a tenure only if it took
+// the lease from elsewhere (D-0237). The proved cores see only whether the
+// watcher holds the lease: the tenure check is here alone.
 
 const leaseRef = "refs/invariant/lease"
 
@@ -50,6 +54,10 @@ var ErrLeaseMoved = errors.New("another watcher moved the lease")
 
 // errLeaseLost stops an effect when the watcher no longer holds the lease.
 var errLeaseLost = errors.New("this watcher no longer holds the repository's lease")
+
+// errStaleTenure stops an effect of a step this watcher started before it
+// took the lease back from another watcher, or of none of its steps.
+var errStaleTenure = errors.New("this watcher took the lease back after another watcher held it, so a step it started before then takes no effect")
 
 // NewHolder names a watcher for its lease: random, so it says nothing about
 // the machine it runs on.
@@ -84,7 +92,8 @@ func (c Clone) readLease(ctx context.Context) (sha string, rec LeaseRecord, err 
 
 // PushLease puts rec in place of the lease at old, or where there's no lease
 // when old is empty. It fails with ErrLeaseMoved if the ref isn't at old any
-// more.
+// more. A push git reports failed that its own read shows landed, as when
+// its answer was lost, pushed the lease.
 func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (string, error) {
 	defer c.lock()()
 	msg, err := json.Marshal(rec)
@@ -97,7 +106,10 @@ func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (stri
 	}
 	if err := c.pushRef(ctx, leaseRef, old, commit); err != nil {
 		now, _, readErr := c.readLease(ctx)
-		if readErr == nil && now != old && now != commit {
+		switch {
+		case readErr == nil && now == commit:
+			return commit, nil
+		case readErr == nil && now != old:
 			return "", ErrLeaseMoved
 		}
 		return "", err
@@ -125,7 +137,19 @@ type lease struct {
 	sha     string    // the lease it last pushed
 	until   time.Time // when its lease runs out, by its own clock; zero when it holds none
 	waiting string    // the holder it last said it was waiting for
-	tenure  uint64    // counts each time it took the lease from where it last left it
+	// tenure counts each time it took the lease from somewhere other than
+	// where it last left it, as after another watcher held it.
+	tenure uint64
+	// tried is a lease it pushed without learning whether the push landed,
+	// and whether that push took the lease from somewhere else: a lease that
+	// says what it tried is its own, from then.
+	tried *triedLease
+}
+
+// triedLease is a push of the lease whose outcome a watcher never learned.
+type triedLease struct {
+	rec      LeaseRecord
+	takeover bool
 }
 
 // tenureKey is the context key for the tenure a step started in.
@@ -149,6 +173,15 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 		f.lease.until = time.Time{}
 		return false, err
 	}
+	// A lease that says what this watcher last tried to push, when it never
+	// learned whether the push landed, is the one it pushed: its own, and a
+	// new tenure only if that push took the lease from elsewhere.
+	if t := f.lease.tried; t != nil && sha != "" && rec.Holder == t.rec.Holder && rec.Until.Equal(t.rec.Until) {
+		if t.takeover {
+			f.lease.tenure++
+		}
+		f.lease.sha, f.lease.until, f.lease.waiting, f.lease.tried = sha, t.rec.Until, "", nil
+	}
 	// It renews only once half its lease has gone, to push less often.
 	if sha != "" && sha == f.lease.sha && rec.Holder == f.Holder && f.lease.until.Sub(now) > f.LeaseFor/2 {
 		return true, nil
@@ -166,10 +199,13 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	if err != nil {
 		f.lease.until = time.Time{}
 		if errors.Is(err, ErrLeaseMoved) {
+			f.lease.tried = nil
 			return false, nil
 		}
+		f.lease.tried = &triedLease{rec: next, takeover: sha != f.lease.sha}
 		return false, err
 	}
+	f.lease.tried = nil
 	if rec.Holder != f.Holder || sha == "" {
 		f.logf("holding the lease on %s as %s", f.Repository, f.Holder)
 	}
@@ -193,16 +229,44 @@ func (f *Factory) holds() bool {
 	return f.now().Before(f.lease.until.Add(-leaseSkew))
 }
 
-// holdsFor says whether the step ctx belongs to may act: this watcher holds
-// the lease, in the tenure the step started in, if it started in one.
-func (f *Factory) holdsFor(ctx context.Context) bool {
+// mayAct says why the step ctx belongs to may not act, if it may not: this
+// watcher doesn't hold the lease, or holds it in a later tenure than the
+// step started in, or ctx belongs to no step at all.
+func (f *Factory) mayAct(ctx context.Context) error {
 	if f.LeaseFor == 0 {
-		return true
+		return nil
 	}
 	f.lease.mu.Lock()
 	defer f.lease.mu.Unlock()
-	tenure, ok := ctx.Value(tenureKey{}).(uint64)
-	return f.now().Before(f.lease.until.Add(-leaseSkew)) && (!ok || tenure == f.lease.tenure)
+	if !f.now().Before(f.lease.until.Add(-leaseSkew)) {
+		return errLeaseLost
+	}
+	if tenure, ok := ctx.Value(tenureKey{}).(uint64); !ok || tenure != f.lease.tenure {
+		return errStaleTenure
+	}
+	return nil
+}
+
+// errResumed is an agent run that outlived its step's tenure: the watcher
+// recorded its result on the run's own ref, and its next step publishes it.
+var errResumed = errors.New("this watcher took the lease back while the agent ran, so it recorded the run's result and leaves the rest to its next step")
+
+// resumed is ctx for recording an agent run's result once the run ends: as
+// it was, or, when this watcher took the lease back in a new tenure while
+// the run went, in that tenure, with resumed set. A run's ref only moves
+// from the commit the watcher recorded there, which no other watcher
+// writes, so its result can be recorded in any tenure, unlike any other
+// effect of a step from an earlier one (D-0237).
+func (f *Factory) resumed(ctx context.Context) (context.Context, bool) {
+	if f.holdsFor(ctx) {
+		return ctx, false
+	}
+	return f.inTenure(ctx), true
+}
+
+// holdsFor says whether the step ctx belongs to may act.
+func (f *Factory) holdsFor(ctx context.Context) bool {
+	return f.mayAct(ctx) == nil
 }
 
 // keepLease renews the lease every poll while ctx lasts, so it holds through
@@ -227,64 +291,64 @@ type leasedGitHub struct {
 }
 
 func (g leasedGitHub) PostComment(ctx context.Context, issue int, body string) (c github.Comment, err error) {
-	if !g.f.holdsFor(ctx) {
-		return c, errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return c, err
 	}
 	return g.GitHub.PostComment(ctx, issue, body)
 }
 
 func (g leasedGitHub) CreateIssue(ctx context.Context, is github.NewIssue) (i github.Issue, err error) {
-	if !g.f.holdsFor(ctx) {
-		return i, errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return i, err
 	}
 	return g.GitHub.CreateIssue(ctx, is)
 }
 
 func (g leasedGitHub) AddLabels(ctx context.Context, issue int, labels ...string) error {
-	if !g.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return g.GitHub.AddLabels(ctx, issue, labels...)
 }
 
 func (g leasedGitHub) RemoveLabel(ctx context.Context, issue int, label string) error {
-	if !g.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return g.GitHub.RemoveLabel(ctx, issue, label)
 }
 
 func (g leasedGitHub) CreatePullRequest(ctx context.Context, pr github.NewPullRequest) (p github.PullRequest, err error) {
-	if !g.f.holdsFor(ctx) {
-		return p, errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return p, err
 	}
 	return g.GitHub.CreatePullRequest(ctx, pr)
 }
 
 func (g leasedGitHub) Merge(ctx context.Context, n int, sha, method string) (string, error) {
-	if !g.f.holdsFor(ctx) {
-		return "", errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return "", err
 	}
 	return g.GitHub.Merge(ctx, n, sha, method)
 }
 
 func (g leasedGitHub) MarkReady(ctx context.Context, n int) error {
-	if !g.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return g.GitHub.MarkReady(ctx, n)
 }
 
 func (g leasedGitHub) ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error) {
-	if !g.f.holdsFor(ctx) {
-		return github.PullRequest{}, errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return github.PullRequest{}, err
 	}
 	return g.GitHub.ClosePullRequest(ctx, n)
 }
 
 func (g leasedGitHub) DeleteBranch(ctx context.Context, branch string) error {
-	if !g.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := g.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return g.GitHub.DeleteBranch(ctx, branch)
 }
@@ -296,29 +360,29 @@ type leasedRepo struct {
 }
 
 func (r leasedRepo) Push(ctx context.Context, worktree, branch string) error {
-	if !r.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := r.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return r.Repo.Push(ctx, worktree, branch)
 }
 
 func (r leasedRepo) PushCommit(ctx context.Context, commit, branch string) error {
-	if !r.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := r.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return r.Repo.PushCommit(ctx, commit, branch)
 }
 
 func (r leasedRepo) Record(ctx context.Context, issue int, step, what string) error {
-	if !r.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := r.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return r.Repo.Record(ctx, issue, step, what)
 }
 
 func (r leasedRepo) Finish(ctx context.Context, issue int, step, result string) error {
-	if !r.f.holdsFor(ctx) {
-		return errLeaseLost
+	if err := r.f.mayAct(ctx); err != nil {
+		return err
 	}
 	return r.Repo.Finish(ctx, issue, step, result)
 }

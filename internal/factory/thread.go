@@ -144,6 +144,10 @@ type Marker struct {
 	// the plan's ratification.
 	Replaces int    `json:"replaces,omitempty"`
 	From     string `json:"from,omitempty"`
+	// Gone says a retry's build couldn't start, since the commit holding the
+	// plan's ratification that it starts from is gone, so a person drafts the
+	// plan again (D-0220, D-0238).
+	Gone bool `json:"gone,omitempty"`
 	// Spend is the agents' estimated cost for the step this post reports,
 	// and GateRuns the gate runs its synthesis used. A post that carries an
 	// earlier marker forward clears them, so nothing counts twice (D-0048).

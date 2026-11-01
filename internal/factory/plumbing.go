@@ -239,9 +239,13 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	f.runsAgent(n, agent, out)
 	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
-	if !f.holdsFor(ctx) {
+	// As for a project: a watcher that lost the lease drops the run, and one
+	// that took it back in a new tenure records its result, and its next
+	// step publishes it, if the build still stands.
+	if !f.holds() {
 		return "", "", nil, nil, errLeaseLost
 	}
+	ctx, resumed := f.resumed(ctx)
 	// As for a project, the run's error, summary and review name the paths on
 	// this machine as localPaths does. The summary quotes the agent run's
 	// error.
@@ -296,6 +300,9 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	}
 	if err := f.Repo.Finish(ctx, n, step, result); err != nil {
 		return "", "", nil, nil, err
+	}
+	if resumed {
+		return "", "", nil, nil, errResumed
 	}
 	return result, agent, res, runErr, nil
 }

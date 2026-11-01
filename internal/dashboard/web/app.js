@@ -1312,6 +1312,7 @@
   // does then is the server's to say, in retryText (#263).
   function why(w, repo) {
     if (w.kind === "stuck") return "The factory couldn't make a draft that checks out. Say what to change in a comment on the issue, then have it draft again.";
+    if (w.gone) return "The factory can't build the plan again: the commit holding its ratification is gone. Draft the plan again, and ratify the new draft before it's built.";
     const pr = w.pr ? `<a href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener"><strong>${esc(ref(repo, w.pr))}</strong></a>` : "the pull request";
     switch (w.failure) {
       case "stopped": return "The build stopped before it made a pull request. Build it again, or draft again from the comments.";
