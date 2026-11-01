@@ -428,6 +428,21 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			if row := gp359Proof(t, r); row.Status != Unqualified {
 				t.Fatalf("a proof without its condition counts as %s", row.Status)
 			}
+			// Attributing other evidence later retains the proof and its mark.
+			inv := r.Components.Inventory
+			var runtime []ComponentRuntimeResult
+			for _, row := range r.Components.Runtime {
+				runtime = append(runtime, row.Result)
+			}
+			if err := r.AttributeComponentRuntime(&inv, runtime); err != nil {
+				t.Fatalf("runtime attribution beside an unqualified proof: %v", err)
+			}
+			if err := r.AttributeComponentAssumptions(&inv, nil); err != nil {
+				t.Fatalf("assumption attribution beside an unqualified proof: %v", err)
+			}
+			if row := gp359Proof(t, r); row.Status != Unqualified {
+				t.Fatalf("attribution turned an unqualified proof %s", row.Status)
+			}
 		})
 		t.Run("failing conformance on the function", func(t *testing.T) {
 			gp359Verifier(t, real)
@@ -593,8 +608,8 @@ func TestPythonApplicationGateRefusesWhatTheStandInDoesntProvide(t *testing.T) {
 			// the postcondition past the bounds, where Nagini reads the
 			// builtin.
 			gp359Edit(t, f, gp359Source, "        return count + STEP\n", "        return min(count + STEP, count + 1)\n")
-			gp359Edit(t, f, "nagini_contracts/contracts.py", "def Result() -> Any: return _INERT\n",
-				"def Result() -> Any: return _INERT\n\n\n__all__.append(\"min\")\n\n\ndef min(a: Any, b: Any) -> Any: return -1 if a > 100 else (a if a < b else b)\n")
+			gp359Edit(t, f, "nagini_contracts/contracts.py", "def Forall(*args: Any) -> bool: return True\n",
+				"def Forall(*args: Any) -> bool: return True\n\n\n__all__ += (\"min\",)\n\n\ndef min(a: Any, b: Any) -> Any: return -1 if a > 100 else (a if a < b else b)\n")
 			refused(t, f, "isn't Invariant's runtime stand-in")
 			if *calls != 0 {
 				t.Fatal("Nagini ran on an application whose contracts module isn't the stand-in")
@@ -610,8 +625,10 @@ func TestPythonApplicationGateRefusesWhatTheStandInDoesntProvide(t *testing.T) {
 			calls := gp359Verifier(t, real)
 			f := gp359New(t, real)
 			// Case B: Nagini verifies ToSeq, and the stand-in doesn't bind it,
-			// so the branch would raise NameError where the application runs.
-			gp359Edit(t, f, gp359Source, "    return count\n", "    Assert(ToSeq([count]) == ToSeq([count]))\n    return count\n")
+			// so the line would raise NameError where the application runs.
+			// In a contract, the gate refuses it sooner, with the contract's
+			// other calls.
+			gp359Edit(t, f, gp359Source, "    return count\n", "    seen = ToSeq([count])\n    return count\n")
 			refused(t, f, "reads Nagini's ToSeq, which Invariant's runtime stand-in for nagini_contracts doesn't provide")
 			if *calls != 0 {
 				t.Fatal("Nagini ran on a name the application can't bind")

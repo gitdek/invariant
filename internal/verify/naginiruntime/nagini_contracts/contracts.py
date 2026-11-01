@@ -7,22 +7,24 @@ no-op and the proved file runs unchanged. An application that proves a
 function in place ships this package at its root, so the module that holds
 the function imports wherever the application runs (#359).
 
-Python evaluates a contract call's argument before the call, so Result()
+Python evaluates a contract call's arguments before the call, so Result()
 returns an inert value: comparing it, doing arithmetic with it, calling it or
-reading from it gives itself back, and it's true, so a contract such as
-Ensures(Result() >= count) evaluates without effect.
+reading from it gives itself back, and it's true. It's made afresh, class and
+all, on every call, so nothing a program does to one reaches another. What
+else a contract may hold, so that evaluating it can't fail where Nagini reads
+it lazily, the gate checks in the function's source.
 """
 
 from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
 
-__all__ = [
+__all__ = (
     "Requires", "Ensures", "Invariant", "Assert", "Assume", "Exsures", "Decreases",
     "Acc", "Rd", "Wildcard", "list_pred", "dict_pred", "set_pred", "Implies", "Old",
     "Result", "Forall", "Exists", "Pure", "Predicate", "Fold", "Unfold", "Unfolding",
     "Ghost", "ContractOnly", "Import", "MayCreate", "Low", "LowVal", "Let",
-]
+)
 
 
 def Requires(expr: Any) -> None: pass
@@ -40,31 +42,31 @@ def dict_pred(*args: Any) -> bool: return True
 def set_pred(*args: Any) -> bool: return True
 def Implies(p: Any, q: Any) -> bool: return True
 def Old(x: T) -> T: return x
-class _Inert:
-    """What Result() stands for when the program runs: nothing a contract
-    does with it fails, and nothing it gives back means anything."""
-
-    def __bool__(self) -> bool: return True
-    def __len__(self) -> int: return 0
-    def __hash__(self) -> int: return 0
-    def __iter__(self) -> Any: return iter(())
-    def __contains__(self, item: Any) -> bool: return True
-    def __getattr__(self, name: str) -> Any: return self
-    def __getitem__(self, key: Any) -> Any: return self
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: return self
-    def _same(self, *args: Any) -> Any: return self
-    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _same  # type: ignore
-    __add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = _same
-    __truediv__ = __rtruediv__ = __floordiv__ = __rfloordiv__ = __mod__ = __rmod__ = _same
-    __pow__ = __rpow__ = __and__ = __rand__ = __or__ = __ror__ = __xor__ = __rxor__ = _same
-    __lshift__ = __rlshift__ = __rshift__ = __rrshift__ = __matmul__ = __rmatmul__ = _same
-    __neg__ = __pos__ = __abs__ = __invert__ = _same
 
 
-_INERT = _Inert()
+def _same(self: Any, *args: Any, **kwargs: Any) -> Any: return self
 
 
-def Result() -> Any: return _INERT
+# The operators Result()'s value answers with itself, reflected forms and all.
+_OPERATORS = (
+    "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+    "__add__", "__radd__", "__sub__", "__rsub__", "__mul__", "__rmul__",
+    "__truediv__", "__rtruediv__", "__floordiv__", "__rfloordiv__", "__mod__", "__rmod__",
+    "__pow__", "__rpow__", "__and__", "__rand__", "__or__", "__ror__", "__xor__", "__rxor__",
+    "__lshift__", "__rlshift__", "__rshift__", "__rrshift__", "__matmul__", "__rmatmul__",
+    "__neg__", "__pos__", "__abs__", "__invert__", "__getattr__", "__getitem__", "__call__",
+)
+
+
+def Result() -> Any:
+    inert = dict.fromkeys(_OPERATORS, _same)
+    inert.update({
+        "__slots__": (), "__bool__": lambda self: True, "__len__": lambda self: 0, "__hash__": lambda self: 0,
+        "__iter__": lambda self: iter(()), "__contains__": lambda self, item: True,
+    })
+    return type("Result", (), inert)()
+
+
 def Forall(*args: Any) -> bool: return True
 def Exists(*args: Any) -> bool: return True
 def Pure(f: T) -> T: return f

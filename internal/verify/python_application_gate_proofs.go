@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/project"
@@ -46,9 +47,10 @@ func (s *PythonApplicationSession) preparePythonApplicationProofs(ctx context.Co
 
 // pythonApplicationProofShape refuses, at admission, what the selected
 // function's own source shows the gate can't prove in place: what the
-// verifier input can't preserve of the function itself, and a decorator,
-// since conformance, which the gate needs beside the proof, binds only
-// undecorated functions (#359). What depends on the rest of the application,
+// verifier input can't preserve of the function itself, a decorator, since
+// conformance, which the gate needs beside the proof, binds only undecorated
+// functions, Assume, and a contract that couldn't run as Nagini reads it
+// (#359). What depends on the rest of the application,
 // its bindings, its trusted contracts and its production sources, is refused
 // once the session has staged it, before any test, conformance, backing test
 // or Nagini runs.
@@ -69,18 +71,29 @@ func pythonApplicationProofShape(root string, target project.Component) error {
 	case len(d.Decorators) > 0:
 		return fmt.Errorf("in-place proof of %s: unsupported: %s is decorated with @%s, and conformance, which the gate needs beside the proof, binds only undecorated functions", target.ID, target.Symbol, d.Decorators[0])
 	}
+	if err := pythonProofContracts(d, target.Symbol); err != nil {
+		return fmt.Errorf("in-place proof of %s: %w", target.ID, err)
+	}
 	return nil
 }
 
-// naginiStandIn is what Invariant's runtime stand-in for nagini_contracts
-// exports, by its __all__: the only Nagini names a selected function may
-// read, since only these are bound where the application runs (#359).
-var naginiStandIn = func() []string {
+// naginiStandInSource is Invariant's runtime stand-in for
+// nagini_contracts.contracts, whose functions the analyzer reads to check
+// that a contract's calls bind as Python runs them.
+var naginiStandInSource = func() []byte {
 	b, err := naginiRuntime.ReadFile("naginiruntime/nagini_contracts/contracts.py")
 	if err != nil {
 		panic(err)
 	}
-	all := regexp.MustCompile(`(?s)__all__ = \[(.*?)\]`).FindSubmatch(b)
+	return b
+}()
+
+// naginiStandIn is what Invariant's runtime stand-in for nagini_contracts
+// exports, by its __all__, a tuple so nothing can add to it: the only Nagini
+// names a selected function may read, since only these are bound where the
+// application runs (#359).
+var naginiStandIn = func() []string {
+	all := regexp.MustCompile(`(?s)__all__ = \((.*?)\)`).FindSubmatch(naginiStandInSource)
 	if all == nil {
 		panic("the runtime stand-in for nagini_contracts has no __all__")
 	}
@@ -93,10 +106,13 @@ var naginiStandIn = func() []string {
 
 // shipsNaginiStandIn checks that the application ships Invariant's runtime
 // stand-in at its root, which the runner puts first on the import path,
-// byte for byte, and nothing else in that package. Any other
-// nagini_contracts could bind names a proof relies on, as a min shadowing
-// the builtin does, or run its contract calls with effects Nagini assumes
-// away.
+// byte for byte, nothing else in that package, and no other
+// nagini_contracts anywhere a change to the import path could load instead.
+// Any other could bind names a proof relies on, as a min shadowing the
+// builtin does, or run its contract calls with effects Nagini assumes away.
+// The stand-in's bytes alone don't settle what it binds when the module
+// runs: the scan for writes refuses production code that changes it, as it
+// does the module (#359).
 func (s *PythonApplicationSession) shipsNaginiStandIn() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,15 +128,23 @@ func (s *PythonApplicationSession) shipsNaginiStandIn() error {
 		want["nagini_contracts/"+name] = pythonApplicationHash(b)
 	}
 	const remedy = "ship Invariant's runtime stand-in, the nagini_contracts package in internal/verify/naginiruntime, at the application's root, exactly as it is"
-	for path, f := range s.snapshot {
+	paths := make([]string, 0, len(s.snapshot))
+	for path := range s.snapshot {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
 		if !strings.HasPrefix(path, "nagini_contracts/") {
+			if parts := strings.Split(path, "/"); slices.Contains(parts[:len(parts)-1], "nagini_contracts") || parts[len(parts)-1] == "nagini_contracts.py" {
+				return fmt.Errorf("the application ships another nagini_contracts at %s, which a change to the import path could load in place of Invariant's runtime stand-in: %s, and no other", path, remedy)
+			}
 			continue
 		}
 		hash, ok := want[path]
 		switch {
 		case !ok:
 			return fmt.Errorf("the application's nagini_contracts holds %s, which Invariant's runtime stand-in doesn't: %s", path, remedy)
-		case f.hash != hash:
+		case s.snapshot[path].hash != hash:
 			return fmt.Errorf("the application's %s isn't Invariant's runtime stand-in: %s", path, remedy)
 		}
 	}

@@ -6,10 +6,12 @@ spans in the original source, the names it reads from its module and how it
 reads them, its exception handlers and what their bodies call, and how the
 module binds each name at its top level, so the gate can build Nagini's
 input around the original bytes. It serves a selected function and a trusted
-contract's declaration alike. With "writes", it names a module and the
-application's sources: the reply gives every place a source writes one of
-that module's attributes, or reaches the module in a way the scan can't
-follow.
+contract's declaration alike. With "standin" too, Invariant's runtime
+stand-in for nagini_contracts.contracts, it gives where the function's
+contract couldn't run as Nagini reads it. With "writes", it names a module
+and the application's sources: the reply gives every place a source writes
+one of that module's attributes, or what the stand-in or the builtins bind,
+or reaches one of them in a way the scan can't follow.
 """
 
 import ast
@@ -230,6 +232,182 @@ def decode(raw):
     return text
 
 
+# The statements Nagini reads as a function's contract, or as facts it checks
+# where they stand. Python runs each one as a call where it stands, and
+# evaluates its arguments then, whatever Nagini reads lazily: an Implies'
+# consequent only where its antecedent holds, and a postcondition at the
+# function's exit, which Python evaluates on entry (#359).
+CONTRACT_STATEMENTS = frozenset(("Requires", "Ensures", "Exsures", "Decreases", "Assert", "Invariant"))
+
+# The builtins a contract may call, by how many arguments each takes: the
+# ones the pinned Nagini models whose call can't raise on the types it
+# checks. Its translator reads len through the argument's __len__ and
+# isinstance as a type check, and its builtins define abs on ints. min and
+# max are left out: their one-argument form fails on an empty list where
+# Nagini only requires one that isn't.
+CONTRACT_BUILTINS = {"len": 1, "abs": 1, "isinstance": 2}
+
+# What a contract's argument may hold besides names, literals, tuples of
+# them, the stand-in's calls and those builtins' calls: nothing here can
+# raise on the types Nagini checks, Result()'s inert value included.
+CONTRACT_OPERATORS = (ast.Add, ast.Sub, ast.Mult)
+CONTRACT_FORMS = (ast.BoolOp, ast.UnaryOp, ast.Compare, ast.IfExp)
+
+# What the rest is called where a contract is refused for holding it.
+CONTRACT_REFUSED = {
+    ast.Subscript: "a subscript", ast.Attribute: "an attribute read", ast.Div: "a division",
+    ast.FloorDiv: "a floor division", ast.Mod: "a modulo", ast.Pow: "a power", ast.LShift: "a shift",
+    ast.RShift: "a shift", ast.BitAnd: "a bitwise operator", ast.BitOr: "a bitwise operator",
+    ast.BitXor: "a bitwise operator", ast.MatMult: "a matrix product", ast.List: "a list", ast.Set: "a set",
+    ast.Dict: "a dict", ast.JoinedStr: "an f-string", ast.Starred: "an unpacked argument",
+    ast.NamedExpr: "an assignment expression", ast.Lambda: "a lambda",
+    ast.ListComp: "a comprehension", ast.SetComp: "a comprehension", ast.DictComp: "a comprehension",
+    ast.GeneratorExp: "a comprehension",
+}
+
+
+def standin_of(raw):
+    """What Invariant's runtime stand-in for nagini_contracts exports, by its
+    __all__, and how each one's parameters bind a call: the positional ones,
+    whether it takes more, and whether it takes keywords beyond them."""
+    tree = ast.parse(raw.decode("utf-8"))
+    names, defs = (), {}
+    for s in tree.body:
+        if isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in s.targets):
+            names = ast.literal_eval(s.value)
+        elif isinstance(s, ast.FunctionDef):
+            a = s.args
+            defs[s.name] = ([p.arg for p in a.posonlyargs + a.args], a.vararg is not None, a.kwarg is not None)
+    return {name: defs[name] for name in names}
+
+
+def binds(call, signature):
+    """Whether a call binds the stand-in's parameters as Python does."""
+    params, more, keywords = signature
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        return False
+    if len(call.args) > len(params) and not more:
+        return False
+    filled = set(params[:len(call.args)])
+    for k in call.keywords:
+        if k.arg in params and k.arg not in filled:
+            filled.add(k.arg)
+        elif not keywords:
+            return False
+    return filled >= set(params)
+
+
+def contracts(node, standin, module):
+    """Each place the function uses one of Nagini's names other than in a
+    contract statement, where Invariant's runtime stand-in gives back nothing
+    Nagini's does, and each contract argument Python could fail evaluating
+    where Nagini reads it lazily. A contract may read the function's
+    parameters, the module's names, and its locals only where every path to
+    it binds them first: Nagini checks a local is bound only where it reads
+    it, and an Implies' consequent only where its antecedent holds."""
+    args = node.args
+    params = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+    bound = Bound()
+    for statement in node.body:
+        bound.visit(statement)
+    deleted = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Del)}
+    local = (bound.names - params) | (params & deleted)
+    names = {n: standin[n] for n in standin if n not in bound.names and n not in params}
+    out = []
+
+    def problem(sub, what):
+        out.append({"line": sub.lineno, "what": what})
+
+    def sure_after(statement):
+        """What a simple statement binds on every path past it."""
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+        elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)) and statement.value is not None:
+            targets = [statement.target]
+        else:
+            return set()
+        return {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)} - deleted
+
+    def block(statements, sure):
+        sure = set(sure)
+        for statement in statements:
+            visit(statement, sure)
+            sure |= sure_after(statement)
+
+    def visit(n, sure):
+        if (isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                and n.value.func.id in CONTRACT_STATEMENTS and n.value.func.id in names):
+            call(n.value, n.value.func.id, sure)
+            return
+        if isinstance(n, ast.Name) and n.id in names:
+            problem(n, "reads Nagini's %s outside a contract statement, where Invariant's runtime stand-in for it gives back nothing Nagini's does" % n.id)
+        for field, value in ast.iter_fields(n):
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                loop = set()
+                if isinstance(n, (ast.For, ast.AsyncFor)) and field == "body":
+                    loop = {t.id for t in ast.walk(n.target) if isinstance(t, ast.Name)} - deleted
+                block(value, sure | loop)
+            elif isinstance(value, list):
+                for v in value:
+                    if isinstance(v, ast.AST):
+                        visit(v, sure)
+            elif isinstance(value, ast.AST):
+                visit(value, sure)
+
+    def call(c, statement, sure):
+        if not binds(c, names[c.func.id]):
+            problem(c, "%s calls %s with arguments Invariant's runtime stand-in doesn't take" % (statement, c.func.id))
+        for a in c.args + [k.value for k in c.keywords]:
+            argument(a, statement, sure)
+
+    def results(e):
+        return any(isinstance(s, ast.Call) and isinstance(s.func, ast.Name) and s.func.id == "Result" and "Result" in names for s in ast.walk(e))
+
+    def argument(e, statement, sure):
+        if isinstance(e, ast.Constant):
+            return
+        if isinstance(e, ast.Name):
+            if e.id in local and e.id not in sure:
+                problem(e, "%s reads %s, which the function may not have bound when Python evaluates the contract" % (statement, e.id))
+            return
+        if isinstance(e, ast.Tuple) and not any(isinstance(x, ast.Starred) for x in e.elts):
+            for x in e.elts:
+                argument(x, statement, sure)
+            return
+        if isinstance(e, ast.BinOp) and isinstance(e.op, CONTRACT_OPERATORS) or isinstance(e, CONTRACT_FORMS):
+            if isinstance(e, ast.Compare):
+                for op, left, right in zip(e.ops, [e.left] + e.comparators, e.comparators):
+                    if isinstance(op, (ast.In, ast.NotIn)) and results(left) and not isinstance(right, ast.Tuple):
+                        problem(e, "%s tests Result() for membership in something other than a tuple it lists, and in a string or bytes that fails on the value Result() stands for when Python evaluates the contract" % statement)
+            for child in ast.iter_child_nodes(e):
+                if isinstance(child, ast.expr):
+                    argument(child, statement, sure)
+            return
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name):
+            f = e.func.id
+            if f in names:
+                call(e, statement, sure)
+                return
+            if f in CONTRACT_BUILTINS and f not in bound.names and f not in params and f not in module:
+                if len(e.args) != CONTRACT_BUILTINS[f] or e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
+                    problem(e, "%s calls %s with other than its %d argument%s" % (statement, f, CONTRACT_BUILTINS[f], "s" if CONTRACT_BUILTINS[f] > 1 else ""))
+                elif f == "isinstance" and not isinstance(e.args[1], ast.Name):
+                    problem(e, "%s's isinstance takes other than a type's name" % statement)
+                for a in e.args:
+                    argument(a, statement, sure)
+                return
+            problem(e, "%s calls %s, and a contract may call only Nagini's names Invariant's runtime stand-in provides, len, abs and isinstance" % (statement, f))
+            return
+        if isinstance(e, ast.Call):
+            what = "a method call" if isinstance(e.func, ast.Attribute) else "a call"
+        else:
+            what = CONTRACT_REFUSED.get(type(e.op) if isinstance(e, ast.BinOp) else type(e), "an expression of its own kind")
+        problem(e, "%s holds %s, which Python evaluates when the statement runs, even where Nagini reads it lazily, so a contract may hold only names, literals, Result(), Old(), Nagini's other names Invariant's runtime stand-in provides, comparisons, and, or, not, conditional expressions, +, -, *, unary operators and calls of len, abs and isinstance" % (statement, what))
+
+    block(node.body, params - deleted)
+    return sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))
+
+
 def dynamic(tree):
     """Each place the module writes its namespace in a way no binding shows."""
     out = []
@@ -357,8 +535,10 @@ def declaration(request):
         unsupported.append("a body on the def line")
     if node.col_offset != 0:
         unsupported.append("a declaration that isn't at the module's top level")
+    # A selected function's contract, which runs where the application runs.
+    eager = contracts(node, standin_of(base64.b64decode(request["standin"])), bindings) if "standin" in request else []
     return {
-        "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries,
+        "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager,
         "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,
         "def_line": node.lineno, "async": isinstance(node, ast.AsyncFunctionDef), "decorators": decorators,
         "header_end": body[0]["start"] if body else line_end(node.end_lineno),
@@ -383,6 +563,26 @@ PATCHERS = frozenset(("unittest.mock.patch", "unittest.mock.patch.dict", "unitte
 # Calls that run code from a path or a code object, which no import shows.
 BY_PATH = frozenset(("runpy.run_path", "runpy.run_code", "importlib.util.spec_from_file_location",
                      "importlib.machinery.SourceFileLoader", "importlib.machinery.SourcelessFileLoader"))
+
+# Calls that run or compile code from a string, which no parse shows.
+FROM_STRING = frozenset(("builtins.exec", "builtins.eval", "builtins.compile"))
+
+# Calls that hand back a module, or every object, from an object, which no
+# reference to the module shows.
+REFLECTION = frozenset(("inspect.getmodule", "gc.get_objects", "gc.get_referrers", "gc.get_referents"))
+
+# What holds a module's names, or the builtins', reached through a function,
+# a frame or a module's own namespace.
+NAMESPACES = frozenset(("__globals__", "f_globals", "f_builtins", "__builtins__"))
+
+# What a function runs, which writing changes whatever binds the function.
+FUNCTION_PARTS = frozenset(("__code__", "__defaults__", "__kwdefaults__"))
+
+# What the proof takes as it is besides the module: Invariant's runtime
+# stand-in for nagini_contracts, whose calls the module states its contract
+# with, and the builtins, which the function and its contract read. The scan
+# protects both as it does the module (#359).
+SHARED = ("nagini_contracts.contracts", "nagini_contracts", "builtins")
 
 
 def module_of(path):
@@ -424,21 +624,26 @@ def imports_of(tree, package):
 
 def writes(request):
     """Every place the application's production sources could change what
-    the module's names hold, or reach the module in a way a parse can't
-    follow. Test sources, which the request marks, are scanned only where
-    production code imports them; the proof covers the module as production
-    code leaves it. A reference to the module, to a package above it, or to
-    an application module whose imports bind one of those, through an
-    import, a relative import, a module that imports it or a star import,
-    may only read attributes, and writing one is refused where it's the
-    module's own or rebinds a module on the way to it. So are reaching one
-    of them by name, through sys.modules, importlib, __import__, runpy,
-    pkgutil, pydoc or mock's patchers, running code from a path or a code
-    object, reading __globals__ or f_globals, reading the namespace of a
-    source that holds one, and a source the host's Python can't read. A
-    test source production code loads, by an import or by a constant name,
-    is production code."""
+    the module's names hold, or what the stand-in for nagini_contracts or
+    the builtins bind, or reach one of them in a way a parse can't follow.
+    Test sources, which the request marks, are scanned only where production
+    code imports them; the proof covers the module as production code leaves
+    it. A reference to the module, to nagini_contracts or its contracts, to
+    builtins, to a package above the module, or to an application module
+    whose imports bind one of those, through an import, a relative import, a
+    module that imports it or a star import, may only read attributes, and
+    writing one is refused where it's one of theirs or rebinds a module on
+    the way to them. So are reaching one of them by name, through
+    sys.modules, importlib, __import__, runpy, pkgutil, pydoc or mock's
+    patchers, running code from a path, a string or a code object, reaching
+    modules through objects with inspect or gc, reading __globals__,
+    f_globals, f_builtins or __builtins__, or naming one of them in a string,
+    writing what a function runs, reading the namespace of a source that
+    holds one, and a source the host's Python can't read. A test source
+    production code loads, by an import or by a constant name, is production
+    code."""
     target = request["module"]
+    protected = (target,) + SHARED
     out, sources, unread = [], [], {}
 
     def report(path, line, what):
@@ -520,11 +725,12 @@ def writes(request):
         if not tests:
             report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
 
-    # The module, the packages on its path, and every application module
-    # whose imports bind one of them, so it's reached by attribute too.
+    # The module and the rest of what the scan protects, the packages on the
+    # module's path, and every application module whose imports bind one of
+    # them, so it's reached by attribute too.
     segments = target.split(".")
-    above = {".".join(segments[:i]) for i in range(1, len(segments))}
-    reach = above | {target}
+    above = {".".join(segments[:i]) for i in range(1, len(segments))} - set(protected)
+    reach = above | set(protected)
     changed = True
     while changed:
         changed = False
@@ -536,18 +742,27 @@ def writes(request):
 
     def reaches(name):
         """Whether a dotted name, as a by-name call takes it, names one of
-        those modules or something in the module."""
-        return any(r in reach or r.startswith(target + ".") for r in resolve(name.replace(":", ".")))
+        those modules or something in one the scan protects."""
+        inside = tuple(p + "." for p in protected)
+        return any(r in reach or r.startswith(inside) for r in resolve(name.replace(":", ".")))
+
+    def shown(refs):
+        return next((p for p in protected if p in refs), None) or max(sorted(refs), key=len)
+
+    def changes(module):
+        """Why writing one of a protected module's attributes is refused."""
+        if module == target:
+            return "which no binding in the module shows"
+        if module == "builtins":
+            return "which changes what every module's builtins bind"
+        return "which changes Invariant's runtime stand-in for nagini_contracts"
 
     for path, tree, names, stars, _, _ in scanned:
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-        holds = any(reach & resolve(b) for bs in names.values() for b in bs) or any(reach & resolve(s) for s in stars)
+        held = {r for bs in names.values() for b in bs for r in reach & resolve(b)} | {r for s in stars for r in reach & resolve(s)}
 
         def candidates(expr, names=names, stars=stars):
             return candidates_of(names, stars, expr)
-
-        def shown(refs):
-            return target if target in refs else max(sorted(refs), key=len)
 
         def use(node, refs, line):
             parent = parents.get(node)
@@ -558,18 +773,21 @@ def writes(request):
                     if parent.attr.startswith("__") and parent.attr.endswith("__") and parent.attr not in PLAIN_DUNDERS:
                         report(path, line, "reads %s.%s, which reaches the module's names" % (shown(refs), parent.attr))
                     return
-                if target in refs:
-                    report(path, line, "writes %s.%s, which no binding in the module shows" % (target, parent.attr))
+                if refs & set(protected):
+                    module = shown(refs & set(protected))
+                    report(path, line, "writes %s.%s, %s" % (module, parent.attr, changes(module)))
                     return
                 for r in sorted(refs & above):
-                    if (above | {target}) & resolve(r + "." + parent.attr):
-                        report(path, line, "rebinds %s's attribute %s, through which code reaches %s" % (r, parent.attr, target))
+                    reached = (above | set(protected)) & resolve(r + "." + parent.attr)
+                    if reached:
+                        report(path, line, "rebinds %s's attribute %s, through which code reaches %s" % (
+                            r, parent.attr, shown(reached & set(protected)) if reached & set(protected) else target))
                         return
                 return
             call = parent if isinstance(parent, ast.Call) and node is not parent.func else None
             if isinstance(parent, (ast.keyword, ast.Starred)) and isinstance(parents.get(parent), ast.Call):
                 call = parents[parent]
-            if call is not None and target not in refs and node in call.args[:1] and len(call.args) > 1:
+            if call is not None and not refs & set(protected) and node in call.args[:1] and len(call.args) > 1:
                 # getattr and its kin may take a package or module on the
                 # way to the module, by a constant naming something else in it.
                 name = call.args[1]
@@ -607,16 +825,34 @@ def writes(request):
                         report(path, line, "looks a module up in sys.modules by a name it computes, and the scan for writes can't follow it")
                     elif reaches(key.value):
                         report(path, line, "looks %s up in sys.modules, and the scan for writes can't follow it" % key.value)
-            if isinstance(node, ast.Attribute) and node.attr in ("__globals__", "f_globals"):
-                report(path, line, "reads %s, which holds a module's names" % node.attr)
+            if isinstance(node, ast.Attribute) and node.attr in NAMESPACES or isinstance(node, ast.Name) and node.id == "__builtins__":
+                what = node.attr if isinstance(node, ast.Attribute) else node.id
+                report(path, line, "%s %s, which holds a module's names" % ("reads" if isinstance(node.ctx, ast.Load) else "writes", what))
+            if isinstance(node, ast.Constant) and node.value in NAMESPACES:
+                report(path, line, "names %s in a string, which reaches what holds a module's names, and the scan for writes can't follow it" % node.value)
+            if isinstance(node, ast.Attribute) and node.attr in FUNCTION_PARTS and not isinstance(node.ctx, ast.Load):
+                report(path, line, "writes %s, which changes what a function runs, and the scan for writes can't follow it" % node.attr)
+            # Running code from a string or reaching modules through objects
+            # is refused wherever the function is reached, not only called.
+            if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load) and not (
+                    isinstance(parents.get(node), ast.Attribute) and parents[node].value is node):
+                reached = candidates(node)
+                if reached & FROM_STRING:
+                    report(path, line, "runs or compiles code from a string, and the scan for writes can't follow it")
+                if reached & REFLECTION:
+                    report(path, line, "reaches modules through objects, and the scan for writes can't follow it")
             if not isinstance(node, ast.Call):
                 continue
             # A string names a module only where it's handed to something
             # that reaches modules by name; a logger's name is just a name.
             funcs, arg = candidates(node.func), node.args[0] if node.args else None
             constant = isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-            if holds and (funcs & {"builtins.globals", "builtins.locals"} or "builtins.vars" in funcs and not node.args and not node.keywords):
-                report(path, line, "reads its own namespace, which holds a module on the way to %s" % target)
+            if held and (funcs & {"builtins.globals", "builtins.locals"} or "builtins.vars" in funcs and not node.args and not node.keywords):
+                report(path, line, "reads its own namespace, which holds a module on the way to %s" % (
+                    shown(held & set(protected)) if held & set(protected) else target))
+            if (funcs & {"builtins.setattr", "builtins.delattr"} and len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in FUNCTION_PARTS):
+                report(path, line, "writes %s, which changes what a function runs, and the scan for writes can't follow it" % node.args[1].value)
             if funcs & BY_PATH:
                 report(path, line, "runs code from a path or a code object, and the scan for writes can't follow it")
             if funcs & BY_NAME:

@@ -103,6 +103,12 @@ const NaginiVersion = "1.3.1"
 // the selected function.
 const PythonApplicationProofMain = "invariant_target.py"
 
+// InPlaceInputPin is the tool pin that marks an in-place proof's result,
+// holding its verifier input's fingerprint. Receipts count the result only
+// beside the attempt that input records, and a supplied result's own pins
+// don't name it unless it claims to be one (#359).
+const InPlaceInputPin = "in_place_input"
+
 // PythonApplicationProofFile is one file of a verifier input, by its name in
 // Nagini's working directory, with its exact contents.
 type PythonApplicationProofFile struct {
@@ -342,7 +348,11 @@ type pythonProofDeclaration struct {
 	Globals      []string                        `json:"globals"`
 	Future       []pythonProofBinding            `json:"future"`
 	Dynamic      []pythonProofDynamic            `json:"dynamic"`
-	source       []byte
+	// Contracts are where the function's contract couldn't run as Nagini
+	// reads it: one of Nagini's names outside a contract statement, or a
+	// contract argument Python could fail evaluating eagerly (#359).
+	Contracts []pythonProofDynamic `json:"contracts"`
+	source    []byte
 }
 
 func runPythonProofAnalyzer(request any, out any) error {
@@ -370,7 +380,9 @@ func runPythonProofAnalyzer(request any, out any) error {
 // isolated mode, which parses the source and never imports or runs it.
 func analyzePythonProof(source []byte, symbol string) (*pythonProofDeclaration, error) {
 	var d pythonProofDeclaration
-	if err := runPythonProofAnalyzer(map[string]string{"source": base64.StdEncoding.EncodeToString(source), "symbol": symbol}, &d); err != nil {
+	request := map[string]string{"source": base64.StdEncoding.EncodeToString(source), "symbol": symbol,
+		"standin": base64.StdEncoding.EncodeToString(naginiStandInSource)}
+	if err := runPythonProofAnalyzer(request, &d); err != nil {
 		return nil, err
 	}
 	inside := func(start, end int) bool { return 0 <= start && start <= end && end <= len(source) }
@@ -453,7 +465,7 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 	result := ComponentProofResult{Target: target, Verifier: "Nagini", Contracts: slices.Clone(check.Proof.Contracts),
 		Inputs: s.proofInputs(in, check), FileInputs: slices.Clone(in.Sources), Assumed: copyComponentContractUses(in.Assumed),
 		Unaccounted: copyComponentUnaccounted(in.Unaccounted),
-		Tool:        &ComponentProofTool{Name: "Nagini", Version: NaginiVersion, Pins: map[string]string{"recipe": proof.Recipe, "platform": "linux/amd64", "input": in.Fingerprint}}}
+		Tool:        &ComponentProofTool{Name: "Nagini", Version: NaginiVersion, Pins: map[string]string{"recipe": proof.Recipe, "platform": "linux/amd64", InPlaceInputPin: in.Fingerprint}}}
 	// An input that binds nothing to a name the function reaches is
 	// incomplete, so Nagini doesn't run on it.
 	var incomplete []string
@@ -810,6 +822,9 @@ func (b *pythonProofBuilder) build() error {
 		}
 		operations = append(operations, ops...)
 	}
+	if err := pythonProofContracts(d, b.target.Symbol); err != nil {
+		return err
+	}
 	if err := b.boundaries(operations); err != nil {
 		return err
 	}
@@ -841,6 +856,23 @@ func (b *pythonProofBuilder) submodules(module string) error {
 		if _, read := b.d.Free[child]; read || child == b.target.Symbol {
 			return b.unsupported("%s is in a submodule of %s, and importing it rebinds %s.%s", name, module, module, child)
 		}
+	}
+	return nil
+}
+
+// pythonProofContracts refuses a selected function whose contract couldn't
+// run where the application runs as Nagini reads it. The module runs with
+// Invariant's runtime stand-in, so Python calls each contract statement
+// where it stands and evaluates its arguments then: a postcondition on
+// entry, which Nagini reads at exit, and an Implies' consequent whether or
+// not its antecedent holds. A contract may hold only what can't fail so,
+// and Nagini's names mean nothing outside one (#359).
+func pythonProofContracts(d *pythonProofDeclaration, symbol string) error {
+	if _, ok := d.Free["Assume"]; ok {
+		return fmt.Errorf("unsupported: %s calls Assume, which has Nagini take a fact nothing proves", symbol)
+	}
+	if len(d.Contracts) > 0 {
+		return fmt.Errorf("unsupported: line %d %s", d.Contracts[0].Line, d.Contracts[0].What)
 	}
 	return nil
 }

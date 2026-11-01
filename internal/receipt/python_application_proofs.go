@@ -35,8 +35,14 @@ func componentInPlace(r *verify.Report) *verify.ComponentEvidence {
 	}
 	e := *r.Components
 	e.Proofs = slices.Clone(e.Proofs)
-	for i := range e.Proofs {
-		e.Proofs[i].Status = componentProofQualification(r, e.Proofs[i])
+	for i, row := range e.Proofs {
+		e.Proofs[i].Status = componentProofQualification(r, row)
+		if row.Result != nil && !componentInPlaceRecorded(r, row.Result) {
+			// Nagini may have verified it; what's missing is the attempt.
+			result := *row.Result
+			result.Errors = []string{"the receipt doesn't record the attempt its result names, so nothing here shows what Nagini read"}
+			e.Proofs[i].Result = &result
+		}
 	}
 	standing, _ := componentContractStanding(r)
 	e.Contracts = nil
@@ -83,18 +89,18 @@ func componentProofFailures(r *verify.Report) []string {
 }
 
 // componentInPlaceRecorded says whether a result that names an in-place
-// verifier input, by its "input" pin, has that attempt in the report's
-// application proofs. One that doesn't proves nothing, since nothing in the
-// receipt shows what Nagini read (#359).
+// verifier input, by the pin only the gate's in-place proof sets, has that
+// attempt in the report's application proofs. One that doesn't proves
+// nothing, since nothing in the receipt shows what Nagini read (#359).
 func componentInPlaceRecorded(r *verify.Report, result *verify.ComponentProofResult) bool {
-	if result.Tool == nil || result.Tool.Pins["input"] == "" {
+	if result.Tool == nil || result.Tool.Pins[verify.InPlaceInputPin] == "" {
 		return true
 	}
 	if r.Application == nil {
 		return false
 	}
 	return slices.ContainsFunc(r.Application.Proofs, func(p verify.PythonApplicationProof) bool {
-		return p.Result.Target == result.Target && p.Input.Fingerprint == result.Tool.Pins["input"]
+		return p.Result.Target == result.Target && p.Input.Fingerprint == result.Tool.Pins[verify.InPlaceInputPin]
 	})
 }
 

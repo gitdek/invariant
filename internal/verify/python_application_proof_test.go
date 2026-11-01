@@ -560,7 +560,7 @@ func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
 	// image, which the attempt records beside them.
 	tag := "invariant-nagini:" + strings.TrimPrefix(toolchain.NaginiRecipe(), "sha256:")[:12]
 	if r.Tool == nil || r.Tool.Name != "Nagini" || r.Tool.Version != NaginiVersion || r.Tool.Pins["recipe"] != toolchain.NaginiRecipe() ||
-		r.Tool.Pins["platform"] != "linux/amd64" || r.Tool.Pins["input"] != proof.Input.Fingerprint || len(r.Tool.Pins) != 3 ||
+		r.Tool.Pins["platform"] != "linux/amd64" || r.Tool.Pins[InPlaceInputPin] != proof.Input.Fingerprint || len(r.Tool.Pins) != 3 ||
 		proof.Image != tag || proof.Recipe != toolchain.NaginiRecipe() {
 		t.Fatalf("the tool's identity: %+v, image %q", r.Tool, proof.Image)
 	}
@@ -799,6 +799,40 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__globals__['LIMIT'] = 100\n"}, want: "reads __globals__"},
 		{name: "rebinding the module in its package", module: same,
 			other: map[string]string{"tasks/config.py": "import tasks\n\ntasks.admission = None\n"}, want: "rebinds tasks's attribute admission"},
+		// What the proof takes as it ships besides the module (#359): the
+		// stand-in for nagini_contracts and the builtins, and the ways to
+		// reach any of them a parse can't follow.
+		{name: "writing the stand-in", module: same,
+			other: map[string]string{"tasks/config.py": "from nagini_contracts import contracts\n\ncontracts.Requires = print\n"},
+			want:  "tasks/config.py:3 writes nagini_contracts.contracts.Requires, which changes Invariant's runtime stand-in for nagini_contracts"},
+		{name: "the stand-in in sys.modules", module: same,
+			other: map[string]string{"tasks/config.py": "import sys\n\nsys.modules['nagini_contracts.contracts'] = sys\n"}, want: "tasks/config.py:3 looks nagini_contracts.contracts up in sys.modules"},
+		{name: "patching the stand-in by name in production", module: same,
+			other: map[string]string{"tasks/config.py": "from unittest import mock\n\nmock.patch('nagini_contracts.contracts.Result', list).start()\n"},
+			want:  "tasks/config.py:3 patches nagini_contracts.contracts.Result by name"},
+		{name: "rebinding a builtin", module: same,
+			other: map[string]string{"tasks/config.py": "import builtins\n\nbuiltins.len = abs\n"}, want: "tasks/config.py:3 writes builtins.len, which changes what every module's builtins bind"},
+		{name: "__builtins__", module: same,
+			other: map[string]string{"tasks/config.py": "__builtins__['len'] = abs\n"}, want: "tasks/config.py:1 reads __builtins__, which holds a module's names"},
+		{name: "a namespace named in a string", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\ngetattr(admit, '__globals__')['LIMIT'] = 100\n"},
+			want:  "tasks/config.py:3 names __globals__ in a string"},
+		{name: "a function's code", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__code__ = (lambda text, admitted: 0).__code__\n"},
+			want:  "tasks/config.py:3 writes __code__, which changes what a function runs"},
+		{name: "exec in production", module: same,
+			other: map[string]string{"tasks/config.py": "exec('import tasks.admission as a; a.LIMIT = 100')\n"}, want: "tasks/config.py:1 runs or compiles code from a string"},
+		{name: "exec by another name", module: same,
+			other: map[string]string{"tasks/config.py": "run = exec\nrun('x = 1')\n"}, want: "tasks/config.py:1 runs or compiles code from a string"},
+		{name: "a module through an object", module: same,
+			other: map[string]string{"tasks/config.py": "import inspect\nfrom tasks.admission import admit\n\ninspect.getmodule(admit).LIMIT = 100\n"},
+			want:  "tasks/config.py:4 reaches modules through objects"},
+		// Contracts Python runs eagerly where the module runs (#359).
+		{name: "a contract that divides", module: replace("    Ensures(Result() >= admitted)\n",
+			"    Ensures(Result() >= admitted)\n    Ensures(Implies(len(text) > 0, Result() - admitted <= len(text) // len(text)))\n"),
+			want: "line 13 Ensures holds a floor division, which Python evaluates when the statement runs"},
+		{name: "Implies as a value", module: replace("    if len(text) > 0:\n", "    if Implies(admitted > 1, False) and len(text) > 0:\n"),
+			want: "line 14 reads Nagini's Implies outside a contract statement"},
 		{name: "a source the host's Python can't read", module: same,
 			other: map[string]string{"tools/broken.py": "def (:\n"}, want: "tools/broken.py:1 can't be read by the host's Python"},
 		// What the module itself binds, and how the function reads builtins.

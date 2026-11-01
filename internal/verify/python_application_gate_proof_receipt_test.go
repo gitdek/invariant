@@ -3,6 +3,7 @@ package verify_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -66,7 +67,30 @@ func TestInPlaceProofReceiptsSayWhatIsProvedAndWhatIsTested(t *testing.T) {
 	application := *r.Application
 	application.Proofs = nil
 	stripped.Application = &application
-	if md := receipt.Markdown(&stripped); !strings.Contains(md, "Component proofs: **0 proved;") {
+	md = receipt.Markdown(&stripped)
+	if !strings.Contains(md, "Component proofs: **0 proved;") {
 		t.Errorf("a proof whose attempt the receipt lacks still counts:\n%s", md)
+	}
+	// It says what's missing, which is the attempt, not Nagini's verdict.
+	if !strings.Contains(md, "the receipt doesn't record the attempt its result names") || strings.Contains(md, "Nagini didn't verify it") {
+		t.Errorf("the receipt misstates why a proof without its attempt doesn't count:\n%s", md)
+	}
+
+	// A supplied result is judged as one, whatever it names its own input:
+	// only the pin the gate's in-place proof sets asks for an attempt.
+	supplied := stripped
+	components := *r.Components
+	components.Proofs = slices.Clone(components.Proofs)
+	for i, row := range components.Proofs {
+		if row.Result != nil && row.Result.Tool != nil {
+			result, tool := *row.Result, *row.Result.Tool
+			tool.Pins = map[string]string{"input": "sha256:supplied"}
+			result.Tool = &tool
+			components.Proofs[i].Result = &result
+		}
+	}
+	supplied.Components = &components
+	if md := receipt.Markdown(&supplied); !strings.Contains(md, "Component proofs: **1 proved;") {
+		t.Errorf("a supplied result with its own input pin was taken for an in-place one:\n%s", md)
 	}
 }
