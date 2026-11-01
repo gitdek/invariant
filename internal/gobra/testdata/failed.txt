@@ -1,6 +1,0 @@
-Gobra 0.1.0-SNAPSHOT (<revision>@<branch>)
-(c) Copyright ETH Zurich 2012 - 2026
-13:46:10.489 [main] INFO viper.gobra.Gobra - Verifying package .. - twophase [13:46:10]
-13:46:24.528 [ForkJoinPool-3-worker-5] ERROR viper.gobra.reporting.FileWriterReporter - Error at: </work/twophase.go:97:9> Postcondition might not hold. 
-Assertion t.PreparedMsg[r] might not hold.
-13:46:24.695 [thread-11] ERROR viper.gobra.Gobra - Gobra found 1 error.
