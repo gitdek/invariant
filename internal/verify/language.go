@@ -496,7 +496,9 @@ node "$DRIVER" ; echo "@@invariant conform=$?"
 
 // Python runs a project's tests and its conformance driver in a Python
 // container, with its admitted application libraries. Files marked # +nagini are
-// proved with Nagini (D-0031); the rest are tested against the model.
+// proved with Nagini (D-0031), once the gate has refused any that holds
+// arithmetic the pinned Nagini models apart from Python (#380); the rest are
+// tested against the model.
 type Python struct {
 	Image    string
 	prepared bool
@@ -507,11 +509,7 @@ func (Python) Verify(ctx context.Context, pkg string) (*Code, error) {
 	if err != nil || len(proved) == 0 {
 		return nil, err
 	}
-	image, err := toolchain.NaginiImage(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return runNagini(ctx, image, pkg, proved, plain)
+	return runNagini(ctx, toolchain.NaginiImage, pkg, proved, plain)
 }
 
 func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {

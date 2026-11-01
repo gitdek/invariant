@@ -149,6 +149,27 @@ func TestPythonApplicationGateRefusesArithmeticNaginiModelsApart(t *testing.T) {
 	})
 }
 
+// #380: the method behind an operator, called by name, is the operator's
+// arithmetic, which the pinned Nagini models as it does the operator's, so
+// it proves (count + 1).__floordiv__(DIV) as Viper divides. The gate
+// refuses it as it does the operator, before any tool runs.
+func TestPythonApplicationGateRefusesOperatorMethodsByName(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		calls := gp359Verifier(t, real)
+		f := gp359New(t, real)
+		gp359Edit(t, f, gp359Source, "STEP = 1\n", "STEP = 1\nDIV = -2\n")
+		gp359Edit(t, f, gp359Source, "    if ", "    if count > 100:\n        return (count + 1).__floordiv__(DIV)\n    if ")
+		want := "line 14 reads __floordiv__, the method behind an operator, which the gate checks only written as the operator"
+		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Check: want %q, got %v", want, err)
+		}
+		gp359Refused(t, f, tc, want)
+		if *calls != 0 {
+			t.Fatal("Nagini ran on arithmetic it models apart from Python")
+		}
+	})
+}
+
 // #359's fourth review: a production module only the gate's own processes
 // load, here through the conformance driver, runs beside the module in the
 // gate as surely as one the module loads, so the scan refuses its import

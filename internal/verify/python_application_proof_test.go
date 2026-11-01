@@ -1034,6 +1034,10 @@ func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testin
 		{"a float constant", "    r = RATE\n    return count\n", "", "line 11 deals in floats"},
 		{"a float annotation", "    r: float = 1\n    return count\n", "", "line 11 deals in floats"},
 		{"a sequence repeated by a parameter", "    r = [0] * count\n    return count\n", "", "line 11 multiplies what the gate can't tell are both ints by other than an int literal"},
+		// #380: the pinned Nagini models the method behind an operator,
+		// called by name, as it does the operator.
+		{"a floor division called by name", "    r = (7).__floordiv__(count)\n    return count\n", "", "line 11 reads __floordiv__, the method behind an operator"},
+		{"a bitwise or called by name", "    r = count.__or__(1)\n    return count\n", "", "line 11 reads __or__, the method behind an operator"},
 		{"arithmetic Nagini models as Python does", "    r = [0] * 3\n    s = name * 2\n    q = count * count + len(xs) * count\n    for x in xs:\n        q = q + x * count\n" +
 			"    m = count % 2 + count // 10 + 7 // 2 + (count << 2) + count ** 2\n    return count\n", "", ""},
 	} {

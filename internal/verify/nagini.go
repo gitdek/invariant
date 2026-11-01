@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -62,9 +64,14 @@ func hasLine(src, want string) bool {
 	return false
 }
 
-// runNagini proves each marked file in image, with no network, and names the
-// functions it proved and the ones it never saw.
-func runNagini(ctx context.Context, image, pkg string, proved, plain []string) (*Code, error) {
+// runNagini proves each marked file, with no network, in the image acquire
+// gives, and names the functions it proved and the ones it never saw. Nagini
+// proves a file whole, so the gate first reads each one for arithmetic the
+// pinned Nagini models apart from Python, by the rule an in-place proof
+// applies (#359), and refuses one that holds any before Nagini runs: the
+// code fails, saying where and why, and Nagini never sees the file (#380).
+// The image is acquired only once a file needs Nagini.
+func runNagini(ctx context.Context, acquire func(context.Context) (string, error), pkg string, proved, plain []string) (*Code, error) {
 	work, err := os.MkdirTemp("", "invariant-nagini-")
 	if err != nil {
 		return nil, err
@@ -74,12 +81,29 @@ func runNagini(ctx context.Context, image, pkg string, proved, plain []string) (
 		return nil, err
 	}
 	code := &Code{Verifier: "Nagini", Passed: true}
+	image := ""
 	for _, f := range proved {
-		src, err := os.ReadFile(filepath.Join(pkg, f))
+		// The copy holds the very bytes Nagini would read.
+		src, err := os.ReadFile(filepath.Join(work, f))
 		if err != nil {
 			return nil, err
 		}
 		fns, contracts := pythonFunctions(string(src))
+		refused, err := naginiRefusals(f, src)
+		if err != nil {
+			return nil, err
+		}
+		if len(refused) > 0 {
+			code.Passed = false
+			code.Errors = append(code.Errors, refused...)
+			code.Unverified = append(code.Unverified, fns...)
+			continue
+		}
+		if image == "" {
+			if image, err = acquire(ctx); err != nil {
+				return nil, err
+			}
+		}
 		code.Functions = append(code.Functions, fns...)
 		code.Contracts = append(code.Contracts, contracts...)
 
@@ -109,6 +133,36 @@ func runNagini(ctx context.Context, image, pkg string, proved, plain []string) (
 		code.Unverified = append(code.Unverified, fns...)
 	}
 	return code, nil
+}
+
+// naginiRefusals reads a marked file with the host's isolated Python, which
+// parses it and never runs it, and returns, as file:line: why, each place
+// it holds arithmetic the pinned Nagini models apart from Python (#380): in
+// any function or method, and in the module's and its classes' own
+// statements, which Nagini reads too. That's the rule an in-place proof
+// applies (#359), except that Acc may take a permission fraction, a
+// positive int literal over one at least as large, as Acc(x, 1/2), which
+// Nagini reads as a permission and never as Python's division. A file the
+// host's Python can't parse is refused too, since the gate couldn't check
+// it.
+func naginiRefusals(file string, src []byte) ([]string, error) {
+	var reply struct {
+		Arithmetic []pythonProofDynamic `json:"arithmetic"`
+		Unreadable string               `json:"unreadable"`
+	}
+	request := map[string]string{"marked": base64.StdEncoding.EncodeToString(src),
+		"standin": base64.StdEncoding.EncodeToString(naginiStandInSource)}
+	if err := runPythonProofAnalyzer(request, &reply); err != nil {
+		return nil, err
+	}
+	if reply.Unreadable != "" {
+		return []string{fmt.Sprintf("%s: refused before Nagini runs: the host's python3 can't parse it, so the gate can't check its arithmetic: %s", file, reply.Unreadable)}, nil
+	}
+	refused := make([]string, 0, len(reply.Arithmetic))
+	for _, p := range reply.Arithmetic {
+		refused = append(refused, fmt.Sprintf("%s:%d: refused before Nagini runs: the line %s", file, p.Line, p.What))
+	}
+	return refused, nil
 }
 
 // naginiError is one of Nagini's errors: the message, then where it is, as
