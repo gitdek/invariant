@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tla"
@@ -497,6 +498,55 @@ func TestPythonApplicationGateRefusesWhatInPlaceProofNeeds(t *testing.T) {
 		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), "selects a proof and no conformance") {
 			t.Fatalf("Check: %v", err)
 		}
+	})
+}
+
+// #359's review: the application's own nagini_contracts could bind names a
+// proof relies on, and a name Invariant's stand-in doesn't export would be
+// unbound where the application runs. The gate refuses both before anything
+// runs.
+func TestPythonApplicationGateRefusesWhatTheStandInDoesntProvide(t *testing.T) {
+	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		refused := func(t *testing.T, f pa342Fixture, want string) {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+			defer cancel()
+			r, err := Run(ctx, f.p.Dir, "", tc)
+			if r != nil || err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("want a refusal saying %q, got report=%v err=%v", want, r != nil, err)
+			}
+		}
+		t.Run("a nagini_contracts that shadows a builtin", func(t *testing.T) {
+			calls := gp359Verifier(t, real)
+			f := gp359New(t, real)
+			// Case A: the shipped contracts module exports a min that breaks
+			// the postcondition past the bounds, where Nagini reads the
+			// builtin.
+			gp359Edit(t, f, gp359Source, "        return count + STEP\n", "        return min(count + STEP, count + 1)\n")
+			gp359Edit(t, f, "nagini_contracts/contracts.py", "def Result() -> Any: return _INERT\n",
+				"def Result() -> Any: return _INERT\n\n\n__all__.append(\"min\")\n\n\ndef min(a: Any, b: Any) -> Any: return -1 if a > 100 else (a if a < b else b)\n")
+			refused(t, f, "isn't Invariant's runtime stand-in")
+			if *calls != 0 {
+				t.Fatal("Nagini ran on an application whose contracts module isn't the stand-in")
+			}
+		})
+		t.Run("another file in nagini_contracts", func(t *testing.T) {
+			gp359Verifier(t, real)
+			f := gp359New(t, real)
+			pa342Write(t, f.root, "nagini_contracts/extra.py", "def Requires(expr):\n    print('effect')\n")
+			refused(t, f, "which Invariant's runtime stand-in doesn't")
+		})
+		t.Run("a Nagini name the stand-in doesn't export", func(t *testing.T) {
+			calls := gp359Verifier(t, real)
+			f := gp359New(t, real)
+			// Case B: Nagini verifies ToSeq, and the stand-in doesn't bind it,
+			// so the branch would raise NameError where the application runs.
+			gp359Edit(t, f, gp359Source, "    return count\n", "    Assert(ToSeq([count]) == ToSeq([count]))\n    return count\n")
+			refused(t, f, "reads Nagini's ToSeq, which Invariant's runtime stand-in for nagini_contracts doesn't provide")
+			if *calls != 0 {
+				t.Fatal("Nagini ran on a name the application can't bind")
+			}
+		})
 	})
 }
 

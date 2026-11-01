@@ -589,12 +589,12 @@ func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
 	if proof.Result.Passed || len(proof.Result.Verified) != 0 || !reflect.DeepEqual(proof.Result.Errors, []string{want}) {
 		t.Fatalf("errors: %q", proof.Result.Errors)
 	}
-	// Assume is an assumption nothing accounts for: Nagini runs, and the
-	// attempt covers nothing.
+	// Assume has Nagini take a fact nothing proves, so a selection that
+	// reads it is refused before Nagini runs (#359).
 	_, p = ppFixture(t, strings.Replace(ppModule, "    return admitted\n\n", "    Assume(admitted < 2)\n    return admitted\n\n", 1))
 	n = &ppNagini{output: ppVerified}
 	proof, err = ppSession(t, p, n).Prove(context.Background(), ppAdmitID())
-	if err != nil || n.calls != 1 || len(proof.Result.Unaccounted) != 1 || proof.Result.Unaccounted[0].Kind != UnaccountedAssumption {
+	if err == nil || proof != nil || n.calls != 0 || !strings.Contains(err.Error(), "calls Assume") {
 		t.Fatalf("Assume: %v %+v", err, proof)
 	}
 }

@@ -3,7 +3,7 @@ package verify
 import (
 	"context"
 	"fmt"
-	"slices"
+	"regexp"
 	"strings"
 )
 
@@ -18,53 +18,85 @@ import (
 // declaration. The proof is conditional on those trusted contracts, which
 // tests support and nothing proves.
 
-// preparePythonApplicationProofs builds every selected proof's verifier
-// input, which refuses a selection the input can't preserve, and checks
-// that the application provides the contracts module its selected functions'
-// modules import. The gate supplies no stand-in for nagini_contracts, so it
-// runs the application as the application runs.
+// preparePythonApplicationProofs checks that the application ships
+// Invariant's runtime stand-in for nagini_contracts, which every module that
+// holds a selected function imports to state its contract, then builds every
+// selected proof's verifier input, which refuses a selection the input can't
+// preserve. The gate supplies no stand-in of its own, so it runs the
+// application as the application runs.
 func (s *PythonApplicationSession) preparePythonApplicationProofs(ctx context.Context, targets []string) error {
-	contracts := ""
-	for _, target := range targets {
-		in, err := s.ProofInput(ctx, target)
-		if err != nil {
-			return err
-		}
-		if contracts == "" && slices.ContainsFunc(in.Boundaries, func(b PythonApplicationProofBoundary) bool { return b.Kind == "nagini" }) {
-			contracts = target
-		}
-	}
-	if contracts == "" {
+	if len(targets) == 0 {
 		return nil
 	}
-	ok, err := s.providesNaginiContracts(ctx)
-	if err != nil {
-		return err
+	if err := s.shipsNaginiStandIn(); err != nil {
+		return fmt.Errorf("%s selects an in-place proof, whose module imports nagini_contracts to state its contract: %w", targets[0], err)
 	}
-	if !ok {
-		return fmt.Errorf("%s selects an in-place proof, and its module imports nagini_contracts to state its contract, which the application doesn't provide: put Invariant's runtime stand-in, a nagini_contracts package with contracts.py, at the application's root, or install a distribution that provides nagini_contracts, so the module imports wherever the application runs", contracts)
+	for _, target := range targets {
+		if _, err := s.ProofInput(ctx, target); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// providesNaginiContracts says whether the application provides
-// nagini_contracts.contracts: as a package at its root, which the runner
-// puts first on the import path, or installed in its dependency image.
-func (s *PythonApplicationSession) providesNaginiContracts(ctx context.Context) (bool, error) {
+// naginiStandIn is what Invariant's runtime stand-in for nagini_contracts
+// exports, by its __all__: the only Nagini names a selected function may
+// read, since only these are bound where the application runs (#359).
+var naginiStandIn = func() []string {
+	b, err := naginiRuntime.ReadFile("naginiruntime/nagini_contracts/contracts.py")
+	if err != nil {
+		panic(err)
+	}
+	all := regexp.MustCompile(`(?s)__all__ = \[(.*?)\]`).FindSubmatch(b)
+	if all == nil {
+		panic("the runtime stand-in for nagini_contracts has no __all__")
+	}
+	var names []string
+	for _, m := range regexp.MustCompile(`"([A-Za-z_][A-Za-z0-9_]*)"`).FindAllSubmatch(all[1], -1) {
+		names = append(names, string(m[1]))
+	}
+	return names
+}()
+
+// shipsNaginiStandIn checks that the application ships Invariant's runtime
+// stand-in at its root, which the runner puts first on the import path,
+// byte for byte, and nothing else in that package. Any other
+// nagini_contracts could bind names a proof relies on, as a min shadowing
+// the builtin does, or run its contract calls with effects Nagini assumes
+// away.
+func (s *PythonApplicationSession) shipsNaginiStandIn() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return false, fmt.Errorf("Python application session is closed")
+		return fmt.Errorf("Python application session is closed")
 	}
-	if _, ok := s.snapshot["nagini_contracts/contracts.py"]; ok {
-		return true, nil
+	want := map[string]string{}
+	for _, name := range []string{"__init__.py", "contracts.py"} {
+		b, err := naginiRuntime.ReadFile("naginiruntime/nagini_contracts/" + name)
+		if err != nil {
+			return err
+		}
+		want["nagini_contracts/"+name] = pythonApplicationHash(b)
 	}
-	modules, err := s.moduleDistributions(ctx)
-	if err != nil {
-		return false, err
+	const remedy = "ship Invariant's runtime stand-in, the nagini_contracts package in internal/verify/naginiruntime, at the application's root, exactly as it is"
+	for path, f := range s.snapshot {
+		if !strings.HasPrefix(path, "nagini_contracts/") {
+			continue
+		}
+		hash, ok := want[path]
+		switch {
+		case !ok:
+			return fmt.Errorf("the application's nagini_contracts holds %s, which Invariant's runtime stand-in doesn't: %s", path, remedy)
+		case f.hash != hash:
+			return fmt.Errorf("the application's %s isn't Invariant's runtime stand-in: %s", path, remedy)
+		}
 	}
-	_, ok := modules["nagini_contracts"]
-	return ok, nil
+	for path := range want {
+		if _, ok := s.snapshot[path]; !ok {
+			return fmt.Errorf("the application doesn't ship %s: %s", path, remedy)
+		}
+	}
+	return nil
 }
 
 // pythonApplicationProofProblems says why each selected proof falls short of

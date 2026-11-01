@@ -992,6 +992,18 @@ func (b *pythonProofBuilder) nagini(name string, row pythonProofBinding) error {
 	if name == "ContractOnly" {
 		return b.unsupported("%s is ContractOnly, which Nagini doesn't verify", b.target.Symbol)
 	}
+	// Assume has Nagini take a fact nothing proves, so a proof that reads it
+	// proves nothing (#359).
+	if name == "Assume" {
+		return b.unsupported("%s calls Assume, which has Nagini take a fact nothing proves", b.target.Symbol)
+	}
+	// The module runs with the application's nagini_contracts, which the
+	// gate requires to be Invariant's runtime stand-in, byte for byte: a
+	// name the stand-in doesn't define wouldn't be bound where the
+	// application runs, whatever Nagini reads it as (#359).
+	if !slices.Contains(naginiStandIn, name) {
+		return b.unsupported("%s reads Nagini's %s, which Invariant's runtime stand-in for nagini_contracts doesn't provide, so the module couldn't run where the application runs", b.target.Symbol, name)
+	}
 	if row.Kind == "star" {
 		for _, s := range b.d.Star {
 			if s.Module == "nagini_contracts.contracts" && s.Level == 0 {
@@ -1003,9 +1015,6 @@ func (b *pythonProofBuilder) nagini(name string, row pythonProofBinding) error {
 		return err
 	}
 	b.boundary(PythonApplicationProofBoundary{Name: name, Kind: "nagini"})
-	if name == "Assume" {
-		b.unaccounted(ComponentUnaccounted{Kind: UnaccountedAssumption, Detail: "the function calls Assume, so Nagini takes a fact that nothing proves"})
-	}
 	return nil
 }
 
