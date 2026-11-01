@@ -831,7 +831,7 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 		// Contracts Python runs eagerly where the module runs (#359).
 		{name: "a contract that divides", module: replace("    Ensures(Result() >= admitted)\n",
 			"    Ensures(Result() >= admitted)\n    Ensures(Implies(len(text) > 0, Result() - admitted <= len(text) // len(text)))\n"),
-			want: "line 13 Ensures holds a floor division, which Python evaluates when the statement runs"},
+			want: "line 13 Ensures holds a floor division by other than a positive integer literal, which Python evaluates when the statement runs"},
 		{name: "Implies as a value", module: replace("    if len(text) > 0:\n", "    if Implies(admitted > 1, False) and len(text) > 0:\n"),
 			want: "line 14 reads Nagini's Implies outside a contract statement"},
 		{name: "a source the host's Python can't read", module: same,
@@ -912,8 +912,20 @@ func TestPythonApplicationProofReadsContractsAsPythonRunsThem(t *testing.T) {
 		{"every form a contract may hold", "    Requires(isinstance(name, str) and abs(-count) == count and len(name) < LIMIT * 2)\n" +
 			"    Ensures(Result() in (count, count + 1) and Result() not in (-1,))\n    Ensures(Result() >= Old(count) if len(name) > 0 else not Result() < count)\n" +
 			"    Ensures(Implies(Result() > count, Result() - count == 1))\n    Exsures(Exception, True)\n    Decreases(None)\n    Ensures(Acc(list_pred(name), 1))\n" +
-			"    total = count\n    i = 0\n    while i < 2:\n        Invariant(0 <= i and i <= 2 and total >= count)\n        i += 1\n" +
-			"    for j in range(2):\n        Invariant(j >= 0 and Implies(i > 0, total >= 0))\n    Assert(total == count)\n    return count\n", ""},
+			"    Requires(count % 2 == 0 or count // 10 >= 0 or LIMIT % 2 == 1)\n" +
+			"    Ensures(Result() % 2 >= 0 and (Result() - count) // 2 <= 1 and len(name) % 3 >= 0 and Old(count) % 2 >= 0 and abs(count) % 2 >= 0)\n" +
+			"    total = count\n    i = 0\n    while i < 2:\n        Invariant(0 <= i and i <= 2 and total >= count and i % 2 >= 0 and (total + i) % 2 >= 0)\n        i += 1\n" +
+			"    for j in range(2):\n        Invariant(j >= 0 and Implies(i > 0, total >= 0) and j % 2 >= 0)\n    Assert(total == count)\n    return count\n", ""},
+		// // and % take only a positive integer literal, written as a plain
+		// int constant: Python's floor division by a negative one isn't what
+		// the pinned Nagini reads, and % formats a string.
+		{"a zero divisor", "    Requires(count % 0 == 0)\n    return count\n", "line 8 Requires holds a modulo by other than a positive integer literal"},
+		{"a bool divisor", "    Ensures(Result() // True >= 0)\n    return count\n", "line 8 Ensures holds a floor division by other than a positive integer literal"},
+		{"a divisor a name holds", "    Ensures(Result() % LIMIT == 0)\n    return count\n", "line 8 Ensures holds a modulo by other than a positive integer literal"},
+		{"a negative divisor", "    Ensures(Result() // -2 <= 0)\n    return count\n", "line 8 Ensures holds a floor division by other than a positive integer literal"},
+		{"a true division", "    Ensures(Result() / 2 >= 0)\n    return count\n", "line 8 Ensures holds a division, which Python evaluates when the statement runs"},
+		{"a modulo of a string", "    Ensures(Implies(len(name) > 0, name % 2 != name))\n    return count\n", "line 8 Ensures holds a modulo of what may be a string"},
+		{"a modulo of a local a string binds", "    seen = name\n    Assert(seen % 2 == seen)\n    return count\n", "line 9 Assert holds a modulo of what may be a string"},
 		{"a contract call the stand-in can't take", "    Ensures(Implies(count > 0))\n    return count\n", "line 8 Ensures calls Implies with arguments Invariant's runtime stand-in doesn't take"},
 		{"a builtin a contract may not call", "    Ensures(Result() <= max(count, 1))\n    return count\n", "line 8 Ensures calls max, and a contract may call only"},
 		{"a builtin called as it can't be", "    Ensures(len(name, count) > 0)\n    return count\n", "line 8 Ensures calls len with other than its 1 argument"},

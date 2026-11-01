@@ -252,14 +252,24 @@ CONTRACT_BUILTINS = {"len": 1, "abs": 1, "isinstance": 2}
 # these lazily, and none raises on the types it checks, Result()'s inert
 # value included, but where its model of the builtins, assumed like the rest
 # of it, leaves an exception out, as float arithmetic does an int too large
-# for a float.
+# for a float. // and % take only a positive integer literal, a plain int
+# constant and not a bool, which neither can fail on a number with, and
+# which the pinned Nagini divides by as Python does, though it reads a
+# negative divisor differently. % takes only what the gate can tell is a
+# number, since it formats a string, which can fail where Nagini's model of
+# it can't (#359).
 CONTRACT_OPERATORS = (ast.Add, ast.Sub, ast.Mult)
+CONTRACT_DIVISIONS = (ast.FloorDiv, ast.Mod)
 CONTRACT_FORMS = (ast.BoolOp, ast.UnaryOp, ast.Compare, ast.IfExp)
+
+# The types whose values % reads as numbers, never as a string to format.
+NUMBERS = frozenset(("int", "float", "bool"))
 
 # What the rest is called where a contract is refused for holding it.
 CONTRACT_REFUSED = {
     ast.Subscript: "a subscript", ast.Attribute: "an attribute read", ast.Div: "a division",
-    ast.FloorDiv: "a floor division", ast.Mod: "a modulo", ast.Pow: "a power", ast.LShift: "a shift",
+    ast.FloorDiv: "a floor division by other than a positive integer literal",
+    ast.Mod: "a modulo by other than a positive integer literal", ast.Pow: "a power", ast.LShift: "a shift",
     ast.RShift: "a shift", ast.BitAnd: "a bitwise operator", ast.BitOr: "a bitwise operator",
     ast.BitXor: "a bitwise operator", ast.MatMult: "a matrix product", ast.List: "a list", ast.Set: "a set",
     ast.Dict: "a dict", ast.JoinedStr: "an f-string", ast.Starred: "an unpacked argument",
@@ -300,14 +310,15 @@ def binds(call, signature):
     return filled >= set(params)
 
 
-def contracts(node, standin, module):
+def contracts(node, standin, module, constants):
     """Each place the function uses one of Nagini's names other than in a
     contract statement, where Invariant's runtime stand-in gives back nothing
     Nagini's does, and each contract argument Python could fail evaluating
     where Nagini reads it lazily. A contract may read the function's
     parameters, the module's names, and its locals only where every path to
     it binds them first: Nagini checks a local is bound only where it reads
-    it, and an Implies' consequent only where its antecedent holds."""
+    it, and an Implies' consequent only where its antecedent holds. constants
+    are the module's names for literal numbers."""
     args = node.args
     params = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
     bound = Bound()
@@ -320,6 +331,72 @@ def contracts(node, standin, module):
 
     def problem(sub, what):
         out.append({"line": sub.lineno, "what": what})
+
+    def refuse(e, what, statement):
+        problem(e, "%s holds %s, which Python evaluates when the statement runs, even where Nagini reads it lazily, so a contract may hold only names, literals, Result(), Old(), Nagini's other names Invariant's runtime stand-in provides, comparisons, and, or, not, conditional expressions, +, -, *, // and %% by a positive integer literal, unary operators and calls of len, abs and isinstance" % (statement, what))
+
+    def builtin(f):
+        return f not in bound.names and f not in params and f not in module
+
+    def numeric(e, known):
+        """Whether e is surely a number where Python evaluates it, so % on it
+        is arithmetic and never a string's formatting."""
+        if isinstance(e, ast.Constant):
+            return type(e.value) in (int, float, bool)
+        if isinstance(e, ast.Name):
+            return e.id in known
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not e.keywords:
+            f = e.func.id
+            if f in ("Result", "Old") and f in names:
+                # Result()'s value is inert where Python evaluates it, and
+                # Old() gives back what it's handed.
+                return f == "Result" or all(numeric(a, known) for a in e.args)
+            if f in NUMBERS | {"len"} and builtin(f):
+                return True
+            return f in ("abs", "min", "max") and builtin(f) and bool(e.args) and all(numeric(a, known) for a in e.args)
+        if isinstance(e, ast.UnaryOp):
+            return isinstance(e.op, ast.Not) or numeric(e.operand, known)
+        if isinstance(e, ast.BinOp):
+            return isinstance(e.op, CONTRACT_OPERATORS + CONTRACT_DIVISIONS + (ast.Div,)) and numeric(e.left, known) and numeric(e.right, known)
+        if isinstance(e, ast.BoolOp):
+            return all(numeric(v, known) for v in e.values)
+        if isinstance(e, ast.IfExp):
+            return numeric(e.body, known) and numeric(e.orelse, known)
+        return isinstance(e, ast.Compare)
+
+    # What's surely a number where a contract reads it: a parameter or local
+    # annotated with a number's type, the module's literal numbers, and a
+    # local every binding of which is a number or a loop over range().
+    parents = {child: n for n in ast.walk(node) for child in ast.iter_child_nodes(n)}
+    declared = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs
+                if isinstance(a.annotation, ast.Name) and a.annotation.id in NUMBERS and builtin(a.annotation.id)}
+    binders = {}
+    for sub in ast.walk(node):
+        if not (isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)):
+            continue
+        parent, value = parents.get(sub), None
+        if (isinstance(parent, ast.AnnAssign) and isinstance(parent.annotation, ast.Name) and parent.annotation.id in NUMBERS
+                and builtin(parent.annotation.id)):
+            declared.add(sub.id)
+            continue
+        if isinstance(parent, ast.Assign) and sub in parent.targets or isinstance(parent, ast.AnnAssign) and parent.value is not None:
+            value = parent.value
+        elif isinstance(parent, ast.AugAssign):
+            value = ast.BinOp(left=ast.Name(id=sub.id, ctx=ast.Load()), op=parent.op, right=parent.value)
+        elif (isinstance(parent, (ast.For, ast.AsyncFor)) and parent.target is sub and isinstance(parent.iter, ast.Call)
+              and isinstance(parent.iter.func, ast.Name) and parent.iter.func.id == "range" and builtin("range")):
+            value = ast.Constant(value=0)
+        binders.setdefault(sub.id, []).append(value)
+    known = declared | (set(constants) - bound.names)
+    counted = {n for n, values in binders.items() if n not in declared and n not in params and None not in values}
+    changed = True
+    while changed:
+        changed = False
+        for n in sorted(counted):
+            if not all(numeric(v, known | counted) for v in binders[n]):
+                counted.discard(n)
+                changed = True
+    numbers = known | counted
 
     def sure_after(statement):
         """What a simple statement binds on every path past it."""
@@ -377,6 +454,14 @@ def contracts(node, standin, module):
             for x in e.elts:
                 argument(x, statement, sure)
             return
+        if isinstance(e, ast.BinOp) and isinstance(e.op, CONTRACT_DIVISIONS):
+            divisor = e.right
+            if not (isinstance(divisor, ast.Constant) and type(divisor.value) is int and divisor.value > 0):
+                refuse(e, CONTRACT_REFUSED[type(e.op)], statement)
+            elif isinstance(e.op, ast.Mod) and not numeric(e.left, numbers):
+                problem(e, "%s holds a modulo of what may be a string, which %% formats, failing where Nagini's model of it doesn't, so its left side must be a number the gate can see: a parameter or local of a number's type or bound only to numbers, a literal constant, len(), abs(), Old() or Result(), or arithmetic on them" % statement)
+            argument(e.left, statement, sure)
+            return
         if isinstance(e, ast.BinOp) and isinstance(e.op, CONTRACT_OPERATORS) or isinstance(e, CONTRACT_FORMS):
             if isinstance(e, ast.Compare):
                 for op, left, right in zip(e.ops, [e.left] + e.comparators, e.comparators):
@@ -391,7 +476,7 @@ def contracts(node, standin, module):
             if f in names:
                 call(e, statement, sure)
                 return
-            if f in CONTRACT_BUILTINS and f not in bound.names and f not in params and f not in module:
+            if f in CONTRACT_BUILTINS and builtin(f):
                 if len(e.args) != CONTRACT_BUILTINS[f] or e.keywords or any(isinstance(a, ast.Starred) for a in e.args):
                     problem(e, "%s calls %s with other than its %d argument%s" % (statement, f, CONTRACT_BUILTINS[f], "s" if CONTRACT_BUILTINS[f] > 1 else ""))
                 elif f == "isinstance" and not isinstance(e.args[1], ast.Name):
@@ -405,7 +490,7 @@ def contracts(node, standin, module):
             what = "a method call" if isinstance(e.func, ast.Attribute) else "a call"
         else:
             what = CONTRACT_REFUSED.get(type(e.op) if isinstance(e, ast.BinOp) else type(e), "an expression of its own kind")
-        problem(e, "%s holds %s, which Python evaluates when the statement runs, even where Nagini reads it lazily, so a contract may hold only names, literals, Result(), Old(), Nagini's other names Invariant's runtime stand-in provides, comparisons, and, or, not, conditional expressions, +, -, *, unary operators and calls of len, abs and isinstance" % (statement, what))
+        refuse(e, what, statement)
 
     block(node.body, params - deleted)
     return sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))
@@ -538,8 +623,19 @@ def declaration(request):
         unsupported.append("a body on the def line")
     if node.col_offset != 0:
         unsupported.append("a declaration that isn't at the module's top level")
-    # A selected function's contract, which runs where the application runs.
-    eager = contracts(node, standin_of(base64.b64decode(request["standin"])), bindings) if "standin" in request else []
+    # A selected function's contract, which runs where the application runs,
+    # and the module's names for literal numbers, which % reads as numbers.
+    numbers = set()
+    for statement in tree.body:
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target] if isinstance(statement, ast.AnnAssign) else []
+        if len(targets) == 1 and isinstance(targets[0], ast.Name) and statement.value is not None:
+            try:
+                value = ast.literal_eval(statement.value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                continue
+            if type(value) in (int, float, bool):
+                numbers.add(targets[0].id)
+    eager = contracts(node, standin_of(base64.b64decode(request["standin"])), bindings, numbers) if "standin" in request else []
     return {
         "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager,
         "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,

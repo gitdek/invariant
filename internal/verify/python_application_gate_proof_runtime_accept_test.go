@@ -80,7 +80,7 @@ func TestPythonApplicationGateRefusesContractsPythonCantRun(t *testing.T) {
 			// Python divides by len(name) on entry, so admit('', 0) raises.
 			{"an Implies consequent that divides", [][2]string{{postcondition,
 				postcondition + "    Ensures(Implies(len(name) > 0, Result() - count <= len(name) // len(name)))\n"}},
-				"line 12 Ensures holds a floor division, which Python evaluates when the statement runs, even where Nagini reads it lazily"},
+				"line 12 Ensures holds a floor division by other than a positive integer literal, which Python evaluates when the statement runs, even where Nagini reads it lazily"},
 			// Nagini reads Implies as implication, and the stand-in's is
 			// always true, so admit('counter', 500) would return 501.
 			{"Implies as a value", [][2]string{
@@ -118,9 +118,9 @@ func TestPythonApplicationGateRefusesContractsPythonCantRun(t *testing.T) {
 
 // gp359Kept is the counter's module with a contract that holds only what
 // Python can evaluate where the module runs without failing: comparisons, and,
-// or and not, a conditional expression, +, - and *, Implies, Old and Result(),
-// len, abs and isinstance, a loop invariant over locals bound ahead of it, and
-// an Assert after the loop.
+// or and not, a conditional expression, +, - and *, // and % by a positive
+// integer literal, Implies, Old and Result(), len, abs and isinstance, a loop
+// invariant over locals bound ahead of it, and an Assert after the loop.
 func gp359Kept(boundary, admits string) string {
 	return `from nagini_contracts.contracts import *
 ` + boundary + `
@@ -137,6 +137,8 @@ def admit(name: str, count: int) -> int:
     Ensures(Implies(Result() > count, Result() - count == 1 * STEP and len(name) > 0))
     Ensures(Result() == count or Result() == count + STEP)
     Ensures(Result() >= Old(count) if len(name) > 0 else not Result() < count)
+    Ensures((Result() - count) // 2 == 0 and Result() // 1 == Result())
+    Ensures(Implies(count % 2 == 0, (Result() + count) % 2 == Result() % 2))
     total = count
     i = 0
     while i < STEP:
