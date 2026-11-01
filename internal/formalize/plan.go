@@ -22,6 +22,11 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
+	// The check tool's build cache serves only this draft's agent, whose
+	// run has ended when Plan returns; the factory's own check of the plan
+	// runs without it. The run's records stay (#366).
+	cache := filepath.Join(out, "gocache")
+	defer plumbing.RemoveCache(cache)
 	ws, err := os.MkdirTemp("", "invariant-plan-")
 	if err != nil {
 		return nil, err
@@ -59,7 +64,7 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     PlanPrompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", filepath.Join(out, "gocache"), ws},
+		GateServer: []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", cache, ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,

@@ -181,6 +181,11 @@ func TestTheRepositorysHandLocksHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The locks are the ones git tracks, so a copy without .git, as the
+	// plumbing sandbox makes, has none to check. CI checks them (#362).
+	if exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Run() != nil {
+		t.Skip(root + " isn't a git checkout, so it tracks no locks to check")
+	}
 	n, problems, err := CheckLocks(context.Background(), Repo{Name: "invariant", Dir: root})
 	if err != nil {
 		t.Fatal(err)

@@ -379,7 +379,7 @@ func TestNoCloseWithoutTheLease(t *testing.T) {
 	if held, err := f.hold(ctx); err != nil || !held {
 		t.Fatal(held, err)
 	}
-	if closed, err := g.ClosePullRequest(ctx, pr.Number); err != nil || closed.State != "closed" || gh.prs[pr.Number].Merged {
+	if closed, err := g.ClosePullRequest(f.inTenure(ctx), pr.Number); err != nil || closed.State != "closed" || gh.prs[pr.Number].Merged {
 		t.Fatalf("a close with the lease = %+v, %v", closed, err)
 	}
 }
@@ -770,9 +770,19 @@ func TestARetrysBuildWithoutItsRatificationNeedsAPerson(t *testing.T) {
 	}
 	said := r.gh.last(1)
 	visible := retry263Visible(said.Comment.Body)
-	if said.Marker.Kind != KindFailed || said.Marker.Failure != FailStopped || !strings.Contains(visible, "is gone") ||
-		!strings.Contains(visible, "/invariant revise") || b.calls != 1 {
-		t.Fatalf("the build must say for a person that it can't start: %+v\n%s", said.Marker, said.Comment.Body)
+	if said.Marker.Kind != KindFailed || said.Marker.Failure != FailStopped || !said.Marker.Gone || !strings.Contains(visible, "is gone") ||
+		!strings.Contains(visible, "/invariant revise") || strings.Contains(visible, "/invariant retry") || b.calls != 1 {
+		t.Fatalf("the build must say for a person that it can't start, and that its ratification is gone: %+v\n%s", said.Marker, said.Comment.Body)
+	}
+	// A writer's retry of it still builds again, as any stopped build's
+	// does, on whichever watcher takes it, and its answer isn't a build that
+	// couldn't start.
+	r.gh.say(1, "gitdek", "/invariant retry")
+	if err := f.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if again := r.gh.last(1); again.Marker.Kind != KindRatified || again.Marker.Gone {
+		t.Fatalf("a retry of it must be answered as a build again: %+v", again.Marker)
 	}
 }
 
@@ -827,7 +837,7 @@ func TestAPullRequestFromBeforeTheBuildIsntItsOwn(t *testing.T) {
 
 // A watcher that loses the lease to another, and takes it back, takes no
 // effect for a step it started before: what that step read may be older
-// than the other watcher's effects (D-0227).
+// than the other watcher's effects (D-0237).
 func TestAStepFromAnEarlierTenureTakesNoEffect(t *testing.T) {
 	ctx := context.Background()
 	origin, _ := gitRepos(t)
@@ -853,8 +863,8 @@ func TestAStepFromAnEarlierTenureTakesNoEffect(t *testing.T) {
 	if held, err := a.hold(ctx); err != nil || !held {
 		t.Fatal(held, err)
 	}
-	if _, err := g.PostComment(step, 1, "stale"); !errors.Is(err, errLeaseLost) {
-		t.Fatalf("a step from before another watcher's tenure = %v; want errLeaseLost", err)
+	if _, err := g.PostComment(step, 1, "stale"); !errors.Is(err, errStaleTenure) {
+		t.Fatalf("a step from before another watcher's tenure = %v; want errStaleTenure", err)
 	}
 	if _, err := g.PostComment(a.inTenure(ctx), 1, "fresh"); err != nil {
 		t.Fatalf("a step in the new tenure = %v", err)
