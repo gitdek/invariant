@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -418,6 +419,15 @@ func (c Codex) attempt(ctx context.Context, job Job, steps int, first bool) try 
 	if err == nil {
 		err = errors.New(strings.TrimRight(why, "\n"))
 	}
+	// Codex fails its turn itself at the first reply that reaches the model's
+	// output limit, so that failure is its loop guard's stop, which a build
+	// falls back on (D-0257). Only the reason in the failed turn, or else in
+	// its last error event, says so, never stderr, and it's never the
+	// provider's failure. Like the provider's, it's why the attempt ended,
+	// even when the run's deadline passed before the attempt saw it end.
+	if readErr == nil && outputLimit(failure) {
+		return try{usage: usage, err: fmt.Errorf("%w; %w", ErrOutputLimit, err)}
+	}
 	// The failed turn's own words, when codex gave any, alone say whether its
 	// provider was why: what came before it on stderr is diagnostic only. A
 	// provider's failure codex reported is why the attempt ended, even when
@@ -515,6 +525,23 @@ func (c Codex) sandboxed(ctx context.Context, ws string, command ...string) erro
 // ErrTooManyTurns is a Codex run the factory stopped at its cap on steps,
 // which codex exec doesn't keep itself.
 var ErrTooManyTurns = errors.New("the agent took more steps than its cap allows, so the factory stopped it")
+
+// ErrOutputLimit is a Codex run that ended because a reply reached the
+// model's output limit. Codex has no need of Claude Code's guard, which
+// counts two such replies in a row: it ends the turn itself at the first,
+// for the Responses API's reason, max_output_tokens, and never tries it
+// again. So that failure is Codex's loop guard's stop, which a build falls
+// back on as it does on ErrThinkingLoop (D-0257).
+var ErrOutputLimit = errors.New("the agent's reply ran out of room at the model's output limit, so Codex ended its turn")
+
+// outputLimitReason is the reason Codex gives a turn that failed because a
+// reply reached the model's output limit, in its words for an incomplete
+// response: "Incomplete response returned, reason: max_output_tokens".
+var outputLimitReason = regexp.MustCompile(`(?i)\breason: *max_output_tokens\b`)
+
+// outputLimit says whether failure, the failed turn's message or else the
+// last error event's, gives the output limit as its reason (D-0257).
+func outputLimit(failure string) bool { return outputLimitReason.MatchString(failure) }
 
 // ReadCodexStream reads codex exec's JSON events, copying each to
 // transcript, into the same Usage Claude Code's run gives: its steps, its

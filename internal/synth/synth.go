@@ -346,7 +346,7 @@ func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Durati
 		return usage, err
 	}
 	usage, err := run()
-	if fallback == "" || !errors.Is(err, ErrThinkingLoop) {
+	if fallback == "" || !loopGuardStop(err) {
 		return usage, nil, err
 	}
 	fb := &Fallback{Effort: fallback, Why: err.Error()}
@@ -357,6 +357,16 @@ func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Durati
 		usage = AddUsage(first, usage)
 	}
 	return usage, fb, err
+}
+
+// loopGuardStop says whether the loop guard stopped a run: Claude Code's,
+// once two replies in a row end at the output limit with nothing but
+// thinking, or Codex's own end of its turn at the first reply that reaches
+// the model's output limit (D-0115, D-0257). A run its provider stopped
+// never counts, whatever its last attempt said: a provider's failure never
+// takes the fallback.
+func loopGuardStop(err error) bool {
+	return !ProviderUnavailable(err) && (errors.Is(err, ErrThinkingLoop) || errors.Is(err, ErrOutputLimit))
 }
 
 // within cuts ctx off once job's timeout has passed, from now.
