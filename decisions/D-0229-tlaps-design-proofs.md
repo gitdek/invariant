@@ -3,7 +3,8 @@ id: D-0229
 title: TLAPS proves a ratified invariant of the model at every size
 date: 2026-10-31
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: "#360, from @gitdek's EasyProver fact-check on 2026-10-31: \"Yeah let's try doing that\""
 ---
@@ -44,7 +45,14 @@ source: "#360, from @gitdek's EasyProver fact-check on 2026-10-31: \"Yeah let's 
 
 A TLAPS proof is weaker than a Lean proof. tlapm translates obligations for backends, and SMT and Zenon results aren't certified. Isabelle can check Zenon's proofs, but the gate doesn't ask it to. Open soundness issues, listed above, show the translation can be wrong. The gate refuses the constructs those issues touch, keeps TLC's check at the bounds beside the proof, and reports TLAPS's result apart from everything else. A proved invariant says that, under TLAPS's trust model, the model never breaks it at any size. It says nothing about the code.
 
+Two caveats stand with the ratification:
+
+- **The completeness check trusts tlapm's own `known:` marking.** It maps every soundness test tlapm marks known. An unsoundness tlapm hasn't found, or hasn't marked known, isn't on the list, and the gate rules it out only if a refusal happens to cover its construct, as the name-collision check (D-0243) covers a #310 route no known test exercises.
+- **The pin moves only with the completeness test rerun.** A new tlapm means re-deriving the known-soundness list at its commit, rerunning `TestTLAPSClosesEveryKnownSoundnessIssue` and `TestTLAPSRealKnownSoundnessTestsMatch`, and checking that the new tlapm still names its atoms as `tlapsAtom` does. The list-match test fails until the list's commit is the pin's.
+
 ## Questions for @gitdek, with recommendations
+
+Ratified on 2026-11-01 as recommended, on @gitdek's standing authorization, after two adversarial reviews of #364: A, the pinned pre-release, and a failed selected proof failing the gate.
 
 1. **A, B, C or D?** Recommend A.
 2. **Pin the rolling pre-release, or wait for a stable release?** Recommend pinning it. 1.5.0, the last stable release, is from 2022 and has soundness fixes 1.6.0 doesn't need. A replaced asset fails closed, and moving the pin is a decision, as TLC's was (D-0016).
