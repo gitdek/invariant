@@ -2,9 +2,9 @@
 
 The factory acts as its own bot once it has a GitHub App ([D-0041](../decisions/log.md)). It comments, pushes and merges as the App's bot, and only people's comments can direct it or ratify.
 
-The App is optional. Without one, the factory posts, pushes and merges as you, through `gh`, and tells its own posts from people's by the markers in them. With one, its work shows as the bot's, and the App's narrow permissions bound what it can do.
+The App is optional. Without one, the factory posts and merges as you, through `gh`, pushes with your git credentials, and tells its own posts from people's by the markers in them. With one, its work shows as the bot's, and the App's narrow permissions bound what it can do.
 
-For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, bot `invariant-code-factory[bot]`, installed on gitdek/invariant and on copythis-ad, the one other repository it works on ([D-0044](../decisions/log.md), [D-0054](../decisions/D-0054-slice-6-part-b-plan.md)). `Invariant Factory` was taken, because it's reserved for an existing account. Creating the App and holding its private key is the repository owner's job. The factory only ever reads the key from the path you give it.
+For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, bot `invariant-code-factory[bot]`, installed on gitdek/invariant alone ([D-0044](../decisions/log.md)). It also worked on copythis-ad ([D-0054](../decisions/D-0054-slice-6-part-b-plan.md)) until that repository left Invariant ([D-0149](../decisions/log.md)). `Invariant Factory` was taken, because it's reserved for an existing account. Creating the App and holding its private key is the repository owner's job. The factory only ever reads the key from the path you give it.
 
 ## Create the App
 
@@ -19,12 +19,12 @@ For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, b
    | :-- | :-- | :-- |
    | Actions | Read-only | Tell a gate job that ran from one GitHub never started, as when the account's Actions minutes run out (D-0081). Without it, the factory says it can't tell (D-0095) |
    | Checks | Read-only | Read `invariant/gate`'s result before merging |
-   | Contents | Read and write | Push the issue's branch, merge, delete the branch |
-   | Issues | Read and write | Post on issues, set labels |
+   | Contents | Read and write | Push the issue's branch, the lease and run records, merge, delete the branch |
+   | Issues | Read and write | Post on issues, open a plan's issues, create and set labels |
    | Metadata | Read-only | Set automatically |
    | Pull requests | Read and write | Open and merge pull requests |
 
-   Leave everything else at **No access**, especially **Workflows**. Without it, the App's token can't change anything in `.github/`.
+   Leave everything else at **No access**, especially **Workflows**. Without it, the App's token can't change a workflow in `.github/workflows/`, and the gate's scope check fails a factory pull request that changes anything else in `.github/`.
 7. **Where can this GitHub App be installed?** Only on this account.
 8. Click **Create GitHub App**.
 
