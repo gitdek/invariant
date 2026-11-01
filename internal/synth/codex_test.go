@@ -408,6 +408,46 @@ func TestCodexSaysWhyARunFailed(t *testing.T) {
 	}
 }
 
+// codexOutputLimit is how codex exec ends a run once a reply reaches the
+// model's output limit, as codex-cli 0.163.0's source has it: the Responses
+// API's incomplete response, reason max_output_tokens, is an error Codex
+// never retries, so it fails the turn there, says why in an error event and
+// in the failed turn, and exits 1. The reply itself shows nothing: an agent
+// message or a tool call shows only once the model has finished writing it,
+// reasoning only as a completed item with a summary, and a failed turn
+// reports no tokens.
+const codexOutputLimit = `{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"ls","aggregated_output":"model.tla\n","exit_code":0,"status":"completed"}}
+{"type":"error","message":"Incomplete response returned, reason: max_output_tokens"}
+{"type":"turn.failed","error":{"message":"Incomplete response returned, reason: max_output_tokens"}}
+`
+
+// A Codex build whose reply reaches the model's output limit ends at that
+// first reply, with Codex's own reason, since Codex fails the turn there
+// itself. The loop guard, which counts two such replies in a row, is Claude
+// Code's alone, so the build doesn't fall back, and the failure isn't the
+// provider's, so nothing tries it again: Codex runs once (D-0256).
+func TestACodexReplyAtTheOutputLimitEndsTheBuildWithCodexsReason(t *testing.T) {
+	b, dir := providerBackend(t, "codex", providerAttempt{out: codexOutputLimit, exit: 1}, providerSuccess("codex"))
+	job := Job{Workspace: t.TempDir(), Prompt: "build", GateServer: []string{"/bin/invariant"}}
+	u, fb, err := RunAgent(providerContext(t), b, job, 30*time.Second, "medium")
+	const reason = "Incomplete response returned, reason: max_output_tokens"
+	if err == nil || !strings.Contains(err.Error(), reason) || u.Outcome != "failed" || u.Summary != reason {
+		t.Errorf("usage %+v, error %v; want the build failed with Codex's reason, %q", u, err, reason)
+	}
+	if errors.Is(err, ErrThinkingLoop) || fb != nil {
+		t.Errorf("fallback %+v, error %v; want neither the loop guard nor a fallback", fb, err)
+	}
+	if ProviderUnavailable(err) {
+		t.Errorf("error %v; want an ordinary failure, not the provider's", err)
+	}
+	if n := providerCount(t, dir); n != 1 {
+		t.Errorf("codex ran %d times; want once", n)
+	}
+}
+
 // containsRun says whether want appears in args, in order and together.
 func containsRun(args, want []string) bool {
 	for i := 0; i+len(want) <= len(args); i++ {

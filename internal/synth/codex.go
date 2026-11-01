@@ -523,6 +523,11 @@ var ErrTooManyTurns = errors.New("the agent took more steps than its cap allows,
 // ErrTooManyTurns, once the agent takes more than maxTurns steps. gated
 // says the run has Invariant's server, which Codex must start before the
 // agent's turn does.
+//
+// Unlike Claude Code's reader, it has no loop guard (D-0256): Codex itself
+// fails the turn at the first reply that reaches the model's output limit,
+// saying "Incomplete response returned, reason: max_output_tokens", so the
+// run ends there, and its events don't say what that reply held.
 func ReadCodexStream(r io.Reader, transcript io.Writer, maxTurns int, gated bool) (Usage, error) {
 	u, _, err := readCodexStream(r, transcript, maxTurns, gated)
 	return u, err
