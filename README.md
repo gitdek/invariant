@@ -159,7 +159,7 @@ BY DEF IndInv_NoSharedConnection
 The gate extends the ratified model and TLAPS around the proof, then adds the only theorem that counts, `NoSharedConnection_AtEverySize == Spec => []NoSharedConnection`. It proves that by PTL from the three lemmas, and LS4 decides it. tlapm proves the rest; for the pool, SMT took all three lemmas, with no decomposition. The receipt shows it on a row of its own:
 
 ```
-| Design · TLAPS | ✅ model invariant proved at every size (TLAPS) | `NoSharedConnection`: 8 obligations (1 ls4, 3 smt, 4 trivial) · tlapm `4744c0f` |
+| Design · TLAPS | ✅ model invariant proved at every size (TLAPS) | `NoSharedConnection`: 8 obligations (1 ls4, 3 smt, 4 trivial) · tlapm `eef4b65` |
 ```
 
 What the gate refuses, so a proof can only be wrong by not going through:
@@ -175,7 +175,7 @@ What it proves, and what it doesn't:
 - It says nothing about the code. What the receipt says of the code doesn't change.
 - Its trust model is weaker than a kernel-checked proof's: SMT and Zenon results aren't certified, and tlapm's translation has the open issues above.
 
-tlapm is pinned: 1.6.0-pre at commit `4744c0f`, from the release's x86_64 Linux tarball pinned by SHA-256, with Z3 4.8.9, Zenon 0.8.4, Isabelle2025 and LS4, in a linux/amd64 image built on first use. To run the real tlapm tests:
+tlapm is pinned: 1.6.0-pre at commit `eef4b65`, from the release's x86_64 Linux tarball pinned by SHA-256, with Z3 4.8.9, Zenon 0.8.4, Isabelle2025 and LS4, in a linux/amd64 image built on first use ([D-0269](decisions/journal/D-0269.jsonl)). The tarball also carries a `tla2tools.jar` for tlapm's optional SANY parser, which the gate never selects, so tlapm parses with its own parser, the default. The release is rolling, so when upstream replaces the asset, the image fails to build, which fails the gate for any project that selects a TLAPS proof until the pin moves. To run the real tlapm tests:
 
 ```bash
 INVARIANT_TLAPS_REAL=1 go test ./internal/verify -run '^TestTLAPSReal' -count=1 -timeout 30m
