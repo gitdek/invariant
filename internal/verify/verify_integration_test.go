@@ -240,3 +240,24 @@ func TestNaginiSeesPastTheReachableStates(t *testing.T) {
 		t.Error("the tests and conformance should pass; only the proof can see this")
 	}
 }
+
+// The pinned Nagini models | apart from Python on negative ints, so the gate
+// refuses a core that holds one before Nagini runs, and keeps the rest of
+// its evidence (#380). COMMITTED | 0 is COMMITTED, so the tests and
+// conformance pass, and Nagini never sees the file.
+func TestNaginiNeverProvesArithmeticItModelsApartFromPython(t *testing.T) {
+	t.Parallel()
+	r := run(t, copyProject(t, provedPython, map[string]func(string) string{
+		"twophase/core.py": replace(t, "    s.rm[r] = COMMITTED\n", "    s.rm[r] = COMMITTED | 0\n"),
+	}))
+	want := "core.py:193: refused before Nagini runs: the line holds a bitwise operator, which the pinned Nagini models apart from Python on negative ints"
+	if r.Passed || !contains(Failed(r), "code") || len(r.Code.Errors) != 1 || r.Code.Errors[0] != want {
+		t.Fatalf("failed = %v, errors = %q; want only %q", Failed(r), r.Code.Errors, want)
+	}
+	if len(r.Code.Functions) != 0 || !contains(r.Code.Unverified, "rm_rcv_commit_msg") {
+		t.Errorf("functions = %v, unverified = %v; Nagini never saw the core", r.Code.Functions, r.Code.Unverified)
+	}
+	if !r.Build.Passed || !r.Conformance.Passed {
+		t.Error("the tests and conformance should pass; only the refusal fails the gate")
+	}
+}

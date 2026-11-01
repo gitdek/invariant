@@ -173,7 +173,7 @@ Slices ship in order. Each one's plan and acceptance criteria are ratified befor
 | 12 | One decision graph for every project (3.12) | Done `D-0096` |
 | 13 | The factory takes every change, and a whole PRD (2.8) | In progress `D-0105` `D-0153` |
 | 14 | Codex on chosen projects (5.5): a project picks its coding agent, and the factory runs Codex under the same rules as Claude Code | Done: #153's eight steps merged, and the loop guard #374 gave Codex builds closed the last gap against the same rules and limits `D-0129` `D-0151` `D-0257` |
-| 15 | Verification inside ordinary code (goal 6): prove critical components in place, and check the code around them | In progress: #294 proves selected Python functions in place, in the gate. Open: #380, to refuse in `# +nagini` cores the arithmetic Nagini models apart from Python. The Go steps and the checks on callers wait for ask3d `D-0152` `D-0172` `D-0260` |
+| 15 | Verification inside ordinary code (goal 6): prove critical components in place, and check the code around them | In progress: #294 proves selected Python functions in place, in the gate, and #380 refuses in `# +nagini` cores, as in place, the arithmetic Nagini models apart from Python. The Go steps and the checks on callers wait for ask3d `D-0152` `D-0172` `D-0260` `D-0264` `D-0268` |
 | Later | Type checking, a TypeScript proof path, a hosted factory | Later |
 
 - **Slice 6 is done when** an issue on copythis-ad goes from opened to merged, with the real lease code tested against rules @gitdek ratified. `D-0054`
