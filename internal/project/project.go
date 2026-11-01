@@ -55,6 +55,10 @@ type Manifest struct {
 	// Components selects checks in an explicit source inventory. Omitting
 	// it keeps the legacy project-wide gate and requires no source discovery.
 	Components *ComponentsConfig `json:"components,omitempty"`
+	// TLAPS names ratified invariants the gate proves at every size with
+	// the TLA+ Proof System, each from its proof in .invariant/proofs (#360).
+	// Selecting one claims evidence; it changes no statement.
+	TLAPS []string `json:"tlaps,omitempty"`
 }
 
 // Lock records what a person ratified: the statements, pinned to their text,
@@ -222,7 +226,24 @@ func (p *Project) validate() error {
 			return fmt.Errorf("%s: bug %s expects %q, which isn't a ratified invariant or property", lockFile, s.Name, s.Expect)
 		}
 	}
+	proving := map[string]bool{}
+	for _, name := range m.TLAPS {
+		switch {
+		case !invariants[name]:
+			return fmt.Errorf("%s: tlaps names %s, which isn't a ratified invariant", manifestFile, name)
+		case proving[name]:
+			return fmt.Errorf("%s: tlaps names %s twice", manifestFile, name)
+		}
+		proving[name] = true
+	}
 	return nil
+}
+
+// TLAPSProofPath is where the proof of a ratified invariant the manifest
+// selects for TLAPS lives: the body of the module the gate writes around it
+// (#360).
+func (p *Project) TLAPSProofPath(name string) string {
+	return filepath.Join(p.Dir, ".invariant", "proofs", name+".tla")
 }
 
 // ModulePath is the TLA+ module's path.
