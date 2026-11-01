@@ -122,8 +122,8 @@ func TestNoEffectWithoutTheLease(t *testing.T) {
 	if held, err := f.hold(ctx); err != nil || !held {
 		t.Fatal(held, err)
 	}
-	if _, err := g.PostComment(ctx, 1, "hello"); !errors.Is(err, errStaleTenure) {
-		t.Fatalf("PostComment with the lease, outside any step = %v; want errStaleTenure", err)
+	if _, err := g.PostComment(ctx, 1, "hello"); !errors.Is(err, errNoStep) {
+		t.Fatalf("PostComment with the lease, outside any step = %v; want errNoStep", err)
 	}
 	if _, err := g.PostComment(f.inTenure(ctx), 1, "hello"); err != nil {
 		t.Fatalf("PostComment with the lease = %v", err)

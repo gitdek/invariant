@@ -211,3 +211,57 @@ func TestATakeoverWhoseAnswerIsLostStillStartsATenure(t *testing.T) {
 		t.Fatalf("a step in the new tenure = %v", err)
 	}
 }
+
+// A watcher whose agent run outlives its tenure, when another watcher held
+// the lease in between and did nothing on the issue, records the run's
+// result and publishes nothing then, and its next step publishes it, since
+// no post answered or replaced the build.
+func TestARunThatOutlivesItsTenureIsPublishedByTheNextStep(t *testing.T) {
+	ctx := context.Background()
+	r, base := plumbingRig(t, "page/page.go")
+	held := &heldBuild{inner: base, started: make(chan struct{}), release: make(chan struct{})}
+	r.f.Plumbing = held
+	start := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	nowA, nowB := start, start
+	a := r.f
+	rawA := a.Repo
+	a.Holder, a.LeaseFor, a.Parallel = "watcher-a", 5*time.Minute, 2
+	a.Now = func() time.Time { return nowA }
+	a.GitHub, a.Repo = leasedGitHub{r.gh, a}, leasedRepo{rawA, a}
+	b := leaseFactory(t, r.origin, "watcher-b", &nowB)
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	r.gh.open(1, "gitdek", "Explain retries", "Kind: plumbing\n\n/invariant solve")
+	r.poll()
+	a.Wait()
+	proposal := r.expect(1, KindProposal, LabelProposal)
+	r.gh.say(1, "gitdek", "/invariant ratify "+strings.TrimPrefix(proposal.Marker.Proposal.Hash, "sha256:")[:hashChars])
+	held.block = true
+	r.poll()
+	<-held.started
+	ratified := r.gh.last(1)
+	// a stalls past its lease, and b holds it for a while, taking no step.
+	nowA, nowB = start.Add(7*time.Minute), start.Add(7*time.Minute)
+	if held, err := b.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	nowA = start.Add(14 * time.Minute)
+	if held, err := a.hold(ctx); err != nil || !held {
+		t.Fatal(held, err)
+	}
+	posts := len(r.gh.posts(1))
+	close(held.release)
+	a.Wait()
+	if state, _, err := rawA.Run(ctx, 1, buildStepName(ratified)); err != nil || state != RunDone {
+		t.Fatalf("the run must record its result: state %d, %v", state, err)
+	}
+	if len(r.gh.posts(1)) != posts || len(r.gh.prs) != 0 {
+		t.Fatalf("the step from the earlier tenure published something: %d posts, was %d; %d pull requests", len(r.gh.posts(1)), posts, len(r.gh.prs))
+	}
+	r.poll()
+	a.Wait()
+	if last := r.gh.last(1); last.Marker.Kind != KindPR || len(r.gh.prs) != 1 {
+		t.Fatalf("the next step must publish the build: %+v, %d pull requests", last.Marker, len(r.gh.prs))
+	}
+}

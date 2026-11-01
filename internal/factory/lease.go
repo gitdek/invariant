@@ -56,8 +56,12 @@ var ErrLeaseMoved = errors.New("another watcher moved the lease")
 var errLeaseLost = errors.New("this watcher no longer holds the repository's lease")
 
 // errStaleTenure stops an effect of a step this watcher started before it
-// took the lease back from another watcher, or of none of its steps.
+// took the lease back from another watcher.
 var errStaleTenure = errors.New("this watcher took the lease back after another watcher held it, so a step it started before then takes no effect")
+
+// errNoStep stops an effect that belongs to none of this watcher's steps:
+// with a lease, it takes effects only in a step, in the step's tenure.
+var errNoStep = errors.New("this effect belongs to none of the watcher's steps, so with a lease it takes no effect")
 
 // NewHolder names a watcher for its lease: random, so it says nothing about
 // the machine it runs on.
@@ -241,7 +245,10 @@ func (f *Factory) mayAct(ctx context.Context) error {
 	if !f.now().Before(f.lease.until.Add(-leaseSkew)) {
 		return errLeaseLost
 	}
-	if tenure, ok := ctx.Value(tenureKey{}).(uint64); !ok || tenure != f.lease.tenure {
+	switch tenure, ok := ctx.Value(tenureKey{}).(uint64); {
+	case !ok:
+		return errNoStep
+	case tenure != f.lease.tenure:
 		return errStaleTenure
 	}
 	return nil
