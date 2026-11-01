@@ -13,8 +13,8 @@ import (
 
 // naginiFakeDocker puts a docker first on PATH that stands in for the pinned
 // Nagini: it logs the file it's asked to prove and every file in the
-// directory it's given, as "core.py: core.py helper.py", and proves the file
-// unless the file says "# fake: unproved", where it fails as Nagini does.
+// directory it's given, as "core.py: core.py", and proves the file unless
+// the file says "# fake: unproved", where it fails as Nagini does.
 func naginiFakeDocker(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -107,10 +107,16 @@ const (
 	// naginiHelper is a marked helper whose body keeps its contract.
 	naginiHelper = "# +nagini\nfrom nagini_contracts.contracts import *\n\n\n" +
 		"def inc(n: int) -> int:\n    Ensures(Result() == n + 1)\n    return n + 1\n"
-	naginiUnmarked   = ", which isn't marked # +nagini, so Nagini would take its contracts without proving its bodies"
-	naginiOwnPackage = "which the pinned Nagini can't resolve: it proves each marked file as a top-level module of its own, " +
-		"so it finds another marked file only by that file's own name, as import helper finds helper.py"
+	// naginiAlone is a marked core that imports nothing of its package.
+	naginiAlone      = "# +nagini\nfrom nagini_contracts.contracts import *\n\n\ndef two() -> int:\n    Ensures(Result() == 2)\n    return 2\n"
+	naginiOnlyItself = ", and a proved core can rest only on itself, the standard library and the modules Nagini models"
 )
+
+// naginiImportRefused is the refusal of an import on line, of what the
+// package holds as held.
+func naginiImportRefused(file string, line, module, held string) string {
+	return file + ":" + line + ": refused before Nagini runs: the line imports " + module + ", which the package holds as " + held + naginiOnlyItself
+}
 
 // naginiCoreImporting is the second probe's core with imports in place of
 // its import of helper, from line 3 on.
@@ -123,7 +129,8 @@ func naginiCoreImporting(imports string) string {
 // probe's core verified fdiv(7, -2) == -3, and the second's verified, though
 // Nagini, run on the helper alone, says "Postcondition of inc might not
 // hold". The gate refuses each core before Nagini runs, and the receipt
-// names its function as one Nagini never saw.
+// names its function as one Nagini never saw. Marked, the helper is refused
+// for its own arithmetic, and the core still for importing it.
 func TestNaginiRefusesACoreThatRestsOnAnUnprovedModule(t *testing.T) {
 	for _, c := range []struct{ name, core, helper, function string }{
 		{"a helper whose contract divides as Viper does", naginiProbeDivision, naginiDivisionHelper, "seven_by_minus_two"},
@@ -131,7 +138,7 @@ func TestNaginiRefusesACoreThatRestsOnAnUnprovedModule(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code := naginiPackageOf(t, map[string]string{"core.py": c.core, "helper.py": c.helper}, naginiNeverAcquired(t))
-			want := []string{"core.py:3: refused before Nagini runs: the line imports helper, the package's helper.py" + naginiUnmarked}
+			want := []string{naginiImportRefused("core.py", "3", "helper", "helper.py")}
 			if code.Passed || !reflect.DeepEqual(code.Errors, want) {
 				t.Fatalf("passed %v, errors %q; want %q", code.Passed, code.Errors, want)
 			}
@@ -140,12 +147,9 @@ func TestNaginiRefusesACoreThatRestsOnAnUnprovedModule(t *testing.T) {
 			}
 		})
 	}
-	// Marked, the helper is the gate's to prove, so the arithmetic rule
-	// applies to it too: the gate refuses its floor division by a name, and
-	// the core whose proof would rest on it.
 	code := naginiPackageOf(t, map[string]string{"core.py": naginiProbeDivision, "helper.py": "# +nagini\n" + naginiDivisionHelper}, naginiNeverAcquired(t))
 	want := []string{
-		"core.py:3: refused before Nagini runs: the line imports helper, the package's helper.py, which the gate refuses, so the proof would rest on contracts nothing proves",
+		naginiImportRefused("core.py", "3", "helper", "helper.py"),
 		"helper.py:7: refused before Nagini runs: the line holds a floor division by other than a positive integer literal",
 		"helper.py:8: refused before Nagini runs: the line holds a floor division by other than a positive integer literal",
 	}
@@ -157,78 +161,100 @@ func TestNaginiRefusesACoreThatRestsOnAnUnprovedModule(t *testing.T) {
 	}
 }
 
-// What a marked file may import from its package, and how the gate reads
-// each form: another marked file it proves in the same run, by that file's
-// name, is the only module of the package a marked file may import.
+// #390's review: a core may import nothing its package holds, marked or not.
+// Nagini would prove a marked sibling in the directory it runs in, but
+// where the code runs, Python binds a bare import helper to whatever its
+// path finds first, the project root before the package, so the gate passed
+// a core whose proof rested on a root helper.py nothing proved. The core is
+// refused, and the marked file it imports is proved alone, so the receipt
+// counts only that file's functions.
+func TestNaginiRefusesACoreThatImportsAnotherMarkedCore(t *testing.T) {
+	for _, core := range []string{naginiProbeBody, naginiCoreImporting("import helper\n")} {
+		log := naginiFakeDocker(t)
+		code := naginiPackageOf(t, map[string]string{"core.py": core, "helper.py": naginiHelper}, naginiFakeImage)
+		want := []string{naginiImportRefused("core.py", "3", "helper", "helper.py")}
+		if code.Passed || !reflect.DeepEqual(code.Errors, want) {
+			t.Fatalf("passed %v, errors %q; want %q", code.Passed, code.Errors, want)
+		}
+		if !reflect.DeepEqual(code.Functions, []string{"inc"}) || !reflect.DeepEqual(code.Unverified, []string{"two"}) {
+			t.Fatalf("functions %v, unverified %v; want only helper.py's inc proved", code.Functions, code.Unverified)
+		}
+		if runs := naginiRuns(t, log); !reflect.DeepEqual(runs, []string{"helper.py: helper.py"}) {
+			t.Fatalf("Nagini ran %q", runs)
+		}
+	}
+}
+
+// Every form of an import of what the package holds is refused, wherever it
+// stands, and an import of what it doesn't hold is Nagini's to resolve, in
+// a directory that holds only the file it proves.
 func TestNaginiReadsEveryImportOfAMarkedFile(t *testing.T) {
-	refused := func(line, why string) string {
-		return "core.py:" + line + ": refused before Nagini runs: the line " + why
+	const elf = "\x7fELF\x02\x01\x01"
+	relative := func(line, from string) string {
+		return "core.py:" + line + ": refused before Nagini runs: the line imports from " + from + ", relative to its package" + naginiOnlyItself
 	}
 	for _, c := range []struct {
 		name  string
 		files map[string]string
-		// errors are the refusals, by prefix, and runs what Nagini was
-		// asked to prove, with what its directory held.
+		// errors are the refusals, and runs what Nagini was asked to
+		// prove, with what its directory held.
 		errors, runs []string
 	}{
 		{name: "a plain module", files: map[string]string{"core.py": naginiCoreImporting("import helper\n"), "helper.py": naginiBrokenHelper},
-			errors: []string{refused("3", "imports helper, the package's helper.py"+naginiUnmarked)}},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.py")}},
 		{name: "a plain module by another name", files: map[string]string{"core.py": naginiCoreImporting("import helper as h\n"), "helper.py": naginiBrokenHelper},
-			errors: []string{refused("3", "imports helper, the package's helper.py"+naginiUnmarked)}},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.py")}},
 		{name: "an import in a function", files: map[string]string{"helper.py": naginiBrokenHelper,
 			"core.py": "# +nagini\nfrom nagini_contracts.contracts import *\n\n\ndef two() -> int:\n    from helper import inc\n    return inc(1)\n"},
-			errors: []string{refused("6", "imports helper, the package's helper.py"+naginiUnmarked)}},
+			errors: []string{naginiImportRefused("core.py", "6", "helper", "helper.py")}},
 		{name: "an import in a try", files: map[string]string{"helper.py": naginiBrokenHelper,
 			"core.py": naginiCoreImporting("try:\n    import helper\nexcept ImportError:\n    pass\n")},
-			errors: []string{refused("4", "imports helper, the package's helper.py"+naginiUnmarked)}},
+			errors: []string{naginiImportRefused("core.py", "4", "helper", "helper.py")}},
+		{name: "an import under TYPE_CHECKING", files: map[string]string{"helper.py": naginiBrokenHelper,
+			"core.py": naginiCoreImporting("from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import helper\n")},
+			errors: []string{naginiImportRefused("core.py", "5", "helper", "helper.py")}},
 		{name: "a test", files: map[string]string{"core.py": naginiCoreImporting("from test_helper import inc\n"), "test_helper.py": naginiHelper},
-			errors: []string{refused("3", "imports test_helper, the package's test_helper.py, a test, which the gate never proves")}},
-		{name: "a stub beside a marked module", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"), "helper.py": naginiHelper,
+			errors: []string{naginiImportRefused("core.py", "3", "test_helper", "test_helper.py")}},
+		{name: "a stub", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"),
 			"helper.pyi": "from nagini_contracts.contracts import *\n\n\ndef inc(n: int) -> int:\n    Ensures(Result() == n + 2)\n    ...\n"},
-			errors: []string{refused("3", "imports helper, which Nagini would read from the package's helper.pyi, a stub the gate never proves, and take its contracts")},
-			runs:   []string{"helper.py: helper.py"}},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.pyi, a stub")}},
 		{name: "a package", files: map[string]string{"core.py": naginiCoreImporting("from helper.inc import inc\n"), "helper/__init__.py": "", "helper/inc.py": naginiHelper},
-			errors: []string{refused("3", "imports helper.inc, which Nagini would read from the package's directory helper, whose modules the gate never proves")}},
-		{name: "a stub package", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"), "helper.py": naginiHelper, "helper-stubs/__init__.pyi": ""},
-			errors: []string{refused("3", "imports helper, which Nagini would read from the package's directory helper-stubs, a stub package the gate never proves")},
-			runs:   []string{"helper.py: helper.py"}},
+			errors: []string{naginiImportRefused("core.py", "3", "helper.inc", "the directory helper")}},
+		{name: "a stub package", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"), "helper-stubs/__init__.pyi": ""},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "the directory helper-stubs, a stub package")}},
+		{name: "a compiled module", files: map[string]string{"core.py": naginiCoreImporting("import helper\n"), "helper.cpython-313-x86_64-linux-gnu.so": elf},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.cpython-313-x86_64-linux-gnu.so, a compiled module")}},
+		{name: "sourceless bytecode", files: map[string]string{"core.py": naginiCoreImporting("import helper\n"), "helper.pyc": "\xf3\r\r\n"},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.pyc, a compiled module")}},
+		// A marked file is no exception: it's proved alone.
+		{name: "another marked core", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"), "helper.py": naginiHelper},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.py")}, runs: []string{"helper.py: helper.py"}},
+		{name: "marked cores that import each other", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"),
+			"helper.py": strings.Replace(naginiHelper, "\n\n\ndef", "\nimport core\n\n\ndef", 1)},
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.py"), naginiImportRefused("helper.py", "3", "core", "core.py")}},
+		{name: "itself", files: map[string]string{"core.py": naginiCoreImporting("import core\n")},
+			errors: []string{naginiImportRefused("core.py", "3", "core", "core.py")}},
 		{name: "a relative import", files: map[string]string{"core.py": naginiCoreImporting("from .helper import inc\n"), "helper.py": naginiHelper},
-			errors: []string{refused("3", "imports from .helper, relative to its package, "+naginiOwnPackage)}, runs: []string{"helper.py: helper.py"}},
+			errors: []string{relative("3", ".helper")}, runs: []string{"helper.py: helper.py"}},
 		{name: "the package itself", files: map[string]string{"core.py": naginiCoreImporting("from . import helper\n"), "helper.py": naginiHelper},
-			errors: []string{refused("3", "imports from ., relative to its package, "+naginiOwnPackage)}, runs: []string{"helper.py: helper.py"}},
+			errors: []string{relative("3", ".")}, runs: []string{"helper.py: helper.py"}},
 		{name: "the package by its own name", files: map[string]string{"core.py": naginiCoreImporting("from twophase.helper import inc\n"), "helper.py": naginiHelper},
-			errors: []string{refused("3", "imports twophase.helper, its own package by name, "+naginiOwnPackage)}, runs: []string{"helper.py: helper.py"}},
-		// A refusal reaches every proof that would rest on it.
-		{name: "a chain", files: map[string]string{"core.py": naginiCoreImporting("from middle import inc\n"), "helper.py": naginiBrokenHelper,
-			"middle.py": "# +nagini\nfrom nagini_contracts.contracts import *\nfrom helper import inc\n"},
-			errors: []string{refused("3", "imports middle, the package's middle.py, which the gate refuses"),
-				"middle.py:3: refused before Nagini runs: the line imports helper, the package's helper.py" + naginiUnmarked}},
+			errors: []string{"core.py:3: refused before Nagini runs: the line imports twophase.helper, its own package by name" + naginiOnlyItself},
+			runs:   []string{"helper.py: helper.py"}},
 		// What the package doesn't hold, or the standard library holds
 		// whatever the package does, is Nagini's to read as before, and
-		// its directory holds no other file of the package.
+		// its directory holds no file of the package but the one it proves.
 		{name: "the standard library over a module the package holds", files: map[string]string{"json.py": naginiBrokenHelper,
 			"core.py": naginiCoreImporting("import json\nfrom typing import List\nimport math\nfrom nagini_contracts.contracts import Result\nimport nagini_contracts.io_builtins\n")},
 			runs: []string{"core.py: core.py"}},
 		{name: "a module the package doesn't hold", files: map[string]string{"core.py": naginiCoreImporting("import yaml\n"), "explore.py": "import json\n", "__init__.py": ""},
 			runs: []string{"core.py: core.py"}},
-		{name: "another marked core", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"), "helper.py": naginiHelper, "explore.py": "from helper import inc\n"},
-			runs: []string{"core.py: core.py helper.py", "helper.py: helper.py"}},
-		{name: "another marked core, by module", files: map[string]string{"core.py": naginiCoreImporting("import helper\n"), "helper.py": naginiHelper},
-			runs: []string{"core.py: core.py helper.py", "helper.py: helper.py"}},
-		{name: "marked cores that import each other", files: map[string]string{"core.py": naginiCoreImporting("from helper import inc\n"),
-			"helper.py": strings.Replace(naginiHelper, "\n\n\ndef", "\nimport core\n\n\ndef", 1)},
-			runs: []string{"core.py: core.py helper.py", "helper.py: core.py helper.py"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			log := naginiFakeDocker(t)
 			code := naginiPackageOf(t, c.files, naginiFakeImage)
-			if len(code.Errors) != len(c.errors) {
-				t.Fatalf("errors %q, want %d starting %q", code.Errors, len(c.errors), c.errors)
-			}
-			for i, want := range c.errors {
-				if !strings.HasPrefix(code.Errors[i], want) {
-					t.Fatalf("errors %q, want %q", code.Errors, c.errors)
-				}
+			if !reflect.DeepEqual(code.Errors, c.errors) && !(len(code.Errors) == 0 && len(c.errors) == 0) {
+				t.Fatalf("errors %q, want %q", code.Errors, c.errors)
 			}
 			if code.Passed != (len(c.errors) == 0) {
 				t.Fatalf("passed %v with errors %q", code.Passed, code.Errors)
@@ -237,28 +263,6 @@ func TestNaginiReadsEveryImportOfAMarkedFile(t *testing.T) {
 				t.Fatalf("Nagini ran %q, want %q", runs, c.runs)
 			}
 		})
-	}
-}
-
-// A core that imports another marked core proves both, and the receipt
-// counts both; a proof that rests on one Nagini didn't prove doesn't stand,
-// and the gate says so beside Nagini's own error.
-func TestNaginiProvesAMarkedCoreAndTheMarkedCoreItImports(t *testing.T) {
-	log := naginiFakeDocker(t)
-	code := naginiPackageOf(t, map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper}, naginiFakeImage)
-	if !code.Passed || !reflect.DeepEqual(code.Functions, []string{"two", "inc"}) || !reflect.DeepEqual(code.Contracts, []string{"two", "inc"}) || len(code.Errors) != 0 {
-		t.Fatalf("code = %+v, want both files proved", code)
-	}
-	if runs := naginiRuns(t, log); !reflect.DeepEqual(runs, []string{"core.py: core.py helper.py", "helper.py: helper.py"}) {
-		t.Fatalf("Nagini ran %q", runs)
-	}
-
-	naginiFakeDocker(t)
-	code = naginiPackageOf(t, map[string]string{"core.py": naginiProbeBody, "helper.py": "# +nagini\n# fake: unproved\n" + naginiBrokenHelper}, naginiFakeImage)
-	want := []string{"helper.py:5:12: Postcondition of inc might not hold. Assertion Result() == n + 1 might not hold.",
-		"core.py: its proof rests on helper.py's contracts, which Nagini didn't prove"}
-	if code.Passed || !reflect.DeepEqual(code.Errors, want) {
-		t.Fatalf("passed %v, errors %q; want %q", code.Passed, code.Errors, want)
 	}
 }
 
@@ -306,18 +310,15 @@ func TestNaginiRunsTodaysCoresAlone(t *testing.T) {
 	}
 }
 
-// naginiAlone is a marked core that imports nothing of its package.
-const naginiAlone = "# +nagini\nfrom nagini_contracts.contracts import *\n\n\ndef two() -> int:\n    Ensures(Result() == 2)\n    return 2\n"
-
 // What Python may load in place of a marked file, and so run where the gate
 // claims the file is proved: an extension, which Python's finder takes
 // before the source, cached bytecode, which CPython 3.13 runs in place of
-// the source when it's unchecked, a package, which it takes before the
-// file, and, as D-0260 refuses where an in-place proof's module would be,
-// sourceless bytecode. The gate refuses each before Nagini runs, for a core
-// and for the marked file a core imports, so a core that imports one is
-// refused too. A namespace directory doesn't shadow the file, and another
-// module's compiled forms don't either.
+// the source when it's unchecked, and a package, which it takes before the
+// file. Sourceless bytecode beside the source loads only after it, and is
+// refused anyway, as D-0260 refuses a compiled module where an in-place
+// proof's module would be. The gate refuses each before Nagini runs. A
+// namespace directory doesn't shadow the file, and another module's
+// compiled forms don't either.
 func TestNaginiRefusesWhatPythonMayLoadInAMarkedFilesPlace(t *testing.T) {
 	const elf = "\x7fELF\x02\x01\x01"
 	shadowed := func(file, what string) string {
@@ -349,24 +350,11 @@ func TestNaginiRefusesWhatPythonMayLoadInAMarkedFilesPlace(t *testing.T) {
 			errors: []string{shadowed("core.py", "directory core, a package the gate never proves")}},
 		{name: "a compiled package", files: map[string]string{"core.py": naginiAlone, "core/__init__.cpython-313-x86_64-linux-gnu.so": elf},
 			errors: []string{shadowed("core.py", "directory core, a package the gate never proves")}},
-		// The marked file a core imports is held to the same, so the core
-		// is refused with it.
-		{name: "an extension beside the marked file a core imports", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
+		// Each marked file is held to it, a helper a core would import too.
+		{name: "an extension beside a marked helper", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
 			"helper.cpython-313-x86_64-linux-gnu.so": elf},
-			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Python may load from the package's helper.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read",
+			errors: []string{naginiImportRefused("core.py", "3", "helper", "helper.py"),
 				shadowed("helper.py", "helper.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read")}},
-		{name: "cached bytecode for the marked file a core imports", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
-			"__pycache__/helper.cpython-313.pyc": "\xf3\r\r\n\x01"},
-			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, the package's helper.py, which the gate refuses, so the proof would rest on contracts nothing proves",
-				shadowed("helper.py", "__pycache__/helper.cpython-313.pyc, bytecode the gate can't read")}},
-		{name: "a package beside the marked file a core imports", files: map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper,
-			"helper/__init__.py": "def inc(n):\n    return n\n"},
-			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Nagini would read from the package's directory helper",
-				shadowed("helper.py", "directory helper, a package the gate never proves")}},
-		{name: "a module the package holds only compiled", files: map[string]string{"core.py": naginiProbeBody, "helper.cpython-313-x86_64-linux-gnu.so": elf},
-			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Python may load from the package's helper.cpython-313-x86_64-linux-gnu.so, a compiled module the gate can't read"}},
-		{name: "a module the package holds only as sourceless bytecode", files: map[string]string{"core.py": naginiProbeBody, "helper.pyc": "\xf3\r\r\n"},
-			errors: []string{"core.py:3: refused before Nagini runs: the line imports helper, which Python may load from the package's helper.pyc, a compiled module the gate can't read"}},
 		// What doesn't stand where a marked file loads from.
 		{name: "a namespace directory", files: map[string]string{"core.py": naginiAlone, "core/data.txt": "2\n"},
 			runs: []string{"core.py: core.py"}},
@@ -377,13 +365,8 @@ func TestNaginiRefusesWhatPythonMayLoadInAMarkedFilesPlace(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			log := naginiFakeDocker(t)
 			code := naginiPackageOf(t, c.files, naginiFakeImage)
-			if len(code.Errors) != len(c.errors) {
+			if !reflect.DeepEqual(code.Errors, c.errors) && !(len(code.Errors) == 0 && len(c.errors) == 0) {
 				t.Fatalf("errors %q, want %q", code.Errors, c.errors)
-			}
-			for i, want := range c.errors {
-				if !strings.HasPrefix(code.Errors[i], want) {
-					t.Fatalf("errors %q, want %q", code.Errors, c.errors)
-				}
 			}
 			if code.Passed != (len(c.errors) == 0) || (len(c.errors) > 0 && len(code.Functions) != 0) {
 				t.Fatalf("code = %+v", code)

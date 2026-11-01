@@ -263,41 +263,33 @@ func TestNaginiNeverProvesArithmeticItModelsApartFromPython(t *testing.T) {
 	}
 }
 
-// #383, against the pinned Nagini: the issue's probes are refused before
-// Nagini runs. A core that imports another marked core proves both, each in
-// a directory of its own, and the receipt counts both. When the core it
-// imports breaks its own contract, Nagini says so, and the gate says the
-// core's proof, which Nagini verified against that contract, rests on it.
-func TestNaginiProvesACoreAndTheMarkedCoreItImports(t *testing.T) {
+// #390's review, on the real gate: the one local import D-0271 let through,
+// a bare import of a sibling marked core, binds where the code runs to
+// whatever the launcher's path finds first, the project root before the
+// package. With a plain root helper.py whose inc returns n + 2, the gate
+// passed and counted bump proved, though bump(0) == 2 where the code runs.
+// The gate now refuses the core before Nagini runs, so the code check fails
+// though the tests and conformance pass, and Nagini proves the package's
+// marked helper.py alone (#383).
+func TestNaginiRefusesACoreThatImportsItsPackage(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	verify := func(t *testing.T, files map[string]string) *Code {
-		t.Helper()
-		pkg := filepath.Join(t.TempDir(), "twophase")
-		for name, body := range files {
-			pa310Write(t, pkg, name, body)
-		}
-		code, err := Python{}.Verify(ctx, pkg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return code
+	dir := copyProject(t, provedPython, map[string]func(string) string{
+		"twophase/core.py": func(src string) string {
+			src = replace(t, "from nagini_contracts.contracts import *\n", "from nagini_contracts.contracts import *\nimport helper\n")(src)
+			return src + "\n\ndef bump(n: int) -> int:\n    Ensures(Result() == n + 1)\n    return helper.inc(n)\n"
+		},
+	})
+	pa310Write(t, dir, "twophase/helper.py", naginiHelper)
+	pa310Write(t, dir, "helper.py", "def inc(n: int) -> int:\n    return n + 2\n")
+	r := run(t, dir)
+	want := []string{naginiImportRefused("core.py", "17", "helper", "helper.py")}
+	if r.Passed || !contains(Failed(r), "code") || !reflect.DeepEqual(r.Code.Errors, want) {
+		t.Fatalf("failed = %v, errors = %q; want only %q", Failed(r), r.Code.Errors, want)
 	}
-	for core, helper := range map[string]string{naginiProbeDivision: naginiDivisionHelper, naginiProbeBody: naginiBrokenHelper} {
-		code := verify(t, map[string]string{"core.py": core, "helper.py": helper})
-		want := "core.py:3: refused before Nagini runs: the line imports helper, the package's helper.py" + naginiUnmarked
-		if code.Passed || len(code.Errors) != 1 || code.Errors[0] != want || len(code.Functions) != 0 {
-			t.Fatalf("code = %+v; want only %q", code, want)
-		}
+	if !reflect.DeepEqual(r.Code.Functions, []string{"inc"}) || !contains(r.Code.Unverified, "bump") {
+		t.Errorf("functions = %v, unverified = %v; want only helper.py's inc proved", r.Code.Functions, r.Code.Unverified)
 	}
-	code := verify(t, map[string]string{"core.py": naginiProbeBody, "helper.py": naginiHelper})
-	if !code.Passed || !reflect.DeepEqual(code.Functions, []string{"two", "inc"}) || !reflect.DeepEqual(code.Contracts, []string{"two", "inc"}) {
-		t.Fatalf("code = %+v, want both cores proved", code)
-	}
-	code = verify(t, map[string]string{"core.py": naginiProbeBody, "helper.py": "# +nagini\n" + naginiBrokenHelper})
-	want := []string{"helper.py:6:12: Postcondition of inc might not hold. Assertion Result() == n + 1 might not hold.",
-		"core.py: its proof rests on helper.py's contracts, which Nagini didn't prove"}
-	if code.Passed || !reflect.DeepEqual(code.Errors, want) {
-		t.Fatalf("passed %v, errors %q; want %q", code.Passed, code.Errors, want)
+	if !r.Build.Passed || !r.Conformance.Passed {
+		t.Error("the tests and conformance pass, since the root helper.py binds where the code runs; only the refusal fails the gate")
 	}
 }
