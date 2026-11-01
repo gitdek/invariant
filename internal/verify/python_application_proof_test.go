@@ -671,6 +671,7 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 	replace := func(from, to string) func(string) string {
 		return func(m string) string { return strings.Replace(m, from, to, 1) }
 	}
+	same := func(m string) string { return m }
 	dumps := func(t *testing.T, root string, p *project.Project) {
 		ppContract(t, root, p, "json.dumps", project.ComponentOperation{Kind: "standard_library", Module: "json", Symbol: "dumps"},
 			"\n\ndef dumps_of(value: object) -> str:\n    Ensures(len(Result()) >= 0)\n    ...\n", "dumps_of", "DumpsTests.test_dumps",
@@ -754,6 +755,38 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			other: map[string]string{"tasks/config.py": "import tasks.admission as adm\n\nadm.admit = None\n"}, want: "writes tasks.admission.admit"},
 		{name: "another module writing through a relative import", module: func(m string) string { return m },
 			other: map[string]string{"tasks/config.py": "from . import admission\n\ndel admission.LIMIT\n"}, want: "writes tasks.admission.LIMIT"},
+		// Ways to reach the module that the scan can't follow, refused where
+		// they reach it.
+		{name: "an alias of the module", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import admission\nm = admission\nm.LIMIT = 100\n"}, want: "tasks/config.py:2 binds tasks.admission to a name other than by an import"},
+		{name: "an alias of an as-import", module: same,
+			other: map[string]string{"tasks/config.py": "import tasks.admission as a\nz = a\nz.LIMIT = 100\n"}, want: "tasks/config.py:2 binds tasks.admission to a name other than by an import"},
+		{name: "a del through an alias", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import admission\nm = admission\ndel m.LIMIT\n"}, want: "tasks/config.py:2 binds tasks.admission to a name other than by an import"},
+		{name: "sys.modules by the module's name", module: same,
+			other: map[string]string{"tasks/config.py": "import sys\n\nsys.modules['tasks.admission'].LIMIT = 100\n"}, want: "tasks/config.py:3 looks tasks.admission up in sys.modules"},
+		{name: "sys.modules by its package's name", module: same,
+			other: map[string]string{"tasks/config.py": "import sys\n\nsys.modules['tasks'].admission.LIMIT = 100\n"}, want: "looks tasks up in sys.modules"},
+		{name: "the module passed to a function", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import admission\n\n\ndef poke(m):\n    m.LIMIT = 100\n\n\npoke(admission)\n"}, want: "tasks/config.py:8 passes tasks.admission to a call"},
+		{name: "a module that re-exports it", module: same,
+			other: map[string]string{"tasks/reexport.py": "from tasks import admission\n", "tasks/config.py": "from tasks.reexport import admission\n\nadmission.LIMIT = 100\n"}, want: "tasks/config.py:3 writes tasks.admission.LIMIT"},
+		{name: "a star import of its package", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks import *\n\nadmission.LIMIT = 100\n"}, want: "tasks/config.py:3 writes tasks.admission.LIMIT"},
+		{name: "importlib with its package's name", module: same,
+			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks').admission.LIMIT = 100\n"}, want: "imports tasks by name"},
+		{name: "patching it by name", module: same,
+			other: map[string]string{"tests/test_admission.py": "from unittest import mock\n\n\n@mock.patch('tasks.admission.LIMIT', 100)\ndef test_admits():\n    pass\n"}, want: "names tasks.admission in a string"},
+		{name: "the function's __globals__", module: same,
+			other: map[string]string{"tasks/config.py": "from tasks.admission import admit\n\nadmit.__globals__['LIMIT'] = 100\n"}, want: "reads __globals__"},
+		{name: "rebinding the module in its package", module: same,
+			other: map[string]string{"tasks/config.py": "import tasks\n\ntasks.admission = None\n"}, want: "rebinds tasks's attribute admission"},
+		{name: "a source the host's Python can't read", module: same,
+			other: map[string]string{"tools/broken.py": "def (:\n"}, want: "tools/broken.py:1 can't be read by the host's Python"},
+		// What the module itself binds, and how the function reads builtins.
+		{name: "a star import beside the function", module: replace("LIMIT = 3\n", "LIMIT = 3\nfrom os.path import *\n"), want: "star import of os.path could rebind what the input copies"},
+		{name: "an attribute of a builtin Nagini models", module: replace("        return admitted + 1\n", "        return admitted + 1 + len(str.maketrans('a', 'b'))\n"),
+			want: "reads attributes of the builtin str"},
 		// Operations an abstraction can't stand for, and imports that fail.
 		{name: "an async application operation", module: func(m string) string {
 			m = strings.Replace(m, "        version = tinyver.parse(text)\n", "        version = tinyver.parse(text)\n        pending = fetch(text)\n", 1)
@@ -789,6 +822,52 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 				t.Fatal("Nagini ran on an input that can't stand for the function")
 			}
 		})
+	}
+}
+
+// A neighbor may import the module and read it: call its functions, read its
+// values and its name, and look an unrelated module up by name. It may not
+// hand the module itself to a call, even getattr.
+func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
+	root, p := ppFixture(t, ppModule)
+	pa310Write(t, root, "tasks/api.py", "import importlib\nimport sys\n\nimport tasks.admission as a\nfrom tasks import admission\n\n\n"+
+		"def handle(text):\n    '''Calls tasks.admission.admit.'''\n    loaded = importlib.import_module('json')\n"+
+		"    return admission.admit(text, a.LIMIT - 1), admission.__name__, sys.modules['json'] is loaded, 'json' in sys.modules, getattr(a, '__doc__')\n")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err == nil || !strings.Contains(err.Error(), "passes tasks.admission to a call") {
+		t.Fatalf("getattr on the module itself: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "tasks/api.py"))
+	pa310Write(t, root, "tasks/api.py", strings.Replace(string(b), ", getattr(a, '__doc__')", ", getattr(sys, 'path')", 1))
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// When the module is a package's own, importing a submodule binds its name
+// in the package, so no submodule may share a name the function reads.
+func TestPythonApplicationProofRefusesASubmoduleNamedForWhatItReads(t *testing.T) {
+	const source = "tasks/admission/__init__.py"
+	module := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\n" +
+		"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Ensures(Result() < 3)\n    return admitted\n"
+	root, p := ppFixture(t, module)
+	if err := os.Remove(filepath.Join(root, ppSource)); err != nil {
+		t.Fatal(err)
+	}
+	pa310Write(t, root, source, module)
+	p.Manifest.Existing = append(slices.DeleteFunc(p.Manifest.Existing, func(s string) bool { return s == ppSource }), source)
+	p.Manifest.Components.Scope = append(p.Manifest.Components.Scope, "tasks/admission")
+	check := &p.Manifest.Components.Checks[len(p.Manifest.Components.Checks)-1]
+	check.Target = pa310Ref(source, "admit")
+	check.Proof.Contracts = []project.ComponentRef{check.Target}
+	pa310Save(t, p)
+	id := pa310ID(source, "admit")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	pa310Write(t, root, "tasks/admission/LIMIT.py", "")
+	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), id); err == nil ||
+		!strings.Contains(err.Error(), "tasks/admission/LIMIT.py is in a submodule of tasks.admission, and importing it rebinds tasks.admission.LIMIT") {
+		t.Fatalf("a submodule named for a constant: %v", err)
 	}
 }
 
@@ -1088,6 +1167,28 @@ func TestPythonApplicationProofReal(t *testing.T) {
 		if proof.Ran || proof.Result.Passed || len(u) != 1 || u[0].Kind != MissingContract || u[0].Operation == nil ||
 			*u[0].Operation != (project.ResolvedComponentOperation{Kind: "dependency", Distribution: "packaging", Module: "packaging.utils", Symbol: "is_normalized_name"}) {
 			t.Fatalf("an omitted contract: %+v", proof.Result)
+		}
+	})
+	// Nagini proves the function as the input copies it, so a neighbor that
+	// writes the module's constant through an alias is refused before
+	// Nagini runs: at run time admit(50) would return 50.
+	t.Run("a write through an alias", func(t *testing.T) {
+		module := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\n" +
+			"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Ensures(Result() < 3)\n    return admitted\n\n\n" +
+			"async def report(text: str) -> str:\n    return text\n"
+		root, p := ppRealFixture(t, module, false)
+		proof, err := pa315Prepare(t, p, PythonApplicationSessionOptions{}).Prove(ctx, ppAdmitID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Nagini: %s", strings.TrimSpace(proof.Output))
+		if !proof.Ran || !proof.Result.Passed {
+			t.Fatalf("the function as the input copies it wasn't proved: %+v", proof.Result)
+		}
+		pa310Write(t, root, "tasks/config.py", "from tasks import admission\nm = admission\nm.LIMIT = 100\n")
+		if proof, err := pa315Prepare(t, p, PythonApplicationSessionOptions{}).Prove(ctx, ppAdmitID()); err == nil ||
+			!strings.Contains(err.Error(), "tasks/config.py:2 binds tasks.admission to a name other than by an import") {
+			t.Fatalf("got %v, %+v; want the alias refused before Nagini runs", err, proof)
 		}
 	})
 	// A contract that declares what its operation raises reaches Nagini:
