@@ -400,3 +400,161 @@ func TestPythonApplicationContractTestsRefuseTheSecondReviewsBypasses(t *testing
 		})
 	}
 }
+
+// #355's final pass: a wrapped method bound at module level counts only on
+// its own object, an application method only on its class, a transplanted
+// __new__ only for its class, the staged source only under the module name
+// its path gives, and a worker thread inside an assertion hides none the
+// test method makes.
+
+const pbfTinyver = `
+import functools
+
+
+def logged(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+    return wrapper
+
+
+class Parser:
+    def __init__(self, strict):
+        self.strict = strict
+
+    @logged
+    def parse(self, text):
+        return text.upper()
+
+    def plain(self, text):
+        return text.lower()
+
+
+_default = Parser(strict=True)
+parse_strict = _default.parse
+plain_strict = _default.plain
+
+
+class Token:
+    def __new__(cls, text):
+        obj = object.__new__(cls)
+        obj.text = text
+        return obj
+`
+
+const pbfTests = pbtTests + `
+
+from store import kv
+
+
+class BoundTests(unittest.TestCase):
+    def test_wrapped_own_object(self):
+        self.assertEqual(tinyver.parse_strict('abc'), 'ABC')
+
+    def test_wrapped_other_instance(self):
+        self.assertEqual(tinyver.Parser(strict=False).parse('abc'), 'ABC')
+
+    def test_plain_other_instance(self):
+        self.assertEqual(tinyver.Parser(strict=False).plain('ABC'), 'abc')
+
+
+class NewTests(unittest.TestCase):
+    def test_real(self):
+        self.assertEqual(tinyver.Token('t').text, 't')
+
+    def test_transplanted(self):
+        class Fake:
+            __new__ = tinyver.Token.__new__
+        self.assertEqual(Fake('t').text, 't')
+
+
+class AppMethodTests(unittest.TestCase):
+    def test_real(self):
+        self.assertEqual(kv.Store().save('a', 1), 1)
+
+    def test_transplanted(self):
+        class Fake:
+            items = {}
+            save = kv.Store.save
+        self.assertEqual(Fake().save('a', 1), 1)
+
+
+class SecondModuleTests(unittest.TestCase):
+    def test_second_module(self):
+        import importlib.util
+        import sys as _sys
+        spec = importlib.util.spec_from_file_location('store_copy', state.__file__)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules['store_copy'] = mod
+        spec.loader.exec_module(mod)
+        mod.helper_double = lambda x: 0
+        self.assertEqual(mod.compute(5), 1)
+
+
+class ThreadedAssertionTests(unittest.TestCase):
+    def test_worker_inside_an_assertion(self):
+        self.assertTrue(json.dumps({'a': 1}))
+        release = threading.Event()
+        inside = threading.Event()
+
+        def blocker():
+            inside.set()
+            release.wait(5)
+            raise ValueError('done')
+
+        def worker():
+            self.assertRaises(ValueError, blocker)
+        t = threading.Thread(target=worker)
+        t.start()
+        inside.wait(5)
+        try:
+            self.assertEqual(1, 2)
+        except AssertionError:
+            pass
+        release.set()
+        t.join()
+`
+
+func TestPythonApplicationContractTestsRefuseTheFinalPassBypasses(t *testing.T) {
+	const (
+		noAssertion = "it made no assertion that passed, or one failed"
+		noCall      = "the test itself made no call into the bound implementation"
+	)
+	method := func(symbol string) project.ComponentOperation {
+		return project.ComponentOperation{Kind: "application", Source: "store/kv.py", Symbol: symbol}
+	}
+	for _, c := range []struct {
+		name      string
+		operation project.ComponentOperation
+		test      string
+		reason    string // empty where the contract stays tested
+	}{
+		{"a wrapped method on its own object", prvDep("parse_strict"), "BoundTests.test_wrapped_own_object", ""},
+		{"a wrapped method bound to another instance", prvDep("parse_strict"), "BoundTests.test_wrapped_other_instance", noCall},
+		{"a method bound to another instance", prvDep("plain_strict"), "BoundTests.test_plain_other_instance", noCall},
+		{"its own __new__", prvDep("Token.__new__"), "NewTests.test_real", ""},
+		{"a transplanted __new__", prvDep("Token.__new__"), "NewTests.test_transplanted", noCall},
+		{"an application method", method("Store.save"), "AppMethodTests.test_real", ""},
+		{"an application method on another class", method("Store.save"), "AppMethodTests.test_transplanted", noCall},
+		{"the staged source loaded as a second module", pbtApp("compute"), "SecondModuleTests.test_second_module", noCall},
+		{"a worker thread inside an assertion", prvStd("json", "dumps"), "ThreadedAssertionTests.test_worker_inside_an_assertion", noAssertion},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, p := ptcFixture(t)
+			pa310Write(t, root, "store/state.py", pbtState)
+			pa310Write(t, root, "store/kv.py", "class Store:\n    def __init__(self):\n        self.items = {}\n\n    def save(self, key, value):\n        self.items[key] = value\n        return value\n")
+			pa310Write(t, root, ptcTests, pbfTests)
+			pa310Write(t, root, ptcContracts, pbtContracts("contract", ""))
+			p.Manifest.Components.TrustedContracts = []project.ComponentContract{ptcContract("probe", c.operation, "contract", c.test)}
+			pa310Save(t, p)
+			r := ptcRun(t, ptcSession(t, p, prvLibrariesWith(t, prvInit+pbfTinyver, false), "1.0"))
+			standing, why := ptcStanding(t, r, "probe"), ptcDiagnostic(r, UnsupportedContract, "probe")
+			if c.reason == "" && standing.Support != "tested" {
+				t.Fatalf("real use lost its support: %q; executions %+v", why, r.Application.Executions)
+			}
+			if c.reason != "" && (standing.Support != "untested" || !strings.Contains(why, c.reason)) {
+				t.Fatalf("support %s, %q; want untested, %q", standing.Support, why, c.reason)
+			}
+		})
+	}
+}

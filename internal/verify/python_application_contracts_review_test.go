@@ -205,9 +205,15 @@ const prvImpl = "class Version:\n    def __init__(self, text):\n        self.par
 // replaces _impl.py's comparison after installation.
 func prvLibraries(t *testing.T, edited bool) string {
 	t.Helper()
+	return prvLibrariesWith(t, prvInit, edited)
+}
+
+// prvLibrariesWith installs tinyver with init as its __init__.py.
+func prvLibrariesWith(t *testing.T, init string, edited bool) string {
+	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"tinyver/__init__.py":            prvInit,
+		"tinyver/__init__.py":            init,
 		"tinyver/_impl.py":               prvImpl,
 		"tinyver-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: tinyver\nVersion: 1.0\n",
 	}
