@@ -19,7 +19,7 @@ import (
 
 // tlapsCommit is the full hash of the pinned tlapm, whose short form is
 // toolchain.TLAPSVersion. The soundness tests are read at this commit.
-const tlapsCommit = "4744c0f30eb8705f52092230bfc6ec8e8956ba6c"
+const tlapsCommit = "eef4b65dc86b5a13eb58be90d793cdf18782e278"
 
 // These run the pinned tlapm (#360). It's a linux/amd64 image, emulated on
 // an ARM laptop, so they run only with INVARIANT_TLAPS_REAL=1, as CI's

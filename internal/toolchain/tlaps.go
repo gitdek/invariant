@@ -16,9 +16,9 @@ import (
 // commit it reports. Changing any of them is a decision.
 const (
 	TLAPSRelease       = "1.6.0-pre"
-	TLAPSVersion       = "4744c0f"
+	TLAPSVersion       = "eef4b65"
 	TLAPSTarballURL    = "https://github.com/tlaplus/tlapm/releases/download/1.6.0-pre/tlapm-1.6.0-pre-x86_64-linux-gnu.tar.gz"
-	TLAPSTarballSHA256 = "e3e0732108a409f3a1643d3e47508da9181fa4df8f47fe8dec346035308f0744"
+	TLAPSTarballSHA256 = "b0038e59a6bddc9aa9a75e7c3320e20333f02fd7ba745ea64f1cc1c9800e43e8"
 )
 
 // TLAPSDockerfile is the recipe for the TLAPS sandbox: tlapm and the backends
