@@ -1,5 +1,5 @@
 # The soundness tests the pinned tlapm marks "known" (a latent unsoundness it
-# has not fixed), at commit 4744c0f, under test/soundness_tests. Each line is
+# has not fixed), at commit eef4b65, under test/soundness_tests. Each line is
 # "<issue> <test>". TestTLAPSClosesEveryKnownSoundnessIssue maps every issue
 # here to a gate refusal or a checked reason it can't arise, and the real
 # TestTLAPSRealKnownSoundnessTestsMatch checks this list still matches the
