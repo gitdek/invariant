@@ -11,13 +11,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/gitdek/invariant/factory/journal-merges/merges"
 )
 
 // Grown checks that a repository's journal only grew since base, a git ref:
 // every line base has is still in the checkout, in its place. A pull request
 // adds lines and files to the journal and never changes or removes one. Each
 // file's hash chain can't show a file rewritten whole, or removed, and this
-// can.
+// can. Each file is checked with factory/journal-merges, its proved core
+// (#194): base's file must be the start of the checkout's, the rule a merge
+// meets.
 func Grown(ctx context.Context, repo Repo, base string) ([]string, error) {
 	list, err := exec.CommandContext(ctx, "git", "-C", repo.Dir, "ls-tree", "-r", "-z", "--name-only", base, "--", "decisions/journal/").Output()
 	if err != nil {
@@ -70,9 +74,52 @@ func Grown(ctx context.Context, repo Repo, base string) ([]string, error) {
 			problems = append(problems, fmt.Sprintf("%s/%s's journal is gone, but it only grows", repo.Name, id))
 		case err != nil:
 			return nil, err
-		case !bytes.HasPrefix(now, was):
-			problems = append(problems, fmt.Sprintf("%s/%s's journal changed a line it had at %s, but it only grows", repo.Name, id, base))
+		default:
+			starts, err := startsJournal(was, now)
+			if err != nil {
+				return nil, fmt.Errorf("checking %s/%s's journal against %s: %w", repo.Name, id, base, err)
+			}
+			if !starts {
+				problems = append(problems, fmt.Sprintf("%s/%s's journal changed a line it had at %s, but it only grows", repo.Name, id, base))
+			}
 		}
 	}
 	return problems, nil
+}
+
+// startsJournal says whether the journal file was is the start of now: the
+// core's StartsWith, with each line, newline and all, as one of its lines.
+// Equal lines are the same line, and no two different ones are.
+func startsJournal(was, now []byte) (bool, error) {
+	ids := map[string]int{}
+	lines := func(file []byte) ([]merges.Line, error) {
+		var out []merges.Line
+		for len(file) > 0 {
+			end := bytes.IndexByte(file, '\n') + 1
+			if end == 0 {
+				end = len(file)
+			}
+			text := string(file[:end])
+			n, seen := ids[text]
+			if !seen {
+				n = len(ids) + 1
+				ids[text] = n
+			}
+			out = append(out, merges.Line{By: 1, N: n})
+			file = file[end:]
+		}
+		if len(out) > merges.MaxSize {
+			return nil, fmt.Errorf("it has %d lines, more than the %d the proof covers", len(out), merges.MaxSize)
+		}
+		return out, nil
+	}
+	main, err := lines(was)
+	if err != nil {
+		return false, err
+	}
+	branch, err := lines(now)
+	if err != nil {
+		return false, err
+	}
+	return merges.StartsWith(main, branch), nil
 }

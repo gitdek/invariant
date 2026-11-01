@@ -1,0 +1,66 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-09-29T21:33:07Z",
+    "issue": 194,
+    "comment": "https://github.com/gitdek/invariant/issues/194#issuecomment-5899379336",
+    "proposal": "sha256:88f22241b2b815270a9f58629a671ff3dff6a35d479aeeb60441b1d526b23f47"
+  },
+  "bounds": {
+    "Branches": "{b1, b2}",
+    "Files": "{f1, f2}",
+    "MaxLines": "2"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "Main and every branch start with empty journals. Branches add lines to their files, merge into main only when each of main's files is the start of theirs, and take main in when main has moved past them.",
+      "sha256": "sha256:41d9986841fb06bf880acf7c9054f74a38d97105bb7cce5687a1ebf77267eb5d"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "Main and each branch hold journal files, each a list of lines, and each branch has added a bounded number of lines.",
+      "sha256": "sha256:210ea143ee7e50e99a5516f8447c8c40cb873c01036b879379f23b8ddff63a7b"
+    },
+    {
+      "name": "MainOnlyGrows",
+      "kind": "invariant",
+      "says": "Merging never changes or removes a line main already has: every file main ever held is the start of the file it holds now.",
+      "sha256": "sha256:f2a6424ccd5af21abf8928bbfad52a5a80eecf1b245b3b70127c53f350b233ec"
+    },
+    {
+      "name": "NoLineLost",
+      "kind": "invariant",
+      "says": "No line is lost: every line a branch added is in its branch or in main.",
+      "sha256": "sha256:73e796b7a852e35b6dedb7beb69a56e15b6bb0ab9bca20805bdd3b3bda6dd310"
+    },
+    {
+      "name": "BothMergedOneFile",
+      "kind": "witness",
+      "says": "Both branches can add lines to the same file, and both can reach main.",
+      "sha256": "sha256:c3bb38ab67415c5de247178adff0c6263d9ad898f1a190c3113ea97c55e66edd"
+    },
+    {
+      "name": "TookMainIn",
+      "kind": "witness",
+      "says": "A branch that main moved past can take main in, and then hold lines past main's.",
+      "sha256": "sha256:40756300ab00bafd49b21f3ed15113fbbfda596bbe6eb18658f6279bd97e9050"
+    },
+    {
+      "name": "MergeUnchecked",
+      "kind": "bug",
+      "says": "A branch merges without the check, and its files replace main's, dropping main's lines it doesn't have.",
+      "expect": "MainOnlyGrows",
+      "sha256": "sha256:790ec88e8e0b039207a10b33c563d9f6185bd3d187f6b83f4871119440e8d55b"
+    },
+    {
+      "name": "TakeMainInDropsOwn",
+      "kind": "bug",
+      "says": "Taking main in drops the branch's own lines past what it had of main, so they're lost.",
+      "expect": "NoLineLost",
+      "sha256": "sha256:d2c1959331a7e0094943eedf370d7540ea28881b0c94a5a487de6371d5300f22"
+    }
+  ]
+}
