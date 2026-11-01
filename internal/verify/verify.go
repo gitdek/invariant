@@ -62,6 +62,11 @@ type Report struct {
 	// statement's action as a step the model takes.
 	Properties []Property `json:"properties,omitempty"`
 	Fairness   []Fair     `json:"fairness,omitempty"`
+	// TLAPS proves the ratified invariants the manifest selects at every
+	// size, from the model alone (#360). It's evidence of its own: it
+	// says nothing of the code, and TLC's check within the bounds stands
+	// beside it.
+	TLAPS []TLAPSProof `json:"tlaps,omitempty"`
 	// Code-level evidence: agreement for a state machine explored from its
 	// initial state, conformance for code run by a driver, and a proof when
 	// the language has a verifier for the code.
@@ -197,6 +202,7 @@ type Toolchain struct {
 	DepsBase           string                        `json:"deps_base,omitempty"`   // where an existing-code project's dependencies image starts
 	DepsRecipe         string                        `json:"deps_recipe,omitempty"` // the recipe, manifest and lockfile it was built from
 	Go                 string                        `json:"go,omitempty"`
+	TLAPS              *TLAPSTool                    `json:"tlaps,omitempty"` // the TLAPS sandbox, when a proof ran in it (#360)
 }
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
@@ -262,6 +268,9 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		return nil, err
 	}
 	if !model && isPythonApplication(p) {
+		if len(p.Manifest.TLAPS) > 0 {
+			return nil, ErrTLAPSApplication
+		}
 		return runPythonApplication(ctx, p, outDir, tc)
 	}
 	if !model && p.Manifest.Components != nil {
@@ -509,6 +518,13 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		})
 	}
 
+	if !model && len(p.Manifest.TLAPS) > 0 {
+		spawn(func() (err error) {
+			r.TLAPS, r.Toolchain.TLAPS, err = proveTLAPS(ctx, work, p, src)
+			return err
+		})
+	}
+
 	if !model {
 		spawn(func() (err error) {
 			r.Code, err = lang.Verify(ctx, p.CodeDir())
@@ -704,6 +720,9 @@ func modelPassed(r *Report) bool {
 	for _, f := range r.Fairness {
 		ok = ok && f.InNext
 	}
+	for _, t := range r.TLAPS {
+		ok = ok && t.Proved
+	}
 	return ok
 }
 
@@ -764,6 +783,12 @@ func Fingerprint(r Report) string {
 	r.Properties = append([]Property(nil), r.Properties...)
 	for i := range r.Properties {
 		r.Properties[i].Trace = ""
+	}
+	// Which backend proved an obligation first depends on timing, so a
+	// laptop and CI can differ on it; what was proved can't (#360).
+	r.TLAPS = append([]TLAPSProof(nil), r.TLAPS...)
+	for i := range r.TLAPS {
+		r.TLAPS[i].Provers = nil
 	}
 	b, _ := json.Marshal(r)
 	sum := sha256.Sum256(b)
