@@ -117,7 +117,7 @@ func (r *Report) AttributeComponentAssumptions(inv *project.ComponentInventory, 
 	if err != nil {
 		return err
 	}
-	if evidence.Assumptions, err = index.assumptions(records); err != nil {
+	if evidence.Assumptions, err = index.assumptions(records, false); err != nil {
 		return err
 	}
 	if evidence.Proofs, err = index.retainedProofs(evidence.Inventory, r.Components); err != nil {
@@ -412,14 +412,27 @@ func sameComponentInvocation(a, b project.ResolvedComponentInvocation) bool {
 		maps.Equal(a.Sampling, b.Sampling) && slices.Equal(a.Inputs, b.Inputs)
 }
 
-func (index *componentIndex) assumptions(records []ComponentAssumptionRecord) ([]ComponentAssumptionEvidence, error) {
+// assumptions validates supplied or retained records against the inventory.
+// A record that names no configured target, another declaration's snapshot or
+// an assumption its target doesn't declare, or repeats a target's assumption,
+// is invalid. One whose target or assumption the inventory holds with other
+// contents is stale, and so is a retained one whose target or assumption the
+// inventory no longer holds, as every kind's stale evidence is (D-0205,
+// D-0253).
+func (index *componentIndex) assumptions(records []ComponentAssumptionRecord, retained bool) ([]ComponentAssumptionEvidence, error) {
 	var rows []ComponentAssumptionEvidence
 	seen := map[[2]string]bool{}
 	for _, record := range records {
 		key := [2]string{record.Target, record.Assumption.ID}
 		check, ok := index.checks[record.Target]
-		if !ok || record.Input != index.components[record.Target] || !slices.Contains(check.Assumptions, record.Assumption) || seen[key] {
+		known := ok && record.Input.ID == record.Target && slices.ContainsFunc(check.Assumptions, func(a project.ResolvedComponentAssumption) bool {
+			return a.ID == record.Assumption.ID
+		})
+		switch {
+		case seen[key], !known && !retained:
 			return nil, fmt.Errorf("component assumptions: invalid, stale or duplicate record %q for %q", record.Assumption.ID, record.Target)
+		case !known, record.Input != index.components[record.Target], !slices.Contains(check.Assumptions, record.Assumption):
+			return nil, fmt.Errorf("%w: component assumptions: invalid, stale or duplicate record %q for %q", ErrStaleComponentEvidence, record.Assumption.ID, record.Target)
 		}
 		seen[key] = true
 		rows = append(rows, ComponentAssumptionEvidence{Target: record.Target, Status: "assumed", Record: record})
@@ -460,7 +473,7 @@ func (index *componentIndex) retainedAssumptions(old *ComponentEvidence) ([]Comp
 			records = append(records, row.Record)
 		}
 	}
-	return index.assumptions(records)
+	return index.assumptions(records, true)
 }
 
 func (index *componentIndex) retainedConformance(old *ComponentEvidence, bounds map[string]string) ([]ComponentConformanceEvidence, error) {
