@@ -124,7 +124,7 @@ var modelModules = map[string]bool{"Naturals": true, "Integers": true, "Reals": 
 // soundness names the constructs tlapm's open soundness issues touch, which
 // neither a model nor a proof may use (#360): a term tlapm doesn't translate
 // under a binder proves false theorems (tlaplus/tlapm#309), overlapping CASE
-// arms do under SMT (#304), and so do negative exponents (#324).
+// arms do under SMT (#304), and so do negative exponents (#300).
 var soundness = map[string]string{
 	"ENABLED":  "ENABLED, which tlapm abstracts unsoundly under a binder (tlaplus/tlapm#309)",
 	`\cdot`:    `\cdot, which tlapm abstracts unsoundly under a binder (tlaplus/tlapm#309)`,
@@ -136,7 +136,7 @@ var soundness = map[string]string{
 	`\AA`:      "temporal quantification, which tlapm abstracts unsoundly under a binder (tlaplus/tlapm#309)",
 	"TEMPORAL": "a temporal declaration, which tlapm abstracts unsoundly under a binder (tlaplus/tlapm#309)",
 	"CASE":     "a CASE expression, whose overlapping arms SMT proves unsoundly (tlaplus/tlapm#304)",
-	"^":        "an exponent, which SMT proves unsoundly when it's negative (tlaplus/tlapm#324)",
+	"^":        "an exponent, which SMT proves unsoundly when it's negative (tlaplus/tlapm#300)",
 }
 
 // tlaToken is one token of TLA+ source.

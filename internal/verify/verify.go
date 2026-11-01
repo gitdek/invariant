@@ -761,10 +761,10 @@ func agree(d Design, e Exploration) Agreement {
 // Fingerprint hashes what a report certifies: the statements, bounds,
 // results and verifier pins. Component reference sets are canonicalized on a
 // detached copy; invocation arguments, observations and diagnostics stay ordered.
-// It leaves out timestamps, test timings, the Go
-// toolchain's patch version, where traces were written and the coding agent
-// that wrote the code, so a local run and a CI run of the same commit have
-// the same fingerprint.
+// It leaves out timestamps, the build output and its test timings, the whole
+// version of the host's Go toolchain, where traces were written and the coding
+// agent that wrote the code, so a local run and a CI run of the same commit
+// have the same fingerprint.
 func Fingerprint(r Report) string {
 	if r.Application != nil {
 		r.Application = portablePythonApplication(r.Application)

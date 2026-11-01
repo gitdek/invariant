@@ -470,6 +470,11 @@ const pa342Startup = `def start():
 // sees them in both runs.
 func TestPythonApplicationGateExplorationExecutions(t *testing.T) {
 	pa342Modes(t, func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		if !real {
+			// The double runs the runner on the host's python3, and the start
+			// checks sys.flags.safe_path, which only a Python that takes -P has.
+			pa315RunnerPython(t)
+		}
 		f := pa342New(t, true, real)
 		pa342Edit(t, f, pa342DriverPath, "def start():\n", pa342Startup)
 		pa342Edit(t, f, pa342DriverPath, "Limit = 2\n", fmt.Sprintf("Limit = 2\nOFFLINE = %s\n", map[bool]string{true: "True", false: "False"}[real]))
