@@ -9,6 +9,7 @@ require (
 	// the factory wrote and Gobra proves (#94, #126).
 	github.com/gitdek/invariant/factory/decision-state v0.0.0
 	github.com/gitdek/invariant/factory/ids v0.0.0
+	github.com/gitdek/invariant/factory/journal-merges v0.0.0
 	github.com/gitdek/invariant/factory/plans v0.0.0
 	// The factory runs on its own protocol, which the factory wrote and Gobra
 	// proves (D-0064). It's a module of its own, so CI's gate verifies it like
@@ -42,3 +43,5 @@ replace github.com/gitdek/invariant/factory/decision-state => ./factory/decision
 replace github.com/gitdek/invariant/factory/ids => ./factory/ids
 
 replace github.com/gitdek/invariant/factory/store-journal => ./factory/store-journal
+
+replace github.com/gitdek/invariant/factory/journal-merges => ./factory/journal-merges

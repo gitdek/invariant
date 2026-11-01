@@ -1,0 +1,6 @@
+{
+  "name": "journal merges",
+  "module": ".invariant/specs/JournalMerges.tla",
+  "code": "merges",
+  "language": "go"
+}
