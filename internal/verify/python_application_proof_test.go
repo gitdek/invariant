@@ -779,6 +779,16 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 			other: map[string]string{"tasks/config.py": "from unittest import mock\n\nmock.patch('tasks.admission.LIMIT', 100).start()\n"}, want: "tasks/config.py:3 patches tasks.admission.LIMIT by name"},
 		{name: "importlib with its name in production", module: same,
 			other: map[string]string{"tasks/config.py": "import importlib\n\nimportlib.import_module('tasks.admission').LIMIT = 1\n"}, want: "tasks/config.py:3 imports tasks.admission by name"},
+		{name: "runpy.run_path in production", module: same,
+			other: map[string]string{"tests/test_helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/config.py": "import runpy\n\nrunpy.run_path('tests/test_helpers.py')\n"},
+			want: "tasks/config.py:3 runs code from a path or a code object"},
+		{name: "runpy.run_code in production", module: same,
+			other: map[string]string{"tasks/config.py": "from runpy import run_code\n\nrun_code(compile('x = 1', 'x', 'exec'))\n"}, want: "tasks/config.py:3 runs code from a path or a code object"},
+		// The helper reaches the module by name, so importing it by name
+		// reaches nothing the scan refuses in production code itself.
+		{name: "a test module production code imports by name", module: same,
+			other: map[string]string{"tests/test_helpers.py": "import sys\n\nsys.modules['tasks.admission'].LIMIT = 100\n", "tasks/config.py": "import importlib\n\nimportlib.import_module('tests.test_helpers')\n"},
+			want: "tests/test_helpers.py:3 looks tasks.admission up in sys.modules"},
 		{name: "a helper production code imports", module: same,
 			other: map[string]string{pa315Project + "/helpers.py": "from tasks import admission\n\nadmission.LIMIT = 100\n", "tasks/config.py": "from verification.lifecycle import helpers\n"},
 			want: pa315Project + "/helpers.py:3 writes tasks.admission.LIMIT"},
@@ -858,6 +868,9 @@ func TestPythonApplicationProofLeavesTestsOutOfTheScan(t *testing.T) {
 		"@mock.patch('tasks.admission.LIMIT', 100)\ndef test_admits_more():\n    with mock.patch.object(admission, 'LIMIT', 5):\n        admission.LIMIT = 7\n")
 	pa310Write(t, root, pa315Project+"/helpers.py", "import sys\n\nfrom tasks import admission\n\nadmission.LIMIT = 9\nsys.modules['tasks.admission'].LIMIT = 9\n")
 	pa310Write(t, root, "tasks/log.py", "import logging\n\nlog = logging.getLogger('tasks.admission')\n")
+	// A file named like a test is one, even in a production package, until
+	// production code imports it.
+	pa310Write(t, root, "tasks/test_helpers.py", "from tasks import admission\n\nadmission.LIMIT = 11\n")
 	if _, err := ppSession(t, p, &ppNagini{}).ProofInput(context.Background(), ppAdmitID()); err != nil {
 		t.Fatal(err)
 	}

@@ -380,6 +380,10 @@ BY_NAME = frozenset(("importlib.import_module", "importlib.__import__", "builtin
 PATCHERS = frozenset(("unittest.mock.patch", "unittest.mock.patch.dict", "unittest.mock.patch.multiple",
                       "mock.patch", "mock.patch.dict", "mock.patch.multiple"))
 
+# Calls that run code from a path or a code object, which no import shows.
+BY_PATH = frozenset(("runpy.run_path", "runpy.run_code", "importlib.util.spec_from_file_location",
+                     "importlib.machinery.SourceFileLoader", "importlib.machinery.SourcelessFileLoader"))
+
 
 def module_of(path):
     """The module a source is, by its path from the application's root."""
@@ -429,9 +433,11 @@ def writes(request):
     may only read attributes, and writing one is refused where it's the
     module's own or rebinds a module on the way to it. So are reaching one
     of them by name, through sys.modules, importlib, __import__, runpy,
-    pkgutil, pydoc or mock's patchers, reading __globals__ or f_globals,
-    reading the namespace of a source that holds one, and a source the
-    host's Python can't read."""
+    pkgutil, pydoc or mock's patchers, running code from a path or a code
+    object, reading __globals__ or f_globals, reading the namespace of a
+    source that holds one, and a source the host's Python can't read. A
+    test source production code loads, by an import or by a constant name,
+    is production code."""
     target = request["module"]
     out, sources, unread = [], [], {}
 
@@ -453,26 +459,6 @@ def writes(request):
     exported = {module_of(s[0]): s[2] for s in sources}
     starred = {module_of(s[0]): s[3] for s in sources}
 
-    # Production sources, and what they import, which runs in production
-    # too, whether or not it's a test helper, with each package on its way.
-    by_module = {module_of(s[0]): s for s in sources}
-    scanned = [s for s in sources if not s[5]]
-    included = {s[0] for s in scanned}
-    for s in scanned:
-        for loaded in s[4]:
-            parts = loaded.split(".")
-            for i in range(1, len(parts) + 1):
-                prefix = ".".join(parts[:i])
-                other = by_module.get(prefix)
-                if other is not None and other[0] not in included:
-                    included.add(other[0])
-                    scanned.append(other)
-                if prefix in unread:
-                    unread[prefix] = unread[prefix][:3] + (False,)
-    for path, line, why, tests in unread.values():
-        if not tests:
-            report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
-
     def resolve(dotted, seen=()):
         """The dotted paths a path may name, the path itself among them,
         following what the staged modules' imports bind."""
@@ -488,6 +474,51 @@ def writes(request):
                     found |= resolve(".".join([b] + parts[i + 1:]), seen + (dotted,))
                 break
         return found
+
+    def candidates_of(names, stars, expr):
+        """The dotted paths a source's expression may name."""
+        attrs = []
+        while isinstance(expr, ast.Attribute):
+            attrs.append(expr.attr)
+            expr = expr.value
+        if not isinstance(expr, ast.Name):
+            return set()
+        heads = set(names.get(expr.id, ())) | {(s + "." if s else "") + expr.id for s in stars}
+        if expr.id not in names:
+            heads.add("builtins." + expr.id)
+        found = set()
+        for h in heads:
+            found |= resolve(".".join([h] + attrs[::-1]))
+        return found
+
+    def by_name(source):
+        """What a source loads by a constant name: through importlib and its
+        kin, or as a patcher's target, which mock imports."""
+        _, tree, names, stars = source[:4]
+        return [node.args[0].value.replace(":", ".") for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+                and candidates_of(names, stars, node.func) & (BY_NAME | PATCHERS)]
+
+    # Production sources, and what they load, by an import or by a constant
+    # name, which runs in production too, whether or not it's a test helper,
+    # with each package on its way.
+    by_module = {module_of(s[0]): s for s in sources}
+    scanned = [s for s in sources if not s[5]]
+    included = {s[0] for s in scanned}
+    for s in scanned:
+        for loaded in s[4] + by_name(s):
+            parts = loaded.split(".")
+            for i in range(1, len(parts) + 1):
+                prefix = ".".join(parts[:i])
+                other = by_module.get(prefix)
+                if other is not None and other[0] not in included:
+                    included.add(other[0])
+                    scanned.append(other)
+                if prefix in unread:
+                    unread[prefix] = unread[prefix][:3] + (False,)
+    for path, line, why, tests in unread.values():
+        if not tests:
+            report(path, line, "can't be read by the host's Python (%s), so the scan for writes can't see it" % why)
 
     # The module, the packages on its path, and every application module
     # whose imports bind one of them, so it's reached by attribute too.
@@ -512,20 +543,8 @@ def writes(request):
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         holds = any(reach & resolve(b) for bs in names.values() for b in bs) or any(reach & resolve(s) for s in stars)
 
-        def candidates(expr):
-            attrs = []
-            while isinstance(expr, ast.Attribute):
-                attrs.append(expr.attr)
-                expr = expr.value
-            if not isinstance(expr, ast.Name):
-                return set()
-            heads = set(names.get(expr.id, ())) | {(s + "." if s else "") + expr.id for s in stars}
-            if expr.id not in names:
-                heads.add("builtins." + expr.id)
-            found = set()
-            for h in heads:
-                found |= resolve(".".join([h] + attrs[::-1]))
-            return found
+        def candidates(expr, names=names, stars=stars):
+            return candidates_of(names, stars, expr)
 
         def shown(refs):
             return target if target in refs else max(sorted(refs), key=len)
@@ -598,6 +617,8 @@ def writes(request):
             constant = isinstance(arg, ast.Constant) and isinstance(arg.value, str)
             if holds and (funcs & {"builtins.globals", "builtins.locals"} or "builtins.vars" in funcs and not node.args and not node.keywords):
                 report(path, line, "reads its own namespace, which holds a module on the way to %s" % target)
+            if funcs & BY_PATH:
+                report(path, line, "runs code from a path or a code object, and the scan for writes can't follow it")
             if funcs & BY_NAME:
                 if not constant or arg.value.startswith("."):
                     report(path, line, "imports a module by a name it computes, and the scan for writes can't follow it")
