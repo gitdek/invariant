@@ -844,6 +844,8 @@
     const first = (i) => (i.repo === state.repo ? 0 : 1);
     const open = all.filter((i) => i.open).sort((a, b) => first(a) - first(b)), closed = all.filter((i) => !i.open);
     const issues = lanesAll ? open.concat(closed) : open.concat(closed.slice(0, Math.max(0, 4 - open.length + 1)));
+    // A list that didn't come is empty, so one issue can't stop the rest (#430).
+    issues.forEach((i) => { i.spans ||= []; i.events ||= []; });
     const hidden = all.length - issues.length;
     const FOLD = 11; // a wait on people takes this share of the widest lane's factory time
     const maxFactory = Math.max(...issues.map((i) => i.spans.filter((s) => s.who !== "people").reduce((a, s) => a + (T(s.to) - T(s.from)) / 1000, 0)), 60);
@@ -986,6 +988,9 @@
       const x = now.offsetLeft + 13;
       road.querySelector(".fill").style.width = `${x}px`;
       road.querySelector(".train").style.left = `${x}px`;
+      // The road is wider than most screens and hides its scrollbar, so bring
+      // the current slice into view instead of leaving it past the edge (#430).
+      road.scrollTo({ left: Math.max(0, now.offsetLeft - (road.clientWidth - now.offsetWidth) / 2), behavior: REDUCED ? "auto" : "smooth" });
     };
     if (roadShown || REDUCED) return go();
     const io = new IntersectionObserver((es) => { if (es[0].isIntersecting) { roadShown = true; setTimeout(go, 150); io.disconnect(); } }, { threshold: 0.3 });
