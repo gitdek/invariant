@@ -212,9 +212,10 @@ func (f *Factory) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// Watch polls until ctx ends, and then waits for its steps to end. With a
-// lease, it polls only while it holds the lease, and checks it before each
-// effect. The first time it may act, before it starts any step, it clears
+// Watch polls until ctx ends, then waits for its steps and lease renewal to
+// end before releasing its lease. With a lease, it polls only while it holds
+// the lease, and checks it before each effect. The first time it may act,
+// before it starts any step, it clears
 // the clone's worktrees: the clone is the watcher's own, so any worktree
 // there is left over from a watcher that stopped mid-build. It clears them
 // only then, since after that its steps run across polls, each in a
@@ -222,12 +223,30 @@ func (f *Factory) Prepare(ctx context.Context) error {
 // may share the clone with a running watcher. Then, for the same reasons,
 // it clears the Go build caches runs in its work directory left (#366).
 func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
+	ctx, stop := context.WithCancel(ctx)
+	var renewal sync.WaitGroup
+	defer func() {
+		stop()
+		f.Wait()
+		renewal.Wait()
+		if f.LeaseFor > 0 {
+			// Shutdown's context has ended, but relinquishing the lease must
+			// still reach the repository, with a limit if it is unavailable.
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := f.releaseLease(cleanup); err != nil {
+				f.logf("release lease: %v", err)
+			}
+		}
+	}()
 	if f.LeaseFor > 0 {
 		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
 		if _, err := f.hold(ctx); err != nil {
 			f.logf("lease: %v", err)
 		}
+		renewal.Add(1)
 		go func() {
+			defer renewal.Done()
 			select {
 			case <-ctx.Done():
 			case <-time.After(every):
@@ -254,6 +273,9 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		return err
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !f.holds() {
 			// Another watcher holds the lease. Wait for it to run out.
 		} else if err := clearOnce(); err != nil {
@@ -263,7 +285,6 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		}
 		select {
 		case <-ctx.Done():
-			f.Wait()
 			return ctx.Err()
 		case <-time.After(every):
 		}
@@ -389,6 +410,9 @@ func (f *Factory) Wait() {
 // started one, and stops waiting when ctx ends.
 func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		f.running.mu.Lock()
 		if f.running.steps == nil {
 			f.running.steps, f.running.ended = map[int]Step{}, make(chan struct{})
@@ -614,8 +638,10 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		return f.note(ctx, t, c, "I'm already working on this issue.")
 	case Revise:
 		switch {
-		case kind == KindForks, kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
-			return f.formalize(ctx, t, c, state.Marker.Answers, state.Marker.Proposal, []int64{c.Comment})
+		case kind == KindForks:
+			return f.choose(ctx, t, state, pending)
+		case kind == KindProposal, kind == KindStuck, kind == KindUnsupported, kind == KindClosed, stoppedBuild(state):
+			return f.formalize(ctx, t, c, choiceAnswers(t, state), state.Marker.Proposal, []int64{c.Comment})
 		case kind == KindFailed && state.Marker.Rebuilds():
 			// A retry builds the plan again, replacing #n (#271).
 			n := state.Marker.PR
@@ -727,36 +753,110 @@ func matches(args []string, hash string) bool {
 	return len(got) >= hashChars && strings.HasPrefix(strings.TrimPrefix(hash, "sha256:"), got)
 }
 
-// choose records people's answers to the open forks. Once every fork is
-// answered, it drafts again with the answers.
+// choose records people's answers to the open forks. A following revise
+// drafts with whatever they answered; otherwise every fork needs an answer.
 func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Command) error {
 	f.doing(t.Issue.Number, "answering")
 	forks := state.Marker.Forks
-	chosen := map[string]formalize.Answer{}
+	answers := append([]formalize.Answer(nil), choiceAnswers(t, state)...)
 	var replyTo []int64
-	var last Command
+	var last, revision Command
+	var problems []string
+	var finish bool
+	var through int64
 	for _, c := range pending {
+		// A reply consumes a whole comment. Finish reading that comment
+		// before acting on its revise or reporting an invalid choice.
+		if finish && c.Comment != through {
+			break
+		}
+		if c.Verb == Revise {
+			revision, finish, through = c, true, c.Comment
+			if !slices.Contains(replyTo, c.Comment) {
+				replyTo = append(replyTo, c.Comment)
+			}
+			continue
+		}
 		if c.Verb != Choose {
 			continue
 		}
 		last = c
+		if !slices.Contains(replyTo, c.Comment) {
+			replyTo = append(replyTo, c.Comment)
+		}
 		fork, option, problem, closing := findChoice(forks, c.Args)
 		if problem != "" || closing != "" {
-			return f.note(ctx, t, c, problem, closing)
+			problems = append(problems, problem+closing)
+			finish, through = true, c.Comment
+			continue
 		}
-		chosen[strings.ToUpper(fork.ID)] = formalize.Answer{Fork: fork.ID, Question: fork.Question, Option: option.ID, Says: option.Says, By: c.By, Comment: c.URL}
-		replyTo = append(replyTo, c.Comment)
-	}
-	for _, fork := range forks {
-		if _, ok := chosen[strings.ToUpper(fork.ID)]; !ok {
-			return nil // wait for the rest
+		answer := formalize.Answer{Fork: fork.ID, Question: fork.Question, Option: option.ID, Says: option.Says, By: c.By, Comment: c.URL}
+		if i := slices.IndexFunc(answers, func(a formalize.Answer) bool {
+			return strings.EqualFold(a.Fork, fork.ID) && a.Question == fork.Question
+		}); i >= 0 {
+			answers[i] = answer
+		} else {
+			answers = append(answers, answer)
 		}
 	}
-	answers := append([]formalize.Answer(nil), state.Marker.Answers...)
+	if len(problems) > 0 {
+		noteReplies := replyTo
+		if revision.Verb != "" {
+			// Save the choices, but leave this comment's revise pending
+			// until its draft succeeds, even if that draft returns an error.
+			noteReplies = slices.DeleteFunc(append([]int64(nil), replyTo...), func(id int64) bool { return id == revision.Comment })
+		}
+		if err := f.choiceNote(ctx, t, answers, noteReplies, strings.Join(problems, " ")); err != nil {
+			return err
+		}
+		if revision.Verb == "" {
+			return nil
+		}
+	}
+	if revision.Verb != "" {
+		return f.formalize(ctx, t, revision, answers, state.Marker.Proposal, replyTo)
+	}
+	var missing []string
 	for _, fork := range forks {
-		answers = append(answers, chosen[strings.ToUpper(fork.ID)])
+		if !slices.ContainsFunc(answers, func(a formalize.Answer) bool {
+			return strings.EqualFold(a.Fork, fork.ID) && a.Question == fork.Question
+		}) {
+			missing = append(missing, fmt.Sprintf("`/invariant choose %s <option>`", fork.ID))
+		}
+	}
+	if len(missing) > 0 {
+		return f.choiceNote(ctx, t, answers, replyTo, "I've recorded your choices.",
+			" Still waiting for "+strings.Join(missing, ", ")+". Use an option from each question, or explain what you want and comment `/invariant revise`.")
 	}
 	return f.formalize(ctx, t, last, answers, nil, replyTo)
+}
+
+// choiceAnswers reads the latest saved choices for this draft. Notes don't
+// change the issue's state, but their accepted answers survive later polls,
+// deleted command comments and watcher restarts. A new draft starts its own
+// answer history, so notes for an earlier draft cannot leak into it.
+func choiceAnswers(t Thread, state Post) []formalize.Answer {
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		p := t.Posts[i]
+		if p.Comment.ID == state.Comment.ID {
+			break
+		}
+		if p.Marker.Kind == KindNote && len(p.Marker.Answers) > 0 {
+			return p.Marker.Answers
+		}
+	}
+	return state.Marker.Answers
+}
+
+// choiceNote answers the commands without running a draft and saves the
+// choices alongside their provenance before those commands are consumed.
+func (f *Factory) choiceNote(ctx context.Context, t Thread, answers []formalize.Answer, replyTo []int64, text string, closing ...string) error {
+	if err := f.recovers(ctx, t.Issue.Number, "record fork choices with a note", f.canPost(noting(), recovery.Note)); err != nil {
+		return err
+	}
+	m := Marker{Kind: KindNote, ReplyTo: replyTo, Answers: answers}
+	_, err := f.GitHub.PostComment(ctx, t.Issue.Number, noteComment(text, m, closing...))
+	return err
 }
 
 func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formalize.Option, string, string) {
@@ -782,7 +882,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// base is the project's lock on the base branch, which a draft amends.
 	var base string
 	stuck := func(problem string) error {
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo}
+		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous}
 		return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 	}
 	f.logf("#%d: formalizing", n)
@@ -806,7 +906,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// with nothing drafted (#103).
 	if !prd && kindLine(t.Issue.Body) == "plumbing" {
 		if !f.plansPlumbing() {
-			m := Marker{Kind: KindUnsupported, ReplyTo: replyTo}
+			m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers, Proposal: previous}
 			return f.drafted(ctx, t, cause, base, m, plumbingElsewhereComment(m), LabelHumanReview)
 		}
 		if projectLine(t.Issue.Body) != "" || len(codeLines(t.Issue.Body)) > 0 {
@@ -890,7 +990,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		// The issue's agent ran the draft that stopped, so its post names it
 		// (#179).
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Agent: agent}
+		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous, Agent: agent}
 		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the watcher running it stopped or lost the repository's lease.", m,
 			" Comment `/invariant revise` to draft again."), LabelHumanReview)
 	}
@@ -1156,8 +1256,10 @@ func revise(t Thread, answers []formalize.Answer, changes []formalize.Revision) 
 	}
 	out := append([]formalize.Answer(nil), answers...)
 	for _, ch := range changes {
-		i := slices.IndexFunc(out, func(a formalize.Answer) bool { return strings.EqualFold(a.Fork, ch.Fork) })
 		fork, asked := askedFork(t, ch.Fork)
+		i := slices.IndexFunc(out, func(a formalize.Answer) bool {
+			return strings.EqualFold(a.Fork, fork.ID) && a.Question == fork.Question
+		})
 		if i < 0 || !asked {
 			continue
 		}
@@ -1326,9 +1428,14 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 
 // branchFor picks the branch and project directory for a ratified proposal,
 // and the ref to start from. If an earlier attempt already pushed this
-// proposal's branch, it picks that up where it stopped; a branch left from a
-// different proposal gets a numbered successor.
+// proposal's branch at its explicitly named destination, it picks that up
+// where it stopped. An implicitly numbered project keeps its allocation;
+// a different proposal or destination gets a numbered successor.
 func (f *Factory) branchFor(ctx context.Context, issue int, p *formalize.Proposal) (branch, dir, from string, err error) {
+	namedDir := p.Dir
+	if p.Target != nil {
+		namedDir = p.Target.Dir
+	}
 	for i := 1; ; i++ {
 		branch = fmt.Sprintf("invariant/issue-%d-%s", issue, p.Slug)
 		if i > 1 {
@@ -1342,7 +1449,7 @@ func (f *Factory) branchFor(ctx context.Context, issue int, p *formalize.Proposa
 		if err != nil {
 			return "", "", "", err
 		}
-		if sc.Project == "" {
+		if sc.Project == "" || namedDir != "" && sc.Project != namedDir {
 			continue
 		}
 		b, err := f.Repo.Show(ctx, "origin/"+branch, sc.Project+"/.invariant/ratified.lock")

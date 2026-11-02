@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -8,8 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gitdek/invariant/internal/github"
@@ -80,11 +85,25 @@ func (c Clone) Lease(ctx context.Context) (sha string, rec LeaseRecord, err erro
 
 // readLease is Lease, for a call that holds the clone's lock.
 func (c Clone) readLease(ctx context.Context) (sha string, rec LeaseRecord, err error) {
-	sha, err = c.remoteRef(ctx, leaseRef)
-	if err != nil || sha == "" {
+	env, err := c.auth(ctx)
+	if err != nil {
 		return "", rec, err
 	}
-	msg, err := c.git(ctx, "log", "-1", "--format=%B", sha)
+	out, err := c.leaseGit(ctx, env, "ls-remote", "origin", leaseRef)
+	if err != nil {
+		return "", rec, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", rec, nil
+	}
+	sha = fields[0]
+	if _, err := c.leaseGit(ctx, nil, "cat-file", "-e", sha+"^{commit}"); err != nil {
+		if _, err := c.leaseGit(ctx, env, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", "+"+leaseRef+":"+leaseRef); err != nil {
+			return "", rec, err
+		}
+	}
+	msg, err := c.leaseGit(ctx, nil, "log", "-1", "--format=%B", sha)
 	if err != nil {
 		return "", rec, err
 	}
@@ -104,11 +123,20 @@ func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (stri
 	if err != nil {
 		return "", err
 	}
-	commit, err := c.emptyCommit(ctx, string(msg))
+	tree, err := c.leaseGit(ctx, nil, "hash-object", "-t", "tree", "-w", "--stdin")
 	if err != nil {
 		return "", err
 	}
-	if err := c.pushRef(ctx, leaseRef, old, commit); err != nil {
+	out, err := c.leaseGit(ctx, nil, "-c", "user.name="+c.Name, "-c", "user.email="+c.Email, "commit-tree", strings.TrimSpace(tree), "-m", string(msg))
+	if err != nil {
+		return "", err
+	}
+	commit := strings.TrimSpace(out)
+	env, err := c.auth(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, err := c.leaseGit(ctx, env, "push", "--quiet", receivePack, "--force-with-lease="+leaseRef+":"+old, "origin", commit+":"+leaseRef); err != nil {
 		now, _, readErr := c.readLease(ctx)
 		switch {
 		case readErr == nil && now == commit:
@@ -119,6 +147,28 @@ func (c Clone) PushLease(ctx context.Context, old string, rec LeaseRecord) (stri
 		return "", err
 	}
 	return commit, nil
+}
+
+// leaseGit bounds lease renewal and cleanup even when a transport helper
+// keeps a pipe open after git exits. No upkeep may outlive a lease command,
+// so its group is also stopped when the command finishes (D-0113, #422).
+func (c Clone) leaseGit(ctx context.Context, env []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", slices.Concat(noDetach, args)...)
+	cmd.Dir = c.Dir
+	cmd.Env = append(os.Environ(), append(env, noLFS)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 100 * time.Millisecond
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if err != nil {
+		return stdout.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
 }
 
 // auth is the environment that lets git push as the factory's App, when it
@@ -224,6 +274,25 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// releaseLease relinquishes only this watcher's lease, once its steps and
+// renewal have ended. The empty record expired before any clock's skew
+// window, so the next watcher can acquire it immediately. Comparing the
+// ref when pushing protects a holder that replaces it after this read.
+func (f *Factory) releaseLease(ctx context.Context) error {
+	f.lease.mu.Lock()
+	defer f.lease.mu.Unlock()
+	f.lease.sha, f.lease.until, f.lease.waiting, f.lease.tried = "", time.Time{}, "", nil
+	sha, rec, err := f.Repo.Lease(ctx)
+	if err != nil || sha == "" || rec.Holder != f.Holder {
+		return err
+	}
+	_, err = f.Repo.PushLease(ctx, sha, LeaseRecord{})
+	if errors.Is(err, ErrLeaseMoved) {
+		return nil
+	}
+	return err
+}
+
 // holds says whether this watcher may act: it holds the lease, with time to
 // spare by its own clock. Without a lease, as in a one-off run, it may.
 func (f *Factory) holds() bool {
@@ -286,6 +355,9 @@ func (f *Factory) holdsFor(ctx context.Context) bool {
 // agent runs, which take longer than a lease lasts.
 func (f *Factory) keepLease(ctx context.Context, every time.Duration) {
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if _, err := f.hold(ctx); err != nil && ctx.Err() == nil {
 			f.logf("lease: %v", err)
 		}

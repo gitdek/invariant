@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -170,6 +171,12 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 	defer stop()
 	cmd := exec.CommandContext(run, c.Binary, args...)
 	cmd.Dir = job.Workspace
+	// The agent's tools inherit its group, so cancellation stops them too,
+	// including any descendants still holding its output pipes open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// exec's context watcher stops when Wait reaps the leader, before it
+	// drains stderr. Keep cancellation alive through that drain ourselves.
+	cmd.Cancel = nil
 	// The gate takes a while; give its tool calls time.
 	cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=900000", "MCP_TIMEOUT=60000")
 	stdout, err := cmd.StdoutPipe()
@@ -182,11 +189,22 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 		// A run whose deadline has passed starts nothing.
 		return try{err: err, cut: ctx.Err() != nil}
 	}
+	drained, watchStopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watchStopped)
+		select {
+		case <-run.Done():
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		case <-drained:
+		}
+	}()
 	usage, end, readErr := readClaudeStream(stdout, job.Transcript)
 	if readErr != nil {
 		stop() // stop the agent, rather than wait for it
 	}
 	waitErr := cmd.Wait()
+	close(drained)
+	<-watchStopped
 	// The result, when there's one, alone says why the attempt failed, in
 	// its fields and its words. Without one, an API error Claude Code
 	// reported in place of a reply does, and only without that, stderr's
