@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -57,30 +58,72 @@ func TestThePlumbingSandboxKeepsEachStepsOutputBeforeItsMarker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// docker image inspect finds every image, and docker run runs its script
-	// on this machine, with the run's -e variables, and hands over everything
-	// the script wrote to stderr only after everything it wrote to stdout.
-	write(bin, "docker", `#!/bin/sh
-[ "$1" = run ] || exit 0
-prev=
-for a in "$@"; do
-	if [ "$prev" = -e ]; then export "$a"; fi
-	prev=$a
-done
-cd "$FAKE_DOCKER_WORK" || exit 1
-sh -c "$prev" 2>stderr
-code=$?
-cat stderr >&2
-exit $code
+	// Run the staged entry script from the mounted checkout with the run's
+	// environment. Deliver stderr only after stdout to reproduce Docker's
+	// separate streams and expose any step whose stderr isn't redirected.
+	write(bin, "docker", `#!/usr/bin/env python3
+import os, shlex, subprocess, sys
+a = sys.argv[1:]
+if not a or a[0] != "run": sys.exit(0)
+env, mounts = dict(os.environ), {}
+i = 1
+while i < len(a):
+    if a[i] == "-e":
+        key, _, value = a[i+1].partition("=")
+        env[key] = value
+        i += 2
+    elif a[i] == "-v":
+        parts = a[i+1].split(":")
+        mounts[parts[1]] = parts[0]
+        i += 2
+    else:
+        i += 1
+for key, value in list(env.items()):
+    if value in mounts: env[key] = mounts[value]
+script = a[-1].replace("cd /src", "cd " + shlex.quote(mounts["/src"]))
+p = subprocess.run(["sh", "-c", script], cwd=mounts["/src"], env=env, stderr=subprocess.PIPE)
+sys.stderr.buffer.write(p.stderr)
+sys.exit(p.returncode)
 `)
-	write(bin, "go", `#!/bin/sh
-case "$*" in
-*-run*) printf '=== RUN   TestDoubleDoubles\n--- PASS: TestDoubleDoubles (0.00s)\nPASS\n' >&2 ;;
-vet*) echo "go vet wrote this" >&2 ;;
-test*) echo "go test wrote this" >&2 ;;
-esac
+	// Compile a fixture executable once and let the real test2json converter
+	// report its events. Extra spacing in its ordinary PASS report preserves
+	// the assertion below that identifies the acceptance replay's own output.
+	write(bin, "go", `#!/usr/bin/env python3
+import json, os, pathlib, sys
+a = sys.argv[1:]
+if a[0] == "list":
+    print(json.dumps(dict(ImportPath="example.com/double", Dir=os.getcwd(), TestGoFiles=["double_accept_test.go"])))
+elif a[0] == "vet":
+    print("go vet wrote this", file=sys.stderr)
+elif a[0] == "test" and "-c" in a:
+    target = pathlib.Path(a[a.index("-o")+1])
+    target.write_text('''#!/usr/bin/env python3
+import pathlib, sys
+if any(arg.startswith("-test.list") for arg in sys.argv[1:]):
+    print("TestDoubleDoubles")
+    sys.exit(0)
+seen = pathlib.Path(".marker-ordinary-completed")
+space = " "
+if not seen.exists():
+    seen.write_text("completed")
+    print("go test wrote this", file=sys.stderr)
+    space = "  "
+print("=== RUN   TestDoubleDoubles", file=sys.stderr)
+print("--- PASS:" + space + "TestDoubleDoubles (0.00s)", file=sys.stderr)
+print("PASS", file=sys.stderr)
+''')
+    target.chmod(0o755)
+elif a[:2] == ["tool", "test2json"]:
+    real = os.environ["MARKERS_REAL_GO"]
+    os.execv(real, [real] + a)
+else:
+    sys.exit("unexpected fake Go invocation: " + repr(a))
 `)
-	t.Setenv("FAKE_DOCKER_WORK", t.TempDir())
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MARKERS_REAL_GO", realGo)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	write(root, "go.mod", "module example.com/double\n\ngo 1.27.1\n")
 	write(root, "double.go", "package double\n")
