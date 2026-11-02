@@ -856,6 +856,10 @@ ObserveSource(mode) ==
                   !.paths = AllowedFollowupArtifacts, !.tied = TRUE]
     /\ UNCHANGED <<ordinaryVars, sourceActor, permit, audit>>
 
+\* Name the observed merger explicitly so the explorer can enumerate this
+\* environment input without changing the ordinary OthersMerge operation.
+OthersMergeAs(a) == OthersMerge /\ sourceActor' = a
+
 OrdinaryStep ==
     /\ ~FollowupActive
     /\ source' = NoSource
@@ -863,7 +867,7 @@ OrdinaryStep ==
     /\ permit' = NoPermit
     /\ audit' = NoAudit
     /\ ((OrdinaryNext /\ UNCHANGED sourceActor)
-        \/ (\E a \in Actors : OthersMerge /\ sourceActor' = a))
+        \/ (\E a \in Actors : OthersMergeAs(a)))
 
 \* CI and scope are independent observations. A push retains their old revision
 \* stamps, making stale evidence visible rather than turning it into a pass.
