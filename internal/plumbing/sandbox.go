@@ -3,6 +3,8 @@ package plumbing
 import (
 	"bytes"
 	"context"
+	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gitdek/invariant/internal/toolchain"
 )
@@ -32,20 +35,48 @@ type Sandbox struct {
 	// the build added from the ones it may not edit. Empty, gofmt checks
 	// every test in the packages the change touches.
 	Original string
+	// Timeout and ShardTimeout may shorten the production limits, never
+	// extend them. Zero uses the default.
+	Timeout      time.Duration
+	ShardTimeout time.Duration
+}
+
+const (
+	SandboxShards           = 8
+	SandboxTimeout          = 10 * time.Minute
+	SandboxShardTimeout     = 8 * time.Minute
+	SandboxStartupAllowance = time.Minute
+	SandboxCleanupAllowance = 15 * time.Second
+)
+
+var sandboxDeadline = errors.New("sandbox deadline exceeded")
+
+// TestResult identifies a test within its package and phase. Shard is 1..8
+// for touched-package tests and zero for acceptance checks.
+type TestResult struct {
+	Package string `json:"package"`
+	Name    string `json:"name"`
+	Phase   string `json:"phase"`
+	Status  string `json:"status"`
+	Shard   int    `json:"shard"`
 }
 
 // Result is what one run found.
 type Result struct {
-	Gofmt    []string        // files gofmt would change
-	Vet      bool            // go vet passed
-	Tests    bool            // the tests of every package the change touches passed
-	Accepted map[string]bool // each acceptance test, as file:Name, and whether it passed
-	Output   string          // the whole run, for the transcript and the agent
+	Gofmt            []string        // files gofmt would change
+	Vet              bool            // go vet passed
+	Tests            bool            // the tests of every package the change touches passed
+	Accepted         map[string]bool // each acceptance test, as file:Name, and whether it passed
+	Output           string          // the whole run, for the transcript and the agent
+	TestResults      []TestResult
+	Failures         []string // build, shard and runner failures, retained apart from Output
+	DeadlineExceeded bool
+	Interrupted      bool
 }
 
 // Passed says whether everything passed.
 func (r Result) Passed() bool {
-	if len(r.Gofmt) > 0 || !r.Vet || !r.Tests {
+	if len(r.Gofmt) > 0 || !r.Vet || !r.Tests || len(r.Failures) > 0 || r.DeadlineExceeded || r.Interrupted {
 		return false
 	}
 	for _, ok := range r.Accepted {
@@ -72,28 +103,49 @@ func (r Result) Failing() []string {
 // stderr apart, and doesn't keep their order when it merges them, so the
 // script starts by sending its stderr to its stdout: all of a step's output
 // then comes before its marker (#124).
-const script = `exec 2>&1
+//
+//go:embed sandbox_runner.py
+var sandboxRunner string
+
+var script = `exec 2>&1
 cd /src
-for f in $GOFMT_FILES; do [ -f "$f" ] && gofmt -l "$f" | sed 's/^/@@gofmt /'; done
-go vet ./... ; echo "@@invariant vet=$?"
-if [ -n "$TEST_PKGS" ]; then go test -count=1 -timeout 20m $TEST_PKGS ; echo "@@invariant test=$?"; else echo "@@invariant test=0"; fi
-for pkg in $ACCEPT_PKGS; do
-  go test -count=1 -v -run "$ACCEPT_RUN" "./$pkg" ; echo "@@invariant accept=$?"
-done
-`
+python3 -I -S -u - <<'INVARIANT_SANDBOX_RUNNER'
+` + sandboxRunner + "\nINVARIANT_SANDBOX_RUNNER\n"
 
 var (
 	// A marker ends its line wherever it starts on it, after the last line
 	// of a step whose output doesn't end with a newline.
 	markerLine = regexp.MustCompile(`(?m)@@invariant (\w+)=(\d+)$`)
 	gofmtLine  = regexp.MustCompile(`(?m)^@@gofmt (.+)$`)
-	testLine   = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): (Test\w+)`)
+	testLine   = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): (Test\w+)(?:\s|$)`)
+	runnerLine = regexp.MustCompile(`(?m)^@@sandbox (\{[^\n]*\})$`)
 )
 
 // Run copies the checkout at root, and runs gofmt, go vet, the tests of
 // every package the change touches, and the plan's acceptance tests on the
 // copy.
-func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, error) {
+func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Result, runErr error) {
+	ctx, cancel := context.WithTimeoutCause(ctx, sandboxLimit(s.Timeout, SandboxTimeout), sandboxDeadline)
+	defer cancel()
+	defer func() {
+		if ctx.Err() == nil {
+			return
+		}
+		result.DeadlineExceeded = errors.Is(context.Cause(ctx), sandboxDeadline)
+		result.Interrupted = !result.DeadlineExceeded
+		if result.Accepted == nil {
+			result.Accepted = map[string]bool{}
+			for _, t := range plan.Tests {
+				result.Accepted[t.File+":"+t.Name] = false
+			}
+		}
+		// A deadline is a failed check, with whatever finished before it,
+		// rather than a tool error which would discard the report.
+		runErr = nil
+	}()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	work, err := os.MkdirTemp("", "invariant-plumbing-")
 	if err != nil {
 		return Result{}, err
@@ -107,27 +159,35 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	var pkgs, names []string
-	seen := map[string]bool{}
+	accept := map[string][]string{}
 	for _, t := range plan.Tests {
 		dir := path.Dir(t.File)
-		if !seen[dir] {
-			seen[dir] = true
-			pkgs = append(pkgs, dir)
-		}
-		names = append(names, t.Name)
+		accept[dir] = append(accept[dir], t.Name)
 	}
-	sort.Strings(pkgs)
+	pkgs, err := packages(ctx, src, plan)
+	if err != nil {
+		return Result{}, err
+	}
+	config, err := json.Marshal(struct {
+		GofmtFiles   []string            `json:"gofmt_files"`
+		Packages     []string            `json:"packages"`
+		Accept       map[string][]string `json:"accept"`
+		Shards       int                 `json:"shards"`
+		ShardTimeout float64             `json:"shard_timeout"`
+	}{formatted, pkgs, accept, SandboxShards, sandboxLimit(s.ShardTimeout, SandboxShardTimeout).Seconds()})
+	if err != nil {
+		return Result{}, err
+	}
 	// With no network, a container's own hostname isn't in its hosts file,
 	// so git, building an identity for a commit, waited five seconds on DNS
 	// for every one. The repository's tests make hundreds of commits, and a
 	// run of them outlived the agent's 15-minute tool limit (#100). Named
 	// localhost, the container resolves itself at once.
 	args := []string{"run", "--rm", "--network", "none", "--hostname", "localhost", "--memory", "4g", "--pids-limit", "1024",
-		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
+		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly -p=1", "-e", "GOMAXPROCS=2", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
-		"-e", "ACCEPT_PKGS=" + strings.Join(pkgs, " "), "-e", "ACCEPT_RUN=^(" + strings.Join(names, "|") + ")$",
-		"-e", "GOFMT_FILES=" + strings.Join(formatted, " "), "-e", "TEST_PKGS=" + strings.Join(packages(src, plan), " "),
+		"-e", "SANDBOX_CONFIG=" + string(config),
+		"-e", "GOFMT_FILES=" + strings.Join(formatted, " "), "-e", "TEST_PKGS=" + strings.Join(pkgs, " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
 	// The code runs as the user who runs the sandbox, not as root, so what
 	// it leaves in the build cache stays that user's to remove.
@@ -144,13 +204,26 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 	var buf bytes.Buffer
 	cmd := toolchain.Docker(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &buf, &buf
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	result = parse(buf.String(), plan)
+	if err != nil {
+		if ctx.Err() != nil {
+			return result, nil
+		}
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			return Result{}, fmt.Errorf("running the sandbox: %w", err)
+			return result, fmt.Errorf("running the sandbox: %w", err)
 		}
+		result.Failures = append(result.Failures, fmt.Sprintf("Sandbox exited unsuccessfully: %v", err))
 	}
-	return parse(buf.String(), plan), nil
+	return result, nil
+}
+
+func sandboxLimit(override, limit time.Duration) time.Duration {
+	if override > 0 && override < limit {
+		return override
+	}
+	return limit
 }
 
 // packages is every Go package the change touches, as ./dir: each file's
@@ -158,17 +231,16 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 // page a package embeds tests that package, and a package the change
 // deletes isn't tested (#298). CI runs every test before anything merges;
 // the sandbox runs these, which is quick enough to build against.
-func packages(src string, plan *Plan) []string {
-	files, _ := walk(src)
-	var names []string
-	for f := range files {
-		names = append(names, f)
+func packages(ctx context.Context, src string, plan *Plan) ([]string, error) {
+	names, err := sandboxFiles(ctx, src)
+	if err != nil {
+		return nil, err
 	}
 	var out []string
 	for _, dir := range plan.packagesIn(names) {
 		out = append(out, "./"+dir)
 	}
-	return out
+	return out, nil
 }
 
 // goFiles checks named Go files, the acceptance tests and the regression
@@ -196,13 +268,9 @@ func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, e
 		if err != nil {
 			return nil, err
 		}
-		files, err := walk(src)
+		names, err := sandboxFiles(ctx, src)
 		if err != nil {
 			return nil, err
-		}
-		var names []string
-		for f := range files {
-			names = append(names, f)
 		}
 		// As staging admits them, against the same original inventory.
 		for _, f := range plan.RegressionFiles(base, names) {
@@ -211,7 +279,14 @@ func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, e
 		sort.Strings(out)
 		return out, nil
 	}
-	for _, pkg := range packages(src, plan) {
+	pkgs, err := packages(ctx, src, plan)
+	if err != nil {
+		return nil, err
+	}
+	for _, pkg := range pkgs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(pkg), "*_test.go"))
 		for _, name := range matches {
 			info, err := os.Lstat(name)
@@ -239,6 +314,53 @@ func parse(out string, plan *Plan) Result {
 	}
 	r.Vet = len(codes["vet"]) == 1 && codes["vet"][0] == 0
 	r.Tests = len(codes["test"]) == 1 && codes["test"][0] == 0
+	results := map[string]TestResult{}
+	packages := map[string]string{}
+	accepted := map[string]bool{}
+	structured := false
+	for _, m := range runnerLine.FindAllStringSubmatch(out, -1) {
+		var event struct {
+			TestResult
+			Kind    string `json:"kind"`
+			Dir     string `json:"dir"`
+			Message string `json:"message"`
+			Passed  bool   `json:"passed"`
+		}
+		if err := json.Unmarshal([]byte(m[1]), &event); err != nil {
+			r.Failures = append(r.Failures, "Unreadable sandbox result: "+err.Error())
+			continue
+		}
+		structured = true
+		switch event.Kind {
+		case "package":
+			packages[path.Clean(event.Dir)] = event.Package
+		case "test":
+			key := event.Phase + "\x00" + event.Package + "\x00" + event.Name
+			results[key] = event.TestResult
+		case "accept":
+			accepted[event.Package] = event.Passed
+		case "failure":
+			r.Failures = append(r.Failures, event.Message)
+		}
+	}
+	var keys []string
+	for key := range results {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		r.TestResults = append(r.TestResults, results[key])
+	}
+	if structured {
+		for _, t := range plan.Tests {
+			pkg := packages[path.Dir(t.File)]
+			got := results["accept\x00"+pkg+"\x00"+t.Name]
+			r.Accepted[t.File+":"+t.Name] = accepted[pkg] && got.Status == "passed"
+		}
+		return r
+	}
+	// Older transcripts have only the text markers. Never use those names
+	// to satisfy a structured run's package-qualified acceptance checks.
 	passed := map[string]string{}
 	for _, m := range testLine.FindAllStringSubmatch(out, -1) {
 		passed[m[2]] = m[1]
@@ -258,6 +380,11 @@ func (r Result) Summary() string {
 	case r.Passed():
 		b.WriteString("Everything passed: gofmt, go vet, the tests of every package the change touches, and every acceptance test.\n")
 	default:
+		if r.DeadlineExceeded {
+			b.WriteString("Sandbox deadline exceeded; unfinished checks did not pass.\n")
+		} else if r.Interrupted {
+			b.WriteString("Sandbox interrupted; unfinished checks did not pass.\n")
+		}
 		if len(r.Gofmt) > 0 {
 			fmt.Fprintf(&b, "gofmt would change: %s\n", strings.Join(r.Gofmt, ", "))
 		}
@@ -269,6 +396,32 @@ func (r Result) Summary() string {
 		}
 		if f := r.Failing(); len(f) > 0 {
 			fmt.Fprintf(&b, "Acceptance tests that didn't pass: %s\n", strings.Join(f, ", "))
+		}
+		for _, failure := range r.Failures {
+			fmt.Fprintln(&b, failure)
+		}
+		for _, status := range []string{"passed", "failed", "skipped", "running", "not_run"} {
+			var names []string
+			for _, test := range r.TestResults {
+				if test.Status != status {
+					continue
+				}
+				name := test.Phase + " " + test.Package + "/" + test.Name
+				if test.Shard > 0 {
+					name += fmt.Sprintf(" (shard %d)", test.Shard)
+				}
+				names = append(names, name)
+			}
+			if len(names) == 0 {
+				continue
+			}
+			label := status
+			if status == "not_run" {
+				label = "unstarted (not_run)"
+			} else if status == "running" {
+				label = "still-running"
+			}
+			fmt.Fprintf(&b, "%s: %s\n", label, strings.Join(names, ", "))
 		}
 	}
 	return b.String()
@@ -295,15 +448,16 @@ func copyCheckout(ctx context.Context, root, dst string) error {
 		}
 		names = strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
 	} else {
-		all, err := walk(root)
+		var err error
+		names, err = sandboxFiles(ctx, root)
 		if err != nil {
 			return err
 		}
-		for f := range all {
-			names = append(names, f)
-		}
 	}
 	for _, f := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if f == "" {
 			continue
 		}
@@ -322,11 +476,35 @@ func copyCheckout(ctx context.Context, root, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 			return err
 		}
-		if err := copyFile(from, to, info.Mode().Perm()); err != nil {
+		if err := copyFile(ctx, from, to, info.Mode().Perm()); err != nil {
 			return err
 		}
 	}
-	return nil
+	return ctx.Err()
+}
+
+// Checkout preparation shares the run's deadline, including inventories of
+// directories which are not git checkouts.
+func sandboxFiles(ctx context.Context, root string) ([]string, error) {
+	var names []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+		} else if d.Type().IsRegular() {
+			rel, _ := filepath.Rel(root, p)
+			names = append(names, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return names, err
 }
 
 // isTop says whether root is the top of a git checkout, rather than a
@@ -341,7 +519,7 @@ func isTop(ctx context.Context, root string) bool {
 	return err1 == nil && err2 == nil && a == b
 }
 
-func copyFile(from, to string, perm os.FileMode) error {
+func copyFile(ctx context.Context, from, to string, perm os.FileMode) error {
 	in, err := os.Open(from)
 	if err != nil {
 		return err
@@ -351,9 +529,21 @@ func copyFile(from, to string, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, sandboxReader{ctx, in}); err != nil {
 		out.Close()
 		return err
 	}
 	return out.Close()
+}
+
+type sandboxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r sandboxReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }

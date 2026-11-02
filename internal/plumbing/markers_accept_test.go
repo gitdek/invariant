@@ -48,7 +48,7 @@ func TestAPlumbingMarkerAfterTextOnItsLineCountsTheSame(t *testing.T) {
 // marker.
 func TestThePlumbingSandboxKeepsEachStepsOutputBeforeItsMarker(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("the fake docker and go are shell scripts")
+		t.Skip("the fake docker and go need POSIX processes")
 	}
 	bin, root := t.TempDir(), t.TempDir()
 	write := func(dir, name, text string) {
@@ -60,25 +60,63 @@ func TestThePlumbingSandboxKeepsEachStepsOutputBeforeItsMarker(t *testing.T) {
 	// docker image inspect finds every image, and docker run runs its script
 	// on this machine, with the run's -e variables, and hands over everything
 	// the script wrote to stderr only after everything it wrote to stdout.
-	write(bin, "docker", `#!/bin/sh
-[ "$1" = run ] || exit 0
-prev=
-for a in "$@"; do
-	if [ "$prev" = -e ]; then export "$a"; fi
-	prev=$a
-done
-cd "$FAKE_DOCKER_WORK" || exit 1
-sh -c "$prev" 2>stderr
-code=$?
-cat stderr >&2
-exit $code
+	write(bin, "docker", `#!/usr/bin/env python3
+import os, shlex, subprocess, sys, tempfile
+args = sys.argv[1:]
+if not args or args[0] != "run":
+    sys.exit(0)
+env = os.environ.copy()
+src = None
+for i, arg in enumerate(args[:-1]):
+    if arg == "-e":
+        name, value = args[i + 1].split("=", 1)
+        env[name] = value
+    elif arg == "-v" and args[i + 1].endswith(":/src"):
+        src = args[i + 1][:-len(":/src")]
+if src is None:
+    sys.exit("fake docker did not find the source mount")
+script = args[-1].replace("cd /src\n", "cd " + shlex.quote(src) + "\n")
+with tempfile.TemporaryFile() as stderr:
+    result = subprocess.run(["sh", "-c", script], env=env,
+                            cwd=env["FAKE_DOCKER_WORK"], stderr=stderr)
+    stderr.seek(0)
+    sys.stderr.buffer.write(stderr.read())
+sys.exit(result.returncode)
 `)
-	write(bin, "go", `#!/bin/sh
-case "$*" in
-*-run*) printf '=== RUN   TestDoubleDoubles\n--- PASS: TestDoubleDoubles (0.00s)\nPASS\n' >&2 ;;
-vet*) echo "go vet wrote this" >&2 ;;
-test*) echo "go test wrote this" >&2 ;;
-esac
+	write(bin, "go", `#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if args[0] == "vet":
+    print("go vet wrote this", file=sys.stderr)
+elif args[0] == "list":
+    print(json.dumps({"ImportPath": "example.com/double", "Dir": os.getcwd()}))
+elif args[0] == "test" and "-c" in args:
+    binary = pathlib.Path(args[args.index("-o") + 1])
+    binary.write_text('''#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+if any(arg.startswith("-test.list=") for arg in args):
+    print("TestOrdinary")
+elif any(arg.startswith("-test.run=") and "TestDoubleDoubles" in arg for arg in args):
+    print("=== RUN   TestDoubleDoubles\\n--- PASS: TestDoubleDoubles (0.00s)\\nPASS", file=sys.stderr)
+else:
+    print("go test wrote this\\n=== RUN   TestOrdinary\\n--- PASS: TestOrdinary (0.00s)\\nPASS", file=sys.stderr)
+''')
+    binary.chmod(0o755)
+elif args[:2] == ["tool", "test2json"]:
+    package = args[args.index("-p") + 1]
+    def emit(action, **fields):
+        print(json.dumps({"Action": action, "Package": package, **fields}), flush=True)
+    for line in sys.stdin:
+        emit("output", Output=line)
+        if line.startswith("=== RUN   "):
+            emit("run", Test=line.split()[2])
+        elif line.startswith("--- PASS: "):
+            emit("pass", Test=line.split()[2])
+        elif line.strip() == "PASS":
+            emit("pass")
+else:
+    sys.exit("unexpected fake go invocation: " + repr(args))
 `)
 	t.Setenv("FAKE_DOCKER_WORK", t.TempDir())
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
