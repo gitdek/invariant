@@ -28,6 +28,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       gated: ${{ steps.diff.outputs.gated }}
+      python: ${{ steps.diff.outputs.python }}
+      tlaps: ${{ steps.diff.outputs.tlaps }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,26 +37,36 @@ jobs:
 
       # A factory pull request always runs the gate, since the factory merges
       # only on a gate that passed, and so does a push this can't compare.
-      # Without renames, moving code into docs/ lists the code it removes.
+      # Without renames, moving code into docs/ lists the code it removes. A
+      # pull request runs each opt-in real suite its change can affect, and
+      # all of them when this can't compare (#416).
       - id: diff
         env:
           FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') }}
+          PULL: ${{ github.event_name == 'pull_request' }}
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: |
           gated=true
-          if [ "$FACTORY" != "true" ] && git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then
+          real=$'python=true\ntlaps=true'
+          if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then
             # A failed diff fails this job, and then the gate runs.
             files=$(git diff --no-renames --name-only "$BASE...HEAD")
-            gated=false
-            while IFS= read -r f; do
-              case "$f" in
-                *.md|docs/*|decisions/*) ;;
-                *) gated=true ;;
-              esac
-            done <<< "$files"
+            if [ "$FACTORY" != "true" ]; then
+              gated=false
+              while IFS= read -r f; do
+                case "$f" in
+                  *.md|docs/*|decisions/*) ;;
+                  *) gated=true ;;
+                esac
+              done <<< "$files"
+            fi
+            real=$(.github/real-suites.sh <<< "$files")
           fi
+          if [ "$PULL" != "true" ]; then real=$'python=false\ntlaps=false'; fi
           echo "gated=$gated" >> "$GITHUB_OUTPUT"
+          echo "$real" >> "$GITHUB_OUTPUT"
           echo "The gate runs: $gated"
+          echo "The real suites that run: ${real//$'\n'/, }"
 
       - uses: actions/setup-go@v7
         with:
@@ -359,14 +371,75 @@ jobs:
           INVARIANT_PYTHON_PINNED: '1'
         run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/project/ ./cmd/invariant/
 
+  real-python:
+    # The Python tests again, with every opt-in for real Docker, TLC, Nagini
+    # and wheels set, which a person used to run by hand before merging a
+    # change that could affect them (#416). The application's own commands
+    # run on Linux Docker since #399. As with the gate's own tests, a pull
+    # request runs them when its change can affect them, and main gets only
+    # what a pull request already ran them on (D-0079). They run in shards,
+    # as internal/verify's tests do (#345).
+    name: invariant/real-python ${{ matrix.shard }}
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && !(needs.changes.result == 'success' && needs.changes.outputs.python != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/6', '2/6', '3/6', '4/6', '5/6', '6/6']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Python tests with real Docker, TLC, Nagini and wheels, shard ${{ matrix.shard }}
+        env:
+          INVARIANT_PYTHON_PINNED: '1'
+          INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL: '1'
+          INVARIANT_PYTHON_APPLICATION_GATE_REAL: '1'
+          INVARIANT_PYTHON_APPLICATION_PROOF_REAL: '1'
+          INVARIANT_PYTHON_APPLICATION_REAL: '1'
+          INVARIANT_PYTHON_DEPS_REAL: '1'
+        run: .github/shard-tests.sh "${{ matrix.shard }}" -run 'Python|Declared' -count=1 -timeout 50m -- ./internal/verify/ ./internal/conformance/ ./cmd/invariant/
+
+  real-tlaps:
+    # The pinned tlapm's own tests: its known bug and unsoundnesses, a missing
+    # proof, a changed invariant and a model the gate must refuse (#360). The
+    # project job proves the example itself; these show the gate fails where
+    # it must. Run as real-python is (#416).
+    name: invariant/real-tlaps
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && !(needs.changes.result == 'success' && needs.changes.outputs.tlaps != 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: TLAPS with the pinned tlapm
+        env:
+          INVARIANT_TLAPS_REAL: '1'
+        run: go test ./internal/verify -run '^TestTLAPSReal' -count=1 -timeout 30m
+
   gate:
     # The check the factory merges its pull requests on (D-0004, D-0033). It
     # passes when the checks, every shard of the tests, every project's
     # verification and the gathering of their receipts did, and the gate's
-    # own tests did or had nothing to run. A matrix job's result is success
-    # only when every shard's was. Skipped only when the change is docs alone.
+    # own tests and the opt-in real suites did or had nothing to run. A
+    # matrix job's result is success only when every shard's was. Skipped
+    # only when the change is docs alone.
     name: invariant/gate
-    needs: [changes, verify, verify-tests, python, projects, project, receipts, integration]
+    needs: [changes, verify, verify-tests, python, projects, project, receipts, integration, real-python, real-tlaps]
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -381,9 +454,13 @@ jobs:
           PROJECT: ${{ needs.project.result }}
           RECEIPTS: ${{ needs.receipts.result }}
           INTEGRATION: ${{ needs.integration.result }}
+          REAL_PYTHON: ${{ needs.real-python.result }}
+          REAL_TLAPS: ${{ needs.real-tlaps.result }}
         run: |
-          echo "Checks: $VERIFY. internal/verify's tests: $VERIFY_TESTS. Python tests under the pinned image's Python: $PYTHON. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION."
+          echo "Checks: $VERIFY. internal/verify's tests: $VERIFY_TESTS. Python tests under the pinned image's Python: $PYTHON. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION. Real Python: $REAL_PYTHON. Real TLAPS: $REAL_TLAPS."
           [ "$VERIFY" = success ] && [ "$VERIFY_TESTS" = success ] && [ "$PYTHON" = success ] && [ "$PROJECTS" = success ] || exit 1
           # A repository with no projects has nothing to verify or gather.
           if [ "$FOUND" != "[]" ]; then [ "$PROJECT" = success ] && [ "$RECEIPTS" = success ] || exit 1; fi
-          [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ]
+          [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ] || exit 1
+          [ "$REAL_PYTHON" = success ] || [ "$REAL_PYTHON" = skipped ] || exit 1
+          [ "$REAL_TLAPS" = success ] || [ "$REAL_TLAPS" = skipped ]
