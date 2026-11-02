@@ -446,7 +446,16 @@ func parse(out string, plan *Plan) Result {
 	return r
 }
 
-// Summary says what a run found, for an agent and for a person.
+// summaryNamed is how many passed or skipped tests a summary names when its
+// run didn't pass.
+const summaryNamed = 100
+
+// Summary says what a run found, for an agent and for a person. It names
+// every test that didn't pass, first. A passing run counts its passed and
+// skipped tests by phase instead of naming them: a large package has
+// thousands, more than an agent's tool result or a pull request holds
+// (#408). A run that didn't pass names them after the rest, up to
+// summaryNamed. TestResults keeps every record.
 func (r Result) Summary() string {
 	var b strings.Builder
 	switch {
@@ -475,7 +484,7 @@ func (r Result) Summary() string {
 	for _, problem := range r.Problems {
 		fmt.Fprintln(&b, problem)
 	}
-	for _, t := range r.TestResults {
+	name := func(t TestResult) {
 		status := t.Status
 		if status == "not_run" {
 			status = "unstarted (not_run)"
@@ -485,6 +494,39 @@ func (r Result) Summary() string {
 			fmt.Fprintf(&b, " (shard %d)", t.Shard)
 		}
 		b.WriteByte('\n')
+	}
+	var settled []TestResult
+	for _, t := range r.TestResults {
+		if t.Status == "passed" || t.Status == "skipped" {
+			settled = append(settled, t)
+		} else {
+			name(t)
+		}
+	}
+	if r.Passed() {
+		var phases []string
+		passed, skipped := map[string]int{}, map[string]int{}
+		for _, t := range settled {
+			if passed[t.Phase]+skipped[t.Phase] == 0 {
+				phases = append(phases, t.Phase)
+			}
+			if t.Status == "passed" {
+				passed[t.Phase]++
+			} else {
+				skipped[t.Phase]++
+			}
+		}
+		for _, phase := range phases {
+			fmt.Fprintf(&b, "%s: %d passed, %d skipped\n", phase, passed[phase], skipped[phase])
+		}
+		return b.String()
+	}
+	for i, t := range settled {
+		if i == summaryNamed {
+			fmt.Fprintf(&b, "…and %d more passed or skipped\n", len(settled)-i)
+			break
+		}
+		name(t)
 	}
 	return b.String()
 }
