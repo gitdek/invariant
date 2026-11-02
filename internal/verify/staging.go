@@ -29,7 +29,13 @@ func stagingFiles(root string, excluded func(string, bool) bool, strict bool) (*
 	}
 	selection := &stagingSelection{Method: "directory"}
 	if !inGit {
-		err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, err error) error {
+		// An ignored root can select the directory while still belonging
+		// to a work tree. Keep its nested repository boundaries intact.
+		inWorkTree, err := stagingInGit(root, true)
+		if err != nil {
+			return nil, err
+		}
+		err = filepath.WalkDir(root, func(name string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -45,6 +51,13 @@ func stagingFiles(root string, excluded func(string, bool) bool, strict bool) (*
 			}
 			rel = filepath.ToSlash(rel)
 			if entry.IsDir() {
+				if inWorkTree && rel != "." {
+					if _, err := os.Lstat(filepath.Join(name, ".git")); err == nil {
+						return fmt.Errorf("staging %q: nested Git repositories are not supported", rel)
+					} else if !os.IsNotExist(err) {
+						return err
+					}
+				}
 				selection.Dirs = append(selection.Dirs, rel)
 			} else if entry.Type().IsRegular() {
 				selection.Files = append(selection.Files, rel)
@@ -180,9 +193,9 @@ func stagingPath(root, name string) (os.FileInfo, error) {
 
 // Repository metadata or a worktree file makes Git authoritative. A broken
 // repository or failed Git command must not widen selection to a tree walk.
-// A root its repository ignores, with nothing tracked under it, holds
-// nothing Git would commit, such as synthesize's default output under an
-// ignored out/. Unless strict, it's selected as a directory outside Git is.
+// A root its repository ignores, with no tracked paths remaining under it,
+// such as synthesize's default output under an ignored out/, is selected as
+// a directory outside Git is, unless strict. Gitlinks still belong to Git.
 // The strict stager, the Python application's, keeps it in Git, so its
 // ignored declarations are refused by name.
 func stagingInGit(root string, strict bool) (bool, error) {
@@ -235,9 +248,9 @@ func stagingInGit(root string, strict bool) (bool, error) {
 }
 
 // stagingSelectsByGit says whether a root in a work tree is Git's to select.
-// One the repository ignores, with nothing tracked under it, isn't. Tracked
-// files keep it Git's, so a work tree stages what a fresh clone does, even
-// when a pattern or a person's own excludes cover the root.
+// One the repository ignores, with no tracked paths remaining under it,
+// isn't. Surviving tracked paths keep it Git's, even when a pattern or a
+// person's own excludes cover the root.
 func stagingSelectsByGit(root string) (bool, error) {
 	// check-ignore exits 0 when the root is ignored and 1 when it isn't;
 	// anything else is a failure, not a fallback.
@@ -253,7 +266,28 @@ func stagingSelectsByGit(root string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(tracked) != 0, nil
+	for _, item := range bytes.Split(tracked, []byte{0}) {
+		if len(item) == 0 {
+			continue
+		}
+		_, err := stagingPath(root, string(item))
+		if !os.IsNotExist(err) {
+			// Existing replacements and inaccessible paths stay under Git,
+			// where each copier's exclusions and path checks still apply.
+			return true, nil
+		}
+	}
+	// An uninitialized gitlink has no work-tree path. Keep Git authoritative
+	// so the copier can refuse it within its existing selection boundaries.
+	indexed, err := stagingGit(root, nil, "ls-files", "--stage", "-z")
+	if err != nil {
+		return false, err
+	}
+	links, err := stagingGitlinks(indexed)
+	if err != nil {
+		return false, err
+	}
+	return len(links) != 0, nil
 }
 
 func stagingGit(root string, input []byte, args ...string) ([]byte, error) {
@@ -281,9 +315,16 @@ func stagingGit(root string, input []byte, args ...string) ([]byte, error) {
 // default check-ignore behavior admits tracked files even if patterns match.
 // strict is stagingInGit's.
 func stagingIgnored(root string, names []string, strict bool) error {
-	inGit, err := stagingInGit(root, strict)
-	if err != nil || !inGit {
+	inWorkTree, err := stagingInGit(root, true)
+	if err != nil || !inWorkTree {
 		return err
+	}
+	inGit := true
+	if !strict {
+		inGit, err = stagingSelectsByGit(root)
+		if err != nil {
+			return err
+		}
 	}
 	indexed, err := stagingGit(root, nil, "ls-files", "--stage", "-z")
 	if err != nil {
@@ -301,6 +342,12 @@ func stagingIgnored(root string, names []string, strict bool) error {
 			}
 		}
 		if name == "" {
+			continue
+		}
+		if err := stagingRepositoryBoundary(root, name); err != nil {
+			return err
+		}
+		if !inGit {
 			continue
 		}
 		info, err := stagingPath(root, name)
@@ -339,6 +386,38 @@ func stagingIgnored(root string, names []string, strict bool) error {
 			if len(name) != 0 {
 				return fmt.Errorf("staging %q: declared path is ignored by Git", bytes.TrimPrefix(name, []byte("./")))
 			}
+		}
+	}
+	return nil
+}
+
+// Explicit selections retain the containing root's repository boundary,
+// even when an ignored root selects by directory instead of by Git.
+func stagingRepositoryBoundary(root, name string) error {
+	if path.IsAbs(name) || path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") {
+		return fmt.Errorf("staging %q: path must be contained and clean", name)
+	}
+	parts := strings.Split(name, "/")
+	for i := range parts {
+		rel := strings.Join(parts[:i+1], "/")
+		if rel == "." {
+			continue
+		}
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Stat(full)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		if _, err := os.Lstat(filepath.Join(full, ".git")); err == nil {
+			return fmt.Errorf("staging %q: nested Git repositories are not supported at %q", name, rel)
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
 	return nil
