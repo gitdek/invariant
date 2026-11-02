@@ -823,14 +823,15 @@ Done ==
 
 \* Representatives cover all four classification outcomes; either PR identity
 \* is interchangeable, while CreateDuplicate still has a second identity available.
+\* Rejection probes use zero when no predecessor exists. Such probes are already
+\* disabled before a head or operation exists; their arguments remain in Nat.
 Next == PlanMerges(FALSE, "one-way", FALSE)
     \/ PlanMerges(TRUE, "one-way", TRUE)
     \/ PlanMerges(TRUE, "two-way", TRUE)
     \/ PlanMerges(TRUE, "two-way", FALSE)
     \/ StartDraft \/ DraftFails
     \/ DraftSucceeds(TRUE, "simple")
-    \/ (door = "two-way" /\ executed /\
-        \E chosenExercise \in Exercises : DraftSucceeds(FALSE, chosenExercise))
+    \/ (\E chosenExercise \in Exercises : DraftSucceeds(FALSE, chosenExercise))
     \/ StartCreation \/ CreationFails
     \/ CreationSucceeds(CHOOSE f \in Followups : TRUE)
     \/ RequestCI
@@ -843,10 +844,10 @@ Next == PlanMerges(FALSE, "one-way", FALSE)
     \/ MergeOutcome(effect.id, effect.head, effect.result)
     \/ Block \/ PersonCloses \/ PersonRetries \/ PersonResumes
     \/ DeferResume \/ ApplyDeferredResume \/ ObserveExternalMerge
-    \/ RejectCI(head - 1) \/ RejectCI(head)
-    \/ RejectOutcome(effect.id - 1, effect.kind, effect.head)
+    \/ RejectCI(IF head = 0 THEN 0 ELSE head - 1) \/ RejectCI(head)
+    \/ RejectOutcome(IF effect.id = 0 THEN 0 ELSE effect.id - 1, effect.kind, effect.head)
     \/ RejectOutcome(effect.id, IF effect.kind = "repair" THEN "merge" ELSE "repair", effect.head)
-    \/ RejectOutcome(effect.id, effect.kind, effect.head - 1)
+    \/ RejectOutcome(effect.id, effect.kind, IF effect.head = 0 THEN 0 ELSE effect.head - 1)
     \/ RejectOutcome(effect.id, effect.kind, effect.head)
     \/ Done
 
