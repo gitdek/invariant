@@ -44,13 +44,16 @@ type PythonApplicationObservation struct {
 	// which model step and arguments each step tried, whether it replayed
 	// an earlier attempt and whether the selected target was called (#342).
 	// An omitted row records a step the environment's bounds rule out.
-	Start   *int                      `json:"start,omitempty"`
-	Step    string                    `json:"step,omitempty"`
-	Args    []any                     `json:"args,omitempty"`
-	Replay  *bool                     `json:"replay,omitempty"`
-	Called  *bool                     `json:"called,omitempty"`
-	Outcome string                    `json:"outcome,omitempty"`
-	Refusal *PythonApplicationRefusal `json:"refusal,omitempty"`
+	Start  *int   `json:"start,omitempty"`
+	Step   string `json:"step,omitempty"`
+	Args   []any  `json:"args,omitempty"`
+	Replay *bool  `json:"replay,omitempty"`
+	Called *bool  `json:"called,omitempty"`
+	// Hold counts the selected start; release completes that same call.
+	// Only explored module transitions carry an operation (#393).
+	Operation string                    `json:"operation,omitempty"`
+	Outcome   string                    `json:"outcome,omitempty"`
+	Refusal   *PythonApplicationRefusal `json:"refusal,omitempty"`
 }
 
 // PythonApplicationRefusal records only the exception class and attributes
@@ -267,6 +270,12 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				}
 				required = append(required, "form")
 			}
+			if row.Operation != "" {
+				if !explored || row.Kind != "transition" || row.Form != "module" || (row.Operation != "hold" && row.Operation != "release") {
+					return fmt.Errorf("invalid held-call observation operation")
+				}
+				required = append(required, "operation")
+			}
 			switch row.Kind {
 			case "initial":
 				required = append(required, "state")
@@ -328,6 +337,9 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return fmt.Errorf("foreign observation binding")
 			}
 			isModule := row.Form == "module"
+			if row.Operation == "release" && (row.Entry != row.Target || row.EntrySHA256 != row.SourceSHA256) {
+				return fmt.Errorf("release must name the selected target as its entry")
+			}
 			// An omitted step calls no application entry.
 			if row.Kind != "omitted" {
 				// Entries may live outside production scope; the Python collector
@@ -394,7 +406,7 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 					if row.Sequence != previous.Sequence || !pythonApplicationState(row.State, row.Readback, isModule) || !reflect.DeepEqual(row.State, state) {
 						return fmt.Errorf("invalid omitted step or state continuity")
 					}
-				} else if row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !pythonApplicationState(row.Before, row.Readback, isModule) || !pythonApplicationState(row.After, row.Readback, isModule) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target {
+				} else if row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !pythonApplicationState(row.Before, row.Readback, isModule) || !pythonApplicationState(row.After, row.Readback, isModule) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target && row.Operation != "release" {
 					return fmt.Errorf("invalid transition or state continuity")
 				}
 			}
