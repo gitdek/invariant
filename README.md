@@ -521,7 +521,7 @@ What each result earns:
 
 Only in an explored run may an entry refuse a step without calling the selected target ([D-0200](decisions/journal/D-0200.jsonl)). Without a refusal declaration, the entry must return normally with the state read back unchanged, and any application exception fails the run. A start or replay that doesn't reproduce its state, a `take` that steps twice or on another run's lifecycle, a lifecycle made outside a start, a handle's attribute read and an exploration that never calls the selected target all fail with no accepted observations. `functional` and `instance` steps take no arguments, as in sampling; `module` steps forward them. Several starts need distinct initial states; a start whose initial state another start reaches tries that state's steps itself, whichever start comes first ([D-0207](decisions/journal/D-0207.jsonl)). Omitting components works as for sampling, with the invocation named `explore` at the default budgets.
 
-For an explored entry that refuses by raising an exception, declare exactly which exception counts ([#392](https://github.com/gitdek/invariant/issues/392)):
+For an explored entry that refuses by raising an exception, declare exactly which exception counts ([#392](https://github.com/gitdek/invariant/issues/392), [D-0279](decisions/journal/D-0279.jsonl)):
 
 ```python
 from invariant_observe import Refusal, Step
