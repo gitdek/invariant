@@ -203,6 +203,11 @@ func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
 		"so #%d is waiting for you to review and merge it. I won't %smerge it, and I won't review it again.", pr.Number, codeList(trusted), pr.Number, ready), m)
 }
 
+// summaryLimit keeps the factory's own run from crowding a plan's pull
+// request, whose body GitHub caps at 65,536 characters: a run that fails
+// across a large package names every test that didn't pass (#408).
+const summaryLimit = 6000
+
 // planPullRequestBody is a plan's pull request: the plan, how the build
 // went, and the second agent's review. m is the marker of the build's post,
 // as for a project's.
@@ -228,7 +233,7 @@ func planPullRequestBody(t Thread, m Marker, res *plumbing.BuildResult, trusted 
 	if res.Fallback != nil {
 		b.WriteString("\n" + fellBack(res.Fallback) + "\n")
 	}
-	fmt.Fprintf(&b, "\n**The factory's own run:** %s", res.Summary)
+	fmt.Fprintf(&b, "\n**The factory's own run:** %s", clip(res.Summary, summaryLimit))
 	if res.Review != "" {
 		b.WriteString("\n**The review,** by a second agent that can only read. It's an opinion, not evidence:\n\n" + quote(clip(res.Review, accountLimit), 200) + "\n")
 	}
