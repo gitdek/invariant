@@ -92,6 +92,12 @@ func Markdown(r *verify.Report) string {
 		}
 		writeRow("Existing code", r.Build.Passed, description, render.existingEvidence(r.Existing))
 	}
+	switch r.FileSelection {
+	case "git":
+		b.WriteString("| File selection | git | git ls-files at the staging root; tracked edits and nonignored new files, within the copier's boundaries and exclusions; deleted files omitted |\n")
+	case "directory":
+		b.WriteString("| File selection | directory | whole directory at the staging root, subject to the copier's boundaries and exclusions |\n")
+	}
 	if !r.ModelOnly {
 		writeRow("Build", r.Build.Passed, render.buildResult(r.Build), "sandboxed, no network")
 	}

@@ -2,6 +2,8 @@ package verify
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -276,6 +278,31 @@ func pythonApplicationTraces(x PythonApplicationExecutionResult) ([]byte, error)
 	return json.Marshal(t)
 }
 
+// The session's sorted snapshot already selects every staged regular file.
+// Hash its original bytes without applying the TypeScript package copier's
+// exclusions again: Python applications can use files under bin/ and out/.
+func pythonApplicationHashExisting(root string, existing []string, files []project.ComponentFile) ([]ExistingCode, error) {
+	var out []ExistingCode
+	for _, selection := range existing {
+		h := sha256.New()
+		count := 0
+		for _, file := range files {
+			if file.Path != selection && !strings.HasPrefix(file.Path, selection+"/") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(file.Path)))
+			if err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(h, "%s\n%d\n", file.Path, len(b))
+			h.Write(b)
+			count++
+		}
+		out = append(out, ExistingCode{Path: selection, Files: count, SHA256: "sha256:" + hex.EncodeToString(h.Sum(nil))})
+	}
+	return out, nil
+}
+
 func runPythonApplication(ctx context.Context, p *project.Project, outDir string, tc toolchain.Toolchain) (*Report, error) {
 	if err := pythonApplicationPreflight(p); err != nil {
 		return nil, err
@@ -319,7 +346,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	}
 	r.Toolchain.PythonImage = toolchain.PythonImage
 	r.Toolchain.PythonDependencies = s.Provenance().Dependencies
-	r.Existing, err = HashExisting(s.root, p.Manifest.Existing)
+	r.Existing, err = pythonApplicationHashExisting(s.root, p.Manifest.Existing, s.Provenance().Files)
 	if err != nil {
 		return nil, err
 	}

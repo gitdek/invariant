@@ -84,6 +84,9 @@ type Report struct {
 	// Existing is the code an existing-code project checked, as it was
 	// (D-0054). The fingerprint covers it, so a receipt names that code.
 	Existing []ExistingCode `json:"existing,omitempty"`
+	// FileSelection names how Go or TypeScript's staging root supplies
+	// files: "git" or "directory". Older and model-only reports omit it.
+	FileSelection string `json:"file_selection,omitempty"`
 	// Assurance records what successful code checks established: "proved",
 	// "tested against the model", or "unchecked" (D-0024). Explicit components
 	// use "component evidence", with each proof recorded separately.
@@ -308,16 +311,23 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		Agent: p.Manifest.Agent,
 	}
 	ratification(ctx, r, p.Dir, p.Lock)
+	var stagingRoot string
 	switch lang.(type) {
 	case Go:
+		stagingRoot, err = moduleRoot(p.Dir, p.CodeDir())
+		if err != nil {
+			return nil, err
+		}
 		r.Toolchain.GobraImage, r.Toolchain.GoImage, r.Toolchain.Go = tc.GobraImage, tc.GoImage, goVersion(ctx)
 	case TypeScript:
+		stagingRoot = p.Dir
 		r.Toolchain.NodeImage = tc.NodeImage
 	case ExistingTypeScript:
 		root, _, err := PackageRoot(dir)
 		if err != nil {
 			return nil, err
 		}
+		stagingRoot = root
 		if r.Existing, err = HashExisting(root, p.Manifest.Existing); err != nil {
 			return nil, err
 		}
@@ -343,6 +353,16 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		r.Toolchain.PythonDependencies = deps
 		if proved, _, err := naginiSources(p.CodeDir()); err == nil && len(proved) > 0 {
 			r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
+		}
+	}
+	if stagingRoot != "" {
+		inGit, err := stagingInGit(stagingRoot, false)
+		if err != nil {
+			return nil, err
+		}
+		r.FileSelection = "directory"
+		if inGit {
+			r.FileSelection = "git"
 		}
 	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
@@ -759,8 +779,9 @@ func agree(d Design, e Exploration) Agreement {
 }
 
 // Fingerprint hashes what a report certifies: the statements, bounds,
-// results and verifier pins. Component reference sets are canonicalized on a
-// detached copy; invocation arguments, observations and diagnostics stay ordered.
+// results, file selection and verifier pins. Component reference sets are
+// canonicalized on a detached copy; invocation arguments, observations and
+// diagnostics stay ordered.
 // It leaves out timestamps, the build output and its test timings, the whole
 // version of the host's Go toolchain, where traces were written and the coding
 // agent that wrote the code, so a local run and a CI run of the same commit
