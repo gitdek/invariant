@@ -484,7 +484,12 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 // RunPythonApplicationCommand is the production executor, also usable by
 // recording wrappers. All declaration values remain individual argv values.
 func RunPythonApplicationCommand(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
+	user, err := pythonApplicationDockerUser(ctx)
+	if err != nil {
+		return PythonApplicationProcess{ExitCode: -1}, err
+	}
 	args := []string{"run", "--rm", "--pull=never", "--network", "none", "--platform", "linux/amd64",
+		"--user", user,
 		"--memory", "512m", "--pids-limit", "128", "--cpus", "1", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--hostname", "localhost", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "-w", c.WorkingDir,
 		"-v", c.Root + ":/src:ro"}
@@ -506,7 +511,7 @@ func RunPythonApplicationCommand(ctx context.Context, c PythonApplicationCommand
 	cmd := toolchain.Docker(ctx, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	p := PythonApplicationProcess{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: -1}
 	if cmd.ProcessState != nil {
 		p.ExitCode = cmd.ProcessState.ExitCode()
@@ -517,6 +522,42 @@ func RunPythonApplicationCommand(ctx context.Context, c PythonApplicationCommand
 		err = fmt.Errorf("running selected Python application image: %w", err)
 	}
 	return p, errors.Join(err, eventsErr)
+}
+
+func pythonApplicationDockerUser(ctx context.Context) (string, error) {
+	cmd := toolchain.Docker(ctx, "info", "--format", "{{json .SecurityOptions}}")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	b, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("discovering Python application Docker execution identity: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var options []any
+	if !utf8.Valid(b) || json.Unmarshal(b, &options) != nil || options == nil {
+		return "", fmt.Errorf("discovering Python application Docker execution identity: malformed security options, want a JSON array of strings")
+	}
+	var rootless, remapped bool
+	for _, value := range options {
+		option, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("discovering Python application Docker execution identity: malformed security option, want a string")
+		}
+		switch option {
+		case "name=rootless":
+			rootless = true
+		case "name=userns":
+			remapped = true
+		}
+	}
+	// Rootless container root maps to the host daemon owner; a host UID
+	// inside that namespace would instead select a subordinate host UID.
+	if rootless {
+		return "0:0", nil
+	}
+	if remapped {
+		return "", fmt.Errorf("Python application Docker execution identity: rootful user-namespace remapping is unsupported")
+	}
+	return fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()), nil
 }
 
 const pythonApplicationEventsLimit = 16 << 20

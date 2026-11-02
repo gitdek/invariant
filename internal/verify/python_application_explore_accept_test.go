@@ -202,6 +202,8 @@ def msg(code,text):
 if args and args[0]=='rm': sys.exit(0)
 if args[:2]==['image','inspect']:
     record({'kind':'image','args':args}); print('linux/amd64'); sys.exit(0)
+if args==['info','--format','{{json .SecurityOptions}}']:
+    print('[]'); sys.exit(0)
 if args and args[0]=='info':
     record({'kind':'info'}); sys.exit(73)
 mounts={}

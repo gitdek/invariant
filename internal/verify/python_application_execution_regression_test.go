@@ -285,7 +285,14 @@ func TestPythonApplicationExecutionAdditionalProtocolFailures(t *testing.T) {
 func TestPythonApplicationExecutionDockerCommandLimits(t *testing.T) {
 	bin := t.TempDir()
 	log := filepath.Join(t.TempDir(), "argv")
-	pa310Write(t, bin, "docker", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PA315_ARGS\"\nexit 125\n")
+	pa310Write(t, bin, "docker", `#!/bin/sh
+if [ "$#" = 3 ] && [ "$1" = info ] && [ "$2" = --format ] && [ "$3" = '{{json .SecurityOptions}}' ]; then
+    printf '%s\n' '[]'
+    exit 0
+fi
+printf '%s\n' "$@" > "$PA315_ARGS"
+exit 125
+`)
 	if err := os.Chmod(filepath.Join(bin, "docker"), 0755); err != nil {
 		t.Fatal(err)
 	}
