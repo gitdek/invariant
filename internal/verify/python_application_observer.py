@@ -309,7 +309,7 @@ class Collector:
         # The first reason a handle was misused, kept for the diagnostic in
         # case the driver catches the error.
         self.misuse = None
-        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__, _ModuleLifecycle.step.__wrapped__.__code__, _Exploration.try_step.__code__)
+        self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__, _ModuleLifecycle.perform.__code__, _Exploration.try_step.__code__)
         # An explored invocation drives the application only through
         # explore(), which runs once (#342).
         self.exploring = request.get("mode") == "explored"
@@ -504,6 +504,7 @@ class _Lifecycle:
         self.expected = expected
         self.entered = self.closed = False
         self.sequence = 0
+        self.operation = ""
         # An exploration run whose one attempt the environment rules out
         # can end with no step.
         self.omitted = False
@@ -708,6 +709,7 @@ class _ModuleLifecycle(_Lifecycle):
         super().__init__(target, None, None, fields, expected, form="module")
         self.paths = {key: path_segments(path) for key, path in self.fields.items()}
         self.timeout = timeout
+        self.held = None
 
     def application(self, function):
         binding = Binding(_collector, function, module=True, entry=True)
@@ -736,14 +738,16 @@ class _ModuleLifecycle(_Lifecycle):
         if coroutine:
             if event == "call":
                 self.coroutines.add(frame)
+                self.coroutine_workers[frame] = threading.current_thread()
             elif event == "return":
                 kind = return_kind(frame)
                 if kind != "yield":
                     self.coroutines.discard(frame)
+                    getattr(self, "coroutine_workers", {}).pop(frame, None)
                     exc = self.pending_exceptions.get(frame)
                     if kind == "unwind" and (exc is None or not self.refusal_candidate(frame, exc)):
                         raise ValueError("module coroutine failed or was cancelled")
-        if event == "call" and frame.f_code is self.entry.code:
+        if event == "call" and self.entry is not None and frame.f_code is self.entry.code:
             self.entry.frame(frame)
             if self.entry_frame is not None and frame is not self.entry_frame:
                 raise ValueError("reentrant application entry")
@@ -753,10 +757,24 @@ class _ModuleLifecycle(_Lifecycle):
             if frame is not self.await_frame and not self.owns(frame.f_back):
                 raise ValueError("selected call is not owned by the module entry")
             if frame is not self.target_frame:
+                if self.held is not None:
+                    raise ValueError("a second call cannot start while a selected call is held")
                 if self.calls:
                     raise ValueError("step requires exactly one nonrecursive selected call")
                 self.calls += 1
                 self.target_frame = frame
+                if self.operation == "hold":
+                    worker = threading.current_thread()
+                    if worker not in self.threads or threading.get_ident() == _collector.thread:
+                        raise ValueError("hold requires a selected call on an owned worker")
+                    held = dict(worker=worker, frame=frame, resume=threading.Event())
+                    self.held = held
+                    # This trace callback blocks before the selected frame's
+                    # first statement. Only release or cleanup can resume it.
+                    held["resume"].wait()
+                    if _collector.active is not self or self.operation != "release":
+                        raise ValueError("held call resumed outside release")
+                    self.check_target()
         selected = frame is self.entry_frame or frame is self.target_frame
         if (selected or coroutine) and event == "exception" and not await_completion(frame, arg):
             if frame is self.target_frame:
@@ -833,17 +851,58 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
 
     @guarded
     def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
+        self.perform("", entry, args, kwargs, expected_before, expected_after)
+
+    @guarded
+    def hold(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
+        self.perform("hold", entry, args, kwargs, expected_before, expected_after)
+
+    @guarded
+    def release(self, *, expected_before=None, expected_after=None):
+        self.perform("release", None, (), {}, expected_before, expected_after)
+
+    @guarded
+    def __exit__(self, exc_type, exc, tb):
+        result = super().__exit__(exc_type, exc, tb)
+        if self.held is not None:
+            self.perform("release", None, (), {}, None, None, cleanup=True)
+        return result
+
+    def drain(self, deadline):
+        # A worker may reach its pause after draining begins. Short joins
+        # let the collector notice that pause without waiting on its release.
+        joined = set()
+        while True:
+            paused = {self.held["worker"]} if self.held is not None and self.operation != "release" else set()
+            waiting = self.started - joined - paused
+            if not waiting:
+                return
+            for worker in waiting:
+                if self.held is not None and worker is self.held["worker"] and self.operation != "release":
+                    continue
+                worker.join(max(0, min(0.01, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    self.expire()
+                if not worker.is_alive():
+                    joined.add(worker)
+
+    def perform(self, operation, entry, args, kwargs, expected_before, expected_after, cleanup=False):
         c = _collector
         c.driver()
-        if not self.entered or self.closed or c.active is not None:
+        if operation and not c.exploring:
+            raise ValueError("hold and release require an explored module lifecycle")
+        if not self.entered or (self.closed and not cleanup) or c.active is not None:
             raise ValueError("closed, unentered or nested lifecycle step")
-        if self.sequence >= int(c.request["sampling"]["steps"]):
+        if not cleanup and self.sequence >= int(c.request["sampling"]["steps"]):
             raise ValueError("step sampling budget exceeded")
-        if c.exploring:
+        if c.exploring and not cleanup:
             c.exploration.stepping(self)
-        self.refusal = c.exploration.refusal if c.exploring else None
+        self.refusal = c.exploration.refusal if c.exploring and not cleanup else None
+        if operation == "release" and self.refusal is not None:
+            raise ValueError("release cannot declare an application refusal")
+        self.operation = operation
         self.outcome = "accepted" if self.refusal is not None else None
-        self.entry = self.application(entry)
+        self.entry = None if operation == "release" else self.application(entry)
         self.before = self.read()
         if not equal(self.before, self.state):
             raise ValueError("state changed between transitions")
@@ -855,39 +914,49 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
         self.pending_exceptions = {}
         self.threads, self.started = set(), set()
         self.coroutines, self.tasks = set(), set()
+        self.coroutine_workers = {}
+        releasing = self.held if operation == "release" else None
+        if releasing is not None:
+            self.target_frame = releasing["frame"]
+            self.threads.add(releasing["worker"])
+            self.started.add(releasing["worker"])
+            self.coroutines.update(releasing["coroutines"])
+            self.coroutine_workers.update(releasing["coroutines"])
         existing_coroutines = coroutine_objects()
         deadline = time.monotonic() + self.timeout
         watchdog = self.watchdog(deadline)
         loop = None
+        succeeded = False
         c.active = self
         try:
             escaped = None
-            try:
-                result = self.entry.call(*args, **kwargs)
-                if inspect.isawaitable(result):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.set_task_factory(self.task)
-                    loop.set_exception_handler(self.async_error)
-                    awaited = self.await_result(result)
-                    self.await_frame = awaited.cr_frame
-                    loop.run_until_complete(awaited)
-            except BaseException as exc:
-                self.escaped_refusal(exc)
-                escaped = exc
+            if operation == "release":
+                if releasing is not None:
+                    releasing["resume"].set()
+            else:
+                try:
+                    result = self.entry.call(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.set_task_factory(self.task)
+                        loop.set_exception_handler(self.async_error)
+                        awaited = self.await_result(result)
+                        self.await_frame = awaited.cr_frame
+                        loop.run_until_complete(awaited)
+                except BaseException as exc:
+                    self.escaped_refusal(exc)
+                    escaped = exc
             # Descendants can start more threads while their parents drain.
             # A worker is registered before it starts, and Thread.join refuses
             # one that hasn't, so join only the workers known to have started.
-            joined = set()
-            while self.started - joined:
-                for worker in list(self.started - joined):
-                    worker.join(max(0, deadline - time.monotonic()))
-                    if worker.is_alive() or time.monotonic() >= deadline:
-                        self.expire()
-                    joined.add(worker)
-            unfinished = any((value.cr_frame if type(value) is types.CoroutineType else value.gi_frame) is not None
-                             for value in coroutine_objects() - existing_coroutines)
-            if self.coroutines or unfinished:
+            self.drain(deadline)
+            paused = {frame: self.coroutine_workers[frame] for frame in self.coroutines
+                      if self.held is not None and self.coroutine_workers[frame] is self.held["worker"] and operation == "hold"}
+            unfinished = any(frame is not None and frame not in paused
+                             for value in coroutine_objects() - existing_coroutines
+                             for frame in [(value.cr_frame if type(value) is types.CoroutineType else value.gi_frame)])
+            if self.coroutines - paused.keys() or unfinished:
                 raise ValueError("module entry left unfinished coroutines")
             if any(not task.done() or task.cancelled()
                    or (task.exception() is not None and not (task is self.await_task and task.exception() is escaped))
@@ -895,20 +964,33 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 raise ValueError("module entry left unfinished or failed tasks")
             # An explored step the application refuses before its selected
             # call completes the entry and leaves the state as it was (#342).
-            refused = c.exploring and self.calls == 0
-            if (c.failed or (self.calls != 1 and not refused) or not (self.completed or refused)
-                    or not (self.entry_completed or escaped is not None)):
+            refused = c.exploring and self.calls == 0 and releasing is None
+            if operation == "hold":
+                valid = (self.calls == 1 and self.held is not None and not self.completed) or self.outcome == "refused"
+            elif operation == "release":
+                valid = self.calls == 0 and (releasing is None or self.completed)
+            else:
+                valid = (self.calls == 1 and self.completed) or refused
+            if (c.failed or not valid
+                    or (operation != "release" and not (self.entry_completed or escaped is not None))):
                 raise ValueError("incomplete selected call")
-            self.entry.check()
+            if self.entry is not None:
+                self.entry.check()
             self.after = self.read()
             if refused and not equal(self.after, self.before):
                 raise ValueError("a refused step changed the state without a selected call")
             expect(self.after, expected_after, module=True)
             if time.monotonic() >= deadline:
                 self.expire()
-            self.sequence += 1
-            self.state = copied(self.after)
-            c.write(self, self.entry, before=self.before, after=self.after)
+            if operation == "hold" and self.calls:
+                self.held["coroutines"] = paused
+            if operation == "release":
+                self.held = None
+            if not cleanup:
+                self.sequence += 1
+                self.state = copied(self.after)
+                c.write(self, self.entry or self.target, before=self.before, after=self.after)
+            succeeded = True
         finally:
             if loop is not None:
                 try:
@@ -920,7 +1002,10 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 finally:
                     loop.close()
                     asyncio.set_event_loop(None)
-            if any(worker.is_alive() for worker in self.threads):
+            if ((self.held is not None and not succeeded)
+                    or any(worker.is_alive() and not (self.held is not None and worker is self.held["worker"]
+                                                     and operation != "release")
+                           for worker in self.threads)):
                 self.expire()
             watchdog.stdin.close()
             if watchdog.wait() != 0:
@@ -936,7 +1021,7 @@ def _poison(message):
 
 
 class Lifecycle:
-    """A driver's handle on one lifecycle: a context manager with step().
+    """A stateless handle with step(), and explored module hold()/release().
 
     It has no state of its own. Reading, writing or deleting any other
     attribute poisons the execution, even if the driver catches the error.
@@ -945,7 +1030,7 @@ class Lifecycle:
     __slots__ = ()
 
     def __getattr__(self, name):
-        _poison("lifecycle handles expose no state; drive the application through step()")
+        _poison("lifecycle handles expose no state; use step(), hold() or release()")
 
     def __setattr__(self, name, value):
         _poison("lifecycle handles are read-only")
@@ -963,6 +1048,20 @@ class Lifecycle:
     @guarded
     def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
         _record(self).step(entry, *args, expected_before=expected_before, expected_after=expected_after, **kwargs)
+
+    @guarded
+    def hold(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
+        record = _record(self)
+        if record.form != "module":
+            raise ValueError("hold requires an explored module lifecycle")
+        record.hold(entry, *args, expected_before=expected_before, expected_after=expected_after, **kwargs)
+
+    @guarded
+    def release(self, *, expected_before=None, expected_after=None):
+        record = _record(self)
+        if record.form != "module":
+            raise ValueError("release requires an explored module lifecycle")
+        record.release(expected_before=expected_before, expected_after=expected_after)
 
 
 def _handle(record):
@@ -1003,8 +1102,8 @@ class Step:
     name is the step's name, exactly as Next names it. args is every argument
     list to try it with, as Next passes them, in the spec's encoding:
     [[{"$mv": "t1"}], [{"$mv": "t2"}]]; leave it out for a step with no
-    arguments. take(life, state, *args) tries the step: it calls life.step()
-    once, with the application entry that takes it, or returns without
+    arguments. take(life, state, *args) tries the step: it calls life.step(),
+    life.hold() or life.release() once, or returns without
     calling it only where the environment's bounds rule the step out. state
     is a copy of what the gate read back, so the driver can apply those
     bounds; changing it changes nothing. refusal=Refusal(ExceptionType, ...)
@@ -1050,6 +1149,8 @@ class _Exploration:
             return dict(step=self.attempt["step"], args=self.attempt["args"])
         fields = dict(step=self.attempt["step"], args=self.attempt["args"],
                       replay=self.attempt["replay"], called=life.calls == 1)
+        if life.operation:
+            fields["operation"] = life.operation
         if self.refusal is not None:
             fields["outcome"] = life.outcome
             if life.outcome == "refused":
@@ -1058,7 +1159,7 @@ class _Exploration:
 
     def stepping(self, life):
         if life is not self.record or self.attempt is None or self.stepped:
-            raise ValueError("a step's take calls life.step() at most once, on the lifecycle it was given")
+            raise ValueError("a step's take calls step(), hold() or release() at most once, on the lifecycle it was given")
         self.stepped = True
 
     def key(self, state):
@@ -1114,7 +1215,7 @@ class _Exploration:
         if node is None:
             node = self.nodes[self.roots[r]]
         # Replay the path that first reached the state, then try one step.
-        for j, (psi, pai, outcome) in enumerate(node["edges"]):
+        for j, (psi, pai, outcome, operation, calls) in enumerate(node["edges"]):
             self.take(handle, record, psi, pai, True)
             if not self.stepped:
                 raise ValueError("a replay did not take the step it took before")
@@ -1122,10 +1223,12 @@ class _Exploration:
                 raise ValueError("the application is not deterministic: a replay reached another state")
             if record.outcome != outcome:
                 raise ValueError("the application is not deterministic: a replay returned another outcome")
+            if record.operation != operation or record.calls != calls:
+                raise ValueError("the application is not deterministic: a replay changed its operation or selected calls")
         self.take(handle, record, si, ai, False)
         if self.stepped:
             if self.key(record.state) not in self.index:
-                self.add(record.state, r, node["edges"] + [(si, ai, record.outcome)], node["trail"], node["level"] + 1)
+                self.add(record.state, r, node["edges"] + [(si, ai, record.outcome, record.operation, record.calls)], node["trail"], node["level"] + 1)
         else:
             record.omitted = True
             self.c.write(record, None, kind="omitted", state=copied(record.state))
@@ -1261,4 +1364,9 @@ def run(request, emit, locations, codes, argv):
         threading.setprofile(None)
         threading.Thread.start = c.thread_start
         threading.excepthook = previous_excepthook
+        # A failure between steps must not leave a paused non-daemon worker
+        # blocking interpreter shutdown after its step's watchdog was closed.
+        for life in c.lives:
+            if getattr(life, "held", None) is not None:
+                life.expire()
     emit(dict(type="end", count=c.count))
