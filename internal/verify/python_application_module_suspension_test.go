@@ -50,6 +50,7 @@ for version, code, offset, outcome in [
     life.entry = life.target = types.SimpleNamespace(code=object())
     life.entry_frame = life.target_frame = None
     life.coroutines = {frame}
+    life.pending_exceptions = {}
     try:
         life.observe(frame, 'return', None)
     except ValueError as error:
