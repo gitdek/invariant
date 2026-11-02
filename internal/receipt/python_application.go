@@ -23,8 +23,11 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 	for _, c := range a.Conformance {
 		explored = explored || c.Mode == "bounded-exhaustive"
 	}
-	if explored {
-		// #342: the exploration's own words, and what each label needs.
+	if explored && pythonApplicationDeclaresRefusal(a) {
+		// #392: explain strict outcomes only when the evidence declares them.
+		b.WriteString("\n### Python application · explored execution\n\nThe gate's harness explored the application at the ratified bounds: every state it reached was read back from the application, and every attempt was a bound application call. TLC checks the starting states against Init and steps without a refusal declaration against Next. For a step with a declared refusal, TLC requires the named action to be disabled for a refused attempt, and checks every normal return against that exact named action's before/after relation, including an unchanged state. For these declared steps, normal read-only returns are accepted outcomes; declared_refusals counts only matched exceptions, with their declared attributes retained below. TLC also checks that every step was tried, but where only the environment's bounds rule one out. **Tested in every state** needs those to pass and the states reached to equal the model's; a failed attempt check blocks it and **every step tried**, and keeps the checked transitions. A run one size larger, when the driver names its bounds, is recorded apart from the ratified bounds' results. None of this is a proof or an every-size claim. Runtime tests establish only their own observed outcomes. Gate and supplied component origins describe provenance; neither label grants a gate verdict.\n")
+	} else if explored {
+		// #342: preserve receipts for explorations without declarations.
 		b.WriteString("\n### Python application · explored execution\n\nThe gate's harness explored the application at the ratified bounds: every state it reached was read back from the application, and every attempt was a bound application call. TLC checks the starting states against Init, every step against Next, and the attempts for every step tried, but where only the environment's bounds rule one out. **Tested in every state** needs those to pass and the states reached to equal the model's; a failed attempt check blocks it and **every step tried**, and keeps the checked transitions. A run one size larger, when the driver names its bounds, is recorded apart from the ratified bounds' results. None of this is a proof or an every-size claim. Runtime tests establish only their own observed outcomes. Gate and supplied component origins describe provenance; neither label grants a gate verdict.\n")
 	} else {
 		b.WriteString("\n### Python application · sampled execution\n\nThese gate executions test observed initial states against Init and observed transitions against Next at the ratified bounds. They establish no proof, exhaustive implementation coverage, every-step or every-size claim. Runtime tests establish only their own observed outcomes. Gate and supplied component origins describe provenance; neither label grants a gate verdict.\n")
@@ -56,6 +59,34 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		fmt.Fprintf(b, "\nOne size larger, overall: %s\n", componentLiteral(string(raw)))
 	}
 	pythonApplicationProofs(b, a)
+}
+
+func pythonApplicationDeclaresRefusal(a *verify.PythonApplicationReport) bool {
+	declares := func(x *verify.PythonApplicationExploration) bool {
+		if x == nil {
+			return false
+		}
+		if x.DeclaredRefusals != nil {
+			return true
+		}
+		for _, step := range x.Steps {
+			if step.Refusal != nil {
+				return true
+			}
+		}
+		return false
+	}
+	for _, x := range a.Executions {
+		if declares(x.Exploration) {
+			return true
+		}
+	}
+	for _, x := range a.Larger {
+		if x.Execution != nil && declares(x.Execution.Exploration) {
+			return true
+		}
+	}
+	return false
 }
 
 // pythonApplicationFailures names an explored check's failed claims, which
