@@ -1,85 +1,40 @@
-# Have the factory record a merged plan's decision
+# Model recoverable decision follow-up effect outcomes
 
-Issue #417 in gitdek/invariant, opened by @gitdek.
+Issue #423 in gitdek/invariant, opened by @invariant-code-factory[bot].
 
 Project: factory/decision-followup
 
-A plumbing build can't write `decisions/`. So after a person merges a factory pull request, the review's merger work includes recording the plan's decision in a follow-up pull request. The follow-up runs `invariant decisions decide`, cites the new decision on the SPEC lines and README passages the change wrote, and rolls SPEC up (#407, #413, #414, #415). It's the same few minutes every time.
+Before #421 wires #417/#420's Workflow, amend its boundary with real effects. Repair spends an allowance and enters Open/CIPending with no failed-repair outcome; AutoMerge enters terminal Merged before GitHub can refuse. After passing CI, a head change cannot invalidate that result because CheckCompletes accepts only pending CI. Plumbing cannot repair these gaps by resetting snapshots or inventing observations.
 
-**What to build.**
-- Once a plan's pull request merges and its plan says a decision is owed, the factory opens one follow-up that records it: the journal entry and its log row, the citations, and the roll-up. An agent drafts the decision's text from the plan, the merged change and its review.
-- A two-way door the plan carried out is recorded as `decided` by `agent`. Anything the owner would want a say in, and every one-way door, is recorded as `proposed`.
-- The factory merges the follow-up once CI passes, since it changes only `decisions/`, SPEC.md and the README.
+Model recoverable repair and merge authorization/outcomes, revision/CI invalidation and external merge observation. Preserve #417's policy: only an owed merged plan starts work; evidence determines decided-by-agent versus proposed; one stable follow-up stays in its allowed scope; failed drafts/creation retry automatically; at most two repairs occur per allowance; only an explicit authorized retry/resume renews it; closure and exhaustion wait for a person.
 
-This changes what the factory does after a merge, which the issue protocol's model covers, so it's modeled rather than plumbing.
+Charge each authorized repair attempt exactly once, including an agent that fails or leaves no publishable change. Such an outcome retains the real failure/conflict cause and can exhaust the allowance; it must neither fabricate a GitHub CI failure nor wait forever for a run that was never requested. Published repairs require fresh CI. Report repair execution failure separately from CI, and keep interrupted effects recoverable without running an attempt twice.
 
-_Posted for @gitdek by a coding agent, at his request._
+An accepted merge authorization is not a completed remote merge. Reconcile success or a lost response; on a definitive refusal return to a truthful nonterminal condition reflecting the observed head, CI, conflict or closure. New revisions invalidate prior CI without changing repair usage or lifting a hold. Closure during an in-flight effect remains effective; a person must explicitly resume that same PR. Record an externally merged PR as externally settled without pretending the factory merged it or supplying invented passing CI. Stable operation identities and outcome guards must reject stale completions.
+
+Amend the model, proved core, explorer and project README through ratification and run the full gate. Add witnesses and counterexamples for failed/no-change repairs, exhaustion and renewal, head movement after CI, closure/conflict after merge authorization, lost replies, external merge and stale outcomes. Preserve the existing classification, scope and artifact guarantees. Later protocol/recovery work composes these operations; the adapters remain tested plumbing.
+
+Basis: #417's ratified statements, #421's persisted-snapshot and real-effect requirements, D-0064/D-0069 and D-0122. The merger records this amendment's decision. Do not claim the watcher uses it yet.
+
+◉ Opened by Invariant for step 1 of 6 of the plan of issues on #421, which @gitdek [ratified](https://github.com/gitdek/invariant/issues/421#issuecomment-6587654565).
+
+<!-- invariant-plan #421 sha256:35403d5bf0549f22c8840b97420b89389648fabb0ba0fba8f24cd1ffc5dc23d2 step 1 -->
 
 ## Decided
 
-- **F1. What evidence lets the factory conclude that an executed two-way door needs no owner input and may be recorded as decided by agent?** B. The drafting agent may infer from the plan, merged change and review that an executed two-way door needs no owner input and record it as decided by agent, leaving all other decisions proposed. (decided by @gitdek: https://github.com/gitdek/invariant/issues/417#issuecomment-6583572322)
-- **F2. If drafting or creating the follow-up fails, its CI fails, or it has a merge conflict, how should the factory recover?** C. The factory retries failed drafting and creation automatically, but failed CI or a merge conflict blocks the work until a person requests another attempt. (decided by @gitdek: https://github.com/gitdek/invariant/issues/417#issuecomment-6586607202)
-- **F3. If a person closes the follow-up without merging it while the plan still owes the decision, what should the factory do?** A. The factory leaves the follow-up closed and waits for an explicit request to resume the same follow-up. (decided by @gitdek: https://github.com/gitdek/invariant/issues/417#issuecomment-6583572322)
-- **F4. After the follow-up has used both automatic repairs and a person asks for another attempt, how many additional repairs does that request authorize?** B. The factory receives a fresh allowance of up to two repairs in the same follow-up, checks each with fresh CI, and then waits for another explicit request if CI fails or a merge conflict remains after both repairs. (decided by @gitdek: https://github.com/gitdek/invariant/issues/417#issuecomment-6584856250)
-- **F5. When a person explicitly requests resumption of a follow-up closed before both repairs in its current allowance were used, how many repairs should remain available?** B. The factory resumes the same follow-up with a fresh allowance of up to two repairs, checking each repair with fresh CI. (decided by @gitdek: https://github.com/gitdek/invariant/issues/417#issuecomment-6585098741)
+- **F1. When a person explicitly requests resumption of a closed follow-up while an earlier repair or merge outcome is still unknown, when should resumption renew the allowance and release the closure hold?** A. Defer the explicit resume request and keep the closure hold and allowance unchanged until reconciliation confirms that the PR is still unmerged, then apply that request with a fresh allowance. (decided by @gitdek: https://github.com/gitdek/invariant/issues/423#issuecomment-6587773063)
+- **F2. If GitHub definitively refuses a merge, for example because of permissions or branch protection, but the observed PR remains open at the same head with current passing CI and no conflict, should the factory try again automatically or wait for a person?** B. Hold the follow-up in a nonterminal merge-refused state until a person explicitly authorizes retry, which renews the repair allowance. (decided by @gitdek: https://github.com/gitdek/invariant/issues/423#issuecomment-6587773063)
 
 ## Discussion
 
 **@gitdek:**
 
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-F2: retry failed drafting and creation automatically. If the follow-up's CI fails or it has a merge conflict, as when two plans' decisions merge close together, repair the same follow-up within its files at most twice, each repair checked by CI afresh. Then stop, and wait for a person to ask for another attempt.
-
+F1 A applies a person's resume once reconciliation settles the earlier outcome, so nobody has to ask twice and nothing runs twice. F2 B holds a definitively refused merge for a person: permissions or branch protection won't change on a retry, and retrying would loop.
 
 _Posted for @gitdek by a coding agent, at his request._
 
 **@gitdek:**
 
-C is the base for the revision above, which keeps C's automatic retries of drafting and creation and adds up to two repairs of a follow-up whose CI fails or that has a merge conflict, before it stops for a person. The factory waits for every fork's choice before it takes up a revision, so F2 needed one.
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-The rule behind F4 B and F5 B: every explicit request from a person to go on, whether it retries a follow-up that used its repairs or resumes one a person closed, gives that follow-up a fresh allowance of up to two repairs, each checked by fresh CI.
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-Checked against the five forks as decided: F1 B, F2 C with the up-to-two automatic repairs from the revision, which RepairAllowance, RepairProgress and ExhaustionIsBlocked carry, F3 A, F4 B and F5 B. A follow-up merges only on passing CI for its current contents and with no conflict. It changes only `decisions/`, SPEC.md and the README. A one-way door is always proposed, which the DecideOneWay bug checks. TLC explored 1,436 states, reached every witness, held every property and caught every bug.
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-The project belongs in `factory/decision-followup`, beside the factory's other proved cores, rather than among the examples, so I've added that Project: line and closed #419. The ratified statements should stay exactly as they are.
-
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-The same 50 statements as before, unchanged, now in `factory/decision-followup` beside the factory's other proved cores.
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-I stopped that build on purpose. It reused the branch from the first ratification, which pinned these same statements in `examples/06-decision-followup`, so it would have built there again. That branch is deleted now, and #419's code stays on #419. Drafting again lets the next ratification start a fresh branch in `factory/decision-followup`, the issue's Project: line. The statements should stay exactly as ratified.
-
-
-_Posted for @gitdek by a coding agent, at his request._
-
-**@gitdek:**
-
-The same 50 statements as before, unchanged, now in `factory/decision-followup` beside the factory's other proved cores.
+Checked against F1 A and F2 B and against #421's step 1. The weakened promises are honest about real effects: a merge attempt rather than a remote merge, a repair charged when it's authorized, and holds that also cover a definitive merge refusal. The new invariants keep every effect from running twice, reject stale outcomes, and keep anyone from inventing CI for a failed repair or an external merge. Every #417 guarantee that isn't amended is kept. TLC explored 20,889 states, reached all 38 witnesses, held all 7 properties and caught all 16 known bugs.
 
 _Posted for @gitdek by a coding agent, at his request._
