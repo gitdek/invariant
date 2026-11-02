@@ -180,9 +180,9 @@ MergeProgress == ReadyToMerge ~> (phase \in {"merged", "closed", "needsRepair"})
 
 Init ==
     /\ planMerged = FALSE
-    /\ decisionOwed \in BOOLEAN
-    /\ door \in {"one-way", "two-way"}
-    /\ executed \in BOOLEAN
+    /\ decisionOwed = FALSE
+    /\ door = "one-way"
+    /\ executed = FALSE
     /\ phase = "waiting"
     /\ draft = EmptyDraft
     /\ followup = NoFollowup
@@ -195,11 +195,14 @@ Init ==
     /\ hold = "none"
     /\ event = [kind |-> "initial", previousRepairs |-> 0]
 
-PlanMerges ==
+PlanMerges(owed, planDoor, wasExecuted) ==
     /\ ~planMerged
     /\ planMerged' = TRUE
+    /\ decisionOwed' = owed
+    /\ door' = planDoor
+    /\ executed' = wasExecuted
     /\ event' = Event("planMerge")
-    /\ UNCHANGED <<decisionOwed, door, executed, phase, draft, followup, created,
+    /\ UNCHANGED <<phase, draft, followup, created,
         bundle, ci, ciFresh, conflict, repairsUsed, hold>>
 
 StartDraft ==
@@ -217,9 +220,9 @@ DraftFails ==
     /\ UNCHANGED <<planMerged, decisionOwed, door, executed, draft, followup, created,
         bundle, ci, ciFresh, conflict, repairsUsed, hold>>
 
-DraftSucceeds ==
+DraftSucceeds(needsOwner) ==
     /\ phase = "drafting"
-    /\ \E needsOwner \in BOOLEAN : draft' = DraftValue(needsOwner)
+    /\ draft' = DraftValue(needsOwner)
     /\ phase' = "readyToCreate"
     /\ event' = Event("draftSuccess")
     /\ UNCHANGED <<planMerged, decisionOwed, door, executed, followup, created,
@@ -239,10 +242,11 @@ CreationFails ==
     /\ UNCHANGED <<planMerged, decisionOwed, door, executed, draft, followup, created,
         bundle, ci, ciFresh, conflict, repairsUsed, hold>>
 
-CreationSucceeds ==
+CreationSucceeds(f) ==
     /\ phase = "creating"
     /\ created = {}
-    /\ \E f \in Followups : followup' = f /\ created' = {f}
+    /\ followup' = f
+    /\ created' = {f}
     /\ bundle' = CompleteBundleValue
     /\ phase' = "open"
     /\ ci' = "pending"
@@ -251,12 +255,12 @@ CreationSucceeds ==
     /\ event' = Event("create")
     /\ UNCHANGED <<planMerged, decisionOwed, door, executed, draft, repairsUsed, hold>>
 
-CheckCompletes ==
+CheckCompletes(result, hasConflict) ==
     \* An external result for the current contents, never an older CI run.
     /\ phase \in {"open", "closed"}
     /\ ci = "pending"
-    /\ ci' \in {"passed", "failed"}
-    /\ conflict' \in BOOLEAN
+    /\ ci' = result
+    /\ conflict' = hasConflict
     /\ ciFresh' = TRUE
     /\ phase' = IF phase = "closed" THEN "closed"
         ELSE IF ci' = "passed" /\ ~conflict' THEN "open" ELSE "needsRepair"
@@ -332,8 +336,14 @@ Done ==
     /\ phase = "merged" \/ (planMerged /\ ~decisionOwed)
     /\ UNCHANGED vars
 
-Next == PlanMerges \/ StartDraft \/ DraftFails \/ DraftSucceeds
-    \/ StartCreation \/ CreationFails \/ CreationSucceeds \/ CheckCompletes
+Next == (\E owed \in BOOLEAN, planDoor \in {"one-way", "two-way"}, wasExecuted \in BOOLEAN :
+        PlanMerges(owed, planDoor, wasExecuted))
+    \/ StartDraft \/ DraftFails
+    \/ (\E needsOwner \in BOOLEAN : DraftSucceeds(needsOwner))
+    \/ StartCreation \/ CreationFails
+    \/ (\E f \in Followups : CreationSucceeds(f))
+    \/ (\E result \in {"passed", "failed"}, hasConflict \in BOOLEAN :
+        CheckCompletes(result, hasConflict))
     \/ ConflictAppears \/ Repair \/ Block \/ PersonCloses \/ PersonRetries
     \/ PersonResumes \/ AutoMerge \/ Done
 
