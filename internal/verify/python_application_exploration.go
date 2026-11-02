@@ -29,7 +29,8 @@ type PythonApplicationExploration struct {
 }
 
 // PythonApplicationExplorationStep is one model step the harness tried, with
-// every argument list, and the application entry each attempt of it called.
+// every argument list and the entry identity recorded for its attempts. A
+// release names the selected target without invoking a new entry.
 type PythonApplicationExplorationStep struct {
 	Name    string                    `json:"name"`
 	Args    [][]any                   `json:"args"`
@@ -63,12 +64,13 @@ type pythonApplicationExplorer struct {
 	states    []string
 	known     map[string]bool
 	attempts  map[[3]string]string // from, step, arguments → to
-	outcomes  map[[3]string]string // the strict outcome reproduced by a replay
+	outcomes  map[[3]string]string // operation, selected start and outcome reproduced by a replay
 	omitted   map[[3]string]bool
 	edges     map[string][]string
 	run       int
 	done      bool
 	called    bool
+	held      *PythonApplicationObservation // selected start awaiting release in this run
 	stats     PythonApplicationExploration
 }
 
@@ -169,6 +171,9 @@ func (x *pythonApplicationExplorer) instance(row PythonApplicationObservation) (
 }
 
 func pythonApplicationOutcome(row PythonApplicationObservation, declaration *PythonApplicationRefusal) error {
+	if row.Operation == "release" && declaration != nil {
+		return fmt.Errorf("release step %s cannot declare an application refusal", row.Step)
+	}
 	if declaration == nil {
 		if row.Outcome != "" || row.Refusal != nil {
 			return fmt.Errorf("undeclared refusal metadata on step %s", row.Step)
@@ -191,6 +196,9 @@ func pythonApplicationOutcome(row PythonApplicationObservation, declaration *Pyt
 }
 
 func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) error {
+	if row.Operation != "" && (row.Kind != "transition" || row.Form != "module" || row.Operation != "hold" && row.Operation != "release") {
+		return fmt.Errorf("invalid held-call exploration operation")
+	}
 	if row.Kind != "transition" && (row.Outcome != "" || row.Refusal != nil) {
 		return fmt.Errorf("refusal metadata outside an exploration transition")
 	}
@@ -203,6 +211,9 @@ func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) er
 			return fmt.Errorf("an exploration run names no start")
 		}
 		x.run, x.done = row.Run, false
+		// The collector drains held work before each fresh run, without
+		// inventing observations for cleanup. A hold cannot cross runs.
+		x.held = nil
 		x.stats.Runs++
 		key := pythonApplicationKey(row.State)
 		if previous, ok := x.starts[*row.Start]; ok {
@@ -253,22 +264,45 @@ func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) er
 		}
 	}
 	from, to := pythonApplicationKey(row.Before), pythonApplicationKey(row.After)
-	if !*row.Called && from != to {
-		return fmt.Errorf("a step without the selected call changed the state")
-	}
 	declaration := x.refusals[row.Step]
 	if err := pythonApplicationOutcome(row, declaration); err != nil {
 		return err
 	}
+	if x.held != nil && *row.Called {
+		return fmt.Errorf("a second call of the selected target started while held")
+	}
+	completing := false
+	switch row.Operation {
+	case "hold":
+		if *row.Called {
+			x.held = &row
+		} else if row.Outcome != "refused" {
+			return fmt.Errorf("a hold has no selected start or declared refusal")
+		}
+	case "release":
+		if *row.Called || row.Entry != row.Target || row.EntrySHA256 != row.SourceSHA256 {
+			return fmt.Errorf("release must complete its selected target without another call")
+		}
+		if x.held != nil {
+			if row.Run != x.held.Run || row.Instance != x.held.Instance || row.Target != x.held.Target || row.SourceSHA256 != x.held.SourceSHA256 {
+				return fmt.Errorf("release does not match the held selected call")
+			}
+			completing = true
+			x.held = nil
+		}
+	}
+	if !*row.Called && !completing && from != to {
+		return fmt.Errorf("a step without the selected call or a held release changed the state")
+	}
 	k := [3]string{from, row.Step, args}
-	outcome := pythonApplicationKey([]any{row.Outcome, row.Refusal})
+	outcome := pythonApplicationKey([]any{row.Operation, *row.Called, row.Outcome, row.Refusal})
 	if *row.Replay {
 		// A replay repeats an attempt the exploration already made.
 		if was, ok := x.attempts[k]; !ok || was != to {
 			return fmt.Errorf("the application is not deterministic: a replay of %s reached another state", row.Step)
 		}
-		if declaration != nil && x.outcomes[k] != outcome {
-			return fmt.Errorf("the application is not deterministic: a replay of %s changed its outcome", row.Step)
+		if x.outcomes[k] != outcome {
+			return fmt.Errorf("the application is not deterministic: a replay of %s changed its operation, selected start or outcome", row.Step)
 		}
 		return nil
 	}
