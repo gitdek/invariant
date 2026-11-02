@@ -187,6 +187,10 @@ class Refusal:
     def matches(self, exc):
         if type(exc) is not self.exception_type:
             return False
+        # The application can give the class a control-flow base after it
+        # was declared, by assigning __bases__.
+        if issubclass(type(exc), (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError)):
+            return False
         if self.type_name != type(exc).__module__ + "." + type(exc).__qualname__:
             return False
         for name, value in self.attributes.items():

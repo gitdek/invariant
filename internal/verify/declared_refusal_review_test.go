@@ -30,6 +30,12 @@ class Refused(Exception):
 zero, negative = Refusal(Refused, code=0.0), Refusal(Refused, code=-0.0)
 assert zero.matches(Refused(0.0)) and not zero.matches(Refused(-0.0)), "-0.0 matched 0.0"
 assert negative.matches(Refused(-0.0)) and not negative.matches(Refused(0.0)), "0.0 matched -0.0"
+class Later(Exception):
+    pass
+later = Refusal(Later)
+assert later.matches(Later())
+Later.__bases__ = (Exception, KeyboardInterrupt)
+assert not later.matches(Later()), "a control-flow base added after declaring matched"
 `
 	python, err := exec.LookPath("python3")
 	if err != nil {
