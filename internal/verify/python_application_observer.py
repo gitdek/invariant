@@ -169,7 +169,10 @@ class Refusal:
 
     @guarded
     def __init__(self, exception_type, **attributes):
-        if not isinstance(exception_type, type) or not issubclass(exception_type, Exception):
+        # An Exception subclass can also inherit a control-flow class, such
+        # as class X(Exception, KeyboardInterrupt); neither may refuse.
+        if (not isinstance(exception_type, type) or not issubclass(exception_type, Exception)
+                or issubclass(exception_type, (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError))):
             raise ValueError("a refusal requires an Exception subclass")
         if (type(exception_type.__module__) is not str or not exception_type.__module__
                 or type(exception_type.__qualname__) is not str or not exception_type.__qualname__):
@@ -193,7 +196,8 @@ class Refusal:
                 return False
             if type(actual) not in (str, bool, int, float, type(None)) or not equal(actual, value):
                 return False
-            if type(actual) is float and not math.isfinite(actual):
+            # == takes -0.0 for 0.0, and the row records the declared value.
+            if type(actual) is float and (not math.isfinite(actual) or math.copysign(1.0, actual) != math.copysign(1.0, value)):
                 return False
         return True
 
