@@ -87,6 +87,10 @@ func stagingFiles(root string, excluded func(string, bool) bool, strict bool) (*
 		if name == "" || seen[name] || stagingExcluded(name, false, excluded) {
 			continue
 		}
+		// Git lists an untracked repository as its directory, with a slash.
+		if strings.HasSuffix(name, "/") {
+			return nil, fmt.Errorf("staging %q: nested Git repositories are not supported", strings.TrimSuffix(name, "/"))
+		}
 		seen[name] = true
 		info, err := stagingPath(root, name)
 		if os.IsNotExist(err) {
@@ -98,8 +102,18 @@ func stagingFiles(root string, excluded func(string, bool) bool, strict bool) (*
 		if excluded(path.Base(name), info.IsDir()) {
 			continue
 		}
+		// A tracked file replaced by a directory: Git lists the files under
+		// it on their own, as untracked ones.
+		if info.IsDir() {
+			continue
+		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("staging %q: not a regular file", name)
+			if strict {
+				return nil, fmt.Errorf("staging %q: not a regular file", name)
+			}
+			// Copiers that skip nonregular files outside Git skip them here
+			// too, so a verdict doesn't depend on which mode selected them.
+			continue
 		}
 		selection.Files = append(selection.Files, name)
 	}
@@ -161,9 +175,17 @@ func stagingPath(root, name string) (os.FileInfo, error) {
 
 // Repository metadata or a worktree file makes Git authoritative. A broken
 // repository or failed Git command must not widen selection to a tree walk.
+// A root its repository ignores holds nothing Git would commit, such as
+// synthesize's default output under an ignored out/, so it's selected as a
+// directory outside Git is.
 func stagingInGit(root string) (bool, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
+		return false, err
+	}
+	// Walk the real path, so a root reached through a symlink into a work
+	// tree is still Git's to select.
+	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return false, err
 	}
 	for dir := root; ; dir = filepath.Dir(dir) {
@@ -191,7 +213,17 @@ func stagingInGit(root string) (bool, error) {
 				if strings.TrimSpace(string(b)) != "true" {
 					return false, fmt.Errorf("staging %s: Git did not identify a work tree", root)
 				}
-				return true, nil
+				// check-ignore exits 0 when the root is ignored and 1 when
+				// it isn't; anything else is a failure, not a fallback.
+				_, err = stagingGit(root, nil, "check-ignore", "-q", "--no-index", ".")
+				var exit *exec.ExitError
+				switch {
+				case err == nil:
+					return false, nil
+				case errors.As(err, &exit) && exit.ExitCode() == 1:
+					return true, nil
+				}
+				return false, err
 			}
 		} else if !os.IsNotExist(err) {
 			return false, err
@@ -252,11 +284,13 @@ func stagingIgnored(root string, names []string) error {
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		// check-ignore reads its input as pathspecs, so a name such as :x
+		// would be taken as magic; ./ keeps every name literal.
 		if err == nil && info.IsDir() {
-			directories = append(directories, name...)
+			directories = append(directories, "./"+name...)
 			directories = append(directories, 0)
 		} else {
-			files = append(files, name...)
+			files = append(files, "./"+name...)
 			files = append(files, 0)
 		}
 	}
@@ -280,7 +314,7 @@ func stagingIgnored(root string, names []string) error {
 		}
 		for _, name := range bytes.Split(b, []byte{0}) {
 			if len(name) != 0 {
-				return fmt.Errorf("staging %q: declared path is ignored by Git", name)
+				return fmt.Errorf("staging %q: declared path is ignored by Git", bytes.TrimPrefix(name, []byte("./")))
 			}
 		}
 	}
