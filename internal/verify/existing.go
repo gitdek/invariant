@@ -133,11 +133,11 @@ func PackageRoot(projectDir string) (root, rel string, err error) {
 // Git filters descendants of named directories in a work tree; explicitly
 // naming an ignored file or directory is an error.
 func StagePackage(root string, existing []string, dst string) error {
-	inGit, err := stagingInGit(root)
+	inGit, err := stagingInGit(root, false)
 	if err != nil {
 		return err
 	}
-	if err := stagingIgnored(root, existing); err != nil {
+	if err := stagingIgnored(root, existing, false); err != nil {
 		return err
 	}
 	for _, f := range []string{"package.json", "package-lock.json", "tsconfig.json"} {
@@ -192,11 +192,11 @@ type ExistingCode struct {
 // HashExisting records the existing code a project checks, so a receipt
 // says exactly what was run.
 func HashExisting(root string, existing []string) ([]ExistingCode, error) {
-	inGit, err := stagingInGit(root)
+	inGit, err := stagingInGit(root, false)
 	if err != nil {
 		return nil, err
 	}
-	if err := stagingIgnored(root, existing); err != nil {
+	if err := stagingIgnored(root, existing, false); err != nil {
 		return nil, err
 	}
 	var out []ExistingCode

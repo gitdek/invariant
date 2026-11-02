@@ -8,10 +8,12 @@ import (
 	"testing"
 )
 
-// A root its repository ignores, such as synthesize's default output under
-// this repository's ignored out/, holds nothing Git would commit. Every
-// stager selects it as a directory outside Git, so nothing in it is silently
-// left out, and the repository's own root still selects by Git.
+// A root its repository ignores, with nothing tracked under it, such as
+// synthesize's default output under this repository's ignored out/, holds
+// nothing Git would commit. The shared copiers select it as a directory
+// outside Git, so nothing in it is silently left out, and the repository's
+// own root still selects by Git. The strict stager still refuses its
+// ignored declarations by name.
 func TestGitStageIgnoredRootSelectsDirectory(t *testing.T) {
 	gs391IsolateGit(t)
 	repo := t.TempDir()
@@ -44,8 +46,11 @@ func TestGitStageIgnoredRootSelectsDirectory(t *testing.T) {
 	if got := gs391Tree(t, copy); !reflect.DeepEqual(got, want) {
 		t.Errorf("copyTree staged %v, want %v", gs391Names(got), gs391Names(want))
 	}
-	if err := stagingIgnored(root, []string{"local.cache", "src/lib"}); err != nil {
+	if err := stagingIgnored(root, []string{"local.cache", "src/lib"}, false); err != nil {
 		t.Errorf("declarations in an ignored root were refused: %v", err)
+	}
+	if err := stagingIgnored(root, []string{"src/lib"}, true); err == nil || !strings.Contains(err.Error(), `"src/lib"`) {
+		t.Errorf("the strict stager admitted a declaration its repository ignores: %v", err)
 	}
 	pkg := filepath.Join(t.TempDir(), "package")
 	if err := StagePackage(root, []string{"src/lib"}, pkg); err != nil {
@@ -69,6 +74,59 @@ func TestGitStageIgnoredRootSelectsDirectory(t *testing.T) {
 	}
 	if top.Method != "git" || !reflect.DeepEqual(top.Files, []string{".gitignore", "kept.go"}) {
 		t.Errorf("the repository's root selected %q %v", top.Method, top.Files)
+	}
+}
+
+// Tracked files keep an ignored root Git's to select, so the work tree
+// stages what a fresh clone does, not a local payload beside them.
+func TestGitStageIgnoredRootWithTrackedFiles(t *testing.T) {
+	gs391IsolateGit(t)
+	repo := t.TempDir()
+	gs391Init(t, repo)
+	writeFiles(t, repo, map[string]string{".gitignore": "lib/\n", "lib/app/main.go": "package main\n"})
+	gs391Git(t, repo, "add", "-f", ".gitignore", "lib/app/main.go")
+	gs391Git(t, repo, "commit", "--quiet", "-m", "Tracked under an ignored directory")
+	writeFiles(t, repo, map[string]string{"lib/app/payload.bin": "local only"})
+	copy := filepath.Join(t.TempDir(), "copy")
+	if err := copyTree(filepath.Join(repo, "lib", "app"), copy); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := gs391Tree(t, copy), map[string]string{"main.go": "package main\n"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("copyTree staged %v, want %v", gs391Names(got), gs391Names(want))
+	}
+}
+
+// A Python application whose root its repository ignores is refused by name
+// before image selection, as #391 asks, rather than staged whole.
+func TestGitStageRefusesIgnoredApplicationRoot(t *testing.T) {
+	root, p := gs391Fixture(t)
+	outer := filepath.Dir(root)
+	gs391Init(t, outer)
+	writeFiles(t, outer, map[string]string{".gitignore": "/" + filepath.Base(root) + "/\n"})
+	got, err := StagePythonApplication(pa310Load(t, p), filepath.Join(t.TempDir(), "stage"))
+	if got != nil || err == nil || !strings.Contains(err.Error(), "ignored by Git") {
+		t.Errorf("an ignored application root was staged: %v", err)
+	}
+}
+
+// A tracked file replaced by a repository is a nested repository whose files
+// Git doesn't list, so it's refused by name rather than left out.
+func TestGitStageRefusesRepositoryOverTrackedFile(t *testing.T) {
+	gs391IsolateGit(t)
+	root := t.TempDir()
+	gs391Init(t, root)
+	writeFiles(t, root, map[string]string{"main.go": "package main\n", "nested": "a file"})
+	gs391Commit(t, root)
+	if err := os.Remove(filepath.Join(root, "nested")); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, root, map[string]string{"nested/lib.go": "package lib\n"})
+	gs391Init(t, filepath.Join(root, "nested"))
+	for _, strict := range []bool{false, true} {
+		_, err := stagingFiles(root, copyTreeExcluded, strict)
+		if err == nil || !strings.Contains(err.Error(), `"nested"`) || !strings.Contains(err.Error(), "nested Git repositories") {
+			t.Errorf("strict=%t: a repository over a tracked file wasn't refused by name: %v", strict, err)
+		}
 	}
 }
 

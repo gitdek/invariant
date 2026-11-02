@@ -23,7 +23,7 @@ type stagingSelection struct {
 // membership, never bytes: tracked edits and nonignored new files are copied
 // from the work tree, and deleted tracked files are left out.
 func stagingFiles(root string, excluded func(string, bool) bool, strict bool) (*stagingSelection, error) {
-	inGit, err := stagingInGit(root)
+	inGit, err := stagingInGit(root, strict)
 	if err != nil {
 		return nil, err
 	}
@@ -103,8 +103,13 @@ func stagingFiles(root string, excluded func(string, bool) bool, strict bool) (*
 			continue
 		}
 		// A tracked file replaced by a directory: Git lists the files under
-		// it on their own, as untracked ones.
+		// it on their own, as untracked ones, unless it's a repository.
 		if info.IsDir() {
+			if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(name), ".git")); err == nil {
+				return nil, fmt.Errorf("staging %q: nested Git repositories are not supported", name)
+			} else if !os.IsNotExist(err) {
+				return nil, err
+			}
 			continue
 		}
 		if !info.Mode().IsRegular() {
@@ -175,10 +180,12 @@ func stagingPath(root, name string) (os.FileInfo, error) {
 
 // Repository metadata or a worktree file makes Git authoritative. A broken
 // repository or failed Git command must not widen selection to a tree walk.
-// A root its repository ignores holds nothing Git would commit, such as
-// synthesize's default output under an ignored out/, so it's selected as a
-// directory outside Git is.
-func stagingInGit(root string) (bool, error) {
+// A root its repository ignores, with nothing tracked under it, holds
+// nothing Git would commit, such as synthesize's default output under an
+// ignored out/. Unless strict, it's selected as a directory outside Git is.
+// The strict stager, the Python application's, keeps it in Git, so its
+// ignored declarations are refused by name.
+func stagingInGit(root string, strict bool) (bool, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return false, err
@@ -213,17 +220,10 @@ func stagingInGit(root string) (bool, error) {
 				if strings.TrimSpace(string(b)) != "true" {
 					return false, fmt.Errorf("staging %s: Git did not identify a work tree", root)
 				}
-				// check-ignore exits 0 when the root is ignored and 1 when
-				// it isn't; anything else is a failure, not a fallback.
-				_, err = stagingGit(root, nil, "check-ignore", "-q", "--no-index", ".")
-				var exit *exec.ExitError
-				switch {
-				case err == nil:
-					return false, nil
-				case errors.As(err, &exit) && exit.ExitCode() == 1:
+				if strict {
 					return true, nil
 				}
-				return false, err
+				return stagingSelectsByGit(root)
 			}
 		} else if !os.IsNotExist(err) {
 			return false, err
@@ -232,6 +232,28 @@ func stagingInGit(root string) (bool, error) {
 			return false, nil
 		}
 	}
+}
+
+// stagingSelectsByGit says whether a root in a work tree is Git's to select.
+// One the repository ignores, with nothing tracked under it, isn't. Tracked
+// files keep it Git's, so a work tree stages what a fresh clone does, even
+// when a pattern or a person's own excludes cover the root.
+func stagingSelectsByGit(root string) (bool, error) {
+	// check-ignore exits 0 when the root is ignored and 1 when it isn't;
+	// anything else is a failure, not a fallback.
+	_, err := stagingGit(root, nil, "check-ignore", "-q", "--no-index", ".")
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	tracked, err := stagingGit(root, nil, "ls-files", "--cached", "-z")
+	if err != nil {
+		return false, err
+	}
+	return len(tracked) != 0, nil
 }
 
 func stagingGit(root string, input []byte, args ...string) ([]byte, error) {
@@ -257,8 +279,9 @@ func stagingGit(root string, input []byte, args ...string) ([]byte, error) {
 
 // Explicit declarations cannot silently disappear from the snapshot. Git's
 // default check-ignore behavior admits tracked files even if patterns match.
-func stagingIgnored(root string, names []string) error {
-	inGit, err := stagingInGit(root)
+// strict is stagingInGit's.
+func stagingIgnored(root string, names []string, strict bool) error {
+	inGit, err := stagingInGit(root, strict)
 	if err != nil || !inGit {
 		return err
 	}

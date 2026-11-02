@@ -182,7 +182,7 @@ func pythonApplicationIgnored(p *project.Project, app *project.PythonApplication
 			invocations(c.Invocations)
 		}
 	}
-	return stagingIgnored(app.Root, names)
+	return stagingIgnored(app.Root, names, true)
 }
 
 func pythonApplicationDestination(root, dst string) error {
