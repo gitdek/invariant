@@ -199,13 +199,21 @@ type PythonApplicationNaginiCommand struct {
 }
 
 // RunPythonApplicationNagini runs the pinned Nagini on one verifier input,
-// offline, in its own linux/amd64 image.
+// offline, in its own linux/amd64 image. The input's directory is private
+// to the gate's user, so Nagini runs as the identity an application's
+// commands run as (#399): on Linux, root with every capability dropped
+// can't read it (#416). The recorded command leaves the identity out, as
+// it does the host's directory, so receipts stay the same on every host.
 func RunPythonApplicationNagini(ctx context.Context, c PythonApplicationNaginiCommand) (PythonApplicationProcess, error) {
-	args := pythonApplicationNaginiArgs(c, c.Dir)
+	user, err := pythonApplicationDockerUser(ctx)
+	if err != nil {
+		return PythonApplicationProcess{ExitCode: -1}, err
+	}
+	args := append([]string{"run", "--user", user}, pythonApplicationNaginiArgs(c, c.Dir)[1:]...)
 	cmd := toolchain.Docker(ctx, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	p := PythonApplicationProcess{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: -1}
 	if cmd.ProcessState != nil {
 		p.ExitCode = cmd.ProcessState.ExitCode()
