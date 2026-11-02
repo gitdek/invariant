@@ -1,6 +1,0 @@
-{
-  "name": "merged plan decision follow-up",
-  "module": ".invariant/specs/DecisionFollowup.tla",
-  "code": "followup",
-  "language": "go"
-}
