@@ -54,14 +54,46 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		return nil, err
 	}
 	var passing []string
+	var unfinished []string
 	for _, t := range plan.Tests {
-		if c.Run.Accepted[t.File+":"+t.Name] {
+		passed := c.Run.Accepted[t.File+":"+t.Name]
+		// Legacy results have only Accepted. Structured runs distinguish a
+		// completed failure (including a compiler failure for a proposed API)
+		// from a check that never ran, skipped, or exited before finishing.
+		if c.Run.TestResults != nil {
+			status := "not_run"
+			for _, result := range c.Run.TestResults {
+				if result.Phase == "accept" && result.File == t.File && result.Name == t.Name {
+					status = result.Status
+					break
+				}
+			}
+			if status != "failed" && status != "passed" {
+				unfinished = append(unfinished, fmt.Sprintf("%s (%s)", t.Name, status))
+			}
+			passed = passed || status == "passed"
+		}
+		if passed {
 			passing = append(passing, t.Name)
 		}
 	}
+	var problems []string
 	if len(passing) > 0 {
-		c.Problem = fmt.Sprintf("these acceptance tests already pass on the code as it is, so they can't show the change works: %s", strings.Join(passing, ", "))
+		problems = append(problems, fmt.Sprintf("these acceptance tests already pass on the code as it is, so they can't show the change works: %s", strings.Join(passing, ", ")))
 	}
+	if c.Run.DeadlineExceeded {
+		problems = append(problems, "the sandbox reached its deadline, so this run cannot establish that the acceptance tests fail on the code as it is")
+	}
+	if c.Run.TimedOut {
+		problems = append(problems, "a sandbox test phase timed out, so this run cannot establish that the acceptance tests fail on the code as it is")
+	}
+	if c.Run.Interrupted {
+		problems = append(problems, "the sandbox was interrupted, so this run cannot establish that the acceptance tests fail on the code as it is")
+	}
+	if len(unfinished) > 0 {
+		problems = append(problems, fmt.Sprintf("these acceptance tests did not complete with failure evidence: %s", strings.Join(unfinished, ", ")))
+	}
+	c.Problem = strings.Join(problems, "; ")
 	return c, nil
 }
 
