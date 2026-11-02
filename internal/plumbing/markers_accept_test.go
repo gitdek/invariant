@@ -86,8 +86,10 @@ sys.stderr.buffer.write(p.stderr)
 sys.exit(p.returncode)
 `)
 	// Compile a fixture executable once and let the real test2json converter
-	// report its events. Extra spacing in its ordinary PASS report preserves
-	// the assertion below that identifies the acceptance replay's own output.
+	// report its events. Like a Go test binary run with -test.v=test2json, it
+	// marks its framing lines with ^V. Extra spacing in its ordinary PASS
+	// report preserves the assertion below that identifies the acceptance
+	// replay's own output.
 	write(bin, "go", `#!/usr/bin/env python3
 import json, os, pathlib, sys
 a = sys.argv[1:]
@@ -108,9 +110,10 @@ if not seen.exists():
     seen.write_text("completed")
     print("go test wrote this", file=sys.stderr)
     space = "  "
-print("=== RUN   TestDoubleDoubles", file=sys.stderr)
-print("--- PASS:" + space + "TestDoubleDoubles (0.00s)", file=sys.stderr)
-print("PASS", file=sys.stderr)
+frame = "\\x16"
+print(frame + "=== RUN   TestDoubleDoubles", file=sys.stderr)
+print(frame + "--- PASS:" + space + "TestDoubleDoubles (0.00s)", file=sys.stderr)
+print(frame + "PASS", file=sys.stderr)
 ''')
     target.chmod(0o755)
 elif a[:2] == ["tool", "test2json"]:

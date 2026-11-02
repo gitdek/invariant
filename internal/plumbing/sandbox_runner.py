@@ -109,6 +109,12 @@ class Runner:
                     start_new_session=True,
                 )
                 processes.append(converter)
+                # Until test2json sees a marked framing line it also accepts
+                # unmarked framing, for older test binaries. Start it marked,
+                # so output from before the testing package runs, such as a
+                # TestMain's, can't pose as a test's lifecycle. A marked
+                # "=== NAME" with no test emits no event.
+                os.write(converter.stdin.fileno(), b"\x16=== NAME  \n")
             process = subprocess.Popen(
                 args, cwd=cwd or self.root,
                 stdout=converter.stdin if converter else subprocess.PIPE,
@@ -436,7 +442,8 @@ class Runner:
             # test2json attaches its synthetic process-exit failure to the
             # current test, even when that test never reported a result. Only
             # genuine testing-package reports establish completed evidence.
-            # Ordinary diagnostics omit OutputType, even if they look like reports.
+            # Ordinary diagnostics omit OutputType, even if they look like
+            # reports, and so does anything printed before the tests start.
             if value.get("OutputType") == "frame":
                 for report in TEST_REPORT.finditer(output):
                     reported.add((report[2], report[1].lower()))
