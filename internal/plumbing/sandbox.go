@@ -194,7 +194,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 	// for every one. The repository's tests make hundreds of commits, and a
 	// run of them outlived the agent's 15-minute tool limit (#100). Named
 	// localhost, the container resolves itself at once.
-	args := []string{"run", "--rm", "--network", "none", "--hostname", "localhost", "--memory", "4g", "--pids-limit", "1024",
+	args := []string{"run", "--rm", "--init", "--network", "none", "--hostname", "localhost", "--memory", "4g", "--pids-limit", "1024",
 		"-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly -p=1", "-e", "GOMAXPROCS=2", "-e", "GOPROXY=off", "-e", "HOME=/tmp",
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "GOFMT_FILES=" + strings.Join(formatted, " "), "-e", "TEST_PKGS=" + strings.Join(pkgs, " "),
