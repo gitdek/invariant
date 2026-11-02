@@ -37,7 +37,8 @@ def guarded(method):
         try:
             return method(*args, **kwargs)
         except BaseException:
-            _collector.failed = True
+            if _collector is not None:
+                _collector.failed = True
             raise
     return call
 
@@ -136,6 +137,65 @@ def coroutine_objects():
     return {value for value in gc.get_objects()
             if type(value) is types.CoroutineType
             or (type(value) is types.GeneratorType and value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE)}
+
+
+def return_kind(frame):
+    code, offset = frame.f_code.co_code, frame.f_lasti
+    # Before 3.10, YIELD_FROM backs f_lasti up one word on suspension.
+    if sys.version_info < (3, 10) and offset + 2 < len(code) and dis.opname[code[offset + 2]] == "YIELD_FROM":
+        offset += 2
+    opcode = dis.opname[code[offset]]
+    # 3.13 reports suspension at the following RESUME instruction.
+    if opcode in ("YIELD_VALUE", "YIELD_FROM") or (opcode == "RESUME" and code[offset + 1] & 3):
+        return "yield"
+    if opcode in ("RETURN_VALUE", "RETURN_CONST"):
+        return "return"
+    return "unwind"
+
+
+def await_completion(frame, arg):
+    # Completion of an await is a stackless exception event, not an
+    # application exception. Explicit raises always carry a traceback.
+    return (arg[0] in (StopIteration, StopAsyncIteration) and arg[2] is None
+            and frame.f_code.co_flags & (inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE))
+
+
+class Refusal:
+    """An exact application exception allowed to refuse an explored step.
+
+    Only the named, finite JSON scalar attributes are matched and recorded.
+    Subclasses of the exception or of an attribute's scalar type do not match.
+    """
+
+    @guarded
+    def __init__(self, exception_type, **attributes):
+        if not isinstance(exception_type, type) or not issubclass(exception_type, Exception):
+            raise ValueError("a refusal requires an Exception subclass")
+        if (type(exception_type.__module__) is not str or not exception_type.__module__
+                or type(exception_type.__qualname__) is not str or not exception_type.__qualname__):
+            raise ValueError("a refusal requires a qualified exception type")
+        self.exception_type = exception_type
+        self.attributes = {key: scalar(value) for key, value in attributes.items()}
+        self.type_name = exception_type.__module__ + "." + exception_type.__qualname__
+
+    def descriptor(self):
+        return dict(type=self.type_name, attributes=self.attributes.copy())
+
+    def matches(self, exc):
+        if type(exc) is not self.exception_type:
+            return False
+        if self.type_name != type(exc).__module__ + "." + type(exc).__qualname__:
+            return False
+        for name, value in self.attributes.items():
+            try:
+                actual = getattr(exc, name)
+            except AttributeError:
+                return False
+            if type(actual) not in (str, bool, int, float, type(None)) or not equal(actual, value):
+                return False
+            if type(actual) is float and not math.isfinite(actual):
+                return False
+        return True
 
 
 class Binding:
@@ -458,6 +518,34 @@ class _Lifecycle:
             raise ValueError("replaced lifecycle target")
         self.target.check()
 
+    def owns(self, frame):
+        if threading.get_ident() != _collector.thread:
+            return False
+        while frame is not None:
+            if frame is self.entry_frame:
+                return True
+            frame = frame.f_back
+        return False
+
+    def refusal_candidate(self, frame, exc):
+        # Attribute getters must run only after escape, with tracing active;
+        # a trace callback itself runs with tracing suspended.
+        return (self.refusal is not None and self.calls == 0
+                and not getattr(self, "threads", ())
+                and threading.get_ident() == _collector.thread
+                and self.owns(frame) and type(exc) is self.refusal.exception_type)
+
+    def escaped_refusal(self, exc):
+        # A driver exception, a target exception, or a collector error must
+        # never become a refusal, even when it has the declared type.
+        escaped = exc is self.entry_raised or exc is getattr(self, "await_raised", None)
+        if (_collector.failed or not escaped or self.refusal is None or self.calls
+                or getattr(self, "threads", ()) or not self.refusal.matches(exc)):
+            raise ValueError("application call raised an undeclared or invalid refusal") from exc
+        if _collector.failed or self.calls or getattr(self, "threads", ()):
+            raise ValueError("refusal attributes started application work")
+        self.outcome = "refused"
+
     @guarded
     def __enter__(self):
         c = _collector
@@ -531,10 +619,18 @@ class _Lifecycle:
             if not equal(before, self.before):
                 raise ValueError("selected call pre-state differs from lifecycle")
         if event == "exception" and (frame is self.entry_frame or frame is self.target_frame):
-            raise ValueError("application call raised an exception")
+            if frame is self.target_frame or not self.refusal_candidate(frame, arg[1]):
+                raise ValueError("application call raised an exception")
+            self.pending_exceptions[frame] = arg[1]
         if event == "return" and frame is self.target_frame:
             self.after = {next(iter(self.fields)): scalar(arg)} if self.functional else self.read()
         if event == "return" and frame is self.entry_frame:
+            if return_kind(frame) == "unwind":
+                self.entry_raised = self.pending_exceptions.pop(frame, None)
+                if self.entry_raised is None:
+                    raise ValueError("application entry failed")
+                return
+            self.pending_exceptions.pop(frame, None)
             actual = {next(iter(self.fields)): scalar(arg)} if self.functional else self.read()
             if self.after is None:
                 # An explored step the application refuses before its
@@ -555,6 +651,8 @@ class _Lifecycle:
             raise ValueError("step sampling budget exceeded")
         if c.exploring:
             c.exploration.stepping(self)
+        self.refusal = c.exploration.refusal if c.exploring else None
+        self.outcome = "accepted" if self.refusal is not None else None
         self.check_target()
         self.entry = self.application(entry)
         self.before = self.state.copy() if self.functional else self.read()
@@ -564,10 +662,18 @@ class _Lifecycle:
         self.calls, self.after = 0, None
         self.delegate_called = not bool(c.request.get('delegates'))
         self.entry_frame = self.target_frame = None
+        self.entry_raised = None
+        self.pending_exceptions = {}
         c.active = self
         try:
             args = [next(iter(self.state.values()))] if self.functional else []
-            self.entry.call(*args)
+            try:
+                self.entry.call(*args)
+            except BaseException as exc:
+                self.escaped_refusal(exc)
+                self.after = self.before.copy() if self.functional else self.read()
+                if not equal(self.after, self.before):
+                    raise ValueError("a refused step changed the state")
             refused = c.exploring and self.calls == 0 and self.after is not None
             if c.failed or (self.calls != 1 and not refused) or self.after is None or not (self.delegate_called or refused):
                 raise ValueError("incomplete selected call")
@@ -613,22 +719,16 @@ class _ModuleLifecycle(_Lifecycle):
 
     def observe(self, frame, event, arg):
         self.check_target()
-        if frame.f_code.co_flags & (inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE):
+        coroutine = frame.f_code.co_flags & (inspect.CO_COROUTINE | inspect.CO_ITERABLE_COROUTINE)
+        if coroutine:
             if event == "call":
                 self.coroutines.add(frame)
             elif event == "return":
-                code, offset = frame.f_code.co_code, frame.f_lasti
-                # Before 3.10, YIELD_FROM backs f_lasti up one word when it
-                # suspends, so the return event points at the preceding op.
-                if sys.version_info < (3, 10) and offset + 2 < len(code) and dis.opname[code[offset + 2]] == "YIELD_FROM":
-                    offset += 2
-                opcode = dis.opname[code[offset]]
-                # 3.13 reports a suspension at the RESUME after its yield,
-                # whose nonzero oparg marks a resumption point.
-                suspended = opcode in ("YIELD_VALUE", "YIELD_FROM") or (opcode == "RESUME" and code[offset + 1] & 3)
-                if not suspended:
+                kind = return_kind(frame)
+                if kind != "yield":
                     self.coroutines.discard(frame)
-                    if opcode not in ("RETURN_VALUE", "RETURN_CONST"):
+                    exc = self.pending_exceptions.get(frame)
+                    if kind == "unwind" and (exc is None or not self.refusal_candidate(frame, exc)):
                         raise ValueError("module coroutine failed or was cancelled")
         if event == "call" and frame.f_code is self.entry.code:
             self.entry.frame(frame)
@@ -645,21 +745,33 @@ class _ModuleLifecycle(_Lifecycle):
                 self.calls += 1
                 self.target_frame = frame
         selected = frame is self.entry_frame or frame is self.target_frame
-        if selected and event == "exception":
-            # Await completion is reported as a stackless StopIteration.
-            # Its instruction varies between supported Python versions.
-            completion = arg[0] in (StopIteration, StopAsyncIteration) and arg[2] is None and frame.f_code.co_flags & inspect.CO_COROUTINE
-            if not completion:
+        if (selected or coroutine) and event == "exception" and not await_completion(frame, arg):
+            if frame is self.target_frame:
                 raise ValueError("application call raised an exception")
-        if selected and event == "return":
+            if self.refusal_candidate(frame, arg[1]):
+                self.pending_exceptions[frame] = arg[1]
+            else:
+                self.pending_exceptions.pop(frame, None)
+                if selected:
+                    raise ValueError("application call raised an exception")
+        if (selected or coroutine) and event == "return":
             # Python reports a return for every coroutine suspension as well
             # as completion. Retain frame identity until the actual return.
-            opcode = dis.opname[frame.f_code.co_code[frame.f_lasti]]
-            if opcode in ("RETURN_VALUE", "RETURN_CONST"):
+            kind = return_kind(frame)
+            if kind == "return":
+                self.pending_exceptions.pop(frame, None)
                 if frame is self.target_frame:
                     self.completed = True
                 if frame is self.entry_frame:
                     self.entry_completed = True
+            elif kind == "unwind":
+                exc = self.pending_exceptions.pop(frame, None)
+                if frame is self.entry_frame:
+                    if exc is None:
+                        raise ValueError("application entry failed")
+                    self.entry_raised = exc
+                if frame is self.await_frame:
+                    self.await_raised = exc
 
     def expire(self):
         # A Python thread cannot safely be killed or forcibly joined. End this
@@ -675,6 +787,8 @@ class _ModuleLifecycle(_Lifecycle):
     def task(self, loop, coroutine, **kwargs):
         task = asyncio.Task(coroutine, loop=loop, **kwargs)
         self.tasks.add(task)
+        if getattr(coroutine, "cr_frame", None) is self.await_frame:
+            self.await_task = task
         return task
 
     def async_error(self, loop, context):
@@ -714,6 +828,8 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
             raise ValueError("step sampling budget exceeded")
         if c.exploring:
             c.exploration.stepping(self)
+        self.refusal = c.exploration.refusal if c.exploring else None
+        self.outcome = "accepted" if self.refusal is not None else None
         self.entry = self.application(entry)
         self.before = self.read()
         if not equal(self.before, self.state):
@@ -722,6 +838,8 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
         self.calls = 0
         self.completed = self.entry_completed = False
         self.entry_frame = self.target_frame = self.await_frame = None
+        self.entry_raised = self.await_raised = self.await_task = None
+        self.pending_exceptions = {}
         self.threads = set()
         self.coroutines, self.tasks = set(), set()
         existing_coroutines = coroutine_objects()
@@ -730,15 +848,20 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
         loop = None
         c.active = self
         try:
-            result = self.entry.call(*args, **kwargs)
-            if inspect.isawaitable(result):
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.set_task_factory(self.task)
-                loop.set_exception_handler(self.async_error)
-                awaited = self.await_result(result)
-                self.await_frame = awaited.cr_frame
-                loop.run_until_complete(awaited)
+            escaped = None
+            try:
+                result = self.entry.call(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.set_task_factory(self.task)
+                    loop.set_exception_handler(self.async_error)
+                    awaited = self.await_result(result)
+                    self.await_frame = awaited.cr_frame
+                    loop.run_until_complete(awaited)
+            except BaseException as exc:
+                self.escaped_refusal(exc)
+                escaped = exc
             # Descendants can start more threads while their parents drain.
             joined = set()
             while self.threads - joined:
@@ -751,12 +874,15 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                              for value in coroutine_objects() - existing_coroutines)
             if self.coroutines or unfinished:
                 raise ValueError("module entry left unfinished coroutines")
-            if any(not task.done() or task.cancelled() or task.exception() is not None for task in self.tasks):
+            if any(not task.done() or task.cancelled()
+                   or (task.exception() is not None and not (task is self.await_task and task.exception() is escaped))
+                   for task in self.tasks):
                 raise ValueError("module entry left unfinished or failed tasks")
             # An explored step the application refuses before its selected
             # call completes the entry and leaves the state as it was (#342).
             refused = c.exploring and self.calls == 0
-            if c.failed or (self.calls != 1 and not refused) or not (self.completed or refused) or not self.entry_completed:
+            if (c.failed or (self.calls != 1 and not refused) or not (self.completed or refused)
+                    or not (self.entry_completed or escaped is not None)):
                 raise ValueError("incomplete selected call")
             self.entry.check()
             self.after = self.read()
@@ -866,13 +992,18 @@ class Step:
     once, with the application entry that takes it, or returns without
     calling it only where the environment's bounds rule the step out. state
     is a copy of what the gate read back, so the driver can apply those
-    bounds; changing it changes nothing.
+    bounds; changing it changes nothing. refusal=Refusal(ExceptionType, ...)
+    declares an exact exception that may escape the entry before a selected
+    call or any application thread, with unchanged read-back. Declared steps
+    distinguish that refusal from every normal return, including read-only
+    acceptance. Without a declaration, the existing outcome rule applies.
     """
 
-    def __init__(self, name, take, args=None):
+    def __init__(self, name, take, args=None, *, refusal=None):
         self.name = name
         self.take = take
         self.args = args if args is not None else [[]]
+        self.refusal = refusal
 
 
 _step_name = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -891,6 +1022,7 @@ class _Exploration:
         self.made = []
         self.entering = self.leaving = None
         self.record = self.attempt = None
+        self.refusal = None
         self.stepped = False
         self.nodes, self.index = [], {}
         self.roots = [None] * len(starts)
@@ -901,8 +1033,13 @@ class _Exploration:
             return dict(start=self.start_index)
         if kind == "omitted":
             return dict(step=self.attempt["step"], args=self.attempt["args"])
-        return dict(step=self.attempt["step"], args=self.attempt["args"],
-                    replay=self.attempt["replay"], called=life.calls == 1)
+        fields = dict(step=self.attempt["step"], args=self.attempt["args"],
+                      replay=self.attempt["replay"], called=life.calls == 1)
+        if self.refusal is not None:
+            fields["outcome"] = life.outcome
+            if life.outcome == "refused":
+                fields["refusal"] = self.refusal.descriptor()
+        return fields
 
     def stepping(self, life):
         if life is not self.record or self.attempt is None or self.stepped:
@@ -930,7 +1067,7 @@ class _Exploration:
         return handle, self.made[0]
 
     def take(self, handle, record, si, ai, replay):
-        name, take, args = self.steps[si]
+        name, take, args, self.refusal = self.steps[si]
         self.record, self.stepped = record, False
         self.attempt = dict(step=name, args=copied(args[ai]), replay=replay)
         try:
@@ -962,16 +1099,18 @@ class _Exploration:
         if node is None:
             node = self.nodes[self.roots[r]]
         # Replay the path that first reached the state, then try one step.
-        for j, (psi, pai) in enumerate(node["edges"]):
+        for j, (psi, pai, outcome) in enumerate(node["edges"]):
             self.take(handle, record, psi, pai, True)
             if not self.stepped:
                 raise ValueError("a replay did not take the step it took before")
             if self.key(record.state) != self.nodes[node["trail"][j + 1]]["key"]:
                 raise ValueError("the application is not deterministic: a replay reached another state")
+            if record.outcome != outcome:
+                raise ValueError("the application is not deterministic: a replay returned another outcome")
         self.take(handle, record, si, ai, False)
         if self.stepped:
             if self.key(record.state) not in self.index:
-                self.add(record.state, r, node["edges"] + [(si, ai)], node["trail"], node["level"] + 1)
+                self.add(record.state, r, node["edges"] + [(si, ai, record.outcome)], node["trail"], node["level"] + 1)
         else:
             record.omitted = True
             self.c.write(record, None, kind="omitted", state=copied(record.state))
@@ -1034,9 +1173,21 @@ def explore(start, steps):
             raise ValueError("a step's take must be callable")
         if type(args) not in (list, tuple) or not args or any(type(a) not in (list, tuple) for a in args):
             raise ValueError("a step's args must be a nonempty list of argument lists")
+        refusal = s.refusal
+        if refusal is not None:
+            if type(refusal) is not Refusal or type(refusal.attributes) is not dict:
+                raise ValueError("a step's refusal must be a Refusal declaration")
+            # Keep the validated declaration independently of driver objects.
+            refusal = Refusal(refusal.exception_type, **refusal.attributes)
         names.add(name)
-        records.append((name, take, [copied(list(a)) for a in args]))
-    c.declare([dict(name=name, args=args) for name, _, args in records])
+        records.append((name, take, [copied(list(a)) for a in args], refusal))
+    declarations = []
+    for name, _, args, refusal in records:
+        declaration = dict(name=name, args=args)
+        if refusal is not None:
+            declaration["refusal"] = refusal.descriptor()
+        declarations.append(declaration)
+    c.declare(declarations)
     c.exploration = _Exploration(c, starts, records)
     try:
         c.exploration.run()
