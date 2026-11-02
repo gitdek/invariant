@@ -41,7 +41,12 @@ func TestPythonApplicationExecutionOutputFiles(t *testing.T) {
 func pa315OutputFile(t *testing.T, which string) {
 	t.Helper()
 	bin := t.TempDir()
-	pa310Write(t, bin, "docker", "#!/bin/sh\nexit 0\n")
+	pa310Write(t, bin, "docker", `#!/bin/sh
+if [ "$#" = 3 ] && [ "$1" = info ] && [ "$2" = --format ] && [ "$3" = '{{json .SecurityOptions}}' ]; then
+    printf '%s\n' '[]'
+fi
+exit 0
+`)
 	if err := os.Chmod(filepath.Join(bin, "docker"), 0755); err != nil {
 		t.Fatal(err)
 	}
