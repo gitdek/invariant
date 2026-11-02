@@ -1,0 +1,322 @@
+{
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-11-02T19:37:57Z",
+    "issue": 417,
+    "comment": "https://github.com/gitdek/invariant/issues/417#issuecomment-6586649064",
+    "proposal": "sha256:72d9af36e05d46b9a58416120eab3d166000f44afdc78c935077e1de81b9942e"
+  },
+  "bounds": {
+    "Followups": "{f1, f2}",
+    "ReadmePassages": "{r1}",
+    "RepairsPerRequest": "2",
+    "SpecLines": "{s1}"
+  },
+  "statements": [
+    {
+      "name": "Spec",
+      "kind": "spec",
+      "says": "The workflow starts in Init and advances only through Next steps.",
+      "sha256": "sha256:9aed69e23a82e955c53b605f95b639c0d0073a35f2c8f2230ed5a510d610cc2d"
+    },
+    {
+      "name": "MergeRequiresCurrentCI",
+      "kind": "invariant",
+      "says": "The factory merges a follow-up only with passing CI for its current contents.",
+      "sha256": "sha256:11bb9e75de785e12521e32d25d6956dbf59383f91918bd2e1addd7fe91dbccce"
+    },
+    {
+      "name": "OneFollowup",
+      "kind": "invariant",
+      "says": "A plan's decision obligation produces at most one follow-up pull request.",
+      "sha256": "sha256:d15c6d84ac087940c0506dec4a9eb510d5ba9f43190b2e14b3d89fa771a2f2f6"
+    },
+    {
+      "name": "RepairAllowance",
+      "kind": "invariant",
+      "says": "The factory uses at most two automatic repairs in each allowance.",
+      "sha256": "sha256:4a54111d8861c578c89d2acf8340528957436fbfd4fc187ed8a8a0a8712eabcd"
+    },
+    {
+      "name": "HumanHoldRespected",
+      "kind": "invariant",
+      "says": "A follow-up held for closure or exhausted repairs stays closed or blocked until a person explicitly resumes or retries it.",
+      "sha256": "sha256:4d5b531986afe011aec1cc088999ad01ca6e57ff5653b7b1cdbb5432f01ec844"
+    },
+    {
+      "name": "TypeOK",
+      "kind": "invariant",
+      "says": "Every workflow value stays within its declared type.",
+      "sha256": "sha256:66bb164212ea8e01b7dd0aecd226b6c69870f5d395b917b37f83ef53d21c6e73"
+    },
+    {
+      "name": "OnlyOwedMergedPlans",
+      "kind": "invariant",
+      "says": "Decision work starts only after the plan's pull request merges and only if the plan owes a decision.",
+      "sha256": "sha256:ec9466ddf97541ff722d027f4cc16b40f86449120a2a627e31a5313e4b23dc21"
+    },
+    {
+      "name": "StableFollowupIdentity",
+      "kind": "invariant",
+      "says": "Creation, repairs, retries and resumption all refer to the same follow-up pull request.",
+      "sha256": "sha256:cc2fd0f03cbd55ddb5e8590e5669d11db64a51f1e60012e8d0caa722ca2ae5a6"
+    },
+    {
+      "name": "DraftUsesEvidence",
+      "kind": "invariant",
+      "says": "The drafting agent uses the plan, merged change and review as the decision's sources.",
+      "sha256": "sha256:cbaa625ff9b1a4c78ac38f464128b55de15ccb924190d7ba08986817f87622e3"
+    },
+    {
+      "name": "DecisionClassification",
+      "kind": "invariant",
+      "says": "The decision is decided by agent exactly when the agent infers that an executed two-way door needs no owner input, and is proposed otherwise.",
+      "sha256": "sha256:d488967b4138094a5c86f7a6a2002482356bbbedb938a7b2e5243ef021b6f450"
+    },
+    {
+      "name": "FollowupHasDecision",
+      "kind": "invariant",
+      "says": "Every created follow-up contains a drafted decision classified as decided or proposed.",
+      "sha256": "sha256:26f39ed72cc27520742bd85b1154a34976064c61aab8d26e8fa0a638cb280315"
+    },
+    {
+      "name": "DecisionCommandUsed",
+      "kind": "invariant",
+      "says": "The follow-up records its decision by running invariant decisions decide.",
+      "sha256": "sha256:7137d8ddd442bda6950348c105737ff8994b305615a5a27cd9e5f43042299bc0"
+    },
+    {
+      "name": "JournalAndLogAgree",
+      "kind": "invariant",
+      "says": "The follow-up contains both a journal entry and its log row for the same new decision.",
+      "sha256": "sha256:cb6e794a89782f8c490bc9be24629111df368399388719fc15272a3f4a10f687"
+    },
+    {
+      "name": "CitationsCoverChangedText",
+      "kind": "invariant",
+      "says": "Every SPEC line and README passage written by the merged change cites the new decision in the follow-up.",
+      "sha256": "sha256:fcf5da18408bc0bb2a6627391794e12834a5e2824a42e9e9e482fe43d5c359c4"
+    },
+    {
+      "name": "SpecIsRolledUp",
+      "kind": "invariant",
+      "says": "The follow-up includes the SPEC roll-up.",
+      "sha256": "sha256:5e6d8402f2b281790e2ea76dd02c7c8af695d8f1408fe75abf0c11382766c0af"
+    },
+    {
+      "name": "FollowupScope",
+      "kind": "invariant",
+      "says": "The follow-up and all its repairs change only decisions/, SPEC.md and the README.",
+      "sha256": "sha256:993e83eb222560ff53197828a5dfc24a3cef8b337abf56c5bde8aa2fdf778eff"
+    },
+    {
+      "name": "MergeWithoutConflict",
+      "kind": "invariant",
+      "says": "The factory merges a follow-up only when it has no merge conflict.",
+      "sha256": "sha256:85082a472f04b49baaf2d39f7018a7ffcd434d4820ba5c1e0ad6458f32c6da2b"
+    },
+    {
+      "name": "CurrentCIResults",
+      "kind": "invariant",
+      "says": "A completed CI result always describes the follow-up's current contents.",
+      "sha256": "sha256:ed921ffeffa9c1883626fba8b84ead6d15026bc636b891bb19e72d1f4b0261d0"
+    },
+    {
+      "name": "EachRepairStartsFreshCI",
+      "kind": "invariant",
+      "says": "Every repair consumes one repair from the allowance and starts fresh CI with prior results invalidated.",
+      "sha256": "sha256:b0f9aeba4c6dde27fdefc5d54990382d61ca1ad49862e90025116472bd1d65e9"
+    },
+    {
+      "name": "RequestsRenewAllowance",
+      "kind": "invariant",
+      "says": "Every explicit retry or resume starts with a fresh allowance of two repairs.",
+      "sha256": "sha256:05a01e2ef9a5a7c1783f1c0d5e50b690813cfd19913be820b2616a7d7920fb48"
+    },
+    {
+      "name": "AllowanceAccounting",
+      "kind": "invariant",
+      "says": "Only a repair consumes the repair allowance, and only an explicit retry or resume resets it.",
+      "sha256": "sha256:6111047b8d64ece99463d9c40b468a3dd47a1fcc0c2582dbea8dc431a569978a"
+    },
+    {
+      "name": "ExhaustionIsBlocked",
+      "kind": "invariant",
+      "says": "Work blocked for exhausted repairs has used both repairs and still has failed CI or a merge conflict.",
+      "sha256": "sha256:e760a5146b1505dda00527d636c1725546a8733055fc9e64d18b868a9abf8864"
+    },
+    {
+      "name": "DecidedDecisionMerged",
+      "kind": "witness",
+      "says": "An executed two-way door inferred to need no owner input can be recorded as decided by agent and merged.",
+      "sha256": "sha256:b21a528eba32df0c9747d6efb8e3ced387d8860c4ee4de4626c229ba2b782a9e"
+    },
+    {
+      "name": "OneWayProposedMerged",
+      "kind": "witness",
+      "says": "A one-way door can be recorded as proposed and merged.",
+      "sha256": "sha256:9bb1bf1da16f9eddfc7e843ddd5268d913fde98d18e88a805da7eb0e6da790da"
+    },
+    {
+      "name": "OwnerInputProposedMerged",
+      "kind": "witness",
+      "says": "An executed two-way door needing owner input can be recorded as proposed and merged.",
+      "sha256": "sha256:19ebf6b40300e3ca9aca4723677e49fe3a526c7b0c0a79ad00308efaf467ec46"
+    },
+    {
+      "name": "UnexecutedProposedMerged",
+      "kind": "witness",
+      "says": "A two-way door that was not executed can be recorded as proposed and merged.",
+      "sha256": "sha256:b6900453c5f7b24590e16f1dc4ab25b6be456ab3d99544f196ee6dd2490c9714"
+    },
+    {
+      "name": "NoDecisionWork",
+      "kind": "witness",
+      "says": "A plan can merge without creating a follow-up when it owes no decision.",
+      "sha256": "sha256:9e38b49cdffd13c2773515e16b038b7b0518d9de4af433f31b1852a7ab064bbc"
+    },
+    {
+      "name": "DraftRetried",
+      "kind": "witness",
+      "says": "The factory can automatically retry a failed drafting attempt.",
+      "sha256": "sha256:b4e84292d429cebda4db0815cf9022eeed9a4dad4e551baaa3580c6d15da3bc8"
+    },
+    {
+      "name": "CreationRetried",
+      "kind": "witness",
+      "says": "The factory can automatically retry a failed follow-up creation attempt.",
+      "sha256": "sha256:54ca0c92ab75a1e7dc3819ccb4c7202a4c1bfc5c9b3d9fdf521745c7313853de"
+    },
+    {
+      "name": "RepairCanMerge",
+      "kind": "witness",
+      "says": "A repaired follow-up can pass fresh CI and merge.",
+      "sha256": "sha256:f24c0c9d88235bf7685f4ef466c0d12295edc15da146ce59c8fe78a454853d22"
+    },
+    {
+      "name": "RepairsExhausted",
+      "kind": "witness",
+      "says": "A follow-up can exhaust both repairs and block for a person.",
+      "sha256": "sha256:894c5c37290d15cfdaef58e1dbe98c14fcc1d75146a52f4e6967ebd26f585f6d"
+    },
+    {
+      "name": "PersonRenewsExhaustedWork",
+      "kind": "witness",
+      "says": "A person can retry an exhausted follow-up with two fresh repairs available.",
+      "sha256": "sha256:5faee605c64c340e50c69c73941eac887244b7ee0dfe10d8cd5e7149be736243"
+    },
+    {
+      "name": "ClosedFollowupWaits",
+      "kind": "witness",
+      "says": "A person can close the follow-up and leave its decision obligation waiting for explicit resumption.",
+      "sha256": "sha256:00d3c32d54bf3c570a9c65dd2a285a102619abb7e02260a3f177b53401f1f632"
+    },
+    {
+      "name": "ResumeRenewsUnusedRepairs",
+      "kind": "witness",
+      "says": "Resuming a follow-up closed after one repair can restore two available repairs.",
+      "sha256": "sha256:d33c48278fcb3202ea3de566c10d1c99704cd64c07eeb03d3ef6f8e38a3b77bf"
+    },
+    {
+      "name": "ResumeRenewsExhaustedRepairs",
+      "kind": "witness",
+      "says": "Resuming a follow-up closed after both repairs can restore two available repairs.",
+      "sha256": "sha256:c321c2df13dc70f3a6a898c3d409ba8d2bbe3ffd16689d18f421499679850562"
+    },
+    {
+      "name": "DraftProgress",
+      "kind": "property",
+      "says": "An eligible merged plan or a failed drafting attempt eventually starts a drafting attempt.",
+      "sha256": "sha256:999733e81f2e42ec3c16e9650aa8e018139d5f71eec267c9ba01a35e8d73c3b0"
+    },
+    {
+      "name": "CreationProgress",
+      "kind": "property",
+      "says": "A completed draft or a failed creation attempt eventually starts a follow-up creation attempt.",
+      "sha256": "sha256:a10180de3a46996d273796c8d8e11fac29fe980a405f559d4625a4d30c17ee3a"
+    },
+    {
+      "name": "RepairProgress",
+      "kind": "property",
+      "says": "A failed or conflicted follow-up with repairs available eventually receives a repair unless a person closes it.",
+      "sha256": "sha256:abc1bf3cf625d77275aafcca13f0aee423af8b9eed9d501aa78a55412f7af818"
+    },
+    {
+      "name": "BlockingProgress",
+      "kind": "property",
+      "says": "A failed or conflicted follow-up with no repairs available eventually blocks unless a person closes it.",
+      "sha256": "sha256:4eb04910ba63b9fcf4d3d682d81461d0f07b6882cdad7fb1c517ac052a653e93"
+    },
+    {
+      "name": "MergeProgress",
+      "kind": "property",
+      "says": "A follow-up ready to merge eventually merges unless a person closes it or a new conflict requires repair.",
+      "sha256": "sha256:7d444d37652f7975197196ef862d28f7c2d3379ff989c5e52cfe663249cc8a92"
+    },
+    {
+      "name": "DraftFairness",
+      "kind": "fairness",
+      "says": "The factory eventually starts a drafting attempt whenever that step remains enabled.",
+      "sha256": "sha256:5a11bb3ec3b75b13b73cd4301ba81a8433dc163b0b55814bf06ce7980f68a472"
+    },
+    {
+      "name": "CreationFairness",
+      "kind": "fairness",
+      "says": "The factory eventually starts a creation attempt whenever that step remains enabled.",
+      "sha256": "sha256:18dfb788bafae0c75cf1d27ff985ed3e8c407375c779cec0f8e79b061d946218"
+    },
+    {
+      "name": "RepairFairness",
+      "kind": "fairness",
+      "says": "The factory eventually performs an available repair whenever that step remains enabled.",
+      "sha256": "sha256:16e35fcebc0bb045e49b2281cf04a84816e54dae5cc14e7f748709a7c739d46c"
+    },
+    {
+      "name": "BlockingFairness",
+      "kind": "fairness",
+      "says": "The factory eventually blocks exhausted work whenever that step remains enabled.",
+      "sha256": "sha256:39290dc12a593e86226fd0d124b0edf5e63b2b3c44eab8985496e99e85e055c6"
+    },
+    {
+      "name": "MergeFairness",
+      "kind": "fairness",
+      "says": "The factory eventually merges a ready follow-up whenever that step remains enabled.",
+      "sha256": "sha256:2a7c202f98d51d915c0133fbfb70d35736c07f8f1bc18e344b93114f5b8618a8"
+    },
+    {
+      "name": "MergeBeforeCI",
+      "kind": "bug",
+      "says": "The factory incorrectly merges while the current CI run is still pending.",
+      "expect": "MergeRequiresCurrentCI",
+      "sha256": "sha256:fb9ad32b3d536c0aa1fae23790421523eef44491968f482e5d91b0dc857b0717"
+    },
+    {
+      "name": "CreateDuplicate",
+      "kind": "bug",
+      "says": "The factory incorrectly creates a second follow-up for the same plan.",
+      "expect": "OneFollowup",
+      "sha256": "sha256:624fd5d62178e1b884e57d5bb0736286ff5fb10952952ef27ff8af360302af2f"
+    },
+    {
+      "name": "RepairPastAllowance",
+      "kind": "bug",
+      "says": "The factory incorrectly makes a third repair without an explicit request.",
+      "expect": "RepairAllowance",
+      "sha256": "sha256:450cf12163b05a40421777c00da09093dbebcb07c5011fd67095b6fb16a119fa"
+    },
+    {
+      "name": "ResumeWithoutPerson",
+      "kind": "bug",
+      "says": "The factory incorrectly resumes a closed follow-up without an explicit request.",
+      "expect": "HumanHoldRespected",
+      "sha256": "sha256:fe65e03f1ad827ea0c38e404fa3f6452056084d0d403d5bb247d2bd3190cf701"
+    },
+    {
+      "name": "DecideOneWay",
+      "kind": "bug",
+      "says": "The drafting agent incorrectly records a one-way door as decided by agent.",
+      "expect": "DecisionClassification",
+      "sha256": "sha256:2cc47dd80f3871e37ae9446e6f562ff4edee6e1c8d71b4b269519f72891687d8"
+    }
+  ]
+}
