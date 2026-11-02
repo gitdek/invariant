@@ -20,19 +20,21 @@ type PythonApplicationExploration struct {
 	States   int                                `json:"states"`
 	Depth    int                                `json:"depth"`
 	Attempts int                                `json:"attempts"`
-	// Refusals are attempts that left the state as it was, with or without
-	// the selected call. Omitted steps are the ones the driver left untried
-	// where it said only the environment's bounds rule them out.
-	Refusals int `json:"refusals"`
-	Omitted  int `json:"omitted"`
+	// Refusals count declared exceptions and unchanged legacy attempts.
+	// Declared normal returns, including read-only returns, are acceptances.
+	// Omitted steps are left untried under the environment's bounds.
+	Refusals         int  `json:"refusals"`
+	DeclaredRefusals *int `json:"declared_refusals,omitempty"`
+	Omitted          int  `json:"omitted"`
 }
 
 // PythonApplicationExplorationStep is one model step the harness tried, with
 // every argument list, and the application entry each attempt of it called.
 type PythonApplicationExplorationStep struct {
-	Name  string  `json:"name"`
-	Args  [][]any `json:"args"`
-	Entry string  `json:"entry,omitempty"`
+	Name    string                    `json:"name"`
+	Args    [][]any                   `json:"args"`
+	Entry   string                    `json:"entry,omitempty"`
+	Refusal *PythonApplicationRefusal `json:"refusal,omitempty"`
 }
 
 // Preserve exact integer arguments when reports are read back through JSON.
@@ -54,12 +56,14 @@ type pythonApplicationExplorer struct {
 	declared  bool
 	steps     []PythonApplicationExplorationStep
 	instances map[string]map[string]bool // step → argument lists, as JSON
+	refusals  map[string]*PythonApplicationRefusal
 	starts    map[int]string
 	initial   map[string]bool
 	inits     []string
 	states    []string
 	known     map[string]bool
 	attempts  map[[3]string]string // from, step, arguments → to
+	outcomes  map[[3]string]string // the strict outcome reproduced by a replay
 	omitted   map[[3]string]bool
 	edges     map[string][]string
 	run       int
@@ -74,17 +78,30 @@ func pythonApplicationKey(v any) string {
 }
 
 func (x *pythonApplicationExplorer) declare(line []byte) error {
-	fields, err := pythonApplicationJSON(line, "type", "steps")
+	fields, err := pythonApplicationJSONFields(line, true, "type", "steps")
 	if err != nil {
 		return err
+	}
+	var kind string
+	if err := json.Unmarshal(fields["type"], &kind); err != nil || kind != "exploration" {
+		return fmt.Errorf("invalid exploration declaration type")
 	}
 	var raw []json.RawMessage
 	if err := json.Unmarshal(fields["steps"], &raw); err != nil || len(raw) == 0 {
 		return fmt.Errorf("exploration needs a nonempty list of steps")
 	}
 	x.instances = map[string]map[string]bool{}
+	x.refusals = map[string]*PythonApplicationRefusal{}
 	for _, item := range raw {
-		if _, err := pythonApplicationJSON(item, "name", "args"); err != nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(item, &fields); err != nil {
+			return err
+		}
+		required := []string{"name", "args"}
+		if _, ok := fields["refusal"]; ok {
+			required = append(required, "refusal")
+		}
+		if _, err := pythonApplicationJSONFields(item, true, required...); err != nil {
 			return err
 		}
 		var step PythonApplicationExplorationStep
@@ -95,6 +112,17 @@ func (x *pythonApplicationExplorer) declare(line []byte) error {
 		}
 		if !pythonApplicationStepName.MatchString(step.Name) || x.instances[step.Name] != nil || len(step.Args) == 0 {
 			return fmt.Errorf("exploration steps need distinct TLA+ names and argument lists")
+		}
+		if descriptor, ok := fields["refusal"]; ok {
+			refusal, err := pythonApplicationRefusal(descriptor)
+			if err != nil {
+				return fmt.Errorf("exploration step %s: %w", step.Name, err)
+			}
+			step.Refusal = refusal
+			x.refusals[step.Name] = refusal
+			if x.stats.DeclaredRefusals == nil {
+				x.stats.DeclaredRefusals = new(int)
+			}
 		}
 		x.instances[step.Name] = map[string]bool{}
 		for _, args := range step.Args {
@@ -116,6 +144,7 @@ func (x *pythonApplicationExplorer) declare(line []byte) error {
 	}
 	x.starts, x.initial, x.known = map[int]string{}, map[string]bool{}, map[string]bool{}
 	x.attempts, x.omitted, x.edges = map[[3]string]string{}, map[[3]string]bool{}, map[string][]string{}
+	x.outcomes = map[[3]string]string{}
 	x.declared = true
 	return nil
 }
@@ -139,7 +168,32 @@ func (x *pythonApplicationExplorer) instance(row PythonApplicationObservation) (
 	return args, nil
 }
 
+func pythonApplicationOutcome(row PythonApplicationObservation, declaration *PythonApplicationRefusal) error {
+	if declaration == nil {
+		if row.Outcome != "" || row.Refusal != nil {
+			return fmt.Errorf("undeclared refusal metadata on step %s", row.Step)
+		}
+		return nil
+	}
+	switch row.Outcome {
+	case "accepted":
+		if row.Refusal != nil {
+			return fmt.Errorf("accepted step %s carries a refusal", row.Step)
+		}
+	case "refused":
+		if row.Refusal == nil || pythonApplicationKey(row.Refusal) != pythonApplicationKey(declaration) || row.Called == nil || *row.Called || pythonApplicationKey(row.Before) != pythonApplicationKey(row.After) {
+			return fmt.Errorf("step %s has an inconsistent declared refusal", row.Step)
+		}
+	default:
+		return fmt.Errorf("step %s has no valid declared outcome", row.Step)
+	}
+	return nil
+}
+
 func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) error {
+	if row.Kind != "transition" && (row.Outcome != "" || row.Refusal != nil) {
+		return fmt.Errorf("refusal metadata outside an exploration transition")
+	}
 	switch row.Kind {
 	case "initial":
 		if x.run > 0 && !x.done {
@@ -202,11 +256,19 @@ func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) er
 	if !*row.Called && from != to {
 		return fmt.Errorf("a step without the selected call changed the state")
 	}
+	declaration := x.refusals[row.Step]
+	if err := pythonApplicationOutcome(row, declaration); err != nil {
+		return err
+	}
 	k := [3]string{from, row.Step, args}
+	outcome := pythonApplicationKey([]any{row.Outcome, row.Refusal})
 	if *row.Replay {
 		// A replay repeats an attempt the exploration already made.
 		if was, ok := x.attempts[k]; !ok || was != to {
 			return fmt.Errorf("the application is not deterministic: a replay of %s reached another state", row.Step)
+		}
+		if declaration != nil && x.outcomes[k] != outcome {
+			return fmt.Errorf("the application is not deterministic: a replay of %s changed its outcome", row.Step)
 		}
 		return nil
 	}
@@ -214,13 +276,17 @@ func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) er
 		return fmt.Errorf("exploration tried %s twice in one state", row.Step)
 	}
 	x.attempts[k] = to
+	x.outcomes[k] = outcome
 	x.edges[from] = append(x.edges[from], to)
 	x.state(to)
 	x.done = true
 	x.called = x.called || *row.Called
 	x.stats.Attempts++
-	if from == to {
+	if row.Outcome == "refused" || declaration == nil && from == to {
 		x.stats.Refusals++
+	}
+	if row.Outcome == "refused" {
+		*x.stats.DeclaredRefusals++
 	}
 	return nil
 }
@@ -301,7 +367,18 @@ func pythonApplicationAttempts(x PythonApplicationExecutionResult) ([]byte, erro
 		return index[key], nil
 	}
 	started := map[int]bool{}
+	declarations := map[string]*PythonApplicationRefusal{}
+	for _, step := range x.Exploration.Steps {
+		declarations[step.Name] = step.Refusal
+	}
 	for _, row := range x.Observations {
+		if row.Kind == "transition" {
+			if err := pythonApplicationOutcome(row, declarations[row.Step]); err != nil {
+				return nil, err
+			}
+		} else if row.Outcome != "" || row.Refusal != nil {
+			return nil, fmt.Errorf("refusal metadata outside an exploration transition")
+		}
 		switch {
 		case row.Kind == "initial":
 			i, err := add(row, row.State)
@@ -325,7 +402,15 @@ func pythonApplicationAttempts(x PythonApplicationExecutionResult) ([]byte, erro
 			if args == nil {
 				args = []any{}
 			}
-			out.Attempts = append(out.Attempts, []any{from, row.Step, args, to})
+			attempt := []any{from, row.Step, args, to}
+			if row.Outcome != "" {
+				metadata := map[string]any{"outcome": row.Outcome}
+				if row.Refusal != nil {
+					metadata["refusal"] = row.Refusal
+				}
+				attempt = append(attempt, metadata)
+			}
+			out.Attempts = append(out.Attempts, attempt)
 		}
 	}
 	if len(out.Attempts) == 0 {
@@ -380,8 +465,8 @@ func mergePythonApplicationAttempts(all [][]byte) ([]byte, error) {
 			}
 		}
 		for _, a := range in.Attempts {
-			if len(a) != 4 {
-				return nil, fmt.Errorf("an explored attempt isn't [from, step, args, to]")
+			if len(a) != 4 && len(a) != 5 {
+				return nil, fmt.Errorf("an explored attempt isn't [from, step, args, to] with optional outcome metadata")
 			}
 			from, err := at(a[0])
 			if err != nil {
@@ -391,7 +476,8 @@ func mergePythonApplicationAttempts(all [][]byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			out.Attempts = append(out.Attempts, []any{from, a[1], a[2], to})
+			a[0], a[3] = from, to
+			out.Attempts = append(out.Attempts, a)
 		}
 	}
 	return json.Marshal(out)

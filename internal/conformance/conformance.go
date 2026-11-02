@@ -2,7 +2,8 @@
 // code: it calls its operations at random and records each state in the
 // spec's vocabulary. TLC then checks that every run starts in a state Init
 // allows and that every step between two different states is a Next step.
-// Refusals are fine, since a step that changes nothing is always allowed.
+// Legacy attempts allow any step that changes nothing. A declared attempt
+// instead checks the exact named action, or its disabledness for a refusal.
 // What the model forbids, TLC catches.
 //
 // It's testing, not proof: it covers the runs the driver made, no more.
@@ -66,6 +67,11 @@ type Runner interface {
 func Check(ctx context.Context, runner Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, raw []byte, model *Model) (Result, error) {
 	r := Result{ModelStates: modelStates}
 	rec, problem := decode(raw, vars)
+	if problem != "" {
+		r.Message = problem
+		return r, nil
+	}
+	strict, problem := strictAttempts(rec, model)
 	if problem != "" {
 		r.Message = problem
 		return r, nil
@@ -177,10 +183,26 @@ func Check(ctx context.Context, runner Runner, dir, module string, bounds map[st
 		}
 		r.BadStep = step
 		r.Message = "the code took a step the model doesn't allow"
+		for _, a := range strict {
+			if rec.pretty[a.from] == step.From && rec.pretty[a.to] == step.To {
+				r.Message = fmt.Sprintf("declared %s attempt %s from %s to %s is not a model Next step", a.outcome, actionCall(a), step.From, step.To)
+				break
+			}
+		}
 		return r, nil
 	case res.Outcome != tlc.Passed:
 		r.Message = "TLC couldn't check the steps: " + res.Message
 		return r, nil
+	}
+	if len(strict) > 0 {
+		bad, message, err := checkStrictAttempts(ctx, runner, dir, header, cfgConstants, vars, rec, strict)
+		if err != nil {
+			return r, err
+		}
+		if message != "" {
+			r.BadStep, r.Message = bad, message
+			return r, nil
+		}
 	}
 	r.Passed = true
 	if rec.attempts != nil && model != nil {
@@ -191,6 +213,81 @@ func Check(ctx context.Context, runner Runner, dir, module string, bounds map[st
 		r.Tried = &tried
 	}
 	return r, nil
+}
+
+// checkStrictAttempts retains each declared outcome, including multiple
+// actions and arguments with the same state pair. The extra done bit makes
+// an accepted read-only action a real transition of this checking module,
+// so TLC cannot excuse it as stuttering. A refusal instead needs the named
+// action to have no successor at all, including an unchanged successor.
+func checkStrictAttempts(ctx context.Context, runner Runner, dir, header string, constants map[string]string, vars []string, rec recorded, strict []attempt) (*Step, string, error) {
+	n := (len(strict) + stepBatch - 1) / stepBatch
+	b, res, err := atOnce(ctx, n, func(ctx context.Context, b int) (tlc.Result, error) {
+		start := b * stepBatch
+		batch := strict[start:min(start+stepBatch, len(strict))]
+		rows := make([]string, len(batch))
+		actions := map[string]string{}
+		for i, a := range batch {
+			name, _ := json.Marshal(a.step)
+			refused := "FALSE"
+			if a.outcome == "refused" {
+				refused = "TRUE"
+			}
+			rows[i] = "<<" + strings.Join([]string{rec.states[a.from], rec.states[a.to], string(name), "<<" + strings.Join(a.args, ", ") + ">>", refused}, ", ") + ">>"
+			args := make([]string, len(a.args))
+			for j := range args {
+				args[j] = fmt.Sprintf("Invariant_Attempts[invariant_i][4][%d]", j+1)
+			}
+			actions[a.step] = "Invariant_Attempts[invariant_i][3] = " + string(name) + " -> " + actionCall(attempt{step: a.step, args: args})
+		}
+		cases := make([]string, 0, len(actions))
+		for _, expression := range actions {
+			cases = append(cases, expression)
+		}
+		sort.Strings(cases)
+		text := "---- MODULE Invariant_StrictAttempts ----\n" + header +
+			"VARIABLES invariant_i, invariant_done\n" +
+			"Invariant_Attempts == <<" + strings.Join(rows, ",\n  ") + ">>\n" +
+			"Invariant_Action == CASE " + strings.Join(cases, "\n  [] ") + "\n  [] OTHER -> FALSE\n" +
+			"Invariant_AInit == \\E i \\in DOMAIN Invariant_Attempts :\n" +
+			"    /\\ invariant_i = i\n    /\\ invariant_done = FALSE\n" +
+			"    /\\ " + is("Invariant_Attempts[i][1]", vars, false) + "\n" +
+			"Invariant_ANext ==\n" +
+			"    \\/ /\\ ~invariant_done\n" +
+			"       /\\ IF Invariant_Attempts[invariant_i][5]\n" +
+			"             THEN /\\ ~ENABLED (Invariant_Action /\\ UNCHANGED <<invariant_i, invariant_done>>)\n" +
+			"                  /\\ UNCHANGED vars\n" +
+			"             ELSE /\\ Invariant_Action\n" +
+			"                  /\\ " + is("Invariant_Attempts[invariant_i][2]", vars, true) + "\n" +
+			"       /\\ invariant_done' = TRUE\n       /\\ UNCHANGED invariant_i\n" +
+			"    \\/ /\\ invariant_done\n       /\\ UNCHANGED <<vars, invariant_i, invariant_done>>\n" +
+			"Invariant_ASpec == Invariant_AInit /\\ [][Invariant_ANext]_<<vars, invariant_i, invariant_done>>\n====\n"
+		d, err := batchDir(dir, fmt.Sprintf("strict-%d", b+1))
+		if err != nil {
+			return tlc.Result{}, err
+		}
+		if err := os.WriteFile(filepath.Join(d, "Invariant_StrictAttempts.tla"), []byte(text), 0o644); err != nil {
+			return tlc.Result{}, err
+		}
+		return runner.Check(ctx, d, "Invariant_StrictAttempts", tlc.Config{Specification: "Invariant_ASpec", Constants: constants})
+	})
+	if err == nil && res.Outcome == tlc.Passed {
+		return nil, "", nil
+	}
+	i := stateIndex(res.Trace)
+	index := b * stepBatch
+	if i >= 1 && i <= stepBatch && index+i-1 < len(strict) {
+		index += i - 1
+	}
+	a := strict[index]
+	description := fmt.Sprintf("declared %s attempt %s from %s to %s", a.outcome, actionCall(a), rec.pretty[a.from], rec.pretty[a.to])
+	if err != nil {
+		return nil, "", fmt.Errorf("TLC couldn't check %s (batch %d): %w", description, b+1, err)
+	}
+	if res.Outcome == tlc.Deadlock && i >= 1 && i <= stepBatch && b*stepBatch+i-1 < len(strict) {
+		return &Step{From: rec.pretty[a.from], To: rec.pretty[a.to]}, description + " disagrees with the named model action", nil
+	}
+	return nil, fmt.Sprintf("TLC couldn't check %s (batch %d): %s", description, b+1, res.Message), nil
 }
 
 // stepBatch is how many steps TLC checks at once. A batch's module holds

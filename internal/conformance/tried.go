@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/tlc"
@@ -25,7 +27,68 @@ import (
 type attempts struct {
 	States   []map[string]any `json:"states"`
 	Init     []int            `json:"init"`
-	Attempts [][]any          `json:"attempts"`
+	Attempts []attemptFields  `json:"attempts"`
+}
+
+// attemptFields preserves the legacy decoder while refusing ambiguous JSON
+// in the opt-in fifth field, before decoding objects could replace a key's
+// earlier value with its later one.
+type attemptFields []any
+
+func (a *attemptFields) UnmarshalJSON(raw []byte) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var values []any
+	if err := d.Decode(&values); err != nil {
+		return err
+	}
+	if len(values) == 5 {
+		var fields []json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return err
+		}
+		if err := distinctMetadataKeys(fields[4]); err != nil {
+			return err
+		}
+	}
+	*a = values
+	return nil
+}
+
+func distinctMetadataKeys(raw []byte) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var read func() error
+	read = func() error {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		bracket, compound := token.(json.Delim)
+		if !compound {
+			return nil
+		}
+		seen := map[string]bool{}
+		for d.More() {
+			if bracket == '{' {
+				key, err := d.Token()
+				if err != nil {
+					return err
+				}
+				name := key.(string) // The already parsed JSON has object keys here.
+				if seen[name] {
+					return fmt.Errorf("declared outcome metadata repeats field %q", name)
+				}
+				seen[name] = true
+			}
+			if err := read(); err != nil {
+				return err
+			}
+		}
+		_, err = d.Token() // The object's or array's closing delimiter.
+		return err
+	}
+	return read()
 }
 
 // Model is what checking a driver's attempts needs from the model.
@@ -66,6 +129,7 @@ type attempt struct {
 	from, to int
 	step     string
 	args     []string // as TLA+
+	outcome  string   // empty for legacy attempts; accepted or refused for declared steps
 }
 
 // decode reads a driver's output, as runs or as attempts. A problem is why
@@ -154,8 +218,8 @@ func decode(raw []byte, vars []string) (rec recorded, problem string) {
 	}
 	rec.attempts = []attempt{}
 	for _, a := range out.Attempts {
-		if len(a) != 4 {
-			return rec, fmt.Sprintf("an attempt is %v; want [from, step, [args], to]", a)
+		if len(a) != 4 && len(a) != 5 {
+			return rec, fmt.Sprintf("an attempt is %v; want [from, step, [args], to] with optional declared outcome metadata", a)
 		}
 		from, okFrom := state(a[0])
 		name, okName := a[1].(string)
@@ -172,6 +236,16 @@ func decode(raw []byte, vars []string) (rec recorded, problem string) {
 			}
 			t.args = append(t.args, text)
 		}
+		if len(a) == 5 {
+			var problem string
+			t.outcome, problem = declaredOutcome(a[4])
+			if problem != "" {
+				return rec, fmt.Sprintf("attempt %s in %s: %s", actionCall(t), rec.pretty[from], problem)
+			}
+			if t.outcome == "refused" && from != to {
+				return rec, fmt.Sprintf("refused attempt %s changed state from %s to %s", actionCall(t), rec.pretty[from], rec.pretty[to])
+			}
+		}
 		rec.attempts = append(rec.attempts, t)
 		rec.recorded++
 		if from != to {
@@ -179,6 +253,106 @@ func decode(raw []byte, vars []string) (rec recorded, problem string) {
 		}
 	}
 	return rec, ""
+}
+
+// declaredOutcome validates the opt-in fifth field independently of the
+// collector. Exception attributes are evidence, not TLA+ values: fractions
+// and null are valid here, as are integers larger than machine integers.
+func declaredOutcome(value any) (string, string) {
+	m, ok := value.(map[string]any)
+	if !ok {
+		return "", "declared outcome metadata must be an object"
+	}
+	outcome, ok := m["outcome"].(string)
+	if !ok || outcome != "accepted" && outcome != "refused" {
+		return "", "declared outcome must be accepted or refused"
+	}
+	if outcome == "accepted" {
+		if len(m) != 1 {
+			return "", "an accepted attempt must have only its outcome"
+		}
+		return outcome, ""
+	}
+	refusal, ok := m["refusal"].(map[string]any)
+	if len(m) != 2 || !ok || len(refusal) != 2 {
+		return "", "a refused attempt must have exactly its outcome and refusal descriptor"
+	}
+	typ, ok := refusal["type"].(string)
+	if !ok || !strings.Contains(typ, ".") || strings.IndexFunc(typ, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return "", "a refusal type must be a module-qualified exception name"
+	}
+	for _, part := range strings.Split(typ, ".") {
+		if part == "" {
+			return "", "a refusal type must be a module-qualified exception name"
+		}
+	}
+	attrs, ok := refusal["attributes"].(map[string]any)
+	if !ok {
+		return "", "refusal attributes must be an object of finite JSON scalars"
+	}
+	for name, value := range attrs {
+		switch x := value.(type) {
+		case nil, bool, string:
+		case json.Number:
+			if !strings.ContainsAny(string(x), ".eE") {
+				continue // JSON decoded the integer exactly, without a size limit.
+			}
+			f, err := x.Float64()
+			if err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
+				continue
+			}
+			return "", fmt.Sprintf("refusal attribute %q must be a finite JSON scalar", name)
+		default:
+			return "", fmt.Sprintf("refusal attribute %q must be a finite JSON scalar", name)
+		}
+	}
+	return outcome, ""
+}
+
+func actionCall(a attempt) string {
+	if len(a.args) == 0 {
+		return a.step
+	}
+	return a.step + "(" + strings.Join(a.args, ", ") + ")"
+}
+
+// strictAttempts validates named actions before emitting any new obligation.
+// Without the model's step declarations these attempts cannot fall back to
+// Next or the legacy stuttering rule.
+func strictAttempts(rec recorded, model *Model) ([]attempt, string) {
+	var strict []attempt
+	for _, a := range rec.attempts {
+		if a.outcome != "" {
+			strict = append(strict, a)
+		}
+	}
+	if len(strict) == 0 {
+		return nil, ""
+	}
+	if model == nil || len(model.Steps) == 0 {
+		return nil, "declared attempts require the model's named steps"
+	}
+	if model.Problem != "" {
+		return nil, "declared attempts cannot be checked: " + model.Problem
+	}
+	arity := map[string]int{}
+	for _, s := range model.Steps {
+		if n, seen := arity[s.Name]; seen && n != len(s.Args) {
+			arity[s.Name] = -1
+		} else {
+			arity[s.Name] = len(s.Args)
+		}
+	}
+	for _, a := range strict {
+		n, ok := arity[a.step]
+		if !ok || !identifier.MatchString(a.step) {
+			return nil, fmt.Sprintf("declared attempt %s in %s names no step of the model's Next", actionCall(a), rec.pretty[a.from])
+		}
+		if n < 0 || n != len(a.args) {
+			return nil, fmt.Sprintf("declared attempt %s in %s has %d arguments; Next must name the step with a consistent arity of %d", actionCall(a), rec.pretty[a.from], len(a.args), n)
+		}
+	}
+	return strict, ""
 }
 
 // triedBatch is how many states one TLC run looks at. A batch's module holds

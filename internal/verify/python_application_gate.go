@@ -577,11 +577,11 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 	// The shared checker can schedule batches concurrently. Execute application
 	// batches in order so a failure has a deterministic actual invocation prefix,
 	// with no schedule-dependent canceled TLC runs in its provenance. Starting
-	// states come first, then the steps' batches, then the attempts'.
+	// states come first, then the steps, declared outcomes and tried steps.
 	batch, _ := filepath.Rel(r.root, dir)
 	phase, order := 0, 0
-	for i, prefix := range []string{"steps-", "tried-"} {
-		if module == []string{"Invariant_Conformance", "Invariant_Tried"}[i] {
+	for i, prefix := range []string{"steps-", "strict-", "tried-"} {
+		if module == []string{"Invariant_Conformance", "Invariant_StrictAttempts", "Invariant_Tried"}[i] {
 			var err error
 			phase = i + 1
 			order, err = strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), prefix))

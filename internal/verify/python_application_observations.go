@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gitdek/invariant/internal/project"
 )
@@ -43,11 +44,46 @@ type PythonApplicationObservation struct {
 	// which model step and arguments each step tried, whether it replayed
 	// an earlier attempt and whether the selected target was called (#342).
 	// An omitted row records a step the environment's bounds rule out.
-	Start  *int   `json:"start,omitempty"`
-	Step   string `json:"step,omitempty"`
-	Args   []any  `json:"args,omitempty"`
-	Replay *bool  `json:"replay,omitempty"`
-	Called *bool  `json:"called,omitempty"`
+	Start   *int                      `json:"start,omitempty"`
+	Step    string                    `json:"step,omitempty"`
+	Args    []any                     `json:"args,omitempty"`
+	Replay  *bool                     `json:"replay,omitempty"`
+	Called  *bool                     `json:"called,omitempty"`
+	Outcome string                    `json:"outcome,omitempty"`
+	Refusal *PythonApplicationRefusal `json:"refusal,omitempty"`
+}
+
+// PythonApplicationRefusal records only the exception class and attributes
+// the driver declared, never arbitrary exception messages or objects.
+type PythonApplicationRefusal struct {
+	Type       string         `json:"type"`
+	Attributes map[string]any `json:"attributes"`
+}
+
+func pythonApplicationRefusal(raw []byte) (*PythonApplicationRefusal, error) {
+	if _, err := pythonApplicationJSONFields(raw, true, "type", "attributes"); err != nil {
+		return nil, err
+	}
+	var refusal PythonApplicationRefusal
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if err := d.Decode(&refusal); err != nil {
+		return nil, err
+	}
+	if !strings.Contains(refusal.Type, ".") || strings.IndexFunc(refusal.Type, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 || refusal.Attributes == nil {
+		return nil, fmt.Errorf("invalid refusal exception descriptor")
+	}
+	for _, part := range strings.Split(refusal.Type, ".") {
+		if part == "" {
+			return nil, fmt.Errorf("invalid refusal exception descriptor")
+		}
+	}
+	for _, value := range refusal.Attributes {
+		if !pythonApplicationValue(value, false) {
+			return nil, fmt.Errorf("refusal attributes must be finite JSON scalars")
+		}
+	}
+	return &refusal, nil
 }
 
 func (s *PythonApplicationSession) freshObserver() error {
@@ -116,7 +152,14 @@ func pythonApplicationState(state map[string]any, reader map[string]string, modu
 // and drivers are the declarations of the driver this execution ran, which
 // a larger run's copy keeps with its own hash. An explored stream is also
 // held to the exploration harness's protocol (#342).
-func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand, execution string, authentication, events []byte, r *PythonApplicationExecutionResult, check project.Component, drivers []project.Component, explored bool) error {
+func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand, execution string, authentication, events []byte, r *PythonApplicationExecutionResult, check project.Component, drivers []project.Component, explored bool) (err error) {
+	// No prefix of a bad stream is evidence, even when a caller uses the
+	// collector directly rather than through the execution session.
+	defer func() {
+		if err != nil {
+			r.Observations, r.Exploration, r.Complete = nil, nil, false
+		}
+	}()
 	if len(events) > pythonApplicationEventsLimit {
 		return fmt.Errorf("Python application observations exceed limit")
 	}
@@ -234,6 +277,12 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				required = append(required, "before", "after")
 				if explored {
 					required = append(required, "step", "args", "replay", "called")
+					if explorer.refusals[row.Step] != nil {
+						required = append(required, "outcome")
+						if row.Outcome == "refused" {
+							required = append(required, "refusal")
+						}
+					}
 				}
 			case "omitted":
 				if !explored {
@@ -251,6 +300,13 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 					return fmt.Errorf("null observation field %s", key)
 				}
+			}
+			if raw, ok := fields["refusal"]; ok {
+				refusal, err := pythonApplicationRefusal(raw)
+				if err != nil {
+					return err
+				}
+				row.Refusal = refusal
 			}
 			if _, err := pythonApplicationJSON(fields["key"], "target", "check", "kind", "id"); err != nil {
 				return err
