@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -430,29 +429,39 @@ func packageName(pkg string) (string, error) {
 }
 
 // copyTree copies a module for the sandbox, leaving out version control and
-// build output.
+// build output. In a work tree, Git selects the files; elsewhere the whole
+// directory supplies them.
 func copyTree(from, to string) error {
-	return filepath.WalkDir(from, func(path string, d fs.DirEntry, err error) error {
+	selected, err := stagingFiles(from, copyTreeExcluded, false)
+	if err != nil {
+		return err
+	}
+	for _, rel := range selected.Dirs {
+		if err := os.MkdirAll(filepath.Join(to, filepath.FromSlash(rel)), 0o755); err != nil {
+			return err
+		}
+	}
+	for _, rel := range selected.Files {
+		info, err := stagingPath(from, rel)
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(from, path)
-		if d.IsDir() && (d.Name() == ".git" || d.Name() == "out" || d.Name() == "bin") && rel != "." {
-			return filepath.SkipDir
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("staging %s: not a regular file", rel)
 		}
-		target := filepath.Join(to, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		b, err := os.ReadFile(path)
+		b, err := os.ReadFile(filepath.Join(from, filepath.FromSlash(rel)))
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, b, 0o644)
-	})
+		if err := writeStaged(filepath.Join(to, filepath.FromSlash(rel)), b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyTreeExcluded(name string, directory bool) bool {
+	return name == ".git" || directory && (name == "out" || name == "bin")
 }
 
 func goVersion(ctx context.Context) string {
