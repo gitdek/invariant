@@ -130,9 +130,18 @@ func PackageRoot(projectDir string) (root, rel string, err error) {
 // StagePackage copies what a driver needs from a package into dst: its
 // package.json, lockfile and tsconfig.json, and the existing code it names.
 // Nothing else of the package, such as its node_modules, comes along.
+// Git filters descendants of named directories in a work tree; explicitly
+// naming an ignored file or directory is an error.
 func StagePackage(root string, existing []string, dst string) error {
+	inGit, err := stagingInGit(root, false)
+	if err != nil {
+		return err
+	}
+	if err := stagingIgnored(root, existing, false); err != nil {
+		return err
+	}
 	for _, f := range []string{"package.json", "package-lock.json", "tsconfig.json"} {
-		b, err := os.ReadFile(filepath.Join(root, f))
+		b, err := readExistingFile(root, f, inGit)
 		if errors.Is(err, fs.ErrNotExist) && f == "tsconfig.json" {
 			continue
 		}
@@ -145,12 +154,12 @@ func StagePackage(root string, existing []string, dst string) error {
 	}
 	for _, e := range existing {
 		from := filepath.Join(root, filepath.FromSlash(e))
-		info, err := os.Stat(from)
+		info, err := existingPath(root, e, inGit)
 		if err != nil {
 			return fmt.Errorf("the existing code %s isn't in the package: %w", e, err)
 		}
 		if !info.IsDir() {
-			b, err := os.ReadFile(from)
+			b, err := readExistingFile(root, e, inGit)
 			if err != nil {
 				return err
 			}
@@ -183,39 +192,80 @@ type ExistingCode struct {
 // HashExisting records the existing code a project checks, so a receipt
 // says exactly what was run.
 func HashExisting(root string, existing []string) ([]ExistingCode, error) {
+	inGit, err := stagingInGit(root, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := stagingIgnored(root, existing, false); err != nil {
+		return nil, err
+	}
 	var out []ExistingCode
 	for _, e := range existing {
 		from := filepath.Join(root, filepath.FromSlash(e))
-		var files []string
-		err := filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() && d.Name() == "node_modules" {
-				return filepath.SkipDir
-			}
-			if d.Type().IsRegular() {
-				files = append(files, p)
-			}
-			return nil
-		})
+		info, err := existingPath(root, e, inGit)
 		if err != nil {
 			return nil, fmt.Errorf("the existing code %s: %w", e, err)
+		}
+		files := []string{e}
+		if info.IsDir() {
+			selected, err := stagingFiles(from, copyTreeExcluded, false)
+			if err != nil {
+				return nil, fmt.Errorf("the existing code %s: %w", e, err)
+			}
+			files = nil
+			for _, rel := range selected.Files {
+				files = append(files, path.Join(e, rel))
+			}
 		}
 		sort.Strings(files)
 		h := sha256.New()
 		for _, f := range files {
-			b, err := os.ReadFile(f)
+			b, err := readExistingFile(root, f, inGit)
 			if err != nil {
 				return nil, err
 			}
-			r, _ := filepath.Rel(root, f)
-			fmt.Fprintf(h, "%s\n%d\n", filepath.ToSlash(r), len(b))
+			fmt.Fprintf(h, "%s\n%d\n", f, len(b))
 			h.Write(b)
 		}
 		out = append(out, ExistingCode{Path: e, Files: len(files), SHA256: "sha256:" + hex.EncodeToString(h.Sum(nil))})
 	}
 	return out, nil
+}
+
+// existingPath checks explicit package boundaries before either copying or
+// hashing them. Git metadata cannot become application input by naming it.
+func existingPath(root, name string, inGit bool) (os.FileInfo, error) {
+	for _, component := range strings.Split(name, "/") {
+		if component == ".git" {
+			return nil, fmt.Errorf("%s names Git metadata", name)
+		}
+	}
+	if !inGit {
+		return os.Stat(filepath.Join(root, filepath.FromSlash(name)))
+	}
+	info, err := stagingPath(root, name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file or directory", name)
+	}
+	return info, nil
+}
+
+// Whole-directory packages keep their established handling of explicitly
+// named files, including metadata symlinks. Git selections never follow links.
+func readExistingFile(root, name string, inGit bool) ([]byte, error) {
+	if inGit {
+		info, err := stagingPath(root, name)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("%s is not a regular file", name)
+		}
+	}
+	return os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 }
 
 var sourceExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"}

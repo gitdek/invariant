@@ -37,6 +37,7 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 	}
 	for _, x := range a.Executions {
 		fmt.Fprintf(b, "\nInvocation %s · %s; complete: %t; successful: %t; exit: %d.\n\n", componentLiteral(x.Key.ID), componentLiteral(x.Key.Kind), x.Complete, x.Success, x.ExitCode)
+		pythonApplicationFileSelection(b, x.Provenance.FileSelection)
 		// Render the complete record using the same literal rules as component
 		// evidence, including keys, diagnostics and arbitrary observation values.
 		raw, _ := json.MarshalIndent(x, "", "  ")
@@ -51,6 +52,9 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		fmt.Fprintf(b, "\n%s: %s\n", label, componentLiteral(string(raw)))
 	}
 	for _, l := range a.Larger {
+		if l.Execution != nil {
+			pythonApplicationFileSelection(b, l.Execution.Provenance.FileSelection)
+		}
 		raw, _ := json.MarshalIndent(l, "", "  ")
 		fmt.Fprintf(b, "\nOne size larger: %s\n", componentLiteral(string(raw)))
 	}
@@ -87,6 +91,15 @@ func pythonApplicationDeclaresRefusal(a *verify.PythonApplicationReport) bool {
 		}
 	}
 	return false
+}
+
+func pythonApplicationFileSelection(b *strings.Builder, selection string) {
+	switch selection {
+	case "git":
+		b.WriteString("\nSnapshot file selection: git ls-files selected tracked and nonignored untracked files under the application root. The snapshot uses their working-tree bytes, omits deleted tracked files, and retains staging exclusions.\n\n")
+	case "directory":
+		b.WriteString("\nSnapshot file selection: the whole directory was selected outside a Git work tree, retaining staging exclusions. Git ignore rules did not filter this snapshot.\n\n")
+	}
 }
 
 // pythonApplicationFailures names an explored check's failed claims, which

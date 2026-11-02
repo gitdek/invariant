@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,10 +19,11 @@ import (
 // PythonApplicationWorkspace is a separate copy of an application's inputs.
 // Callers own Root and remove it when finished. No application command runs.
 type PythonApplicationWorkspace struct {
-	Root      string
-	Project   *project.Project
-	Inventory *project.ComponentInventory
-	Files     []project.ComponentFile
+	Root          string
+	Project       *project.Project
+	Inventory     *project.ComponentInventory
+	Files         []project.ComponentFile
+	FileSelection string `json:"file_selection"`
 }
 
 // StagePythonApplication preserves application bytes and layout, including the
@@ -33,6 +35,9 @@ func StagePythonApplication(p *project.Project, dst string) (*PythonApplicationW
 	}
 	app, err := project.ResolvePythonApplication(p)
 	if err != nil {
+		return nil, err
+	}
+	if err := pythonApplicationIgnored(p, app); err != nil {
 		return nil, err
 	}
 	if _, err := project.ResolveComponents(p); err != nil {
@@ -48,41 +53,45 @@ func StagePythonApplication(p *project.Project, dst string) (*PythonApplicationW
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return nil, err
 	}
-	err = filepath.WalkDir(app.Root, func(from string, entry fs.DirEntry, err error) error {
+	selection, err := stagingFiles(app.Root, func(name string, directory bool) bool {
+		return name == ".git" || directory && (name == ".venv" || name == "__pycache__")
+	}, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range selection.Dirs {
+		if err := os.MkdirAll(filepath.Join(dst, filepath.FromSlash(rel)), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	for _, rel := range selection.Files {
+		info, err := stagingPath(app.Root, rel)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		rel, err := filepath.Rel(app.Root, from)
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("Python application %q is not a regular file", rel)
+		}
+		to := filepath.Join(dst, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+			return nil, err
+		}
+		b, err := os.ReadFile(filepath.Join(app.Root, filepath.FromSlash(rel)))
 		if err != nil {
-			return err
-		}
-		to := filepath.Join(dst, rel)
-		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == ".venv" || entry.Name() == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return os.MkdirAll(to, 0o755)
-		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("Python application %q is not a regular file", filepath.ToSlash(rel))
-		}
-		b, err := os.ReadFile(from)
-		if err != nil {
-			return err
+			return nil, err
 		}
 		f, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		_, writeErr := f.Write(b)
 		closeErr := f.Close()
 		if writeErr != nil {
-			return writeErr
+			return nil, writeErr
 		}
-		return closeErr
-	})
-	if err != nil {
-		return nil, err
+		if closeErr != nil {
+			return nil, closeErr
+		}
 	}
 	staged, err := project.Load(filepath.Join(dst, filepath.FromSlash(app.ProjectPath)))
 	if err != nil {
@@ -99,7 +108,7 @@ func StagePythonApplication(p *project.Project, dst string) (*PythonApplicationW
 	if err != nil {
 		return nil, err
 	}
-	w := &PythonApplicationWorkspace{Root: dst, Project: staged, Inventory: inv}
+	w := &PythonApplicationWorkspace{Root: dst, Project: staged, Inventory: inv, FileSelection: selection.Method}
 	// Hash the copied bytes, not the original tree. Provenance includes every
 	// staged file while the inventory's production files retain explicit scope.
 	err = filepath.WalkDir(dst, func(name string, entry fs.DirEntry, err error) error {
@@ -132,6 +141,48 @@ func StagePythonApplication(p *project.Project, dst string) (*PythonApplicationW
 		inv.Provenance.Files = append([]project.ComponentFile(nil), w.Files...)
 	}
 	return w, nil
+}
+
+func pythonApplicationIgnored(p *project.Project, app *project.PythonApplication) error {
+	names := append([]string{app.ProjectPath, p.Manifest.Environment}, p.Manifest.Existing...)
+	for _, name := range []string{p.Manifest.Module, p.Manifest.Conformance, p.Manifest.Code, ".invariant/invariant.json", ".invariant/ratified.lock"} {
+		names = append(names, path.Join(app.ProjectPath, name))
+	}
+	if cfg := p.Manifest.Components; cfg != nil {
+		names = append(names, cfg.Scope...)
+		invocations := func(values []project.ComponentInvocation) {
+			for _, v := range values {
+				names = append(names, v.Check.Source, v.WorkingDir)
+				names = append(names, v.Inputs...)
+			}
+		}
+		for _, check := range cfg.Checks {
+			names = append(names, check.Target.Source)
+			refs := append([]project.ComponentRef(nil), check.Tests...)
+			refs = append(refs, check.Conformance...)
+			if check.Proof != nil {
+				refs = append(refs, check.Proof.Contracts...)
+			}
+			for _, ref := range refs {
+				names = append(names, ref.Source)
+			}
+			for _, a := range check.Assumptions {
+				names = append(names, a.Source)
+			}
+			invocations(check.Invocations)
+		}
+		for _, c := range cfg.TrustedContracts {
+			names = append(names, c.Contract.Source)
+			if c.Operation.Kind == project.OperationApplication {
+				names = append(names, c.Operation.Source)
+			}
+			for _, ref := range c.Tests {
+				names = append(names, ref.Source)
+			}
+			invocations(c.Invocations)
+		}
+	}
+	return stagingIgnored(app.Root, names, true)
 }
 
 func pythonApplicationDestination(root, dst string) error {
