@@ -458,7 +458,12 @@ class Collector:
             if life is None or life.form != "module" or not life.owns(sys._getframe(1)):
                 raise ValueError("thread must be started by a module entry or its workers")
             life.threads.add(worker)
-            return self.thread_start(worker, *args, **kwargs)
+            result = self.thread_start(worker, *args, **kwargs)
+            # Thread.start returns once the worker runs. A worker finishes
+            # starting its own before it ends, so a step that joins only
+            # started workers still reaches every descendant (#405).
+            life.started.add(worker)
+            return result
         except BaseException:
             self.failed = True
             raise
@@ -848,7 +853,7 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
         self.entry_frame = self.target_frame = self.await_frame = None
         self.entry_raised = self.await_raised = self.await_task = None
         self.pending_exceptions = {}
-        self.threads = set()
+        self.threads, self.started = set(), set()
         self.coroutines, self.tasks = set(), set()
         existing_coroutines = coroutine_objects()
         deadline = time.monotonic() + self.timeout
@@ -871,9 +876,11 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 self.escaped_refusal(exc)
                 escaped = exc
             # Descendants can start more threads while their parents drain.
+            # A worker is registered before it starts, and Thread.join refuses
+            # one that hasn't, so join only the workers known to have started.
             joined = set()
-            while self.threads - joined:
-                for worker in list(self.threads - joined):
+            while self.started - joined:
+                for worker in list(self.started - joined):
                     worker.join(max(0, deadline - time.monotonic()))
                     if worker.is_alive() or time.monotonic() >= deadline:
                         self.expire()
