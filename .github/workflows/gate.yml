@@ -38,12 +38,12 @@ jobs:
       # A factory pull request always runs the gate, since the factory merges
       # only on a gate that passed, and so does a push this can't compare.
       # Without renames, moving code into docs/ lists the code it removes. A
-      # pull request runs each opt-in real suite its change can affect, and
-      # all of them when this can't compare (#416).
+      # pull request, or a push to main, runs each opt-in real suite its
+      # change can affect, and all of them when this can't compare (#416,
+      # #436).
       - id: diff
         env:
           FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') }}
-          PULL: ${{ github.event_name == 'pull_request' }}
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: |
           gated=true
@@ -62,7 +62,6 @@ jobs:
             fi
             real=$(.github/real-suites.sh <<< "$files")
           fi
-          if [ "$PULL" != "true" ]; then real=$'python=false\ntlaps=false'; fi
           echo "gated=$gated" >> "$GITHUB_OUTPUT"
           echo "$real" >> "$GITHUB_OUTPUT"
           echo "The gate runs: $gated"
@@ -299,15 +298,17 @@ jobs:
           if-no-files-found: ignore
 
   integration:
-    # The gate's own tests, on a pull request that can change the gate, on a
-    # runner of their own, so they run alongside the projects' verification
-    # instead of after it. A factory pull request can't change the gate, and
-    # main gets only what a pull request already ran them on (D-0079). They
-    # run in shards, and only the tests the integration tag adds, since
-    # invariant/verify and its tests' shards run the rest (#345).
+    # The gate's own tests, on a pull request that can change the gate and on
+    # main, on a runner of their own, so they run alongside the projects'
+    # verification instead of after it. Main runs them again because two
+    # pull requests that passed apart can break it together, and branches
+    # needn't be up to date to merge (#436). A factory pull request can't
+    # change the gate (D-0079). They run in shards, and only the tests the
+    # integration tag adds, since invariant/verify and its tests' shards run
+    # the rest (#345).
     name: invariant/integration ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -376,12 +377,12 @@ jobs:
     # and wheels set, which a person used to run by hand before merging a
     # change that could affect them (#416). The application's own commands
     # run on Linux Docker since #399. As with the gate's own tests, a pull
-    # request runs them when its change can affect them, and main gets only
-    # what a pull request already ran them on (D-0079). They run in shards,
-    # as internal/verify's tests do (#345).
+    # request and a push to main run them when the change can affect them
+    # and the gate runs at all (#436). They run in shards, as
+    # internal/verify's tests do (#345).
     name: invariant/real-python ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && !(needs.changes.result == 'success' && needs.changes.outputs.python != 'true') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.python != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -416,7 +417,7 @@ jobs:
     # it must. Run as real-python is (#416).
     name: invariant/real-tlaps
     needs: changes
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && !(needs.changes.result == 'success' && needs.changes.outputs.tlaps != 'true') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tlaps != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
