@@ -1,6 +1,7 @@
 package plumbing
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -49,10 +50,15 @@ type dependencyImage struct {
 }
 
 func dependencyDocker(ctx context.Context, args ...string) ([]byte, error) {
+	return dependencyDockerInput(ctx, nil, args...)
+}
+
+func dependencyDockerInput(ctx context.Context, input io.Reader, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdin = input
 	// Container removal is owned by Cleanup, under its single reserve, not
 	// by each client invocation's cancellation handler.
 	cmd.WaitDelay = time.Second
@@ -141,7 +147,7 @@ func (r *DockerDependencyRunner) Install(ctx context.Context, q DependencyReques
 	if err := createDependencyContainer(ctx, launch, script); err != nil {
 		return a, err
 	}
-	if _, err := dependencyDocker(ctx, "cp", stage+string(os.PathSeparator)+".", q.Token+":/"); err != nil {
+	if err := copyDependencyStage(ctx, stage, q.Token); err != nil {
 		return a, err
 	}
 	if _, err := startDependencyContainer(ctx, q.Token); err != nil {
@@ -232,7 +238,7 @@ func (r *DockerDependencyRunner) Run(ctx context.Context, q DependencyRequest) (
 	if err := createDependencyContainer(ctx, q, "set -eu\nexec \"$@\"\n"); err != nil {
 		return nil, err
 	}
-	if _, err := dependencyDocker(ctx, "cp", stage+string(os.PathSeparator)+".", q.Token+":/"); err != nil {
+	if err := copyDependencyStage(ctx, stage, q.Token); err != nil {
 		return nil, err
 	}
 	return startDependencyContainer(ctx, q.Token)
@@ -277,6 +283,107 @@ func stageDependencySource(ctx context.Context, q DependencyRequest, install boo
 		return "", err
 	}
 	return stage, nil
+}
+
+// Stream the validated private copy with root ownership. Container root has
+// no capabilities to bypass the host owner's permissions or chown the files.
+func copyDependencyStage(ctx context.Context, stage, token string) error {
+	input, output, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		err := archiveDependencyStage(ctx, output, stage)
+		output.Close()
+		done <- err
+	}()
+	_, copyErr := dependencyDockerInput(ctx, input, "cp", "-", token+":/")
+	// Close both ends before joining the writer: Docker may exit without
+	// reading, or a canceled client's child may still hold its stdin open.
+	input.Close()
+	output.Close()
+	archiveErr := <-done
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.Join(copyErr, archiveErr)
+}
+
+func archiveDependencyStage(ctx context.Context, dst io.Writer, stage string) error {
+	root, err := os.OpenRoot(stage)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	archive := tar.NewWriter(dst)
+	if err := archiveDependencyTree(ctx, archive, root, ""); err != nil {
+		return err
+	}
+	return archive.Close()
+}
+
+func archiveDependencyTree(ctx context.Context, archive *tar.Writer, root *os.Root, prefix string) error {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := dir.ReadDir(128)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			name := path.Join(prefix, entry.Name())
+			info, err := root.Lstat(entry.Name())
+			if err != nil {
+				return err
+			}
+			// Construct headers without host ownership or special permissions.
+			header := &tar.Header{Name: name, Mode: int64(info.Mode().Perm()), ModTime: info.ModTime()}
+			if info.IsDir() {
+				header.Typeflag = tar.TypeDir
+			} else if info.Mode().IsRegular() {
+				header.Typeflag, header.Size = tar.TypeReg, info.Size()
+			} else {
+				return &regular.Refused{File: name, Why: "it isn't a regular file or directory"}
+			}
+			if err := archive.WriteHeader(header); err != nil {
+				return err
+			}
+			if info.IsDir() {
+				child, err := root.OpenRoot(entry.Name())
+				if err != nil {
+					return err
+				}
+				err = archiveDependencyTree(ctx, archive, child, name)
+				closeErr := child.Close()
+				if err := errors.Join(err, closeErr); err != nil {
+					return err
+				}
+			} else {
+				file, err := root.OpenFile(entry.Name(), os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+				if err != nil {
+					return err
+				}
+				err = copyDependencyBytes(ctx, archive, file, info.Size())
+				closeErr := file.Close()
+				if err := errors.Join(err, closeErr); err != nil {
+					return err
+				}
+			}
+		}
+		if readErr == io.EOF {
+			return ctx.Err()
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // discard removes a check's or an installation's container, then its staged
