@@ -45,6 +45,15 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 			return c, nil
 		}
 	}
+	if s.Repository != nil {
+		// No adapter collects individual acceptance evidence yet, so no
+		// configured run can show these tests fail on the code as it is.
+		// Refuse before copying the checkout or preparing dependencies; an
+		// adapter's issue lifts this for the frameworks it runs.
+		c.Run = unstartedAcceptance(plan)
+		c.Problem = "configured acceptance has no individual execution adapter yet, so no run can show these tests fail on the code as it is"
+		return c, nil
+	}
 	dir, err := os.MkdirTemp("", "invariant-plan-check-")
 	if err != nil {
 		return nil, err

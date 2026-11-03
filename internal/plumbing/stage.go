@@ -21,15 +21,12 @@ import (
 // checkout throughout repairs. Nothing else the build wrote counts.
 func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
 	if plan.Native() {
-		if err := plan.Validate(); err != nil {
-			return err
-		}
-		if err := plan.validateExecution(true); err != nil {
+		if err := plan.ratifiable(); err != nil {
 			return err
 		}
 		for f, source := range plan.Sources {
 			data, err := regular.ReadFile(root, f)
-			if err != nil || string(data) != source {
+			if err != nil || !SameSource(string(data), source) {
 				return fmt.Errorf("original acceptance source %s differs from the ratified plan: %v", f, err)
 			}
 		}
@@ -41,12 +38,29 @@ func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
 	if err := copyCheckout(ctx, root, dst); err != nil {
 		return err
 	}
+	if plan.Native() {
+		// The checkout holds each source as git stored it. The tests run
+		// the bytes that were ratified.
+		for f, source := range plan.Sources {
+			if err := os.WriteFile(filepath.Join(dst, filepath.FromSlash(f)), []byte(source), 0o644); err != nil {
+				return err
+			}
+		}
+	}
 	for _, f := range writable {
 		if err := take(ws, f, filepath.Join(dst, filepath.FromSlash(f))); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// SameSource says whether data is a ratified acceptance source as git may
+// store or check it out: the same bytes up to line-ending normalization,
+// such as a repository's text=auto. Go, Python and JavaScript read either
+// ending the same way, so a normalized source is still the one ratified.
+func SameSource(data, source string) bool {
+	return data == source || strings.ReplaceAll(data, "\r\n", "\n") == strings.ReplaceAll(source, "\r\n", "\n")
 }
 
 func writableFiles(ctx context.Context, root, ws string, plan *Plan) ([]string, error) {

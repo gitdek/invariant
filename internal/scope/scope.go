@@ -411,7 +411,7 @@ func plan(g git, base, head string, issue int, r Result) Result {
 	}
 	// The acceptance tests are the plan's, as ratified.
 	for f, src := range lock.Plan.Sources {
-		if got, err := g.show(head, f); err != nil || got != src || (after[f] != "100644" && after[f] != "100755") {
+		if got, err := g.show(head, f); err != nil || !plumbing.SameSource(got, src) || (after[f] != "100644" && after[f] != "100755") {
 			r.Problems = append(r.Problems, "its acceptance test "+f+" isn't the one ratified")
 		}
 	}

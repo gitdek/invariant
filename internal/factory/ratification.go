@@ -41,15 +41,12 @@ func VerifyRatification(ctx context.Context, gh Comments, repo string, lock proj
 // that was ratified, and a person with write access ratified exactly it on
 // the recorded issue.
 func VerifyPlan(ctx context.Context, gh Comments, repo string, lock plumbing.Lock) error {
-	if err := lock.Plan.Validate(); err != nil {
-		return err
-	}
-	if lock.Plan.Native() && lock.Plan.Execution == nil {
-		return fmt.Errorf("the native plan has no captured execution identity")
-	}
 	r := lock.Ratified
 	if got := lock.Plan.Hash(); got != r.Proposal {
 		return fmt.Errorf("the record holds plan %s, not the ratified %s", short(got), short(r.Proposal))
+	}
+	if err := lock.Verify(); err != nil {
+		return err
 	}
 	return verifyComment(ctx, gh, repo, r.By, r.Issue, r.Comment, r.Proposal)
 }

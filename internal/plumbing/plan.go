@@ -472,14 +472,8 @@ type Ratification struct {
 // each acceptance test file at its path.
 func (l Lock) Write(root string) error {
 	if l.Plan.Native() {
-		if err := l.Plan.Validate(); err != nil {
+		if err := l.Verify(); err != nil {
 			return err
-		}
-		if err := l.Plan.validateExecution(true); err != nil {
-			return err
-		}
-		if l.Plan.Hash() != l.Ratified.Proposal {
-			return errors.New("the native plan is not the one ratified")
 		}
 	}
 	b, err := json.MarshalIndent(l, "", "  ")
@@ -517,14 +511,29 @@ func ReadLock(b []byte) (*Lock, error) {
 	if err := json.Unmarshal(b, &l); err != nil {
 		return nil, err
 	}
-	if err := l.Plan.Validate(); err != nil {
+	if err := l.Verify(); err != nil {
 		return nil, err
-	}
-	if err := l.Plan.validateExecution(true); err != nil {
-		return nil, err
-	}
-	if h := l.Plan.Hash(); h != l.Ratified.Proposal {
-		return nil, fmt.Errorf("the plan hashes to %s, not the %s ratified", h, l.Ratified.Proposal)
 	}
 	return &l, nil
+}
+
+// Verify checks that a lock holds the plan that was ratified: a plan fit
+// to be ratified, hashing to the ratified proposal.
+func (l *Lock) Verify() error {
+	if err := l.Plan.ratifiable(); err != nil {
+		return err
+	}
+	if h := l.Plan.Hash(); h != l.Ratified.Proposal {
+		return fmt.Errorf("the plan hashes to %s, not the %s ratified", h, l.Ratified.Proposal)
+	}
+	return nil
+}
+
+// ratifiable checks what any ratified plan must hold, wherever it's read:
+// a valid plan, with the captured execution a native plan needs.
+func (p *Plan) ratifiable() error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	return p.validateExecution(true)
 }
