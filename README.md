@@ -72,6 +72,10 @@ People steer the factory with comments on the issue, and only people with write 
 | `/invariant plan` | On an issue that holds or links a PRD, the factory proposes a plan of at most 10 issues in place of statements. Once a writer ratifies it, the factory opens the plan's issues one at a time, each once the one before has merged, and takes each on that writer's authority |
 | `/invariant stop` | On a ratified plan's issue, the factory opens no more of the plan's issues. To stop it on a pull request, close the pull request or the issue, or turn the pull request into a draft |
 
+You can answer forks a few at a time. The factory keeps each choice and who made it across polls and restarts, and replies once for each new set of choices with the forks still unanswered. A following `/invariant revise` drafts immediately with those choices, the previous draft and your comments, even while other forks remain open.
+
+Ratification resumes an earlier branch only when the proposal hash and any project directory named in the saved proposal match, including an amendment's target. Changing that destination starts a fresh branch from the base. A project given an automatic numbered directory keeps its earlier allocation when work resumes.
+
 Whatever the issue, the factory never merges a change to the trusted base, the gate, its own code and its proved rules among them. A modeled project under `factory/`, such as the factory's own recovery core, waits for a person to merge it, as a plan's change to the trusted base does ([D-0109](decisions/journal/D-0109.jsonl), [D-0248](decisions/journal/D-0248.jsonl)).
 
 For plumbing, the factory builds the plan in a sandbox with no network. It runs formatting, vet, the tests of every package the change touches and the plan's acceptance tests, then has a second agent review the whole change. Review findings go back to the same builder, at most twice. Only passing checks and an approving review make a ready pull request; anything else stays a draft for a person. [The factory's page](docs/factory.md) has the rest: the sandbox and its budgets, retries, what a build may write, provider failures, merger work and plans of issues.
@@ -182,6 +186,8 @@ The watcher takes each step as a few effects on GitHub, and it can stop between 
 - **A retry can replace a failed draft.** For [#271](https://github.com/gitdek/invariant/issues/271), a coding agent amended the recovery model by hand, and @gitdek ratified it. A writer's retry starts a new build that replaces the failed draft, and at most one of the work's pull requests is open at a time. A test stops the watcher before each of a rebuild's 16 effects, and every time the draft is replaced once, with one merge ([D-0210](decisions/journal/D-0210.jsonl), [D-0218](decisions/journal/D-0218.jsonl)).
 
 The test above stops the watcher before each of its effects and starts a fresh one. Every time, the issue still merges with every effect done once.
+
+SIGTERM and Ctrl-C cancel the watcher's steps and each agent run's whole process group. The watcher waits for every step and lease renewal to stop, then relinquishes its own lease with bounded cleanup, so a successor can take it immediately.
 
 [The factory's page](docs/factory.md#recovery) has the rest of how the watcher recovers.
 
