@@ -105,6 +105,15 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	// records stay (#366). Deferred before the build's record is written,
 	// it's removed after it.
 	defer RemoveCache(b.Sandbox.Cache)
+	// Execution policy stays in this process. Even a standalone configured
+	// builder gives its separate test-tool process the same queue endpoint.
+	if b.Checks == nil && b.Sandbox.Repository != nil {
+		b.Checks, err = NewCheckQueue(1)
+		if err != nil {
+			return nil, err
+		}
+		defer b.Checks.Close()
+	}
 	var checks *checkBuild
 	if b.Checks != nil {
 		checks, err = b.Checks.register(ctx, b.Sandbox, plan)
