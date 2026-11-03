@@ -166,7 +166,7 @@ Saved proposals, revisions, ratification comments, locks and dashboard views ret
 
 All four native execution adapters are pending. Until one exists, configured planning refuses a draft before copying the checkout or preparing dependencies, since no run can show its tests fail. Native execution returns an explicit unstarted or refused acceptance result with the full identity before dependency preparation, and never falls back to the built-in Go runner. Configured results require individual completed failure evidence to propose a draft and individual passes to qualify a build; skipped, running, refused and unstarted results cannot qualify either. Unsupported native builds cannot reach review approval or ready status. External plumbing remains disabled ([D-0121](../decisions/journal/D-0121.jsonl)).
 
-The merger records this extension of D-0107 before the next issue, grounded in D-0105, D-0107, D-0108, D-0121, D-0122, D-0162, D-0173, D-0281, D-0294, D-0301 and D-0305, and the captured execution API from #484. Decision recording and unavailable Docker or network checks are merger work; affected CI Python and TLAPS suites remain required.
+[D-0314](../decisions/journal/D-0314.jsonl) records this extension of D-0107, grounded in D-0105, D-0107, D-0108, D-0121, D-0122, D-0162, D-0173, D-0281, D-0294, D-0301 and D-0305, and the captured execution API from #484.
 
 ## Retries
 
