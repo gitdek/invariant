@@ -93,7 +93,7 @@ const (
 	KindPR          = "pr"          // opened a pull request; waiting for CI's gate
 	KindFailed      = "failed"      // the build or CI's gate failed; people need to look
 	KindMerged      = "merged"      // merged
-	KindClosed      = "closed"      // the pull request was closed without merging
+	KindClosed      = "closed"      // the issue, or its unmerged pull request, was closed
 	KindNote        = "note"        // answered a command without changing anything
 	// A ratified plan's posts on its issue, which, like notes, leave that
 	// issue's state as it was (#126).
@@ -149,16 +149,20 @@ const maxStops = 2
 
 // Marker is the state a factory post records, hidden at its end.
 type Marker struct {
-	Kind     string              `json:"kind"`
-	ReplyTo  []int64             `json:"reply_to,omitempty"` // the commands it answers; 0 is the issue itself
-	Forks    []formalize.Fork    `json:"forks,omitempty"`
-	Answers  []formalize.Answer  `json:"answers,omitempty"` // the forks decided so far
-	Proposal *formalize.Proposal `json:"proposal,omitempty"`
-	Project  string              `json:"project,omitempty"` // the project's directory
-	Branch   string              `json:"branch,omitempty"`
-	Hash     string              `json:"hash,omitempty"` // the ratified proposal
-	PR       int                 `json:"pr,omitempty"`
-	Failure  string              `json:"failure,omitempty"` // why a failed post failed: Fail*
+	// Refusal and EffectRetry identify notes about a durable GitHub refusal.
+	// Neither note changes the issue's ordinary work state.
+	Refusal     string              `json:"refusal,omitempty"`
+	EffectRetry string              `json:"effect_retry,omitempty"`
+	Kind        string              `json:"kind"`
+	ReplyTo     []int64             `json:"reply_to,omitempty"` // the commands it answers; 0 is the issue itself
+	Forks       []formalize.Fork    `json:"forks,omitempty"`
+	Answers     []formalize.Answer  `json:"answers,omitempty"` // the forks decided so far
+	Proposal    *formalize.Proposal `json:"proposal,omitempty"`
+	Project     string              `json:"project,omitempty"` // the project's directory
+	Branch      string              `json:"branch,omitempty"`
+	Hash        string              `json:"hash,omitempty"` // the ratified proposal
+	PR          int                 `json:"pr,omitempty"`
+	Failure     string              `json:"failure,omitempty"` // why a failed post failed: Fail*
 	// A writer's retry of a plan's failed draft builds the plan again on a
 	// branch of its own (#271). Replaces is the draft its build replaces,
 	// which the factory closed, and From the commit its branch starts from:

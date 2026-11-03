@@ -22,6 +22,12 @@ const header = "◉ **Invariant** · "
 // hashChars is how much of a proposal's hash a ratifying comment must quote.
 const hashChars = 12
 
+func effectRefusedComment(operation, message string, m Marker) string {
+	body := fmt.Sprintf("GitHub refused **%s**:\n\n> %s", operation, strings.ReplaceAll(message, "\n", "\n> "))
+	return post("GitHub refused an operation", body, m,
+		"\n\nThe recorded work is preserved. Once the refusal is resolved, a writer can comment `/invariant retry` to resume it.")
+}
+
 // maxComment keeps a post under GitHub's limit of 65,536 characters, with
 // room to spare. A post GitHub refuses would be drafted again, by an agent,
 // on every poll.
@@ -600,6 +606,10 @@ func mergedComment(pr github.PullRequest, run github.CheckRun, sha string, r *Ma
 		body += "\n\n" + r.Numbers.Sentence()
 	}
 	return post("merged", body, *r)
+}
+
+func issueClosedComment(m Marker) string {
+	return post("closed", "This issue was closed, so work on it has stopped.", m)
 }
 
 func closedComment(pr github.PullRequest, m Marker) string {

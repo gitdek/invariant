@@ -76,13 +76,27 @@ func (f *Factory) WorkPlan(ctx context.Context, plan PlanOfIssues) error {
 	if f.writers == nil {
 		f.writers, f.asked = map[string]bool{}, map[string]bool{}
 	}
+	if ctx.Value(effectsKey{}) == nil {
+		f.asked = map[string]bool{}
+	}
 	f.mu.Unlock()
+	if ctx.Value(effectsKey{}) == nil {
+		defer f.effectGitHub()()
+		issue, err := f.GitHub.Issue(ctx, plan.Issue)
+		if err != nil {
+			return err
+		}
+		return f.withEffects(ctx, issue, func(ctx context.Context) error { return f.WorkPlan(ctx, plan) })
+	}
 	issue, err := f.GitHub.Issue(ctx, plan.Issue)
 	if err != nil {
 		return err
 	}
 	t, err := f.read(ctx, issue)
 	if err != nil {
+		return err
+	}
+	if handled, err := f.closedIssue(ctx, t); handled || err != nil {
 		return err
 	}
 	answered := map[int64]bool{}

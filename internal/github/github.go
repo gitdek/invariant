@@ -567,7 +567,7 @@ func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byt
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if strings.Contains(msg, "(HTTP 404)") {
-			return nil, ErrNotFound
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, msg)
 		}
 		if strings.Contains(msg, "Resource not accessible by integration") {
 			return nil, fmt.Errorf("%w: %s", ErrNoPermission, msg)
