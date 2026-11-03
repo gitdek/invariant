@@ -16,7 +16,7 @@ Both attempts share the caller's original context and remaining time. Cancellati
 
 A second stall returns a `Failed` result whose message says `TLC stopped making progress` and includes the last twenty lines of that attempt's combined stdout and stderr. Checks that finish keep their existing outcomes and diagnostics and are never retried. After a first stall, only the completed retry supplies evidence.
 
-These rules build on the pinned TLC runner ([D-0016](../decisions/journal/D-0016.jsonl)), container cleanup ([D-0111](../decisions/journal/D-0111.jsonl)), and keeping the specification and reference pages current ([D-0122](../decisions/journal/D-0122.jsonl), [D-0294](../decisions/journal/D-0294.jsonl)). The silence-and-retry policy needs a new decision, which the merger must record because this build cannot write decisions/.
+These rules build on the pinned TLC runner ([D-0016](../decisions/journal/D-0016.jsonl)), container cleanup ([D-0111](../decisions/journal/D-0111.jsonl)), and keeping the specification and reference pages current ([D-0122](../decisions/journal/D-0122.jsonl), [D-0294](../decisions/journal/D-0294.jsonl)). The silence-and-retry policy is [D-0306](../decisions/journal/D-0306.jsonl).
 
 ## Model parse and semantic failures
 
