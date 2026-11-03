@@ -16,6 +16,54 @@ The opt-in real-image gate checks cold-run capacity on a cgroup-v2 Docker host. 
 
 The orphan-reaping acceptance test checks `--init` alongside the existing launch settings without Docker. Run `INVARIANT_PLUMBING_INIT_REAL=1 go test ./internal/plumbing -run '^TestSandboxReapsOrphanedProcesses$' -count=1 -timeout 20m` to also run a Go test in the pinned sandbox image: it waits for a child's parent to exit, kills the orphan, and requires `kill(pid, 0)` to report that the process is gone (`ESRCH`). The real-image check returns normally when it is not enabled.
 
+## Repository check contract
+
+Version 1 of `.invariant/repository.json` describes a repository's Go, Python and TypeScript parts, their checks, their owners and the files that supply check authority ([#461's ratified plan](../.invariant/plans/issue-461.json)). The shared `internal/repository` loader captures this contract from a caller-supplied committed base. It executes no declared commands. Plumbing on external repositories remains disabled ([D-0121](../decisions/journal/D-0121.jsonl)). Invariant continues to use its built-in plumbing runner, commands, sandbox limits and scope rules without requiring this file.
+
+The top-level fields are `version`, `parts`, `agent_rules`, `current_state`, `trusted_paths` and `shared_paths`. `parts` is nonempty; each part has a unique `name` and `directory`, one supported `language`, an `image` pinned by `@sha256:` and a 64-digit hexadecimal digest, explicit `lockfiles` and `inputs` arrays, and a `commands` object. All paths are relative to the repository root, including a part's dependency inputs. Commands are defined to run in the part's directory. This example uses an illustrative image digest; a repository supplies its own toolchain image:
+
+```json
+{
+  "version": 1,
+  "parts": [
+    {
+      "name": "api",
+      "directory": "api",
+      "language": "go",
+      "image": "registry.example/toolchain@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lockfiles": ["api/go.sum"],
+      "inputs": ["api/go.mod"],
+      "commands": {
+        "install": {"argv": ["go", "mod", "download"]},
+        "format": {"argv": ["gofmt", "-l", "."]},
+        "lint": {"argv": ["go", "vet", "./..."]},
+        "build": {"argv": ["go", "build", "./..."]},
+        "test": {"argv": ["go", "test", "./..."]},
+        "test_one": {"argv": ["go", "test", "./...", "-run", "^{test}$", "-count=1"]}
+      }
+    }
+  ],
+  "agent_rules": ["AGENTS.md"],
+  "current_state": ["SPEC.md", "README.md"],
+  "trusted_paths": ["tools/"],
+  "shared_paths": [{"path": "shared/", "parts": ["api"]}]
+}
+```
+
+`language` is `go`, `python` or `typescript`, and a repository may mix them. Each of the six command entries is required. It holds either a nonempty `argv` array with a nonblank executable, or a nonblank reason such as `{"not_applicable": "This application has no distribution artifact."}`, never both. `lockfiles` and `inputs` are required arrays but may be empty. The executable form of `test_one` contains exactly one `{test}` placeholder in one argument: for example, `"^{test}$"` with Go's `-run`, `"{test}"` as a pytest selector, or `"{test}"` after `npm test --`. This is literal command data for a later runner, with no shell interpolation by the loader. An inapplicable `test_one` needs an explicit reason like any other check.
+
+The loader rejects unsupported versions and languages, mutable image tags without a digest, malformed digests, unknown or duplicate JSON keys, trailing JSON, missing required fields and contradictory commands. Part directories must exist in the base commit, and agent rules, current-state documents, lockfiles and inputs must be regular files there. Paths use `/`, are nonempty and clean, and stay inside the repository; only a part's `directory` may be `.`. Backslashes, control characters, Git metadata, globs, symlink ancestors or leaves, and gitlinks are refused. Unrelated links elsewhere in the repository do not invalidate a contract.
+
+`trusted_paths` entries and each `shared_paths.path` select an exact file or a directory prefix ending in `/`; prefixes can reserve future files. A shared rule lists its owners in `parts`. Duplicate or overlapping shared selectors, duplicate part names or directories, and unknown owners are invalid. Nested part directories are allowed.
+
+For each touched file, ownership is the deepest enclosing part, plus any explicitly shared owners and every part declaring that file as a lockfile or input. A root part therefore owns files outside its nested parts without also owning their code. A workspace lockfile can select several parts, even outside their directories. Changes to `.invariant/repository.json`, `agent_rules` or `current_state` files select every part. Selection returns unique parts sorted by name, independent of declaration order. New paths need not exist, deleted paths retain their base ownership, and any unowned or unsafe path fails the entire selection. An empty set of touched files selects no parts.
+
+Ownership and trust answer different questions. Trust includes the contract itself, agent rules, every declared lockfile and input, and `trusted_paths`. Ordinary code and current-state documents are not implicitly trusted. For Invariant itself, the loader under `internal/repository/` and `.invariant/repository.json` are also in its built-in trusted base, so their changes require a person to merge them ([D-0109](../decisions/journal/D-0109.jsonl)).
+
+`repository.Load(ctx, checkout, baseRef)` requires an explicit nonempty commit or ref and resolves it once. The resulting snapshot exposes the resolved commit through `Commit()`, independent configuration through `Config()`, committed file bytes through `ReadFile(path)`, applicable parts through `PartsFor(paths)`, and the captured trust policy through `IsTrusted(path)`. Every method stays bound to that commit. Changing the index, working tree, candidate configuration or base ref, or mutating returned configuration, parts or bytes, cannot replace its authority. `ErrMissing` means only that the contract is absent from a valid base tree; invalid configuration returns `ErrInvalid`, and invalid revisions and read failures never masquerade as missing configuration.
+
+The loader has no automatic fallback to Invariant's built-in policy or to a modeled project. Modeled projects continue to load their own `.invariant/invariant.json` and ratified locks unchanged, with or without a repository contract. This step supplies the shared contract and ownership queries; it does not wire declared commands into the factory or relax external-plumbing, sandbox or scope restrictions. Before the next step, the merger records #461's repository-contract decision, since a plumbing build cannot write `decisions/` ([D-0105](../decisions/D-0105-factory-takes-every-change.md), [D-0122](../decisions/journal/D-0122.jsonl)).
+
 ## Retries
 
 A retry builds a plan's failed draft again, and otherwise watches a pull request that's open, or builds again when there's none ([D-0047](../decisions/journal/D-0047.jsonl), [D-0064](../decisions/journal/D-0064.jsonl), [D-0218](../decisions/journal/D-0218.jsonl)). After a plan's build left a draft, because its agent ended its last run with an error, its tests failed or its review asked for changes, `/invariant retry` has the factory store its record that the retry replaces the draft, close the draft without merging it, so its work stays there to read, and build the ratified plan again from its ratification, on a branch of its own, review included. The new build opens a pull request of its own, ready once its checks and review pass, or a draft again, which a writer can retry in turn ([#271](https://github.com/gitdek/invariant/issues/271)). If the draft's branch, which holds the plan's ratification, is gone, the retry is answered with a note for a person instead: close the draft and comment `/invariant revise` to draft the plan again ([D-0220](../decisions/journal/D-0220.jsonl)). A retry's build on another machine that can't reach the commit holding the ratification says the same once the draft is closed, as a failure for a person, and the dashboard's card for it offers only drafting the plan again. A retry applies to the failure that was the issue's latest when it was posted, so one posted before a draft's failure post, such as a second retry queued while the first draft was open, gets a note and builds nothing ([D-0238](../decisions/journal/D-0238.jsonl)). After CI's gate failed on a pull request, or for a modeled project's draft, or a draft GitHub wouldn't mark ready after its build passed, `/invariant retry` has the factory watch that pull request again. Once CI's gate passes on its current head, it's still in scope with its ratified lock, and GitHub says it can merge it, the factory marks a draft ready and merges it at the head it checked, without running a review ([#145](https://github.com/gitdek/invariant/issues/145), [D-0249](../decisions/journal/D-0249.jsonl), [D-0252](../decisions/journal/D-0252.jsonl)). Its answer to the retry records whether the pull request was a draft or ready, and when the writer retried, and it marks a draft ready only when that answer saw it as a draft and GitHub shows no one has turned it into a draft since the retry. So a person stops a watched pull request by closing it or the issue, or, while it's ready, by turning it into a draft, even before the factory answers the retry: once CI's gate passes, the factory says once that someone turned it into a draft after the retry, and a writer's retry after that has it watch the draft after all. An answer from before #371, which records neither, watches no draft, so a person decides, and so does a draft whose events GitHub won't show, or keeps failing to show for half an hour ([#371](https://github.com/gitdek/invariant/issues/371), [D-0270](../decisions/journal/D-0270.jsonl), [D-0274](../decisions/journal/D-0274.jsonl)). A change to the trusted base waits for a person to merge it instead, and the factory doesn't mark its draft ready ([D-0109](../decisions/journal/D-0109.jsonl)). To change a plan instead, close its pull request, say what to change, comment `/invariant revise`, and ratify the new draft. After a build that stopped before it made a pull request, a retry builds the ratified proposal again. The factory's posts say which happens, and so does the dashboard: a card's retry button says what it does, such as "Build the plan again, replacing #N" or "Merge #N once CI passes", `/act` asks first in the same words and says what follows once it's posted, and the comment it posts is `/invariant retry` either way ([D-0156](../decisions/journal/D-0156.jsonl)). A failed draft's post lists the plan's files in the trusted base in its body, which a post too long for GitHub clips, and keeps its commands and what they do whole ([D-0167](../decisions/journal/D-0167.jsonl)).
