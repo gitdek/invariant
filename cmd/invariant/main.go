@@ -749,6 +749,30 @@ func formalizeCmd(ctx context.Context, args []string) int {
 }
 
 func watchCmd(ctx context.Context, args []string) int {
+	// Keep the same factory from startup onward, so a signal during setup
+	// closes admission before any work can start.
+	f := &factory.Factory{}
+	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
+	drains := make(chan os.Signal, 1)
+	signal.Notify(drains, syscall.SIGUSR1)
+	stopSignals, signalsDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(signalsDone)
+		for {
+			select {
+			case <-drains:
+				f.Drain()
+				logger.Print("drain requested; admitted work will finish before the watcher stops")
+			case <-stopSignals:
+				return
+			}
+		}
+	}()
+	defer func() {
+		signal.Stop(drains)
+		close(stopSignals)
+		<-signalsDone
+	}()
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	repo := fs.String("repo", "", "the repository to watch, as owner/name")
 	every := fs.Duration("every", time.Minute, "how often to poll GitHub")
@@ -806,7 +830,6 @@ func watchCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant: -check-parallel must be positive")
 		return 2
 	}
-	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
 	fail := func(err error) int { logger.Print(err); return 2 }
 	checkQueue, err := plumbing.NewCheckQueue(*checkParallel)
 	if err != nil {
@@ -927,12 +950,11 @@ func watchCmd(ctx context.Context, args []string) int {
 			others[name] = r
 		}
 	}
-	f := &factory.Factory{
-		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate", Language: *language, Self: bot,
-		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
-		Agent: *agent, Formalizer: own.Formalizer, Builder: own.Builder, Plumbing: own.Plumbing, Agents: others,
-		Holder: factory.NewHolder(), LeaseFor: *leaseFor, Parallel: *parallel,
-	}
+	f.Repository, f.GitHub, f.Repo = *repo, gh, clone
+	f.Base, f.Projects, f.Check, f.Language, f.Self = *base, *projects, "invariant/gate", *language, bot
+	f.Work, f.Log = filepath.Join(dir, "issues"), logger.Printf
+	f.Agent, f.Formalizer, f.Builder, f.Plumbing, f.Agents = *agent, own.Formalizer, own.Builder, own.Plumbing, others
+	f.Holder, f.LeaseFor, f.Parallel = factory.NewHolder(), *leaseFor, *parallel
 	if err := f.Prepare(ctx); err != nil {
 		return fail(err)
 	}
