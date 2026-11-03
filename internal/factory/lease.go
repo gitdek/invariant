@@ -297,6 +297,26 @@ func (f *Factory) keepLease(ctx context.Context, every time.Duration) {
 	}
 }
 
+// releaseLease runs only after every step and renewal has stopped. It
+// replaces only this watcher's lease, using the same compare-and-swap as
+// renewal. A zero record is already expired, including the skew window.
+func (f *Factory) releaseLease(ctx context.Context) error {
+	f.lease.mu.Lock()
+	defer f.lease.mu.Unlock()
+	defer func() {
+		f.lease.sha, f.lease.until, f.lease.tried = "", time.Time{}, nil
+	}()
+	sha, rec, err := f.Repo.Lease(ctx)
+	if err != nil || sha == "" || rec.Holder != f.Holder {
+		return err
+	}
+	_, err = f.Repo.PushLease(ctx, sha, LeaseRecord{})
+	if errors.Is(err, ErrLeaseMoved) {
+		return nil // another watcher took it after the read
+	}
+	return err
+}
+
 // leasedGitHub checks the lease before each effect on GitHub.
 type leasedGitHub struct {
 	GitHub

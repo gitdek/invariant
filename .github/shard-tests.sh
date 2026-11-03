@@ -77,6 +77,8 @@ for f in "$events"/*.json; do
 done
 if compgen -G "$events/*.json" > /dev/null; then
   echo "The shard's 20 slowest tests, in seconds:"
-  cat "$events"/*.json | jq -r 'select((.Action == "pass" or .Action == "fail") and .Test != null and (.Test | contains("/") | not)) | "\(.Elapsed)\t\(.Action)\t\(.Package)\t\(.Test)"' | sort -rn | head -20
+  # sed reads all its input, where head would close the pipe on sort, which
+  # Ubuntu 26.04's sort reports as a failure (#482).
+  cat "$events"/*.json | jq -r 'select((.Action == "pass" or .Action == "fail") and .Test != null and (.Test | contains("/") | not)) | "\(.Elapsed)\t\(.Action)\t\(.Package)\t\(.Test)"' | sort -rn | sed -n '1,20p'
 fi
 exit $status

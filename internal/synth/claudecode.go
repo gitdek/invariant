@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -199,10 +201,12 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
+	stopWatching, err := startProcessGroup(run, cmd)
+	if err != nil {
 		// A run whose deadline has passed starts nothing.
 		return try{err: err, cut: ctx.Err() != nil}
 	}
+	defer stopWatching()
 	usage, end, readErr := readClaudeStream(stdout, job.Transcript)
 	if readErr != nil {
 		stop() // stop the agent, rather than wait for it
@@ -268,6 +272,36 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 		t.err = fmt.Errorf("%w; this attempt ended before Claude Code said what it cost, so the rest of the run's budget, $%s, counts as spent: a conservative estimate, since its real cost is unknown", t.err, usd(left.BudgetUSD))
 	}
 	return t
+}
+
+// startProcessGroup makes cancellation stop the agent and everything it
+// started. The caller stops watching only after Wait has drained its output:
+// exec stops calling Cancel once the leader exits, even if stderr is open.
+func startProcessGroup(ctx context.Context, cmd *exec.Cmd) (func(), error) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = sync.OnceValue(func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	})
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-ctx.Done():
+			_ = cmd.Cancel()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}, nil
 }
 
 // ErrThinkingLoop is a run the factory stopped because the agent's replies
