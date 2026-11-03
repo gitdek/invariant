@@ -55,10 +55,10 @@ type Test struct {
 // the configuration that starts their tools in a session (D-0132).
 var TrustedBase = []string{
 	".github/", "cmd/", "factory/", "go.mod", "go.sum", "AGENTS.md", "CLAUDE.md",
-	".claude/", ".codex/", ".mcp.json",
+	".claude/", ".codex/", ".mcp.json", ".invariant/repository.json",
 	"internal/conformance/", "internal/decisions/", "internal/factory/", "internal/formalize/",
 	"internal/github/", "internal/gobra/", "internal/mcp/", "internal/plumbing/", "internal/project/",
-	"internal/receipt/", "internal/regular/", "internal/scope/", "internal/setup/", "internal/synth/", "internal/tla/",
+	"internal/receipt/", "internal/regular/", "internal/repository/", "internal/scope/", "internal/setup/", "internal/synth/", "internal/tla/",
 	"internal/tlc/", "internal/toolchain/", "internal/verify/",
 	"internal/dashboard/act.go", "internal/dashboard/http.go",
 }

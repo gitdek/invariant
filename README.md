@@ -260,7 +260,7 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
 5. **Open an issue** that describes a component and what must always be true of it, and label it `invariant` or comment `/invariant solve`. [#18](https://github.com/gitdek/invariant/issues/18) is a good model. The factory asks about anything it can't settle, proposes statements, and builds once a writer ratifies them.
 
-`Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)).
+`Kind: plumbing` issues work only on this repository for now ([#103](https://github.com/gitdek/invariant/issues/103)). The [repository check contract](docs/factory.md#repository-check-contract) captures declared Go, Python and TypeScript checks from a committed base; its loader does not yet enable plumbing on other repositories.
 
 The [live dashboard](https://invariant.puglisij.com/) gives each running step its own card, with its activity, tool calls and stretches of thinking. Its public view publishes counts, times and paths only, never commands, agent words, output or reasoning. [The dashboard's page](docs/dashboard.md) says what each card shows and keeps, and what the private `/act` page adds.
 
