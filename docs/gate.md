@@ -8,6 +8,16 @@ For projects without explicit components, code assurance comes from successful r
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](../decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](../decisions/D-0024-checking-typescript-and-python.md) and [D-0031](../decisions/journal/D-0031.jsonl), and the larger check in [D-0070](../decisions/journal/D-0070.jsonl).
 
+## Silent TLC checks
+
+Under [#470's ratified plan](../.invariant/plans/issue-470.json), `tlc.Runner.Check` stops and removes a TLC container after fifteen uninterrupted minutes without stdout or stderr, including before its first output. It then runs the identical check once more in a fresh container. Any output bytes restart the silence window, including bytes without a newline on either stream. A check that keeps printing can run as long as its caller allows. `Runner.SilenceTimeout` is a `time.Duration` override for short tests; zero or a negative value uses fifteen minutes.
+
+Both attempts share the caller's original context and remaining time. Cancellation or deadline expiry takes priority over a stall, stops and removes the container without another retry, and returns an error wrapping the context cause and identifying the check as cut off. An already ended context starts no container. The first container is removed before the retry starts.
+
+A second stall returns a `Failed` result whose message says `TLC stopped making progress` and includes the last twenty lines of that attempt's combined stdout and stderr. Checks that finish keep their existing outcomes and diagnostics and are never retried. After a first stall, only the completed retry supplies evidence.
+
+These rules build on the pinned TLC runner ([D-0016](../decisions/journal/D-0016.jsonl)), container cleanup ([D-0111](../decisions/journal/D-0111.jsonl)), and keeping the specification and reference pages current ([D-0122](../decisions/journal/D-0122.jsonl), [D-0294](../decisions/journal/D-0294.jsonl)). The silence-and-retry policy needs a new decision, which the merger must record because this build cannot write decisions/.
+
 ## Model parse and semantic failures
 
 When SANY, TLA+'s parser and semantic checker, prevents TLC from checking a module, the failed result's message includes SANY's complete error diagnostics and source locations in printed order before TLC's closing `Parsing or semantic analysis failed.` message. A misindented conjunction retains the offending item's line and column range and the enclosing list's range; undefined operators retain each module, source range and explanation. Routine parsing and progress lines are omitted.
