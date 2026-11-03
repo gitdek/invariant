@@ -25,6 +25,7 @@ type Builder struct {
 	TestRuns int           // the most test runs the agent gets
 	Timeout  time.Duration
 	Sandbox  Sandbox
+	Checks   *CheckQueue // the watcher's shared queue, independent of agent runs
 	// FallbackEffort is the effort the agent runs at once more when the loop
 	// guard stops its first run (D-0125). Empty never runs it again. A review
 	// never falls back.
@@ -104,6 +105,14 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	// records stay (#366). Deferred before the build's record is written,
 	// it's removed after it.
 	defer RemoveCache(b.Sandbox.Cache)
+	var checks *checkBuild
+	if b.Checks != nil {
+		checks, err = b.Checks.register(ctx, b.Sandbox, plan)
+		if err != nil {
+			return nil, err
+		}
+		b.Sandbox.Checks = &CheckClient{Address: b.Checks.listener.Addr().String(), Build: checks.id}
+	}
 	job := synth.Job{
 		Workspace: ws,
 		Prompt:    BuildPrompt(plan, n, b.TestRuns),
@@ -112,8 +121,19 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		Tools:      []string{"test"},
 		Transcript: transcript,
 	}
+	if checks != nil {
+		job.ToolTimeout = b.Timeout
+		if b.Timeout <= 0 {
+			job.ToolTimeout = -1 // an uncut build asks for the backend's longest tool timer
+		}
+		// Flags precede the positional workspace, as flag.Parse requires.
+		job.GateServer = append(job.GateServer[:len(job.GateServer)-1], "-check-queue", b.Sandbox.Checks.Address, "-check-build", checks.id, ws)
+	}
 	r := &BuildResult{Tests: len(plan.Tests)}
 	defer func() {
+		if checks.finish() {
+			r.Summary += "\nThe build's time allowance expired while waiting for checks.\n"
+		}
 		r.TestRuns, _ = readRuns(testLog)
 		r.Usage.Backend = b.Backend.Name()
 		r.Spend = r.Usage.CostUSD

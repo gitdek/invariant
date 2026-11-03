@@ -38,6 +38,9 @@ var sandboxRunner string
 type Sandbox struct {
 	Image    string // the Go image, pinned by digest
 	ModCache string // the host's module cache, as go env GOMODCACHE
+	// Checks sends a build's checks to its watcher's queue. Direct sandbox
+	// checks, including the real-image budget checks, leave it nil.
+	Checks *CheckClient
 	// Cache is a build cache kept between one build's runs, so each run
 	// doesn't compile everything again. Empty, each run starts cold.
 	Cache string
@@ -118,6 +121,9 @@ var (
 // every package the change touches, and the plan's acceptance tests on the
 // copy.
 func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Result, runErr error) {
+	if s.Checks != nil {
+		return s.Checks.run(ctx, root)
+	}
 	end := time.Now().Add(sandboxLimit(s.Timeout, SandboxTimeout))
 	ownDeadline := true
 	if parentEnd, ok := ctx.Deadline(); ok && parentEnd.Before(end) {
