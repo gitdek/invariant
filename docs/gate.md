@@ -12,7 +12,7 @@ Markdown receipts and the dashboard derive these claims from evidence even when 
 
 When SANY, TLA+'s parser and semantic checker, prevents TLC from checking a module, the failed result's message includes SANY's complete error diagnostics and source locations in printed order before TLC's closing `Parsing or semantic analysis failed.` message. A misindented conjunction retains the offending item's line and column range and the enclosing list's range; undefined operators retain each module, source range and explanation. Routine parsing and progress lines are omitted.
 
-These diagnostics reach the formalizer's check feedback, the gate's JSON and Markdown receipts, and the factory's failure posts and pull request body. Each uses its existing rendering and clipping rules; the result's message itself is not truncated. The raw unframed chunks in `Result.Printed`, outcome classification, other TLC errors and the last-twenty-lines fallback for other failures keep their existing behavior.
+These diagnostics reach the formalizer's check feedback, the gate's JSON and Markdown receipts, and the factory's failure posts and pull request body. Each uses its existing rendering and clipping rules; the result's message itself is not truncated. The raw unframed chunks in `Result.Printed`, outcome classification, other TLC errors and the last-twenty-lines fallback for other failures keep their existing behavior ([#450](https://github.com/gitdek/invariant/issues/450), [D-0298](../decisions/journal/D-0298.jsonl)).
 
 ## Proving a model's invariant at every size
 
