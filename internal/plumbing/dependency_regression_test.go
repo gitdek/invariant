@@ -1,10 +1,12 @@
 package plumbing
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -221,15 +223,35 @@ func TestDependencyDockerProcess(t *testing.T) {
 				os.Exit(1)
 			}
 		} else {
-			if args[2] != "invariant-deps-regression:/" {
-				fmt.Fprintln(os.Stderr, "copy needs the complete layout at the container root")
+			if len(args) != 3 || args[1] != "-" || args[2] != "invariant-deps-regression:/" {
+				fmt.Fprintln(os.Stderr, "copy needs the complete layout streamed to the container root")
 				os.Exit(1)
 			}
-			data, err := os.ReadFile(filepath.Join(args[1], "invariant", "work", "go.mod"))
-			if err != nil {
-				os.Exit(1)
+			archive := tar.NewReader(os.Stdin)
+			found := false
+			for {
+				header, err := archive.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if header.Uid != 0 || header.Gid != 0 || (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir) {
+					t.Fatalf("invalid staged entry: %+v", header)
+				}
+				if header.Name == "invariant/work/go.mod" {
+					data, err := io.ReadAll(archive)
+					if err != nil {
+						t.Fatal(err)
+					}
+					write("input", data)
+					found = true
+				}
 			}
-			write("input", data)
+			if !found {
+				t.Fatal("stream did not include go.mod")
+			}
 		}
 	case "start":
 		fmt.Println("installed dependencies")

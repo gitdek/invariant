@@ -17,7 +17,7 @@ func TestRepositoryDependencyDockerConsumerEnforcesIsolation(t *testing.T) {
 	bin, logs, src, cache := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	write468(t, src, "app/main.py", "print('fixture')\n")
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-	script := "#!/bin/sh\nset -eu\nprintf '%s\\000' \"$@\" > " + quote(logs) + "/$$\ncase \"$1\" in\ncreate) printf '%s\\n' fixture-container;;\nrun|start|logs) printf '%s\\n' fixture-check;;\nwait) printf '0\\n';;\nesac\n"
+	script := "#!/bin/sh\nset -eu\nprintf '%s\\000' \"$@\" > " + quote(logs) + "/$$\ncase \"$1\" in\ncreate) printf '%s\\n' fixture-container;;\ncp) [ \"$#\" -eq 3 ] && [ \"$2\" = '-' ] && [ \"$3\" = 'invariant-deps-468-consumer:/' ] || exit 1; cat > /dev/null;;\nrun|start|logs) printf '%s\\n' fixture-check;;\nwait) printf '0\\n';;\nesac\n"
 	docker := filepath.Join(bin, "docker")
 	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
