@@ -113,6 +113,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The oldest Python Invariant supports, which ubuntu-latest gave this
+      # job until it moved to Ubuntu 26.04 and Python 3.14 (#478). With
+      # invariant/python's 3.13, CI tests two versions; 3.14 is #479.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
       - name: Vet and unit tests
         run: |
           go vet ./...
@@ -174,6 +181,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      # As in invariant/verify, above: Python 3.12 (#478).
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
 
       - name: internal/verify's tests, shard ${{ matrix.shard }}
         run: .github/shard-tests.sh "${{ matrix.shard }}" -timeout 20m -- ./internal/verify/
