@@ -301,19 +301,32 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 	if exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Run() != nil {
 		t.Skip(root + " isn't a git checkout, so the ratification check can't find its journal")
 	}
-	for _, dir := range []string{"factory/protocol", "factory/recovery"} {
+	// Every project whose lock was ratified by hand, as git tracks them: a
+	// lock ratified on its issue, as #428 ratified factory/protocol's, is
+	// another test's to check (#440).
+	tracked, err := exec.Command("git", "-C", root, "ls-files", "*/.invariant/invariant.json").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, manifest := range strings.Fields(string(tracked)) {
+		dir := strings.TrimSuffix(manifest, "/.invariant/invariant.json")
 		p, err := project.Load(filepath.Join(root, dir))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if p.Lock.Ratified != nil || p.Lock.Decision == "" {
-			t.Fatalf("%s's lock isn't ratified by hand", dir)
+			continue
 		}
+		checked++
 		code, out := ratificationPrints(t, "-repo", "gitdek/invariant", filepath.Join(root, dir))
 		want := "ratified by hand by @gitdek, as " + p.Lock.Decision + " records (" + project.ProposalHash(p.Lock.Bounds, p.Lock.Statements) + ")"
 		if code != 0 || !strings.Contains(out, want) {
 			t.Errorf("%s: exit %d, want 0 and %q:\n%s", dir, code, want, out)
 		}
+	}
+	if checked == 0 {
+		t.Fatal("the repository has no lock ratified by hand to check")
 	}
 }
 
