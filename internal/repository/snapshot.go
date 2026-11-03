@@ -97,10 +97,19 @@ func (s *Snapshot) Config() Config { return cloneConfig(s.config) }
 // ReadFile returns fresh bytes from a regular file in the captured tree. It
 // reads the captured blob ID, never a ref, index entry or working-tree file.
 func (s *Snapshot) ReadFile(name string) ([]byte, error) {
+	return s.ReadFileContext(context.Background(), name)
+}
+
+// ReadFileContext reads the same captured blob as ReadFile, with the caller's
+// cancellation and deadline applying to the object read.
+func (s *Snapshot) ReadFileContext(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := s.requireFile(name); err != nil {
 		return nil, err
 	}
-	data, err := readGit(context.Background(), s.checkout, "cat-file", "blob", s.entries[name].oid)
+	data, err := readGit(ctx, s.checkout, "cat-file", "blob", s.entries[name].oid)
 	if err != nil {
 		return nil, fmt.Errorf("read %s at %s: %w", name, s.commit, err)
 	}
