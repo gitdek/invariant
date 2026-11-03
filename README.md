@@ -1222,7 +1222,17 @@ git clone https://github.com/gitdek/invariant && cd invariant
 go run ./cmd/invariant verify examples/02-twophase-commit
 ```
 
-The first run pulls about 440 MB of pinned images, and Docker must run linux/amd64 images, as Rosetta does on Apple Silicon. It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
+The first run pulls about 440 MB of pinned images, and Docker must run linux/amd64 images, as Rosetta does on Apple Silicon.
+
+Toolchain file downloads and digest-pinned Docker pulls make at most three attempts, with cancellable waits of one then two seconds. Downloads retry network and interrupted-body failures, HTTP 5xx, 429 and CDN 403 responses; pinned pulls retry registry failures. The final failure keeps its diagnostic. Hash or digest mismatches stop immediately, as do other permanent file-download errors; failed downloads leave no partial destination ([#433's ratified plan](.invariant/plans/issue-433.json), [D-0016](decisions/journal/D-0016.jsonl)).
+
+Before a Docker run needs a missing digest-pinned image, it acquires that exact pin and requested platform through the same retry path. Cached and local images and explicit `--pull=never` keep their behavior. Acquisition preserves the workload's arguments, stdin, output, exit status and proxy suppression; image builds and executed workloads are never retried ([D-0178](decisions/journal/D-0178.jsonl)).
+
+Cancelled named Docker runs remove their container before stopping the client, then remove the same name again after the client exits, catching a late creation. Cleanup uses bounded contexts independent of the cancelled run. `Run`, `Output`, `CombinedOutput` and `Start`/`Wait` wait for cleanup before reporting completion; normal completion needs no forced removal ([D-0111](decisions/journal/D-0111.jsonl), [#433's ratified plan](.invariant/plans/issue-433.json)).
+
+Both Python cancellation leak checks share a listing limited to the current process's `invariant-<pid>-` container names, so another process cannot create a false leak while this process's new containers remain detectable. A failed listing fails the check. CI runs the affected real Python and TLAPS suites ([D-0286](decisions/journal/D-0286.jsonl), [#433's ratified plan](.invariant/plans/issue-433.json)).
+
+Verification prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
 
 <p align="center">
   <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit: every check passed. Pinned statements: 6 of 6 match. Design · TLC: no violations, no deadlock. Reachability: 2 of 2 witnesses reached. Known bugs: 1 of 1 caught. Agreement: code reaches the model's states. One size larger: code reaches the model's states. Code · Gobra: 10 of 10 functions verified. Conformance: every reachable state, no step outside it. Every step tried: in every state reached. Build: go vet, go test." width="100%">

@@ -6,14 +6,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // Pins. Changing any of them changes what a receipt certifies, so each change
@@ -83,35 +86,85 @@ func fetch(ctx context.Context, url, path, want string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	return retryAcquisition(ctx, func() (bool, error) {
+		return fetchAttempt(ctx, url, path, want)
+	})
+}
+
+// retryAcquisition retries only acquisition failures the attempt identifies as
+// transient. Each attempt must release its resources before the next wait.
+func retryAcquisition(ctx context.Context, attempt func() (bool, error)) error {
+	var lastErr error
+	for tries := 0; ; tries++ {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(err, lastErr)
+		}
+		retry, err := attempt()
+		lastErr = err
+		if err == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(err, lastErr)
+		}
+		if !retry || tries == 2 {
+			return lastErr
+		}
+		timer := time.NewTimer(time.Duration(tries+1) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
+}
+
+func fetchAttempt(ctx context.Context, url, path, want string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return false, fmt.Errorf("download %s: unsupported protocol scheme %q", url, req.URL.Scheme)
+	}
+	if req.URL.Hostname() == "" {
+		return false, fmt.Errorf("download %s: missing host", url)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		// A response alongside an error means the redirect policy refused
+		// it; the client already closed that body. Invalid TLS certificates
+		// also need a permanent fix, rather than another network attempt.
+		var certificateErr *tls.CertificateVerificationError
+		return resp == nil && !errors.As(err, &certificateErr), err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: %s", url, resp.Status)
+		retry := resp.StatusCode >= 500 && resp.StatusCode < 600 ||
+			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden
+		return retry, fmt.Errorf("download %s: %s", url, resp.Status)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".download-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
 		tmp.Close()
-		return err
+		// File writes fail with a PathError (or a short write); retry an
+		// interrupted response, but never a local storage failure.
+		var fileErr *os.PathError
+		return !errors.As(err, &fileErr) && !errors.Is(err, io.ErrShortWrite), err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		return fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, want)
+		return false, fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, want)
 	}
-	return os.Rename(tmp.Name(), path)
+	return false, os.Rename(tmp.Name(), path)
 }
 
 func fileSHA256(path string) (string, error) {

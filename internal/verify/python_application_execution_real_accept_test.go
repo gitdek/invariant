@@ -316,13 +316,9 @@ class TaskTests(unittest.TestCase):
 		pa315Select(t, p, "TaskTests.test_wait", "tests.test_tasks.TaskTests.test_wait")
 		before := pa315Tree(t, root)
 		containers := func() map[string]bool {
-			b, err := toolchain.Docker(ctx, "ps", "-aq", "--filter", "name=invariant-").CombinedOutput()
+			m, err := pythonApplicationContainers(ctx)
 			if err != nil {
-				t.Fatalf("list containers: %v %s", err, b)
-			}
-			m := map[string]bool{}
-			for _, id := range strings.Fields(string(b)) {
-				m[id] = true
+				t.Fatal(err)
 			}
 			return m
 		}
