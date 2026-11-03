@@ -449,6 +449,9 @@ jobs:
       - name: TLAPS with the pinned tlapm
         env:
           INVARIANT_TLAPS_REAL: '1'
+          # The soundness test reads tlapm's tests through GitHub's API, whose
+          # unauthenticated limit shared runners use up (#491).
+          GITHUB_TOKEN: ${{ github.token }}
         run: go test ./internal/verify -run '^TestTLAPSReal' -count=1 -timeout 30m
 
   gate:
