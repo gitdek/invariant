@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -38,7 +37,10 @@ func (r *DockerDependencyRunner) OpenChecks(ctx context.Context, q DependencyReq
 	if err := createDependencyContainer(ctx, q, "exec sleep 86400\n"); err != nil {
 		return nil, err
 	}
-	if _, err := dependencyDocker(ctx, "cp", stage+string(os.PathSeparator)+".", q.Token+":/"); err != nil {
+	// Root-owned, as installation's copy is: the container's root, with every
+	// capability dropped, can't write in what docker cp gives the host's uid
+	// (#485).
+	if err := copyDependencyStage(ctx, stage, q.Token); err != nil {
 		return nil, err
 	}
 	if _, err := dependencyDocker(ctx, "start", q.Token); err != nil {
