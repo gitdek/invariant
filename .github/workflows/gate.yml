@@ -377,7 +377,7 @@ jobs:
       - name: Python tests under the pinned image's Python, shard ${{ matrix.shard }}
         env:
           INVARIANT_PYTHON_PINNED: '1'
-        run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/project/ ./cmd/invariant/
+        run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/verify/pythongate/ ./internal/project/ ./cmd/invariant/
 
   real-python:
     # The Python tests again, with every opt-in for real Docker, TLC, Nagini
