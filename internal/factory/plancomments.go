@@ -3,6 +3,7 @@ package factory
 import (
 	"fmt"
 	"html"
+	"regexp"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/formalize"
@@ -60,10 +61,25 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	return post("plan for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
 }
 
-// planText keeps native labels and selectors as text inside Markdown tables.
+// planText keeps native labels and assertions as text inside Markdown
+// tables, as the receipt's componentText does for source-derived text: one
+// pass encodes markup, cell and line delimiters, and GFM's automatic links
+// are defused, since inline HTML does not suppress them.
 func planText(text string) string {
-	return strings.NewReplacer("\\", "&#92;", "`", "&#96;", "|", "&#124;", "*", "&#42;", "_", "&#95;", "[", "&#91;", "]", "&#93;", "\r", "&#13;", "\n", "&#10;").Replace(html.EscapeString(text))
+	text = planEscapes.Replace(text)
+	return planAutolink.ReplaceAllStringFunc(text, func(link string) string {
+		return strings.NewReplacer(":", "&#58;", ".", "&#46;", "@", "&#64;").Replace(link)
+	})
 }
+
+var (
+	planEscapes = strings.NewReplacer(
+		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;",
+		"\\", "&#92;", "`", "&#96;", "|", "&#124;", "*", "&#42;", "_", "&#95;",
+		"[", "&#91;", "]", "&#93;", "~", "&#126;", "\r", "&#13;", "\n", "&#10;",
+	)
+	planAutolink = regexp.MustCompile(`(?i)(https?|ftp)://|www\.|@[a-z0-9._-]+\.[a-z0-9_-]+`)
+)
 
 func planCode(text string) string {
 	fence := "`"

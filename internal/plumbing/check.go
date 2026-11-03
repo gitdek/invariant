@@ -65,6 +65,11 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 	// The copy isn't a checkout, so the sandbox lists its files by walking.
 	c.Run, err = s.Run(ctx, dir, plan)
 	if err != nil {
+		// The built-in runner's failure is the factory's, not the plan's.
+		// A configured check refuses the draft instead.
+		if s.Repository == nil {
+			return nil, err
+		}
 		c.Problem = "acceptance checks could not finish: " + err.Error()
 		return c, nil
 	}
@@ -78,7 +83,7 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		if c.Run.TestResults != nil || c.Run.CommandResults != nil || s.Repository != nil {
 			status := "not_run"
 			for _, result := range c.Run.TestResults {
-				if result.Phase == "accept" && result.File == t.File && result.Name == t.Name && result.Part == t.Part && result.Framework == t.Framework && result.Selector == t.Selector {
+				if result.Phase == "accept" && result.identity() == t.Identity() {
 					status = result.Status
 					break
 				}

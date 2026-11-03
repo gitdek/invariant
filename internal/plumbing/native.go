@@ -124,12 +124,15 @@ func (p *Plan) SourceLanguage(file string) string {
 	return "go"
 }
 
+// nativeText is text a person can read as ratified: no control, format,
+// private-use or line-separating character can hide or reorder what a
+// proposal shows.
 func nativeText(s string) bool {
 	if !utf8.ValidString(s) || strings.TrimSpace(s) == "" {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) {
+		if unicode.In(r, unicode.C, unicode.Zl, unicode.Zp) {
 			return false
 		}
 	}
@@ -137,7 +140,7 @@ func nativeText(s string) bool {
 }
 
 func (t Test) validateNative() error {
-	if !nativeText(t.Part) || !nativeText(t.Selector) || strings.TrimSpace(t.Name) == "" {
+	if !nativeText(t.Part) || !nativeText(t.Selector) || !nativeText(t.Name) {
 		return errors.New("native acceptance needs a label, part and exact selector")
 	}
 	if c, err := clean(t.File); err != nil || c != t.File || strings.ContainsAny(t.File, `\*?[]:`) || !nativeText(t.File) {
@@ -317,6 +320,7 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 		return "", err
 	}
 	var identities []string
+	owners := map[string]bool{}
 	for _, t := range p.Tests {
 		if !t.Native() {
 			continue
@@ -336,6 +340,7 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 		if owner == nil || owner.Name != t.Part {
 			return "", fmt.Errorf("acceptance file %s must execute in its deepest owning part %q", t.File, t.Part)
 		}
+		owners[owner.Name] = true
 		language := map[string]string{"go": "go", "pytest": "python", "vitest": "typescript", "jest": "typescript"}[t.Framework]
 		if owner.Language != language || len(owner.Commands["test_one"].Argv) == 0 || owner.Commands["test_one"].NotApplicable != "" {
 			return "", fmt.Errorf("part %q needs language %s and an applicable test_one for %s", owner.Name, language, t.Identity())
@@ -353,17 +358,21 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 		identities = append(identities, t.identity())
 	}
 	// Canonicalize set-like declarations, keeping argv order and exact bytes.
+	// The whole configuration is policy. Of the declared bytes, only the
+	// lockfiles and inputs of parts running native tests can change what a
+	// selector means, so the repository's rules, documentation and other
+	// parts' dependencies never invalidate a ratified identity.
 	sort.Slice(config.Parts, func(i, j int) bool { return config.Parts[i].Name < config.Parts[j].Name })
 	inputNames := map[string]bool{}
 	for _, names := range [][]string{config.AgentRules, config.CurrentState, config.TrustedPaths} {
 		sort.Strings(names)
 	}
-	for _, name := range append(append([]string(nil), config.AgentRules...), config.CurrentState...) {
-		inputNames[name] = true
-	}
 	for _, part := range config.Parts {
 		sort.Strings(part.Lockfiles)
 		sort.Strings(part.Inputs)
+		if !owners[part.Name] {
+			continue
+		}
 		for _, name := range append(append([]string(nil), part.Lockfiles...), part.Inputs...) {
 			inputNames[name] = true
 		}

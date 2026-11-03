@@ -1303,7 +1303,9 @@
     // A plumbing plan is tested, not proved (D-0105).
     if (w.plan) {
       const files = (w.plan.files || []).length, trusted = (w.plan.trusted || []).length;
-      const tests = (w.plan.tests || []).map((t) => `<li><strong>${esc(t.name)}</strong>${t.framework ? ` · part <code>${esc(t.part)}</code> · ${esc(t.framework)} · <code>${esc(t.file)}</code> · selector <code>${esc(t.selector)}</code>` : ` · <code>${esc(t.file)}</code>`}<p>${esc(t.says)}</p></li>`).join("");
+      // said() lists every test's name and what it says. Native tests also
+      // name the complete identity being ratified.
+      const tests = (w.plan.tests || []).filter((t) => t.framework).map((t) => `<li><strong>${esc(t.name)}</strong> · part <code>${esc(t.part)}</code> · ${esc(t.framework)} · <code>${esc(t.file)}</code> · selector <code>${esc(t.selector)}</code></li>`).join("");
       const sources = Object.entries(w.plan.sources || {}).sort(([a], [b]) => a.localeCompare(b)).map(([file, source]) => {
         const language = w.plan.languages?.[file] || "go";
         return `<details><summary><code>${esc(file)}</code> · ${esc(language)}</summary><pre><code class="language-${esc(language)}">${planSource(source, language)}</code></pre></details>`;

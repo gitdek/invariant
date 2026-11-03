@@ -49,12 +49,9 @@ func (s Sandbox) runRepository(ctx context.Context, root string, plan *Plan) (Re
 	// supplies its remaining allowance in Job.Timeout without pausing for this
 	// host operation. No agent is started, and no fallback can renew the run.
 	_, _, err := synth.RunAgent(ctx, run, synth.Job{}, sandboxLimit(s.Timeout, SandboxTimeout), "")
-	if run.result.CommandResults == nil {
-		run.result.CommandResults = []CommandResult{}
+	// Once the checks ran, their own result already records their error.
+	if !run.ran {
 		run.result.Problems = append(run.result.Problems, fmt.Sprintf("repository checks could not start: %v", err))
-	}
-	if err != nil {
-		run.result.Problems = append(run.result.Problems, err.Error())
 	}
 	if ctx.Err() != nil {
 		run.result.Interrupted = true
@@ -69,6 +66,7 @@ type repositoryCheck struct {
 	plan    *Plan
 	started time.Time
 	result  Result
+	ran     bool
 }
 
 func (*repositoryCheck) Name() string { return "repository checks" }
@@ -81,6 +79,7 @@ func (r *repositoryCheck) Run(ctx context.Context, job synth.Job) (synth.Usage, 
 		defer cancel()
 	}
 	var err error
+	r.ran = true
 	r.result, err = r.sandbox.checkRepository(ctx, r.root, r.plan, r.started.Add(limit))
 	return synth.Usage{}, err
 }
@@ -304,8 +303,7 @@ func (r Result) repositorySummary() string {
 	}
 	for _, result := range r.TestResults {
 		if result.Phase == "accept" {
-			test := Test{Name: result.Name, File: result.File, Part: result.Part, Framework: result.Framework, Selector: result.Selector}
-			fmt.Fprintf(&b, "accept %s: %s (%s)\n", test.Identity(), result.Status, result.Reason)
+			fmt.Fprintf(&b, "accept %s: %s (%s)\n", result.identity(), result.Status, result.Reason)
 		}
 	}
 	for _, problem := range r.Problems {

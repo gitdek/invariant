@@ -163,8 +163,20 @@ func (p *Plan) Touches(n int) map[string]bool {
 // belongs to its nearest enclosing package; new unnamed files cannot
 // introduce another package into the plan's scope.
 func (p *Plan) GoPackages(baseFiles []string) []string {
-	touches := append(append([]string(nil), p.Files...), p.TestFiles()...)
-	return p.packagesIn(append(append([]string(nil), baseFiles...), touches...))
+	return p.packagesIn(append(append([]string(nil), baseFiles...), p.goTouches()...))
+}
+
+// goTouches is what the plan's Go packages come from: its files and its Go
+// acceptance tests. A Python or JavaScript acceptance test is never an
+// embedded asset, so it can't widen the Go regression allowance.
+func (p *Plan) goTouches() []string {
+	out := append([]string(nil), p.Files...)
+	for _, t := range p.Tests {
+		if t.Framework == "" || t.Framework == "go" {
+			out = append(out, t.File)
+		}
+	}
+	return out
 }
 
 // packagesIn finds the packages the plan touches with files as the whole
@@ -178,9 +190,8 @@ func (p *Plan) packagesIn(files []string) []string {
 			have[path.Dir(f)] = true
 		}
 	}
-	touches := append(append([]string(nil), p.Files...), p.TestFiles()...)
 	seen := map[string]bool{}
-	for _, f := range touches {
+	for _, f := range p.goTouches() {
 		for dir := path.Dir(f); ; dir = path.Dir(dir) {
 			if have[dir] {
 				seen[dir] = true
@@ -277,6 +288,15 @@ func (p *Plan) Validate() error {
 	sort.Strings(p.Files)
 	if len(p.Tests) == 0 {
 		return errors.New("the plan has no acceptance tests")
+	}
+	native := 0
+	for _, t := range p.Tests {
+		if t.Native() {
+			native++
+		}
+	}
+	if native > 0 && native < len(p.Tests) {
+		return errors.New("a plan's acceptance tests must all be native or all legacy Go; nothing infers a part for a legacy record")
 	}
 	names := map[string]bool{}
 	identities := map[string]bool{}
@@ -399,8 +419,8 @@ func ReadDraft(ws string) (*Plan, error) {
 		return nil, fmt.Errorf("plan.json: %w", err)
 	}
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(b, &fields); err != nil {
-		return nil, err
+	if err := json.NewDecoder(strings.NewReader(string(b))).Decode(&fields); err != nil {
+		return nil, fmt.Errorf("plan.json: %w", err)
 	}
 	if _, supplied := fields["execution"]; supplied || p.Execution != nil || p.Sources != nil || p.Trusted != nil {
 		return nil, errors.New("plan.json: leave sources, trusted and execution out; the factory reads the tests and captures authority")
@@ -471,7 +491,9 @@ func (l Lock) Write(root string) error {
 		files[f] = src
 	}
 	for f, text := range files {
-		if l.Plan.Native() {
+		// A ratified source is created exclusively. The record itself is
+		// rewritten when the same plan is ratified again.
+		if l.Plan.Native() && f != LockPath(l.Ratified.Issue) {
 			if err := writeNativeFile(root, f, text); err != nil {
 				return err
 			}
