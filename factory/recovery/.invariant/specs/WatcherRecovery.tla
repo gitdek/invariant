@@ -1160,7 +1160,7 @@ WatchedDraftsSettled == (gate = "pass" /\ pr = "draft" /\ watched) ~> MergeDone
 \* The model.
 
 Init ==
-    /\ lane \in {"ordinary", "followup"}
+    /\ lane = "ordinary"
     /\ fence = 0
     /\ follow \in IF lane = "ordinary" THEN {"inactive"} ELSE {FollowInitial}
     /\ given = {}
@@ -1187,6 +1187,14 @@ Init ==
     /\ inRun = [w \in Watchers |-> "none"]
     /\ crashes = 0
     /\ unleased = {}
+
+\* Choose the independent follow-up lane before taking any ordinary step.
+\* Keeping a single initial state also gives the executable model one Init.
+ChooseFollowup ==
+    /\ Init
+    /\ lane' = "followup"
+    /\ follow' = FollowInitial
+    /\ UNCHANGED <<FBase, unleased, fence>>
 
 \* What the issue, its branch and its pull requests show every watcher.
 Shared == <<given, posts, retried, retryPosts, buildPosts, runs, runStarts, ratPushed,
@@ -1640,6 +1648,7 @@ Rest ==
     /\ UNCHANGED <<lane, fence, follow>>
 
 Next ==
+    \/ ChooseFollowup
     \/ \E c \in Cmds : Give(c)
     \/ GiveRetry
     \/ GiveWatch
