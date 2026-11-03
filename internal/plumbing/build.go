@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/regular"
+	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/synth"
 )
 
@@ -74,6 +76,13 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		return nil, err
 	}
 	plan := &lock.Plan
+	var snapshot *repository.Snapshot
+	if b.Sandbox.Repository != nil {
+		snapshot = b.Sandbox.Repository.Snapshot
+	}
+	if err := plan.ValidateRepository(ctx, snapshot); err != nil {
+		return nil, err
+	}
 	ctx, cancel := synth.WithExecutionBudget(ctx, b.Timeout)
 	defer cancel()
 	if err := os.MkdirAll(out, 0o755); err != nil {
@@ -277,7 +286,7 @@ func apply(root, ws string, plan *Plan, extra ...string) error {
 
 // ReadLockFile reads issue n's ratified plan from the checkout at root.
 func ReadLockFile(root string, n int) (*Lock, error) {
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(LockPath(n))))
+	b, err := regular.ReadFile(root, LockPath(n))
 	if err != nil {
 		return nil, fmt.Errorf("the ratified plan's record: %w", err)
 	}

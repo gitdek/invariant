@@ -118,9 +118,49 @@ The trusted Go host runs each selected part's captured `format`, `lint`, `build`
 
 The whole-run deadline starts at `Sandbox.Run` entry, or queue admission, and includes selection, dependency preparation, copying, startup and every command. It is capped at twelve minutes and by the parent and any shorter override. The preparer's own shorter allowance also remains in force. The first test command starts one shared ten-minute test allowance; later parts' setup and commands consume its remaining time without renewal. No later invocation extends either deadline. The existing one-minute startup and fifteen-second cleanup reserves remain; cleanup uses an uncanceled context bounded to fifteen seconds, removes a container before its staging, and completes before the queue releases its slot.
 
-`Result.CommandResults` retains the part, phase and status of every selected command: passed, failed, skipped, running or unstarted (`not_run`), with reasons for skipped phases. Failure stops execution and retains completed work and diagnostics alongside all unfinished commands. Host-side status decides results; command output is never parsed as result records, deadlines or acceptance passes. These are suite outcomes only: `Accepted` entries remain false without individual native acceptance evidence, which belongs to the next issue. Existing Go `TestResults` are unchanged.
+`Result.CommandResults` retains the part, phase and status of every selected command: passed, failed, skipped, running or unstarted (`not_run`), with reasons for skipped phases. Failure stops execution and retains completed work and diagnostics alongside all unfinished commands. Host-side status decides results; command output is never parsed as result records, deadlines or acceptance passes. These are suite outcomes only. Configured checks retain an explicit unstarted acceptance result for each test until an individual adapter exists, including legacy-shaped tests on the configured path. Neither suite success, setup failure nor the legacy `Accepted` map can qualify a draft or build. Invariant's built-in Go evidence path remains operational.
 
 Both the builder's separate test-tool process and fresh final factory checks reach the same captured sandbox through the shared check queue. A configured standalone builder creates a local queue for its build. The IPC request carries only the registered build identity and candidate location, never replacement execution policy. Initial execution, tool calls, final checks, fallback, repairs and review retain the same build allowance. The acceptance tests cover selection, all phase failures, diagnostics, deadlines, cancellation, cleanup, actual Docker arguments and both builder paths; they replace Docker execution and need no network or daemon. The merger ran a real Go part's format, lint, build and test through it against the pinned golang image, after switching its container to the root-owned copy. External plumbing is still disabled. The decision is [D-0311](../decisions/journal/D-0311.jsonl).
+
+## Native acceptance plans
+
+[#503's ratified plan](../.invariant/plans/issue-503.json) extends plumbing acceptance records with explicit native identities. The schema keeps legacy Go records unchanged: `name`, `file`, `says`, with no inferred metadata or execution binding. Their canonical hash bytes and committed locks need no migration or repository contract. A native record supplies **all three** of `part`, `framework` and `selector`; absent, empty or null members of a partial native record are errors. Its `name` is a display label, so several identities may share it.
+
+```json
+{
+  "name": "Worker readiness",
+  "summary": "Require the selected worker case to be ready.",
+  "files": ["worker/main.py"],
+  "tests": [{
+    "name": "ready",
+    "part": "worker",
+    "framework": "pytest",
+    "file": "worker/test_ready.py",
+    "selector": "test_ready.py::TestWorker::test_ready[case one]",
+    "says": "The selected worker case is ready."
+  }]
+}
+```
+
+The draft puts each source under `tests/` at its exact repository path. Sources must be new regular UTF-8 files, reached through safe ancestors, without symbolic or hard links, writable-source overlap or extra source entries. Bytes, including CRLF and a missing final newline, are preserved. The hash pins summary, writable files, each complete `(part, framework, file, selector)` identity, labels, assertions, source bytes and execution digest. File and test declaration order does not affect it; duplicate identities are refused even when their labels differ.
+
+| Framework | Part language and file | Exact selector |
+| :-- | :-- | :-- |
+| `go` | `go`; `*_test.go` | One declared `TestX` function, optionally followed by `/` and the exact subtest path. The top-level function must be unambiguous in its package. Selectors are literal identities, never regular expressions. |
+| `pytest` | `python`; `test_*.py` or `*_test.py` | The source path relative to the part directory, followed by `::function` or `::Class::method`, including a concrete parameter ID when needed. File-only and class-only selections are refused. |
+| `vitest`, `jest` | `typescript`; `.test` or `.spec` files, or files under `__tests__/`, with a JS/TS extension (`js`, `jsx`, `mjs`, `cjs`, `ts`, `tsx`, `mts`, `cts`) | The complete nested test title, including a concrete parameterized case's title. Spaces and punctuation are literal. The file is independently part of the identity. |
+
+The native file must execute in its deepest enclosing part's directory; shared ownership cannot move it to another part. The part's language must match and its captured `test_one` must have executable arguments. Only Go sources undergo Go declaration checks. Python and JavaScript declaration discovery belongs to the pending adapters.
+
+`ReadDraft(workspace)` performs structural inspection. `ReadRepositoryDraft(ctx, workspace, snapshot)` additionally checks the trusted caller's captured repository contract and binds native plans to `execution: {"base": "<captured commit>", "digest": "sha256:<content digest>"}`. Draft `plan.json` cannot supply `execution`, `sources` or `trusted`. Legacy plans acquire no execution field. `Plan.ValidateRepository(ctx, snapshot)` verifies the binding without rewriting it.
+
+The execution digest uses a versioned canonical encoding of the entire captured configuration, the exact bytes of declared lockfiles, inputs, agent rules and current-state documents, and sorted planned paths and native identities. Set-like declarations are sorted; command argument order is preserved. An unrelated commit or different JSON formatting does not change authority. Changed policy or declared input bytes require a new proposal. The captured base remains provenance and is excluded from the ratified hash; verification at an identical contract on another commit leaves that provenance untouched. Candidate files and serialized digest claims never supply execution policy.
+
+Saved proposals, revisions, ratification comments, locks, builder prompts and dashboard views retain full identities and verbatim source. Comments and the dashboard show language-tagged sources and treat native labels as text. Configured planning owns a local check queue: the separate tool sends only the draft workspace, while the caller retains the original checkout and captured snapshot for both checks and final proposal creation. Build queue registrations retain the original plan and authority; child requests cannot replace either. Staging and scope keep the acceptance sources and selectors fixed against the original baseline through repairs. The existing allowance for new regular Go regression files is unchanged; it does not admit unnamed Python or JavaScript tests.
+
+All four native execution adapters are pending. Native execution returns an explicit unstarted or refused acceptance result with the full identity before dependency preparation, and never falls back to the built-in Go runner. Configured results require individual completed failure evidence to propose a draft and individual passes to qualify a build; skipped, running, refused and unstarted results cannot qualify either. Unsupported native builds cannot reach review approval or ready status. External plumbing remains disabled ([D-0121](../decisions/journal/D-0121.jsonl)).
+
+The merger records this extension of D-0107 before the next issue, grounded in D-0105, D-0107, D-0108, D-0121, D-0122, D-0162, D-0173, D-0281, D-0294, D-0301 and D-0305, and the captured execution API from #484. Decision recording and unavailable Docker or network checks are merger work; affected CI Python and TLAPS suites remain required.
 
 ## Retries
 

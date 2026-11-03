@@ -20,6 +20,20 @@ import (
 // plan's packages taken from the workspace. root remains the original
 // checkout throughout repairs. Nothing else the build wrote counts.
 func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
+	if plan.Native() {
+		if err := plan.Validate(); err != nil {
+			return err
+		}
+		if err := plan.validateExecution(true); err != nil {
+			return err
+		}
+		for f, source := range plan.Sources {
+			data, err := regular.ReadFile(root, f)
+			if err != nil || string(data) != source {
+				return fmt.Errorf("original acceptance source %s differs from the ratified plan: %v", f, err)
+			}
+		}
+	}
 	writable, err := writableFiles(ctx, root, ws, plan)
 	if err != nil {
 		return err

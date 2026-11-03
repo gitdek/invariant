@@ -67,6 +67,11 @@ type TestResult struct {
 	Status  string `json:"status"`
 	Shard   int    `json:"shard,omitempty"`
 	File    string `json:"file,omitempty"`
+
+	Part      string `json:"part,omitempty"`
+	Framework string `json:"framework,omitempty"`
+	Selector  string `json:"selector,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // Result is what one run found.
@@ -97,12 +102,30 @@ func (r Result) Passed() bool {
 			return false
 		}
 	}
-	for _, ok := range r.Accepted {
-		if !ok {
-			return false
+	if r.CommandResults == nil {
+		for _, ok := range r.Accepted {
+			if !ok {
+				return false
+			}
+		}
+	} else {
+		evidence := map[string]bool{}
+		for _, result := range r.TestResults {
+			if result.Phase == "accept" && result.Status == "passed" {
+				test := Test{Name: result.Name, File: result.File, Part: result.Part, Framework: result.Framework, Selector: result.Selector}
+				evidence[test.Identity()] = true
+			}
+		}
+		for identity := range r.Accepted {
+			if !evidence[identity] {
+				return false
+			}
 		}
 	}
 	for _, test := range r.TestResults {
+		if test.Phase == "accept" && test.Status != "passed" {
+			return false
+		}
 		if test.Status != "passed" && test.Status != "skipped" {
 			return false
 		}
@@ -113,6 +136,16 @@ func (r Result) Passed() bool {
 // Failing is every acceptance test that didn't pass.
 func (r Result) Failing() []string {
 	var out []string
+	if r.CommandResults != nil {
+		for _, result := range r.TestResults {
+			if result.Phase == "accept" && result.Status != "passed" {
+				test := Test{Name: result.Name, File: result.File, Part: result.Part, Framework: result.Framework, Selector: result.Selector}
+				out = append(out, test.Identity())
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
 	for t, ok := range r.Accepted {
 		if !ok {
 			out = append(out, t)
@@ -139,6 +172,11 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 	}
 	if s.Repository != nil {
 		return s.runRepository(ctx, root, plan)
+	}
+	if plan.Native() || plan != nil && plan.Execution != nil {
+		result = unstartedAcceptance(plan)
+		result.Problems = append(result.Problems, "native acceptance needs captured repository authority and an execution adapter")
+		return result, nil
 	}
 	end := time.Now().Add(sandboxLimit(s.Timeout, SandboxTimeout))
 	ownDeadline := true

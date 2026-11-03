@@ -38,14 +38,20 @@ type Plan struct {
 	// Trusted is the files the change touches in the trusted base, which
 	// only a person merges. The factory sets it; the hash leaves it out.
 	Trusted []string `json:"trusted,omitempty"`
+	// Execution is supplied by the trusted caller, never by a draft.
+	Execution *Execution `json:"execution,omitempty"`
 }
 
-// Test is one acceptance test: a Go test function in one of the plan's test
-// files.
+// Test is one acceptance test. Without native metadata Name is a Go function;
+// with it Name is a display label and Selector identifies the exact test.
 type Test struct {
-	Name string `json:"name"` // the function, as TestGraphShowsEveryDecision
+	Name string `json:"name"` // the legacy function name, or a native display label
 	File string `json:"file"` // its file, from the repository's root
 	Says string `json:"says"` // what it shows, in plain words
+
+	Part      string `json:"part,omitempty"`
+	Framework string `json:"framework,omitempty"`
+	Selector  string `json:"selector,omitempty"`
 }
 
 // TrustedBase is what only a person merges (D-0105): the gate and the
@@ -101,10 +107,22 @@ func LockIssue(p string) int {
 // person's ratification names it.
 func (p *Plan) Hash() string {
 	c := Plan{Summary: p.Summary, Files: append([]string(nil), p.Files...), Tests: append([]Test(nil), p.Tests...), Sources: p.Sources}
+	if p.Execution != nil {
+		c.Execution = &Execution{Digest: p.Execution.Digest}
+	}
 	sort.Strings(c.Files)
 	sort.Slice(c.Tests, func(i, j int) bool {
 		if c.Tests[i].File != c.Tests[j].File {
 			return c.Tests[i].File < c.Tests[j].File
+		}
+		if c.Tests[i].Part != c.Tests[j].Part {
+			return c.Tests[i].Part < c.Tests[j].Part
+		}
+		if c.Tests[i].Framework != c.Tests[j].Framework {
+			return c.Tests[i].Framework < c.Tests[j].Framework
+		}
+		if c.Tests[i].Selector != c.Tests[j].Selector {
+			return c.Tests[i].Selector < c.Tests[j].Selector
 		}
 		return c.Tests[i].Name < c.Tests[j].Name
 	})
@@ -261,24 +279,54 @@ func (p *Plan) Validate() error {
 		return errors.New("the plan has no acceptance tests")
 	}
 	names := map[string]bool{}
+	identities := map[string]bool{}
+	frameworks := map[string]string{}
+	goFiles := map[string]string{}
 	for i, t := range p.Tests {
 		c, err := clean(t.File)
 		if err != nil {
 			return err
 		}
+		if t.Native() {
+			if err := t.validateNative(); err != nil {
+				return err
+			}
+			if identities[t.identity()] {
+				return fmt.Errorf("duplicate acceptance identity: %s", t.Identity())
+			}
+			identities[t.identity()] = true
+		}
+		if framework, seen := frameworks[c]; seen && framework != t.Framework {
+			return fmt.Errorf("acceptance file %s has conflicting frameworks", c)
+		}
+		frameworks[c] = t.Framework
 		switch {
-		case !strings.HasSuffix(c, "_test.go"):
+		case !t.Native() && !strings.HasSuffix(c, "_test.go"):
 			return fmt.Errorf("acceptance test file %s must be a Go test file, ending in _test.go", c)
 		case files[c]:
 			return fmt.Errorf("%s is both a file the build writes and an acceptance test file; the build can't change the tests", c)
-		case !testName.MatchString(t.Name):
+		case !t.Native() && !testName.MatchString(t.Name):
 			return fmt.Errorf("acceptance test %q must be named like TestGraphShowsEveryDecision", t.Name)
 		case strings.TrimSpace(t.Says) == "":
 			return fmt.Errorf("acceptance test %s doesn't say what it shows", t.Name)
-		case names[path.Dir(c)+"."+t.Name]:
+		case !t.Native() && names[path.Dir(c)+"."+t.Name]:
 			return fmt.Errorf("two acceptance tests in %s are named %s", path.Dir(c), t.Name)
 		}
-		names[path.Dir(c)+"."+t.Name], p.Tests[i].File = true, c
+		if !t.Native() {
+			names[path.Dir(c)+"."+t.Name] = true
+		}
+		if !t.Native() || t.Framework == "go" {
+			name := t.Name
+			if t.Native() {
+				name = strings.Split(t.Selector, "/")[0]
+			}
+			key := path.Dir(c) + "." + name
+			if previous := goFiles[key]; previous != "" && previous != c {
+				return fmt.Errorf("ambiguous Go acceptance function %s in %s and %s", name, previous, c)
+			}
+			goFiles[key] = c
+		}
+		p.Tests[i].File = c
 	}
 	for f := range p.Sources {
 		if c, err := clean(f); err != nil || c != f {
@@ -290,12 +338,15 @@ func (p *Plan) Validate() error {
 		if !ok {
 			return fmt.Errorf("the plan has no text for acceptance test file %s", f)
 		}
-		if err := declares(f, src, p.Tests); err != nil {
+		if err := acceptanceDeclarations(f, src, p.Tests); err != nil {
 			return err
 		}
 	}
 	if len(p.Sources) != len(p.TestFiles()) {
 		return errors.New("the plan's test sources hold a file no acceptance test is in")
+	}
+	if err := p.validateExecution(false); err != nil {
+		return err
 	}
 	p.Trusted = nil
 	for f := range p.Touches(0) {
@@ -347,8 +398,12 @@ func ReadDraft(ws string) (*Plan, error) {
 	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("plan.json: %w", err)
 	}
-	if p.Sources != nil || p.Trusted != nil {
-		return nil, errors.New("plan.json: leave sources and trusted out; the factory reads the tests from tests/ and works out what's trusted")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return nil, err
+	}
+	if _, supplied := fields["execution"]; supplied || p.Execution != nil || p.Sources != nil || p.Trusted != nil {
+		return nil, errors.New("plan.json: leave sources, trusted and execution out; the factory reads the tests and captures authority")
 	}
 	p.Sources = map[string]string{}
 	for _, t := range p.Tests {
@@ -365,7 +420,15 @@ func ReadDraft(ws string) (*Plan, error) {
 		}
 		p.Sources[c] = string(src)
 	}
-	return &p, p.Validate()
+	if err := p.Validate(); err != nil {
+		return &p, err
+	}
+	if p.Native() {
+		if err := nativeSourceEntries(ws, p.Sources); err != nil {
+			return &p, err
+		}
+	}
+	return &p, nil
 }
 
 // Lock is a ratified plan as the repository records it: who ratified which
@@ -388,6 +451,17 @@ type Ratification struct {
 // Write records the ratified plan in a checkout at root: its record, and
 // each acceptance test file at its path.
 func (l Lock) Write(root string) error {
+	if l.Plan.Native() {
+		if err := l.Plan.Validate(); err != nil {
+			return err
+		}
+		if err := l.Plan.validateExecution(true); err != nil {
+			return err
+		}
+		if l.Plan.Hash() != l.Ratified.Proposal {
+			return errors.New("the native plan is not the one ratified")
+		}
+	}
 	b, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
 		return err
@@ -397,6 +471,12 @@ func (l Lock) Write(root string) error {
 		files[f] = src
 	}
 	for f, text := range files {
+		if l.Plan.Native() {
+			if err := writeNativeFile(root, f, text); err != nil {
+				return err
+			}
+			continue
+		}
 		p := filepath.Join(root, filepath.FromSlash(f))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
@@ -416,6 +496,9 @@ func ReadLock(b []byte) (*Lock, error) {
 		return nil, err
 	}
 	if err := l.Plan.Validate(); err != nil {
+		return nil, err
+	}
+	if err := l.Plan.validateExecution(true); err != nil {
 		return nil, err
 	}
 	if h := l.Plan.Hash(); h != l.Ratified.Proposal {

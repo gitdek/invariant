@@ -92,6 +92,7 @@ type checkBuild struct {
 	stop    func() bool
 	sandbox Sandbox
 	plan    *Plan
+	repo    string // nonempty only for a registered planning check
 	wg      sync.WaitGroup
 	mu      sync.Mutex
 	waiting int
@@ -100,6 +101,21 @@ type checkBuild struct {
 }
 
 func (q *CheckQueue) register(ctx context.Context, sandbox Sandbox, plan *Plan) (*checkBuild, error) {
+	if plan != nil {
+		data, err := json.Marshal(plan)
+		if err != nil {
+			return nil, err
+		}
+		var captured Plan
+		if err := json.Unmarshal(data, &captured); err != nil {
+			return nil, err
+		}
+		plan = &captured
+	}
+	if sandbox.Repository != nil {
+		captured := *sandbox.Repository
+		sandbox.Repository = &captured
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if err := q.ctx.Err(); err != nil {
@@ -113,6 +129,21 @@ func (q *CheckQueue) register(ctx context.Context, sandbox Sandbox, plan *Plan) 
 	b.stop = context.AfterFunc(q.ctx, cancel)
 	q.builds[b.id] = b
 	return b, nil
+}
+
+// RegisterPlan gives the planning tool an endpoint whose owner retains the
+// original repository and captured snapshot. Requests carry only a workspace.
+func (q *CheckQueue) RegisterPlan(ctx context.Context, sandbox Sandbox, repo string) (*CheckClient, func(), error) {
+	if repo == "" || sandbox.Repository == nil || sandbox.Repository.Snapshot == nil {
+		return nil, nil, errors.New("configured planning needs a repository and captured snapshot")
+	}
+	sandbox.Original = repo
+	b, err := q.register(ctx, sandbox, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	b.repo = repo
+	return &CheckClient{Address: q.listener.Addr().String(), Build: b.id}, func() { b.finish() }, nil
 }
 
 func (b *checkBuild) finish() bool {
@@ -154,8 +185,30 @@ func (b *checkBuild) wait(start bool) {
 }
 
 func (b *checkBuild) run(ctx context.Context, root string) (Result, error) {
-	if err := ctx.Err(); err != nil {
+	if b.repo != "" {
+		return Result{}, errors.New("a planning registration cannot run a build")
+	}
+	if err := b.admit(ctx); err != nil {
 		return Result{}, err
+	}
+	defer func() { <-b.queue.slots }()
+	return b.sandbox.Run(ctx, root, b.plan)
+}
+
+func (b *checkBuild) check(ctx context.Context, ws string) (*Checked, error) {
+	if b.repo == "" {
+		return nil, errors.New("a build registration cannot replace its plan")
+	}
+	if err := b.admit(ctx); err != nil {
+		return nil, err
+	}
+	defer func() { <-b.queue.slots }()
+	return Check(ctx, ws, b.repo, b.sandbox)
+}
+
+func (b *checkBuild) admit(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	select {
 	case b.queue.slots <- struct{}{}:
@@ -166,14 +219,14 @@ func (b *checkBuild) run(ctx context.Context, root string) (Result, error) {
 			b.wait(false)
 		case <-ctx.Done():
 			b.wait(false)
-			return Result{}, fmt.Errorf("waiting for checks: %w", ctx.Err())
+			return fmt.Errorf("waiting for checks: %w", ctx.Err())
 		}
 	}
-	defer func() { <-b.queue.slots }()
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		<-b.queue.slots
+		return err
 	}
-	return b.sandbox.Run(ctx, root, b.plan)
+	return nil
 }
 
 // CheckClient identifies a registered build on the watcher's queue. A missing
@@ -184,14 +237,16 @@ type CheckClient struct {
 }
 
 type checkRequest struct {
-	Build string
-	Root  string
+	Build     string
+	Root      string
+	Workspace string
 }
 
 type checkResponse struct {
-	Result Result
-	Error  string
-	Cause  string
+	Result  Result
+	Checked *Checked
+	Error   string
+	Cause   string
 }
 
 func (q *CheckQueue) serve(conn net.Conn) {
@@ -227,7 +282,11 @@ func (q *CheckQueue) serve(conn net.Conn) {
 		}()
 		defer func() { conn.Close(); <-gone }()
 		var err error
-		response.Result, err = b.run(ctx, request.Root)
+		if request.Workspace != "" {
+			response.Checked, err = b.check(ctx, request.Workspace)
+		} else {
+			response.Result, err = b.run(ctx, request.Root)
+		}
 		if err != nil {
 			response.Error = err.Error()
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -242,22 +301,35 @@ func (q *CheckQueue) serve(conn net.Conn) {
 }
 
 func (c *CheckClient) run(ctx context.Context, root string) (Result, error) {
+	response, err := c.call(ctx, checkRequest{Build: c.Build, Root: root})
+	return response.Result, err
+}
+
+func (c *CheckClient) check(ctx context.Context, ws string) (*Checked, error) {
+	response, err := c.call(ctx, checkRequest{Build: c.Build, Workspace: ws})
+	if err == nil && response.Checked == nil {
+		err = errors.New("the check queue returned no planning evidence")
+	}
+	return response.Checked, err
+}
+
+func (c *CheckClient) call(ctx context.Context, request checkRequest) (checkResponse, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", c.Address)
 	if err != nil {
-		return Result{}, fmt.Errorf("the check queue is unavailable: %w", err)
+		return checkResponse{}, fmt.Errorf("the check queue is unavailable: %w", err)
 	}
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
-	if err := json.NewEncoder(conn).Encode(checkRequest{Build: c.Build, Root: root}); err != nil {
-		return Result{}, fmt.Errorf("requesting checks: %w", err)
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return checkResponse{}, fmt.Errorf("requesting checks: %w", err)
 	}
 	var response checkResponse
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
 		if ctx.Err() != nil {
-			return Result{}, ctx.Err()
+			return checkResponse{}, ctx.Err()
 		}
-		return Result{}, fmt.Errorf("the check queue stopped: %w", err)
+		return checkResponse{}, fmt.Errorf("the check queue stopped: %w", err)
 	}
 	if response.Error != "" {
 		err := errors.New(response.Error)
@@ -267,7 +339,7 @@ func (c *CheckClient) run(ctx context.Context, root string) (Result, error) {
 		case "canceled":
 			err = fmt.Errorf("%s: %w", response.Error, context.Canceled)
 		}
-		return response.Result, err
+		return response, err
 	}
-	return response.Result, nil
+	return response, nil
 }

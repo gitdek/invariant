@@ -343,12 +343,12 @@ func mcpCmd(ctx context.Context, args []string) int {
 	pipes := fs.Bool("plumbing", false, "serve the test tool to an agent building issue -issue's ratified plan, from the checkout at -ratified")
 	issue := fs.Int("issue", 0, "with -plumbing: the issue whose plan is built")
 	cache := fs.String("cache", "", "with -plan or -plumbing: a Go build cache to keep between test runs")
-	checkQueue := fs.String("check-queue", "", "with -plumbing: the watcher's check queue endpoint")
-	checkBuild := fs.String("check-build", "", "with -plumbing: the build registered on the check queue")
+	checkQueue := fs.String("check-queue", "", "with -plan or -plumbing: the caller's check queue endpoint")
+	checkBuild := fs.String("check-build", "", "with -plan or -plumbing: the registration on the check queue")
 	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
 	fs.Parse(args)
-	if (*checkQueue != "" || *checkBuild != "") && (!*pipes || *checkQueue == "" || *checkBuild == "") {
-		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plumbing, -check-queue and -check-build")
+	if (*checkQueue != "" || *checkBuild != "") && ((!*pipes && !*plan) || *checkQueue == "" || *checkBuild == "") {
+		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plan or -plumbing, -check-queue and -check-build")
 		return 2
 	}
 	if *graph {
