@@ -52,15 +52,31 @@ done
 mine=$(printf '%s' "$all" | awk -v n="$n" -v k="$k" 'NF && (i++ % n) == k - 1')
 echo "Shard $shard runs $(printf '%s\n' "$mine" | grep -c . || true) of $(printf '%s' "$all" | grep -c . || true) tests."
 
+# Each package's share writes go test's JSON, which keeps every test's time.
+# Its output, build output included, is printed as go test would print it,
+# and then the shard's 20 slowest top-level tests, so a test that grows
+# shows in CI's log (#436).
+events=$(mktemp -d)
+trap 'rm -rf "$events"' EXIT
 pids=()
+i=0
 for pkg in "$@"; do
   names=$(printf '%s\n' "$mine" | awk -v p="$pkg" '$1 == p { print $2 }' | paste -sd '|' -)
   [ -n "$names" ] || continue
-  go test ${tag:+-tags "$tag"} ${flags[@]+"${flags[@]}"} -run "^($names)\$" "$pkg" &
+  i=$((i + 1))
+  go test -json ${tag:+-tags "$tag"} ${flags[@]+"${flags[@]}"} -run "^($names)\$" "$pkg" > "$events/$i.json" &
   pids+=($!)
 done
 status=0
 for pid in ${pids[@]+"${pids[@]}"}; do
   wait "$pid" || status=1
 done
+for f in "$events"/*.json; do
+  [ -e "$f" ] || continue
+  jq -rj 'select(.Action == "output" or .Action == "build-output") | .Output // empty' "$f"
+done
+if compgen -G "$events/*.json" > /dev/null; then
+  echo "The shard's 20 slowest tests, in seconds:"
+  cat "$events"/*.json | jq -r 'select((.Action == "pass" or .Action == "fail") and .Test != null and (.Test | contains("/") | not)) | "\(.Elapsed)\t\(.Action)\t\(.Package)\t\(.Test)"' | sort -rn | head -20
+fi
 exit $status

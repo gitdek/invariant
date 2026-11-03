@@ -190,7 +190,9 @@ func TestTheRepositorysHandLocksHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n < 2 || len(problems) > 0 {
+	// factory/recovery's lock is ratified by hand; #428 ratified
+	// factory/protocol's amendment on its issue (#440).
+	if n < 1 || len(problems) > 0 {
 		t.Fatalf("checked %d of the repository's locks ratified by hand, with problems:\n%s", n, strings.Join(problems, "\n"))
 	}
 }

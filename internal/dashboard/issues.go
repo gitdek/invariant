@@ -187,7 +187,9 @@ type Span struct {
 // markers alone, as they were before it had an App (D-0041).
 func Lane(issue github.Issue, comments []github.Comment, self string, now time.Time) Issue {
 	opened := parseTime(issue.CreatedAt)
-	l := Issue{Number: issue.Number, Title: issue.Title, Open: issue.State == "open", Opened: opened}
+	// Lists, never null: a closed issue with one event has no span, and the
+	// page reads both of every issue (#430).
+	l := Issue{Number: issue.Number, Title: issue.Title, Open: issue.State == "open", Opened: opened, Events: []Event{}, Spans: []Span{}}
 	var said []saidAt
 	for _, lab := range issue.Labels {
 		if s, ok := stageLabels[lab.Name]; ok {
