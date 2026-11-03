@@ -2,7 +2,7 @@
 
 How the gate checks an existing Python application as it is, without changing a line: adopting it, exploring every state, its dependencies, the evidence it records for each component in ordinary Go and Python, trusted contracts for what the application calls, and proving a function in place. [The README](../README.md#the-gate) lists every check the gate runs, and [the gate's page](gate.md) what each claim on a receipt needs.
 
-Python 3.12, 3.13 and 3.14 are supported. Execution uses the separately pinned Python 3.13 image, which also supplies the plumbing sandbox's interpreter. CI's general verification jobs use 3.12 and its pinned-Python jobs use 3.13 ([D-0304](../decisions/journal/D-0304.jsonl)); supporting 3.14 does not change that execution image.
+Python 3.12, 3.13 and 3.14 are supported. Execution uses the separately pinned Python 3.13 image, which also supplies the plumbing sandbox's interpreter. CI's general verification jobs use 3.12, its pinned-Python jobs use 3.13 ([D-0304](../decisions/journal/D-0304.jsonl)), and `invariant/python-latest` runs the Python tests under 3.14 ([D-0309](../decisions/journal/D-0309.jsonl)); supporting 3.14 does not change that execution image.
 
 ## Manually adopting an existing Python application
 
