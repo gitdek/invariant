@@ -210,11 +210,13 @@ func pa321Positive(t *testing.T, real bool, source string) {
 }
 
 func TestPythonApplicationExecutionModuleObservations(t *testing.T) {
+	t.Parallel()
 	for _, real := range []bool{false, true} {
 		if real && os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
 			continue
 		}
 		t.Run(map[bool]string{false: "local", true: "Docker"}[real], func(t *testing.T) {
+			t.Parallel()
 			variants := map[string]string{
 				"worker target":      pa321Worker,
 				"async target":       pa321Async,
@@ -224,9 +226,13 @@ func TestPythonApplicationExecutionModuleObservations(t *testing.T) {
 			}
 			variants["synchronous"] = strings.Replace(variants["synchronous"], "    await asyncio.sleep(0.001)\n", "", 1)
 			for name, body := range variants {
-				t.Run(name, func(t *testing.T) { pa321Positive(t, real, pa321State+body) })
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					pa321Positive(t, real, pa321State+body)
+				})
 			}
 			t.Run("replay", func(t *testing.T) {
+				t.Parallel()
 				_, p := pa321Fixture(t, pa321State+pa321Worker, pa321Driver)
 				opts := pa318Options(t, real, new(int))
 				execute := opts.Execute
@@ -253,6 +259,7 @@ func TestPythonApplicationExecutionModuleObservations(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionModuleEntryDefaults(t *testing.T) {
+	t.Parallel()
 	// Both kinds of defaults are opaque, non-JSON objects created by a call,
 	// as with framework parameter declarations. Neither affects read-back.
 	defaults := "def Form(default):\n    return object()\n" + strings.Replace(pa321Worker,
@@ -263,13 +270,17 @@ func TestPythonApplicationExecutionModuleEntryDefaults(t *testing.T) {
 			continue
 		}
 		t.Run(map[bool]string{false: "local", true: "Docker"}[real], func(t *testing.T) {
+			t.Parallel()
 			// Reuse the full copied-state, binding, repeatability and relocation
 			// assertions. A blanket refusal cannot satisfy this acceptance test.
 			pa321Positive(t, real, pa321State+defaults)
 			syncDefaults := strings.Replace(defaults, "async def submit", "def submit", 1)
 			syncDefaults = strings.ReplaceAll(syncDefaults, "    await asyncio.sleep(0)\n", "")
 			syncDefaults = strings.ReplaceAll(syncDefaults, "    await asyncio.sleep(0.001)\n", "")
-			t.Run("sync entry", func(t *testing.T) { pa321Positive(t, real, pa321State+syncDefaults) })
+			t.Run("sync entry", func(t *testing.T) {
+				t.Parallel()
+				pa321Positive(t, real, pa321State+syncDefaults)
+			})
 			// Replacement values still satisfy the entry's type assertions and
 			// produce the same lifecycle. Only default integrity can refuse them.
 			for _, replacement := range []struct{ name, statement string }{
@@ -283,6 +294,7 @@ func TestPythonApplicationExecutionModuleEntryDefaults(t *testing.T) {
 						phase, anchor = "between steps", "        life.step(app.submit, {'upload': object()}, status='other')"
 					}
 					t.Run(replacement.name+" "+phase, func(t *testing.T) {
+						t.Parallel()
 						driver := strings.Replace(pa321Driver, anchor, "        "+replacement.statement+"\n"+anchor, 1)
 						_, p := pa321Fixture(t, pa321State+defaults, driver)
 						s := pa315Prepare(t, p, pa318Options(t, real, new(int)))
@@ -296,6 +308,7 @@ func TestPythonApplicationExecutionModuleEntryDefaults(t *testing.T) {
 				"def advance(key, status, *, unused=Form('')):",
 			} {
 				t.Run("target still refuses "+declaration, func(t *testing.T) {
+					t.Parallel()
 					source := strings.Replace(defaults, "def advance(key, status):", declaration, 1)
 					_, p := pa321Fixture(t, pa321State+source, pa321Driver)
 					s := pa315Prepare(t, p, pa318Options(t, real, new(int)))
@@ -308,11 +321,13 @@ func TestPythonApplicationExecutionModuleEntryDefaults(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionModuleRefusals(t *testing.T) {
+	t.Parallel()
 	for _, real := range []bool{false, true} {
 		if real && os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
 			continue
 		}
 		t.Run(map[bool]string{false: "local", true: "Docker"}[real], func(t *testing.T) {
+			t.Parallel()
 			// A blanket rejection of the new form is not a passing refusal test.
 			pa321Positive(t, real, pa321State+pa321Worker)
 			base := pa321State + pa321Worker
@@ -342,6 +357,7 @@ func TestPythonApplicationExecutionModuleRefusals(t *testing.T) {
 			}
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
+					t.Parallel()
 					root, p := pa321Fixture(t, tc.source, tc.driver)
 					before := pa315Tree(t, root)
 					s := pa315Prepare(t, p, pa318Options(t, real, new(int)))

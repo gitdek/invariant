@@ -16,6 +16,7 @@ import (
 )
 
 func TestPythonApplicationExecutionModuleReturnedAwaitable(t *testing.T) {
+	t.Parallel()
 	source := pa321State + strings.Split(pa321Async, "@register\nasync def submit")[0] + `
 class Pending:
     def __init__(self, request, status):
@@ -34,6 +35,7 @@ def submit(request, *, status):
 }
 
 func TestPythonApplicationExecutionModuleInterleaving(t *testing.T) {
+	t.Parallel()
 	const source = `left, right = [], []
 def advance(side, value):
     side.append(value)
@@ -79,12 +81,14 @@ if __name__ == '__main__': drive()
 }
 
 func TestPythonApplicationExecutionModuleFreshness(t *testing.T) {
+	t.Parallel()
 	for _, real := range []bool{false, true} {
 		if real && os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
 			continue
 		}
 		for _, which := range []string{"staged before", "staged during", "observer before", "observer during"} {
 			t.Run(which, func(t *testing.T) {
+				t.Parallel()
 				root, p := pa321Fixture(t, pa321State+pa321Worker, pa321Driver)
 				before := pa315Tree(t, root)
 				opts := pa318Options(t, real, new(int))
@@ -129,6 +133,7 @@ func TestPythonApplicationExecutionModuleFreshness(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionModuleCancellation(t *testing.T) {
+	t.Parallel()
 	for _, real := range []bool{false, true} {
 		if real && os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
 			continue
@@ -162,6 +167,7 @@ func TestPythonApplicationExecutionModuleCancellation(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionModuleAdditionalRefusals(t *testing.T) {
+	t.Parallel()
 	for _, real := range []bool{false, true} {
 		if real && os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
 			continue
@@ -227,6 +233,7 @@ async def submit(request, *, status):
 `,
 		} {
 			t.Run(name, func(t *testing.T) {
+				t.Parallel()
 				source := pa321State + "def advance(key, status):\n    finish(key, status)\n" + body
 				if name == "unfinished target coroutine" {
 					source = pa321State + strings.Split(pa321Async, "@register\nasync def submit")[0] + body
@@ -248,6 +255,7 @@ async def submit(request, *, status):
 // executor wrapper. These cases exercise independent Go validation after MAC
 // verification, rather than merely proving that an invalid MAC is refused.
 func TestPythonApplicationExecutionModuleAuthenticatedFields(t *testing.T) {
+	t.Parallel()
 	for name, corrupt := range map[string]func([]byte) []byte{
 		"unknown form": func(b []byte) []byte {
 			return bytes.ReplaceAll(b, []byte(`"form": "module"`), []byte(`"form": "other"`))
@@ -271,6 +279,7 @@ func TestPythonApplicationExecutionModuleAuthenticatedFields(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			_, p := pa321Fixture(t, pa321State+pa321Worker, pa321Driver)
 			opts := pa318Options(t, false, new(int))
 			execute := opts.Execute
@@ -305,6 +314,7 @@ func TestPythonApplicationExecutionModuleAuthenticatedFields(t *testing.T) {
 }
 
 func TestPythonApplicationModuleModelEncoding(t *testing.T) {
+	t.Parallel()
 	state := map[string]any{"rows": []any{map[string]any{"n": json.Number("9007199254740993"), "items": []any{true, "x"}}}}
 	before := pa321JSON(t, state)
 	value, err := pythonApplicationModelValue(state)

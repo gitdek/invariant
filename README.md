@@ -1311,6 +1311,20 @@ Every watcher's drafts and builds also keep their agent's public activity, the c
 
 At `/act`, behind Cloudflare Access, **Show shell commands** displays each running step's shell invocations verbatim beside its activity strip, with their existing kind and start/end times. It starts off on every page load. Turning it off, losing access, ending a step or replacing its run clears the display, and a late response cannot restore it. Commands are inert text, with no tool output or reasoning, and retained only for the strip's bounded recent window. Only an authenticated `GET /act/api/live.json?commands=1` includes them, with `Cache-Control: no-store`; the default private response, public responses and agent listener never include command text. This private view follows [#236's ratified plan](.invariant/plans/issue-236.json), an exception to [D-0116](decisions/journal/D-0116.jsonl) for this page only ([D-0165](decisions/journal/D-0165.jsonl)), behind the existing [Access boundary](decisions/journal/D-0065.jsonl).
 
+## Testing
+
+Run unit tests from the repository root with `go test -timeout 10m ./...`. Python application tests need `python3` 3.12 or newer on PATH to run rather than skip. Use Python 3.13 for pinned-runtime checks (`INVARIANT_PYTHON_PINNED=1`) and timing measurements. Each example is a separate Go module, outside the root unit-test command.
+
+Independent Python application proof, contract, execution, observation, held-call and module cases run in parallel. Each scheduled case owns its mutable fixtures, temporary paths and counters, and starts its deadlines after scheduling. Tests that change process environment, working directory or package globals stay serial, including tool traps and gate overrides. The complete local `TestPythonApplicationGateFailures` and `TestPythonApplicationGateFingerprints` suites live in `internal/verify/pythongate`, where they run serially under `go test ./...`, even with `INVARIANT_PYTHON_PINNED=1`. Their original entry points in `internal/verify` skip unless `INVARIANT_PYTHON_APPLICATION_GATE_REAL=1`; when enabled, they run both the local and real branches, keeping the existing real-Python CI selection's coverage.
+
+With real-tool opt-ins disabled, each package must finish an uncached run within eight minutes on CI runners at Go's default parallelism:
+
+```sh
+go test -count=1 -timeout 8m ./internal/verify ./internal/verify/pythongate
+```
+
+Scheduling changes are checked with shuffled repeated runs and the race detector. All existing assertions, refusal cases, fixture cleanup and real-tool opt-ins stay in place; moving the two entry points adds no other skips. The real-tool commands above keep their distinct timeouts: 30m for Python execution and dependencies, 45m for sampled gate and trusted-contract checks, and 60m for exhaustive gate and in-place proof checks. They require Docker and their pinned tools. The unit-test command doesn't change those opt-ins or CI's existing job budgets ([D-0291](decisions/journal/D-0291.jsonl)).
+
 ## Status
 
 Pre-alpha. The gate works end to end in Go, TypeScript and Python. The factory turns an issue into a merged pull request, with the code written in any of the three and checked against statements a person ratified on the issue.
