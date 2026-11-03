@@ -55,7 +55,7 @@ func newParRig(t *testing.T, parallel int) *parRig {
 }
 
 // syncHub is the fake GitHub, one call at a time. It counts the polls by the
-// lists of issues they read.
+// lists of open issues they read.
 type syncHub struct {
 	GitHub
 	mu    *sync.Mutex
@@ -73,8 +73,13 @@ func (s *syncHub) OpenIssues(ctx context.Context) ([]github.Issue, error) {
 func (s *syncHub) Issues(ctx context.Context, label string) ([]github.Issue, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lists++
 	return s.gh.Issues(ctx, label)
+}
+
+func (s *syncHub) MergedPullRequests(ctx context.Context) ([]github.PullRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gh.MergedPullRequests(ctx)
 }
 
 // Issue reads one issue as it is now, open or closed.
