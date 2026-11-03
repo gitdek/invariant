@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -117,6 +118,16 @@ func (g *fakeGitHub) OpenIssues(context.Context) ([]github.Issue, error) {
 	return out, nil
 }
 
+func (g *fakeGitHub) Issues(_ context.Context, label string) ([]github.Issue, error) {
+	var out []github.Issue
+	for _, i := range g.issues {
+		if i.PullRequest == nil && (label == "" || i.HasLabel(label)) {
+			out = append(out, *i)
+		}
+	}
+	return out, nil
+}
+
 // Issue reads one issue as it is now, open or closed.
 func (g *fakeGitHub) Issue(_ context.Context, n int) (github.Issue, error) {
 	if i, ok := g.issues[n]; ok {
@@ -216,6 +227,19 @@ func (g *fakeGitHub) OpenPullRequest(_ context.Context, branch string) (github.P
 
 // PullRequestFrom finds the newest pull request from a branch, in any
 // state.
+// MergedPullRequests lists the merged pull requests, newest first, as the
+// real one lists those among the 30 closed most recently.
+func (g *fakeGitHub) MergedPullRequests(context.Context) ([]github.PullRequest, error) {
+	var out []github.PullRequest
+	for _, pr := range g.prs {
+		if pr.Merged {
+			out = append(out, *pr)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Number > out[j].Number })
+	return out, nil
+}
+
 func (g *fakeGitHub) PullRequestFrom(_ context.Context, branch string) (github.PullRequest, bool, error) {
 	newest := 0
 	for n, pr := range g.prs {

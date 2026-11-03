@@ -70,6 +70,18 @@ func (s *syncHub) OpenIssues(ctx context.Context) ([]github.Issue, error) {
 	return s.gh.OpenIssues(ctx)
 }
 
+func (s *syncHub) Issues(ctx context.Context, label string) ([]github.Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gh.Issues(ctx, label)
+}
+
+func (s *syncHub) MergedPullRequests(ctx context.Context) ([]github.PullRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gh.MergedPullRequests(ctx)
+}
+
 // Issue reads one issue as it is now, open or closed.
 func (s *syncHub) Issue(_ context.Context, n int) (github.Issue, error) {
 	s.mu.Lock()

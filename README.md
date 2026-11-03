@@ -76,6 +76,8 @@ Whatever the issue, the factory never merges a change to the trusted base, the g
 
 For plumbing, the factory builds the plan in a sandbox with no network. It runs formatting, vet, the tests of every package the change touches and the plan's acceptance tests, then has a second agent review the whole change. Review findings go back to the same builder, at most twice. Only passing checks and an approving review make a ready pull request; anything else stays a draft for a person. [The factory's page](docs/factory.md) has the rest: the sandbox and its budgets, retries, what a build may write, provider failures, merger work and plans of issues.
 
+If GitHub refuses one of the factory's steps outright, such as opening a pull request, the factory quotes GitHub's answer once on the issue and waits for a writer's `/invariant retry`. Closing an issue stops its work: the factory records the close once, and a person's merge of its pull request, even one after the close.
+
 Anyone can open an issue, but the factory takes one only when a writer labels it, or says `/invariant solve` or `/invariant plan`. That hands the issue's text to a coding agent, so read someone else's issue before you do. The agent that drafts statements has no network and no GitHub access, and nothing it drafts is built until a person ratifies it.
 
 ## Watch it catch a bug
