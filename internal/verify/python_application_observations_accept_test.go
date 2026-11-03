@@ -461,8 +461,12 @@ func pa318Positive(t *testing.T, real bool, wheel bool, method bool) {
 }
 
 func TestPythonApplicationExecutionBoundObservations(t *testing.T) {
+	t.Parallel()
 	for _, method := range []bool{false, true} {
-		t.Run(fmt.Sprintf("method=%v", method), func(t *testing.T) { pa318Positive(t, false, false, method) })
+		t.Run(fmt.Sprintf("method=%v", method), func(t *testing.T) {
+			t.Parallel()
+			pa318Positive(t, false, false, method)
+		})
 	}
 }
 
@@ -541,6 +545,7 @@ func pa318Negative(t *testing.T, real bool) {
 	t.Helper()
 	for _, tc := range pa318BadDrivers() {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa318Fixture(t, false, tc.driver, tc.method)
 			if tc.app != "" {
 				pa310Write(t, root, "tasks/application.py", tc.app)
@@ -563,6 +568,7 @@ func pa318Negative(t *testing.T, real bool) {
 }
 
 func TestPythonApplicationExecutionRejectsUnboundObservations(t *testing.T) {
+	t.Parallel()
 	// A rejection-only test would already pass the old blanket refusal.
 	pa318Positive(t, false, false, false)
 	pa318Negative(t, false)
@@ -578,6 +584,7 @@ func pa318RuntimeIndependence(t *testing.T, real bool) {
 		{"test_fail", "test_pass", "not_run"},
 	} {
 		t.Run(tc.outcome, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa318Fixture(t, false, pa318Functional, false)
 			pa315Select(t, p, "TaskTests."+tc.symbol, "tests.test_tasks.TaskTests."+tc.selection)
 			before := pa315Tree(t, root)
@@ -610,6 +617,7 @@ func pa318RuntimeIndependence(t *testing.T, real bool) {
 }
 
 func TestPythonApplicationExecutionKeepsRuntimeOutcomesIndependent(t *testing.T) {
+	t.Parallel()
 	pa318RuntimeIndependence(t, false)
 }
 
@@ -617,6 +625,7 @@ func pa318Freshness(t *testing.T, real bool) {
 	t.Helper()
 	for _, mode := range []string{"same invocation replay", "other invocation replay", "during execution", "between executions", "runner changed"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa318Fixture(t, false, pa318Functional, false)
 			if mode == "other invocation replay" {
 				v := p.Manifest.Components.Checks[0].Invocations[1]
@@ -682,10 +691,12 @@ func pa318Freshness(t *testing.T, real bool) {
 }
 
 func TestPythonApplicationExecutionObservationFreshness(t *testing.T) {
+	t.Parallel()
 	pa318Freshness(t, false)
 }
 
 func TestPythonApplicationExecutionObservationsReal(t *testing.T) {
+	t.Parallel()
 	// Meaningful actual-Python behavior always runs, so no opt-out SKIP can
 	// disguise this acceptance test. Explicit opt-in MUST run real Docker.
 	pa318Positive(t, false, false, false)
@@ -699,10 +710,22 @@ func TestPythonApplicationExecutionObservationsReal(t *testing.T) {
 	}
 	for _, wheel := range []bool{false, true} {
 		for _, method := range []bool{false, true} {
-			t.Run(fmt.Sprintf("wheel=%v/method=%v", wheel, method), func(t *testing.T) { pa318Positive(t, true, wheel, method) })
+			t.Run(fmt.Sprintf("wheel=%v/method=%v", wheel, method), func(t *testing.T) {
+				t.Parallel()
+				pa318Positive(t, true, wheel, method)
+			})
 		}
 	}
-	t.Run("negative drivers", func(t *testing.T) { pa318Negative(t, true) })
-	t.Run("freshness", func(t *testing.T) { pa318Freshness(t, true) })
-	t.Run("runtime outcomes", func(t *testing.T) { pa318RuntimeIndependence(t, true) })
+	t.Run("negative drivers", func(t *testing.T) {
+		t.Parallel()
+		pa318Negative(t, true)
+	})
+	t.Run("freshness", func(t *testing.T) {
+		t.Parallel()
+		pa318Freshness(t, true)
+	})
+	t.Run("runtime outcomes", func(t *testing.T) {
+		t.Parallel()
+		pa318RuntimeIndependence(t, true)
+	})
 }

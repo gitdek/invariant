@@ -223,6 +223,7 @@ func ptcDiagnostic(r *Report, kind, contract string) string {
 }
 
 func TestPythonApplicationContractTestsReachRealImplementations(t *testing.T) {
+	t.Parallel()
 	_, p := ptcFixture(t)
 	s := ptcSession(t, p, ptcLibraries(t, ptcTinyver), "1.0")
 	r := ptcRun(t, s)
@@ -294,6 +295,7 @@ func TestPythonApplicationContractTestsReachRealImplementations(t *testing.T) {
 }
 
 func TestPythonApplicationContractTestsFailWithoutRealSupport(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name   string
 		test   string
@@ -306,6 +308,7 @@ func TestPythonApplicationContractTestsFailWithoutRealSupport(t *testing.T) {
 		{"passes without running it", "LoadsTests.test_skipped", []string{"-m", "unittest", "tests.test_contracts.LoadsTests.test_parses_objects"}, "didn't run"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			_, p := ptcFixture(t)
 			loads := &p.Manifest.Components.TrustedContracts[0]
 			*loads = ptcContract("json.loads", loads.Operation, "loads", "LoadsTests.test_parses_objects", c.test)
@@ -342,6 +345,7 @@ func TestPythonApplicationContractTestsFailWithoutRealSupport(t *testing.T) {
 }
 
 func TestPythonApplicationContractTestsBindTheInstalledDistribution(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name      string
 		libraries func(t *testing.T) string
@@ -358,6 +362,7 @@ func TestPythonApplicationContractTestsBindTheInstalledDistribution(t *testing.T
 		{"application shadows the distribution", func(t *testing.T) string { return ptcLibraries(t, ptcTinyver) }, "1.0", true, "didn't resolve the operation's implementation"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			root, p := ptcFixture(t)
 			if c.shadow {
 				pa310Write(t, root, "tinyver/__init__.py", ptcTinyver)
@@ -380,6 +385,7 @@ func TestPythonApplicationContractTestsBindTheInstalledDistribution(t *testing.T
 }
 
 func TestPythonApplicationContractTestsNeedAnInvocationEach(t *testing.T) {
+	t.Parallel()
 	_, p := ptcFixture(t)
 	p.Manifest.Components.TrustedContracts[2].Invocations = nil
 	pa310Save(t, p)
@@ -398,6 +404,7 @@ func TestPythonApplicationContractTestsNeedAnInvocationEach(t *testing.T) {
 }
 
 func TestPythonApplicationContractSupportGoesStaleWithItsInputs(t *testing.T) {
+	t.Parallel()
 	root, p := ptcFixture(t)
 	s := ptcSession(t, p, ptcLibraries(t, ptcTinyver), "1.0")
 	r := ptcRun(t, s)

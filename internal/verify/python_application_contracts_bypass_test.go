@@ -318,6 +318,7 @@ func pbtApp(symbol string) project.ComponentOperation {
 }
 
 func TestPythonApplicationContractTestsRefuseTheSecondReviewsBypasses(t *testing.T) {
+	t.Parallel()
 	const (
 		noAssertion = "it made no assertion that passed, or one failed"
 		noCall      = "the test itself made no call into the bound implementation"
@@ -383,6 +384,7 @@ func TestPythonApplicationContractTestsRefuseTheSecondReviewsBypasses(t *testing
 		{"a builtin Exsures alias", prvStd("builtins", "open"), "AliasTests.test_ioerror_alias", "IOError", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			root, p := ptcFixture(t)
 			pa310Write(t, root, "store/state.py", pbtState)
 			pa310Write(t, root, ptcTests, pbtTests)
@@ -516,6 +518,7 @@ class ThreadedAssertionTests(unittest.TestCase):
 `
 
 func TestPythonApplicationContractTestsRefuseTheFinalPassBypasses(t *testing.T) {
+	t.Parallel()
 	const (
 		noAssertion = "it made no assertion that passed, or one failed"
 		noCall      = "the test itself made no call into the bound implementation"
@@ -540,6 +543,7 @@ func TestPythonApplicationContractTestsRefuseTheFinalPassBypasses(t *testing.T) 
 		{"a worker thread inside an assertion", prvStd("json", "dumps"), "ThreadedAssertionTests.test_worker_inside_an_assertion", noAssertion},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			root, p := ptcFixture(t)
 			pa310Write(t, root, "store/state.py", pbtState)
 			pa310Write(t, root, "store/kv.py", "class Store:\n    def __init__(self):\n        self.items = {}\n\n    def save(self, key, value):\n        self.items[key] = value\n        return value\n")

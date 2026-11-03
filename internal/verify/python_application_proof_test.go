@@ -193,6 +193,7 @@ func ppBoundaries(in *PythonApplicationProofInput) map[string]PythonApplicationP
 }
 
 func TestPythonApplicationProofInputKeepsTheFunctionAsWritten(t *testing.T) {
+	t.Parallel()
 	root, p := ppFixture(t, ppModule)
 	before := pa315Tree(t, root)
 	s := ppSession(t, p, &ppNagini{})
@@ -282,6 +283,7 @@ func TestPythonApplicationProofInputKeepsTheFunctionAsWritten(t *testing.T) {
 }
 
 func TestPythonApplicationProofReportsWhatNoContractBinds(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name, from, to string
 		drop           string
@@ -310,6 +312,7 @@ func TestPythonApplicationProofReportsWhatNoContractBinds(t *testing.T) {
 			op: project.ResolvedComponentOperation{Kind: "standard_library", Module: "builtins", Symbol: "print"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			module := strings.Replace(ppModule, "import tinyver\n", "import tinyver\nimport json\nimport yamlish\nimport yaml\nfrom json import dumps\n", 1)
 			if c.from != "" {
 				module = strings.Replace(module, c.from, c.to, 1)
@@ -362,6 +365,8 @@ func TestPythonApplicationProofReportsWhatNoContractBinds(t *testing.T) {
 }
 
 func TestPythonApplicationProofRefusesWhatItCantPreserve(t *testing.T) {
+	// The selection refusals below change PATH to trap tool invocations.
+	// Only the independent input cases run in parallel.
 	body := func(from, to string) func(string) string {
 		return func(m string) string { return strings.Replace(m, from, to, 1) }
 	}
@@ -390,6 +395,7 @@ func TestPythonApplicationProofRefusesWhatItCantPreserve(t *testing.T) {
 		{"another encoding", func(m string) string { return "# -*- coding: latin-1 -*-\n" + m }, "latin-1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			module := c.module(ppModule)
 			if c.name == "a class" {
 				module = strings.Replace(module, "if len(text) > 0:", "if isinstance(text, Box):\n        return admitted\n    if len(text) > 0:", 1)
@@ -413,6 +419,7 @@ func TestPythonApplicationProofRefusesWhatItCantPreserve(t *testing.T) {
 		{"Assume", "\n\ndef version_of(text: str) -> object:\n    Requires(len(text) > 0)\n    Assume(len(text) > 1)\n", "isn't a contract"},
 	} {
 		t.Run("abstraction with "+c.name, func(t *testing.T) {
+			t.Parallel()
 			root, p := ppFixture(t, ppModule)
 			b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
 			pa310Write(t, root, ptcContracts, strings.Replace(string(b), ppAbstraction, c.abstraction, 1))
@@ -460,6 +467,7 @@ func TestPythonApplicationProofRefusesWhatItCantPreserve(t *testing.T) {
 }
 
 func TestPythonApplicationProofCopiesASharedContractLineOnce(t *testing.T) {
+	t.Parallel()
 	root, p := ppFixture(t, ppModule)
 	b, _ := os.ReadFile(filepath.Join(root, ptcContracts))
 	pa310Write(t, root, ptcContracts, strings.Replace(string(b), ppAbstraction,
@@ -474,6 +482,7 @@ func TestPythonApplicationProofCopiesASharedContractLineOnce(t *testing.T) {
 }
 
 func TestPythonApplicationProofChecksItsInputAgainstTheApplication(t *testing.T) {
+	t.Parallel()
 	_, p := ppFixture(t, ppModule)
 	s := ppSession(t, p, &ppNagini{output: ppVerified})
 	in, _, err := s.proofInput(context.Background(), ppAdmitID())
@@ -543,6 +552,7 @@ func TestPythonApplicationProofChecksItsInputAgainstTheApplication(t *testing.T)
 }
 
 func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
+	t.Parallel()
 	_, p := ppFixture(t, ppModule)
 	n := &ppNagini{output: ppVerified}
 	s := ppSession(t, p, n)
@@ -601,6 +611,7 @@ func TestPythonApplicationProofRunsTheVerifierOnTheInput(t *testing.T) {
 }
 
 func TestPythonApplicationProofAttributesWithItsBackingTests(t *testing.T) {
+	t.Parallel()
 	_, p := ppFixture(t, ppModule)
 	libraries := ptcLibraries(t, ptcTinyver)
 	n := &ppNagini{output: ppVerified}
@@ -665,6 +676,7 @@ func ppContract(t *testing.T, root string, p *project.Project, id string, op pro
 // while the real function breaks its contract; the pinned Nagini confirmed
 // each. Each is refused now before any verifier runs.
 func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
+	t.Parallel()
 	recursive := `def admit(text: str, admitted: int) -> int:
     Requires(admitted >= 0)
     Ensures(Result() == admitted)
@@ -885,6 +897,7 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 		{name: "a line continuation", module: replace("LIMIT = 3\n", "LIMIT = 3 \\\n\nHOOK = 1\n"), want: "line continuation"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			root, p := ppFixture(t, c.module(ppModule))
 			for name, body := range c.other {
 				pa310Write(t, root, name, body)
@@ -913,6 +926,7 @@ func TestPythonApplicationProofRefusesTheReviewedHoles(t *testing.T) {
 // values and its name, and look an unrelated module up by name. It may not
 // hand the module itself to a call, even getattr.
 func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
+	t.Parallel()
 	root, p := ppFixture(t, ppModule)
 	pa310Write(t, root, "tasks/api.py", "import importlib\nimport sys\n\nimport tasks.admission as a\nfrom tasks import admission\n\n\n"+
 		"def handle(text):\n    '''Calls tasks.admission.admit.'''\n    loaded = importlib.import_module('json')\n"+
@@ -947,6 +961,7 @@ func TestPythonApplicationProofLetsNeighborsReadTheModule(t *testing.T) {
 // the receipt names as assumed and its backing tests hold to what the
 // operation does (D-0260).
 func TestPythonApplicationProofNeverReadsASiblingsOwnContract(t *testing.T) {
+	t.Parallel()
 	const own = "Result() == a // b"
 	module := strings.Replace(ppModule, "from .helper import next_state\n", "from .helper import next_state\nfrom .arith import fdiv\n", 1)
 	module = strings.Replace(module, "        version = tinyver.parse(text)\n", "        version = fdiv(7, -2)\n", 1)
@@ -1012,6 +1027,7 @@ func TestPythonApplicationProofNeverReadsASiblingsOwnContract(t *testing.T) {
 // stand-in, and Python evaluates every argument when the statement runs
 // (#359). The analyzer takes what can't fail so, and says where the rest is.
 func TestPythonApplicationProofReadsContractsAsPythonRunsThem(t *testing.T) {
+	t.Parallel()
 	head := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\ndef admit(name: str, count: int) -> int:\n    Requires(count >= 0)\n"
 	for _, c := range []struct{ name, body, want string }{
 		{"every form a contract may hold", "    Requires(isinstance(name, str) and abs(-count) == count and len(name) < LIMIT * 2)\n" +
@@ -1043,6 +1059,7 @@ func TestPythonApplicationProofReadsContractsAsPythonRunsThem(t *testing.T) {
 		{"Result() as a value", "    seen = Result()\n    return count\n", "line 8 reads Nagini's Result outside a contract statement"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			d, err := analyzePythonProof([]byte(head+c.body), "admit")
 			if err != nil {
 				t.Fatal(err)
@@ -1066,6 +1083,7 @@ func TestPythonApplicationProofReadsContractsAsPythonRunsThem(t *testing.T) {
 // Python evaluates the contract eagerly. The body and contract alike may hold
 // only the arithmetic the pinned Nagini models as Python does.
 func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testing.T) {
+	t.Parallel()
 	head := "from nagini_contracts.contracts import *\nfrom typing import List, Optional, Union\n\nLIMIT = 3\nDIV = -2\nRATE = 1.5\n\n\n" +
 		"def admit(name: str, count: int, limit: Optional[int], mixed: Union[int, str], xs: List[int]) -> int:\n    Requires(count >= 0)\n"
 	for _, c := range []struct{ name, body, contracts, arithmetic string }{
@@ -1116,6 +1134,7 @@ func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testin
 			"    m = count % 2 + count // 10 + 7 // 2 + (count << 2) + count ** 2\n    return count\n", "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			d, err := analyzePythonProof([]byte(head+c.body), "admit")
 			if err != nil {
 				t.Fatal(err)
@@ -1143,6 +1162,7 @@ func TestPythonApplicationProofReadsTypesAndArithmeticAsPythonRunsThem(t *testin
 // the pinned Nagini can't translate today but a later one could model as it
 // models the operators, are refused in place as in a marked file.
 func TestPythonApplicationProofRefusesArithmeticByOtherNames(t *testing.T) {
+	t.Parallel()
 	head := "from nagini_contracts.contracts import *\nimport builtins\nimport functools\nimport operator\nimport operator as op\n" +
 		"from operator import floordiv as fd\nfrom builtins import float as real\nfrom typing import List\n\n" +
 		"NAME = '__floordiv__'\nFLOAT = 'float'\n\n\ndef admit(count: int, xs: List[int]) -> int:\n    Requires(count >= 0)\n"
@@ -1177,6 +1197,7 @@ func TestPythonApplicationProofRefusesArithmeticByOtherNames(t *testing.T) {
 		{"what those modules offer besides", "    r = operator.add(count, 1) + pow(count, 2) + functools.reduce(operator.add, xs) + len(getattr(xs, 'copy')())\n", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			d, err := analyzePythonProof([]byte(head+c.body+"    return count\n"), "admit")
 			if err != nil {
 				t.Fatal(err)
@@ -1198,6 +1219,7 @@ func TestPythonApplicationProofRefusesArithmeticByOtherNames(t *testing.T) {
 // annotation, so a default the annotation doesn't admit is refused, as
 // limit: int = None is, where the contract would order None.
 func TestPythonApplicationProofReadsDefaultsAgainstTheirAnnotations(t *testing.T) {
+	t.Parallel()
 	head := "from nagini_contracts.contracts import *\nfrom typing import Optional\n\nLIMIT = 3\n\n\ndef compute() -> int:\n    return 1\n\n\n"
 	for _, c := range []struct{ signature, want string }{
 		{"limit: int = None", "line 11 defaults limit to None, which isn't the int its annotation names"},
@@ -1211,6 +1233,7 @@ func TestPythonApplicationProofReadsDefaultsAgainstTheirAnnotations(t *testing.T
 		{"n: int = compute()", ""},
 	} {
 		t.Run(c.signature, func(t *testing.T) {
+			t.Parallel()
 			source := head + "def admit(count: int, " + c.signature + ") -> int:\n    Requires(count >= 0)\n    return count\n"
 			d, err := analyzePythonProof([]byte(source), "admit")
 			if err != nil {
@@ -1233,6 +1256,7 @@ func TestPythonApplicationProofReadsDefaultsAgainstTheirAnnotations(t *testing.T
 // the module, as setup.py, docs/conf.py and a standalone tool are, with a
 // compiled module nothing loads.
 func TestPythonApplicationProofPassesOrdinaryCode(t *testing.T) {
+	t.Parallel()
 	root, p := ppFixture(t, ppModule)
 	pa310Write(t, root, "tasks/__init__.py", "from . import names\n")
 	pa310Write(t, root, "tasks/names.py", "import logging\n\n\ndef build(compile):\n    return compile('x')\n\n\n"+
@@ -1253,6 +1277,7 @@ func TestPythonApplicationProofPassesOrdinaryCode(t *testing.T) {
 // otherwise, and a production string that merely names it, as a logger's
 // does, reaches nothing.
 func TestPythonApplicationProofLeavesTestsOutOfTheScan(t *testing.T) {
+	t.Parallel()
 	root, p := ppFixture(t, ppModule)
 	pa310Write(t, root, "tests/test_admission.py", "from unittest import mock\n\nfrom tasks import admission\n\n\n"+
 		"@mock.patch('tasks.admission.LIMIT', 100)\ndef test_admits_more():\n    with mock.patch.object(admission, 'LIMIT', 5):\n        admission.LIMIT = 7\n")
@@ -1275,6 +1300,7 @@ func TestPythonApplicationProofLeavesTestsOutOfTheScan(t *testing.T) {
 // When the module is a package's own, importing a submodule binds its name
 // in the package, so no submodule may share a name the function reads.
 func TestPythonApplicationProofRefusesASubmoduleNamedForWhatItReads(t *testing.T) {
+	t.Parallel()
 	const source = "tasks/admission/__init__.py"
 	module := "from nagini_contracts.contracts import *\n\nLIMIT = 3\n\n\n" +
 		"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Ensures(Result() < 3)\n    return admitted\n"
@@ -1304,6 +1330,7 @@ func TestPythonApplicationProofRefusesASubmoduleNamedForWhatItReads(t *testing.T
 // inventory reads it (D-0221), with an exception Nagini models, and a handler
 // may catch only what the contract declares.
 func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
+	t.Parallel()
 	module := func(caught string) string {
 		return "from nagini_contracts.contracts import *\nimport json\nfrom typing import Final\n\nLIMIT: Final = 3\n\n\n" +
 			"def admit(text: str, admitted: int) -> int:\n    Requires(admitted >= 0)\n    Requires(admitted < LIMIT)\n    Requires(len(text) > 0)\n" +
@@ -1313,6 +1340,7 @@ func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
 	}
 	for _, c := range []struct{ caught, declared string }{{"Exception", "Exception"}, {"ConnectionRefusedError", "Exception"}, {"ConnectionRefusedError", "ConnectionRefusedError"}} {
 		t.Run("except "+c.caught+" around "+c.declared, func(t *testing.T) {
+			t.Parallel()
 			root, p := ppFixture(t, module(c.caught))
 			ppLoads(c.declared)(t, root, p)
 			s := ppSession(t, p, &ppNagini{})
@@ -1342,6 +1370,7 @@ func TestPythonApplicationProofTakesDeclaredExceptions(t *testing.T) {
 }
 
 func TestPythonApplicationProofSignatureRenamesOnlyTheFunction(t *testing.T) {
+	t.Parallel()
 	_, p := ppFixture(t, ppModule)
 	s := ppSession(t, p, &ppNagini{})
 	in, _, err := s.proofInput(context.Background(), ppAdmitID())
@@ -1382,6 +1411,7 @@ func TestPythonApplicationProofSignatureRenamesOnlyTheFunction(t *testing.T) {
 }
 
 func TestPythonApplicationProofReadsDistributionsFromRecords(t *testing.T) {
+	t.Parallel()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Fatal(err)
@@ -1409,6 +1439,7 @@ func TestPythonApplicationProofReadsDistributionsFromRecords(t *testing.T) {
 // the pinned image's minor version (INVARIANT_PYTHON_PINNED=1, as in CI's
 // second run of the Python tests), they must be its own.
 func TestPythonApplicationProofKnowsThePinnedRuntime(t *testing.T) {
+	t.Parallel()
 	for name, list := range map[string]string{"standard library": pythonStdlibModules, "builtins": pythonBuiltins, "builtin exceptions": pythonBuiltinExceptions,
 		"Nagini's names": naginiNamesList, "Nagini's calls": naginiCallsList} {
 		if fields := strings.Fields(list); len(fields) < 50 || !slices.IsSorted(fields) {
@@ -1437,6 +1468,7 @@ func TestPythonApplicationProofKnowsThePinnedRuntime(t *testing.T) {
 }
 
 func TestPythonApplicationProofKeepsMarkedFiles(t *testing.T) {
+	t.Parallel()
 	// The legacy adapter still proves whole marked files of a core.
 	dir := t.TempDir()
 	pa310Write(t, dir, "core.py", "# +nagini\nfrom nagini_contracts.contracts import *\n\ndef inc(n: int) -> int:\n    Requires(n >= 0)\n    Ensures(Result() > n)\n    return n + 1\n")
@@ -1528,6 +1560,7 @@ func TestPythonApplicationProofReal(t *testing.T) {
 	if os.Getenv("INVARIANT_PYTHON_APPLICATION_PROOF_REAL") != "1" {
 		t.Skip("set INVARIANT_PYTHON_APPLICATION_PROOF_REAL=1 to run the pinned Nagini and the real dependency image")
 	}
+	t.Parallel()
 	ctx := context.Background()
 	root, p := ppRealFixture(t, ppRealModule, true)
 	before := pa315Tree(t, root)

@@ -53,12 +53,13 @@ type view struct {
 }
 
 // allows says whether the protocol has a step from one view of an issue to
-// the next.
+// the next. A view holds only what the watcher tracks, so a step matches
+// when some next state agrees with the view on those fields; the rest, such
+// as who merged a person's merge, the protocol keeps for itself.
 func allows(from, to view) bool {
 	r := rename(from, to)
-	a, b := r.state(from), r.state(to)
-	for _, s := range protocol.Successors(a) {
-		if s == b {
+	for _, s := range protocol.Successors(r.state(from)) {
+		if r.onto(s, to) == s {
 			return true
 		}
 	}
@@ -123,16 +124,23 @@ func rename(views ...view) renaming {
 	return r
 }
 
+// state is the protocol's state for a view: its initial state, with what
+// the view tracks.
 func (r renaming) state(v view) protocol.State {
-	s := protocol.State{
-		Kind: v.kind, Proposal: r.locks[v.proposal], Amends: r.locks[v.amends], Base: r.locks[v.base],
-		Ratified: r.locks[v.ratified], RatifiedBase: r.locks[v.ratifiedBase], Head: r.heads[v.head],
-		PrLock: r.locks[v.prLock], MergedBy: v.mergedBy, MergedHead: r.heads[v.mergedHead], DirectedBy: v.directedBy,
-	}
+	return r.onto(protocol.Init(), v)
+}
+
+// onto writes what a view tracks over state s, and leaves the rest of s.
+func (r renaming) onto(s protocol.State, v view) protocol.State {
+	s.Kind, s.Proposal, s.Amends, s.Base = v.kind, r.locks[v.proposal], r.locks[v.amends], r.locks[v.base]
+	s.Ratified, s.RatifiedBase, s.Head = r.locks[v.ratified], r.locks[v.ratifiedBase], r.heads[v.head]
+	s.PrLock, s.MergedBy, s.MergedHead, s.DirectedBy = r.locks[v.prLock], v.mergedBy, r.heads[v.mergedHead], v.directedBy
 	s.Open[0], s.Open[1] = v.open >= 1, v.open >= 2
+	s.Gate = [len(s.Gate)]int8{}
 	if s.Head != protocol.NoHead {
 		s.Gate[s.Head-1] = v.gate
 	}
+	s.Scope = protocol.ScopeOne
 	if v.scopeMany {
 		s.Scope = protocol.ScopeMany
 	}
