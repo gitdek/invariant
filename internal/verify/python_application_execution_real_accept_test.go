@@ -315,26 +315,22 @@ class TaskTests(unittest.TestCase):
 		root, p := pa315Fixture(t, false)
 		pa315Select(t, p, "TaskTests.test_wait", "tests.test_tasks.TaskTests.test_wait")
 		before := pa315Tree(t, root)
-		containers := func() map[string]bool {
-			b, err := toolchain.Docker(ctx, "ps", "-aq", "--filter", "name=invariant-").CombinedOutput()
-			if err != nil {
-				t.Fatalf("list containers: %v %s", err, b)
-			}
-			m := map[string]bool{}
-			for _, id := range strings.Fields(string(b)) {
-				m[id] = true
-			}
-			return m
-		}
 		s := pa315Prepare(t, p, PythonApplicationSessionOptions{})
-		old := containers()
+		old, err := pythonApplicationContainers(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
 		runCtx, stop := context.WithTimeout(ctx, 3*time.Second)
 		defer stop()
 		r, err := s.Run(runCtx, pa315Unit(t, s).Key)
 		if err == nil || !errors.Is(runCtx.Err(), context.DeadlineExceeded) || (r != nil && r.Success) {
 			t.Fatalf("cancelled execution succeeded: %+v %v", r, err)
 		}
-		for id := range containers() {
+		remaining, err := pythonApplicationContainers(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for id := range remaining {
 			if !old[id] {
 				t.Fatalf("cancelled container remains: %s", id)
 			}

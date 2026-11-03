@@ -6,14 +6,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // Pins. Changing any of them changes what a receipt certifies, so each change
@@ -77,41 +83,133 @@ func Ensure(ctx context.Context) (Toolchain, error) {
 
 // fetch makes sure path holds the file at url with the given SHA-256.
 func fetch(ctx context.Context, url, path, want string) error {
-	if got, err := fileSHA256(path); err == nil && got == want {
-		return nil
+	if got, err := fileSHA256(path); err == nil {
+		if got == want {
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		retry, err := fetchOnce(ctx, url, path, want)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !retry || attempt == 3 {
+			return err
+		}
+		if err := retryDelay(ctx, attempt); err != nil {
+			return err
+		}
+	}
+}
+
+// retryDelay waits one then two seconds between the three acquisition attempts.
+func retryDelay(ctx context.Context, attempt int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timer := time.NewTimer(time.Duration(attempt) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
+}
+
+// fetchOnce closes its response and removes its temporary file before a retry.
+// Its bool reports whether the failure can be retried.
+func fetchOnce(ctx context.Context, url, path, want string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		// A response with an error means CheckRedirect refused the redirect;
+		// the client has already closed that response's body.
+		return resp == nil && retryDownloadRequest(err), err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: %s", url, resp.Status)
+		retry := resp.StatusCode >= 500 && resp.StatusCode <= 599 ||
+			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden
+		return retry, fmt.Errorf("download %s: %s", url, resp.Status)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".download-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
-		tmp.Close()
-		return err
+	disk := &downloadWriter{Writer: tmp}
+	if _, err := io.Copy(io.MultiWriter(disk, h), resp.Body); err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return false, closeErr
+		}
+		return disk.err == nil, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		return fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, want)
+		return false, fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, want)
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return false, os.Rename(tmp.Name(), path)
+}
+
+func retryDownloadRequest(err error) bool {
+	var verification *tls.CertificateVerificationError
+	var invalid x509.CertificateInvalidError
+	var hostname x509.HostnameError
+	var authority x509.UnknownAuthorityError
+	var roots x509.SystemRootsError
+	if errors.As(err, &verification) || errors.As(err, &invalid) ||
+		errors.As(err, &hostname) || errors.As(err, &authority) || errors.As(err, &roots) {
+		return false
+	}
+	var request *url.Error
+	if errors.As(err, &request) {
+		// net/http exposes these request and redirect errors without types.
+		detail := request.Err.Error()
+		if strings.HasPrefix(detail, "unsupported protocol scheme ") ||
+			detail == "http: no Host in request URL" ||
+			strings.HasPrefix(detail, "failed to parse Location header ") {
+			return false
+		}
+	}
+	// HTTP/2 connection failures can be plain errors, not net.Error values.
+	return true
+}
+
+// downloadWriter distinguishes permanent local writes from interrupted reads
+// of the response body, which can be retried with a new temporary file.
+type downloadWriter struct {
+	io.Writer
+	err error
+}
+
+func (w *downloadWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	w.err = err
+	return n, err
 }
 
 func fileSHA256(path string) (string, error) {

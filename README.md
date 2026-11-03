@@ -1222,7 +1222,15 @@ git clone https://github.com/gitdek/invariant && cd invariant
 go run ./cmd/invariant verify examples/02-twophase-commit
 ```
 
-The first run pulls about 440 MB of pinned images, and Docker must run linux/amd64 images, as Rosetta does on Apple Silicon. It prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
+The first run pulls about 440 MB of pinned images, and Docker must run linux/amd64 images, as Rosetta does on Apple Silicon.
+
+Toolchain file downloads and digest-pinned Docker pulls try at most three times, waiting one then two seconds after network failures, interrupted downloads, HTTP 5xx, 429 or CDN 403 responses, or registry failures. Cancellation interrupts the waits; exhausted retries report the last failure. Hash, digest and layer-verification mismatches and other permanent file-download errors stop immediately, and only checksum-verified files enter the cache. A run that needs a missing pinned image acquires that exact digest and requested platform through the same retry path before executing. A failed acquisition also sends its final pull diagnostic to the run's configured stderr, so callers that parse command output retain it. Cached images, explicit `--pull=never`, local images, command arguments, proxy suppression, stdin, output and exit status keep their behavior. Only acquisition retries; builds and executed workloads do not.
+
+Every container has a name. Cancellation removes it, stops the Docker client, then removes the name again after the client exits, using a bounded cleanup context independent of the cancelled command. Each removal gets four seconds, leaving room for the client's five-second wait within the plumbing sandbox's fifteen-second cleanup reserve. `Run`, `Output`, `CombinedOutput` and `Start`/`Wait` finish after cleanup, so a container created after the first removal is removed too. Both Python cancellation leak checks share a test-only listing restricted to `invariant-<current pid>-` names, detecting this process's new containers without counting another process's containers or a longer PID with the same prefix.
+
+This follows [#433's ratified plan](.invariant/plans/issue-433.json) and the existing pinning, cleanup and isolation decisions ([D-0016](decisions/journal/D-0016.jsonl), [D-0111](decisions/journal/D-0111.jsonl), [D-0178](decisions/journal/D-0178.jsonl)). The merger records the new retry and cleanup decision under [D-0122](decisions/journal/D-0122.jsonl). CI runs the affected real Python and TLAPS suites ([D-0286](decisions/journal/D-0286.jsonl), [D-0291](decisions/journal/D-0291.jsonl)).
+
+The gate prints a receipt. This is the real one for the [two-phase commit example](examples/02-twophase-commit):
 
 <p align="center">
   <img src="docs/assets/receipt.svg" alt="Invariant receipt for two-phase commit: every check passed. Pinned statements: 6 of 6 match. Design · TLC: no violations, no deadlock. Reachability: 2 of 2 witnesses reached. Known bugs: 1 of 1 caught. Agreement: code reaches the model's states. One size larger: code reaches the model's states. Code · Gobra: 10 of 10 functions verified. Conformance: every reachable state, no step outside it. Every step tried: in every state reached. Build: go vet, go test." width="100%">
