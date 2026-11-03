@@ -85,6 +85,13 @@ func (f *Factory) WorkPlan(ctx context.Context, plan PlanOfIssues) error {
 	if err != nil {
 		return err
 	}
+	if _, ok := ctx.Value(effectsKey{}).(*issueEffects); !ok {
+		var stopped bool
+		ctx, stopped, err = f.effects(ctx, t)
+		if err != nil || stopped {
+			return err
+		}
+	}
 	answered := map[int64]bool{}
 	for _, c := range t.Pending() {
 		if c.Verb != Stop || answered[c.Comment] {
@@ -380,7 +387,7 @@ func (f *Factory) openStep(ctx context.Context, plan PlanOfIssues, run *planRun,
 	}
 	is, err := f.GitHub.CreateIssue(ctx, github.NewIssue{Title: plan.Issues[k].Title, Body: plannedBody(plan, k)})
 	if err != nil {
-		return err
+		return f.effect(ctx, plan.Issue, "create the issue for step "+fmt.Sprint(k+1), err, nil)
 	}
 	f.logf("#%d: opened #%d for step %d of its plan", plan.Issue, is.Number, k+1)
 	run.steps[k] = stepIssue{number: is.Number, status: plans.Open}
@@ -396,7 +403,7 @@ func (f *Factory) recordStep(ctx context.Context, plan PlanOfIssues, run *planRu
 	}
 	m := Marker{Kind: KindPlanOpened, Hash: plan.Hash, Step: k + 1, Opened: n, Ratifier: plan.By}
 	if _, err := f.GitHub.PostComment(ctx, plan.Issue, planOpenedComment(plan, k, n, m)); err != nil {
-		return err
+		return f.effect(ctx, plan.Issue, "record the plan's opened issue", err, nil)
 	}
 	run.steps[k].recorded = true
 	return nil
@@ -413,7 +420,7 @@ func (f *Factory) finishPlan(ctx context.Context, plan PlanOfIssues, run planRun
 		numbers = append(numbers, s.number)
 	}
 	_, err := f.GitHub.PostComment(ctx, plan.Issue, planDoneComment(numbers, Marker{Kind: KindPlanDone, Hash: plan.Hash}))
-	return err
+	return f.effect(ctx, plan.Issue, "post the completed plan", err, nil)
 }
 
 // stepMark is the hidden line that ties an issue to the step of a plan it

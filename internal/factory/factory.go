@@ -30,6 +30,8 @@ import (
 // GitHub is what the factory does on GitHub. github.Client is the real one.
 type GitHub interface {
 	OpenIssues(ctx context.Context) ([]github.Issue, error)
+	// Issues lists issues in every state; an empty label includes them all.
+	Issues(ctx context.Context, label string) ([]github.Issue, error)
 	// Issue reads one issue as it is now, open or closed.
 	Issue(ctx context.Context, n int) (github.Issue, error)
 	Comments(ctx context.Context, issue int) ([]github.Comment, error)
@@ -49,6 +51,9 @@ type GitHub interface {
 	// PullRequestFrom finds the newest pull request from a branch, in any
 	// state, if there is one.
 	PullRequestFrom(ctx context.Context, branch string) (github.PullRequest, bool, error)
+	// MergedPullRequests lists the merged pull requests among those closed
+	// most recently, newest first.
+	MergedPullRequests(ctx context.Context) ([]github.PullRequest, error)
 	// ClosePullRequest closes a pull request without merging it, and
 	// returns it as it is then: closing a closed one changes nothing, and a
 	// merged one stays merged.
@@ -163,13 +168,15 @@ type Factory struct {
 	// has asked. Each poll asks again, and a step that runs across polls
 	// keeps the answers it read. It guards mergeWait too: the drafts, at
 	// their heads, whose wait for GitHub to say it can merge them was
-	// logged.
-	mu        sync.Mutex
-	writers   map[string]bool
-	asked     map[string]bool
-	mergeWait map[string]bool
-	running   running
-	lease     lease
+	// logged. And seenMerges: the merged pull requests whose issue a step
+	// has read since the watcher started.
+	mu         sync.Mutex
+	writers    map[string]bool
+	asked      map[string]bool
+	mergeWait  map[string]bool
+	seenMerges map[int]bool
+	running    running
+	lease      lease
 }
 
 // Labels show where each issue is. The factory keeps exactly one status
@@ -201,6 +208,9 @@ var labels = []struct{ name, color, description string }{
 }
 
 var statusLabels = []string{LabelAsking, LabelProposal, LabelBuilding, LabelPR, LabelMerged, LabelHumanReview}
+
+// activeLabels are the status labels of work under way.
+var activeLabels = []string{LabelAsking, LabelProposal, LabelBuilding, LabelPR, LabelHumanReview}
 
 // Prepare creates the labels the factory uses.
 func (f *Factory) Prepare(ctx context.Context) error {
@@ -270,20 +280,25 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 	}
 }
 
-// Poll starts a step on every open issue that has none running, in order of
-// number, and each step reads its issue again first. With Parallel above 1,
-// up to that many run at once (D-0113): Poll waits for a free slot whenever
-// that many are running, and returns without waiting for its steps, so
-// they run across polls, and each logs its error as it ends. Otherwise Poll
-// takes one step at a time, and returns their errors once they've ended.
+// Poll starts a step on every issue it reads that has none running, in order
+// of number, and each step reads its issue again first. It reads the open
+// issues, and the closed ones with something left to record (pollIssues).
+// With Parallel above 1, up to that many run at once (D-0113): Poll waits for
+// a free slot whenever that many are running, and returns without waiting
+// for its steps, so they run across polls, and each logs its error as it
+// ends. Otherwise Poll takes one step at a time, and returns their errors
+// once they've ended.
 func (f *Factory) Poll(ctx context.Context) error {
 	f.mu.Lock()
 	if f.writers == nil {
 		f.writers = map[string]bool{}
 	}
 	f.asked = map[string]bool{}
+	if f.seenMerges == nil {
+		f.seenMerges = map[int]bool{}
+	}
 	f.mu.Unlock()
-	issues, err := f.GitHub.OpenIssues(ctx)
+	issues, merges, err := f.pollIssues(ctx)
 	if err != nil {
 		return err
 	}
@@ -303,6 +318,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 		case most == 1:
 			err := f.safeStep(ctx, n)
 			f.end(n, f.now())
+			f.sawMerge(merges[n], err)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("#%d: %w", n, err))
 			}
@@ -319,6 +335,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 				}()
 				err := f.safeStep(ctx, n)
 				ended = f.now()
+				f.sawMerge(merges[n], err)
 				if err != nil {
 					f.logf("#%d: %v", n, err)
 				}
@@ -330,6 +347,84 @@ func (f *Factory) Poll(ctx context.Context) error {
 	f.tell()
 	f.running.mu.Unlock()
 	return errors.Join(errs...)
+}
+
+// pollIssues is what a poll steps on: every open issue, and each closed one
+// with something left to record. That's one still carrying an active label,
+// because it closed mid-work or its labels outlived its final post, and the
+// issue of a factory pull request merged since the watcher started, as when
+// a person merges it after its issue's close was recorded (#434's review).
+// Merges maps each such issue to its pull request. Any other closed issue is
+// finished, and reading each one on every poll would spend a big
+// repository's whole rate limit.
+func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, error) {
+	issues, err := f.GitHub.OpenIssues(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen := map[int]bool{}
+	for _, issue := range issues {
+		seen[issue.Number] = true
+	}
+	for _, label := range activeLabels {
+		labeled, err := f.GitHub.Issues(ctx, label)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, issue := range labeled {
+			if issue.State == "closed" && !seen[issue.Number] {
+				seen[issue.Number] = true
+				issues = append(issues, issue)
+			}
+		}
+	}
+	prs, err := f.GitHub.MergedPullRequests(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	merges := map[int]int{}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, pr := range prs {
+		n, ok := branchIssue(pr.Head.Ref)
+		if !ok || f.seenMerges[pr.Number] || merges[n] != 0 {
+			continue
+		}
+		merges[n] = pr.Number
+		if !seen[n] {
+			seen[n] = true
+			issues = append(issues, github.Issue{Number: n})
+		}
+	}
+	return issues, merges, nil
+}
+
+// sawMerge remembers that a step on the issue of merged pull request pr
+// ended, so no later poll reads it again for that merge. A step that failed
+// is read again, even for a refusal, whose report may be what failed,
+// unless the issue is gone.
+func (f *Factory) sawMerge(pr int, err error) {
+	if pr == 0 || err != nil && !errors.Is(err, github.ErrNotFound) {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seenMerges[pr] = true
+}
+
+// branchIssue is the issue a factory branch is for. Its branches are named
+// invariant/issue-<n>-<slug>.
+func branchIssue(branch string) (int, bool) {
+	rest, ok := strings.CutPrefix(branch, "invariant/issue-")
+	if !ok {
+		return 0, false
+	}
+	num, _, ok := strings.Cut(rest, "-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(num)
+	return n, err == nil && n > 0
 }
 
 // Step is a step the watcher is running on an issue: what it's doing,
@@ -465,7 +560,8 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 	// or a writer gave it the invariant label. One the factory opened for a
 	// ratified plan is solved as if the plan's ratifier had opened it with
 	// /invariant solve (#126).
-	if len(t.Posts) == 0 && !planned {
+	work := slices.ContainsFunc(t.Posts, func(p Post) bool { return p.Marker.Refusal == "" })
+	if !work && !planned {
 		if ok, err := f.writer(ctx, issue.User.Login); err != nil {
 			return t, err
 		} else if ok && hasVerb(ParseCommands(issue.Body), Solve) {
@@ -548,7 +644,22 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	if err != nil {
 		return err
 	}
+	var stopped bool
+	ctx, stopped, err = f.effects(ctx, t)
+	if err != nil || stopped {
+		return err
+	}
+	// A retry's answer may have been posted while releasing a refusal.
+	if ctx.Value(effectsKey{}).(*issueEffects).retried {
+		t, err = f.read(ctx, issue)
+		if err != nil {
+			return err
+		}
+	}
 	state, started := t.State()
+	if issue.State == "closed" {
+		return f.closedIssue(ctx, t, state)
+	}
 	// open is a failed build's pull request while it's open, which a writer's
 	// retry has the factory watch again.
 	var open github.PullRequest
@@ -581,7 +692,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 					if c, ok, err := f.replacement(ctx, t, state); err != nil {
 						return err
 					} else if ok {
-						return f.rebuild(ctx, t, state, c)
+						return f.effectResult(ctx, issue.Number, "replace the failed draft", f.rebuild(ctx, t, state, c))
 					}
 				}
 				return f.watch(ctx, t, state)
@@ -641,6 +752,10 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		}
 		return f.choose(ctx, t, state, pending)
 	case Retry:
+		if state.Marker.Refusal != "" && c.Comment <= state.Comment.ID {
+			return f.note(ctx, t, c, "That retry was posted before GitHub's refusal was reported. The recorded work is still waiting for a person.",
+				"\n\nAfter fixing the refusal, comment `/invariant retry` again.")
+		}
 		if kind != KindFailed {
 			return f.note(ctx, t, c, "There's nothing that failed to try again right now.")
 		}
@@ -664,7 +779,7 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		// A plan's build that failed in the factory's own run is built
 		// again, replacing its draft (#271).
 		if state.Marker.Rebuilds() {
-			return f.rebuild(ctx, t, state, c)
+			return f.effectResult(ctx, issue.Number, "replace the failed draft", f.rebuild(ctx, t, state, c))
 		}
 		// Watch the pull request again. Nothing merges unless CI's gate passes
 		// on its current head, it stays in scope, and its lock is still the
@@ -1234,7 +1349,8 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 		return Post{}, err
 	}
 	if p.Plan != nil {
-		return f.commitPlan(ctx, t, state, c)
+		posted, err := f.commitPlan(ctx, t, state, c)
+		return posted, f.effectResult(ctx, n, "post the plan's ratification", err)
 	}
 	if p.Target != nil {
 		cur, err := f.current(ctx, p.Target.Dir)
@@ -1319,7 +1435,7 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	body := ratifiedComment(c.By, dir, branch, p.Hash, len(p.Statements), m)
 	posted, err := f.GitHub.PostComment(ctx, n, body)
 	if err != nil {
-		return Post{}, err
+		return Post{}, f.effect(ctx, n, "post the ratification", err, nil)
 	}
 	return Post{Comment: posted, Marker: m}, f.status(ctx, n, LabelBuilding)
 }
@@ -1840,7 +1956,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return err
 	}
 	if built.Plumbing != nil {
-		return f.publishPlan(ctx, t, ratified, result, built, next, stops)
+		return f.effectResult(ctx, n, "publish the plumbing pull request", f.publishPlan(ctx, t, ratified, result, built, next, stops))
 	}
 	res := built.Result
 	if res == nil || res.Final == nil {
@@ -1905,7 +2021,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !res.Final.Passed,
 			Body: pullRequestBody(t, next, res, m.Proposal, sc.Trusted),
 		}); err != nil {
-			return err
+			return f.effect(ctx, n, "create the pull request", err, nil)
 		}
 	}
 	var refusal error
@@ -1926,7 +2042,7 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 	}
 	if !res.Final.Passed {
 		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
-			return err
+			return f.effect(ctx, n, "label the pull request for a person", err, nil)
 		}
 		next.Failure = FailGate
 		return f.say(ctx, n, buildFailedComment(&pr, res, runErr, next), LabelHumanReview)
@@ -1981,6 +2097,88 @@ func copyResult(from, to string) error {
 	})
 }
 
+// closedIssue records an external close without taking another ordinary
+// step. It neither resumes queued commands nor changes an open pull request.
+// A final post is durable before label cleanup, so another poll can finish
+// that cleanup without repeating the observation.
+func (f *Factory) closedIssue(ctx context.Context, t Thread, state Post) error {
+	if len(t.Posts) == 0 {
+		return nil
+	}
+	m := state.Marker
+	finished := m.Kind == KindMerged || m.Kind == KindClosed
+	// A closure leaves the working state intact for a reopened issue. Until
+	// another working post follows it, the close isn't recorded again, but a
+	// person can still merge the issue's pull request, and that merge is
+	// recorded (#434's review).
+	noted := false
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		p := t.Posts[i]
+		if p.Comment.ID == state.Comment.ID {
+			break
+		}
+		if p.Marker.Kind == KindNote && p.Marker.IssueClosed {
+			noted = true
+			break
+		}
+	}
+	if m.Kind == KindRatified && isIssuePlan(m) {
+		for _, p := range t.Posts {
+			if p.Marker.Kind == KindPlanDone && p.Marker.Hash == m.Proposal.Hash {
+				finished = true
+				break
+			}
+		}
+	}
+	if finished {
+		return f.clearActive(ctx, t, m)
+	}
+	var pr github.PullRequest
+	var err error
+	switch {
+	case m.PR != 0:
+		pr, err = f.GitHub.PullRequest(ctx, m.PR)
+	case m.Kind == KindRatified && m.Branch != "" && !isIssuePlan(m):
+		// Publication may have opened the pull request before its post was
+		// interrupted. Recover only this build's pull request, including one
+		// a person merged before the next poll, without resuming the build.
+		var found bool
+		pr, found, err = f.buildPullRequest(ctx, m.Branch, state)
+		if found {
+			state.Marker.Kind, state.Marker.PR = KindPR, pr.Number
+			m.PR = pr.Number
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if pr.Merged {
+		return f.watchMerged(ctx, t, state, pr)
+	}
+	if noted {
+		return f.clearActive(ctx, t, m)
+	}
+	next := m.carried()
+	next.Kind, next.ReplyTo, next.Failure = KindNote, nil, ""
+	next.IssueClosed = true
+	return f.say(ctx, t.Issue.Number, post("issue closed", "This issue was closed, so I've stopped work on it.", next), "")
+}
+
+// clearActive removes a closed issue's active labels, if it has any, once
+// its final post is durable. A merge's label stays.
+func (f *Factory) clearActive(ctx context.Context, t Thread, m Marker) error {
+	for _, label := range activeLabels {
+		if t.Issue.HasLabel(label) {
+			keep := ""
+			if m.Kind == KindMerged || t.Issue.HasLabel(LabelMerged) {
+				keep = LabelMerged
+			}
+			return f.status(ctx, t.Issue.Number, keep)
+		}
+	}
+	return nil
+}
+
 // watch follows an open pull request, and merges it once CI's gate passes on
 // its head, it stays in scope, and its lock is what was ratified.
 func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
@@ -1993,34 +2191,7 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	next.ReplyTo, next.Failure = nil, ""
 	switch {
 	case pr.Merged:
-		// A merge the factory recorded, at this head, is the factory's: it
-		// stopped after merging and before it said so (D-0069). Only while
-		// its latest post is the pull request's, though: the record of an
-		// attempt GitHub refused stays, and a person may merge after that
-		// (#145).
-		if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
-			return err
-		} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR {
-			runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
-			if err != nil {
-				return err
-			}
-			run, _ := latest(runs)
-			from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
-			if err := f.allowed(ctx, n, fmt.Sprintf("record that the factory merged #%d", pr.Number), from, to); err != nil {
-				return err
-			}
-			if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
-				return err
-			}
-			return f.saidMerged(ctx, t, pr, run, pr.MergeCommitSHA, next)
-		}
-		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
-		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was merged", pr.Number), from, to); err != nil {
-			return err
-		}
-		next.Kind = KindMerged
-		return f.say(ctx, n, post("merged", fmt.Sprintf("#%d was merged.", pr.Number), next), LabelMerged)
+		return f.watchMerged(ctx, t, state, pr)
 	case pr.State == "closed":
 		from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindClosed, protocol.Nobody)
 		if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was closed", pr.Number), from, to); err != nil {
@@ -2098,6 +2269,17 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
 	if err != nil {
 		return err
+	}
+	if len(sc.Files) == 0 {
+		// Main may have acquired this head since the first pull request
+		// read. An empty diff alone can't say whether that was a merge.
+		fresh, err := f.GitHub.PullRequest(ctx, pr.Number)
+		if err != nil {
+			return err
+		}
+		if fresh.Merged {
+			return f.watchMerged(ctx, t, state, fresh)
+		}
 	}
 	problems := sc.Problems
 	if sc.Project != m.Project {
@@ -2195,12 +2377,49 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	return f.saidMerged(ctx, t, pr, run, sha, next)
 }
 
+// watchMerged records a merge already observed on GitHub, using the same
+// protocol and recovery checks wherever the watcher noticed it.
+func (f *Factory) watchMerged(ctx context.Context, t Thread, state Post, pr github.PullRequest) error {
+	n, m := t.Issue.Number, state.Marker
+	next := m.carried()
+	next.ReplyTo, next.Failure = nil, ""
+	// A merge the factory recorded, at this head, is the factory's: it
+	// stopped after merging and before it said so (D-0069). Only while
+	// its latest post is the pull request's, though: the record of an
+	// attempt GitHub refused stays, and a person may merge after that
+	// (#145).
+	if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
+		return err
+	} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR {
+		runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
+		if err != nil {
+			return err
+		}
+		run, _ := latest(runs)
+		from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
+		if err := f.allowed(ctx, n, fmt.Sprintf("record that the factory merged #%d", pr.Number), from, to); err != nil {
+			return err
+		}
+		if err := f.recovers(ctx, n, "say it merged", f.canPost(merging(true, true), recovery.Merge)); err != nil {
+			return err
+		}
+		return f.saidMerged(ctx, t, pr, run, pr.MergeCommitSHA, next)
+	}
+	from, to := prStep(t, state, pullRequest{head: pr.Head.SHA}, protocol.KindMerged, protocol.ByOther)
+	if err := f.allowed(ctx, n, fmt.Sprintf("record that #%d was merged", pr.Number), from, to); err != nil {
+		return err
+	}
+	next.Kind = KindMerged
+	return f.say(ctx, n, post("merged", fmt.Sprintf("#%d was merged.", pr.Number), next), LabelMerged)
+}
+
 // saidMerged deletes a merged pull request's branch and says the factory
 // merged it, with the issue's numbers.
 func (f *Factory) saidMerged(ctx context.Context, t Thread, pr github.PullRequest, run github.CheckRun, sha string, next Marker) error {
 	n := t.Issue.Number
 	if err := f.GitHub.DeleteBranch(ctx, next.Branch); err != nil {
 		f.logf("#%d: deleting %s: %v", n, next.Branch, err)
+		return f.effect(ctx, n, "delete branch "+next.Branch, err, nil)
 	}
 	next.Kind = KindMerged
 	numbers := NumbersOf(t, f.now())
@@ -2245,7 +2464,13 @@ func (f *Factory) refusedMerge(ctx context.Context, t Thread, state Post, pr git
 		return err
 	}
 	next.Kind, next.Failure = KindFailed, FailMerge
-	return f.say(ctx, n, mergeRefusedComment(pr, unready, answer, next), LabelHumanReview)
+	operation := fmt.Sprintf("merge #%d", pr.Number)
+	if unready {
+		operation = fmt.Sprintf("mark #%d ready for review", pr.Number)
+	}
+	return f.sayRefused(ctx, n, operation, answer, next, func(m Marker) string {
+		return mergeRefusedComment(pr, unready, answer, m)
+	}, 0)
 }
 
 // errCantMerge is GitHub's answer for a draft it says it can't merge, which
@@ -2298,10 +2523,15 @@ func (f *Factory) unready(ctx context.Context, t Thread, ratified Post, stops in
 	if err := f.allowed(ctx, n, fmt.Sprintf("say GitHub refused to mark #%d ready", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
-		return err
-	}
 	next.Kind, next.Failure = KindFailed, FailUnready
+	if permanentEffect(answer) {
+		return f.sayRefused(ctx, n, fmt.Sprintf("mark #%d ready for review", pr.Number), answer, next, func(m Marker) string {
+			return unreadyComment(pr, answer, m)
+		}, pr.Number)
+	}
+	if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
+		return f.effect(ctx, n, "label the pull request for a person", err, nil)
+	}
 	return f.say(ctx, n, unreadyComment(pr, answer, next), LabelHumanReview)
 }
 
@@ -2403,14 +2633,17 @@ func (f *Factory) note(ctx context.Context, t Thread, c Command, text string, cl
 		return err
 	}
 	_, err := f.GitHub.PostComment(ctx, t.Issue.Number, noteComment(text, Marker{Kind: KindNote, ReplyTo: []int64{c.Comment}}, closing...))
-	return err
+	return f.effect(ctx, t.Issue.Number, "post a command's answer", err, nil)
 }
 
 // say posts a comment and sets the issue's status label. An empty label
 // clears it.
 func (f *Factory) say(ctx context.Context, issue int, body, label string) error {
-	if _, err := f.GitHub.PostComment(ctx, issue, body); err != nil {
+	if err := f.mayAct(ctx); err != nil {
 		return err
+	}
+	if _, err := f.GitHub.PostComment(ctx, issue, body); err != nil {
+		return f.effect(ctx, issue, "post the issue's update", err, nil)
 	}
 	return f.status(ctx, issue, label)
 }
@@ -2418,15 +2651,21 @@ func (f *Factory) say(ctx context.Context, issue int, body, label string) error 
 func (f *Factory) status(ctx context.Context, issue int, label string) error {
 	for _, l := range statusLabels {
 		if l != label {
-			if err := f.GitHub.RemoveLabel(ctx, issue, l); err != nil {
+			if err := f.mayAct(ctx); err != nil {
 				return err
+			}
+			if err := f.GitHub.RemoveLabel(ctx, issue, l); err != nil {
+				return f.effect(ctx, issue, "remove label "+l, err, &label)
 			}
 		}
 	}
 	if label == "" {
 		return nil
 	}
-	return f.GitHub.AddLabels(ctx, issue, label)
+	if err := f.mayAct(ctx); err != nil {
+		return err
+	}
+	return f.effect(ctx, issue, "add label "+label, f.GitHub.AddLabels(ctx, issue, label), &label)
 }
 
 func hasVerb(cmds []Command, verb string) bool {
@@ -2447,8 +2686,8 @@ func (f *Factory) now() time.Time {
 
 // safeStep takes one step on an issue, and turns a panic into an error,
 // so that one issue's bug can't stop the factory's work on the others. It
-// reads the issue again first, and takes no step on one closed since the
-// poll listed it.
+// reads the issue again first, so a close since the poll listed it stops
+// ordinary work and records the external outcome instead.
 func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2459,9 +2698,6 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	issue, err := f.GitHub.Issue(ctx, n)
 	if err != nil {
 		return err
-	}
-	if issue.State == "closed" {
-		return nil
 	}
 	return f.step(ctx, issue)
 }

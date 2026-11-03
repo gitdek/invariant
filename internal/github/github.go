@@ -431,13 +431,36 @@ func (c Client) MarkReady(ctx context.Context, n int) error {
 }
 
 // DeleteBranch deletes a branch. Deleting one that's already gone is not an
-// error.
+// error. GitHub answers that with a 404, or with a 422 saying the reference
+// doesn't exist, as when GitHub deleted the branch itself on merge (#434's
+// review).
 func (c Client) DeleteBranch(ctx context.Context, branch string) error {
 	err := c.call(ctx, "DELETE", c.path("git/refs/heads/"+branch), nil, nil)
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) || err != nil && refGone.MatchString(err.Error()) {
 		return nil
 	}
 	return err
+}
+
+// refGone is how GitHub refuses to delete a reference that doesn't exist.
+var refGone = regexp.MustCompile(`Reference does not exist \(HTTP 422\)`)
+
+// MergedPullRequests lists the merged pull requests among the 30 closed
+// ones updated most recently, newest first.
+func (c Client) MergedPullRequests(ctx context.Context) ([]PullRequest, error) {
+	var out []PullRequest
+	if err := c.call(ctx, "GET", c.path("pulls?state=closed&sort=updated&direction=desc&per_page=30"), nil, &out); err != nil {
+		return nil, err
+	}
+	var merged []PullRequest
+	for _, pr := range out {
+		// A list of pull requests says when one merged, not whether it did.
+		if pr.MergedAt != "" {
+			pr.Merged = true
+			merged = append(merged, pr)
+		}
+	}
+	return merged, nil
 }
 
 // Workflows reads the text of each workflow file under .github/workflows at
@@ -567,7 +590,7 @@ func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byt
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if strings.Contains(msg, "(HTTP 404)") {
-			return nil, ErrNotFound
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, msg)
 		}
 		if strings.Contains(msg, "Resource not accessible by integration") {
 			return nil, fmt.Errorf("%w: %s", ErrNoPermission, msg)
