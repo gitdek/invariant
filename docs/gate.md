@@ -8,6 +8,12 @@ For projects without explicit components, code assurance comes from successful r
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](../decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](../decisions/D-0024-checking-typescript-and-python.md) and [D-0031](../decisions/journal/D-0031.jsonl), and the larger check in [D-0070](../decisions/journal/D-0070.jsonl).
 
+## Model parse and semantic failures
+
+When SANY, TLA+'s parser and semantic checker, prevents TLC from checking a module, the failed result's message includes SANY's complete error diagnostics and source locations in printed order before TLC's closing `Parsing or semantic analysis failed.` message. A misindented conjunction retains the offending item's line and column range and the enclosing list's range; undefined operators retain each module, source range and explanation. Routine parsing and progress lines are omitted.
+
+These diagnostics reach the formalizer's check feedback, the gate's JSON and Markdown receipts, and the factory's failure posts and pull request body. Each uses its existing rendering and clipping rules; the result's message itself is not truncated. The raw unframed chunks in `Result.Printed`, outcome classification, other TLC errors and the last-twenty-lines fallback for other failures keep their existing behavior.
+
 ## Proving a model's invariant at every size
 
 TLC checks the design within the ratified bounds, and Gobra and Nagini prove the code's operations at every size. A project can also have the gate prove a ratified invariant of the model itself at every size, with TLAPS, the TLA+ Proof System ([#360](https://github.com/gitdek/invariant/issues/360), [D-0229](../decisions/D-0229-tlaps-design-proofs.md)). The idea comes from EasyProver ([arXiv 2610.38174](https://arxiv.org/abs/2610.38174)): an agent's proof is untrusted search, and the gate alone accepts it, against a theorem the gate writes itself.

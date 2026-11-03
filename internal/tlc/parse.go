@@ -27,7 +27,7 @@ type Result struct {
 	Outcome         Outcome
 	Invariant       string // the violated invariant, when Outcome is Violated
 	Property        string // the violated action property, when Outcome is PropertyViolated and TLC names it
-	Message         string // TLC's own explanation, when Outcome is Failed
+	Message         string // TLC's explanation, including SANY diagnostics, when Outcome is Failed
 	StatesGenerated int64
 	DistinctStates  int64
 	Depth           int
@@ -83,6 +83,7 @@ const (
 	codeStarting      = 2185
 	codeSANYStart     = 2220
 	codeSANYEnd       = 2219
+	codeSANYFailed    = 3002
 	codeInitComputing = 2189
 	codeInitDone      = 2190
 	codeProgress      = 2200
@@ -118,12 +119,31 @@ func Parse(out string, exitCode int) Result {
 	}
 	var success, deadlock, temporal bool
 	var problems []string
-	for _, m := range message.FindAllStringSubmatch(out, -1) {
-		code, _ := strconv.Atoi(m[1])
-		body := strings.TrimRight(m[2], "\n")
+	var sany strings.Builder
+	var inSANY bool
+	end := 0
+	for _, m := range message.FindAllStringSubmatchIndex(out, -1) {
+		if inSANY {
+			sany.WriteString(out[end:m[0]])
+		}
+		end = m[1]
+		code, _ := strconv.Atoi(out[m[2]:m[3]])
+		body := strings.TrimRight(out[m[4]:m[5]], "\n")
 		switch code {
 		case codeVersion:
 			r.Version = strings.TrimSpace(body)
+		case codeSANYStart:
+			inSANY = true
+			sany.Reset()
+		case codeSANYEnd:
+			inSANY = false
+		case codeSANYFailed:
+			if diagnostics := sanyErrors(sany.String()); diagnostics != "" {
+				problems = append(problems, diagnostics)
+			}
+			problems = append(problems, strings.TrimSpace(body))
+			inSANY = false
+			sany.Reset()
 		case codeSuccess:
 			success = true
 		case codeViolated:
@@ -191,6 +211,32 @@ func Parse(out string, exitCode int) Result {
 		}
 	}
 	return r
+}
+
+// SANY writes outside TLC's message frames. Keep its error text whole,
+// removing only progress lines and warning sections before reporting it.
+func sanyErrors(out string) string {
+	var lines []string
+	warnings := false
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "Parsing file "),
+			strings.HasPrefix(line, "Semantic processing of module "),
+			strings.HasPrefix(line, "Linting of module "):
+			warnings = false
+			continue
+		case line == "Semantic warnings:", strings.HasPrefix(line, "*** Warnings:"):
+			warnings = true
+			continue
+		case line == "***Parse Error***", line == "Semantic errors:",
+			strings.HasPrefix(line, "*** Errors:"), strings.HasPrefix(line, "*** Abort messages:"):
+			warnings = false
+		}
+		if !warnings {
+			lines = append(lines, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // parseState reads one trace state: a header line such as
