@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -128,6 +129,14 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		}
 		// Flags precede the positional workspace, as flag.Parse requires.
 		job.GateServer = append(job.GateServer[:len(job.GateServer)-1], "-check-queue", b.Sandbox.Checks.Address, "-check-build", checks.id, ws)
+	} else {
+		names, err := sandboxFiles(ctx, ws)
+		if err != nil {
+			return nil, err
+		}
+		if timeout := buildSandboxTimeout(plan, names); timeout > SandboxTimeout {
+			job.ToolTimeout = timeout + SandboxStartupAllowance + SandboxCleanupAllowance
+		}
 	}
 	r := &BuildResult{Tests: len(plan.Tests)}
 	defer func() {
@@ -253,6 +262,30 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		}
 	}
 	return r, nil
+}
+
+func buildSandboxTimeout(plan *Plan, names []string) time.Duration {
+	// A plan can delete a child's last Go file, leaving verify to own its
+	// paths. Size the tool for that candidate too, retaining any Go files
+	// the plan could keep or add in verify itself and all pinned tests.
+	writable := map[string]bool{}
+	for _, f := range plan.Files {
+		writable[f] = true
+	}
+	var possible []string
+	for _, f := range names {
+		if !writable[f] || path.Dir(f) == "internal/verify" {
+			possible = append(possible, f)
+		}
+	}
+	for _, f := range plan.Files {
+		if path.Dir(f) == "internal/verify" {
+			possible = append(possible, f)
+		}
+	}
+	possible = append(possible, plan.TestFiles()...)
+	timeout, _ := sandboxBudgets(plan.packagesIn(possible))
+	return timeout
 }
 
 // apply copies the named files and admitted regressions into root, removing
