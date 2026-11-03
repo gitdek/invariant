@@ -74,6 +74,7 @@ func pa315RunnerPython(t *testing.T) string {
 }
 
 func TestPythonApplicationExecutionRealRunnerOutcomes(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		method, outcome    string
 		success, exercised bool
@@ -87,6 +88,7 @@ func TestPythonApplicationExecutionRealRunnerOutcomes(t *testing.T) {
 		{"test_subtest", "failed", false, true},
 	} {
 		t.Run(tc.method, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa315Fixture(t, false)
 			pa315Select(t, p, "TaskTests."+tc.method, "tests.test_tasks.TaskTests."+tc.method)
 			before := pa315Tree(t, root)
@@ -113,8 +115,10 @@ func TestPythonApplicationExecutionRealRunnerOutcomes(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionRealRunnerIdentityAndCompletion(t *testing.T) {
+	t.Parallel()
 	for _, which := range []string{"replacement", "alias", "setup", "teardown", "class fixture", "module fixture", "partial", "stdout"} {
 		t.Run(which, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa315Fixture(t, false)
 			source := "import unittest, os\nclass TaskTests(unittest.TestCase):\n    def test_pass(self):\n        pass\n"
 			switch which {
@@ -152,6 +156,7 @@ func TestPythonApplicationExecutionRealRunnerIdentityAndCompletion(t *testing.T)
 }
 
 func TestPythonApplicationExecutionRealRunnerStartup(t *testing.T) {
+	// Keep serial: the host-secret check changes the process environment.
 	root, p := pa315Fixture(t, false)
 	libraries := t.TempDir()
 	for name, body := range map[string]string{
@@ -202,8 +207,10 @@ class TaskTests(unittest.TestCase):
 }
 
 func TestPythonApplicationExecutionSnapshotDuringOperations(t *testing.T) {
+	t.Parallel()
 	for _, during := range []string{"prepare", "run"} {
 		t.Run(during, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa315Fixture(t, false)
 			before := pa315Tree(t, root)
 			opts := pa315Options(new(int))
@@ -241,8 +248,10 @@ func TestPythonApplicationExecutionSnapshotDuringOperations(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionAdditionalProtocolFailures(t *testing.T) {
+	t.Parallel()
 	for _, which := range []string{"duplicate field", "truncated end", "trailing row", "null diagnostic", "missing exercised", "wrong source", "foreign check", "contradictory skip"} {
 		t.Run(which, func(t *testing.T) {
+			t.Parallel()
 			root, p := pa315Fixture(t, false)
 			hash := pa315Tree(t, root)[pa315TestSource]
 			opts := pa315Options(new(int))
@@ -283,6 +292,7 @@ func TestPythonApplicationExecutionAdditionalProtocolFailures(t *testing.T) {
 }
 
 func TestPythonApplicationExecutionDockerCommandLimits(t *testing.T) {
+	// Keep serial: the Docker trap changes PATH and its argument-log variable.
 	bin := t.TempDir()
 	log := filepath.Join(t.TempDir(), "argv")
 	pa310Write(t, bin, "docker", `#!/bin/sh

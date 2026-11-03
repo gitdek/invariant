@@ -1,14 +1,35 @@
 {
-  "decision": "D-0209",
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-11-02T22:17:05Z",
+    "issue": 428,
+    "comment": "https://github.com/gitdek/invariant/issues/428#issuecomment-6589862585",
+    "proposal": "sha256:66edc304e86631eefbd2c5c2f7814764760b4ae5e91a09c6930ecc5020d82ea6",
+    "amends": "sha256:7a940fa942df2918af704e9c28d94506ad372aca53072029a85d97f517b45786",
+    "previous": "D-0209"
+  },
   "bounds": {
     "Actors": "{alice, mallory, invbot}",
+    "BaseRefs": "{trustedBase, otherBase}",
     "Bots": "{invbot}",
+    "Decisions": "{d1}",
+    "FollowPR": "followPR",
     "Heads": "{h1, h2}",
     "NoActor": "NoActor",
+    "NoAudit": "NoAudit",
     "NoHead": "NoHead",
     "NoP": "NoP",
+    "NoPR": "NoPR",
+    "NoPermit": "NoPermit",
+    "NoSource": "NoSource",
     "Proposals": "{p1, p2}",
+    "PullRequests": "{sourcePR, followPR, unrelatedPR}",
     "Questions": "{f1, f2}",
+    "SourcePR": "sourcePR",
+    "TrustedBases": "{trustedBase}",
+    "WorkflowInitial": "c0",
+    "WorkflowStepRows": "{{{\"beforeTag\", c0}, {\"operationTag\", \"open\"}, {\"outcomeTag\", \"accepted\"}, {\"afterTag\", c1}}, {{\"beforeTag\", c1}, {\"operationTag\", \"merge\"}, {\"outcomeTag\", \"succeeded\"}, {\"afterTag\", cm}}, {{\"beforeTag\", c1}, {\"operationTag\", \"close\"}, {\"outcomeTag\", \"observed\"}, {\"afterTag\", cc}}, {{\"beforeTag\", cc}, {\"operationTag\", \"resume\"}, {\"outcomeTag\", \"accepted\"}, {\"afterTag\", c1}}, {{\"beforeTag\", c1}, {\"operationTag\", \"repair\"}, {\"outcomeTag\", \"observed\"}, {\"afterTag\", c2}}, {{\"beforeTag\", c2}, {\"operationTag\", \"repair\"}, {\"outcomeTag\", \"observed\"}, {\"afterTag\", c3}}, {{\"beforeTag\", c3}, {\"operationTag\", \"classify\"}, {\"outcomeTag\", \"observed\"}, {\"afterTag\", cb}}, {{\"beforeTag\", cb}, {\"operationTag\", \"retry\"}, {\"outcomeTag\", \"accepted\"}, {\"afterTag\", cr}}, {{\"beforeTag\", cr}, {\"operationTag\", \"merge\"}, {\"outcomeTag\", \"succeeded\"}, {\"afterTag\", crm}}, {{\"beforeTag\", c1}, {\"operationTag\", \"effect\"}, {\"outcomeTag\", \"failed\"}, {\"afterTag\", c1}}}",
+    "WorkflowViewRows": "{{{\"tokenTag\", c0}, {\"phaseTag\", \"none\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"0\"}}, {{\"tokenTag\", c1}, {\"phaseTag\", \"open\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"0\"}}, {{\"tokenTag\", c2}, {\"phaseTag\", \"open\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"1\"}}, {{\"tokenTag\", c3}, {\"phaseTag\", \"open\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"2\"}}, {{\"tokenTag\", cb}, {\"phaseTag\", \"blocked\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"2\"}}, {{\"tokenTag\", cc}, {\"phaseTag\", \"closed\"}, {\"holdTag\", \"true\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"0\"}}, {{\"tokenTag\", cr}, {\"phaseTag\", \"open\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance2}, {\"repairsTag\", \"0\"}}, {{\"tokenTag\", cm}, {\"phaseTag\", \"merged\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance1}, {\"repairsTag\", \"0\"}}, {{\"tokenTag\", crm}, {\"phaseTag\", \"merged\"}, {\"holdTag\", \"false\"}, {\"allowanceTag\", allowance2}, {\"repairsTag\", \"0\"}}}",
     "Writers": "{alice, invbot}"
   },
   "statements": [
@@ -16,13 +37,13 @@
       "name": "Spec",
       "kind": "spec",
       "says": "The factory starts with no post on the issue, and every step is a Next step.",
-      "sha256": "sha256:1ad1e97165da087a07871554d0a03dcf90bb1f54cad26edd9d5647d288004f0d"
+      "sha256": "sha256:80e9e059a2089f4d4812c97de3c6b19c69359c7fe69cc548181f6260f84cfa2d"
     },
     {
       "name": "TypeOK",
       "kind": "invariant",
       "says": "The issue's state is always one of the ten kinds of post, and everything else the factory knows has its expected type.",
-      "sha256": "sha256:ade8b428766cec26abe520e5ad93499676e91ff28173bce06d105b5f7b55581a"
+      "sha256": "sha256:eaaed76c9c93d48d9b7cbbe3f2bb2e92101c8a425edaacd6759025dbb62487f6"
     },
     {
       "name": "OnlyDirectorsDirect",
@@ -191,63 +212,266 @@
       "kind": "bug",
       "says": "A bot or someone without write access gets the factory to take the issue.",
       "expect": "OnlyDirectorsDirect",
-      "sha256": "sha256:2df76ef0ad424dd26babb0d819117da2f26dcb1bb2249656de7151649646c6e4"
+      "sha256": "sha256:b919f5f16e41ca545acae8f2506d886f48104fb7a1c39dcdb1f37bd48bda78dd"
     },
     {
       "name": "RatifyEarlier",
       "kind": "bug",
       "says": "A ratify naming an earlier proposal's hash is accepted.",
       "expect": "RatifiesCurrentProposal",
-      "sha256": "sha256:e4f00b1645d32413b2185dd815789214d636019c1a0b484d4cbd209110d8851a"
+      "sha256": "sha256:36ce58c26e6378da1158163458f977e292c89f8ce2e3a2357d69d8182dbf8923"
     },
     {
       "name": "RatifyOverMovedLock",
       "kind": "bug",
       "says": "An amendment is ratified after the base branch's lock has moved.",
       "expect": "AmendsHeldLock",
-      "sha256": "sha256:3dcf9082bf41443e9cc0847936f56d1c47de8ded2ce3f369db18dc8ae2e1f12d"
+      "sha256": "sha256:77d15458328e30f7bebf79a83bd5704eeb0327967c93a022b532f6f239878374"
     },
     {
       "name": "MergeOnAnyPass",
       "kind": "bug",
       "says": "The factory merges a commit that passed CI even though it is no longer the pull request's head.",
       "expect": "MergedCurrentHead",
-      "sha256": "sha256:3a128daece701d61560278a1cad2d2c578c01a15f4c1993f1bec595f680a078b"
+      "sha256": "sha256:a407dc06f52404d3313130336a7959fa2cebc31abf38caaf75231b76b3776f24"
     },
     {
       "name": "MergeIgnoringLock",
       "kind": "bug",
       "says": "The factory merges without checking that the project's lock is the ratified proposal.",
       "expect": "MergedLockRatified",
-      "sha256": "sha256:0b31e7bb8c13599934e77582091ff43ef164a51f9af57e692cd35cab884d3a1c"
+      "sha256": "sha256:aaac9a6d9b84078c7fbeb5bdbe22b19640f9fb6f1d7608586dc67dcb13f2e49b"
     },
     {
       "name": "StartPastLimit",
       "kind": "bug",
       "says": "The factory starts a third build after two builds of the issue have stopped partway and no writer has said retry.",
       "expect": "StopLimit",
-      "sha256": "sha256:de6a2ce18ca743b573f3850951700e4930f9aa3b3b1301ad89ac25359eb5e5fc"
+      "sha256": "sha256:68fefa0d4df1ab5de015116dd8e4fceba422af5da0c2cb446ca4c5f25ed70df3"
     },
     {
       "name": "MergeFailedBuild",
       "kind": "bug",
       "says": "The factory merges a pull request whose build failed, before a writer says retry and CI's gate passes.",
       "expect": "MergedGatePassed",
-      "sha256": "sha256:7fa5ad2bae7f3e00f2fa38145f8a4a2d5f6b2155b5760e2fa2c7e90df6cd39b5"
+      "sha256": "sha256:c06221cc00296d42d0c4c3889cc5a20dee4d9c11dc6048fbb463d918749b7fd7"
     },
     {
       "name": "RebuildKeepsDraft",
       "kind": "bug",
       "says": "A retry builds a failed build again but keeps its draft's head, CI's result and lock for the next build.",
       "expect": "BuildStartsClean",
-      "sha256": "sha256:5801d3d0e919fec59bcc76d45e4cf016fa926b18c1bfb192c6ea072de961bdae"
+      "sha256": "sha256:fafe017622818cdb7cb84ffa612d447adb4ddfb349d277634f396092ed598db9"
     },
     {
       "name": "RebuildAfterCI",
       "kind": "bug",
       "says": "A retry builds a pull request that failed CI's gate again, instead of watching it again.",
       "expect": "RebuildsOwnFailures",
-      "sha256": "sha256:7a14b85e19f0ec087988ecc972410e4611a019f10b0fc68deaa3cf885f068ea6"
+      "sha256": "sha256:a4bf7c9817edd501a0440a29365b0cf7ada699a3b70bb58af1ec099b5fd5bf01"
+    },
+    {
+      "name": "FollowupSourceAuthorized",
+      "kind": "invariant",
+      "says": "A decision follow-up is authorized only by the exact ratified plan in its merged source pull request and the decision that source still owes.",
+      "sha256": "sha256:e213fca125c7621b2f42ec53ad35ae52a95f5340e24c3e3aafa041522a56a265"
+    },
+    {
+      "name": "FollowupAssociationAuthenticated",
+      "kind": "invariant",
+      "says": "A follow-up must match the independently verified association between its source obligation and its own pull-request identity, so a claimed source or matching branch cannot authorize another pull request.",
+      "sha256": "sha256:67af1993e7fb90e39973c3855668c0a0e328aedd6ca279e91d434b76826ff45f"
+    },
+    {
+      "name": "FollowupSourcePreserved",
+      "kind": "invariant",
+      "says": "Observing or processing a decision follow-up preserves the source issue’s ratified plan and merged history.",
+      "sha256": "sha256:4954cb3a26a0eb3a860a1178502c7f74acbcafc7e7018b0dd991e2d3cfd13d60"
+    },
+    {
+      "name": "FollowupStableIdentity",
+      "kind": "invariant",
+      "says": "An authorized follow-up keeps its own pull-request identity through every accepted step, including retries and resumes.",
+      "sha256": "sha256:2d2881500ad194bedab653c85f1a5e60f64879f65295bdaaaca480babdf2ec00"
+    },
+    {
+      "name": "FollowupNoNewRatification",
+      "kind": "invariant",
+      "says": "A decision follow-up neither ratifies a new plan nor fabricates a project lock.",
+      "sha256": "sha256:dbced37802c8fcd8d5609f516a418885128b0745ee63473cbaf5d195049dd376"
+    },
+    {
+      "name": "FollowupMergedCurrentHead",
+      "kind": "invariant",
+      "says": "When the factory merges a decision follow-up, it merges that follow-up’s current head.",
+      "sha256": "sha256:157e283748917b249f6415ae56deefc51ce11cd6031a70181d6dd77368bc6814"
+    },
+    {
+      "name": "FollowupNarrowMerge",
+      "kind": "invariant",
+      "says": "A follow-up merge requires independently verified scope on its current head containing only decisions/, SPEC.md and README.md changes tied to its source obligation.",
+      "sha256": "sha256:ec0d5d6da80776a8545df4115310ff962af658bc41d6b41d527591f8dc8ac0dc"
+    },
+    {
+      "name": "FollowupCurrentDecisionChecks",
+      "kind": "invariant",
+      "says": "A follow-up merge requires successful current-head decision checks including the decision graph check, with the project gate either passed or intentionally skipped together with independently verified follow-up scope.",
+      "sha256": "sha256:43c586dea40f43a950f8afe165def8df06dd4aabd2546e91674ceee1f59e3222"
+    },
+    {
+      "name": "FollowupTrustedBase",
+      "kind": "invariant",
+      "says": "The factory merges a decision follow-up only into a trusted base.",
+      "sha256": "sha256:d107c0a2b29a761ca29d5b1c21929f71d193d6820361a534a1d64b87e44b7a5f"
+    },
+    {
+      "name": "FollowupCommandsAuthorized",
+      "kind": "invariant",
+      "says": "Only an authenticated person with repository write access, never a bot, may request a decision follow-up retry or resume.",
+      "sha256": "sha256:113bfed8bfb2bdb500f8043ee2e029e8608bcb2e15d59826da46984a2f806f1b"
+    },
+    {
+      "name": "FollowupCoreAccepted",
+      "kind": "invariant",
+      "says": "Given an externally supplied acceptance receipt from the amended Workflow for the exact request context, every applied follow-up step preserves that context and its accepted before-state, after-state and effect outcome.",
+      "sha256": "sha256:a0e838d38447d5639cd46e20bdab443c5fd8fdb296399bb4c2a6d9d59fb17636"
+    },
+    {
+      "name": "FollowupHumanHold",
+      "kind": "invariant",
+      "says": "A closed follow-up retains its human hold, and only an accepted explicit resume can clear a hold before a merge.",
+      "sha256": "sha256:5cbb52ded09bbd0e463594d4fa03b57ada5d7e1e36f4a734901d58f7b44c2c6e"
+    },
+    {
+      "name": "FollowupRetryRenewsAllowance",
+      "kind": "invariant",
+      "says": "An accepted retry of blocked follow-up work renews its repair allowance with no repairs used.",
+      "sha256": "sha256:c921795bff020824eda749e0030a2431574ab715ee33b8b5800207409bbd1717"
+    },
+    {
+      "name": "FollowupClosedRetryResumes",
+      "kind": "invariant",
+      "says": "A retry of closed follow-up work is an explicit resume of the same existing pull request.",
+      "sha256": "sha256:f346840d0fc7581208d6d63984f8497e4ec540d832830ee16a036d204f220d83"
+    },
+    {
+      "name": "FollowupTwoRepairsPerAllowance",
+      "kind": "invariant",
+      "says": "The amended Workflow’s repair count for a follow-up’s current allowance stays at most two.",
+      "sha256": "sha256:0b71c1385b000ef0673445a4332d0018d2a210ef1e545d7fc8bbb4cb2e68f2ad"
+    },
+    {
+      "name": "HumanMergedPlanFollowupMerges",
+      "kind": "witness",
+      "says": "With the corresponding Workflow steps accepted, an eligible plan merged by a person with write access can lead to a follow-up merge.",
+      "sha256": "sha256:930f01dbae4b2025e455f0821b8b7b1a8478765b5bcbdde8134c79c28c5e7fc4"
+    },
+    {
+      "name": "ClosedFollowupResumesSamePR",
+      "kind": "witness",
+      "says": "With the corresponding Workflow resume accepted, a closed follow-up can resume under the same pull-request identity.",
+      "sha256": "sha256:8b1fbe281344e39bd664e023f77eefdbfcfaf643056db75aef410442e657bc89"
+    },
+    {
+      "name": "SkippedProjectGateFollowupMerges",
+      "kind": "witness",
+      "says": "A follow-up can merge after an intentional project-gate skip when its current decision checks and independent scope verification succeed.",
+      "sha256": "sha256:2bd238d8971cc6fb826d04e99f309939f4bef180906106ff839cf46ea1985878"
+    },
+    {
+      "name": "BlockedFollowupGetsNewAllowance",
+      "kind": "witness",
+      "says": "With the corresponding Workflow retry accepted, a blocked follow-up can receive a renewed repair allowance.",
+      "sha256": "sha256:c7f20a31716d46caf9359a3f55baa95cbb215e6066dbfe393ad7017cf6a237a2"
+    },
+    {
+      "name": "ClosedFollowupKeepsHold",
+      "kind": "witness",
+      "says": "A follow-up can close while retaining its human hold.",
+      "sha256": "sha256:78f9b9a8d67bd1a8d6965008cbe3d65380e9c4b9de60453738ec351f38f4f4ae"
+    },
+    {
+      "name": "AcceptedEffectFailurePreserved",
+      "kind": "witness",
+      "says": "The protocol can preserve a failed effect outcome accepted by the amended Workflow.",
+      "sha256": "sha256:cbe594662a83c72abe4b5a58b56726fd7709153e5d8504edf93a9f20bf09ea93"
+    },
+    {
+      "name": "FollowupOpenUnmergedSource",
+      "kind": "bug",
+      "says": "The protocol opens a decision follow-up from a source that has not merged.",
+      "expect": "FollowupSourceAuthorized",
+      "sha256": "sha256:1720f103a76d2d5cbb65883e9ea6ee863e6add756080b733f3c5fce1f7075875"
+    },
+    {
+      "name": "FollowupOpenNonOwingSource",
+      "kind": "bug",
+      "says": "The protocol opens a decision follow-up from a merged source that owes no decision.",
+      "expect": "FollowupSourceAuthorized",
+      "sha256": "sha256:5d4804450d50aa6a95cb4265b35b04c34c27b7626cf2cdcb35d507638498ce0d"
+    },
+    {
+      "name": "FollowupOpenForgedAssociation",
+      "kind": "bug",
+      "says": "The protocol grants follow-up authority to a pull request with a forged source association.",
+      "expect": "FollowupAssociationAuthenticated",
+      "sha256": "sha256:6cebc750ccd4cc5b69b932f62a10ecc56397295f45856af13df74967de58518c"
+    },
+    {
+      "name": "FollowupMergeBroaderScope",
+      "kind": "bug",
+      "says": "The factory merges a follow-up without independently verifying its narrow scope on the current head.",
+      "expect": "FollowupNarrowMerge",
+      "sha256": "sha256:ba3550ed9351bc7307ad96e8bb9d0367d36639e5d0079fddbbbfc0d7901dac41"
+    },
+    {
+      "name": "FollowupMergeStaleCI",
+      "kind": "bug",
+      "says": "The factory merges a follow-up using successful decision checks from an earlier head.",
+      "expect": "FollowupCurrentDecisionChecks",
+      "sha256": "sha256:2fad8ab083df5d74e8b3d9beabf84d742628013cb5d6f3066c078d4d1c15c34c"
+    },
+    {
+      "name": "FollowupMergeOldHead",
+      "kind": "bug",
+      "says": "The factory merges an earlier follow-up head despite acceptance and checks for the current head.",
+      "expect": "FollowupMergedCurrentHead",
+      "sha256": "sha256:0131c96a2b024f24a9f615e1027be36b15ca6645afbd72b759656ba46282e9b9"
+    },
+    {
+      "name": "FollowupRetryUnauthorized",
+      "kind": "bug",
+      "says": "The protocol accepts a follow-up retry or resume from a bot, a non-writer or an unauthenticated requester.",
+      "expect": "FollowupCommandsAuthorized",
+      "sha256": "sha256:5e0917f3ef67c03a88ca01d09a9728aba6a2b139f056cfc674d4f13f25d77951"
+    },
+    {
+      "name": "FollowupApplyStaleAcceptance",
+      "kind": "bug",
+      "says": "The protocol applies Workflow acceptance for an earlier request context after the follow-up head has changed.",
+      "expect": "FollowupCoreAccepted",
+      "sha256": "sha256:4d6a6b1e482470d8d187cb8f0d1d93c91ad2d943cd4bf5dd79419ca667621d6b"
+    },
+    {
+      "name": "FollowupMergeWithoutGraphCheck",
+      "kind": "bug",
+      "says": "The factory treats an intentional project-gate skip as permission to merge despite a failed current decision graph check.",
+      "expect": "FollowupCurrentDecisionChecks",
+      "sha256": "sha256:54ed46f38bc89ac9c6f18f54b17771398475f49a26110a40a52db0cd0f7471f7"
+    },
+    {
+      "name": "FollowupResumeReplacesPR",
+      "kind": "bug",
+      "says": "The protocol resumes a closed follow-up by replacing its pull request.",
+      "expect": "FollowupStableIdentity",
+      "sha256": "sha256:c26eaee18ee2f5835102ea4337cae181b761e2d82777172e01968452a01690aa"
+    },
+    {
+      "name": "FollowupChangesEffectOutcome",
+      "kind": "bug",
+      "says": "The protocol changes the effect outcome of an accepted Workflow step.",
+      "expect": "FollowupCoreAccepted",
+      "sha256": "sha256:dd8f9f4a5d94f111d642389882d343a0bffa91b9822f1f383490af54bcf30f7d"
     }
   ]
 }

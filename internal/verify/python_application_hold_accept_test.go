@@ -280,8 +280,10 @@ func hold393Assert(t *testing.T, x *PythonApplicationExecutionResult) {
 }
 
 func TestPythonApplicationExecutionHeldCalls(t *testing.T) {
+	t.Parallel()
 	hold393API(t)
 	refusal392Modes(t, func(t *testing.T, real bool) {
+		t.Parallel()
 		x := hold393Execution(t, real, hold393Source, hold393Driver, false)
 		hold393Assert(t, x)
 		// A second staged execution must reproduce portable observations,
@@ -298,14 +300,19 @@ func TestPythonApplicationExecutionHeldCalls(t *testing.T) {
 			"descendant selected worker": strings.Replace(hold393Source, "target=increment, args=(value,)", "target=spawn, args=(value,)", 1) + "\ndef spawn(value):\n    threading.Thread(target=increment, args=(value,)).start()\n",
 			"async selected worker":      strings.Replace(strings.Replace(hold393Source, "def increment(value):", "async def increment(value):\n    await asyncio.sleep(0)", 1), "target=increment, args=(value,)", "target=run_target, args=(value,)", 1) + "\ndef run_target(value):\n    asyncio.run(increment(value))\n",
 		} {
-			t.Run(name, func(t *testing.T) { hold393Assert(t, hold393Execution(t, real, source, hold393Driver, false)) })
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				hold393Assert(t, hold393Execution(t, real, source, hold393Driver, false))
+			})
 		}
 	})
 }
 
 func TestPythonApplicationExecutionHeldCallFailures(t *testing.T) {
+	t.Parallel()
 	hold393API(t)
 	refusal392Modes(t, func(t *testing.T, real bool) {
+		t.Parallel()
 		hold393Assert(t, hold393Execution(t, real, hold393Source, hold393Driver, false))
 		for _, c := range []struct {
 			name, source, driver, diagnostic string
@@ -326,6 +333,7 @@ func TestPythonApplicationExecutionHeldCallFailures(t *testing.T) {
 			{name: "release retains target identity checks", driver: strings.Replace(hold393Driver, "    life.release(", "    if state['active']:\n        app.increment = app.read\n    life.release(", 1)},
 		} {
 			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
 				if c.source == "" {
 					c.source = hold393Source
 				}
@@ -351,6 +359,7 @@ func TestPythonApplicationExecutionHeldCallFailures(t *testing.T) {
 		}
 		for _, form := range []string{"functional", "instance"} {
 			t.Run(form+" cannot hold", func(t *testing.T) {
+				t.Parallel()
 				source := "class Counter:\n    def __init__(self): self.count = 0\n    def increment(self): self.count = 1\n    def submit(self): self.increment()\ndef initial(): return 0\ndef increment(count): return 1\ndef submit(count): return increment(count)\n"
 				driver := "from invariant_observe import Step, explore, functional, instance\nfrom counter import core as app\ndef start():\n    return functional(app.increment, app.initial, argument='count', field='count')\ndef submit(life, state):\n    life.hold(app.submit)\ndef drive():\n    explore(start, [Step('Submit', submit)])\nif __name__ == '__main__': drive()\n"
 				f := hold393Fixture(t, true, source, driver)

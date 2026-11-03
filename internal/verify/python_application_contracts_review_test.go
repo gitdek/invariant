@@ -258,6 +258,7 @@ func prvDep(symbol string) project.ComponentOperation {
 }
 
 func TestPythonApplicationContractTestsCountOnlyTheTestsOwnCalls(t *testing.T) {
+	t.Parallel()
 	r := prvRun(t, true,
 		ptcContract("collections.Counter", prvStd("collections", "Counter"), "counter", "CounterTests.test_substitute_counter"),
 		ptcContract("builtins.len", prvStd("builtins", "len"), "length", "LenTests.test_substitute_len"),
@@ -301,6 +302,7 @@ func TestPythonApplicationContractTestsCountOnlyTheTestsOwnCalls(t *testing.T) {
 }
 
 func TestPythonApplicationContractTestsStillCountRealUse(t *testing.T) {
+	t.Parallel()
 	r := prvRun(t, false,
 		ptcContract("collections.Counter", prvStd("collections", "Counter"), "counter", "CounterTests.test_real_counter"),
 		ptcContract("builtins.len", prvStd("builtins", "len"), "length", "LenTests.test_real_len"),
@@ -336,6 +338,7 @@ func TestPythonApplicationContractTestsStillCountRealUse(t *testing.T) {
 }
 
 func TestPythonApplicationContractTestsRefuseWhatCantBeObserved(t *testing.T) {
+	t.Parallel()
 	r := prvRun(t, false,
 		ptcContract("collections.OrderedDict", prvStd("collections", "OrderedDict"), "ordered", "MapTests.test_ordered_pop"),
 		ptcContract("int.__add__", prvStd("builtins", "int.__add__"), "add", "LenTests.test_real_len"),
@@ -363,6 +366,7 @@ func TestPythonApplicationContractTestsRefuseWhatCantBeObserved(t *testing.T) {
 }
 
 func TestPythonApplicationContractTestsRunOnceEach(t *testing.T) {
+	t.Parallel()
 	root, p := ptcFixture(t)
 	pa310Write(t, root, ptcTests, ptcTestSource+"\n\nclass MoreLoadsTests(LoadsTests):\n    pass\n")
 	loads := &p.Manifest.Components.TrustedContracts[0]

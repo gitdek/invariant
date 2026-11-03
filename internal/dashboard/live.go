@@ -23,28 +23,29 @@ import (
 // command, a tool's output or the model (D-0051, D-0052). Once the step has
 // ended, it's the step as the watcher recorded it (#269).
 type Live struct {
-	Repo          string         `json:"repo"`
-	Issue         int            `json:"issue"`
-	Doing         string         `json:"doing"`
-	Title         string         `json:"title"`         // what the card's heading says the step does, or did once it has ended
-	Run           string         `json:"run,omitempty"` // the watcher's opaque run directory basename
-	Since         *time.Time     `json:"since,omitempty"`
-	Limit         float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
-	Turns         int            `json:"turns"`
-	Thinking      int            `json:"thinking"`         // reported thinking tokens of completed turns, or estimates so far
-	ThinkingExact bool           `json:"thinkingExact"`    // the thinking total comes from reported usage
-	Context       int            `json:"context"`          // tokens the agent holds now
-	Output        int            `json:"output,omitempty"` // output tokens, once the agent's run has ended
-	Tools         map[string]int `json:"tools"`            // tool calls by kind
-	Now           string         `json:"now,omitempty"`    // thinking, or the kind of tool it's running
-	Last          *time.Time     `json:"last,omitempty"`   // when the transcript last grew
-	Marks         []Mark         `json:"marks"`
-	Files         []LiveFile     `json:"files"`
-	Runs          []RunMark      `json:"runs,omitempty"`
-	RunsKind      string         `json:"runsKind,omitempty"` // check, gate or test
-	Agent         string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
-	By            string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
-	Ended         *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
+	Repo            string         `json:"repo"`
+	Issue           int            `json:"issue"`
+	Doing           string         `json:"doing"`
+	Title           string         `json:"title"`         // what the card's heading says the step does, or did once it has ended
+	Run             string         `json:"run,omitempty"` // the watcher's opaque run directory basename
+	Since           *time.Time     `json:"since,omitempty"`
+	Limit           float64        `json:"limit,omitempty"` // seconds the agent's run may take, when the watcher says
+	Turns           int            `json:"turns"`
+	Thinking        int            `json:"thinking"`         // reported thinking tokens of completed turns, or estimates so far
+	ThinkingExact   bool           `json:"thinkingExact"`    // the thinking total comes from reported usage
+	ThinkingPending bool           `json:"thinkingPending"`  // Codex has not supplied a reasoning item or completed turn yet
+	Context         int            `json:"context"`          // tokens the agent holds now
+	Output          int            `json:"output,omitempty"` // output tokens, once the agent's run has ended
+	Tools           map[string]int `json:"tools"`            // tool calls by kind
+	Now             string         `json:"now,omitempty"`    // thinking, or the kind of tool it's running
+	Last            *time.Time     `json:"last,omitempty"`   // when the transcript last grew
+	Marks           []Mark         `json:"marks"`
+	Files           []LiveFile     `json:"files"`
+	Runs            []RunMark      `json:"runs,omitempty"`
+	RunsKind        string         `json:"runsKind,omitempty"` // check, gate or test
+	Agent           string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
+	By              string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
+	Ended           *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
 
 	path string // the transcript supplying this view; never serialized
 }
@@ -86,6 +87,7 @@ type transcript struct {
 	turns         int // the turns of the agent's sessions before this one
 	thinking      int
 	thinkingExact bool
+	thinkingSeen  bool // a Codex reasoning item or completed turn, even without tokens
 	context       int
 	output        int
 	agent         string
@@ -447,6 +449,7 @@ func (t *transcript) codexLine(b []byte) {
 	case "item.completed":
 		switch e.Item.Type {
 		case "reasoning":
+			t.thinkingSeen = true
 			// Its thinking came between the event before and this one.
 			until, tokens := t.last, len(e.Item.Text)/4
 			if !t.thinkingExact {
@@ -474,6 +477,7 @@ func (t *transcript) codexLine(b []byte) {
 		}
 		t.now = t.pendingKind("thinking")
 	case "turn.completed":
+		t.thinkingSeen = true
 		if e.Usage.Reasoning != nil {
 			if !t.thinkingExact {
 				t.thinking = 0 // the first reported count replaces estimates
@@ -646,7 +650,8 @@ func agentEnded(subtype string, isError bool) string {
 // is gone.
 func (t *transcript) view() Live {
 	v := Live{Turns: t.turns + len(t.ids), Thinking: t.thinking, ThinkingExact: t.thinkingExact, Context: t.context, Output: t.output, Now: t.now, Agent: t.agent,
-		Tools: map[string]int{}, Marks: append([]Mark{}, t.marks...), Files: []LiveFile{}}
+		ThinkingPending: t.codex && !t.thinkingSeen && t.agent == "",
+		Tools:           map[string]int{}, Marks: append([]Mark{}, t.marks...), Files: []LiveFile{}}
 	for k, n := range t.tools {
 		v.Tools[k] = n
 	}
@@ -917,6 +922,7 @@ func (s *Server) finishedStep(repo string, step Step, work string, read map[stri
 	v.Repo, v.Issue, v.Doing, v.Limit, v.By = repo, step.Issue, step.Doing, step.Limit, step.Agent
 	v.Title = liveTitle(step.Doing, true)
 	v.Run, v.path, v.Ended, v.Now = step.Run, path, &ended, ""
+	v.ThinkingPending = false
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
@@ -945,16 +951,16 @@ func (s *Server) finishedStep(repo string, step Step, work string, read map[stri
 // attempt may have stopped or failed.
 func liveTitle(doing string, ended bool) string {
 	if ended {
-		return map[string]string{"building": "Build step ended", "formalizing": "Draft step ended", "answering": "Answer step ended"}[doing]
+		return map[string]string{"building": "Build step ended", "waiting for checks": "Build step ended", "formalizing": "Draft step ended", "answering": "Answer step ended"}[doing]
 	}
-	return map[string]string{"building": "Building", "formalizing": "Drafting", "answering": "Answering"}[doing]
+	return map[string]string{"building": "Building", "waiting for checks": "Waiting for checks", "formalizing": "Drafting", "answering": "Answering"}[doing]
 }
 
 // stepFiles is the prefix of a step's directory in the work directory, and
 // the file it logs its checks to, for what a watcher is doing.
 func stepFiles(doing string) (prefix string, runs []string) {
 	switch doing {
-	case "building":
+	case "building", "waiting for checks":
 		// A modeled build logs gate runs, and a plumbing build logs test
 		// runs (D-0105).
 		return "build-", []string{"gate-runs.jsonl", "test-runs.jsonl"}
@@ -995,6 +1001,9 @@ func readRuns(dir, doing string) ([]RunMark, string) {
 }
 
 func runsKindOf(doing string) string {
+	if doing == "waiting for checks" {
+		return "test"
+	}
 	if doing == "building" {
 		return "gate"
 	}

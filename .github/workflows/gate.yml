@@ -21,7 +21,8 @@ jobs:
   # don't, so the gate is skipped for them (D-0079). GitHub counts a job its
   # condition skips as passing, and waits forever for a required check whose
   # workflow a path filter skipped, so the skip lives here (D-0080). Docs cite
-  # decisions, though, so this job checks the decision graph on every change.
+  # decisions, though, so this job checks the decision graph on every change,
+  # and the docs' own length and links.
   changes:
     name: What changed
     runs-on: ubuntu-latest
@@ -86,6 +87,12 @@ jobs:
           if git rev-parse -q --verify "$BASE^{commit}" > /dev/null; then base="-base $BASE"; fi
           go run ./cmd/invariant decisions check $base
 
+      # The README stays a front page, and every relative link in it and
+      # under docs/ resolves (D-0294). The gate skips a change to docs alone,
+      # so this job checks them on every change, as it does the decisions.
+      - name: Check the docs
+        run: go test ./internal/docs/
+
   verify:
     # Everything but verifying the projects, which their own jobs do, and the
     # gate's own tests. invariant/gate, below, is the check the factory
@@ -105,6 +112,13 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      # The oldest Python Invariant supports, which ubuntu-latest gave this
+      # job until it moved to Ubuntu 26.04 and Python 3.14 (#478). With
+      # invariant/python's 3.13, CI tests two versions; 3.14 is #479.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
 
       - name: Vet and unit tests
         run: |
@@ -167,6 +181,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      # As in invariant/verify, above: Python 3.12 (#478).
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
 
       - name: internal/verify's tests, shard ${{ matrix.shard }}
         run: .github/shard-tests.sh "${{ matrix.shard }}" -timeout 20m -- ./internal/verify/
@@ -370,7 +389,7 @@ jobs:
       - name: Python tests under the pinned image's Python, shard ${{ matrix.shard }}
         env:
           INVARIANT_PYTHON_PINNED: '1'
-        run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/project/ ./cmd/invariant/
+        run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/verify/pythongate/ ./internal/project/ ./cmd/invariant/
 
   real-python:
     # The Python tests again, with every opt-in for real Docker, TLC, Nagini

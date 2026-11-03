@@ -17,7 +17,7 @@ import (
 )
 
 // These tests run several issues' steps at once (D-0113): one step per
-// issue, and up to Parallel of them.
+// issue, and up to Parallel agent operations (#455).
 
 // parRig is a rig whose watcher runs steps at once. The fakes aren't safe to
 // use from several steps, so every call into them, and every read the test
@@ -32,8 +32,8 @@ type parRig struct {
 	clone Clone
 }
 
-// newParRig is a rig whose watcher runs up to parallel steps at once, with
-// no forks to decide.
+// newParRig is a rig whose watcher runs up to parallel agent operations at
+// once, with no forks to decide.
 func newParRig(t *testing.T, parallel int) *parRig {
 	t.Helper()
 	r := newRig(t)
@@ -68,6 +68,18 @@ func (s *syncHub) OpenIssues(ctx context.Context) ([]github.Issue, error) {
 	defer s.mu.Unlock()
 	s.lists++
 	return s.gh.OpenIssues(ctx)
+}
+
+func (s *syncHub) Issues(ctx context.Context, label string) ([]github.Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gh.Issues(ctx, label)
+}
+
+func (s *syncHub) MergedPullRequests(ctx context.Context) ([]github.PullRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gh.MergedPullRequests(ctx)
 }
 
 // Issue reads one issue as it is now, open or closed.
@@ -535,12 +547,12 @@ func TestLosingTheLeaseStopsEveryStep(t *testing.T) {
 	}
 }
 
-// No more than Parallel steps run at once. A poll that finds that many
-// running waits for one to end before it starts the next, and reads each
-// issue again just before its step, so it skips one closed while it waited.
-func TestNoMoreStepsRunThanParallel(t *testing.T) {
+// No more than Parallel agent operations run at once. Poll returns while
+// other steps wait for a slot, and each reads its issue again after waiting,
+// so it skips one closed before capacity was free.
+func TestNoMoreAgentOperationsRunThanParallel(t *testing.T) {
 	p := newParRig(t, 2)
-	for n := 1; n <= 4; n++ {
+	for n := 1; n <= 2; n++ {
 		p.held.holdOpen(n)
 		p.open(n)
 	}
@@ -548,22 +560,26 @@ func TestNoMoreStepsRunThanParallel(t *testing.T) {
 	soon(t, "#1's and #2's drafts to start", func() bool {
 		return p.held.started("draft", 1) == 1 && p.held.started("draft", 2) == 1
 	})
-	time.Sleep(200 * time.Millisecond)
+	returned(t, done, "the poll with both slots occupied")
+	for n := 3; n <= 4; n++ {
+		p.held.holdOpen(n)
+		p.open(n)
+	}
+	returned(t, p.pollAsync(), "the poll that queues two more drafts")
 	if now, _ := p.held.going(); now != 2 {
-		t.Fatalf("%d drafts are going with two steps at most; want two", now)
+		t.Fatalf("%d drafts are going with two agent slots; want two", now)
 	}
 	p.shut(3)
 	p.held.let(1)
-	soon(t, "#4's draft, once #1's step ended", func() bool { return p.held.started("draft", 4) == 1 })
+	soon(t, "#4's draft, once #1's slot is free", func() bool { return p.held.started("draft", 4) == 1 })
 	p.held.let(2)
 	p.held.let(4)
-	returned(t, done, "the poll")
 	p.f.Wait()
 	for _, n := range []int{1, 2, 4} {
 		p.expect(n, KindProposal, LabelProposal)
 	}
 	if got := p.held.started("draft", 3); got != 0 || len(p.posts(3)) != 0 {
-		t.Errorf("#3 was closed before its step, and still got %d drafts and %d posts", got, len(p.posts(3)))
+		t.Errorf("#3 was closed before its agent run, and still got %d drafts and %d posts", got, len(p.posts(3)))
 	}
 	if _, most := p.held.going(); most != 2 {
 		t.Errorf("%d drafts went at once; want two at most", most)
@@ -581,13 +597,12 @@ func (b closing) Build(ctx context.Context, dir, out string, amend bool) (*synth
 	return b.Builder.Build(ctx, dir, out, amend)
 }
 
-// With one step at a time, as the watcher took them before (-parallel 1), a
-// poll still reads each issue again just before its step: an issue closed
-// while an earlier issue built gets no step from the same poll.
+// The zero-valued Factory keeps synchronous Poll compatibility: it reads
+// each issue again just before its step, so an issue closed while an earlier
+// issue built gets no ordinary work from the same poll.
 func TestAnIssueClosedDuringAPollGetsNoStep(t *testing.T) {
 	r := newRig(t)
 	r.form.forks = nil
-	r.f.Parallel = 1
 	r.gh.open(1, "gitdek", "Add a bounded buffer", "A buffer.\n\n/invariant solve")
 	r.poll()
 	p := r.expect(1, KindProposal, LabelProposal)

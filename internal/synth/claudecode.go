@@ -171,7 +171,28 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 	cmd := exec.CommandContext(run, c.Binary, args...)
 	cmd.Dir = job.Workspace
 	// The gate takes a while; give its tool calls time.
-	cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=900000", "MCP_TIMEOUT=60000")
+	// Claude Code caps its timer at the largest signed 32-bit millisecond
+	// count. Larger values can overflow JavaScript timers in older clients.
+	const maxToolMillis = int64(1<<31 - 1)
+	toolTimeout := int64(900000)
+	if job.ToolTimeout < 0 {
+		toolTimeout = maxToolMillis
+	} else if job.ToolTimeout > 0 {
+		millis := job.ToolTimeout.Milliseconds()
+		if job.ToolTimeout%time.Millisecond != 0 {
+			millis++
+		}
+		if millis > toolTimeout {
+			toolTimeout = millis
+		}
+		toolTimeout = min(toolTimeout, maxToolMillis)
+	}
+	cmd.Env = append(os.Environ(), fmt.Sprintf("MCP_TOOL_TIMEOUT=%d", toolTimeout), "MCP_TIMEOUT=60000")
+	if job.ToolTimeout != 0 {
+		// A queued check may be silent longer than the client's idle timer.
+		// Its build context and the sandbox still bound execution.
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0")
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return try{err: err}

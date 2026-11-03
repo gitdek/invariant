@@ -57,7 +57,7 @@ Usage:
   invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
   invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
   invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
-  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-agent A] [-language L] [-lease D] [-parallel N]
+  invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-agent A] [-language L] [-lease D] [-parallel N] [-check-parallel N]
                                                turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
   invariant ratification -repo OWNER/NAME PROJECT|PLAN...
@@ -342,8 +342,14 @@ func mcpCmd(ctx context.Context, args []string) int {
 	pipes := fs.Bool("plumbing", false, "serve the test tool to an agent building issue -issue's ratified plan, from the checkout at -ratified")
 	issue := fs.Int("issue", 0, "with -plumbing: the issue whose plan is built")
 	cache := fs.String("cache", "", "with -plan or -plumbing: a Go build cache to keep between test runs")
+	checkQueue := fs.String("check-queue", "", "with -plumbing: the watcher's check queue endpoint")
+	checkBuild := fs.String("check-build", "", "with -plumbing: the build registered on the check queue")
 	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
 	fs.Parse(args)
+	if (*checkQueue != "" || *checkBuild != "") && (!*pipes || *checkQueue == "" || *checkBuild == "") {
+		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plumbing, -check-queue and -check-build")
+		return 2
+	}
 	if *graph {
 		return decisionsMCP(ctx, *dir, *storePath, *write)
 	}
@@ -356,7 +362,13 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 0
 	}
 	if (*plan || *pipes) && fs.NArg() == 1 {
-		sb, err := sandbox(ctx, *cache)
+		var sb plumbing.Sandbox
+		var err error
+		if *checkQueue != "" {
+			sb.Checks = &plumbing.CheckClient{Address: *checkQueue, Build: *checkBuild}
+		} else {
+			sb, err = sandbox(ctx, *cache)
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
@@ -758,7 +770,8 @@ func watchCmd(ctx context.Context, args []string) int {
 	home, _ := os.UserHomeDir()
 	appKey := fs.String("app-key", filepath.Join(home, ".config", "invariant", "factory.pem"), "the App's private key")
 	leaseFor := fs.Duration("lease", 5*time.Minute, "how long the watcher's lease on the repository lasts, renewed every poll: over 2m and at least three polls; 0 watches without one")
-	parallel := fs.Int("parallel", 3, "how many issues the watcher takes steps on at once, one step per issue; 1 takes one step at a time")
+	parallel := fs.Int("parallel", 3, "agent slots for drafts and builds, including reviews and repairs; commands and polling continue while full, even with 1")
+	checkParallel := fs.Int("check-parallel", 1, "how many plumbing build sandbox checks may run at once, independently of -parallel and agents")
 	fs.Parse(args)
 	if !validAgent(*agent) {
 		fmt.Fprintf(os.Stderr, "invariant: -agent is codex or claude-code, the coding agents Invariant can run, not %q\n", *agent)
@@ -785,8 +798,19 @@ func watchCmd(ctx context.Context, args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
+	if *checkParallel < 1 {
+		fmt.Fprintln(os.Stderr, "invariant: -check-parallel must be positive")
+		return 2
+	}
 	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
 	fail := func(err error) int { logger.Print(err); return 2 }
+	checkQueue, err := plumbing.NewCheckQueue(*checkParallel)
+	if err != nil {
+		return fail(err)
+	}
+	defer checkQueue.Close()
+	stopChecks := context.AfterFunc(ctx, func() { checkQueue.Close() })
+	defer stopChecks()
 
 	gh := github.Client{Repo: *repo}
 	dir := filepath.Join(*work, filepath.FromSlash(*repo))
@@ -889,7 +913,7 @@ func watchCmd(ctx context.Context, args []string) int {
 			Formalizer: formalize.Formalizer{Backend: drafts, Binary: self, CheckRuns: 4, Timeout: *timeout, Toolchain: tc, Sandbox: sb},
 			Builder: factory.Synthesis{Options: synth.Options{Backend: builds, Binary: self, GateRuns: *runs, Timeout: *timeout, Toolchain: tc,
 				FallbackEffort: fallbackEffort(top[name], *fallback)}},
-			Plumbing: plumbing.Builder{Backend: builds, Reviewer: drafts, Binary: self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb,
+			Plumbing: plumbing.Builder{Backend: builds, Reviewer: drafts, Binary: self, TestRuns: *runs + 2, Timeout: *timeout, Sandbox: sb, Checks: checkQueue,
 				FallbackEffort: fallbackEffort(top[name], *fallback)},
 		}
 	}

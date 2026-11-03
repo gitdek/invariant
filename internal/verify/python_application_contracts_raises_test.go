@@ -97,6 +97,7 @@ def settle(n: int) -> int:
 `
 
 func TestPythonApplicationContractTestsNeedWhatTheyRaiseDeclared(t *testing.T) {
+	t.Parallel()
 	root, p := ptcFixture(t)
 	pa310Write(t, root, "store/state.py", praState)
 	pa310Write(t, root, ptcTests, praTests)

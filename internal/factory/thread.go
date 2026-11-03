@@ -83,7 +83,7 @@ func ParseCommands(body string) []Command {
 	return out
 }
 
-// Kinds of factory post. Each records what state the issue is in.
+// Kinds of factory post. Each records a state or an observation on the issue.
 const (
 	KindForks       = "forks"       // asked people to decide forks
 	KindProposal    = "proposal"    // proposed statements for ratification
@@ -94,7 +94,7 @@ const (
 	KindFailed      = "failed"      // the build or CI's gate failed; people need to look
 	KindMerged      = "merged"      // merged
 	KindClosed      = "closed"      // the pull request was closed without merging
-	KindNote        = "note"        // answered a command without changing anything
+	KindNote        = "note"        // answered a command or recorded an observation without changing the working state
 	// A ratified plan's posts on its issue, which, like notes, leave that
 	// issue's state as it was (#126).
 	KindPlanOpened = "plan-opened" // recorded the issue opened for one of the plan's steps
@@ -150,6 +150,7 @@ const maxStops = 2
 // Marker is the state a factory post records, hidden at its end.
 type Marker struct {
 	Kind     string              `json:"kind"`
+	Refusal  string              `json:"refusal,omitempty"`  // a refused effect's report or retry answer
 	ReplyTo  []int64             `json:"reply_to,omitempty"` // the commands it answers; 0 is the issue itself
 	Forks    []formalize.Fork    `json:"forks,omitempty"`
 	Answers  []formalize.Answer  `json:"answers,omitempty"` // the forks decided so far
@@ -193,6 +194,9 @@ type Marker struct {
 	Step     int    `json:"step,omitempty"`
 	Opened   int    `json:"opened,omitempty"`
 	Ratifier string `json:"ratifier,omitempty"`
+	// IssueClosed marks a closure observation, encoded as a note so readers
+	// keep the working state and its commands available after reopening.
+	IssueClosed bool `json:"issue_closed,omitempty"`
 }
 
 // carried is the marker a later post carries forward: the same issue state,
@@ -200,6 +204,7 @@ type Marker struct {
 // and when.
 func (m Marker) carried() Marker {
 	m.Spend, m.GateRuns, m.Agent, m.Numbers, m.Watched, m.RetriedAt = 0, 0, "", nil, "", ""
+	m.Refusal, m.IssueClosed = "", false
 	return m
 }
 
@@ -294,8 +299,10 @@ type Thread struct {
 	People   []github.Comment // comments from people with write access
 }
 
-// State is the factory's latest post, not counting notes or a plan's posts
-// on its issue. ok is false for an issue the factory hasn't touched.
+// State is the factory's latest working state, not counting notes, issue
+// closure observations or a plan's posts on its issue. Closing an issue
+// stops its steps, but leaves this state usable when it reopens. ok is false
+// for an issue the factory hasn't touched.
 func (t Thread) State() (post Post, ok bool) {
 	for i := len(t.Posts) - 1; i >= 0; i-- {
 		switch t.Posts[i].Marker.Kind {

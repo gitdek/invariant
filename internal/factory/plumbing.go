@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -215,6 +216,11 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	case run.Plumbing == nil:
 		return "", "", nil, fmt.Errorf("this watcher can't build plumbing with %s", agent), nil
 	}
+	release, err := f.agentSlot(ctx, n)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	defer release()
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
@@ -245,7 +251,10 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		return "", "", nil, nil, err
 	}
 	f.runsAgent(n, agent, out)
-	res, runErr := run.Plumbing.Build(ctx, wt, n, out)
+	checks := plumbing.WithCheckStatus(ctx, func(waiting bool) {
+		f.checkStatus(n, filepath.Base(out), waiting)
+	})
+	res, runErr := run.Plumbing.Build(checks, wt, n, out)
 	// As for a project: a watcher that lost the lease drops the run, and one
 	// that took it back in a new tenure records its result, and its next
 	// step publishes it, if the build still stands.
