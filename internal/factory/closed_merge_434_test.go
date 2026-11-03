@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -110,15 +111,17 @@ func TestBranchIssue434(t *testing.T) {
 	}
 }
 
-// A merge's issue is read again after GitHub failed for a moment, and not
-// after it refused, as for an issue since deleted, nor after it succeeded.
-func TestSawMergeRetriesOnlyTransientFailures434(t *testing.T) {
+// A merge's issue is read again after any failed step, a refusal's included,
+// since the failure may be the refusal's own report. Only a step that ended
+// without error, or an issue that's gone, settles it.
+func TestSawMergeRetriesFailedSteps434(t *testing.T) {
 	f := &Factory{seenMerges: map[int]bool{}}
 	f.sawMerge(5, errors.New("gh: Bad Gateway (HTTP 502)"))
-	f.sawMerge(6, errors.New("gh: This issue was deleted (HTTP 410)"))
+	f.sawMerge(6, errors.New("delete branch: gh: branch deletion was refused (HTTP 422)"))
 	f.sawMerge(7, nil)
+	f.sawMerge(8, fmt.Errorf("GET issues/8: %w", github.ErrNotFound))
 	f.sawMerge(0, nil)
-	if f.seenMerges[5] || !f.seenMerges[6] || !f.seenMerges[7] || f.seenMerges[0] {
-		t.Fatalf("seen merges %v; want #6 and #7 only", f.seenMerges)
+	if f.seenMerges[5] || f.seenMerges[6] || !f.seenMerges[7] || !f.seenMerges[8] || f.seenMerges[0] {
+		t.Fatalf("seen merges %v; want #7 and #8 only", f.seenMerges)
 	}
 }

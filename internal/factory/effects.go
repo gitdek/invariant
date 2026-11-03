@@ -35,8 +35,10 @@ type issueEffects struct {
 
 func effectName(n int) string { return fmt.Sprintf("effect-%d", n) }
 
-// effects runs before even a closed issue's cleanup. Every issue is polled,
-// so a refusal needs neither a successful post nor a label to be found.
+// effects runs before even a closed issue's cleanup. A refusal needs neither
+// a successful post nor a label to be found: an open issue is polled every
+// time, and a closed one while it keeps an active label or until a step on
+// it ends without error after its pull request's merge (pollIssues).
 func (f *Factory) effects(ctx context.Context, t Thread) (context.Context, bool, error) {
 	e := &issueEffects{issue: t.Issue.Number}
 	for _, label := range statusLabels {

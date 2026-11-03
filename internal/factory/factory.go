@@ -399,12 +399,12 @@ func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, 
 	return issues, merges, nil
 }
 
-// sawMerge remembers that a step read the issue of merged pull request pr,
-// so no later poll reads it again for that merge. One that GitHub failed
-// for a moment is read again; one it refused, as for an issue since
-// deleted, isn't.
+// sawMerge remembers that a step on the issue of merged pull request pr
+// ended, so no later poll reads it again for that merge. A step that failed
+// is read again, even for a refusal, whose report may be what failed,
+// unless the issue is gone.
 func (f *Factory) sawMerge(pr int, err error) {
-	if pr == 0 || github.Transient(err) {
+	if pr == 0 || err != nil && !errors.Is(err, github.ErrNotFound) {
 		return
 	}
 	f.mu.Lock()
