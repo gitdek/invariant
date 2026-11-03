@@ -587,11 +587,14 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 	// may not edit, which never fail its formatting (#298).
 	sb.Original = root
 	calls := toolCalls("test", maxRuns)
+	description := "Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, in a sandbox with no network."
+	if sb.Repository != nil || sb.Checks != nil {
+		description = "Run the build's configured repository checks on staged changes to the plan's files and allowed new regression tests, offline. Report command or test failures and unfinished acceptance evidence."
+	}
 	return mcp.Tool{
-		Name: "test",
-		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, "+
-			"in a sandbox with no network. You have %d runs in total.", maxRuns),
-		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Name:        "test",
+		Description: fmt.Sprintf("%s You have %d runs in total.", description, maxRuns),
+		Schema:      map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			runs, err := calls(ctx)
 			if err != nil {
@@ -614,7 +617,7 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 			}
 			r, err := sb.Run(ctx, staged, &lock.Plan)
 			if err != nil {
-				return fmt.Sprintf("The tests couldn't run: %v\n\n(Test run %d of %d.)", err, runs, maxRuns), true
+				return fmt.Sprintf("The tests couldn't run: %v\n%s\n%s\n\n(Test run %d of %d.)", err, r.Summary(), r.Tail(8000), runs, maxRuns), true
 			}
 			if logPath != "" {
 				synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: r.Passed(), Failed: r.Failing(), At: time.Now().UTC().Format(time.RFC3339)})
