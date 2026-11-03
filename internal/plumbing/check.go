@@ -21,16 +21,38 @@ type Checked struct {
 // on the code as it is. A test that already passes can't show the change
 // works, as a planted bug TLC can't catch shows nothing.
 func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
-	plan, err := ReadDraft(ws)
+	if s.Checks != nil {
+		return s.Checks.check(ctx, ws)
+	}
+	var plan *Plan
+	var err error
+	if s.Repository != nil {
+		plan, err = ReadRepositoryDraft(ctx, ws, s.Repository.Snapshot)
+	} else {
+		plan, err = ReadDraft(ws)
+	}
 	if err != nil {
 		return &Checked{Problem: err.Error()}, nil
 	}
 	c := &Checked{Plan: plan}
+	if plan.Native() && s.Repository == nil {
+		c.Problem = "native acceptance needs the caller's captured repository authority"
+		return c, nil
+	}
 	for _, f := range plan.TestFiles() {
 		if _, err := os.Lstat(filepath.Join(repo, filepath.FromSlash(f))); err == nil {
 			c.Problem = fmt.Sprintf("acceptance test file %s is already in the repository; put the tests in a new file, which the build can't change", f)
 			return c, nil
 		}
+	}
+	if s.Repository != nil {
+		// No adapter collects individual acceptance evidence yet, so no
+		// configured run can show these tests fail on the code as it is.
+		// Refuse before copying the checkout or preparing dependencies; an
+		// adapter's issue lifts this for the frameworks it runs.
+		c.Run = unstartedAcceptance(plan)
+		c.Problem = "configured acceptance has no individual execution adapter yet, so no run can show these tests fail on the code as it is"
+		return c, nil
 	}
 	dir, err := os.MkdirTemp("", "invariant-plan-check-")
 	if err != nil {
@@ -50,8 +72,15 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		}
 	}
 	// The copy isn't a checkout, so the sandbox lists its files by walking.
-	if c.Run, err = s.Run(ctx, dir, plan); err != nil {
-		return nil, err
+	c.Run, err = s.Run(ctx, dir, plan)
+	if err != nil {
+		// The built-in runner's failure is the factory's, not the plan's.
+		// A configured check refuses the draft instead.
+		if s.Repository == nil {
+			return nil, err
+		}
+		c.Problem = "acceptance checks could not finish: " + err.Error()
+		return c, nil
 	}
 	var passing []string
 	var unfinished []string
@@ -60,18 +89,18 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		// Legacy results have only Accepted. Structured runs distinguish a
 		// completed failure (including a compiler failure for a proposed API)
 		// from a check that never ran, skipped, or exited before finishing.
-		if c.Run.TestResults != nil {
+		if c.Run.TestResults != nil || c.Run.CommandResults != nil || s.Repository != nil {
 			status := "not_run"
 			for _, result := range c.Run.TestResults {
-				if result.Phase == "accept" && result.File == t.File && result.Name == t.Name {
+				if result.Phase == "accept" && result.identity() == t.Identity() {
 					status = result.Status
 					break
 				}
 			}
 			if status != "failed" && status != "passed" {
-				unfinished = append(unfinished, fmt.Sprintf("%s (%s)", t.Name, status))
+				unfinished = append(unfinished, fmt.Sprintf("%s (%s)", t.Identity(), status))
 			}
-			passed = passed || status == "passed"
+			passed = status == "passed"
 		}
 		if passed {
 			passing = append(passing, t.Name)

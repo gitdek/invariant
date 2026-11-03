@@ -1303,7 +1303,15 @@
     // A plumbing plan is tested, not proved (D-0105).
     if (w.plan) {
       const files = (w.plan.files || []).length, trusted = (w.plan.trusted || []).length;
-      return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.plan.summary)}</p>`;
+      // said() lists every test's name and what it says. Native tests also
+      // name the complete identity being ratified.
+      const tests = (w.plan.tests || []).filter((t) => t.framework).map((t) => `<li><strong>${esc(t.name)}</strong> · part <code>${esc(t.part)}</code> · ${esc(t.framework)} · <code>${esc(t.file)}</code> · selector <code>${esc(t.selector)}</code></li>`).join("");
+      const sources = Object.entries(w.plan.sources || {}).sort(([a], [b]) => a.localeCompare(b)).map(([file, source]) => {
+        const language = w.plan.languages?.[file] || "go";
+        return `<details><summary><code>${esc(file)}</code> · ${esc(language)}</summary><pre><code class="language-${esc(language)}">${planSource(source, language)}</code></pre></details>`;
+      }).join("");
+      const execution = w.plan.execution ? `<p>Captured execution: <code>${esc(w.plan.execution.digest)}</code><br>Base provenance: <code>${esc(w.plan.execution.base)}</code></p>` : "";
+      return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.plan.summary)}</p>${tests ? `<ul>${tests}</ul>` : ""}${execution}${sources}`;
     }
     // A plan of issues pins no statement: it's the issues, in order.
     if (w.issuePlan) {
@@ -1312,6 +1320,27 @@
     }
     if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
     return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
+  }
+  // Highlight escaped tokens only. Source and labels never become page markup.
+  function planSource(source, language) {
+    const keywords = {
+      go: "package import func var const type struct interface map chan return if else for range switch case default select go defer break continue true false nil",
+      python: "def class import from as return if elif else for while in is not and or assert raise try except finally with async await lambda pass yield True False None",
+      typescript: "import export from as const let var function class interface type return if else for while switch case default async await new throw try catch finally true false null undefined",
+    };
+    const words = new Set((keywords[language === "javascript" ? "typescript" : language] || "").split(" "));
+    const tokens = language === "python"
+      ? /#[^\r\n]*|'''[\s\S]*?'''|"""[\s\S]*?"""|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"|\b[A-Za-z_]\w*\b|\b\d+(?:\.\d+)?\b/g
+      : /\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"|`(?:\\[\s\S]|[^`\\])*`|\b[A-Za-z_]\w*\b|\b\d+(?:\.\d+)?\b/g;
+    let out = "", end = 0;
+    for (const match of source.matchAll(tokens)) {
+      out += esc(source.slice(end, match.index));
+      const token = match[0], comment = language === "python" ? token.startsWith("#") : token.startsWith("//") || token.startsWith("/*");
+      const color = comment ? "var(--muted)" : words.has(token) ? "var(--accent)" : "";
+      out += color ? `<span style="color:${color}">${esc(token)}</span>` : esc(token);
+      end = match.index + token.length;
+    }
+    return out + esc(source.slice(end));
   }
   // why says, in words, why a failed issue needs a person. What a retry
   // does then is the server's to say, in retryText (#263).

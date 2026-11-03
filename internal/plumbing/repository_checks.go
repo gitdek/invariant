@@ -44,13 +44,13 @@ type CommandResult struct {
 var repositoryPhases = []string{"format", "lint", "build", "test"}
 
 func (s Sandbox) runRepository(ctx context.Context, root string, plan *Plan) (Result, error) {
-	run := &repositoryCheck{sandbox: s, root: root, plan: plan, started: time.Now()}
+	run := &repositoryCheck{sandbox: s, root: root, plan: plan, started: time.Now(), result: unstartedAcceptance(plan)}
 	// The build's pausable execution budget has no fixed Deadline. RunAgent
 	// supplies its remaining allowance in Job.Timeout without pausing for this
 	// host operation. No agent is started, and no fallback can renew the run.
 	_, _, err := synth.RunAgent(ctx, run, synth.Job{}, sandboxLimit(s.Timeout, SandboxTimeout), "")
-	if run.result.CommandResults == nil {
-		run.result.CommandResults = []CommandResult{}
+	// Once the checks ran, their own result already records their error.
+	if !run.ran {
 		run.result.Problems = append(run.result.Problems, fmt.Sprintf("repository checks could not start: %v", err))
 	}
 	if ctx.Err() != nil {
@@ -66,6 +66,7 @@ type repositoryCheck struct {
 	plan    *Plan
 	started time.Time
 	result  Result
+	ran     bool
 }
 
 func (*repositoryCheck) Name() string { return "repository checks" }
@@ -78,6 +79,7 @@ func (r *repositoryCheck) Run(ctx context.Context, job synth.Job) (synth.Usage, 
 		defer cancel()
 	}
 	var err error
+	r.ran = true
 	r.result, err = r.sandbox.checkRepository(ctx, r.root, r.plan, r.started.Add(limit))
 	return synth.Usage{}, err
 }
@@ -90,13 +92,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	}
 	ctx, cancel := context.WithDeadline(parent, end)
 	defer cancel()
-	result.CommandResults = []CommandResult{}
-	result.Accepted = map[string]bool{}
-	if plan != nil {
-		for _, test := range plan.Tests {
-			result.Accepted[test.File+":"+test.Name] = false
-		}
-	}
+	result = unstartedAcceptance(plan)
 	defer func() {
 		if parent.Err() != nil {
 			result.Interrupted = true
@@ -118,6 +114,13 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	}()
 	if s.Repository.Snapshot == nil || plan == nil || s.Original == "" {
 		return result, errors.New("repository checks need a captured snapshot, plan and original checkout")
+	}
+	if err := plan.ValidateRepository(ctx, s.Repository.Snapshot); err != nil {
+		return result, err
+	}
+	if plan.Native() {
+		result.Problems = append(result.Problems, "native acceptance execution adapters are not available")
+		return result, nil
 	}
 	parts, err := s.repositoryParts(ctx, root, plan)
 	if err != nil {
@@ -298,6 +301,11 @@ func (r Result) repositorySummary() string {
 		}
 		b.WriteByte('\n')
 	}
+	for _, result := range r.TestResults {
+		if result.Phase == "accept" {
+			fmt.Fprintf(&b, "accept %s: %s (%s)\n", result.identity(), result.Status, result.Reason)
+		}
+	}
 	for _, problem := range r.Problems {
 		fmt.Fprintln(&b, problem)
 	}
@@ -305,4 +313,16 @@ func (r Result) repositorySummary() string {
 		fmt.Fprintf(&b, "Acceptance tests without individual evidence: %s\n", strings.Join(failing, ", "))
 	}
 	return b.String()
+}
+
+func unstartedAcceptance(plan *Plan) Result {
+	r := Result{CommandResults: []CommandResult{}, Accepted: map[string]bool{}, TestResults: []TestResult{}}
+	if plan != nil {
+		for _, t := range plan.Tests {
+			r.Accepted[t.Identity()] = false
+			r.TestResults = append(r.TestResults, TestResult{Name: t.Name, File: t.File, Part: t.Part, Framework: t.Framework, Selector: t.Selector,
+				Phase: "accept", Status: "not_run", Reason: "individual acceptance execution adapter is not available"})
+		}
+	}
+	return r
 }

@@ -2,6 +2,8 @@ package factory
 
 import (
 	"fmt"
+	"html"
+	"regexp"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/formalize"
@@ -22,7 +24,14 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	b.WriteString("**The files the build may write:** " + codeList(plan.Files) + "\n\n")
 	b.WriteString("**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n")
 	for _, t := range plan.Tests {
-		fmt.Fprintf(&b, "| `%s` in `%s` | %s |\n", t.Name, t.File, t.Says)
+		if t.Native() {
+			fmt.Fprintf(&b, "| %s — part %s; framework %s; file %s; selector %s | %s |\n", planText(t.Name), planCode(t.Part), planCode(t.Framework), planCode(t.File), planCode(t.Selector), planText(t.Says))
+		} else {
+			fmt.Fprintf(&b, "| `%s` in `%s` | %s |\n", t.Name, t.File, t.Says)
+		}
+	}
+	if plan.Execution != nil {
+		fmt.Fprintf(&b, "\nCaptured execution: %s. Base provenance: %s.\n", planText(plan.Execution.Digest), planText(plan.Execution.Base))
 	}
 	if len(plan.Trusted) > 0 {
 		fmt.Fprintf(&b, "\nIt changes the trusted base (%s), so once CI's gate and a second agent's review pass, a person merges it.\n", codeList(plan.Trusted))
@@ -36,11 +45,48 @@ func planComment(p *formalize.Proposal, m Marker) string {
 		}
 	}
 	for _, f := range plan.TestFiles() {
-		fmt.Fprintf(&b, "\n<details>\n<summary><code>%s</code></summary>\n\n```go\n%s```\n\n</details>\n", f, plan.Sources[f])
+		source := plan.Sources[f]
+		fence := "```"
+		for strings.Contains(source, fence) {
+			fence += "`"
+		}
+		fmt.Fprintf(&b, "\n<details>\n<summary><code>%s</code></summary>\n\n%s%s\n%s", html.EscapeString(f), fence, plan.SourceLanguage(f), source)
+		if !strings.HasSuffix(source, "\n") {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "%s\n\n</details>\n", fence)
 	}
 	closing := fmt.Sprintf("\n\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
 	return post("plan for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
+}
+
+// planText keeps native labels and assertions as text inside Markdown
+// tables, as the receipt's componentText does for source-derived text: one
+// pass encodes markup, cell and line delimiters, and GFM's automatic links
+// are defused, since inline HTML does not suppress them.
+func planText(text string) string {
+	text = planEscapes.Replace(text)
+	return planAutolink.ReplaceAllStringFunc(text, func(link string) string {
+		return strings.NewReplacer(":", "&#58;", ".", "&#46;", "@", "&#64;").Replace(link)
+	})
+}
+
+var (
+	planEscapes = strings.NewReplacer(
+		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;",
+		"\\", "&#92;", "`", "&#96;", "|", "&#124;", "*", "&#42;", "_", "&#95;",
+		"[", "&#91;", "]", "&#93;", "~", "&#126;", "\r", "&#13;", "\n", "&#10;",
+	)
+	planAutolink = regexp.MustCompile(`(?i)(https?|ftp)://|www\.|@[a-z0-9._-]+\.[a-z0-9_-]+`)
+)
+
+func planCode(text string) string {
+	fence := "`"
+	for strings.Contains(text, fence) {
+		fence += "`"
+	}
+	return fence + " " + strings.ReplaceAll(text, "|", "\\|") + " " + fence
 }
 
 // plumbingElsewhereComment answers a plumbing issue on a repository that

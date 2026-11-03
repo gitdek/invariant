@@ -45,6 +45,9 @@ func VerifyPlan(ctx context.Context, gh Comments, repo string, lock plumbing.Loc
 	if got := lock.Plan.Hash(); got != r.Proposal {
 		return fmt.Errorf("the record holds plan %s, not the ratified %s", short(got), short(r.Proposal))
 	}
+	if err := lock.Verify(); err != nil {
+		return err
+	}
 	return verifyComment(ctx, gh, repo, r.By, r.Issue, r.Comment, r.Proposal)
 }
 

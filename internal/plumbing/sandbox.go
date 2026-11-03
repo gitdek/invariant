@@ -70,6 +70,17 @@ type TestResult struct {
 	Status  string `json:"status"`
 	Shard   int    `json:"shard,omitempty"`
 	File    string `json:"file,omitempty"`
+
+	Part      string `json:"part,omitempty"`
+	Framework string `json:"framework,omitempty"`
+	Selector  string `json:"selector,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// identity is the acceptance test a result is evidence for. A native
+// result's label is display text, so only the full tuple selects its test.
+func (r TestResult) identity() string {
+	return Test{Name: r.Name, File: r.File, Part: r.Part, Framework: r.Framework, Selector: r.Selector}.Identity()
 }
 
 // Result is what one run found.
@@ -100,12 +111,21 @@ func (r Result) Passed() bool {
 			return false
 		}
 	}
-	for _, ok := range r.Accepted {
-		if !ok {
-			return false
+	if r.CommandResults == nil {
+		for _, ok := range r.Accepted {
+			if !ok {
+				return false
+			}
 		}
+	} else if len(r.missingEvidence()) > 0 {
+		return false
 	}
 	for _, test := range r.TestResults {
+		// Built-in Go runs keep their rule: a passing acceptance test may
+		// skip a subtest. Configured acceptance needs every record passed.
+		if r.CommandResults != nil && test.Phase == "accept" && test.Status != "passed" {
+			return false
+		}
 		if test.Status != "passed" && test.Status != "skipped" {
 			return false
 		}
@@ -113,9 +133,43 @@ func (r Result) Passed() bool {
 	return true
 }
 
+// missingEvidence is every configured acceptance identity without an
+// individual pass, including those no result names at all.
+func (r Result) missingEvidence() []string {
+	passed := map[string]bool{}
+	for _, result := range r.TestResults {
+		if result.Phase == "accept" && result.Status == "passed" {
+			passed[result.identity()] = true
+		}
+	}
+	var out []string
+	for identity := range r.Accepted {
+		if !passed[identity] {
+			out = append(out, identity)
+		}
+	}
+	return out
+}
+
 // Failing is every acceptance test that didn't pass.
 func (r Result) Failing() []string {
 	var out []string
+	if r.CommandResults != nil {
+		failing := map[string]bool{}
+		for _, result := range r.TestResults {
+			if result.Phase == "accept" && result.Status != "passed" {
+				failing[result.identity()] = true
+			}
+		}
+		for _, identity := range r.missingEvidence() {
+			failing[identity] = true
+		}
+		for identity := range failing {
+			out = append(out, identity)
+		}
+		sort.Strings(out)
+		return out
+	}
 	for t, ok := range r.Accepted {
 		if !ok {
 			out = append(out, t)
@@ -142,6 +196,11 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, erro
 	}
 	if s.Repository != nil {
 		return s.runRepository(ctx, root, plan)
+	}
+	if plan.Native() || plan != nil && plan.Execution != nil {
+		result := unstartedAcceptance(plan)
+		result.Problems = append(result.Problems, "native acceptance needs captured repository authority and an execution adapter")
+		return result, nil
 	}
 	return s.run(ctx, root, plan, time.Now())
 }

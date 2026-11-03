@@ -25,7 +25,14 @@ func BuildPrompt(plan *Plan, n, runs int) string {
 	b.WriteString("\nYou may also add new regular Go `*_test.go` regression files in packages the plan touches, including the nearest Go package owning a planned embedded asset and new packages the plan names. The original checkout stays the baseline for every repair, so you may correct or remove your own new tests later. This does not permit changes to existing unnamed tests, other production files or unrelated packages.\n")
 	b.WriteString("\n**The acceptance tests.** They're already in the repository, and you can't change them. Your change has to make every one pass:\n\n")
 	for _, t := range plan.Tests {
-		fmt.Fprintf(&b, "- `%s` in `%s`: %s\n", t.Name, t.File, strings.TrimSpace(t.Says))
+		if t.Native() {
+			fmt.Fprintf(&b, "- %q (%s): %s\n", t.Name, t.Identity(), strings.TrimSpace(t.Says))
+		} else {
+			fmt.Fprintf(&b, "- `%s` in `%s`: %s\n", t.Name, t.File, strings.TrimSpace(t.Says))
+		}
+	}
+	if plan.Execution != nil {
+		fmt.Fprintf(&b, "\nCaptured execution: %s (base provenance %s). Native selectors and verbatim sources stay pinned. Individual execution adapters are pending; suite success cannot supply acceptance evidence.\n", plan.Execution.Digest, plan.Execution.Base)
 	}
 	fmt.Fprintf(&b, `
 The plan's record is `+"`%s`"+`.

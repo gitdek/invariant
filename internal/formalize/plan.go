@@ -61,10 +61,26 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	}
 	defer transcript.Close()
 	checkLog := filepath.Join(out, "check-runs.jsonl")
+	gateServer := []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", cache, ws}
+	if f.Sandbox.Repository != nil {
+		queue, err := plumbing.NewCheckQueue(1)
+		if err != nil {
+			return nil, err
+		}
+		defer queue.Close()
+		f.Sandbox.Original = repo
+		client, finish, err := queue.RegisterPlan(ctx, f.Sandbox, repo)
+		if err != nil {
+			return nil, err
+		}
+		defer finish()
+		gateServer = append(gateServer[:len(gateServer)-1], "-check-queue", client.Address, "-check-build", client.Build, ws)
+		f.Sandbox.Checks = client
+	}
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     PlanPrompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", cache, ws},
+		GateServer: gateServer,
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
@@ -153,6 +169,8 @@ plan.json:
 - The build may also add new regular Go `+"`*_test.go`"+` regression files in packages the plan touches, including the nearest Go package owning a planned embedded asset and new packages the plan names. These need not be listed in **files**. The original checkout stays the baseline across repairs, so the builder may correct or remove its own new tests. This allowance never permits changes to existing unnamed tests, the ratified acceptance tests or plan, other production files or unrelated packages.
 - **tests** are the acceptance tests: Go test functions that show the change works, each in a new file that isn't in repo/ yet, named like `+"`*_accept_test.go`"+`. Write each file under tests/, at its path in the repository: tests/internal/dashboard/graph_accept_test.go. The build can't change them, so write them against the change's intended API, and test what it does, not how.
 - Each test must fail on the code as it is. A test that already passes can't show anything.
+
+Native acceptance records explicitly add part, framework and selector together. Framework is go, pytest, vitest or jest; name is then only a display label. The full part/framework/file/selector identity and verbatim new source are pinned. Go selectors name a declared Test function and optional exact subtest path; pytest selectors are part-relative file::function or file::Class::method node IDs with concrete parameter cases; Vitest and Jest selectors are complete nested titles including a concrete case. Never supply execution, sources or trusted in plan.json: the caller captures authority. Native execution adapters are pending, so these drafts cannot yet qualify for proposal. Existing Invariant Go plans omit all native fields and keep the built-in runner. See docs/factory.md for the schema.
 
 After the build passes factory checks, a second agent reviews the whole candidate against the original checkout. Findings return to the same builder in its existing workspace under this unchanged plan for at most two repair attempts, each followed by fresh checks and, if they pass, a fresh review. Only final passing checks and approval produce a ready pull request; unresolved findings, failed checks or an exhausted time allowance leave a draft for a person. Decision recording and checks requiring unavailable Docker or network access belong under Merger work in the review, and do not by themselves require a repair. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, so they aren't Merger work.
 
