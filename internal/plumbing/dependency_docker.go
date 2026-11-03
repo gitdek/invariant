@@ -123,7 +123,7 @@ func (r *DockerDependencyRunner) Install(ctx context.Context, q DependencyReques
 	if err != nil {
 		return a, err
 	}
-	defer os.RemoveAll(stage)
+	defer r.discard(q.Token, stage)
 	// The base is resolved once. Docker cannot select another platform or
 	// entrypoint after inspection, or pull an image at container creation.
 	launch := cloneDependencyRequest(q)
@@ -228,7 +228,7 @@ func (r *DockerDependencyRunner) Run(ctx context.Context, q DependencyRequest) (
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(stage)
+	defer r.discard(q.Token, stage)
 	if err := createDependencyContainer(ctx, q, "set -eu\nexec \"$@\"\n"); err != nil {
 		return nil, err
 	}
@@ -257,14 +257,14 @@ func stageDependencySource(ctx context.Context, q DependencyRequest, install boo
 	// create its workdir until start. Copy the complete layout into / instead.
 	work := filepath.Join(stage, "invariant", "work")
 	if err := os.MkdirAll(filepath.Join(work, filepath.FromSlash(q.Directory)), 0o755); err != nil {
-		os.RemoveAll(stage)
+		discardStage(stage)
 		return "", err
 	}
 	// npm refuses loading the same configuration path twice, even /dev/null.
 	// Both files are host-created outside the repository's copied subtree.
 	for _, name := range []string{"npm-user.npmrc", "npm-global.npmrc"} {
 		if err := os.WriteFile(filepath.Join(stage, "invariant", name), nil, 0o600); err != nil {
-			os.RemoveAll(stage)
+			discardStage(stage)
 			return "", err
 		}
 	}
@@ -273,10 +273,45 @@ func stageDependencySource(ctx context.Context, q DependencyRequest, install boo
 		err = ctx.Err()
 	}
 	if err != nil {
-		os.RemoveAll(stage)
+		discardStage(stage)
 		return "", err
 	}
 	return stage, nil
+}
+
+// discard removes a check's or an installation's container, then its staged
+// copy, within one cleanup allowance. The container goes first: deleting a
+// big candidate's copy can take a while, and mustn't leave the container
+// running meanwhile (#468's review). The caller's own cleanup then finds the
+// container gone, and reports anything this one couldn't remove.
+func (r *DockerDependencyRunner) discard(token, stage string) {
+	ctx, cancel := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
+	defer cancel()
+	_ = r.Cleanup(ctx, token)
+	removeStage(ctx, stage)
+}
+
+// discardStage deletes a staged copy that never reached a container, within
+// a cleanup allowance of its own.
+func discardStage(stage string) {
+	ctx, cancel := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
+	defer cancel()
+	removeStage(ctx, stage)
+}
+
+// removeStage deletes a staged copy, waiting for it no longer than ctx
+// allows. Whatever is left then goes on being deleted in the background, so
+// a big candidate can't hold cleanup past its reserve.
+func removeStage(ctx context.Context, stage string) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		os.RemoveAll(stage)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // Read directories in batches and files in chunks, checking the original
