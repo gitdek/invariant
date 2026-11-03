@@ -159,8 +159,9 @@ type Factory struct {
 	// lease. Zero means no lease, as in a one-off run.
 	Holder   string
 	LeaseFor time.Duration
-	// Parallel is how many issues the watcher takes steps on at once, one
-	// step per issue (D-0113). 0 or 1 takes one step at a time.
+	// Parallel bounds agent operations, including their reviews and repairs,
+	// with one step per issue across polls (D-0113, #455). Positive values
+	// dispatch steps without waiting; zero keeps Poll synchronous.
 	Parallel int
 
 	// mu guards the cache of who can write, which steps share: writers is
@@ -283,11 +284,11 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 // Poll starts a step on every issue it reads that has none running, in order
 // of number, and each step reads its issue again first. It reads the open
 // issues, and the closed ones with something left to record (pollIssues).
-// With Parallel above 1, up to that many run at once (D-0113): Poll waits for
-// a free slot whenever that many are running, and returns without waiting
-// for its steps, so they run across polls, and each logs its error as it
-// ends. Otherwise Poll takes one step at a time, and returns their errors
-// once they've ended.
+// With positive Parallel, Poll returns without waiting for its steps, so
+// they run across polls, and each logs its error as it ends. Only new agent
+// work waits for a slot; commands and other effects go on while those slots
+// are full (D-0113, #455). Otherwise Poll takes one step at a time, and
+// returns their errors once they've ended.
 func (f *Factory) Poll(ctx context.Context) error {
 	f.mu.Lock()
 	if f.writers == nil {
@@ -303,7 +304,10 @@ func (f *Factory) Poll(ctx context.Context) error {
 		return err
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
-	most := max(f.Parallel, 1)
+	most := 1
+	if f.Parallel > 0 {
+		most = 0 // no limit on steps; only agent operations wait for slots
+	}
 	var errs []error
 	for _, issue := range issues {
 		n := issue.Number
@@ -315,7 +319,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 		switch {
 		case !started:
 			// Its last step is still running.
-		case most == 1:
+		case f.Parallel <= 0:
 			err := f.safeStep(ctx, n)
 			f.end(n, f.now())
 			f.sawMerge(merges[n], err)
@@ -447,6 +451,7 @@ type running struct {
 	mu    sync.Mutex
 	steps map[int]Step
 	ended chan struct{} // closed, and made anew, each time a step ends
+	slots chan struct{} // shared by every kind of agent operation
 }
 
 // list is the steps running, by issue.
@@ -466,7 +471,7 @@ func (f *Factory) Steps() []Step {
 	return f.running.list()
 }
 
-// Wait waits until no step is running.
+// Wait waits until no step is running or waiting for an agent slot.
 func (f *Factory) Wait() {
 	for {
 		f.running.mu.Lock()
@@ -481,15 +486,18 @@ func (f *Factory) Wait() {
 
 // start waits until fewer than most steps are running, then starts one on
 // issue n, unless its last step is still running. It says whether it
-// started one, and stops waiting when ctx ends.
+// started one, and stops waiting when ctx ends. Zero means no limit.
 func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		f.running.mu.Lock()
 		if f.running.steps == nil {
 			f.running.steps, f.running.ended = map[int]Step{}, make(chan struct{})
 		}
 		_, busy := f.running.steps[n]
-		free := !busy && len(f.running.steps) < most
+		free := !busy && (most == 0 || len(f.running.steps) < most)
 		if free {
 			f.running.steps[n] = Step{Issue: n, Since: f.now()}
 			f.tell()
@@ -505,6 +513,53 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 			return false, ctx.Err()
 		}
 	}
+}
+
+var errIssueClosed = errors.New("the issue closed before its agent run started")
+
+// agentSlot waits for capacity for new agent work, then checks the issue
+// and the step's tenure again. Its caller defers the release through the
+// whole operation, including reviews, fallbacks and repairs. A wait starts
+// no run record or directory, and cancellation never starts a queued run.
+func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
+	f.running.mu.Lock()
+	if f.running.slots == nil {
+		f.running.slots = make(chan struct{}, max(f.Parallel, 1))
+	}
+	slots := f.running.slots
+	f.running.mu.Unlock()
+	select {
+	case slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			<-slots
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := f.mayAct(ctx); err != nil {
+		return nil, err
+	}
+	issue, err := f.GitHub.Issue(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := f.mayAct(ctx); err != nil {
+		return nil, err
+	}
+	if issue.State == "closed" {
+		return nil, errIssueClosed
+	}
+	keep = true
+	return func() { <-slots }, nil
 }
 
 // end ends the step on issue n, which ended at ended.
@@ -1088,6 +1143,11 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 		var res formalize.Result
 		return &res, f.loadResult(ctx, result, &res)
 	}
+	release, err := f.agentSlot(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := f.recovers(ctx, n, "start a draft's agent run", f.canStartRun(drafting(RunNone), recovery.Solve)); err != nil {
 		return nil, err
 	}
@@ -1752,6 +1812,11 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if !ok || run.Builder == nil {
 		return "", "", nil, cantRun(agent), nil
 	}
+	release, err := f.agentSlot(ctx, n)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	defer release()
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
@@ -2699,7 +2764,17 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	if err != nil {
 		return err
 	}
-	return f.step(ctx, issue)
+	err = f.step(ctx, issue)
+	if errors.Is(err, errIssueClosed) {
+		// The queued operation released its slot without starting a run.
+		// Read the thread afresh to record the close and clean up labels.
+		issue, err = f.GitHub.Issue(ctx, n)
+		if err != nil || issue.State != "closed" {
+			return err
+		}
+		return f.step(ctx, issue)
+	}
+	return err
 }
 
 // doing records what the step on an issue starts doing, with no agent or

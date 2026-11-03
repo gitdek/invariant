@@ -770,7 +770,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	home, _ := os.UserHomeDir()
 	appKey := fs.String("app-key", filepath.Join(home, ".config", "invariant", "factory.pem"), "the App's private key")
 	leaseFor := fs.Duration("lease", 5*time.Minute, "how long the watcher's lease on the repository lasts, renewed every poll: over 2m and at least three polls; 0 watches without one")
-	parallel := fs.Int("parallel", 3, "how many issues the watcher takes steps on at once, one step per issue; 1 takes one step at a time")
+	parallel := fs.Int("parallel", 3, "agent slots for drafts and builds, including reviews and repairs; commands and polling continue while full, even with 1")
 	checkParallel := fs.Int("check-parallel", 1, "how many plumbing build sandbox checks may run at once, independently of -parallel and agents")
 	fs.Parse(args)
 	if !validAgent(*agent) {

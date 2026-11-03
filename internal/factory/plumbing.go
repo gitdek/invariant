@@ -216,6 +216,11 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	case run.Plumbing == nil:
 		return "", "", nil, fmt.Errorf("this watcher can't build plumbing with %s", agent), nil
 	}
+	release, err := f.agentSlot(ctx, n)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	defer release()
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
