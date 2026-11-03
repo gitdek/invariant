@@ -12,15 +12,14 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Runner runs TLC inside a pinned Java image, from a jar whose checksum the
 // caller has already verified.
 type Runner struct {
-	Image string // Java runtime image, pinned by digest
-	Jar   string // local path to tla2tools.jar
+	Image  string  // Java runtime image, pinned by digest
+	Jar    string  // local path to tla2tools.jar
+	Budget *Budget // shared capacity; nil uses standalone memory limits
 	// SilenceTimeout bounds uninterrupted silence, including before the first
 	// output. Nonpositive values use fifteen minutes.
 	SilenceTimeout time.Duration
@@ -59,8 +58,23 @@ func (c Config) render() string {
 // Check model-checks module (a file in dir) against cfg, with no network.
 // Deadlock checking is always on: Check never passes -deadlock.
 func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Result, error) {
-	if err := context.Cause(ctx); err != nil {
-		return Result{}, fmt.Errorf("TLC check cut off: %w", err)
+	return r.CheckWithin(ctx, dir, module, cfg, 0)
+}
+
+// CheckWithin gives an admitted check its execution timeout, including a
+// possible stall retry. Nonpositive durations add no deadline. Queueing never
+// consumes this allowance, but the caller's context always applies.
+func (r Runner) CheckWithin(ctx context.Context, dir, module string, cfg Config, timeout time.Duration) (Result, error) {
+	release, err := r.Budget.acquire(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
+	}
+	// Docker's Run waits for removal before returning, including on a stall.
+	defer release()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	if err := os.WriteFile(filepath.Join(dir, "Invariant.cfg"), []byte(cfg.render()), 0o644); err != nil {
 		return Result{}, err
@@ -71,12 +85,25 @@ func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Resu
 	}
 	for attempt := 0; ; attempt++ {
 		if err := context.Cause(ctx); err != nil {
-			return Result{}, fmt.Errorf("TLC check cut off: %w", err)
+			return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
 		}
 		out, stalled, err := r.run(ctx, dir, module, silence)
 		// Cancellation takes priority even when it arrives during stall cleanup.
 		if cause := context.Cause(ctx); cause != nil {
-			return Result{}, fmt.Errorf("TLC check cut off: %w", cause)
+			return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, cause)
+		}
+		var exit *exec.ExitError
+		exitCode := 0
+		if errors.As(err, &exit) {
+			exitCode = exit.ExitCode()
+		}
+		resourceExit := exitCode
+		if stalled {
+			// Removing a stalled container may itself make Docker exit 137.
+			resourceExit = 0
+		}
+		if res, failed := memoryFailure(module, out, resourceExit); failed {
+			return res, nil
 		}
 		if stalled {
 			if attempt == 0 {
@@ -88,7 +115,6 @@ func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Resu
 			}
 			return Result{Outcome: Failed, Message: msg}, nil
 		}
-		var exit *exec.ExitError
 		switch {
 		case err == nil:
 			return Parse(out, 0), nil
@@ -103,11 +129,7 @@ func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Resu
 func (r Runner) run(ctx context.Context, dir, module string, silence time.Duration) (string, bool, error) {
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	jarDir, jar := filepath.Split(r.Jar)
-	cmd := toolchain.Docker(attemptCtx, "run", "--rm", "--network", "none",
-		"-v", dir+":/work", "-v", filepath.Clean(jarDir)+":/opt/tla:ro", "-w", "/work",
-		r.Image, "java", "-XX:+UseParallelGC", "-cp", "/opt/tla/"+jar, "tlc2.TLC",
-		"-tool", "-workers", "1", "-metadir", "/tmp/states", "-config", "Invariant.cfg", module+".tla")
+	cmd := r.command(attemptCtx, dir, module)
 	out := checkOutput{last: time.Now()}
 	cmd.Stdout, cmd.Stderr = &out, &out
 	timer := time.NewTimer(silence)
@@ -145,6 +167,24 @@ func (r Runner) run(ctx context.Context, dir, module string, silence time.Durati
 			return out.buf.String(), true, err
 		}
 	}
+}
+
+// Resource failures override even a partially printed success or violation.
+// None of that attempt's states or counterexample can supply evidence.
+func memoryFailure(module, out string, exitCode int) (Result, bool) {
+	diagnostic := strings.ToLower(out)
+	msg := ""
+	switch {
+	case strings.Contains(diagnostic, "gc overhead limit exceeded"):
+		msg = "exhausted Java memory: GC overhead limit exceeded"
+	case strings.Contains(diagnostic, "outofmemoryerror"), strings.Contains(diagnostic, "java heap space"):
+		msg = "exhausted Java memory: OutOfMemoryError or Java heap space"
+	case exitCode == 137:
+		msg = "was killed (exit 137); possible memory exhaustion"
+	default:
+		return Result{}, false
+	}
+	return Result{Outcome: Failed, ExitCode: exitCode, Message: fmt.Sprintf("TLC check %s %s", module, msg)}, true
 }
 
 type checkOutput struct {
