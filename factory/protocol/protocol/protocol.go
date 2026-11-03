@@ -1,10 +1,11 @@
 // +gobra
 
+package protocol
+
 // Package protocol implements the factory's issue protocol, as modeled in
 // .invariant/specs/IssueProtocol.tla, for one issue. Every operation decides
 // for itself whether it runs: where the model's action can't run, it returns
 // false and changes nothing.
-package protocol
 
 // Kinds of the factory's latest post.
 const (
@@ -96,6 +97,9 @@ type Draft struct {
 // drafted again, someone pushes to its pull request or the base branch's
 // lock moves: only the model's RebuildsOwnFailures and its witnesses read it.
 type Issue struct {
+	// FollowupPR freezes the merged source while its separate follow-up is active.
+	// Its zero value preserves the existing ordinary watcher API.
+	FollowupPR   int
 	Kind         int
 	Open         []bool
 	NOpen        int
@@ -118,6 +122,7 @@ type Issue struct {
 
 // NewIssue is an issue with no post yet, among the given number of questions.
 // @ requires 0 <= questions
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
@@ -128,6 +133,7 @@ type Issue struct {
 // @ ensures i.Ratified == NoP && i.RatifiedBase == NoP && i.Head == NoHead && i.HeadGate == GateNone
 // @ ensures i.PrLock == NoP && i.Scope == ScopeOne && i.MergedBy == Nobody && i.MergedHead == NoHead
 // @ ensures i.DirectedBy == NoActor && i.Stops == 0 && i.Failure == FailNone && i.RebuiltAfter == FailNone
+// @ ensures i.FollowupPR == 0
 func NewIssue(questions int) (i *Issue) {
 	i = &Issue{
 		Kind:         KindNone,
@@ -154,12 +160,14 @@ func NewIssue(questions int) (i *Issue) {
 
 // postDraft makes draft d the issue's latest post, against the base branch's
 // current lock, and forgets any pull request. The issue takes d's questions.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires len(d.Open) == len(i.Open)
 // @ requires forall j int :: { &d.Open[j] } 0 <= j && j < len(d.Open) ==> acc(&d.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
@@ -173,6 +181,7 @@ func NewIssue(questions int) (i *Issue) {
 // @ ensures i.PrLock == NoP && i.Scope == ScopeOne && i.MergedBy == Nobody && i.MergedHead == NoHead
 // @ ensures i.Failure == FailNone && i.RebuiltAfter == FailNone
 // @ ensures i.Base == old(i.Base) && i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) postDraft(d Draft) {
 	i.Kind = d.Kind
 	i.Open = d.Open
@@ -198,18 +207,20 @@ func (i *Issue) postDraft(d Draft) {
 // Solve takes the issue at a director's word and posts draft d. It runs when
 // there's no post yet, the factory is stuck, the issue is unsupported, the
 // pull request was closed, or a build stopped.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires len(d.Open) == len(i.Open)
 // @ requires forall j int :: { &d.Open[j] } 0 <= j && j < len(d.Open) ==> acc(&d.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
-// @ ensures ok == (a.Director() && (old(i.Kind) == KindNone || old(i.Kind) == KindStuck || old(i.Kind) == KindUnsupported || old(i.Kind) == KindClosed || (old(i.Kind) == KindFailed && old(i.Head) == NoHead)))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (a.Director() && (old(i.Kind) == KindNone || old(i.Kind) == KindStuck || old(i.Kind) == KindUnsupported || old(i.Kind) == KindClosed || (old(i.Kind) == KindFailed && old(i.Head) == NoHead))))
 // @ ensures !ok ==> forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends)
 // @ ensures !ok ==> i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate)
@@ -223,7 +234,11 @@ func (i *Issue) postDraft(d Draft) {
 // @ ensures ok ==> i.PrLock == NoP && i.Scope == ScopeOne && i.MergedBy == Nobody && i.MergedHead == NoHead
 // @ ensures ok ==> i.Failure == FailNone && i.RebuiltAfter == FailNone
 // @ ensures i.Base == old(i.Base) && i.Stops == old(i.Stops)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Solve(a Actor, d Draft) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !a.Director() {
 		return false
 	}
@@ -239,18 +254,20 @@ func (i *Issue) Solve(a Actor, d Draft) (ok bool) {
 // director's word. It runs when the factory asked, proposed, got stuck or
 // found the issue unsupported, the pull request was closed, or a build
 // stopped.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires len(d.Open) == len(i.Open)
 // @ requires forall j int :: { &d.Open[j] } 0 <= j && j < len(d.Open) ==> acc(&d.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
-// @ ensures ok == (a.Director() && (old(i.Kind) == KindAsked || old(i.Kind) == KindProposed || old(i.Kind) == KindStuck || old(i.Kind) == KindUnsupported || old(i.Kind) == KindClosed || (old(i.Kind) == KindFailed && old(i.Head) == NoHead)))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (a.Director() && (old(i.Kind) == KindAsked || old(i.Kind) == KindProposed || old(i.Kind) == KindStuck || old(i.Kind) == KindUnsupported || old(i.Kind) == KindClosed || (old(i.Kind) == KindFailed && old(i.Head) == NoHead))))
 // @ ensures !ok ==> forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends)
 // @ ensures !ok ==> i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate)
@@ -264,7 +281,11 @@ func (i *Issue) Solve(a Actor, d Draft) (ok bool) {
 // @ ensures ok ==> i.PrLock == NoP && i.Scope == ScopeOne && i.MergedBy == Nobody && i.MergedHead == NoHead
 // @ ensures ok ==> i.Failure == FailNone && i.RebuiltAfter == FailNone
 // @ ensures i.Base == old(i.Base) && i.Stops == old(i.Stops)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Revise(a Actor, d Draft) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !a.Director() {
 		return false
 	}
@@ -278,6 +299,7 @@ func (i *Issue) Revise(a Actor, d Draft) (ok bool) {
 
 // Choose answers open question q at a director's word. Answering the last
 // open question posts draft d; otherwise d is unused.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
@@ -285,12 +307,13 @@ func (i *Issue) Revise(a Actor, d Draft) (ok bool) {
 // @ requires 0 <= q && q < len(i.Open)
 // @ requires len(d.Open) == len(i.Open)
 // @ requires forall j int :: { &d.Open[j] } 0 <= j && j < len(d.Open) ==> acc(&d.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
-// @ ensures ok == (a.Director() && old(i.Kind) == KindAsked && old(i.Open[q]))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (a.Director() && old(i.Kind) == KindAsked && old(i.Open[q])))
 // @ ensures !ok ==> forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends)
 // @ ensures !ok ==> i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate)
@@ -311,7 +334,11 @@ func (i *Issue) Revise(a Actor, d Draft) (ok bool) {
 // @ ensures ok && old(i.NOpen) <= 1 ==> i.PrLock == NoP && i.Scope == ScopeOne && i.MergedBy == Nobody && i.MergedHead == NoHead
 // @ ensures ok && old(i.NOpen) <= 1 ==> i.Failure == FailNone && i.RebuiltAfter == FailNone
 // @ ensures i.Base == old(i.Base) && i.Stops == old(i.Stops)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Choose(a Actor, q int, d Draft) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !a.Director() || i.Kind != KindAsked || !i.Open[q] {
 		return false
 	}
@@ -328,24 +355,30 @@ func (i *Issue) Choose(a Actor, q int, d Draft) (ok bool) {
 // Ratify ratifies proposal p at a director's word. It runs only when p is
 // the current proposal, no question is open, and the base branch still holds
 // the lock p amends.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (a.Director() && old(i.Kind) == KindProposed && old(i.NOpen) == 0 && p == old(i.Proposal) && old(i.Base) == old(i.Amends))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (a.Director() && old(i.Kind) == KindProposed && old(i.NOpen) == 0 && p == old(i.Proposal) && old(i.Base) == old(i.Amends)))
 // @ ensures ok ==> i.Kind == KindRatified && i.Ratified == p && i.RatifiedBase == old(i.Base) && i.DirectedBy == a.ID
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.DirectedBy == old(i.DirectedBy)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
 // @ ensures i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate) && i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope)
 // @ ensures i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead) && i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Ratify(a Actor, p int) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !a.Director() || i.Kind != KindProposed || i.NOpen != 0 || p != i.Proposal || i.Base != i.Amends {
 		return false
 	}
@@ -358,25 +391,31 @@ func (i *Issue) Ratify(a Actor, p int) (ok bool) {
 
 // Build builds the ratified proposal and opens a pull request at head h,
 // unless builds have already stopped partway MaxStops times.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires h != NoHead
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindRatified && old(i.Stops) < MaxStops)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindRatified && old(i.Stops) < MaxStops))
 // @ ensures ok ==> i.Kind == KindPROpen && i.Head == h && i.HeadGate == GatePending && i.PrLock == old(i.Ratified) && i.Scope == ScopeOne
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate) && i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
 // @ ensures i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Build(h int) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindRatified || i.Stops >= MaxStops {
 		return false
 	}
@@ -390,17 +429,19 @@ func (i *Issue) Build(h int) (ok bool) {
 
 // StopBuild records a build that started and stopped before it made a pull
 // request.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindRatified && old(i.Stops) < MaxStops)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindRatified && old(i.Stops) < MaxStops))
 // @ ensures ok ==> i.Kind == KindFailed && i.Stops == old(i.Stops) + 1 && i.Failure == FailStopped
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -408,7 +449,11 @@ func (i *Issue) Build(h int) (ok bool) {
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) StopBuild() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindRatified || i.Stops >= MaxStops {
 		return false
 	}
@@ -420,17 +465,19 @@ func (i *Issue) StopBuild() (ok bool) {
 
 // RefuseBuild refuses to start another build once MaxStops builds have
 // stopped partway, and posts that the build failed.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindRatified && old(i.Stops) == MaxStops)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindRatified && old(i.Stops) == MaxStops))
 // @ ensures ok ==> i.Kind == KindFailed && i.Failure == FailLimit
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Failure == old(i.Failure)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -438,7 +485,11 @@ func (i *Issue) StopBuild() (ok bool) {
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) RefuseBuild() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindRatified || i.Stops != MaxStops {
 		return false
 	}
@@ -450,18 +501,20 @@ func (i *Issue) RefuseBuild() (ok bool) {
 // BuildFailsGate records a build whose code failed the gate in the factory's
 // own run: it opens a draft pull request at head h and posts that the build
 // failed.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires h != NoHead
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindRatified && old(i.Stops) < MaxStops)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindRatified && old(i.Stops) < MaxStops))
 // @ ensures ok ==> i.Kind == KindFailed && i.Head == h && i.HeadGate == GatePending && i.PrLock == old(i.Ratified) && i.Scope == ScopeOne
 // @ ensures ok ==> i.Failure == FailGate
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate) && i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope)
@@ -470,7 +523,11 @@ func (i *Issue) RefuseBuild() (ok bool) {
 // @ ensures i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) BuildFailsGate(h int) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindRatified || i.Stops >= MaxStops {
 		return false
 	}
@@ -485,19 +542,21 @@ func (i *Issue) BuildFailsGate(h int) (ok bool) {
 
 // Push records someone pushing head h to the pull request, with lock l and
 // scope sc.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires h != NoHead
 // @ requires sc == ScopeOne || sc == ScopeMany
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead && h != old(i.Head))
+// @ ensures ok == (old(i.FollowupPR) == 0 && ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead && h != old(i.Head)))
 // @ ensures ok ==> i.Head == h && i.HeadGate == GatePending && i.PrLock == l && i.Scope == sc
 // @ ensures !ok ==> i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate) && i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope)
 // @ ensures i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -505,7 +564,11 @@ func (i *Issue) BuildFailsGate(h int) (ok bool) {
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures ok ==> i.RebuiltAfter == FailNone
 // @ ensures !ok ==> i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Push(h int, l int, sc int) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !(i.Kind == KindPROpen || i.Kind == KindFailed) || i.Head == NoHead || h == i.Head {
 		return false
 	}
@@ -519,18 +582,20 @@ func (i *Issue) Push(h int, l int, sc int) (ok bool) {
 
 // CIGate records CI's gate result r, GatePass or GateFail, on the pull
 // request's current head.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ requires r == GatePass || r == GateFail
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead && old(i.HeadGate) == GatePending)
+// @ ensures ok == (old(i.FollowupPR) == 0 && ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead && old(i.HeadGate) == GatePending))
 // @ ensures ok ==> i.HeadGate == r
 // @ ensures !ok ==> i.HeadGate == old(i.HeadGate)
 // @ ensures i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -538,7 +603,11 @@ func (i *Issue) Push(h int, l int, sc int) (ok bool) {
 // @ ensures i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead) && i.DirectedBy == old(i.DirectedBy)
 // @ ensures i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) CIGate(r int) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !(i.Kind == KindPROpen || i.Kind == KindFailed) || i.Head == NoHead || i.HeadGate != GatePending {
 		return false
 	}
@@ -547,17 +616,19 @@ func (i *Issue) CIGate(r int) (ok bool) {
 }
 
 // NoticeFail posts that the pull request failed CI's gate.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindPROpen && old(i.HeadGate) == GateFail)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindPROpen && old(i.HeadGate) == GateFail))
 // @ ensures ok ==> i.Kind == KindFailed && i.Failure == FailCI
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Failure == old(i.Failure)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -565,7 +636,11 @@ func (i *Issue) CIGate(r int) (ok bool) {
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) NoticeFail() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindPROpen || i.HeadGate != GateFail {
 		return false
 	}
@@ -576,17 +651,19 @@ func (i *Issue) NoticeFail() (ok bool) {
 
 // NoticeUnmergeable posts that the pull request passed CI's gate but changes
 // more than its one project or has a lock other than the ratified proposal.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindPROpen && old(i.HeadGate) == GatePass && (old(i.Scope) != ScopeOne || old(i.PrLock) != old(i.Ratified)))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindPROpen && old(i.HeadGate) == GatePass && (old(i.Scope) != ScopeOne || old(i.PrLock) != old(i.Ratified))))
 // @ ensures ok ==> i.Kind == KindFailed && i.Failure == FailUnmergeable
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Failure == old(i.Failure)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -594,7 +671,11 @@ func (i *Issue) NoticeFail() (ok bool) {
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) NoticeUnmergeable() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindPROpen || i.HeadGate != GatePass || (i.Scope == ScopeOne && i.PrLock == i.Ratified) {
 		return false
 	}
@@ -605,17 +686,19 @@ func (i *Issue) NoticeUnmergeable() (ok bool) {
 
 // Retry reopens a failed pull request at a director's word, or builds a
 // stopped build's ratified proposal again with the stop limit reset.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (a.Director() && old(i.Kind) == KindFailed)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (a.Director() && old(i.Kind) == KindFailed))
 // @ ensures ok && old(i.Head) == NoHead ==> i.Kind == KindRatified && i.Stops == 0
 // @ ensures ok && old(i.Head) != NoHead ==> i.Kind == KindPROpen && i.Stops == old(i.Stops)
 // @ ensures ok ==> i.Failure == FailNone && i.DirectedBy == a.ID
@@ -624,7 +707,11 @@ func (i *Issue) NoticeUnmergeable() (ok bool) {
 // @ ensures i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate)
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Retry(a Actor) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !a.Director() || i.Kind != KindFailed {
 		return false
 	}
@@ -644,24 +731,30 @@ func (i *Issue) Retry(a Actor) (ok bool) {
 // request. The ratification stands; the draft, its head and CI's result
 // there are retired, so none of them stands for the next build, and the
 // stops are counted afresh.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (a.Director() && old(i.Kind) == KindFailed && old(i.Failure) == FailGate && old(i.Head) != NoHead)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (a.Director() && old(i.Kind) == KindFailed && old(i.Failure) == FailGate && old(i.Head) != NoHead))
 // @ ensures ok ==> i.Kind == KindRatified && i.DirectedBy == a.ID && i.Failure == FailNone && i.Stops == 0 && i.RebuiltAfter == FailGate
 // @ ensures ok ==> i.Head == NoHead && i.HeadGate == GateNone && i.PrLock == NoP && i.Scope == ScopeOne && i.MergedBy == Nobody && i.MergedHead == NoHead
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.DirectedBy == old(i.DirectedBy) && i.Failure == old(i.Failure) && i.Stops == old(i.Stops) && i.RebuiltAfter == old(i.RebuiltAfter)
 // @ ensures !ok ==> i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate) && i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
 // @ ensures i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Rebuild(a Actor) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !a.Director() || i.Kind != KindFailed || i.Failure != FailGate || i.Head == NoHead {
 		return false
 	}
@@ -682,17 +775,19 @@ func (i *Issue) Rebuild(a Actor) (ok bool) {
 // Merge merges the pull request, only when CI's gate passed on its current
 // head, it changes only its one project, and its lock is the ratified
 // proposal.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindPROpen && old(i.HeadGate) == GatePass && old(i.Scope) == ScopeOne && old(i.PrLock) == old(i.Ratified))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindPROpen && old(i.HeadGate) == GatePass && old(i.Scope) == ScopeOne && old(i.PrLock) == old(i.Ratified)))
 // @ ensures ok ==> i.Kind == KindMerged && i.MergedBy == ByFactory && i.MergedHead == old(i.Head) && i.Base == old(i.PrLock)
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead) && i.Base == old(i.Base)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends)
@@ -700,7 +795,11 @@ func (i *Issue) Rebuild(a Actor) (ok bool) {
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.DirectedBy == old(i.DirectedBy)
 // @ ensures i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Merge() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if i.Kind != KindPROpen || i.HeadGate != GatePass || i.Scope != ScopeOne || i.PrLock != i.Ratified {
 		return false
 	}
@@ -712,24 +811,30 @@ func (i *Issue) Merge() (ok bool) {
 }
 
 // OthersMerge records someone else merging the pull request.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead)
+// @ ensures ok == (old(i.FollowupPR) == 0 && ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead))
 // @ ensures ok ==> i.Kind == KindMerged && i.MergedBy == ByOther && i.MergedHead == old(i.Head) && i.Base == old(i.PrLock) && i.Failure == FailNone
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead) && i.Base == old(i.Base) && i.Failure == old(i.Failure)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends)
 // @ ensures i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate)
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) OthersMerge() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !(i.Kind == KindPROpen || i.Kind == KindFailed) || i.Head == NoHead {
 		return false
 	}
@@ -742,17 +847,19 @@ func (i *Issue) OthersMerge() (ok bool) {
 }
 
 // OthersClose records someone else closing the pull request.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead)
+// @ ensures ok == (old(i.FollowupPR) == 0 && ((old(i.Kind) == KindPROpen || old(i.Kind) == KindFailed) && old(i.Head) != NoHead))
 // @ ensures ok ==> i.Kind == KindClosed && i.Failure == FailNone
 // @ ensures !ok ==> i.Kind == old(i.Kind) && i.Failure == old(i.Failure)
 // @ ensures i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
@@ -760,7 +867,11 @@ func (i *Issue) OthersMerge() (ok bool) {
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) OthersClose() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if !(i.Kind == KindPROpen || i.Kind == KindFailed) || i.Head == NoHead {
 		return false
 	}
@@ -770,17 +881,19 @@ func (i *Issue) OthersClose() (ok bool) {
 }
 
 // BaseMoves records the base branch's lock changing elsewhere, to l.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (l != old(i.Base))
+// @ ensures ok == (old(i.FollowupPR) == 0 && (l != old(i.Base)))
 // @ ensures ok ==> i.Base == l
 // @ ensures !ok ==> i.Base == old(i.Base)
 // @ ensures i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends)
@@ -789,7 +902,11 @@ func (i *Issue) OthersClose() (ok bool) {
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures ok ==> i.RebuiltAfter == FailNone
 // @ ensures !ok ==> i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) BaseMoves(l int) (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	if l == i.Base {
 		return false
 	}
@@ -799,22 +916,28 @@ func (i *Issue) BaseMoves(l int) (ok bool) {
 }
 
 // Finished holds once the pull request is merged: nothing changes.
+// @ requires acc(&i.FollowupPR)
 // @ requires acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ requires acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ requires acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ requires forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
+// @ ensures acc(&i.FollowupPR)
 // @ ensures acc(&i.Kind) && acc(&i.Open) && acc(&i.NOpen) && acc(&i.Proposal) && acc(&i.Amends) && acc(&i.Base)
 // @ ensures acc(&i.Ratified) && acc(&i.RatifiedBase) && acc(&i.Head) && acc(&i.HeadGate) && acc(&i.PrLock) && acc(&i.Scope)
 // @ ensures acc(&i.MergedBy) && acc(&i.MergedHead) && acc(&i.DirectedBy) && acc(&i.Stops) && acc(&i.Failure) && acc(&i.RebuiltAfter)
 // @ ensures len(i.Open) == old(len(i.Open))
 // @ ensures forall j int :: { &i.Open[j] } 0 <= j && j < len(i.Open) ==> acc(&i.Open[j])
 // @ ensures forall j int :: { i.Open[j] } 0 <= j && j < len(i.Open) ==> i.Open[j] == old(i.Open[j])
-// @ ensures ok == (old(i.Kind) == KindMerged)
+// @ ensures ok == (old(i.FollowupPR) == 0 && (old(i.Kind) == KindMerged))
 // @ ensures i.Kind == old(i.Kind) && i.NOpen == old(i.NOpen) && i.Proposal == old(i.Proposal) && i.Amends == old(i.Amends) && i.Base == old(i.Base)
 // @ ensures i.Ratified == old(i.Ratified) && i.RatifiedBase == old(i.RatifiedBase) && i.Head == old(i.Head) && i.HeadGate == old(i.HeadGate)
 // @ ensures i.PrLock == old(i.PrLock) && i.Scope == old(i.Scope) && i.MergedBy == old(i.MergedBy) && i.MergedHead == old(i.MergedHead)
 // @ ensures i.DirectedBy == old(i.DirectedBy) && i.Stops == old(i.Stops) && i.Failure == old(i.Failure)
 // @ ensures i.RebuiltAfter == old(i.RebuiltAfter)
+// @ ensures i.FollowupPR == old(i.FollowupPR)
 func (i *Issue) Finished() (ok bool) {
+	if i.FollowupPR != 0 {
+		return false
+	}
 	return i.Kind == KindMerged
 }
