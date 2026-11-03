@@ -14,15 +14,16 @@ import (
 // staged copy, which can take a while for a big candidate, and the copy is
 // gone once Run returns (#468's review).
 func TestCanceledCheckRemovesItsContainerBeforeItsStagedCopy468(t *testing.T) {
-	bin, logs, src := t.TempDir(), t.TempDir(), t.TempDir()
+	bin, logs, src, stages := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", stages)
 	write468(t, src, "app/main.py", "print('fixture')\n")
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-	// cp records the staged copy it's given, start runs until it's stopped,
-	// and rm records whether that copy was still there when it ran.
+	// cp drains the stream and records its private stage, start runs until
+	// stopped, and rm records whether that stage was still there when it ran.
 	script := "#!/bin/sh\nset -eu\ncase \"$1\" in\n" +
 		"create) printf '%s\\n' fixture-container;;\n" +
-		"cp) printf '%s' \"${2%/.}\" > " + quote(logs) + "/stage;;\n" +
-		"start) exec sleep 30;;\n" +
+		"cp) [ \"$#\" -eq 3 ] && [ \"$2\" = '-' ] && [ \"$3\" = 'invariant-deps-468-cleanup:/' ] || exit 1; cat > /dev/null; for stage in " + quote(stages) + "/invariant-dependency-copy-*; do [ -d \"$stage\" ]; printf '%s' \"$stage\" > " + quote(logs) + "/stage; done;;\n" +
+		"start) touch " + quote(logs) + "/started; exec sleep 30;;\n" +
 		"rm) if [ -d \"$(cat " + quote(logs) + "/stage)\" ]; then echo present; else echo gone; fi > " + quote(logs) + "/rm;;\n" +
 		"esac\n"
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
@@ -36,16 +37,20 @@ func TestCanceledCheckRemovesItsContainerBeforeItsStagedCopy468(t *testing.T) {
 		Env:     map[string]string{"HOME": "/tmp"},
 		Network: false, Pull: false, Init: true, MemoryBytes: 4 << 30, PidsLimit: 1024,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	go func() {
 		// Cancel once the check has started.
 		for {
-			if _, err := os.Stat(filepath.Join(logs, "stage")); err == nil {
-				time.Sleep(100 * time.Millisecond)
+			if _, err := os.Stat(filepath.Join(logs, "started")); err == nil {
 				cancel()
 				return
 			}
-			time.Sleep(10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	}()
 	started := time.Now()
