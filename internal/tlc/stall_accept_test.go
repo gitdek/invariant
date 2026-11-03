@@ -103,6 +103,9 @@ func stall470Read(t *testing.T, file string) string {
 
 // A stopped attempt must be removed before the next starts. Finished attempts
 // need no extra rm, and every attempt must have a different container name.
+// Removing a container again is harmless, and toolchain.Docker removes a
+// cancelled one both before and after its client exits (#433), so repeated
+// removals of one container, one right after another, count once (#488).
 func (f stall470Fixture) events(t *testing.T, runs, removed int) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(f.root, "events"))
@@ -112,7 +115,13 @@ func (f stall470Fixture) events(t *testing.T, runs, removed int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if strings.HasPrefix(line, "rm ") && len(lines) > 0 && lines[len(lines)-1] == line {
+			continue
+		}
+		lines = append(lines, line)
+	}
 	var want []string
 	seen := map[string]bool{}
 	for i := 1; i <= runs; i++ {
