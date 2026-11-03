@@ -26,6 +26,7 @@ case " $* " in
 esac
 case "$1" in
   create) echo fixture-container ;;
+  cp) cat > /dev/null ;;
   exec)
     echo 'container diagnostic'
     for arg in "$@"; do
