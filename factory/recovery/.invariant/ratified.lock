@@ -1,7 +1,29 @@
 {
-  "decision": "D-0225",
+  "ratified": {
+    "by": "gitdek",
+    "at": "2026-11-03T08:28:53Z",
+    "issue": 445,
+    "comment": "https://github.com/gitdek/invariant/issues/445#issuecomment-6598920767",
+    "proposal": "sha256:27750707e0dc9d7c1db6bebfcf4dc786e21a3a486328dd72b4834951ad147fbb",
+    "amends": "sha256:2a836c2603ab70fbcd3f19ec28b59e8a590b3b1c3cbea0ab2140574e88f449cd",
+    "previous": "D-0225"
+  },
   "bounds": {
+    "MaxCIFailures": "1",
+    "MaxCloses": "1",
     "MaxCrashes": "2",
+    "MaxCreateFailures": "1",
+    "MaxDraftFailures": "1",
+    "MaxFollowCrashes": "1",
+    "MaxFollowEvents": "3",
+    "MaxFollowOps": "7",
+    "MaxHeadMoves": "1",
+    "MaxLostCreations": "1",
+    "MaxLostMerges": "1",
+    "MaxLostPublications": "1",
+    "MaxPublicationRefusals": "1",
+    "MaxRefusedMerges": "1",
+    "MaxUnknownMerges": "1",
     "Watchers": "{w1, w2}"
   },
   "statements": [
@@ -9,7 +31,7 @@
       "name": "Spec",
       "kind": "spec",
       "says": "The factory starts with an issue that has no commands, posts, branch or pull request, and every step is a Next step.",
-      "sha256": "sha256:750a2e3c7ecaced1790bc01c8149d67a386b5cfc815266b4d2b1b271990d6f9c"
+      "sha256": "sha256:cb6049864d1fc72c391a6285732275caa279bc0933911155ebb4bb7956b376e8"
     },
     {
       "name": "NoDoubleAnswer",
@@ -90,10 +112,94 @@
       "sha256": "sha256:7e21b0519613ed54c761bafef3d56fc4ad14bf49a796c0510022cdc3e0f3fb24"
     },
     {
+      "name": "FollowSnapshotsKept",
+      "kind": "invariant",
+      "says": "Every accepted Workflow snapshot is durably retained with its original contents across effects, watchers and crashes.",
+      "sha256": "sha256:317637945429dad735e448e76ecc485d63827a62632c06d284c7aa2446dddb56"
+    },
+    {
+      "name": "FollowOnePR",
+      "kind": "invariant",
+      "says": "A follow-up opens at most one PR for its source ratified-plan obligation and keeps the same branch and PR across attempts, closure and resumption.",
+      "sha256": "sha256:166a06dab4e28b9c523aec5e9bcad9bb7fbcfbdbbc1d187de2292a05398c7fc3"
+    },
+    {
+      "name": "FollowOperationOnce",
+      "kind": "invariant",
+      "says": "Every recorded follow-up draft, creation, repair, publication, reopening and merge operation is dispatched at most once, including after a stopped operation or lost response.",
+      "sha256": "sha256:4714e87927c835e45021e57bdd02cab0c5566025994283ff07d029ae4e0de913"
+    },
+    {
+      "name": "FollowOneMerge",
+      "kind": "invariant",
+      "says": "The follow-up PR is merged at most once across factory actions, external merges and recovery.",
+      "sha256": "sha256:9b7711db0643d11d26f12720082620fba7cff0386ba5126145ab0710e2c5de31"
+    },
+    {
+      "name": "FollowWriterRequired",
+      "kind": "invariant",
+      "says": "Closed or exhausted follow-up work resumes only after consuming an explicit writer request, and reopening uses the same PR under that authorization.",
+      "sha256": "sha256:46c88ee20f645a3f30a122fcb2728544ada50620d1eb31237edaed38312d0537"
+    },
+    {
+      "name": "FollowRenewalWaits",
+      "kind": "invariant",
+      "says": "A retry or resume received during an unresolved repair waits until that operation and its publication have been reconciled before the request is consumed.",
+      "sha256": "sha256:fadfe97c3cefb28e353f55e46ad6702e6443c442d3b2d04788ce7ea73e980a74"
+    },
+    {
+      "name": "FollowSnapshotsBeforeEffects",
+      "kind": "invariant",
+      "says": "Every follow-up effect is tied to its own recorded intent and an already durable accepted Workflow snapshot bearing the stable source, branch and PR identity.",
+      "sha256": "sha256:af329336d1ef8388a6625eb6c147d987f78921585ab95ceb556b1e24091a91a1"
+    },
+    {
+      "name": "FollowEffectLedger",
+      "kind": "invariant",
+      "says": "Pending and completed follow-up effects retain distinct operation identities, and an operation settles only after all its recorded effects are reconciled.",
+      "sha256": "sha256:5ec943ae8de02cadc875d321e6c71127ba04d137f1ad8d07f649376e2e050cd6"
+    },
+    {
+      "name": "FollowResultsCurrent",
+      "kind": "invariant",
+      "says": "An accepted follow-up result belongs to the current operation and a successful result belongs to the revision it acts on.",
+      "sha256": "sha256:9a11062791a01a66cd59da24fba226a68c6f29e34931b81aab737622ae4a98b7"
+    },
+    {
+      "name": "FollowCurrentRevision",
+      "kind": "invariant",
+      "says": "Follow-up publication and merge effects use the current lease fence and head revision, and a merge uses CI and mergeability observations for that same revision.",
+      "sha256": "sha256:0dff8465c26ee61144bb2086c7b3496426ba88edce33b4e4519b112c0ce694bf"
+    },
+    {
+      "name": "FollowAllowance",
+      "kind": "invariant",
+      "says": "Each Workflow-authorized repair consumes exactly one of the two allowances for its renewal period, and consuming a writer request once renews the allowance to two.",
+      "sha256": "sha256:102b59d2bedc1141f14f6f099f5fc6d084cefdce0a770bcb0f99f501a2771b44"
+    },
+    {
+      "name": "FollowFailurePreserved",
+      "kind": "invariant",
+      "says": "Recovery preserves the actual failed, stopped or no-change result of a repair instead of changing its failure cause or refunding its recorded usage.",
+      "sha256": "sha256:01f2c654d20629dd4f0e353cd3a0f6cfa88a55872ef43b243e0bdbe88541d420"
+    },
+    {
+      "name": "FollowMergeConfirmed",
+      "kind": "invariant",
+      "says": "Merge authorization alone cannot establish a merge, while confirmed results and external observations settle through outcome handling without dispatching another merge for an externally merged PR.",
+      "sha256": "sha256:b43a8f937d9a1de472071c8ea22f028217bc3a828c9768b76bdc3641703903ef"
+    },
+    {
+      "name": "FollowAnswersOnce",
+      "kind": "invariant",
+      "says": "A follow-up writer retry or resume receives at most one answer across watchers and crashes.",
+      "sha256": "sha256:0297c3d3483d713e7e265643f8085591148b9a49fa5e8ee2e71ef05988be32a7"
+    },
+    {
       "name": "TypeOK",
       "kind": "invariant",
       "says": "Every part of the state always has the expected kind of value.",
-      "sha256": "sha256:51a6ee5f90c427e68d7ad9648904b4be488488fb59b25882b1847b14f4ab5e3e"
+      "sha256": "sha256:3e3497f6c9007706e670bb6bd6a0ce5bdecd9788f5543e2697af3eef5ee393cb"
     },
     {
       "name": "Merged",
@@ -207,129 +313,381 @@
       "name": "FairAcquire",
       "kind": "fairness",
       "says": "A running watcher eventually takes a lease that nobody holds.",
-      "sha256": "sha256:073a975b41d712bee417182d6b3010fbfa0e93e8e425bea246f08c720b320288"
+      "sha256": "sha256:c821464c1816a6e4049cfc969800f34d773f2a0174e35891119b8d9232ba952e"
     },
     {
       "name": "FairExpire",
       "kind": "fairness",
       "says": "A lease whose holder has crashed eventually runs out.",
-      "sha256": "sha256:3a409f588e2ea6c6fe2a649abacb2a17429759c59a3a8565b2c5cdfd122a337a"
+      "sha256": "sha256:105d606e9329da9f17b6a386657f4006b033c03e2ebde7af0587aa5006cdb1bd"
     },
     {
       "name": "FairAct",
       "kind": "fairness",
       "says": "A watcher holding the lease eventually takes the next effect that's due.",
-      "sha256": "sha256:7358eab087ca85ee79d45feb7ac3506c6d0de56dfe6173e36f117a99130197a0"
+      "sha256": "sha256:e24ca7945d330735d41499dc81c3725a92457f739075d43d575a95f88501224d"
     },
     {
       "name": "FairFinishRun",
       "kind": "fairness",
       "says": "An agent run held by the lease's holder eventually finishes and is recorded.",
-      "sha256": "sha256:17f9e4575e507b3cfe500d6329fa01cfaf59f8bebdfaac88860af5515fb4f9e4"
+      "sha256": "sha256:072397e438e1a2da19f5aaaa69ae27c19918fa5aefbfd59a9d4a113c938badaf"
     },
     {
       "name": "FairDropRun",
       "kind": "fairness",
       "says": "A watcher that has lost the lease eventually drops the agent run it was in.",
-      "sha256": "sha256:78316700c7586cab9e9fd33aa79c349a56e653b2686a8e62c6a152beaed70c9f"
+      "sha256": "sha256:1fe3297a8bb98c61f4f8a1a1c5a3cda3596c5dd7ab2c0fba3736564f0fbf555f"
     },
     {
       "name": "PostWithoutLooking",
       "kind": "bug",
       "says": "A watcher posts its answer without looking for an answer already there.",
       "expect": "NoDoubleAnswer",
-      "sha256": "sha256:b9a870b355ef96f43888b2b19438df870937890bfb1b8fc75b7fcdb4475e5cd0"
+      "sha256": "sha256:de32b090881917c1c637776a093281511052414182df087b2aa05cb850e085dd"
     },
     {
       "name": "PostWithoutLease",
       "kind": "bug",
       "says": "A watcher that woke after its lease ran out posts without checking the lease.",
       "expect": "OnlyHolderActs",
-      "sha256": "sha256:df4829a1fa0b3cd91813cf5149d0bb1ab02b3e33c9f223d2bd042ea28a8ba0e4"
+      "sha256": "sha256:eaa887feb6c046e477ef2440e6d511f89744a6e4f0c5fe55d67fbe8ed8160057"
     },
     {
       "name": "RerunStoppedRun",
       "kind": "bug",
       "says": "A watcher that finds an agent run that stopped partway starts it again.",
       "expect": "NoRunTwice",
-      "sha256": "sha256:b7b6a66a53126d0e52167e4e093e79bbfe50092f8879250af6fa3b750bb1b268"
+      "sha256": "sha256:3f040ef984cb45446ffdadbaa6b7c97b6c02c5adfdc40493e3ffed6d9c1d9311"
     },
     {
       "name": "OpenWithoutLookingClosed",
       "kind": "bug",
       "says": "A watcher finds no open pull request for the latest build, misses the one it opened that was since closed or merged, and opens another.",
       "expect": "OnePullRequest",
-      "sha256": "sha256:62434f2065ab07178a86c4cfb4f8eba8220c2f3c2467f49d001d35e5e43f989d"
+      "sha256": "sha256:5dc0e75c9e6a46e3cb63993132b83788bd0ca4c6925030877531c1d64c364f26"
     },
     {
       "name": "OpenBeforeRetiring",
       "kind": "bug",
       "says": "A retry's build opens its pull request while the draft it replaces is still open.",
       "expect": "OneOpenPullRequest",
-      "sha256": "sha256:fcdc2d93fdaf21e4191a91bb6344f05e8e5791e9cbee3899e9186804cf256fcd"
+      "sha256": "sha256:5e24be829addc6f8f5f55c9cb44785550476f6c87805ef6ec4a95d780f331de4"
     },
     {
       "name": "RetireWithoutRecord",
       "kind": "bug",
       "says": "The factory closes the draft before storing the retry's record, so after a crash its own close looks like someone else's.",
       "expect": "RetiredOnlyByRecord",
-      "sha256": "sha256:298662a7d3c4cc893b2e0c84f0d4f9060320c3818d045b21a1ff40bee554be8a"
+      "sha256": "sha256:23075fb5a1d0e3c33800de5a5557bbda2eb9b6cb130a2e9681548ee455591fea"
     },
     {
       "name": "ReplaceMergedDraft",
       "kind": "bug",
       "says": "A retry whose draft someone merged builds again anyway.",
       "expect": "NoReplacingMerged",
-      "sha256": "sha256:144110ff8102d9279c69020595c91c61b25fdec6ea0744a1252828c02a428318"
+      "sha256": "sha256:2cbb9c6b86a4935e4bc765cb24a2cf1a8a32abe9dd6b5c53dd896f5561c92eab"
     },
     {
       "name": "KeepGateAcrossRetry",
       "kind": "bug",
       "says": "A writer's retry keeps CI's result from the draft it replaces.",
       "expect": "OwnGate",
-      "sha256": "sha256:a88ac9510ba16d0eee36754aaa1bf3e8d802dc856c7b6f440368337c07eec13a"
+      "sha256": "sha256:890609ddce3b145f5ca6334b2292e94417ac883c2a9fda4e5e9e397192c2d5f9"
     },
     {
       "name": "FinishStaleRun",
       "kind": "bug",
       "says": "A watcher whose agent run a retry made stale records it as the latest build's.",
       "expect": "OwnRun",
-      "sha256": "sha256:0205e54902b99ce1ac2a53a44d67ba5a31b08a46c1be612aa4e0228d6965fcc5"
+      "sha256": "sha256:1af215f9c0d876f5e927487c5348c335892575d994356ab6fc756a579dda2ccc"
     },
     {
       "name": "CloseWithoutLease",
       "kind": "bug",
       "says": "A watcher that woke after its lease ran out closes the draft without checking the lease.",
       "expect": "OnlyHolderActs",
-      "sha256": "sha256:d3025b4287e73522f07853d3418a52f12d4e3fad3a6a1b6a733a9ef957af74d6"
+      "sha256": "sha256:5d722b3d4a0628510ea99235540db8fb72efa65110bc3ccde6d02f1bd3e94e6c"
     },
     {
       "name": "MarkReadyWithoutWatch",
       "kind": "bug",
       "says": "The factory marks a failed draft ready when no writer's retry watches it again.",
       "expect": "ReadiedOnlyWhenWatched",
-      "sha256": "sha256:cb96322573731ad1e8eba29e04b5b29e3ba0d3e5f29156d9ba13d5fcef49b3a0"
+      "sha256": "sha256:6b5f43b7f1579bf6ee6932f2d0937d9a49439f52b18e63b82b9c2d77a708d04f"
     },
     {
       "name": "MarkReadyBeforeGate",
       "kind": "bug",
       "says": "The factory marks a watched draft ready before CI's gate passes on it.",
       "expect": "ReadiedOnlyAfterGate",
-      "sha256": "sha256:40da3afb302a764416001b91a9fc65eec348f8f44444490072247d2677d0fb2e"
+      "sha256": "sha256:66a949ec7fd61f9e2e7566d31c0630d21cf702fc0fe6f7486faefa38b1955987"
     },
     {
       "name": "MarkUnmergeableReady",
       "kind": "bug",
       "says": "The factory marks ready a watched draft it can't merge, such as one that changes the trusted base.",
       "expect": "ReadiedOnlyAfterGate",
-      "sha256": "sha256:c375c514564d6859d327d0ed01f3897b62eb830574655af50c107b3e02155a5c"
+      "sha256": "sha256:11984c3521bf3006c35d70603b7fd79d847614bf960adb25106b3dc4515031f6"
     },
     {
       "name": "AnswerWatchWithoutLooking",
       "kind": "bug",
       "says": "A watcher answers a retry that watches a failed draft again without looking for an answer already there.",
       "expect": "NoDoubleAnswer",
-      "sha256": "sha256:046d37a6eab35bd171a93313c22eca632e660f0ae30c293abb7e81f2aa71a758"
+      "sha256": "sha256:06272cf9073de77af3d37574307b9e5c2a18e5229755fa8cf8d260d9af9ab534"
+    },
+    {
+      "name": "AutomaticDraftAndCreateRecovery",
+      "kind": "witness",
+      "says": "Failed follow-up drafting and creation can each recover automatically through fresh recorded attempts and open the single PR.",
+      "sha256": "sha256:89f108fa0f91648741a2a491ca6d9f68758ad7dd5f5b2f11ae9a2f038b9d6923"
+    },
+    {
+      "name": "RepairAfterCIFailure",
+      "kind": "witness",
+      "says": "A CI failure can lead to a charged repair that publishes a new revision on the same PR.",
+      "sha256": "sha256:361601b68c4e807deb32fd2f746f0ca693182e77a8501b47cb6705c39632af5f"
+    },
+    {
+      "name": "ExhaustedThenRenewed",
+      "kind": "witness",
+      "says": "After two repairs are exhausted, a writer request can renew the allowance and permit another repair on the same PR.",
+      "sha256": "sha256:b6395fd0609245ab4d5048baf1ad163d065b0830171b29180f8870cb4483d471"
+    },
+    {
+      "name": "ClosedFollowupResumed",
+      "kind": "witness",
+      "says": "A writer request can resume closed follow-up work by reopening its existing PR.",
+      "sha256": "sha256:27d834f74ca0ef9cefdfc9a631840c37d5025f1416ae265642622dd0c04315dd"
+    },
+    {
+      "name": "LostCreationAdoptsClosed",
+      "kind": "witness",
+      "says": "A lost creation response can adopt the existing PR after a person closes it.",
+      "sha256": "sha256:ca1d529ea4b95c52df9ea9a85eb69d644ae8a7f930d61906de25160f2f3be57f"
+    },
+    {
+      "name": "LostCreationAdoptsMerged",
+      "kind": "witness",
+      "says": "A lost creation response can adopt and settle the existing PR after a person merges it.",
+      "sha256": "sha256:ade237f9cbc9bf6c50d43d98db4e4f76a39d18bf8572baaf9645f0b8890a40ea"
+    },
+    {
+      "name": "LostRepairPublicationRecovered",
+      "kind": "witness",
+      "says": "A lost repair publication response can be reconciled without publishing or charging the repair again.",
+      "sha256": "sha256:5464aa8026f75627ced887c39804876f72421886aaa69a5dce3920d7b16f86f6"
+    },
+    {
+      "name": "LostMergeResponseRecovered",
+      "kind": "witness",
+      "says": "After a crash, a lost merge response can be reconciled as success from the actual remote result.",
+      "sha256": "sha256:d7c0e463ef7dcb38ba51712e2ea21a222a11dd163d32bf88811f0be50345ed19"
+    },
+    {
+      "name": "UnknownMergeRecorded",
+      "kind": "witness",
+      "says": "Recovery can record an unknown merge outcome while leaving the work unsettled.",
+      "sha256": "sha256:ccb2e107c318bd2c110018d41abc84d80b7c189a3a08fa98c7e08778dbd66c63"
+    },
+    {
+      "name": "MergeRefusalReconciled",
+      "kind": "witness",
+      "says": "Recovery can reconcile and report a definitive merge refusal without claiming a merge.",
+      "sha256": "sha256:217c319b8f9bd8bb53143a7dfe2ff2795fbe5fe67b45fe4b6bcbda6c826ee9b6"
+    },
+    {
+      "name": "ExternalMergeObserved",
+      "kind": "witness",
+      "says": "An externally merged follow-up can settle from observation with no fabricated CI result or factory merge dispatch.",
+      "sha256": "sha256:878b696abfd3892434acd44588933da67d52c70d632cd5f0a94e96d75f13cb83"
+    },
+    {
+      "name": "PendingRenewalReconciled",
+      "kind": "witness",
+      "says": "A request arriving during a repair can be answered once after reconciliation and renew the allowance to two.",
+      "sha256": "sha256:4e4e48c2c730e7e1cffa893715f856ae1101f960a6674bbed37ac4eec577b088"
+    },
+    {
+      "name": "FailedAndNoChangeRepairsRetained",
+      "kind": "witness",
+      "says": "Failed and no-change repairs can retain their different causes and both consume their authorized attempts.",
+      "sha256": "sha256:8067efd432eb96b740a94d7c4927f19839b69e5b57034d0cc75136dee849ff95"
+    },
+    {
+      "name": "InvalidatedRepairRetainsUsage",
+      "kind": "witness",
+      "says": "A repair invalidated by a newer head can settle without publishing stale contents or refunding its attempt.",
+      "sha256": "sha256:80d2a5fb507a923aa72e8904cd8fea1193c74b8fd8ac9ff4e45872d11c4e7f78"
+    },
+    {
+      "name": "TwoWatchersRecoverFollowup",
+      "kind": "witness",
+      "says": "Two watchers can both take part in a follow-up that is merged and settled after the maximum modeled crashes.",
+      "sha256": "sha256:946740028ed3ce0302a0089e0e4926e2abdaf047f3d96fac3b9df793be4b04b9"
+    },
+    {
+      "name": "FollowRunsSettled",
+      "kind": "property",
+      "says": "Every started follow-up agent operation eventually has a durable reconciled outcome under watcher fairness.",
+      "sha256": "sha256:94e63e653bbc3f1d071f9a45a2b700e34179d9a2e80fd338a188fc02e265ba8e"
+    },
+    {
+      "name": "FollowPublicationsSettled",
+      "kind": "property",
+      "says": "Every dispatched follow-up publication eventually reconciles its durable result without waiting for a person.",
+      "sha256": "sha256:5b4a1f62e12dcc701c32599f8f14858d639abfc080873f7aa4970e10bfe2c246"
+    },
+    {
+      "name": "FollowKnownMergesSettled",
+      "kind": "property",
+      "says": "A confirmed remote merge or definitive merge refusal is eventually settled through the follow-up outcome path.",
+      "sha256": "sha256:39678d3fb34a1556dcf853d045768cccb18c11df37aefefb5566a113b27479ed"
+    },
+    {
+      "name": "FollowRequestsAnswered",
+      "kind": "property",
+      "says": "Every modeled explicit writer retry or resume is eventually consumed and answered after any unresolved repair is reconciled.",
+      "sha256": "sha256:e05fd18cc91384f4e62506840fa77b5075ac01793861a04750a98e1f19c79dd2"
+    },
+    {
+      "name": "FollowAuthorizedWorkStarts",
+      "kind": "property",
+      "says": "Every accepted follow-up operation authorization eventually dispatches its recorded effect or reconciles a superseding remote observation under watcher fairness.",
+      "sha256": "sha256:86fb83727d2f6d2800d01e560e0ecd0cde2a60987bd2053f0d68225ceee0e3de"
+    },
+    {
+      "name": "DuplicateFollowCreation",
+      "kind": "bug",
+      "says": "Recovery misses a closed or merged PR after losing its creation response and creates another.",
+      "expect": "FollowOnePR",
+      "sha256": "sha256:2ed6fd4ef0952a015991b7b2c835561c0c57c0925c6481c95b3b640d9b1db121"
+    },
+    {
+      "name": "DuplicateFollowRun",
+      "kind": "bug",
+      "says": "Recovery restarts the same stopped follow-up operation instead of recording a fresh attempt.",
+      "expect": "FollowOperationOnce",
+      "sha256": "sha256:ad1c42c67e231d50c240f54760933fe92266ce6e8f2a52261cd43eff11c8a0cd"
+    },
+    {
+      "name": "DuplicateFollowMerge",
+      "kind": "bug",
+      "says": "Recovery performs a second merge after the follow-up PR was already merged.",
+      "expect": "FollowOneMerge",
+      "sha256": "sha256:4720ef9883e48ba7343462a55d1c503b5ce08011760736fbc455bd7598a352b5"
+    },
+    {
+      "name": "ApplyStaleRepairResult",
+      "kind": "bug",
+      "says": "A watcher applies an older operation result to the current repair.",
+      "expect": "FollowResultsCurrent",
+      "sha256": "sha256:54261f0f1458042b416471167792ef259934e43341a1d36f1721deb3a7bdfbc7"
+    },
+    {
+      "name": "DispatchWithoutRecord",
+      "kind": "bug",
+      "says": "Recovery starts a follow-up agent effect before recording its intent and snapshot association.",
+      "expect": "FollowSnapshotsBeforeEffects",
+      "sha256": "sha256:1635e13713704eeb3147ea00e7e391514bfca98a83617f0f2561dbb94e43f045"
+    },
+    {
+      "name": "FollowEffectAfterLeaseLoss",
+      "kind": "bug",
+      "says": "A watcher continues a follow-up effect after losing the repository lease.",
+      "expect": "OnlyHolderActs",
+      "sha256": "sha256:2d96bca0f3c4cfb02442d3c4024f11398143db4f6f1eaeb973e570a863d35f94"
+    },
+    {
+      "name": "ReuseFollowCI",
+      "kind": "bug",
+      "says": "Recovery reuses CI and mergeability from an older revision after a repair changes the head.",
+      "expect": "FollowCurrentRevision",
+      "sha256": "sha256:00ee8a4acb0983989d23fbc683172f9b4813b03a0d2153100ce3f11e39e53a7e"
+    },
+    {
+      "name": "ResumeWithoutWriter",
+      "kind": "bug",
+      "says": "Recovery renews a closed or exhausted follow-up without an explicit writer request.",
+      "expect": "FollowWriterRequired",
+      "sha256": "sha256:393b98a4a56b29348bb774d117c26550957d7c54d1fabf1ceacf043dd8cc93b7"
+    },
+    {
+      "name": "RenewBeforeReconciliation",
+      "kind": "bug",
+      "says": "Recovery consumes a pending writer request before the existing repair and publication are reconciled.",
+      "expect": "FollowRenewalWaits",
+      "sha256": "sha256:23f294d8a31acbd9451cacd3d9de1347b112aae51484993a0c98d18663d46b7c"
+    },
+    {
+      "name": "TreatAuthorizationAsMerge",
+      "kind": "bug",
+      "says": "Recovery treats a persisted merge authorization as proof that GitHub merged the PR.",
+      "expect": "FollowMergeConfirmed",
+      "sha256": "sha256:69aa4b56424a669aa5cc862b121d62660b30f5eb82e63e8dd85a65eb60b89937"
+    },
+    {
+      "name": "ChargeLostPushAgain",
+      "kind": "bug",
+      "says": "Recovery spends a second repair allowance while reconciling a lost publication response.",
+      "expect": "FollowAllowance",
+      "sha256": "sha256:7fbc20ba2866c5ed4ac277637d2bec5b01fe35e660f0fa9621310d3ef1528faa"
+    },
+    {
+      "name": "HideRepairFailure",
+      "kind": "bug",
+      "says": "Recovery changes a no-change repair result into a generic failure.",
+      "expect": "FollowFailurePreserved",
+      "sha256": "sha256:66ef1c802a257dc87b7c8b5c135cd94f1759dc0715c9dd22c1400c624f31b2d8"
+    },
+    {
+      "name": "FollowAutomaticRetries",
+      "kind": "property",
+      "says": "A reconciled failed or stopped draft or failed creation eventually starts a fresh recorded operation automatically under Workflow authorization.",
+      "sha256": "sha256:a5f83bd9ac580f86e5b8ed537d53ce585a6029ed1b2b096a01522573c0059e50"
+    },
+    {
+      "name": "LostRepairThenExternalMerge",
+      "kind": "witness",
+      "says": "A repair publication whose response is lost can be reconciled after a person merges the PR without another publication or merge.",
+      "sha256": "sha256:6e9fafae9f1f3ca14374e71101354fcdf9d47cdcfeea5c36d185f7d8fe7cd68f"
+    },
+    {
+      "name": "RepairClosedReconciled",
+      "kind": "witness",
+      "says": "A person can close a PR during an authorized repair, which settles as invalidated and retains its usage.",
+      "sha256": "sha256:57d5a8f6bbe2faa1337fc6a525cfe68684cbb88e2aa5c769246df0936b7623bb"
+    },
+    {
+      "name": "MergeClosedBeforeDispatch",
+      "kind": "witness",
+      "says": "Closure after merge authorization can cancel its dispatch and leave the follow-up on hold.",
+      "sha256": "sha256:d9eee0c91bb7e65913d5709c35b02928b18c4e68871b600819b9362d1df43e06"
+    },
+    {
+      "name": "MergeObservedBeforeDispatch",
+      "kind": "witness",
+      "says": "An external merge after authorization can settle without dispatching the authorized merge.",
+      "sha256": "sha256:afc45c27834a3bf8a74763f38f13cd7f376c257fffec2f069463d8b235c682bb"
+    },
+    {
+      "name": "MergeHeadInvalidated",
+      "kind": "witness",
+      "says": "A head change after merge authorization can invalidate that authorization without reusing its CI.",
+      "sha256": "sha256:a5ea0eaf917ee7fbea4315594882d14d791f47b80e6717e030e3b891db8ad96e"
+    },
+    {
+      "name": "RefusedThenExternallyMerged",
+      "kind": "witness",
+      "says": "A refused factory merge can later settle through observation of a person merging the PR.",
+      "sha256": "sha256:784c0e2b3eb0b0e8bf6a05a6ed250354f0dd2aa19f37d95056d480bb68c485ad"
+    },
+    {
+      "name": "FollowUnmergeableReported",
+      "kind": "witness",
+      "says": "Passing CI on an unmergeable follow-up can be reported without dispatching a merge.",
+      "sha256": "sha256:75fa81b87ab1244d49485425ad0df47b3165e26973289d8943a6c3df62a0d102"
     }
   ]
 }
