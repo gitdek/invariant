@@ -588,11 +588,14 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 	// may not edit, which never fail its formatting (#298).
 	sb.Original = root
 	calls := toolCalls("test", maxRuns)
+	description := "Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, in a sandbox with no network."
+	if sb.Repository != nil || sb.Checks != nil {
+		description = "Run the build's configured repository checks on staged changes to the plan's files and allowed new regression tests, offline. Report command or test failures and unfinished acceptance evidence."
+	}
 	return mcp.Tool{
-		Name: "test",
-		Description: fmt.Sprintf("Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, "+
-			"in a sandbox with no network. You have %d runs in total.", maxRuns),
-		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Name:        "test",
+		Description: fmt.Sprintf("%s You have %d runs in total.", description, maxRuns),
+		Schema:      map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			runs, err := calls(ctx)
 			if err != nil {
@@ -615,7 +618,7 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 			}
 			r, err := sb.Run(ctx, staged, &lock.Plan)
 			if err != nil {
-				return fmt.Sprintf("The tests couldn't run: %v\n\n(Test run %d of %d.)", err, runs, maxRuns), true
+				return fmt.Sprintf("The tests couldn't run: %v\n%s\n%s\n\n(Test run %d of %d.)", err, r.Summary(), r.Tail(8000), runs, maxRuns), true
 			}
 			if logPath != "" {
 				synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: r.Passed(), Failed: r.Failing(), At: time.Now().UTC().Format(time.RFC3339)})
@@ -746,6 +749,30 @@ func formalizeCmd(ctx context.Context, args []string) int {
 }
 
 func watchCmd(ctx context.Context, args []string) int {
+	// Keep the same factory from startup onward, so a signal during setup
+	// closes admission before any work can start.
+	f := &factory.Factory{}
+	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
+	drains := make(chan os.Signal, 1)
+	signal.Notify(drains, syscall.SIGUSR1)
+	stopSignals, signalsDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(signalsDone)
+		for {
+			select {
+			case <-drains:
+				f.Drain()
+				logger.Print("drain requested; admitted work will finish before the watcher stops")
+			case <-stopSignals:
+				return
+			}
+		}
+	}()
+	defer func() {
+		signal.Stop(drains)
+		close(stopSignals)
+		<-signalsDone
+	}()
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	repo := fs.String("repo", "", "the repository to watch, as owner/name")
 	every := fs.Duration("every", time.Minute, "how often to poll GitHub")
@@ -803,7 +830,6 @@ func watchCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant: -check-parallel must be positive")
 		return 2
 	}
-	logger := log.New(os.Stderr, "invariant: ", log.LstdFlags)
 	fail := func(err error) int { logger.Print(err); return 2 }
 	checkQueue, err := plumbing.NewCheckQueue(*checkParallel)
 	if err != nil {
@@ -924,12 +950,11 @@ func watchCmd(ctx context.Context, args []string) int {
 			others[name] = r
 		}
 	}
-	f := &factory.Factory{
-		Repository: *repo, GitHub: gh, Repo: clone, Base: *base, Projects: *projects, Check: "invariant/gate", Language: *language, Self: bot,
-		Work: filepath.Join(dir, "issues"), Log: logger.Printf,
-		Agent: *agent, Formalizer: own.Formalizer, Builder: own.Builder, Plumbing: own.Plumbing, Agents: others,
-		Holder: factory.NewHolder(), LeaseFor: *leaseFor, Parallel: *parallel,
-	}
+	f.Repository, f.GitHub, f.Repo = *repo, gh, clone
+	f.Base, f.Projects, f.Check, f.Language, f.Self = *base, *projects, "invariant/gate", *language, bot
+	f.Work, f.Log = filepath.Join(dir, "issues"), logger.Printf
+	f.Agent, f.Formalizer, f.Builder, f.Plumbing, f.Agents = *agent, own.Formalizer, own.Builder, own.Plumbing, others
+	f.Holder, f.LeaseFor, f.Parallel = factory.NewHolder(), *leaseFor, *parallel
 	if err := f.Prepare(ctx); err != nil {
 		return fail(err)
 	}

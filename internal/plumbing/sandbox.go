@@ -37,13 +37,17 @@ var sandboxRunner string
 // Sandbox runs a checkout's checks on a throwaway copy of it, in the
 // pinned Go image, with no network and none of the host's environment
 // (D-0014). The host's module cache is mounted read-only, so the
-// repository's own dependencies build offline.
+// repository's own dependencies build offline. Repository opts into captured
+// repository checks instead, with prepared dependencies and no host caches.
 type Sandbox struct {
 	Image    string // the Go image, pinned by digest
 	ModCache string // the host's module cache, as go env GOMODCACHE
 	// Checks sends a build's checks to its watcher's queue. Direct sandbox
 	// checks, including the real-image budget checks, leave it nil.
 	Checks *CheckClient
+	// Repository is explicit execution policy supplied by the trusted caller.
+	// Nil retains Invariant's built-in Go selection and scheduling.
+	Repository *RepositoryChecks
 	// Cache is a build cache kept between one build's runs, so each run
 	// doesn't compile everything again. Empty, each run starts cold.
 	Cache string
@@ -79,13 +83,22 @@ type Result struct {
 	Interrupted      bool
 	TimedOut         bool // a phase exhausted its budget before the whole-run deadline
 	TestResults      []TestResult
-	Problems         []string // phase, build and worker failures retained in summaries
+	CommandResults   []CommandResult // non-nil for captured repository checks
+	Problems         []string        // phase, build and worker failures retained in summaries
 }
 
 // Passed says whether everything passed.
 func (r Result) Passed() bool {
-	if r.DeadlineExceeded || r.Interrupted || r.TimedOut || len(r.Problems) > 0 || len(r.Gofmt) > 0 || !r.Vet || !r.Tests {
+	if r.DeadlineExceeded || r.Interrupted || r.TimedOut || len(r.Problems) > 0 || len(r.Gofmt) > 0 {
 		return false
+	}
+	if r.CommandResults == nil && (!r.Vet || !r.Tests) {
+		return false
+	}
+	for _, command := range r.CommandResults {
+		if command.Status != "passed" && command.Status != "skipped" {
+			return false
+		}
 	}
 	for _, ok := range r.Accepted {
 		if !ok {
@@ -126,6 +139,9 @@ var (
 func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, error) {
 	if s.Checks != nil {
 		return s.Checks.run(ctx, root)
+	}
+	if s.Repository != nil {
+		return s.runRepository(ctx, root, plan)
 	}
 	return s.run(ctx, root, plan, time.Now())
 }
@@ -502,6 +518,9 @@ const summaryNamed = 100
 // (#408). A run that didn't pass names them after the rest, up to
 // summaryNamed. TestResults keeps every record.
 func (r Result) Summary() string {
+	if r.CommandResults != nil {
+		return r.repositorySummary()
+	}
 	var b strings.Builder
 	switch {
 	case r.Passed():

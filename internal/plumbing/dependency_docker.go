@@ -588,6 +588,22 @@ func createDependencyContainer(ctx context.Context, q DependencyRequest, script 
 		"--platform", q.Platform, "--hostname", "localhost", "--memory", "4g", "--pids-limit", "1024",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "0:0",
 		"--entrypoint", "/usr/bin/env", "--workdir", path.Join(dependencyWork, q.Directory)}
+	env := dependencyContainerEnv(q)
+	keys := slices.Sorted(maps.Keys(env))
+	for _, name := range keys {
+		args = append(args, "--env", name+"="+env[name])
+	}
+	args = append(args, q.Image, "-i")
+	for _, name := range keys {
+		args = append(args, name+"="+env[name])
+	}
+	args = append(args, "/bin/sh", "-c", script, "invariant-dependencies")
+	args = append(args, q.Argv...)
+	_, err := dependencyDocker(ctx, args...)
+	return err
+}
+
+func dependencyContainerEnv(q DependencyRequest) map[string]string {
 	env := maps.Clone(q.Env)
 	if env == nil {
 		env = map[string]string{}
@@ -601,18 +617,7 @@ func createDependencyContainer(ctx context.Context, q DependencyRequest, script 
 	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "FTP_PROXY", "ftp_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"} {
 		env[name] = ""
 	}
-	keys := slices.Sorted(maps.Keys(env))
-	for _, name := range keys {
-		args = append(args, "--env", name+"="+env[name])
-	}
-	args = append(args, q.Image, "-i")
-	for _, name := range keys {
-		args = append(args, name+"="+env[name])
-	}
-	args = append(args, "/bin/sh", "-c", script, "invariant-dependencies")
-	args = append(args, q.Argv...)
-	_, err := dependencyDocker(ctx, args...)
-	return err
+	return env
 }
 
 func startDependencyContainer(ctx context.Context, token string) ([]byte, error) {
@@ -642,6 +647,14 @@ func (r *DockerDependencyRunner) Cleanup(ctx context.Context, token string) erro
 }
 
 func validateDependencyRequest(q DependencyRequest, install bool) error {
+	if !install && len(q.Argv) == 0 {
+		return errors.New("dependency checks require a command")
+	}
+	return validateDependencyContainer(q, install)
+}
+
+// Persistent checks open an environment before supplying any command.
+func validateDependencyContainer(q DependencyRequest, install bool) error {
 	if !dependencyContainer.MatchString(q.Token) || !dependencyPlatform.MatchString(q.Platform) || !dependencyRelative(q.Directory, true) || q.SourceDir == "" || !q.Init || q.MemoryBytes != 4<<30 || q.PidsLimit != 1024 {
 		return errors.New("invalid dependency container request")
 	}
@@ -649,7 +662,7 @@ func validateDependencyRequest(q DependencyRequest, install bool) error {
 		if !dependencyBase.MatchString(q.Image) || !dependencyID.MatchString(q.Key) || q.Inputs == nil || q.Network != (len(q.Argv) != 0) {
 			return errors.New("invalid dependency installation request")
 		}
-	} else if !dependencyID.MatchString(q.Image) || q.Network || q.Pull || len(q.Argv) == 0 {
+	} else if !dependencyID.MatchString(q.Image) || q.Network || q.Pull {
 		return errors.New("dependency checks require an offline immutable environment")
 	}
 	for _, arg := range q.Argv {

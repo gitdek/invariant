@@ -177,6 +177,7 @@ type Factory struct {
 	mergeWait  map[string]bool
 	seenMerges map[int]bool
 	running    running
+	admission  admission
 	lease      lease
 }
 
@@ -223,7 +224,7 @@ func (f *Factory) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// Watch polls until ctx ends, and then waits for its steps to end. With a
+// Watch polls until ctx ends or Drain finishes, then joins its steps. With a
 // lease, it polls only while it holds the lease, and checks it before each
 // effect. The first time it may act, before it starts any step, it clears
 // the clone's worktrees: the clone is the watcher's own, so any worktree
@@ -232,10 +233,18 @@ func (f *Factory) Prepare(ctx context.Context) error {
 // worktree of its own (D-0113). A one-off run doesn't clear them, since it
 // may share the clone with a running watcher. Then, for the same reasons,
 // it clears the Go build caches runs in its work directory left (#366).
-func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
+func (f *Factory) Watch(ctx context.Context, every time.Duration) (err error) {
+	drained := f.drainDone()
+	select {
+	case <-drained:
+		return ctx.Err()
+	default:
+	}
+	renewCtx, stopRenewal := context.WithCancel(ctx)
 	leaseDone := make(chan struct{})
 	defer func() {
 		f.Wait()
+		stopRenewal()
 		<-leaseDone
 		if f.LeaseFor > 0 {
 			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -243,6 +252,9 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 			if err := f.releaseLease(cleanup); err != nil {
 				f.logf("release lease: %v", err)
 			}
+		}
+		if ctx.Err() != nil {
+			err = ctx.Err()
 		}
 	}()
 	if f.LeaseFor > 0 {
@@ -253,9 +265,9 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		go func() {
 			defer close(leaseDone)
 			select {
-			case <-ctx.Done():
+			case <-renewCtx.Done():
 			case <-time.After(every):
-				f.keepLease(ctx, every)
+				f.keepLease(renewCtx, every)
 			}
 		}()
 	} else {
@@ -280,6 +292,13 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		return err
 	}
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-drained:
+			return ctx.Err()
+		default:
+		}
 		if !f.holds() {
 			// Another watcher holds the lease. Wait for it to run out.
 		} else if err := clearOnce(); err != nil {
@@ -289,6 +308,8 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		}
 		select {
 		case <-ctx.Done():
+			return ctx.Err()
+		case <-drained:
 			return ctx.Err()
 		case <-time.After(every):
 		}
@@ -465,7 +486,64 @@ type running struct {
 	mu    sync.Mutex
 	steps map[int]Step
 	ended chan struct{} // closed, and made anew, each time a step ends
-	slots chan struct{} // shared by every kind of agent operation
+}
+
+// admission guards agent slots and drain requests separately from running,
+// whose activity callbacks may wait on IO. An admitted step stays here
+// through publication, even after its agent slot has been released.
+type admission struct {
+	mu    sync.Mutex
+	slots chan struct{}
+	drain chan struct{}
+	done  chan struct{}
+	steps map[int]bool
+}
+
+func (a *admission) init() {
+	if a.drain == nil {
+		a.drain, a.done = make(chan struct{}), make(chan struct{})
+		a.steps = map[int]bool{}
+	}
+}
+
+// finish closes done once draining has no admitted step left. Its caller
+// holds the admission lock.
+func (a *admission) finish() {
+	select {
+	case <-a.drain:
+		if len(a.steps) == 0 {
+			select {
+			case <-a.done:
+			default:
+				close(a.done)
+			}
+		}
+	default:
+	}
+}
+
+// Drain closes admission to new agent operations without waiting for work
+// to finish. It is safe to repeat, including before Watch starts. Admitted
+// steps finish normally; cancellation still stops them.
+func (f *Factory) Drain() {
+	a := &f.admission
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.init()
+	select {
+	case <-a.drain:
+	default:
+		close(a.drain)
+	}
+	a.finish()
+}
+
+func (f *Factory) drainDone() <-chan struct{} {
+	a := &f.admission
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.init()
+	return a.done
 }
 
 // list is the steps running, by issue.
@@ -502,9 +580,15 @@ func (f *Factory) Wait() {
 // issue n, unless its last step is still running. It says whether it
 // started one, and stops waiting when ctx ends. Zero means no limit.
 func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
+	drained := f.drainDone()
 	for {
 		if err := ctx.Err(); err != nil {
 			return false, err
+		}
+		select {
+		case <-drained:
+			return false, nil
+		default:
 		}
 		f.running.mu.Lock()
 		if f.running.steps == nil {
@@ -523,6 +607,8 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 		}
 		select {
 		case <-ended:
+		case <-drained:
+			return false, nil
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
@@ -530,20 +616,30 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 }
 
 var errIssueClosed = errors.New("the issue closed before its agent run started")
+var errDraining = errors.New("the watcher is draining, so this agent operation waits for its successor")
 
 // agentSlot waits for capacity for new agent work, then checks the issue
 // and the step's tenure again. Its caller defers the release through the
 // whole operation, including reviews, fallbacks and repairs. A wait starts
 // no run record or directory, and cancellation never starts a queued run.
 func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
-	f.running.mu.Lock()
-	if f.running.slots == nil {
-		f.running.slots = make(chan struct{}, max(f.Parallel, 1))
+	a := &f.admission
+	a.mu.Lock()
+	a.init()
+	if a.slots == nil {
+		a.slots = make(chan struct{}, max(f.Parallel, 1))
 	}
-	slots := f.running.slots
-	f.running.mu.Unlock()
+	slots, drain := a.slots, a.drain
+	a.mu.Unlock()
+	select {
+	case <-drain:
+		return nil, errDraining
+	default:
+	}
 	select {
 	case slots <- struct{}{}:
+	case <-drain:
+		return nil, errDraining
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -572,6 +668,16 @@ func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
 	if issue.State == "closed" {
 		return nil, errIssueClosed
 	}
+	// Admission and Drain share this lock, so a slot obtained just as drain
+	// begins cannot start another operation after the request.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	select {
+	case <-drain:
+		return nil, errDraining
+	default:
+	}
+	a.steps[n] = true
 	keep = true
 	return func() { <-slots }, nil
 }
@@ -580,6 +686,13 @@ func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
 func (f *Factory) end(n int, ended time.Time) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
+	defer func() {
+		a := &f.admission
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		delete(a.steps, n)
+		a.finish()
+	}()
 	f.finished(f.running.steps[n], ended)
 	delete(f.running.steps, n)
 	f.tell()
@@ -2819,6 +2932,9 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 		return err
 	}
 	err = f.step(ctx, issue)
+	if errors.Is(err, errDraining) {
+		return nil // no run started; leave the request for the next watcher
+	}
 	if errors.Is(err, errIssueClosed) {
 		// The queued operation released its slot without starting a run.
 		// Read the thread afresh to record the close and clean up labels.
