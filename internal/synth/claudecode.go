@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -170,6 +171,10 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 	defer stop()
 	cmd := exec.CommandContext(run, c.Binary, args...)
 	cmd.Dir = job.Workspace
+	// Cancel the agent's tools and their descendants too, including those
+	// that keep its output pipes open after the agent itself has stopped.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = nil
 	// The gate takes a while; give its tool calls time.
 	cmd.Env = append(os.Environ(), "MCP_TOOL_TIMEOUT=900000", "MCP_TIMEOUT=60000")
 	stdout, err := cmd.StdoutPipe()
@@ -182,6 +187,18 @@ func (c ClaudeCode) attempt(ctx context.Context, job Job, spent Usage) try {
 		// A run whose deadline has passed starts nothing.
 		return try{err: err, cut: ctx.Err() != nil}
 	}
+	// CommandContext stops watching once Wait reaps the agent, before it
+	// finishes collecting stderr. Keep cancellation alive until both end.
+	canceled := make(chan struct{})
+	stopCancel := context.AfterFunc(run, func() {
+		defer close(canceled)
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	})
+	defer func() {
+		if !stopCancel() {
+			<-canceled
+		}
+	}()
 	usage, end, readErr := readClaudeStream(stdout, job.Transcript)
 	if readErr != nil {
 		stop() // stop the agent, rather than wait for it
