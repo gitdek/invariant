@@ -19,18 +19,19 @@ import (
 	"github.com/gitdek/invariant/internal/toolchain"
 )
 
-// TestSandboxBudgetAndRealCheckout pins #397's public limits: eight global
-// queue workers, a ten-minute touched-test phase and a twelve-minute whole
-// Sandbox.Run deadline, including staging, startup, vet and acceptance tests.
+// TestSandboxBudgetAndRealCheckout pins the eight global queue workers and
+// #397's default ten-minute test phase inside a twelve-minute run. Selecting
+// internal/verify gets twenty minutes inside twenty-five (#498), including
+// staging, startup, vet and acceptance tests in the whole-run deadline.
 // Sandbox.Timeout and Sandbox.ShardTimeout may shorten their defaults, never
 // extend them. A separate minute for startup and fifteen seconds for cleanup
-// conservatively reserve more time before either backend's unchanged limit.
+// fit inside the selected tool allowance; ordinary backend defaults stay put.
 //
 // The merger runs the full checkout in two waves: two simultaneous cold-cache
 // runs must pass, then three simultaneous fresh-cache runs must return results
 // within the budget, with partial results allowed. Both waves measure peaks:
 //
-//	INVARIANT_PLUMBING_REAL=1 go test ./internal/plumbing -run '^TestSandboxBudgetAndRealCheckout$' -count=1 -timeout 45m
+//	INVARIANT_PLUMBING_REAL=1 go test ./internal/plumbing -run '^TestSandboxBudgetAndRealCheckout$' -count=1 -timeout 70m
 //
 // Image acquisition is outside the timed runs, as it is when the watcher starts.
 // Only this subtest's plan touches internal/verify: this acceptance file belongs
@@ -49,6 +50,8 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 	}{
 		{"whole run", plumbing.SandboxTimeout, 12 * time.Minute},
 		{"touched-test phase", plumbing.SandboxShardTimeout, 10 * time.Minute},
+		{"verify whole run", plumbing.SandboxVerifyTimeout, 25 * time.Minute},
+		{"verify touched-test phase", plumbing.SandboxVerifyShardTimeout, 20 * time.Minute},
 		{"startup reserve", plumbing.SandboxStartupAllowance, time.Minute},
 		{"cleanup reserve", plumbing.SandboxCleanupAllowance, 15 * time.Second},
 	} {
@@ -59,16 +62,20 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 	if plumbing.SandboxShards != 8 {
 		t.Errorf("sandbox shard workers = %d, want 8", plumbing.SandboxShards)
 	}
-	budget := plumbing.SandboxTimeout + plumbing.SandboxStartupAllowance + plumbing.SandboxCleanupAllowance
+	defaultBudget := plumbing.SandboxTimeout + plumbing.SandboxStartupAllowance + plumbing.SandboxCleanupAllowance
+	budget := plumbing.SandboxVerifyTimeout + plumbing.SandboxStartupAllowance + plumbing.SandboxCleanupAllowance
 	limits := make(map[string]time.Duration)
 	for _, name := range []string{"codex", "claude-code"} {
-		limit := sandboxBudgetBackendLimit(t, name)
-		limits[name] = limit
+		limit := sandboxBudgetBackendLimit(t, name, 0)
 		if limit != 900*time.Second {
 			t.Errorf("%s emitted tool limit %s, want the unchanged 900s limit", name, limit)
 		}
-		if budget >= limit {
-			t.Errorf("sandbox deadline plus startup and cleanup reserves = %s, must be below %s's emitted %s tool limit", budget, name, limit)
+		if defaultBudget >= limit {
+			t.Errorf("sandbox deadline plus startup and cleanup reserves = %s, must be below %s's emitted %s tool limit", defaultBudget, name, limit)
+		}
+		limits[name] = sandboxBudgetBackendLimit(t, name, budget)
+		if limits[name] < budget {
+			t.Errorf("%s emitted verify tool limit %s, want at least %s including reserves", name, limits[name], budget)
 		}
 	}
 	if t.Failed() {
@@ -117,7 +124,7 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 			t.Fatalf("find the real Go module cache: %v; output %q", err, mod)
 		}
 		finishSetup()
-		reports := sandboxBudgetObserveResources(t)
+		reports := sandboxBudgetObserveResources(t, budget)
 		seenReports := make(map[string]bool)
 
 		type outcome struct {
@@ -137,7 +144,7 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 					Cache: filepath.Join(t.TempDir(), "cold-cache"), Original: root,
 				}
 			}
-			t.Logf("running %d concurrent cold-cache containers, each with 8 global queue workers, 4 GiB and 1024 PIDs: aggregate caps %d GiB and %d PIDs; sandbox deadline %s, outer budget %s", wave.runs, wave.runs*4, wave.runs*1024, plumbing.SandboxTimeout, budget)
+			t.Logf("running %d concurrent cold-cache containers, each with 8 global queue workers, 4 GiB and 1024 PIDs: aggregate caps %d GiB and %d PIDs; sandbox deadline %s, outer budget %s", wave.runs, wave.runs*4, wave.runs*1024, plumbing.SandboxVerifyTimeout, budget)
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			ready := make(chan struct{}, wave.runs)
 			start := make(chan struct{})
@@ -172,8 +179,8 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 					if !out.result.Passed() {
 						t.Errorf("%d-run wave: real sandbox %d failed after %s:\n%s\n%s", wave.runs, out.i+1, out.elapsed, out.result.Summary(), out.result.Tail(16000))
 					}
-					if out.elapsed >= plumbing.SandboxTimeout {
-						t.Errorf("%d-run wave: real sandbox %d took %s, want less than its %s deadline", wave.runs, out.i+1, out.elapsed, plumbing.SandboxTimeout)
+					if out.elapsed >= plumbing.SandboxVerifyTimeout {
+						t.Errorf("%d-run wave: real sandbox %d took %s, want less than its %s deadline", wave.runs, out.i+1, out.elapsed, plumbing.SandboxVerifyTimeout)
 					}
 					if !out.result.Accepted[acceptanceFile+":TestSandboxBudgetAndRealCheckout"] {
 						t.Errorf("%d-run wave: real sandbox %d did not pass the pinned acceptance test in internal/plumbing", wave.runs, out.i+1)
@@ -210,7 +217,7 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 			elapsed := time.Since(began)
 			cancel()
 			t.Logf("all %d real sandbox runs completed in %s", wave.runs, elapsed)
-			if elapsed >= budget || wave.mustPass && elapsed >= plumbing.SandboxTimeout {
+			if elapsed >= budget || wave.mustPass && elapsed >= plumbing.SandboxVerifyTimeout {
 				t.Errorf("%d concurrent sandbox runs took %s, exceeding the required deadline/budget", wave.runs, elapsed)
 			}
 			entries, err := os.ReadDir(reports)
@@ -248,7 +255,7 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 // A polling docker-stats sample can miss compilation peaks; memory.peak and
 // pids.peak include every process since container creation. Missing counters or
 // observer failures fail only the opt-in check. It needs a cgroup-v2 Docker host.
-func sandboxBudgetObserveResources(t *testing.T) string {
+func sandboxBudgetObserveResources(t *testing.T, budget time.Duration) string {
 	t.Helper()
 	docker, err := exec.LookPath("docker")
 	if err != nil {
@@ -271,6 +278,7 @@ func sandboxBudgetObserveResources(t *testing.T) string {
 	}
 	t.Setenv("S397_REAL_DOCKER", docker)
 	t.Setenv("S397_RESOURCE_DIR", dir)
+	t.Setenv("S397_OBSERVER_TIMEOUT", strconv.Itoa(int((budget+plumbing.SandboxCleanupAllowance)/time.Second)))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return reports
 }
@@ -412,10 +420,11 @@ if args and args[0] == "run":
     pending = b""
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
-    end = time.monotonic() + 810
+    timeout = float(os.environ["S397_OBSERVER_TIMEOUT"])
+    end = time.monotonic() + timeout
     try:
         while selector.get_map():
-            if time.monotonic() >= end: raise TimeoutError("resource observer's Docker run exceeded 810 seconds")
+            if time.monotonic() >= end: raise TimeoutError("resource observer's Docker run exceeded %s seconds" % timeout)
             if not identity.get("cid") and read_cid(cidfile):
                 identity["cid"] = read_cid(cidfile)
                 atomic(registration, identity)
@@ -446,7 +455,7 @@ os.execv(real, [real, *args])
 // Exercise each production Backend.Run rather than copying its defaults into
 // the assertion. Only the CLI process is replaced; it records the arguments or
 // single timeout environment variable the real backend actually supplied.
-func sandboxBudgetBackendLimit(t *testing.T, name string) time.Duration {
+func sandboxBudgetBackendLimit(t *testing.T, name string, timeout time.Duration) time.Duration {
 	t.Helper()
 	dir := t.TempDir()
 	const standIn = `#!/bin/sh
@@ -481,6 +490,7 @@ cat "$here/events"
 	usage, err := backend.Run(ctx, synth.Job{
 		Workspace: t.TempDir(), Prompt: "Record the test tool's configured limit.",
 		GateServer: []string{"invariant", "mcp", "-plumbing"}, Tools: []string{"test"}, Transcript: io.Discard,
+		ToolTimeout: timeout,
 	})
 	if err != nil || usage.Outcome != "success" {
 		t.Fatalf("%s's stand-in backend did not complete: %v, usage %+v", name, err, usage)

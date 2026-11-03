@@ -21,11 +21,13 @@ import (
 )
 
 const (
-	SandboxShards           = 8
-	SandboxTimeout          = 12 * time.Minute
-	SandboxShardTimeout     = 10 * time.Minute
-	SandboxStartupAllowance = time.Minute
-	SandboxCleanupAllowance = 15 * time.Second
+	SandboxShards             = 8
+	SandboxTimeout            = 12 * time.Minute
+	SandboxShardTimeout       = 10 * time.Minute
+	SandboxVerifyTimeout      = 25 * time.Minute
+	SandboxVerifyShardTimeout = 20 * time.Minute
+	SandboxStartupAllowance   = time.Minute
+	SandboxCleanupAllowance   = 15 * time.Second
 )
 
 //go:embed sandbox_runner.py
@@ -124,13 +126,23 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 	if s.Checks != nil {
 		return s.Checks.run(ctx, root)
 	}
-	end := time.Now().Add(sandboxLimit(s.Timeout, SandboxTimeout))
+	started := time.Now()
+	parent := ctx
+	// Bound inventory before choosing the package budget. Both deadlines
+	// start at entry, so selecting the budget cannot renew preparation time.
+	end := started.Add(sandboxLimit(s.Timeout, SandboxVerifyTimeout))
 	ownDeadline := true
 	if parentEnd, ok := ctx.Deadline(); ok && parentEnd.Before(end) {
 		ownDeadline = false
 	}
 	ctx, cancel := context.WithDeadline(ctx, end)
-	defer cancel()
+	var finish context.CancelFunc
+	defer func() {
+		if finish != nil {
+			finish()
+		}
+		cancel()
+	}()
 	defer func() {
 		if !ownDeadline && result.DeadlineExceeded {
 			result.DeadlineExceeded = false
@@ -150,13 +162,25 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 			runErr = nil
 		}
 	}()
+	names, err := sandboxFiles(ctx, root)
+	if err != nil {
+		return Result{}, err
+	}
+	timeout, shardTimeout := sandboxBudgets(plan.packagesIn(names))
+	end = started.Add(sandboxLimit(s.Timeout, timeout))
+	ownDeadline = true
+	if parentEnd, ok := parent.Deadline(); ok && parentEnd.Before(end) {
+		ownDeadline = false
+	}
+	ctx, selectedCancel := context.WithDeadline(ctx, end)
+	finish = selectedCancel
 	work, err := os.MkdirTemp("", "invariant-plumbing-")
 	if err != nil {
 		return Result{}, err
 	}
 	defer os.RemoveAll(work)
 	src := filepath.Join(work, "src")
-	if err := copyCheckout(ctx, root, src); err != nil {
+	if err := copySandboxFiles(ctx, root, src, names); err != nil {
 		return Result{}, err
 	}
 	formatted, err := goFiles(ctx, s.Original, src, plan)
@@ -184,7 +208,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 		Deadline     float64  `json:"deadline"`
 		ShardTimeout float64  `json:"shard_timeout"`
 		Workers      int      `json:"workers"`
-	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, SandboxShardTimeout).Seconds(), SandboxShards}
+	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, shardTimeout).Seconds(), SandboxShards}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return Result{}, err
@@ -260,6 +284,15 @@ func sandboxLimit(override, limit time.Duration) time.Duration {
 		return override
 	}
 	return limit
+}
+
+func sandboxBudgets(packages []string) (time.Duration, time.Duration) {
+	for _, pkg := range packages {
+		if pkg == "internal/verify" {
+			return SandboxVerifyTimeout, SandboxVerifyShardTimeout
+		}
+	}
+	return SandboxTimeout, SandboxShardTimeout
 }
 
 // packages is every Go package the change touches, as ./dir: each file's
@@ -550,25 +583,36 @@ func (r Result) Tail(n int) string {
 // ignore, which is everything the build could have written. A directory
 // that isn't a checkout is copied whole, but for .git.
 func copyCheckout(ctx context.Context, root, dst string) error {
+	names, err := sandboxFiles(ctx, root)
+	if err != nil {
+		return err
+	}
+	return copySandboxFiles(ctx, root, dst, names)
+}
+
+// sandboxFiles is the inventory the copy will include. Budget selection uses
+// it too, so ignored, deleted and non-regular Go files cannot own an asset.
+func sandboxFiles(ctx context.Context, root string) ([]string, error) {
 	var names []string
 	if exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--show-prefix").Run() == nil && isTop(ctx, root) {
 		out, err := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "-c", "-o", "--exclude-standard").Output()
 		if err != nil {
-			return fmt.Errorf("listing the checkout's files: %w", err)
+			return nil, fmt.Errorf("listing the checkout's files: %w", err)
 		}
 		names = strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
 	} else {
 		all, err := sandboxWalk(ctx, root)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for f := range all {
 			names = append(names, f)
 		}
 	}
+	var regular []string
 	for _, f := range names {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		if f == "" {
 			continue
@@ -577,6 +621,27 @@ func copyCheckout(ctx context.Context, root, dst string) error {
 		info, err := os.Lstat(from)
 		if errors.Is(err, os.ErrNotExist) {
 			continue // deleted in the checkout
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		regular = append(regular, f)
+	}
+	return regular, nil
+}
+
+func copySandboxFiles(ctx context.Context, root, dst string, names []string) error {
+	for _, f := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		from := filepath.Join(root, filepath.FromSlash(f))
+		info, err := os.Lstat(from)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
 		if err != nil {
 			return err

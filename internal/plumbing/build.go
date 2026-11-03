@@ -128,6 +128,15 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		}
 		// Flags precede the positional workspace, as flag.Parse requires.
 		job.GateServer = append(job.GateServer[:len(job.GateServer)-1], "-check-queue", b.Sandbox.Checks.Address, "-check-build", checks.id, ws)
+	} else {
+		names, err := checkoutNames(ctx, root)
+		if err != nil {
+			return nil, err
+		}
+		timeout, _ := sandboxBudgets(plan.GoPackages(names))
+		if timeout > SandboxTimeout {
+			job.ToolTimeout = timeout + SandboxStartupAllowance + SandboxCleanupAllowance
+		}
 	}
 	r := &BuildResult{Tests: len(plan.Tests)}
 	defer func() {
