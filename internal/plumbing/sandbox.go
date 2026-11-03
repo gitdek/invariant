@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,11 +22,13 @@ import (
 )
 
 const (
-	SandboxShards           = 8
-	SandboxTimeout          = 12 * time.Minute
-	SandboxShardTimeout     = 10 * time.Minute
-	SandboxStartupAllowance = time.Minute
-	SandboxCleanupAllowance = 15 * time.Second
+	SandboxShards             = 8
+	SandboxTimeout            = 12 * time.Minute
+	SandboxShardTimeout       = 10 * time.Minute
+	SandboxVerifyTimeout      = 25 * time.Minute
+	SandboxVerifyShardTimeout = 20 * time.Minute
+	SandboxStartupAllowance   = time.Minute
+	SandboxCleanupAllowance   = 15 * time.Second
 )
 
 //go:embed sandbox_runner.py
@@ -133,21 +136,28 @@ var (
 // Run copies the checkout at root, and runs gofmt, go vet, the tests of
 // every package the change touches, and the plan's acceptance tests on the
 // copy.
-func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Result, runErr error) {
+func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, error) {
 	if s.Checks != nil {
 		return s.Checks.run(ctx, root)
 	}
 	if s.Repository != nil {
 		return s.runRepository(ctx, root, plan)
 	}
-	end := time.Now().Add(sandboxLimit(s.Timeout, SandboxTimeout))
+	return s.run(ctx, root, plan, time.Now())
+}
+
+func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.Time) (result Result, runErr error) {
+	// Discovery has the ordinary limit until ownership establishes the
+	// exception. Both deadlines count from the same entry time.
+	end := started.Add(sandboxLimit(s.Timeout, SandboxTimeout))
+	parent := ctx
 	ownDeadline := true
 	if parentEnd, ok := ctx.Deadline(); ok && parentEnd.Before(end) {
 		ownDeadline = false
 	}
 	ctx, cancel := context.WithDeadline(ctx, end)
 	defer cancel()
-	defer func() {
+	report := func() {
 		if !ownDeadline && result.DeadlineExceeded {
 			result.DeadlineExceeded = false
 			result.Interrupted = true
@@ -165,23 +175,45 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 			// tool can deliver the report even when staging never finished.
 			runErr = nil
 		}
-	}()
+	}
+	names, err := sandboxFiles(ctx, root)
+	if err != nil {
+		defer report()
+		return Result{}, err
+	}
+	dirs := plan.packagesIn(names)
+	if err := ctx.Err(); err != nil {
+		defer report()
+		return Result{}, err
+	}
+	timeout, shardTimeout := sandboxBudgets(dirs)
+	end = started.Add(sandboxLimit(s.Timeout, timeout))
+	if parentEnd, ok := parent.Deadline(); ok {
+		ownDeadline = !parentEnd.Before(end)
+	}
+	ctx, cancelRun := context.WithDeadline(parent, end)
+	cancel()
+	defer cancelRun()
+	defer report()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	work, err := os.MkdirTemp("", "invariant-plumbing-")
 	if err != nil {
 		return Result{}, err
 	}
 	defer os.RemoveAll(work)
 	src := filepath.Join(work, "src")
-	if err := copyCheckout(ctx, root, src); err != nil {
+	if err := copyCheckoutFiles(ctx, root, src, names); err != nil {
 		return Result{}, err
 	}
 	formatted, err := goFiles(ctx, s.Original, src, plan)
 	if err != nil {
 		return Result{}, err
 	}
-	pkgs, err := packages(ctx, src, plan)
-	if err != nil {
-		return Result{}, err
+	var pkgs []string
+	for _, dir := range dirs {
+		pkgs = append(pkgs, "./"+dir)
 	}
 	// Stage the embedded runner separately from the checkout's code. The
 	// config uses arrays, not shell words, for all paths and test names.
@@ -200,7 +232,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 		Deadline     float64  `json:"deadline"`
 		ShardTimeout float64  `json:"shard_timeout"`
 		Workers      int      `json:"workers"`
-	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, SandboxShardTimeout).Seconds(), SandboxShards}
+	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, shardTimeout).Seconds(), SandboxShards}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return Result{}, err
@@ -269,6 +301,13 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 		}
 	}
 	return result, nil
+}
+
+func sandboxBudgets(dirs []string) (time.Duration, time.Duration) {
+	if slices.Contains(dirs, "internal/verify") {
+		return SandboxVerifyTimeout, SandboxVerifyShardTimeout
+	}
+	return SandboxTimeout, SandboxShardTimeout
 }
 
 func sandboxLimit(override, limit time.Duration) time.Duration {
@@ -569,22 +608,54 @@ func (r Result) Tail(n int) string {
 // ignore, which is everything the build could have written. A directory
 // that isn't a checkout is copied whole, but for .git.
 func copyCheckout(ctx context.Context, root, dst string) error {
+	names, err := sandboxFiles(ctx, root)
+	if err != nil {
+		return err
+	}
+	return copyCheckoutFiles(ctx, root, dst, names)
+}
+
+// sandboxFiles is the regular-file inventory both ownership and copying use.
+func sandboxFiles(ctx context.Context, root string) ([]string, error) {
 	var names []string
 	if exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--show-prefix").Run() == nil && isTop(ctx, root) {
 		out, err := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "-c", "-o", "--exclude-standard").Output()
 		if err != nil {
-			return fmt.Errorf("listing the checkout's files: %w", err)
+			return nil, fmt.Errorf("listing the checkout's files: %w", err)
 		}
 		names = strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
 	} else {
 		all, err := sandboxWalk(ctx, root)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for f := range all {
 			names = append(names, f)
 		}
 	}
+	var regular []string
+	for _, f := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if f == "" {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f)))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode().IsRegular() {
+			regular = append(regular, f)
+		}
+	}
+	return regular, nil
+}
+
+func copyCheckoutFiles(ctx context.Context, root, dst string, names []string) error {
 	for _, f := range names {
 		if err := ctx.Err(); err != nil {
 			return err
