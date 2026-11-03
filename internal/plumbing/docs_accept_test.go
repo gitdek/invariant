@@ -14,6 +14,8 @@ import (
 var buildDocsPhrases = []string{
 	"SPEC.md and the README describe Invariant as it is",
 	"When the plan names either one, change it as the plan's summary says",
+	"The README is the front page, at most 400 lines",
+	"detail goes in the page under docs/ it links",
 	"A new or changed SPEC bullet cites the decisions it rests on, as `decisions check` requires",
 	"only decisions already recorded, since you can't write decisions/",
 	"the change needs a decision no one has recorded yet",

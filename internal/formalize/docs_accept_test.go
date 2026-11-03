@@ -18,6 +18,8 @@ var planDocsPhrases = []string{
 	"a change that makes either one wrong fixes it in the same change",
 	"name that file among the plan's files",
 	"say in the summary what changes there",
+	"The README is the front page, at most 400 lines",
+	"detail belongs in the page under docs/ it links",
 	"A new or changed SPEC bullet cites the decisions it rests on, as `decisions check` requires",
 	"A plumbing build can't write decisions/",
 	"the change needs a decision no one has recorded yet",
