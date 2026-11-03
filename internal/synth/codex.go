@@ -232,9 +232,22 @@ func (c Codex) args(job Job, tmp string) ([]string, error) {
 		if len(tools) == 0 {
 			tools = []string{"gate"}
 		}
-		timeout := c.ToolTimeout
+		timeout := int64(c.ToolTimeout)
 		if timeout <= 0 {
 			timeout = 900
+		}
+		if job.ToolTimeout < 0 {
+			// Codex takes a finite duration. An uncut build uses the largest
+			// whole-second timer representable by Go's execution clock.
+			timeout = max(timeout, int64((1<<63-1)/time.Second))
+		} else if job.ToolTimeout > 0 {
+			seconds := int64(job.ToolTimeout / time.Second)
+			if job.ToolTimeout%time.Second != 0 {
+				seconds++
+			}
+			if seconds > timeout {
+				timeout = seconds
+			}
 		}
 		// Codex asks before an MCP call unless the server's tools are
 		// approved, and codex exec never asks, so it would refuse every

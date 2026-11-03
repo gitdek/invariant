@@ -951,16 +951,16 @@ func (s *Server) finishedStep(repo string, step Step, work string, read map[stri
 // attempt may have stopped or failed.
 func liveTitle(doing string, ended bool) string {
 	if ended {
-		return map[string]string{"building": "Build step ended", "formalizing": "Draft step ended", "answering": "Answer step ended"}[doing]
+		return map[string]string{"building": "Build step ended", "waiting for checks": "Build step ended", "formalizing": "Draft step ended", "answering": "Answer step ended"}[doing]
 	}
-	return map[string]string{"building": "Building", "formalizing": "Drafting", "answering": "Answering"}[doing]
+	return map[string]string{"building": "Building", "waiting for checks": "Waiting for checks", "formalizing": "Drafting", "answering": "Answering"}[doing]
 }
 
 // stepFiles is the prefix of a step's directory in the work directory, and
 // the file it logs its checks to, for what a watcher is doing.
 func stepFiles(doing string) (prefix string, runs []string) {
 	switch doing {
-	case "building":
+	case "building", "waiting for checks":
 		// A modeled build logs gate runs, and a plumbing build logs test
 		// runs (D-0105).
 		return "build-", []string{"gate-runs.jsonl", "test-runs.jsonl"}
@@ -1001,6 +1001,9 @@ func readRuns(dir, doing string) ([]RunMark, string) {
 }
 
 func runsKindOf(doing string) string {
+	if doing == "waiting for checks" {
+		return "test"
+	}
 	if doing == "building" {
 		return "gate"
 	}

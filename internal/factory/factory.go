@@ -432,7 +432,7 @@ func branchIssue(branch string) (int, bool) {
 }
 
 // Step is a step the watcher is running on an issue: what it's doing,
-// formalizing, answering, ratifying or building, or "" before it starts
+// formalizing, answering, ratifying, building or waiting for checks, or "" before it starts
 // one of those, and since when. Agent is the coding agent it runs, from
 // when its run starts (#179). Run is its output directory's opaque basename,
 // published after the directory exists and before its agent starts (#236).
@@ -2786,6 +2786,26 @@ func (f *Factory) doing(issue int, what string) {
 		now := f.now()
 		f.finished(s, now)
 		s.Doing, s.Since, s.Agent, s.Run = what, now, "", ""
+		f.running.steps[issue] = s
+		f.tell()
+	}
+}
+
+// checkStatus changes only the current build's waiting words. Its run, clock
+// and completion belong to the build, including the time it spends queued.
+func (f *Factory) checkStatus(issue int, run string, waiting bool) {
+	f.running.mu.Lock()
+	defer f.running.mu.Unlock()
+	s, ok := f.running.steps[issue]
+	if !ok || s.Run != run || (s.Doing != "building" && s.Doing != "waiting for checks") {
+		return
+	}
+	what := "building"
+	if waiting {
+		what = "waiting for checks"
+	}
+	if s.Doing != what {
+		s.Doing = what
 		f.running.steps[issue] = s
 		f.tell()
 	}

@@ -56,6 +56,11 @@ type Job struct {
 	// run's later turns all count against it (#261). Zero leaves the run
 	// uncut.
 	Timeout time.Duration
+	// ToolTimeout gives queued checks time to wait within the build's shared
+	// allowance. Zero keeps the backend's ordinary tool timeout; negative
+	// asks for its longest safe timer for an uncut build. The clients still
+	// impose finite timer limits.
+	ToolTimeout time.Duration
 	// allowance is where the run keeps its tool calls, for every server it
 	// starts to count against (#261).
 	allowance string

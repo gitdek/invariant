@@ -1116,7 +1116,7 @@ type namedStep struct {
 }
 
 // stepWords say what a step is doing, in a headline that names several.
-var stepWords = map[string]string{"building": "building", "formalizing": "drafting", "answering": "answering", "ratifying": "committing the ratification on"}
+var stepWords = map[string]string{"building": "building", "waiting for checks": "waiting for checks on", "formalizing": "drafting", "answering": "answering", "ratifying": "committing the ratification on"}
 
 // stepsLine names every step, grouped by what each is doing, as "Building
 // #148 and #150 · drafting #152". The steps come longest-running first, so
@@ -1300,6 +1300,8 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 			n.Headline, n.Stage = "Drafting again with the answers on "+ref, StageAsking
 		case "ratifying":
 			n.Headline, n.Stage = "Committing the ratification on "+ref, StageRatifying
+		case "waiting for checks":
+			n.Headline = "Waiting for checks on " + ref
 		default:
 			n.Headline = "Writing the code for " + ref
 		}
