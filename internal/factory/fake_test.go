@@ -117,6 +117,16 @@ func (g *fakeGitHub) OpenIssues(context.Context) ([]github.Issue, error) {
 	return out, nil
 }
 
+func (g *fakeGitHub) Issues(_ context.Context, label string) ([]github.Issue, error) {
+	var out []github.Issue
+	for _, i := range g.issues {
+		if i.PullRequest == nil && (label == "" || i.HasLabel(label)) {
+			out = append(out, *i)
+		}
+	}
+	return out, nil
+}
+
 // Issue reads one issue as it is now, open or closed.
 func (g *fakeGitHub) Issue(_ context.Context, n int) (github.Issue, error) {
 	if i, ok := g.issues[n]; ok {
