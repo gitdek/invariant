@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 type RepositoryChecks struct {
 	Snapshot     *repository.Snapshot
 	Dependencies DependencyPreparer
+	Adapters     map[string]RepositoryAcceptanceAdapter
 }
 
 // RepositoryCheckEnvironment retains a part's build outputs between commands.
@@ -44,7 +47,18 @@ type CommandResult struct {
 var repositoryPhases = []string{"format", "lint", "build", "test"}
 
 func (s Sandbox) runRepository(ctx context.Context, root string, plan *Plan) (Result, error) {
-	run := &repositoryCheck{sandbox: s, root: root, plan: plan, started: time.Now(), result: unstartedAcceptance(plan)}
+	return s.runRepositoryMode(ctx, root, plan, false)
+}
+
+func (s Sandbox) runRepositoryMode(ctx context.Context, root string, plan *Plan, base bool) (Result, error) {
+	started := time.Now()
+	plan = cloneRepositoryPlan(plan)
+	if s.Repository != nil {
+		captured := *s.Repository
+		captured.Adapters = maps.Clone(captured.Adapters)
+		s.Repository = &captured
+	}
+	run := &repositoryCheck{sandbox: s, root: root, plan: plan, base: base, started: started, result: unstartedAcceptance(plan)}
 	// The build's pausable execution budget has no fixed Deadline. RunAgent
 	// supplies its remaining allowance in Job.Timeout without pausing for this
 	// host operation. No agent is started, and no fallback can renew the run.
@@ -67,6 +81,7 @@ type repositoryCheck struct {
 	started time.Time
 	result  Result
 	ran     bool
+	base    bool
 }
 
 func (*repositoryCheck) Name() string { return "repository checks" }
@@ -80,11 +95,11 @@ func (r *repositoryCheck) Run(ctx context.Context, job synth.Job) (synth.Usage, 
 	}
 	var err error
 	r.ran = true
-	r.result, err = r.sandbox.checkRepository(ctx, r.root, r.plan, r.started.Add(limit))
+	r.result, err = r.sandbox.checkRepository(ctx, r.root, r.plan, r.started, r.started.Add(limit), r.base)
 	return synth.Usage{}, err
 }
 
-func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan, end time.Time) (result Result, runErr error) {
+func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan, started, end time.Time, base bool) (result Result, runErr error) {
 	ownDeadline := true
 	if parentEnd, ok := parent.Deadline(); ok && !parentEnd.After(end) {
 		ownDeadline = false
@@ -92,6 +107,19 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	}
 	ctx, cancel := context.WithDeadline(parent, end)
 	defer cancel()
+	preparerLimit := SandboxTimeout
+	if s.Repository != nil {
+		preparerLimit = sandboxLimit(s.Repository.Dependencies.Timeout, SandboxTimeout)
+	}
+	execution, finish := context.WithDeadline(ctx, started.Add(preparerLimit))
+	defer finish()
+	var stopTests context.CancelFunc
+	defer func() {
+		if stopTests != nil {
+			stopTests()
+		}
+	}()
+	executionEnd, _ := execution.Deadline()
 	result = unstartedAcceptance(plan)
 	defer func() {
 		if parent.Err() != nil {
@@ -103,26 +131,66 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			result.DeadlineExceeded = ownDeadline
 			result.Interrupted = !ownDeadline
 			result.TimedOut = false
+		} else if !time.Now().Before(executionEnd) {
+			result.TimedOut = true
 		}
 		if runErr != nil {
 			result.Problems = append(result.Problems, runErr.Error())
+		}
+		reason := "earlier work did not finish successfully"
+		if len(result.Problems) > 0 {
+			reason = result.Problems[len(result.Problems)-1]
+		} else if result.Interrupted || result.DeadlineExceeded || result.TimedOut {
+			reason = "the check exhausted its allowance or was interrupted"
+		}
+		for i := range result.CommandResults {
+			command := &result.CommandResults[i]
+			if command.Status == "not_run" {
+				command.Reason = reason
+			}
+		}
+		for i := range result.TestResults {
+			test := &result.TestResults[i]
+			if test.Status == "not_run" && (test.Reason == "acceptance invocation has not started" ||
+				len(result.Problems) > 0 && test.Reason == "individual acceptance execution adapter is not available") {
+				test.Reason = reason
+			}
 		}
 		// Cancellation still delivers completed and unfinished work to tools.
 		if result.Interrupted || result.DeadlineExceeded {
 			runErr = nil
 		}
 	}()
-	if s.Repository.Snapshot == nil || plan == nil || s.Original == "" {
+	if s.Repository == nil || s.Repository.Snapshot == nil || plan == nil || s.Original == "" {
 		return result, errors.New("repository checks need a captured snapshot, plan and original checkout")
 	}
-	if err := plan.ValidateRepository(ctx, s.Repository.Snapshot); err != nil {
+	if plan.Native() || base {
+		if err := plan.Validate(); err != nil {
+			return result, err
+		}
+	}
+	if base && !plan.Native() {
+		return result, errors.New("configured base acceptance needs native identities and an execution adapter")
+	}
+	if err := plan.ValidateRepository(execution, s.Repository.Snapshot); err != nil {
 		return result, err
 	}
+	var selections []RepositoryAcceptanceSelection
 	if plan.Native() {
-		result.Problems = append(result.Problems, "native acceptance execution adapters are not available")
-		return result, nil
+		var err error
+		selections, err = s.selectRepositoryAcceptance(execution, plan)
+		if err != nil {
+			// Unsupported native execution has always been a failed report,
+			// including across the queue, rather than an IPC transport error.
+			result.Problems = append(result.Problems, err.Error())
+			return result, nil
+		}
+		for i, selection := range selections {
+			result.TestResults[i].Package = selection.Package
+			result.TestResults[i].Reason = "acceptance invocation has not started"
+		}
 	}
-	parts, err := s.repositoryParts(ctx, root, plan)
+	parts, err := s.repositoryParts(execution, root, plan)
 	if err != nil {
 		return result, err
 	}
@@ -148,22 +216,6 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	if !ok {
 		return result, errors.New("repository dependency runner cannot open persistent checks")
 	}
-	// All selection and preparation finish before candidate execution. Prepare
-	// inherits this run's deadline, including time already spent on selection.
-	session, err := dependencies.Prepare(ctx, s.Repository.Snapshot, names)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			result.TimedOut = true
-		}
-		return result, err
-	}
-	execution, finish := context.WithDeadline(ctx, session.deadline)
-	defer finish()
-	defer func() {
-		if errors.Is(execution.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			result.TimedOut = true
-		}
-	}()
 	work, err := stageDependencySource(execution, DependencyRequest{SourceDir: root, Directory: "."}, false)
 	if err != nil {
 		return result, err
@@ -174,7 +226,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		cleanup, done := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
 		defer done()
 		if environment != nil {
-			if err := environment.Close(cleanup); err != nil {
+			if err := errors.Join(environment.Close(cleanup), cleanup.Err()); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("part %q cleanup: %w", activePart, err))
 			}
 		}
@@ -183,7 +235,25 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		}
 	}()
 	src := filepath.Join(work, "invariant", "work")
+	if plan.Native() {
+		if err := stageRepositoryAcceptance(execution, src, plan); err != nil {
+			return result, err
+		}
+	}
+	// All selection and safe staging finish before preparation. Prepare inherits
+	// the original deadline, including any shorter preparer allowance.
+	session, err := dependencies.Prepare(execution, s.Repository.Snapshot, names)
+	if err != nil {
+		return result, err
+	}
 	testStarted := false
+	startTests := func() {
+		if !testStarted {
+			execution, stopTests = context.WithTimeout(execution, sandboxLimit(s.ShardTimeout, SandboxShardTimeout))
+			executionEnd, _ = execution.Deadline()
+			testStarted = true
+		}
+	}
 	for i, part := range parts {
 		if err := execution.Err(); err != nil {
 			result.TimedOut = ctx.Err() == nil
@@ -211,11 +281,8 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			if command.Status == "skipped" {
 				continue
 			}
-			if phase == "test" && !testStarted {
-				var stop context.CancelFunc
-				execution, stop = context.WithTimeout(execution, sandboxLimit(s.ShardTimeout, SandboxShardTimeout))
-				defer stop()
-				testStarted = true
+			if phase == "test" {
+				startTests()
 			}
 			if err := execution.Err(); err != nil {
 				result.TimedOut = ctx.Err() == nil
@@ -227,17 +294,46 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			err = errors.Join(err, execution.Err())
 			if err != nil {
 				command.Status = "failed"
+				command.Reason = err.Error()
 				result.TimedOut = errors.Is(execution.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+				if base && execution.Err() == nil && (phase == "build" || phase == "test") && repositoryCommandFailed(err) {
+					// Ordinary suite failures never substitute for individual
+					// evidence or prevent independent selectors from running.
+					continue
+				}
 				result.Problems = append(result.Problems, fmt.Sprintf("part %q %s: %v", part.Name, phase, err))
 				return result, nil
 			}
 			command.Status = "passed"
 		}
+		for j, test := range plan.Tests {
+			if !plan.Native() || test.Part != part.Name {
+				continue
+			}
+			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)
+			if !ok {
+				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
+			}
+			startTests()
+			if err := execution.Err(); err != nil {
+				return result, err
+			}
+			invocation := repositoryInvocation(plan, test, selections[j])
+			expected := invocation.Binding
+			evidence, out, err := acceptance.RunAcceptance(execution, invocation)
+			result.Output += fmt.Sprintf("accept %s:\n%s\n", test.Identity(), out)
+			var evidenceErr error
+			result.TestResults[j], evidenceErr = repositoryEvidence(expected, evidence, result.TestResults[j])
+			result.Accepted[test.Identity()] = result.TestResults[j].Status == "passed"
+			if err := errors.Join(err, evidenceErr, execution.Err()); err != nil {
+				return result, fmt.Errorf("accept %s: %w", test.Identity(), err)
+			}
+		}
 		// Close before opening another part. The last environment and source
 		// copy share the deferred cleanup reserve, even on cancellation.
 		if i+1 < len(parts) {
 			cleanup, done := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
-			err := environment.Close(cleanup)
+			err := errors.Join(environment.Close(cleanup), cleanup.Err())
 			done()
 			environment = nil
 			if err != nil {
@@ -246,6 +342,39 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		}
 	}
 	return result, nil
+}
+
+// Only a reported command exit may be expected on the base. Launch failures
+// and Docker's reserved startup/signal statuses veto it even if tests failed.
+// Run's error is a trusted host result; diagnostics are never inspected here.
+func repositoryCommandFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A joined transport or setup error still vetoes the check, even when
+	// another cause reports an ordinary command exit.
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		causes := wrapped.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !repositoryCommandFailed(cause) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return repositoryCommandFailed(wrapped.Unwrap())
+	}
+	code := 0
+	if exit, ok := err.(interface{ ExitCode() int }); ok {
+		code = exit.ExitCode()
+	} else if text, ok := strings.CutPrefix(err.Error(), "exit status "); ok {
+		code, _ = strconv.Atoi(text)
+	}
+	return code > 0 && code < 125
 }
 
 func (s Sandbox) repositoryParts(ctx context.Context, root string, plan *Plan) ([]repository.Part, error) {

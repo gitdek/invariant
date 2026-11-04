@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -114,6 +115,7 @@ func (q *CheckQueue) register(ctx context.Context, sandbox Sandbox, plan *Plan) 
 	}
 	if sandbox.Repository != nil {
 		captured := *sandbox.Repository
+		captured.Adapters = maps.Clone(captured.Adapters)
 		sandbox.Repository = &captured
 	}
 	q.mu.Lock()
