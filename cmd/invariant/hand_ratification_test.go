@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -287,9 +289,8 @@ func TestARatificationByHandNeedsADecisionAPersonRatified(t *testing.T) {
 	}
 }
 
-// The repository's own locks ratified by hand, factory/protocol's and
-// factory/recovery's since #271, pass the check as they are: each names a
-// decision @gitdek ratified for exactly its proposal (D-0208).
+// Every repository lock ratified by hand names a decision @gitdek ratified
+// for exactly its proposal, if the checkout still has any (D-0208).
 func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -302,8 +303,7 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 		t.Skip(root + " isn't a git checkout, so the ratification check can't find its journal")
 	}
 	// Every project whose lock was ratified by hand, as git tracks them: a
-	// lock ratified on its issue, as #428 ratified factory/protocol's, is
-	// another test's to check (#440).
+	// lock ratified on its issue is another test's to check (#440).
 	tracked, err := exec.Command("git", "-C", root, "ls-files", "*/.invariant/invariant.json").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -326,8 +326,77 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 		}
 	}
 	if checked == 0 {
-		t.Fatal("the repository has no lock ratified by hand to check")
+		t.Log("the repository has no lock ratified by hand to check")
 	}
+}
+
+// Exercise the repository check in its own checkout, so its coverage
+// survives amendments to the last real project ratified by hand.
+func TestTheRepositoryHandLockCheckUsesItsJournal(t *testing.T) {
+	dir, repo, store := handProject(t, "D-0001")
+	var env []string
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GIT_") {
+			env = append(env, value)
+		}
+	}
+	env = append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CEILING_DIRECTORIES="+filepath.Dir(repo.Dir))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo.Dir}, args...)...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("remote", "set-url", "origin", "https://github.com/gitdek/invariant.git")
+	cwd := filepath.Join(repo.Dir, "cmd", "invariant")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(holds bool, want string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		const target = "TestTheRepositorysLocksRatifiedByHandHold"
+		cmd := exec.CommandContext(ctx, exe, "-test.run=^"+target+"$", "-test.v", "-test.count=1", "-test.timeout=45s")
+		cmd.Dir, cmd.Env = cwd, env
+		out, err := cmd.CombinedOutput()
+		verdict := "--- PASS: " + target
+		if holds {
+			if err != nil {
+				t.Fatalf("repository check: %v\n%s", err, out)
+			}
+		} else {
+			verdict = "--- FAIL: " + target
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("repository check did not reject the lock: %v\n%s", err, out)
+			}
+		}
+		if ctx.Err() != nil || !strings.Contains(string(out), verdict) || !strings.Contains(string(out), want) {
+			t.Fatalf("repository check: %v; want %q and %q:\n%s", ctx.Err(), verdict, want, out)
+		}
+	}
+
+	check(true, "no lock ratified by hand")
+	decide(t, store, repo, "proposed", "agent")
+	if err := store.RatifyProposal(repo, "D-0001", "@gitdek", proposalOf(t, dir)); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "--", "factory/demo")
+	check(true, "--- PASS:")
+	editLock(t, dir)
+	check(false, "isn't what @gitdek ratified")
+	if err := os.WriteFile(filepath.Join(repo.Dir, ".git", "index"), []byte("invalid index"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check(false, "exit status 128")
 }
 
 // ratifyAsAgent appends a ratification by a coding agent to a decision's

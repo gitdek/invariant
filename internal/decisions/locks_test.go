@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitdek/invariant/internal/project"
 )
@@ -174,8 +177,8 @@ func TestCheckLocksHoldsHandLocksToTheirRatification(t *testing.T) {
 	}
 }
 
-// The repository's own locks ratified by hand hold, as decisions check
-// finds them in this checkout (D-0208).
+// Every repository lock ratified by hand holds, as decisions check finds
+// them in this checkout, if it still has any (D-0208).
 func TestTheRepositorysHandLocksHold(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -190,11 +193,93 @@ func TestTheRepositorysHandLocksHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// factory/recovery's lock is ratified by hand; #428 ratified
-	// factory/protocol's amendment on its issue (#440).
-	if n < 1 || len(problems) > 0 {
+	if len(problems) > 0 {
 		t.Fatalf("checked %d of the repository's locks ratified by hand, with problems:\n%s", n, strings.Join(problems, "\n"))
 	}
+	if n == 0 {
+		t.Log("the repository has no lock ratified by hand to check")
+	}
+}
+
+// Exercise the repository check in its own checkout, so its coverage
+// survives amendments to the last real project ratified by hand.
+func TestTheRepositoryHandLockCheckUsesItsJournal(t *testing.T) {
+	s, repo := fixture(t)
+	var env []string
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GIT_") {
+			env = append(env, value)
+		}
+	}
+	env = append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CEILING_DIRECTORIES="+filepath.Dir(repo.Dir))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo.Dir}, args...)...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	cwd := filepath.Join(repo.Dir, "internal", "decisions")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(holds bool, want string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		const target = "TestTheRepositorysHandLocksHold"
+		cmd := exec.CommandContext(ctx, exe, "-test.run=^"+target+"$", "-test.v", "-test.count=1", "-test.timeout=45s")
+		cmd.Dir, cmd.Env = cwd, env
+		out, err := cmd.CombinedOutput()
+		verdict := "--- PASS: " + target
+		if holds {
+			if err != nil {
+				t.Fatalf("repository check: %v\n%s", err, out)
+			}
+		} else {
+			verdict = "--- FAIL: " + target
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("repository check did not reject the lock: %v\n%s", err, out)
+			}
+		}
+		if ctx.Err() != nil || !strings.Contains(string(out), verdict) || !strings.Contains(string(out), want) {
+			t.Fatalf("repository check: %v; want %q and %q:\n%s", ctx.Err(), verdict, want, out)
+		}
+	}
+	lock := project.Lock{Decision: "D-0001", Bounds: map[string]string{"N": "1"},
+		Statements: []project.Statement{{Name: "Zero", Kind: project.Invariant, Says: "x is always 0."}}}
+	writeLock := func() {
+		t.Helper()
+		b, err := json.Marshal(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(repo.Dir, "demo", ".invariant", "ratified.lock"), string(b))
+	}
+
+	check(true, "no lock ratified by hand")
+	writeLock()
+	if _, err := s.Decide(repo, NewDecision{Door: "two-way", Status: "proposed", Who: "agent", Text: "The demo's lock."}, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RatifyProposal(repo, "D-0001", "@gitdek", project.ProposalHash(lock.Bounds, lock.Statements)); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "--", "demo")
+	check(true, "--- PASS:")
+	lock.Statements[0].Says = "x is always 0, or 1."
+	writeLock()
+	check(false, "isn't what @gitdek ratified")
+	write(t, filepath.Join(repo.Dir, ".git", "index"), "invalid index")
+	check(false, "listing invariant's locks")
 }
 
 // sealedAs is the hash a line would have, sealed as the store seals it.
