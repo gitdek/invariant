@@ -68,3 +68,24 @@ What to change, from my comment above: give the model one initial state, so the 
 **@gitdek:**
 
 What to change is in my two comments above: one initial state, with `follow` the same kind of value in every state, and every ratified statement kept with its meaning.
+
+**@gitdek:**
+
+This build ran out of memory in the gate, not out of correct code. The gate starts every TLC check at once: about 80 JVMs for this model, each exploring some 234,000 states, with no memory limit, on one 16 GB machine. Conformance failed with "GC overhead limit exceeded", the design check stopped after 161,091 distinct states, and agreement had nothing to compare. The same model checked out when it was drafted, which runs far fewer checks. #497 bounds how many TLC runs the gate starts at once. I'll retry this once that's merged.
+
+**@gitdek:**
+
+#495 has two problems, and the deployed TLC budget (#497, merged as #519) fixes only the first.
+
+1. **The factory's gate run.** It ran out of memory, as described above, so the build got one gate run and its code was never checked against the model. The gate now bounds TLC, so a new build would get real feedback.
+2. **CI.** `TestTheRepositorysLocksRatifiedByHandHold` (cmd/invariant) and `TestTheRepositorysHandLocksHold` (internal/decisions) fail with "the repository has no lock ratified by hand to check". On main, `factory/recovery`'s lock is the repository's only lock ratified by hand, through a decision. This amendment re-ratifies it on this issue, which leaves none, and both tests treat that as a failure. They need to accept a repository with no hand-ratified lock, or check a fixture one, before any amendment like this can merge.
+
+I'm leaving #445 parked for now. The next build needs the test change first, then a revise, since `/invariant retry` only watches #495 again.
+
+**@gitdek:**
+
+Both of the earlier build's failures were outside the model:
+- The gate ran every TLC check at once and ran out of memory. #497 (merged as #519, D-0315) bounds that.
+- Two repository tests demanded at least one hand-ratified lock. #525 (merged as #531, D-0319) lets them pass when there is none.
+
+Keep the ratified amendment exactly as it was: the same statements, bounds and model (`sha256:58e3be24aa3e`). Draft it again so the factory builds it with the bounded gate.
