@@ -1,9 +1,12 @@
 package plumbing
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"path"
 	"slices"
@@ -81,6 +84,60 @@ func (e *dockerRepositoryChecks) Run(ctx context.Context, argv []string) ([]byte
 	args = append(args, argv...)
 	return dependencyDocker(ctx, args...)
 }
+
+// ReadFile copies no archive entries to the host filesystem. Check ancestors
+// in the container, then require exactly one regular, unlinked archive entry.
+// The path is a positional argument, never part of the fixed shell program.
+func (e *dockerRepositoryChecks) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e.closed {
+		return nil, errors.New("repository check environment is closed")
+	}
+	if !goAcceptancePath(name) {
+		return nil, fmt.Errorf("unsafe prepared source path %q", name)
+	}
+	file := path.Join(dependencyWork, e.request.Directory, name)
+	if _, err := e.Run(ctx, []string{"/bin/sh", "-c", repositorySourceCheck, "invariant-source", file}); err != nil {
+		return nil, fmt.Errorf("prepared source %s is not a regular file with safe ancestors: %w", name, err)
+	}
+	out, err := dependencyDocker(ctx, "cp", e.request.Token+":"+file, "-")
+	if err != nil {
+		return nil, err
+	}
+	archive := tar.NewReader(bytes.NewReader(out))
+	header, err := archive.Next()
+	if err != nil {
+		return nil, fmt.Errorf("read prepared source archive: %w", err)
+	}
+	if header.Name != path.Base(name) || header.Typeflag != tar.TypeReg || header.Linkname != "" {
+		return nil, errors.New("prepared source archive is not the requested regular file")
+	}
+	data, err := io.ReadAll(archive)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := archive.Next(); err != io.EOF {
+		return nil, errors.New("prepared source archive contains extra or malformed entries")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+const repositorySourceCheck = `set -eu
+file=$1
+parent=${file%/*}
+while [ "$parent" != / ]; do
+  [ ! -L "$parent" ] && [ -d "$parent" ] || exit 1
+  parent=${parent%/*}
+  [ -n "$parent" ] || parent=/
+done
+[ ! -L "$file" ] && [ -f "$file" ] || exit 1
+[ "$(stat -c %h -- "$file")" = 1 ]
+`
 
 func (e *dockerRepositoryChecks) Close(ctx context.Context) error {
 	if e.closed {

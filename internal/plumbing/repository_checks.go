@@ -186,7 +186,9 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			return result, nil
 		}
 		for i, selection := range selections {
-			result.TestResults[i].Package = selection.Package
+			if _, discovers := s.Repository.Adapters[plan.Tests[i].Framework].(RepositoryAcceptanceDiscoverer); !discovers {
+				result.TestResults[i].Package = selection.Package
+			}
 			result.TestResults[i].Reason = "acceptance invocation has not started"
 		}
 	}
@@ -310,15 +312,45 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			if !plan.Native() || test.Part != part.Name {
 				continue
 			}
-			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)
-			if !ok {
-				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
-			}
 			startTests()
 			if err := execution.Err(); err != nil {
 				return result, err
 			}
 			invocation := repositoryInvocation(plan, test, selections[j])
+			if discoverer, ok := s.Repository.Adapters[test.Framework].(RepositoryAcceptanceDiscoverer); ok {
+				discoveryInput := invocation
+				discoveryInput.Argv = slices.Clone(invocation.Argv)
+				discovered, err := discoverer.Discover(execution, part, discoveryInput, environment)
+				err = errors.Join(err, execution.Err())
+				if err == nil {
+					bound := discovered.Binding
+					bound.Package = invocation.Binding.Package
+					if bound != invocation.Binding || !nativeText(discovered.Binding.Package) || !nativeText(discovered.TestName) || test.Framework == "go" && discovered.TestName != strings.Split(test.Selector, "/")[0] {
+						err = errors.New("discovery changed the invocation binding or returned no exact declaration and package")
+					}
+				}
+				if err != nil {
+					r := &result.TestResults[j]
+					r.Package, r.Kind, r.Status, r.Reason = "", "evidence", "refused", err.Error()
+					var detail *RepositoryAcceptanceDiscoveryError
+					if errors.As(err, &detail) {
+						if detail.Kind == "setup" {
+							r.Kind = "setup"
+						} else if detail.Kind == "refused" {
+							r.Kind = "test"
+						}
+					}
+					return result, fmt.Errorf("discover %s: %w", test.Identity(), err)
+				}
+				invocation.Binding = discovered.Binding
+				result.TestResults[j].Package = discovered.Binding.Package
+			}
+			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)
+			if !ok {
+				result.TestResults[j].Kind = "evidence"
+				result.TestResults[j].Reason = "prepared environment has no runtime acceptance collector"
+				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
+			}
 			expected := invocation.Binding
 			evidence, out, err := acceptance.RunAcceptance(execution, invocation)
 			result.Output += fmt.Sprintf("accept %s:\n%s\n", test.Identity(), out)

@@ -16,8 +16,8 @@ import (
 )
 
 // RepositoryAcceptanceAdapter is selected by the host, never by a candidate.
-// Select validates the captured invocation form and resolves one exact test.
-// There are no default adapters; framework discovery belongs to this boundary.
+// Select validates the captured invocation form and supplies literal arguments.
+// There are no default adapters; discovery is an optional second boundary.
 type RepositoryAcceptanceAdapter interface {
 	Select(context.Context, repository.Part, Test) (RepositoryAcceptanceSelection, error)
 }
@@ -26,6 +26,35 @@ type RepositoryAcceptanceSelection struct {
 	Package string
 	Argv    []string
 }
+
+// RepositoryAcceptanceDiscoverer resolves a preliminary selection using the
+// prepared environment. Discovery establishes neither runtime selection nor completion.
+type RepositoryAcceptanceDiscoverer interface {
+	Discover(context.Context, repository.Part, RepositoryAcceptanceInvocation, RepositoryCheckEnvironment) (RepositoryAcceptanceDiscovery, error)
+}
+
+type RepositoryAcceptanceDiscovery struct {
+	Binding  RepositoryAcceptanceBinding
+	TestName string
+}
+
+// RepositoryAcceptanceFileEnvironment reads clean part-relative regular files
+// through safe ancestors in the same prepared environment that runs commands.
+type RepositoryAcceptanceFileEnvironment interface {
+	RepositoryCheckEnvironment
+	ReadFile(context.Context, string) ([]byte, error)
+}
+
+// RepositoryAcceptanceDiscoveryError distinguishes a refused selection from
+// unavailable setup. Neither kind qualifies as a completed acceptance failure.
+type RepositoryAcceptanceDiscoveryError struct {
+	Kind   string
+	Reason string
+	Err    error
+}
+
+func (e *RepositoryAcceptanceDiscoveryError) Error() string { return e.Kind + ": " + e.Reason }
+func (e *RepositoryAcceptanceDiscoveryError) Unwrap() error { return e.Err }
 
 // RepositoryAcceptanceEnvironment supplies evidence separately from diagnostics.
 // An error reports execution infrastructure, not a test's verdict. Run/Close-only
