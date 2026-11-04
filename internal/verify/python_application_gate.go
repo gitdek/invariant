@@ -338,6 +338,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	if r == nil {
 		return nil, err
 	}
+	defer func() { r.TLCAttempts = budget.Attempts() }()
 	// The gate ran on the staged copy, outside the repository, so the lock's
 	// ratification is read where the project is.
 	ratification(ctx, r, dir, lock)
@@ -355,7 +356,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	r.Build.Passed = true
-	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget}
+	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget, CheckRoot: work}
 	raw, err := os.ReadFile(p.ModulePath())
 	if err != nil {
 		return nil, err

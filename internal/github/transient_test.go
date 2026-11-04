@@ -93,6 +93,56 @@ func TestATransientFailureIsntARefusal(t *testing.T) {
 	}
 }
 
+// Git's refusal diagnostics retain precedence even when a proxy or the
+// remote reports a failure too. A generic remote rejection with (failure)
+// is different: commit_refs_rules uses it for a server error.
+func TestGitRefusalsOverrideTransientWords(t *testing.T) {
+	for _, refusal := range []string{
+		"fatal: The requested URL returned error: 401",
+		"fatal: The requested URL returned error: 403",
+		"fatal: The requested URL returned error: 404",
+		"fatal: The requested URL returned error: 409",
+		"fatal: The requested URL returned error: 422",
+		"fatal: Authentication failed for 'https://github.com/o/r/'",
+		"remote: Permission to o/r denied to watcher",
+		" ! [rejected] HEAD -> refs/invariant/runs/545/draft (stale info)",
+		" ! [rejected] HEAD -> main (non-fast-forward)",
+		"remote: GH013: Repository rule violations found",
+		" ! [remote rejected] HEAD -> main (pre-receive hook declined)",
+		"fatal: SSL certificate problem: certificate has expired",
+	} {
+		for _, failure := range []string{
+			"fatal: The requested URL returned error: 503",
+			"remote: fatal error in commit_refs_rules",
+			"fatal: Operation timed out after 30000 milliseconds",
+			"error: RPC failed; curl 56 Recv failure: Connection reset by peer",
+		} {
+			for _, message := range []string{refusal + "\n" + failure, failure + "\n" + refusal} {
+				if err := errors.New(message); Transient(err) || RateLimited(err) {
+					t.Errorf("a refusal became transient: %s", message)
+				}
+			}
+		}
+	}
+}
+
+func TestGitHTTPStatusesKeepTheRateLimitRules(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		limited bool
+	}{
+		{"fatal: The requested URL returned error: 408", false},
+		{"fatal: The requested URL returned error: 429", false},
+		{"fatal: The requested URL returned error: 403\nremote: API rate limit exceeded", true},
+		{"fatal: The requested URL returned error: 403\nremote: You have exceeded a secondary rate limit", false},
+	} {
+		err := errors.New(tc.message)
+		if !Transient(err) || RateLimited(err) != tc.limited {
+			t.Errorf("Transient = %v, RateLimited = %v for %s", Transient(err), RateLimited(err), tc.message)
+		}
+	}
+}
+
 // What gh writes on its standard error decides, through the client's own
 // errors, as gh writes it: a name that didn't resolve over two lines, and a
 // connection closed before any answer, both GitHub failing for a moment,
