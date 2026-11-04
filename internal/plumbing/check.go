@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gitdek/invariant/internal/decisions"
 )
 
 // Checked is what the factory found checking a drafted plan against the
@@ -19,7 +21,8 @@ type Checked struct {
 // Check reads the plan an agent drafted in ws, and checks it against the
 // checkout at repo: each acceptance test is a new file, and each one fails
 // on the code as it is. A test that already passes can't show the change
-// works, as a planted bug TLC can't catch shows nothing.
+// works, as a planted bug TLC can't catch shows nothing. With a decision
+// journal, the staged acceptance sources must also leave the graph valid.
 func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 	if s.Checks != nil {
 		return s.Checks.check(ctx, ws)
@@ -70,6 +73,13 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
 			return nil, err
 		}
+	}
+	c.Problem, err = checkPlanDecisions(repo, dir)
+	if err != nil {
+		return nil, err
+	}
+	if c.Problem != "" {
+		return c, nil
 	}
 	// The copy isn't a checkout, so the sandbox lists its files by walking.
 	c.Run, err = s.Run(ctx, dir, plan)
@@ -124,6 +134,36 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 	}
 	c.Problem = strings.Join(problems, "; ")
 	return c, nil
+}
+
+// checkPlanDecisions checks the staged copy in a fresh store, so neither
+// another draft nor the machine's decision store supplies its citations.
+func checkPlanDecisions(repo, dir string) (string, error) {
+	// Copying regular files doesn't preserve an empty journal directory.
+	if _, err := os.Stat(filepath.Join(repo, "decisions", "journal")); os.IsNotExist(err) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp("", "invariant-plan-decisions-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	s, err := decisions.Open(filepath.Join(tmp, "decisions.db"))
+	if err != nil {
+		return "", err
+	}
+	defer s.Close()
+	repos := []decisions.Repo{{Name: "repo", Dir: dir}}
+	if err := s.Rebuild(repos); err != nil {
+		return "the journal doesn't rebuild: " + err.Error(), nil
+	}
+	problems, err := s.Check(repos)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(problems, "; "), nil
 }
 
 // Feedback says what a check found, for the agent drafting the plan.
