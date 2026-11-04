@@ -87,27 +87,34 @@ func StartGoAcceptance(ctx context.Context, part repository.Part, test Test, sou
 	}
 	in.Binding = discovery.Binding
 	run.Invocation, run.invocation = cloneGoInvocation(in), cloneGoInvocation(in)
+	return run, run.start(ctx, part)
+}
+
+// start uses an already discovered invocation, including for the optional local
+// collector. It must not mint another ID or repeat selection with new authority.
+func (run *GoAcceptanceRun) start(ctx context.Context, part repository.Part) error {
+	in := run.invocation
 	binary, err := prepareGoTesting(ctx, run.environment, in)
 	if err != nil {
-		return run, err
+		return err
 	}
-	file, err := goAcceptanceFile(part, test.File)
+	file, err := goAcceptanceFile(part, in.Binding.File)
 	if err != nil {
-		return run, err
+		return err
 	}
 	spec := RepositoryProcessSpec{Argv: goTestingArguments(binary, in.Argv), EventEnv: goTestingEventEnv, Directory: path.Dir(file)}
 	run.prepared, err = run.environment.Prepare(ctx, spec)
 	if err != nil {
-		return run, err
+		return err
 	}
 	if run.prepared == nil {
-		return run, errors.New("Go transport returned no prepared process")
+		return errors.New("Go transport returned no prepared process")
 	}
 	run.Process, err = run.prepared.Start(ctx)
 	if err == nil && run.Process == nil {
 		err = errors.New("Go transport returned no process")
 	}
-	return run, err
+	return errors.Join(err, ctx.Err())
 }
 
 func cloneGoInvocation(in RepositoryAcceptanceInvocation) RepositoryAcceptanceInvocation {
