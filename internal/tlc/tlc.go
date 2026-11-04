@@ -245,14 +245,20 @@ func (r Runner) run(ctx context.Context, dir, module string, silence time.Durati
 // Match diagnostic lines, not names in SANY progress or values in a trace.
 var memoryDiagnostic = regexp.MustCompile(`(?im)^[\t ]*(?:(?:Exception in thread "[^"\r\n]+"|Caused by:|Suppressed:|Error:|The exception was a)[\t ]+)?(?:(?:java\.lang\.)?OutOfMemoryError(?::[^\r\n]*)?|Java heap space|GC overhead limit exceeded)[\t ]*\r?$`)
 
+// TLC's general exception frame puts ExecutionException's cause after a
+// colon, sometimes on the next line. Require the cause's exception type.
+var wrappedMemoryDiagnostic = regexp.MustCompile(`(?im)^[\t ]*The exception was a java\.util\.concurrent\.ExecutionException[\t ]*(?:\r?\n[\t ]*)?:[\t ]+(?:java\.lang\.)?OutOfMemoryError(?::[^\r\n]*)?[\t ]*\r?$`)
+
 // Resource failures override partial success and counterexamples alike. None
 // of an unfinished check's output can establish model evidence. Only a memory
 // diagnostic, not exit 137 alone, can earn a larger allocation.
 func resourceFailure(module, out string, exitCode int) (Result, bool) {
 	msg := ""
 	diagnostics := memoryDiagnostic.FindAllString(out, -1)
-	for _, m := range message.FindAllStringSubmatch(out, -1) {
+	for _, m := range message.FindAllStringSubmatch(strings.ReplaceAll(out, "\r\n", "\n"), -1) {
 		switch m[1] {
+		case "1000":
+			diagnostics = append(diagnostics, wrappedMemoryDiagnostic.FindAllString(m[2], -1)...)
 		// tlc2.output.EC: SYSTEM_OUT_OF_MEMORY, SYSTEM_OUT_OF_MEMORY_TOO_MANY_INIT,
 		// and SYSTEM_OUT_OF_MEMORY_LIVENESS. TLC may catch the Java exception
 		// and emit only its own diagnostic, without an exception line.
