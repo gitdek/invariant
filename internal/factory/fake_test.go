@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
@@ -78,6 +79,9 @@ func (g *fakeGitHub) say(issue int, by, body string) github.Comment {
 		URL:      fmt.Sprintf("https://github.com/o/r/issues/%d#issuecomment-%d", issue, g.nextID),
 		IssueURL: fmt.Sprintf("https://api.github.com/repos/o/r/issues/%d", issue), CreatedAt: at}
 	g.comments[issue] = append(g.comments[issue], c)
+	if i := g.issues[issue]; i != nil {
+		i.Comments = len(g.comments[issue])
+	}
 	return c
 }
 
@@ -122,6 +126,25 @@ func (g *fakeGitHub) Issues(_ context.Context, label string) ([]github.Issue, er
 	var out []github.Issue
 	for _, i := range g.issues {
 		if i.PullRequest == nil && (label == "" || i.HasLabel(label)) {
+			out = append(out, *i)
+		}
+	}
+	return out, nil
+}
+
+func (g *fakeGitHub) ClosedIssues(_ context.Context, since string) ([]github.Issue, error) {
+	var after time.Time
+	if since != "" {
+		var err error
+		after, err = time.Parse(time.RFC3339, since)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var out []github.Issue
+	for _, i := range g.issues {
+		updated, _ := time.Parse(time.RFC3339, i.UpdatedAt)
+		if i.State == "closed" && i.PullRequest == nil && (after.IsZero() || updated.IsZero() || !updated.Before(after)) {
 			out = append(out, *i)
 		}
 	}
