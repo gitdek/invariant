@@ -118,6 +118,14 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 		p := &out.Proofs[i]
 		p.Image, p.Command, p.Output = "", nil, ""
 	}
+	// A check's batch is how the conformance checker scheduled its TLC work,
+	// not what the work found, so a change to the batching leaves identical
+	// evidence's fingerprint alone (#572). The receipt still shows it.
+	for i := range out.Conformance {
+		for j := range out.Conformance[i].Checks {
+			out.Conformance[i].Checks[j].Batch = ""
+		}
+	}
 	return &out
 }
 
