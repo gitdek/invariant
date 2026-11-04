@@ -238,7 +238,15 @@ Reviewers put decision recording and checks that require unavailable Docker or n
 
 ## Plans of issues
 
-Plans of issues can nest. A planned issue may itself become a ratified plan of issues, with no build or pull request of its own. Its parent waits until the factory records that child's whole plan as complete under its ratified hash; an unfinished or stopped child plan holds its parent. Completion carries upward through nested plans on later polls, opening each step and recording each plan's completion once, including after a watcher restarts.
+New plans of issues have one level under [#560's ratified plan](../.invariant/plans/issue-560.json): every step must draft one complete plumbing or modeled change. Ordinary issues can still propose a plan of issues through a writer's `/invariant plan` or through plumbing planning when the whole issue needs several pull requests. Each plan is ratified by its hash before the factory opens its steps in order ([D-0105](../decisions/D-0105-factory-takes-every-change.md), [D-0147](../decisions/journal/D-0147.jsonl), [D-0162](../decisions/journal/D-0162.jsonl)).
+
+The factory identifies a step from the matching factory record on its parent, checking the issue number, plan hash and step. A copied issue-body marker alone does not establish membership. Membership remains separate from the ratifier's current write permission: another writer's `/invariant plan`, fork answer or revision still drafts one complete change. The parent issue is supplied to planner instructions and check tools. Agent checks and final draft validation refuse `issues.json` even alongside another draft, and the factory also refuses a returned or recovered plan-of-issues result before posting it. Check-tool refusals consume the shared check allowance and are logged as failures.
+
+When the whole step cannot fit one reviewable pull request, the planner asks a fork in `proposal.json`. The question explains what does not fit and suggests replacement steps in the parent. It offers either building the complete step as one change, or having a writer stop the parent with `/invariant stop` and request a replacement plan on a new top-level issue with `/invariant plan`. Stopping the parent prevents further issues from opening; an already-open step goes on as it is. The factory does not rewrite the ratified parent or open replacement steps on its own.
+
+Already-ratified nested plans remain executable under their original hashes, with no build or pull request of their own. A parent waits until the factory records its child's whole plan as complete under the child's ratified hash; an unfinished or stopped child plan holds its parent. Completion carries upward through nested plans on later polls, opening each step and recording each plan's completion once, including after a watcher restarts. Newly drafted leaves of those existing trees must still be one complete change.
+
+The merger must record #560's new restriction as a refinement of [D-0162](../decisions/journal/D-0162.jsonl), grounded in [D-0105](../decisions/D-0105-factory-takes-every-change.md) and [D-0147](../decisions/journal/D-0147.jsonl); this plumbing build cannot write `decisions/`.
 
 ## Running the factory
 

@@ -40,6 +40,9 @@ type Request struct {
 	// as a PRD: the agent drafts a plan of issues instead of statements
 	// (#112).
 	PRD string
+	// ParentPlan is the caller-authenticated parent plan's issue number.
+	// A step drafts one complete change; zero is an ordinary issue.
+	ParentPlan int
 }
 
 // Existing is code an issue names for the factory to check as it is: its
@@ -192,7 +195,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     Prompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, ws},
+		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan), ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
@@ -205,7 +208,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	var report *verify.Report
 	if synth.ProviderUnavailable(runErr) {
 		err = unfinished(runErr)
-	} else {
+	} else if err = CheckStepDraft(ws, req.ParentPlan); err == nil {
 		p, report, err = Check(ctx, ws, f.Toolchain)
 	}
 	if p != nil {

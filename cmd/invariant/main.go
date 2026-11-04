@@ -351,6 +351,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 	checkQueue := fs.String("check-queue", "", "with -plan or -plumbing: the caller's check queue endpoint")
 	checkBuild := fs.String("check-build", "", "with -plan or -plumbing: the registration on the check queue")
 	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
+	parentPlan := fs.Int("parent-plan", 0, "with draft checks: the caller-authenticated parent plan's issue, or zero for an ordinary issue")
 	fs.Parse(args)
 	if (*checkQueue != "" || *checkBuild != "") && ((!*pipes && !*plan) || *checkQueue == "" || *checkBuild == "") {
 		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plan or -plumbing, -check-queue and -check-build")
@@ -360,7 +361,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return decisionsMCP(ctx, *dir, *storePath, *write)
 	}
 	if *issues && fs.NArg() == 1 {
-		server := mcp.Server{Name: "invariant", Version: "0.6", Tools: []mcp.Tool{issuesTool(fs.Arg(0), *maxRuns, *logPath)}}
+		server := mcp.Server{Name: "invariant", Version: "0.6", Tools: []mcp.Tool{issuesTool(fs.Arg(0), *maxRuns, *logPath, *parentPlan)}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 1
@@ -379,7 +380,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
 		}
-		tool := planTool(fs.Arg(0), sb, *maxRuns, *logPath)
+		tool := planTool(fs.Arg(0), sb, *maxRuns, *logPath, *parentPlan)
 		if *pipes {
 			if *ratified == "" || *issue == 0 {
 				fmt.Fprintln(os.Stderr, "usage: invariant mcp -plumbing -ratified CHECKOUT -issue N [-max-runs N] [-log FILE] [-cache DIR] WORKSPACE")
@@ -405,7 +406,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	if *formal {
-		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath)}}
+		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath, *parentPlan)}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 1
@@ -501,13 +502,18 @@ func toolCalls(tool string, max int) func(context.Context) (int, error) {
 // planTool checks the plan an agent drafts for a plumbing issue (D-0105):
 // it holds together, and its acceptance tests fail on the code as it is,
 // or its plan of issues holds together.
-func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
+func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string, parentPlan int) mcp.Tool {
 	calls := toolCalls("check", maxRuns)
+	description := "Check the plan in plan.json and its acceptance tests under tests/ against the repository in repo/: the plan holds together, and every acceptance test fails on the code as it is. "
+	if parentPlan == 0 {
+		description += "Or check the plan of issues in issues.json against the plan-of-issues rules. "
+	} else {
+		description += formalize.StepPlanProblem(parentPlan) + " "
+	}
 	return mcp.Tool{
-		Name: "check",
-		Description: fmt.Sprintf("Check the plan in plan.json and its acceptance tests under tests/ against the repository in repo/: "+
-			"the plan holds together, and every acceptance test fails on the code as it is. Or check the plan of issues in issues.json against the plan-of-issues rules. You have %d checks in total.", maxRuns),
-		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		Name:        "check",
+		Description: fmt.Sprintf("%sYou have %d checks in total.", description, maxRuns),
+		Schema:      map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			runs, err := calls(ctx)
 			if err != nil {
@@ -515,6 +521,9 @@ func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.T
 			}
 			if runs == 0 {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
+			}
+			if problem := checkStepDraft(ws, parentPlan, runs, maxRuns, logPath); problem != "" {
+				return problem, true
 			}
 			if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
 				if _, err := os.Stat(filepath.Join(ws, "issues.json")); err == nil {
@@ -543,7 +552,7 @@ func planTool(ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.T
 
 // issuesTool checks the plan of issues an agent drafts for a PRD (#112): it
 // holds together as a plan a person can ratify.
-func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
+func issuesTool(ws string, maxRuns int, logPath string, parentPlan int) mcp.Tool {
 	calls := toolCalls("check", maxRuns)
 	return mcp.Tool{
 		Name: "check",
@@ -558,6 +567,9 @@ func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
 			if runs == 0 {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
 			}
+			if problem := checkStepDraft(ws, parentPlan, runs, maxRuns, logPath); problem != "" {
+				return problem, true
+			}
 			if _, err := os.Stat(filepath.Join(ws, "issues.json")); err != nil {
 				if _, err := os.Stat(filepath.Join(ws, "proposal.json")); err == nil {
 					return fmt.Sprintf("There's no issues.json, and proposal.json asks questions or says the issue is unsupported, so there's nothing to check. "+
@@ -567,6 +579,16 @@ func issuesTool(ws string, maxRuns int, logPath string) mcp.Tool {
 			return checkIssues(ws, runs, maxRuns, logPath), false
 		},
 	}
+}
+
+func checkStepDraft(ws string, parentPlan, run, maxRuns int, logPath string) string {
+	if err := formalize.CheckStepDraft(ws, parentPlan); err != nil {
+		if logPath != "" {
+			synth.LogGateRun(logPath, synth.GateRun{Run: run, Failed: []string{err.Error()}, At: time.Now().UTC().Format(time.RFC3339)})
+		}
+		return fmt.Sprintf("The draft can't be proposed: %v\n\n(Check %d of %d.)", err, run, maxRuns)
+	}
+	return ""
 }
 
 func checkIssues(ws string, run, maxRuns int, logPath string) string {
@@ -634,7 +656,7 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 }
 
 // checkTool runs the gate's model checks on a formalizing agent's draft.
-func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) mcp.Tool {
+func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, parentPlan int) mcp.Tool {
 	calls := toolCalls("check", maxRuns)
 	return mcp.Tool{
 		Name: "check",
@@ -648,6 +670,9 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string) m
 			}
 			if runs == 0 {
 				return fmt.Sprintf("No checks left: you've used all %d.", maxRuns), true
+			}
+			if problem := checkStepDraft(ws, parentPlan, runs, maxRuns, logPath); problem != "" {
+				return problem, true
 			}
 			record := func(passed bool, failed ...string) {
 				if logPath != "" {

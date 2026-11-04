@@ -1134,10 +1134,15 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	f.logf("#%d: formalizing", n)
 	f.doing(n, "formalizing")
 	req := f.request(t, answers, previous)
-	// Once a writer asks for a plan of issues, the issue is a PRD: its draft
-	// is a plan of issues, read against the base branch as it is, whatever
-	// its own Kind:, Project: and Code: lines say (#112).
-	prd := isPRD(t)
+	parent, _, err := f.plannedStep(ctx, t.Issue)
+	if err != nil {
+		return err
+	}
+	req.ParentPlan = parent
+	// A writer's /invariant plan makes an ordinary issue a PRD (#112).
+	// A recorded step still drafts one complete change, including after
+	// that command, an answer or a revision (#560).
+	prd := parent == 0 && isPRD(t)
 	if prd {
 		root, err := f.planBase(ctx)
 		if err != nil {
@@ -1242,6 +1247,11 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	}
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
 		return err
+	}
+	// A returned or recovered draft must obey the same limit, even when
+	// its formalizer did not check it or it was saved before the limit.
+	if parent != 0 && res.Proposal != nil && res.Proposal.IssuePlan != nil {
+		res.Problem, res.Proposal = formalize.StepPlanProblem(parent), nil
 	}
 	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir

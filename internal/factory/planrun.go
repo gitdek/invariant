@@ -315,29 +315,39 @@ func (f *Factory) postsOn(ctx context.Context, n int) ([]Post, error) {
 // the ratifier can still write. It's "" for any other issue, such as a copy
 // of one that claims a plan's authority.
 func (f *Factory) plannedBy(ctx context.Context, issue github.Issue) (string, error) {
+	_, by, err := f.plannedStep(ctx, issue)
+	if err != nil || by == "" {
+		return "", err
+	}
+	if ok, err := f.writer(ctx, by); err != nil || !ok {
+		return "", err
+	}
+	return by, nil
+}
+
+// plannedStep identifies membership from the matching factory record on
+// the parent, independently of the ratifier's current write permission.
+func (f *Factory) plannedStep(ctx context.Context, issue github.Issue) (int, string, error) {
 	mark, ok := markOf(issue.Body)
 	if !ok {
-		return "", nil
+		return 0, "", nil
 	}
 	// Anyone can write the marker, naming any issue, or none.
 	posts, err := f.postsOn(ctx, mark.plan)
 	if errors.Is(err, github.ErrNotFound) {
-		return "", nil
+		return 0, "", nil
 	}
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
 	for _, p := range posts {
 		m := p.Marker
 		if m.Kind != KindPlanOpened || m.Opened != issue.Number || m.Hash != mark.hash || m.Step != mark.step || m.Ratifier == "" {
 			continue
 		}
-		if ok, err := f.writer(ctx, m.Ratifier); err != nil || !ok {
-			return "", err
-		}
-		return m.Ratifier, nil
+		return mark.plan, m.Ratifier, nil
 	}
-	return "", nil
+	return 0, "", nil
 }
 
 // planCore is the plan in the core's terms, as GitHub shows it, with this
