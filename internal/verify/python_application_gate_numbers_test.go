@@ -47,7 +47,11 @@ func TestPythonApplicationGateFailedBatchesDeterministic(t *testing.T) {
 	for i := 0; i < 4002; i++ {
 		trace = append(trace, map[string]any{"n": i})
 	}
-	raw, err := json.Marshal(conformance.Traces{Traces: [][]map[string]any{trace}})
+	traces := [][]map[string]any{trace}
+	for i := 0; i < 3000; i++ {
+		traces = append(traces, []map[string]any{{"n": i}})
+	}
+	raw, err := json.Marshal(conformance.Traces{Traces: traces})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,8 +66,13 @@ func TestPythonApplicationGateFailedBatchesDeterministic(t *testing.T) {
 		if err != nil || result.Passed {
 			t.Fatalf("failed batch: %+v %v", result, err)
 		}
-		if len(runner.results) != 2 {
+		if len(runner.results) != 4 {
 			t.Fatalf("schedule-dependent TLC invocations: %+v", runner.results)
+		}
+		for i, batch := range []string{"init-1", "init-2", "init-3", "steps-1"} {
+			if runner.results[i].Batch != batch {
+				t.Fatalf("actual invocation %d: got %s, want %s", i, runner.results[i].Batch, batch)
+			}
 		}
 		fingerprint := pythonApplicationFingerprint(runner.results)
 		if repeat > 0 && first != fingerprint {

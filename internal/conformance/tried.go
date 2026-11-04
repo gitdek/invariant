@@ -3,12 +3,10 @@ package conformance
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,145 +112,12 @@ type Tried struct {
 	Message  string `json:"message,omitempty"`
 }
 
-// recorded is what a driver wrote, in either form: its states, the ones its
-// runs start in, and the steps that changed the state.
-type recorded struct {
-	states, pretty []string
-	starts         map[int]bool
-	steps          map[[2]int]bool
-	runs, recorded int       // runs made, and steps recorded, refusals included
-	attempts       []attempt // nil for a driver that records only runs
-}
-
 // attempt is one step a driver tried, from one state to another.
 type attempt struct {
 	from, to int
 	step     string
 	args     []string // as TLA+
 	outcome  string   // empty for legacy attempts; accepted or refused for declared steps
-}
-
-// decode reads a driver's output, as runs or as attempts. A problem is why
-// it can't be read.
-func decode(raw []byte, vars []string) (rec recorded, problem string) {
-	rec.starts, rec.steps = map[int]bool{}, map[[2]int]bool{}
-	index := map[string]int{}
-	add := func(s map[string]any) (int, string) {
-		text, readable, err := encodeState(s, vars)
-		if err != nil {
-			return 0, fmt.Sprintf("a recorded state can't be read: %v", err)
-		}
-		i, seen := index[text]
-		if !seen {
-			i = len(rec.states)
-			index[text] = i
-			rec.states = append(rec.states, text)
-			rec.pretty = append(rec.pretty, readable)
-		}
-		return i, ""
-	}
-
-	var out struct {
-		Traces [][]map[string]any `json:"traces"`
-		attempts
-	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.UseNumber()
-	if err := d.Decode(&out); err != nil {
-		return rec, "the driver's output isn't valid JSON: " + err.Error()
-	}
-	if err := d.Decode(new(any)); err != io.EOF {
-		return rec, "the driver's output isn't valid JSON: trailing data"
-	}
-	if out.Attempts == nil {
-		rec.runs = len(out.Traces)
-		if rec.runs == 0 {
-			return rec, "the driver recorded no runs"
-		}
-		for _, run := range out.Traces {
-			prev := -1
-			for n, s := range run {
-				i, problem := add(s)
-				if problem != "" {
-					return rec, problem
-				}
-				if n == 0 {
-					rec.starts[i] = true
-				} else {
-					rec.recorded++
-					if i != prev {
-						rec.steps[[2]int{prev, i}] = true
-					}
-				}
-				prev = i
-			}
-		}
-		return rec, ""
-	}
-
-	// Attempts. The driver's own state numbers map onto distinct states.
-	ids := make([]int, len(out.States))
-	for n, s := range out.States {
-		i, problem := add(s)
-		if problem != "" {
-			return rec, problem
-		}
-		ids[n] = i
-	}
-	state := func(v any) (int, bool) {
-		f, ok := v.(json.Number)
-		n, err := f.Int64()
-		if !ok || err != nil || n < 0 || n >= int64(len(ids)) {
-			return 0, false
-		}
-		return ids[int(n)], true
-	}
-	for _, n := range out.Init {
-		if n < 0 || n >= len(ids) {
-			return rec, fmt.Sprintf("the driver starts in state %d, which it didn't record", n)
-		}
-		rec.starts[ids[n]] = true
-	}
-	if len(rec.starts) == 0 {
-		return rec, "the driver recorded no state to start in"
-	}
-	rec.attempts = []attempt{}
-	for _, a := range out.Attempts {
-		if len(a) != 4 && len(a) != 5 {
-			return rec, fmt.Sprintf("an attempt is %v; want [from, step, [args], to] with optional declared outcome metadata", a)
-		}
-		from, okFrom := state(a[0])
-		name, okName := a[1].(string)
-		args, okArgs := a[2].([]any)
-		to, okTo := state(a[3])
-		if !okFrom || !okName || !okArgs || !okTo {
-			return rec, fmt.Sprintf("an attempt is %v; want [from, step, [args], to], with states the driver recorded", a)
-		}
-		t := attempt{from: from, to: to, step: name}
-		for _, arg := range args {
-			text, err := Encode(arg)
-			if err != nil {
-				return rec, fmt.Sprintf("an argument of %s can't be read: %v", name, err)
-			}
-			t.args = append(t.args, text)
-		}
-		if len(a) == 5 {
-			var problem string
-			t.outcome, problem = declaredOutcome(a[4])
-			if problem != "" {
-				return rec, fmt.Sprintf("attempt %s in %s: %s", actionCall(t), rec.pretty[from], problem)
-			}
-			if t.outcome == "refused" && from != to {
-				return rec, fmt.Sprintf("refused attempt %s changed state from %s to %s", actionCall(t), rec.pretty[from], rec.pretty[to])
-			}
-		}
-		rec.attempts = append(rec.attempts, t)
-		rec.recorded++
-		if from != to {
-			rec.steps[[2]int{from, to}] = true
-		}
-	}
-	return rec, ""
 }
 
 // declaredOutcome validates the opt-in fifth field independently of the
@@ -316,56 +181,128 @@ func actionCall(a attempt) string {
 	return a.step + "(" + strings.Join(a.args, ", ") + ")"
 }
 
-// strictAttempts validates named actions before emitting any new obligation.
-// Without the model's step declarations these attempts cannot fall back to
-// Next or the legacy stuttering rule.
-func strictAttempts(rec recorded, model *Model) ([]attempt, string) {
-	var strict []attempt
-	for _, a := range rec.attempts {
-		if a.outcome != "" {
-			strict = append(strict, a)
-		}
-	}
-	if len(strict) == 0 {
-		return nil, ""
+// strictAttempts validates every declared action before starting TLC. Its
+// index contains original attempt positions, not copies of their arguments.
+func strictAttempts(ctx context.Context, rec recorded, model *Model) (string, error) {
+	if len(rec.strict) == 0 {
+		return "", nil
 	}
 	if model == nil || len(model.Steps) == 0 {
-		return nil, "declared attempts require the model's named steps"
+		return "declared attempts require the model's named steps", nil
 	}
 	if model.Problem != "" {
-		return nil, "declared attempts cannot be checked: " + model.Problem
+		return "declared attempts cannot be checked: " + model.Problem, nil
 	}
+	arity := stepArities(model.Steps)
+	for _, id := range rec.strict {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		a, err := rec.store.attempt(rec.attempts[id])
+		if err != nil {
+			return "", err
+		}
+		n, ok := arity[a.step]
+		if !ok || !identifier.MatchString(a.step) || n < 0 || n != len(a.args) {
+			pretty, err := rec.store.pretty(a.from)
+			if err != nil {
+				return "", err
+			}
+			if !ok || !identifier.MatchString(a.step) {
+				return fmt.Sprintf("declared attempt %s in %s names no step of the model's Next", actionCall(a), pretty), nil
+			}
+			return fmt.Sprintf("declared attempt %s in %s has %d arguments; Next must name the step with a consistent arity of %d", actionCall(a), pretty, len(a.args), n), nil
+		}
+	}
+	return "", nil
+}
+
+func stepArities(steps []tla.Step) map[string]int {
 	arity := map[string]int{}
-	for _, s := range model.Steps {
+	for _, s := range steps {
 		if n, seen := arity[s.Name]; seen && n != len(s.Args) {
 			arity[s.Name] = -1
 		} else {
 			arity[s.Name] = len(s.Args)
 		}
 	}
-	for _, a := range strict {
-		n, ok := arity[a.step]
-		if !ok || !identifier.MatchString(a.step) {
-			return nil, fmt.Sprintf("declared attempt %s in %s names no step of the model's Next", actionCall(a), rec.pretty[a.from])
-		}
-		if n < 0 || n != len(a.args) {
-			return nil, fmt.Sprintf("declared attempt %s in %s has %d arguments; Next must name the step with a consistent arity of %d", actionCall(a), rec.pretty[a.from], len(a.args), n)
-		}
-	}
-	return strict, ""
+	return arity
 }
 
-// triedBatch is how many states one TLC run looks at. A batch's module holds
-// only its own states, so memory stays flat however many the driver reached.
 const triedBatch = 1000
 
-// checkTried has TLC find, in each state the driver reached, a step it never
-// tried that more than a bound rules out. The module extends the model at
-// the ratified bounds and instantiates it with the environment's bounds one
-// larger, so TLC evaluates each step both ways (D-0085). The states are
-// checked in batches, several at once, as Check checks the steps.
-func checkTried(ctx context.Context, runner Runner, dir, module, header string, constants map[string]string, vars []string, m Model, rec recorded) (Tried, error) {
-	t := Tried{Attempts: len(rec.attempts), States: len(rec.states)}
+type triedEntry struct {
+	state, next int
+	text        diskText
+}
+
+type triedKey struct {
+	state int
+	hash  [32]byte
+}
+
+// triedEntries keeps each state's distinct action instances on disk. Even a
+// single state's set need not fit in memory; sorting compares disk text and
+// generation copies one instance at a time.
+func triedEntries(ctx context.Context, rec recorded, arity map[string]int) ([]triedEntry, string, error) {
+	var entries []triedEntry
+	index := map[triedKey]int{}
+	s := rec.store
+	for _, ref := range rec.attempts {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		a, err := s.attempt(ref)
+		if err != nil {
+			return nil, "", err
+		}
+		n, ok := arity[a.step]
+		switch {
+		case !ok:
+			return nil, fmt.Sprintf("the driver tried %s, a step the model's Next doesn't name", a.step), nil
+		case n >= 0 && n != len(a.args):
+			return nil, fmt.Sprintf("the driver tried %s with %d arguments, and Next passes it %d", a.step, len(a.args), n), nil
+		}
+		text := instance(a.step, a.args)
+		key := triedKey{state: a.from, hash: sha256.Sum256([]byte(text))}
+		seen := false
+		for link := index[key]; link != 0; link = entries[link-1].next {
+			equal, err := s.equal(entries[link-1].text, text)
+			if err != nil {
+				return nil, "", err
+			}
+			if equal {
+				seen = true
+				break
+			}
+		}
+		if seen {
+			continue
+		}
+		ref, err := s.put(text)
+		if err != nil {
+			return nil, "", err
+		}
+		entries = append(entries, triedEntry{state: a.from, text: ref, next: index[key]})
+		index[key] = len(entries)
+	}
+	err := sortEntries(ctx, entries, func(a, b triedEntry) (int, error) {
+		if a.state < b.state {
+			return -1, nil
+		}
+		if a.state > b.state {
+			return 1, nil
+		}
+		return s.compare(a.text, b.text)
+	})
+	return entries, "", err
+}
+
+// checkTried checks every reached state at both bounds. State windows are
+// lazy, and their variable-size tried sets are streamed directly to a module.
+func checkTried(ctx context.Context, runner Runner, dir, root, module, header string, constants map[string]string, vars []string, m Model, rec recorded) (Tried, error) {
+	s := rec.store
+	t := Tried{Attempts: len(rec.attempts), States: len(s.states)}
 	if m.Problem != "" {
 		t.Message = m.Problem
 		return t, nil
@@ -374,31 +311,29 @@ func checkTried(ctx context.Context, runner Runner, dir, module, header string, 
 		t.Message = "the model names no steps, so the driver's attempts can't be checked"
 		return t, nil
 	}
-	arity := map[string]int{}
-	for _, s := range m.Steps {
-		if n, seen := arity[s.Name]; seen && n != len(s.Args) {
-			arity[s.Name] = -1 // Next calls it with different numbers of arguments
-			continue
-		}
-		arity[s.Name] = len(s.Args)
+	tried, problem, err := triedEntries(ctx, rec, stepArities(m.Steps))
+	if err != nil {
+		return t, err
 	}
-	tried := make([]map[string]bool, len(rec.states))
-	for _, a := range rec.attempts {
-		n, ok := arity[a.step]
-		switch {
-		case !ok:
-			t.Message = fmt.Sprintf("the driver tried %s, a step the model's Next doesn't name", a.step)
-			return t, nil
-		case n >= 0 && n != len(a.args):
-			t.Message = fmt.Sprintf("the driver tried %s with %d arguments, and Next passes it %d", a.step, len(a.args), n)
-			return t, nil
-		}
-		if tried[a.from] == nil {
-			tried[a.from] = map[string]bool{}
-		}
-		tried[a.from][instance(a.step, a.args)] = true
+	if problem != "" {
+		t.Message = problem
+		return t, nil
 	}
-
+	ranges := make([]int, len(s.states)+1)
+	pos := 0
+	for i := range s.states {
+		if err := ctx.Err(); err != nil {
+			return t, err
+		}
+		ranges[i] = pos
+		for pos < len(tried) && tried[pos].state == i {
+			if err := ctx.Err(); err != nil {
+				return t, err
+			}
+			pos++
+		}
+	}
+	ranges[len(s.states)] = pos
 	larger := "Invariant_Larger == INSTANCE " + module
 	if len(m.Larger) > 0 {
 		names := make([]string, 0, len(m.Larger))
@@ -413,36 +348,43 @@ func checkTried(ctx context.Context, runner Runner, dir, module, header string, 
 		larger += " WITH " + strings.Join(subs, ", ")
 	}
 	untried := untriedText(m.Steps)
-	n := (len(rec.states) + triedBatch - 1) / triedBatch
-	b, res, err := atOnce(ctx, n, func(ctx context.Context, b int) (tlc.Result, error) {
-		start := b * triedBatch
-		end := min(start+triedBatch, len(rec.states))
-		sets := make([]string, 0, end-start)
-		for i := start; i < end; i++ {
-			names := make([]string, 0, len(tried[i]))
-			for x := range tried[i] {
-				names = append(names, x)
-			}
-			sort.Strings(names)
-			sets = append(sets, "{"+strings.Join(names, ", ")+"}")
-		}
-		text := "---- MODULE Invariant_Tried ----\n" + header +
-			"VARIABLE invariant_i\n" +
-			larger + "\n" +
-			"Invariant_States == <<" + strings.Join(rec.states[start:end], ",\n  ") + ">>\n" +
-			"Invariant_Tried == <<" + strings.Join(sets, ",\n  ") + ">>\n" +
-			"Invariant_TInit == \\E i \\in DOMAIN Invariant_States : invariant_i = i /\\ " + is("Invariant_States[i]", vars, false) + "\n" +
-			"Invariant_TSpec == Invariant_TInit /\\ [][UNCHANGED <<vars, invariant_i>>]_<<vars, invariant_i>>\n" +
-			"Invariant_Untried ==\n  " + untried + "\n" +
-			"Invariant_EveryStepTried == Invariant_Untried = {} \\/ (PrintT(<<\"invariant-untried\", Invariant_Untried>>) /\\ FALSE)\n====\n"
-		d, err := batchDir(dir, fmt.Sprintf("tried-%d", b+1))
-		if err != nil {
-			return tlc.Result{}, err
-		}
-		if err := os.WriteFile(filepath.Join(d, "Invariant_Tried.tla"), []byte(text), 0o644); err != nil {
-			return tlc.Result{}, err
-		}
-		return runner.Check(ctx, d, "Invariant_Tried", tlc.Config{Specification: "Invariant_TSpec", Constants: constants, Invariants: []string{"Invariant_EveryStepTried"}})
+	b, res, err := atOnce(ctx, batchCount(len(s.states), triedBatch), func(ctx context.Context, b int) (tlc.Result, error) {
+		return checkBatch(ctx, runner, dir, root, fmt.Sprintf("tried-%d", b+1), "Invariant_Tried",
+			tlc.Config{Specification: "Invariant_TSpec", Constants: constants, Invariants: []string{"Invariant_EveryStepTried"}}, func(w *moduleWriter) error {
+				start, end := b*triedBatch, min((b+1)*triedBatch, len(s.states))
+				w.text("---- MODULE Invariant_Tried ----\n" + header + "VARIABLE invariant_i\n" + larger + "\nInvariant_States == <<")
+				for i := start; i < end; i++ {
+					if i > start {
+						w.text(",\n  ")
+					}
+					w.value(s, s.states[i].text)
+					if w.err != nil {
+						return w.err
+					}
+				}
+				w.text(">>\nInvariant_Tried == <<")
+				for i := start; i < end; i++ {
+					if i > start {
+						w.text(",\n  ")
+					}
+					w.text("{")
+					for j := ranges[i]; j < ranges[i+1]; j++ {
+						if j > ranges[i] {
+							w.text(", ")
+						}
+						w.value(s, tried[j].text)
+						if w.err != nil {
+							return w.err
+						}
+					}
+					w.text("}")
+				}
+				w.text(">>\nInvariant_TInit == \\E i \\in DOMAIN Invariant_States : invariant_i = i /\\ " + is("Invariant_States[i]", vars, false) + "\n" +
+					"Invariant_TSpec == Invariant_TInit /\\ [][UNCHANGED <<vars, invariant_i>>]_<<vars, invariant_i>>\n" +
+					"Invariant_Untried ==\n  " + untried + "\n" +
+					"Invariant_EveryStepTried == Invariant_Untried = {} \\/ (PrintT(<<\"invariant-untried\", Invariant_Untried>>) /\\ FALSE)\n====\n")
+				return nil
+			})
 	})
 	if err != nil {
 		return t, err
@@ -451,8 +393,11 @@ func checkTried(ctx context.Context, runner Runner, dir, module, header string, 
 	case res.Outcome == tlc.Violated && res.Invariant == "Invariant_EveryStepTried":
 		t.Untried = printedUntried(res.Printed)
 		start := b * triedBatch
-		if i := stateIndex(res.Trace); i >= 1 && start+i-1 < len(rec.pretty) {
-			t.In = rec.pretty[start+i-1]
+		if i := stateIndex(res.Trace); i >= 1 && start+i-1 < len(s.states) {
+			t.In, err = s.pretty(start + i - 1)
+			if err != nil {
+				return t, err
+			}
 		}
 		t.Message = "the driver never tried a step that more than a bound rules out"
 		return t, nil

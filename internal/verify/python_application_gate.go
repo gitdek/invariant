@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -605,10 +607,10 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 	// batches in order so a failure has a deterministic actual invocation prefix,
 	// with no schedule-dependent canceled TLC runs in its provenance. Starting
 	// states come first, then the steps, declared outcomes and tried steps.
-	batch, _ := filepath.Rel(r.root, dir)
+	batch := filepath.Base(dir)
 	phase, order := 0, 0
-	for i, prefix := range []string{"steps-", "strict-", "tried-"} {
-		if module == []string{"Invariant_Conformance", "Invariant_StrictAttempts", "Invariant_Tried"}[i] {
+	for i, prefix := range []string{"init-", "steps-", "strict-", "tried-"} {
+		if module == []string{"Invariant_ConformanceInit", "Invariant_Conformance", "Invariant_StrictAttempts", "Invariant_Tried"}[i] {
 			var err error
 			phase = i + 1
 			order, err = strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), prefix))
@@ -642,7 +644,7 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 		return tlc.Result{}, err
 	}
 	if r.failed {
-		return tlc.Result{}, fmt.Errorf("an earlier application model batch failed")
+		return tlc.Result{Outcome: tlc.Failed, Message: "an earlier application model batch failed"}, nil
 	}
 	defer func() {
 		r.next++
@@ -651,14 +653,14 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 			r.changed = nil
 		}
 	}()
-	raw, err := os.ReadFile(filepath.Join(dir, module+".tla"))
+	inputHash, err := pythonApplicationModelHash(ctx, filepath.Join(dir, module+".tla"))
 	if err != nil {
 		r.failed = true
 		return tlc.Result{}, err
 	}
 	result, err := r.runner.Check(ctx, dir, module, cfg)
 	r.failed = err != nil || result.Outcome != tlc.Passed
-	record := PythonApplicationModelCheck{Module: module, Batch: filepath.ToSlash(batch), InputSHA256: pythonApplicationHash(raw), Config: cfg, Result: result}
+	record := PythonApplicationModelCheck{Module: module, Batch: filepath.ToSlash(batch), InputSHA256: inputHash, Config: cfg, Result: result}
 	// TLC's unstructured progress includes temporary extraction paths. Retain
 	// its parsed verdict, diagnostics and counterexample, not progress output.
 	record.Result.Printed = nil
@@ -667,6 +669,31 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 	}
 	r.results = append(r.results, record)
 	return result, err
+}
+
+// A tried-state window can contain arbitrarily many action instances. Hash
+// its generated module without retaining those recording contents in memory.
+func pythonApplicationModelHash(ctx context.Context, path string) (sum string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+	h := sha256.New()
+	var buffer [32 << 10]byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buffer[:])
+		h.Write(buffer[:n])
+		if err == io.EOF {
+			return "sha256:" + hex.EncodeToString(h.Sum(nil)), ctx.Err()
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 }
 
 func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evidence, error) {
