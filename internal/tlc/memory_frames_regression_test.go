@@ -54,7 +54,7 @@ func TestTLCMemoryFramesOverrideEvidence(t *testing.T) {
 }
 
 func TestTLCMemoryFrameRejectsGraphDump(t *testing.T) {
-	f := stall470Setup(t, "cat \"$root/transcript\"\nprintf 'digraph G {}\\n' > \"$work/states.dot\"\n")
+	f := stall470Setup(t, "cat \"$root/transcript\"\nprintf 'digraph G {}\\n' > \"$dump\"\n")
 	out := stall470Frame(2193, "Model checking completed.") + stall470Frame(1001, "Java ran out of memory.")
 	if err := os.WriteFile(filepath.Join(f.root, "transcript"), []byte(out), 0o600); err != nil {
 		t.Fatal(err)

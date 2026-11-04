@@ -88,10 +88,19 @@ func tlc497Docker(args []string) int {
 	default:
 		return 91
 	}
-	var name, work, output, module string
+	var name, work, output, module, configArg, dumpArg string
 	for i, arg := range args {
 		if arg == "--name" && i+1 < len(args) {
 			name = args[i+1]
+		}
+		if arg == "-config" && i+1 < len(args) {
+			configArg = args[i+1]
+		}
+		if arg == "-dump" && i+2 < len(args) {
+			if args[i+1] != "dot,actionlabels" {
+				return 94
+			}
+			dumpArg = args[i+2]
 		}
 		if arg == "-v" && i+1 < len(args) {
 			mount := args[i+1]
@@ -121,14 +130,23 @@ func tlc497Docker(args []string) int {
 		fmt.Print("@@invariant test=0\n@@invariant conform=0\n")
 		return 0
 	}
-	if name == "" || work == "" {
+	if name == "" || work == "" || configArg == "" {
 		return 93
+	}
+	resolve := func(path string) string {
+		if strings.HasPrefix(path, "/work/") {
+			return filepath.Join(work, strings.TrimPrefix(path, "/work/"))
+		}
+		if filepath.IsAbs(path) {
+			panic("fake Docker cannot resolve " + path)
+		}
+		return filepath.Join(work, path)
 	}
 	raw, _ := json.Marshal(args)
 	if err := os.WriteFile(filepath.Join(root, name+".json"), raw, 0600); err != nil {
 		panic(err)
 	}
-	config, err := os.ReadFile(filepath.Join(work, "Invariant.cfg"))
+	config, err := os.ReadFile(resolve(configArg))
 	if err != nil {
 		panic(err)
 	}
@@ -181,7 +199,13 @@ func tlc497Docker(args []string) int {
 		return n
 	}
 	if module == "Dump" {
-		if err := os.WriteFile(filepath.Join(work, "states.dot"), []byte("digraph G {}\n"), 0600); err != nil {
+		if dumpArg == "" {
+			return 94
+		}
+		if !strings.HasSuffix(dumpArg, ".dot") {
+			dumpArg += ".dot"
+		}
+		if err := os.WriteFile(resolve(dumpArg), []byte("digraph G {}\n"), 0600); err != nil {
 			panic(err)
 		}
 	}

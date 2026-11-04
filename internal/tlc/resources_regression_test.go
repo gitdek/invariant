@@ -84,7 +84,7 @@ func TestTLCMemoryWordsKeepModelEvidence(t *testing.T) {
 		})
 	}
 	t.Run("graph dump", func(t *testing.T) {
-		f := stall470Setup(t, "cat \"$root/transcript\"\nprintf 'digraph G {}\\n' > \"$work/states.dot\"\n")
+		f := stall470Setup(t, "cat \"$root/transcript\"\nprintf 'digraph G {}\\n' > \"$dump\"\n")
 		if err := os.WriteFile(filepath.Join(f.root, "transcript"), []byte(passed), 0o600); err != nil {
 			t.Fatal(err)
 		}
