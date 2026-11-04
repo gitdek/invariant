@@ -426,7 +426,7 @@ func tlc497Project(t *testing.T) string {
 	return dir
 }
 
-func tlc497AllModelResults(t *testing.T, r *verify.Report, modules map[string]int) {
+func tlc497AllModelResults(t *testing.T, r *verify.Report, modules map[string]int, retried ...string) {
 	t.Helper()
 	if len(r.Witnesses) != 6 || len(r.Properties) != 3 || len(r.Fairness) != 2 || len(r.Bugs) != 2 || r.Design.Spec != "Spec" {
 		t.Fatalf("missing model results: %+v", r)
@@ -442,8 +442,12 @@ func tlc497AllModelResults(t *testing.T, r *verify.Report, modules map[string]in
 		want = append(want, fmt.Sprintf("Fairness_F%d", i))
 	}
 	for _, name := range want {
-		if modules[name] != 1 {
-			t.Errorf("%s ran %d times, want once", name, modules[name])
+		attempts := 1
+		if len(retried) > 0 && name == retried[0] {
+			attempts = 2
+		}
+		if modules[name] != attempts {
+			t.Errorf("%s ran %d times, want %d", name, modules[name], attempts)
 		}
 	}
 	for i, w := range r.Witnesses {
@@ -599,7 +603,7 @@ func TestTLC497MemoryFailureKeepsOtherResults(t *testing.T) {
 			if peak > 2 {
 				t.Errorf("peak = %d, want at most 2", peak)
 			}
-			tlc497AllModelResults(t, r, modules)
+			tlc497AllModelResults(t, r, modules, module)
 			data, _ := json.Marshal(r)
 			text := strings.ToLower(string(data))
 			if !strings.Contains(text, "memory") || !strings.Contains(text, strings.ToLower(module)) {
@@ -800,8 +804,12 @@ func TestTLC497OutOfMemoryIsNotCounterexample(t *testing.T) {
 				t.Fatalf("memory failure retained counterexample evidence: %+v", res)
 			}
 			_, modules, _ := f.runs(t)
-			if modules["Transcript"] != 1 {
-				t.Errorf("memory failure retried: %v", modules)
+			attempts := 2
+			if c.exit == 137 {
+				attempts = 1
+			}
+			if modules["Transcript"] != attempts {
+				t.Errorf("memory failure attempts = %v, want %d", modules, attempts)
 			}
 		})
 	}
@@ -846,6 +854,12 @@ func TestTLC497LimitsPreserveEvidenceAndReceipts(t *testing.T) {
 				t.Fatalf("schedule %d failed: %+v, %v", n, r, err)
 			}
 			r.GeneratedAt = "fixed timestamp"
+			if len(r.TLCAttempts) == 0 {
+				t.Fatal("gate omitted resource history")
+			}
+			// Admission order is operational history. Compare all evidence,
+			// verdicts and fingerprints independently of that history.
+			r.TLCAttempts = nil
 			data, err := json.Marshal(r)
 			if err != nil {
 				t.Fatal(err)

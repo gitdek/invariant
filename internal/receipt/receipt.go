@@ -136,6 +136,22 @@ func Markdown(r *verify.Report) string {
 		}
 	}
 
+	if len(r.TLCAttempts) > 0 {
+		b.WriteString("\n<details>\n<summary>TLC resource history</summary>\n\n")
+		b.WriteString("Allocations and retry outcomes are operational history, excluded from the evidence fingerprint.\n\n")
+		b.WriteString("| Check | Module | Attempt | Container memory | Java heap | Outcome | Diagnostic |\n| :-- | :-- | --: | --: | --: | :-- | :-- |\n")
+		for _, a := range r.TLCAttempts {
+			outcome := string(a.Outcome)
+			if a.Attempt > 1 {
+				outcome = "retry: " + outcome
+			}
+			diagnostic := componentText(a.Message)
+			fmt.Fprintf(&b, "| %s | %s | %d | %d MiB | %d MiB | %s | %s |\n",
+				render.literal(a.Check), render.literal(a.Module), a.Attempt,
+				a.MemoryBytes/(1<<20), a.HeapBytes/(1<<20), render.text(outcome), diagnostic)
+		}
+		b.WriteString("\n</details>\n")
+	}
 	b.WriteString("\n<details>\n<summary>Ratified statements</summary>\n\n")
 	b.WriteString("| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n")
 	for _, p := range r.Pins {

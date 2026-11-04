@@ -23,6 +23,9 @@ type Runner struct {
 	Image  string  // Java runtime image, pinned by digest
 	Jar    string  // local path to tla2tools.jar
 	Budget *Budget // shared admission and memory limits; nil uses a 1 GiB container
+	// CheckRoot makes check identities relative to the gate's staging directory,
+	// distinguishing batches without recording temporary host paths.
+	CheckRoot string
 	// SilenceTimeout bounds uninterrupted silence, including before the first
 	// output. Nonpositive values use fifteen minutes.
 	SilenceTimeout time.Duration
@@ -65,7 +68,8 @@ func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Resu
 }
 
 // CheckWithin gives an admitted check its own execution allowance. Queueing
-// does not consume it; both attempts still share the caller's overall deadline.
+// for the first attempt does not consume it. Retries and their admission waits
+// share that allowance and the caller's overall deadline.
 func (r Runner) CheckWithin(ctx context.Context, dir, module string, cfg Config, timeout time.Duration) (Result, error) {
 	return r.check(ctx, dir, module, cfg, timeout)
 }
@@ -74,9 +78,14 @@ func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeo
 	if err := r.Budget.acquire(ctx); err != nil {
 		return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
 	}
-	// Docker Run joins cancellation cleanup before returning. Retain the slot
-	// through that cleanup and the identical retry, if one is needed.
-	defer r.Budget.release()
+	// Docker Run joins cleanup before returning. Keep the allocation until
+	// then, releasing it before queueing for an exclusive memory retry.
+	slots := 1
+	defer func() {
+		if slots > 0 {
+			r.Budget.releaseSlots(slots)
+		}
+	}()
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -92,14 +101,29 @@ func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeo
 	if silence <= 0 {
 		silence = 15 * time.Minute
 	}
-	for attempt := 0; ; attempt++ {
+	name := module
+	if r.CheckRoot != "" {
+		if rel, err := filepath.Rel(r.CheckRoot, dir); err == nil {
+			name = filepath.ToSlash(filepath.Join(rel, module))
+		}
+	}
+	check := r.Budget.newCheck(name)
+	memory, heap := r.allocation()
+	stallRetried, memoryRetried := false, false
+	for attempt := 1; ; attempt++ {
 		if err := context.Cause(ctx); err != nil {
 			return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
 		}
-		out, stalled, err := r.run(ctx, dir, module, silence)
+		record := func(result Result) {
+			r.Budget.record(check, Attempt{Module: module, Attempt: attempt,
+				MemoryBytes: memory, HeapBytes: heap, Outcome: result.Outcome, Message: result.Message})
+		}
+		out, stalled, err := r.run(ctx, dir, module, silence, memory, heap)
 		// Cancellation takes priority even when it arrives during stall cleanup.
 		if cause := context.Cause(ctx); cause != nil {
-			return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, cause)
+			cutoff := fmt.Errorf("TLC check %s cut off: %w", module, cause)
+			record(Result{Outcome: Failed, Message: cutoff.Error()})
+			return Result{}, cutoff
 		}
 		var exit *exec.ExitError
 		exitCode := 0
@@ -112,36 +136,68 @@ func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeo
 		if stalled {
 			failureCode = 0
 		}
-		if failure, ok := resourceFailure(module, out, failureCode); ok {
+		failure, confirmed := resourceFailure(module, out, 0)
+		if confirmed || failureCode == 137 {
+			if !confirmed {
+				failure, _ = resourceFailure(module, out, failureCode)
+			}
 			failure.ExitCode = exitCode
+			record(failure)
+			if confirmed && !memoryRetried && r.Budget != nil && r.Budget.exclusiveMemory > memory {
+				memoryRetried = true
+				r.Budget.releaseSlots(slots)
+				slots = 0
+				if err := r.Budget.acquireSlots(ctx, r.Budget.Parallel); err != nil {
+					return Result{}, fmt.Errorf("TLC check %s cut off waiting for memory retry: %w", module, err)
+				}
+				slots = r.Budget.Parallel
+				memory = r.Budget.exclusiveMemory
+				heap = memory / mib * 3 / 4 * mib
+				continue
+			}
 			return failure, nil
 		}
 		if stalled {
-			if attempt == 0 {
-				continue
+			msg := fmt.Sprintf("TLC stopped making progress: no output for %s", silence)
+			if stallRetried {
+				if attempt == 2 {
+					msg += " on the second attempt"
+				} else {
+					msg += " after the one stall retry"
+				}
 			}
-			msg := fmt.Sprintf("TLC stopped making progress: no output for %s on the second attempt", silence)
 			if last := tail(out, 20); last != "" {
 				msg += "\n" + last
 			}
-			return Result{Outcome: Failed, Message: msg}, nil
+			failure := Result{Outcome: Failed, Message: msg}
+			record(failure)
+			if !stallRetried {
+				stallRetried = true
+				continue
+			}
+			return failure, nil
 		}
+		var result Result
 		switch {
 		case err == nil:
-			return Parse(out, 0), nil
+			result = Parse(out, 0)
 		case errors.As(err, &exit):
-			return Parse(out, exit.ExitCode()), nil
+			result = Parse(out, exit.ExitCode())
 		default:
-			return Result{}, fmt.Errorf("running TLC: %w", err)
+			runErr := fmt.Errorf("running TLC: %w", err)
+			record(Result{Outcome: Failed, Message: runErr.Error()})
+			return Result{}, runErr
 		}
+		record(result)
+		return result, nil
 	}
 }
 
-func (r Runner) run(ctx context.Context, dir, module string, silence time.Duration) (string, bool, error) {
+func (r Runner) run(ctx context.Context, dir, module string, silence time.Duration, memoryBytes, heapBytes uint64) (string, bool, error) {
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jarDir, jar := filepath.Split(r.Jar)
-	memory, heap := r.limits()
+	memory, heap := fmt.Sprintf("%dm", memoryBytes/mib), fmt.Sprintf("%dm", heapBytes/mib)
 	cmd := toolchain.Docker(attemptCtx, "run", "--rm", "--network", "none",
 		"--memory", memory, "--memory-swap", memory,
 		"-v", dir+":/work", "-v", filepath.Clean(jarDir)+":/opt/tla:ro", "-w", "/work",
@@ -190,7 +246,8 @@ func (r Runner) run(ctx context.Context, dir, module string, silence time.Durati
 var memoryDiagnostic = regexp.MustCompile(`(?im)^[\t ]*(?:(?:Exception in thread "[^"\r\n]+"|Caused by:|Suppressed:|Error:|The exception was a)[\t ]+)?(?:(?:java\.lang\.)?OutOfMemoryError(?::[^\r\n]*)?|Java heap space|GC overhead limit exceeded)[\t ]*\r?$`)
 
 // Resource failures override partial success and counterexamples alike. None
-// of an unfinished check's output can establish model evidence or earn a retry.
+// of an unfinished check's output can establish model evidence. Only a memory
+// diagnostic, not exit 137 alone, can earn a larger allocation.
 func resourceFailure(module, out string, exitCode int) (Result, bool) {
 	msg := ""
 	diagnostics := memoryDiagnostic.FindAllString(out, -1)
