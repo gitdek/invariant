@@ -532,6 +532,13 @@ func (c Client) gh() string {
 // call makes one request. A body is sent as JSON, and a response is decoded
 // into out unless out is nil.
 func (c Client) call(ctx context.Context, method, path string, body, out any) error {
+	if method == "GET" && body == nil {
+		page, err := c.get(ctx, path, "application/vnd.github+json")
+		if err != nil || out == nil || len(bytes.TrimSpace([]byte(page.body))) == 0 {
+			return err
+		}
+		return json.Unmarshal([]byte(page.body), out)
+	}
 	args := []string{"api", "-X", method, "-H", "Accept: application/vnd.github+json", path}
 	var stdin io.Reader
 	if body != nil {
@@ -552,21 +559,25 @@ func (c Client) call(ctx context.Context, method, path string, body, out any) er
 	return json.Unmarshal(stdout, out)
 }
 
-// pages fetches every page of a list. gh prints each page as its own JSON
-// array.
+// pages revalidates each page separately, following that response's links.
 func (c Client) pages(ctx context.Context, path string, out any) error {
-	stdout, err := c.run(ctx, nil, "api", "--paginate", "-H", "Accept: application/vnd.github+json", path)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
-	}
 	var all []json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(stdout))
-	for dec.More() {
+	seen := map[string]bool{}
+	for path != "" {
+		if seen[path] {
+			return fmt.Errorf("GET %s: repeated pagination link", path)
+		}
+		seen[path] = true
+		response, err := c.get(ctx, path, "application/vnd.github+json")
+		if err != nil {
+			return err
+		}
 		var page []json.RawMessage
-		if err := dec.Decode(&page); err != nil {
+		if err := json.Unmarshal([]byte(response.body), &page); err != nil {
 			return err
 		}
 		all = append(all, page...)
+		path = response.next
 	}
 	b, err := json.Marshal(all)
 	if err != nil {
@@ -576,15 +587,20 @@ func (c Client) pages(ctx context.Context, path string, out any) error {
 }
 
 func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.gh(), args...)
-	cmd.Stdin = stdin
+	env := os.Environ()
 	if c.Token != nil {
 		token, err := c.Token(ctx)
 		if err != nil {
 			return nil, err
 		}
-		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+		env = append(env, "GH_TOKEN="+token)
 	}
+	return c.runEnv(ctx, stdin, env, args...)
+}
+
+func (c Client) runEnv(ctx context.Context, stdin io.Reader, env []string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, c.gh(), args...)
+	cmd.Stdin, cmd.Env = stdin, env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

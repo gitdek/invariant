@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
@@ -123,6 +124,25 @@ func (g *fakeGitHub) Issues(_ context.Context, label string) ([]github.Issue, er
 	for _, i := range g.issues {
 		if i.PullRequest == nil && (label == "" || i.HasLabel(label)) {
 			out = append(out, *i)
+		}
+	}
+	return out, nil
+}
+
+func (g *fakeGitHub) ClosedIssues(_ context.Context, since string) ([]github.Issue, error) {
+	var after time.Time
+	if since != "" {
+		var err error
+		after, err = time.Parse(time.RFC3339, since)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var out []github.Issue
+	for _, issue := range g.issues {
+		updated, _ := time.Parse(time.RFC3339, issue.UpdatedAt)
+		if issue.State == "closed" && issue.PullRequest == nil && (after.IsZero() || updated.IsZero() || !updated.Before(after)) {
+			out = append(out, *issue)
 		}
 	}
 	return out, nil

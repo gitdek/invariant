@@ -76,6 +76,12 @@ func (s *syncHub) Issues(ctx context.Context, label string) ([]github.Issue, err
 	return s.gh.Issues(ctx, label)
 }
 
+func (s *syncHub) ClosedIssues(ctx context.Context, since string) ([]github.Issue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gh.ClosedIssues(ctx, since)
+}
+
 func (s *syncHub) MergedPullRequests(ctx context.Context) ([]github.PullRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

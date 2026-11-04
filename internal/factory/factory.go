@@ -30,6 +30,7 @@ import (
 // GitHub is what the factory does on GitHub. github.Client is the real one.
 type GitHub interface {
 	OpenIssues(ctx context.Context) ([]github.Issue, error)
+	ClosedIssues(ctx context.Context, since string) ([]github.Issue, error)
 	// Issues lists issues in every state; an empty label includes them all.
 	Issues(ctx context.Context, label string) ([]github.Issue, error)
 	// Issue reads one issue as it is now, open or closed.
@@ -171,14 +172,16 @@ type Factory struct {
 	// their heads, whose wait for GitHub to say it can merge them was
 	// logged. And seenMerges: the merged pull requests whose issue a step
 	// has read since the watcher started.
-	mu         sync.Mutex
-	writers    map[string]bool
-	asked      map[string]bool
-	mergeWait  map[string]bool
-	seenMerges map[int]bool
-	running    running
-	admission  admission
-	lease      lease
+	mu          sync.Mutex
+	writers     map[string]bool
+	asked       map[string]bool
+	mergeWait   map[string]bool
+	seenMerges  map[int]bool
+	observed    map[int]issueObservation // successful reads and work still eligible, under mu
+	closedSince time.Time                // overlapping successful-poll watermark, under mu
+	running     running
+	admission   admission
+	lease       lease
 }
 
 // Labels show where each issue is. The factory keeps exactly one status
@@ -316,15 +319,29 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) (err error) {
 	}
 }
 
-// Poll starts a step on every issue it reads that has none running, in order
-// of number, and each step reads its issue again first. It reads the open
-// issues, and the closed ones with something left to record (pollIssues).
+// Poll starts a step on each changed or unfinished issue with none running,
+// in order of number. Each step reads its issue again first. Discovery lists
+// open issues and closed ones with something left to record (pollIssues).
 // With positive Parallel, Poll returns without waiting for its steps, so
 // they run across polls, and each logs its error as it ends. Only new agent
 // work waits for a slot; commands and other effects go on while those slots
 // are full (D-0113, #455). Otherwise Poll takes one step at a time, and
 // returns their errors once they've ended.
-func (f *Factory) Poll(ctx context.Context) error {
+func (f *Factory) Poll(ctx context.Context) (err error) {
+	began := f.now()
+	defer func() {
+		if err == nil {
+			f.mu.Lock()
+			if since := began.Add(-time.Minute); since.After(f.closedSince) {
+				f.closedSince = since
+			}
+			f.mu.Unlock()
+		}
+		// Activity hears every poll, including a failed discovery.
+		f.running.mu.Lock()
+		f.tell()
+		f.running.mu.Unlock()
+	}()
 	f.mu.Lock()
 	if f.writers == nil {
 		f.writers = map[string]bool{}
@@ -332,6 +349,9 @@ func (f *Factory) Poll(ctx context.Context) error {
 	f.asked = map[string]bool{}
 	if f.seenMerges == nil {
 		f.seenMerges = map[int]bool{}
+	}
+	if f.observed == nil {
+		f.observed = map[int]issueObservation{}
 	}
 	f.mu.Unlock()
 	issues, merges, err := f.pollIssues(ctx)
@@ -355,9 +375,8 @@ func (f *Factory) Poll(ctx context.Context) error {
 		case !started:
 			// Its last step is still running.
 		case f.Parallel <= 0:
-			err := f.safeStep(ctx, n)
+			err := f.pollStep(ctx, issue, merges[n])
 			f.end(n, f.now())
-			f.sawMerge(merges[n], err)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("#%d: %w", n, err))
 			}
@@ -372,49 +391,39 @@ func (f *Factory) Poll(ctx context.Context) error {
 					}
 					f.end(n, ended)
 				}()
-				err := f.safeStep(ctx, n)
+				err := f.pollStep(ctx, issue, merges[n])
 				ended = f.now()
-				f.sawMerge(merges[n], err)
 				if err != nil {
 					f.logf("#%d: %v", n, err)
 				}
 			}()
 		}
 	}
-	// Activity hears the end of every poll, as the watcher's heartbeat.
-	f.running.mu.Lock()
-	f.tell()
-	f.running.mu.Unlock()
 	return errors.Join(errs...)
 }
 
-// pollIssues is what a poll steps on: every open issue, and each closed one
-// with something left to record. That's one still carrying an active label,
-// because it closed mid-work or its labels outlived its final post, and the
-// issue of a factory pull request merged since the watcher started, as when
-// a person merges it after its issue's close was recorded (#434's review).
-// Merges maps each such issue to its pull request. Any other closed issue is
-// finished, and reading each one on every poll would spend a big
-// repository's whole rate limit.
-func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, error) {
+// pollIssues lists open issues and incrementally discovers closed work,
+// filtering active labels locally. It keeps unfinished work after the
+// watermark passes it, and discovers merges independently of issue updates.
+// Merges maps each issue to a pull request whose merge still needs a step.
+func (f *Factory) pollIssues(ctx context.Context) ([]polledIssue, map[int]int, error) {
+	f.mu.Lock()
+	since := ""
+	if !f.closedSince.IsZero() {
+		since = f.closedSince.UTC().Format(time.RFC3339)
+	}
+	f.mu.Unlock()
 	issues, err := f.GitHub.OpenIssues(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	seen := map[int]bool{}
-	for _, issue := range issues {
-		seen[issue.Number] = true
+	closed, err := f.GitHub.ClosedIssues(ctx, since)
+	if err != nil {
+		return nil, nil, err
 	}
-	for _, label := range activeLabels {
-		labeled, err := f.GitHub.Issues(ctx, label)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, issue := range labeled {
-			if issue.State == "closed" && !seen[issue.Number] {
-				seen[issue.Number] = true
-				issues = append(issues, issue)
-			}
+	for _, issue := range closed {
+		if issue.State == "closed" && slices.ContainsFunc(activeLabels, issue.HasLabel) {
+			issues = append(issues, issue)
 		}
 	}
 	prs, err := f.GitHub.MergedPullRequests(ctx)
@@ -424,18 +433,40 @@ func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, 
 	merges := map[int]int{}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	selected := map[int]polledIssue{}
+	for _, issue := range issues {
+		n := issue.Number
+		seen, ok := f.observed[n]
+		seen.listed = issueVersion(issue)
+		if !ok {
+			seen.again = true
+		}
+		f.observed[n] = seen
+		if issue.UpdatedAt == "" || seen.again || seen.listed != seen.read {
+			selected[n] = polledIssue{Number: n, version: seen.listed}
+		}
+	}
 	for _, pr := range prs {
 		n, ok := branchIssue(pr.Head.Ref)
 		if !ok || f.seenMerges[pr.Number] || merges[n] != 0 {
 			continue
 		}
 		merges[n] = pr.Number
-		if !seen[n] {
-			seen[n] = true
-			issues = append(issues, github.Issue{Number: n})
+		seen := f.observed[n]
+		seen.again = true
+		f.observed[n] = seen
+	}
+	// Unfinished reads, effects and steps survive the closed-list watermark.
+	for n, seen := range f.observed {
+		if seen.again || seen.listed != seen.read {
+			selected[n] = polledIssue{Number: n, version: seen.listed}
 		}
 	}
-	return issues, merges, nil
+	var work []polledIssue
+	for _, issue := range selected {
+		work = append(work, issue)
+	}
+	return work, merges, nil
 }
 
 // sawMerge remembers that a step on the issue of merged pull request pr
@@ -840,7 +871,11 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	}
 	state, started := t.State()
 	if issue.State == "closed" {
-		return f.closedIssue(ctx, t, state)
+		err := f.closedIssue(ctx, t, state)
+		if err == nil {
+			pollIdle(ctx)
+		}
+		return err
 	}
 	// open is a failed build's pull request while it's open, which a writer's
 	// retry has the factory watch again.
@@ -852,6 +887,11 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		// A ratified plan of issues builds nothing itself (#112), and working
 		// it is its issue's whole step (#148).
 		if isIssuePlan(state.Marker) {
+			for _, p := range t.Posts {
+				if p.Marker.Kind == KindPlanDone && p.Marker.Hash == state.Marker.Proposal.Hash {
+					pollIdle(ctx)
+				}
+			}
 			return f.workRatified(ctx, t, state)
 		}
 		// No post has answered the ratification's build yet: start it, or
@@ -887,6 +927,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	// never holds up the commands after it.
 	pending := slices.DeleteFunc(t.Pending(), func(c Command) bool { return c.Verb == Stop })
 	if len(pending) == 0 {
+		if state.Marker.Kind != KindFailed || state.Marker.PR == 0 {
+			pollIdle(ctx)
+		}
 		return nil
 	}
 	c := pending[0]

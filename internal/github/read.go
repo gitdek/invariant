@@ -13,6 +13,26 @@ import (
 // These reads serve the dashboard (D-0049). None of them changes anything
 // on GitHub.
 
+// ClosedIssues lists closed issues updated since the optional RFC3339
+// timestamp, with every label and without pull requests.
+func (c Client) ClosedIssues(ctx context.Context, since string) ([]Issue, error) {
+	query := "issues?state=closed&per_page=100"
+	if since != "" {
+		query += "&since=" + url.QueryEscape(since)
+	}
+	var all []Issue
+	if err := c.pages(ctx, c.path(query), &all); err != nil {
+		return nil, err
+	}
+	var issues []Issue
+	for _, issue := range all {
+		if issue.PullRequest == nil {
+			issues = append(issues, issue)
+		}
+	}
+	return issues, nil
+}
+
 // Issues lists the issues that carry a label, open and closed, leaving out
 // pull requests. An empty label lists them all.
 func (c Client) Issues(ctx context.Context, label string) ([]Issue, error) {
@@ -130,7 +150,8 @@ func (c Client) Artifacts(ctx context.Context, run int64) ([]Artifact, error) {
 
 // Download fetches an artifact, as the zip GitHub stores it in.
 func (c Client) Download(ctx context.Context, artifact int64) ([]byte, error) {
-	return c.run(ctx, nil, "api", c.path(fmt.Sprintf("actions/artifacts/%d/zip", artifact)))
+	page, err := c.get(ctx, c.path(fmt.Sprintf("actions/artifacts/%d/zip", artifact)), "application/vnd.github+json")
+	return []byte(page.body), err
 }
 
 // TreeEntry is one file or directory in a commit's tree.
@@ -181,7 +202,8 @@ func (c Client) CommitMessage(ctx context.Context, sha string) (string, error) {
 
 // File reads one file as it is at ref.
 func (c Client) File(ctx context.Context, path, ref string) ([]byte, error) {
-	return c.run(ctx, nil, "api", "-H", "Accept: application/vnd.github.raw+json", c.path("contents/"+path+"?ref="+url.QueryEscape(ref)))
+	page, err := c.get(ctx, c.path("contents/"+path+"?ref="+url.QueryEscape(ref)), "application/vnd.github.raw+json")
+	return []byte(page.body), err
 }
 
 // DirFile is one file in a directory, as it is at a commit.
