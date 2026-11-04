@@ -61,7 +61,7 @@ type Sandbox struct {
 }
 
 // TestResult identifies a test independently of other packages and phases.
-// Status is passed, failed, skipped, running, or not_run; Shard identifies
+// Status is passed, failed, skipped, refused, running, or not_run; Shard identifies
 // one of the eight queue workers in the ordinary test phase.
 type TestResult struct {
 	Package string `json:"package"`
@@ -75,6 +75,7 @@ type TestResult struct {
 	Framework string `json:"framework,omitempty"`
 	Selector  string `json:"selector,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 // identity is the acceptance test a result is evidence for. A native
