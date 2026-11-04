@@ -244,6 +244,11 @@ func (f *Factory) mayAct(ctx context.Context) error {
 	}
 	f.lease.mu.Lock()
 	defer f.lease.mu.Unlock()
+	return f.mayActLocked(ctx)
+}
+
+// mayActLocked is mayAct, for a call that holds the lease lock.
+func (f *Factory) mayActLocked(ctx context.Context) error {
 	if !f.now().Before(f.lease.until.Add(-leaseSkew)) {
 		return errLeaseLost
 	}
@@ -392,6 +397,39 @@ type leasedRepo struct {
 	f *Factory
 }
 
+// runPermissionKey carries the watcher's check through a run write, which
+// can try its push again after waiting. Each attempt checks the same step.
+type runPermissionKey struct{}
+
+// lockRun checks permission after taking the clone lock. Renewal takes the
+// lease lock first, so a busy lease lock means giving the clone back before
+// waiting for it. Permission is checked again once both locks are held.
+func (c Clone) lockRun(ctx context.Context) (func(), error) {
+	f, _ := ctx.Value(runPermissionKey{}).(*Factory)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		unlock := c.lock()
+		if f == nil || f.LeaseFor == 0 {
+			return unlock, nil
+		}
+		if f.lease.mu.TryLock() {
+			err := f.mayActLocked(ctx)
+			f.lease.mu.Unlock()
+			if err != nil {
+				unlock()
+				return nil, err
+			}
+			return unlock, nil
+		}
+		unlock()
+		if err := f.mayAct(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
 func (r leasedRepo) Push(ctx context.Context, worktree, branch string) error {
 	if err := r.f.mayAct(ctx); err != nil {
 		return err
@@ -410,12 +448,12 @@ func (r leasedRepo) Record(ctx context.Context, issue int, step, what string) er
 	if err := r.f.mayAct(ctx); err != nil {
 		return err
 	}
-	return r.Repo.Record(ctx, issue, step, what)
+	return r.Repo.Record(context.WithValue(ctx, runPermissionKey{}, r.f), issue, step, what)
 }
 
 func (r leasedRepo) Finish(ctx context.Context, issue int, step, result string) error {
 	if err := r.f.mayAct(ctx); err != nil {
 		return err
 	}
-	return r.Repo.Finish(ctx, issue, step, result)
+	return r.Repo.Finish(context.WithValue(ctx, runPermissionKey{}, r.f), issue, step, result)
 }

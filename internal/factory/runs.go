@@ -8,6 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/gitdek/invariant/internal/github"
 )
 
 // Agent runs are recorded where every watcher can see them, before they
@@ -89,34 +92,92 @@ func (c Clone) Recorded(ctx context.Context, issue int, step string) (string, er
 // Record records a step before it happens. It fails with ErrRecorded if the
 // step already has a record.
 func (c Clone) Record(ctx context.Context, issue int, step, what string) error {
-	defer c.lock()()
+	unlock := c.lock()
 	// The nonce makes every record its own commit. Two watchers making the
 	// same commit would both "succeed", since pushing a ref where it already
 	// points changes nothing.
 	commit, err := c.emptyCommit(ctx, recordedMark+what+"\n\n"+NewHolder())
+	unlock()
 	if err != nil {
 		return err
 	}
-	if err := c.pushRef(ctx, runRef(issue, step), "", commit); err != nil {
-		if state, _, readErr := c.readRun(ctx, issue, step); readErr == nil && state != RunNone {
-			return ErrRecorded
-		}
-		return err
-	}
-	return nil
+	return c.pushRun(ctx, runRef(issue, step), "", commit)
 }
 
 // Finish moves a recorded step's ref to its result, the commit result.
 func (c Clone) Finish(ctx context.Context, issue int, step, result string) error {
-	defer c.lock()()
-	state, recorded, err := c.readRun(ctx, issue, step)
+	state, recorded, err := c.Run(ctx, issue, step)
 	switch {
 	case err != nil:
 		return err
 	case state != RunRecorded:
 		return fmt.Errorf("%s isn't recorded as going, so its result can't be recorded", runRef(issue, step))
 	}
-	return c.pushRef(ctx, runRef(issue, step), recorded, result)
+	return c.pushRun(ctx, runRef(issue, step), recorded, result)
+}
+
+// pushRun retries only a failed run push whose readback still shows old.
+// Every attempt keeps the same commit and lease expectation. Neither lock
+// is held while waiting, so the watcher can renew its lease (#545).
+func (c Clone) pushRun(ctx context.Context, ref, old, commit string) error {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if f, ok := ctx.Value(runPermissionKey{}).(*Factory); ok {
+			if err := f.mayAct(ctx); err != nil {
+				return err
+			}
+		}
+		retry, err := c.pushRunOnce(ctx, ref, old, commit)
+		if err == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !retry || attempt == 4 {
+			return err
+		}
+		timer := time.NewTimer((15 * time.Second) << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// pushRunOnce reads back even a refusal: the server may have published the
+// commit before its answer was lost. A different record belongs to another
+// call, even when it says the same thing, since each Record has a nonce.
+func (c Clone) pushRunOnce(ctx context.Context, ref, old, commit string) (bool, error) {
+	unlock, err := c.lockRun(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	err = c.pushRef(ctx, ref, old, commit)
+	if err == nil {
+		return false, nil
+	}
+	now, readErr := c.remoteRef(ctx, ref)
+	switch {
+	case readErr != nil:
+		return false, err
+	case now == commit:
+		return false, nil
+	case now != old:
+		if old == "" {
+			return false, ErrRecorded
+		}
+		return false, err
+	}
+	return github.Transient(err), err
 }
 
 // Save commits the files in dir, on top of parent when it isn't empty, and

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -19,6 +20,152 @@ func leaseFactory(t *testing.T, origin, holder string, now *time.Time) *Factory 
 	}
 	return &Factory{Repository: "o/r", Repo: clone, GitHub: newFakeGitHub(t, origin), Holder: holder, LeaseFor: 5 * time.Minute,
 		Now: func() time.Time { return *now }, Log: t.Logf}
+}
+
+// The watcher's renewal takes the lease lock before using the clone. A
+// leased run write leaves both available during its wait, and its next
+// push still belongs to the same tenure after an ordinary renewal.
+func TestALeasedRunPushAllowsRenewalDuringBackoff(t *testing.T) {
+	for _, operation := range []string{"Record", "Finish"} {
+		t.Run(operation, func(t *testing.T) {
+			fixture := newRun545Fixture(t, operation, run545Reply{"fail", run545ServerError}, run545Reply{"ok", ""})
+			synctest.Test(t, func(t *testing.T) {
+				f := &Factory{Repo: fixture.clone, Holder: "watcher-a", LeaseFor: 2 * time.Minute, Now: time.Now}
+				if held, err := f.hold(context.Background()); err != nil || !held {
+					t.Fatal(held, err)
+				}
+				ctx := f.inTenure(context.Background())
+				tenure := f.lease.tenure
+				first := f.lease.sha
+				time.Sleep(55 * time.Second)
+				timer := time.AfterFunc(10*time.Second, func() {
+					if held, err := f.hold(context.Background()); err != nil || !held {
+						t.Errorf("renewal = %v, %v", held, err)
+					}
+				})
+				defer timer.Stop()
+				if err := fixture.call(ctx, leasedRepo{Repo: fixture.clone, f: f}, operation); err != nil {
+					t.Fatal(err)
+				}
+				if f.lease.sha == first || f.lease.tenure != tenure {
+					t.Error("the lease must renew in the same tenure")
+				}
+				fixture.checkAttempts(t, 2, 1)
+				fixture.checkPublished(t, operation)
+			})
+		})
+	}
+}
+
+// A retry can pass its early permission check while another operation
+// owns the clone. Permission lost before admission must still stop it.
+func TestALeasedRunPushRechecksPermissionAfterCloneContention(t *testing.T) {
+	for _, operation := range []string{"Record", "Finish"} {
+		for _, change := range []string{"expiry", "loss", "tenure"} {
+			t.Run(operation+"/"+change, func(t *testing.T) {
+				fixture := newRun545Fixture(t, operation, run545Reply{"fail", run545ServerError}, run545Reply{"ok", ""})
+				synctest.Test(t, func(t *testing.T) {
+					now := time.Now()
+					waiting := false
+					checked := make(chan struct{}, 1)
+					f := &Factory{Repo: fixture.clone, Holder: "watcher-a", LeaseFor: 5 * time.Minute, Now: func() time.Time {
+						if waiting {
+							checked <- struct{}{}
+						}
+						return now
+					}}
+					if held, err := f.hold(context.Background()); err != nil || !held {
+						t.Fatal(held, err)
+					}
+					ctx := f.inTenure(context.Background())
+					done := make(chan struct{})
+					timer := time.AfterFunc(10*time.Second, func() {
+						defer close(done)
+						unlock := fixture.clone.lock()
+						defer unlock()
+						f.lease.mu.Lock()
+						waiting = true
+						f.lease.mu.Unlock()
+						<-checked
+						// Taking the lease lock waits for the retry's early
+						// check to finish, while the clone stays unavailable.
+						f.lease.mu.Lock()
+						waiting = false
+						switch change {
+						case "expiry":
+							now = f.lease.until.Add(-leaseSkew)
+						case "loss":
+							f.lease.until = time.Time{}
+						case "tenure":
+							f.lease.tenure++
+						}
+						f.lease.mu.Unlock()
+					})
+					defer timer.Stop()
+					err := fixture.call(ctx, leasedRepo{Repo: fixture.clone, f: f}, operation)
+					<-done
+					want := errLeaseLost
+					if change == "tenure" {
+						want = errStaleTenure
+					}
+					if !errors.Is(err, want) {
+						t.Errorf("%s = %v; want %v", operation, err, want)
+					}
+					fixture.checkAttempts(t, 1, 1)
+					if got := fixture.remote(t); got != fixture.recorded {
+						t.Errorf("an unauthorized retry changed the ref to %s", got)
+					}
+				})
+			})
+		}
+	}
+}
+
+// A resumed run may record its result in the tenure it resumed in. A retry
+// must not silently refresh that tenure again if another takeover happens
+// while the result push waits.
+func TestAResumedRunPushKeepsItsResumedTenure(t *testing.T) {
+	for _, takeover := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same tenure", true: "another takeover"}[takeover], func(t *testing.T) {
+			fixture := newRun545Fixture(t, "Finish", run545Reply{"fail", run545ServerError}, run545Reply{"ok", ""})
+			synctest.Test(t, func(t *testing.T) {
+				f := &Factory{Repo: fixture.clone, Holder: "watcher-a", LeaseFor: 5 * time.Minute, Now: time.Now}
+				if held, err := f.hold(context.Background()); err != nil || !held {
+					t.Fatal(held, err)
+				}
+				ctx := f.inTenure(context.Background())
+				f.lease.tenure++
+				ctx, resumed := f.resumed(ctx)
+				if !resumed {
+					t.Fatal("the run must resume in the new tenure")
+				}
+				if takeover {
+					timer := time.AfterFunc(5*time.Second, func() {
+						f.lease.mu.Lock()
+						defer f.lease.mu.Unlock()
+						f.lease.tenure++
+					})
+					defer timer.Stop()
+				}
+				err := fixture.call(ctx, leasedRepo{Repo: fixture.clone, f: f}, "Finish")
+				if takeover {
+					if !errors.Is(err, errStaleTenure) {
+						t.Fatalf("Finish = %v; want errStaleTenure", err)
+					}
+					fixture.checkAttempts(t, 1, 1)
+					if got := fixture.remote(t); got != fixture.recorded {
+						t.Errorf("a stale resumed run changed the ref to %s", got)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					fixture.checkAttempts(t, 2, 1)
+					fixture.checkPublished(t, "Finish")
+				}
+			})
+		})
+	}
 }
 
 // Two watchers on one repository: only one holds the lease, until it stops
