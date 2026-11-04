@@ -1,9 +1,9 @@
 {
   "ratified": {
     "by": "gitdek",
-    "at": "2026-11-04T05:47:59Z",
+    "at": "2026-11-04T11:46:54Z",
     "issue": 445,
-    "comment": "https://github.com/gitdek/invariant/issues/445#issuecomment-6623656033",
+    "comment": "https://github.com/gitdek/invariant/issues/445#issuecomment-6629773797",
     "proposal": "sha256:58e3be24aa3ec6c2c0ef6b1d996dfb5493dc03d4261b53c47c270889f895c0dd",
     "amends": "sha256:2a836c2603ab70fbcd3f19ec28b59e8a590b3b1c3cbea0ab2140574e88f449cd",
     "previous": "D-0225"

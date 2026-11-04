@@ -89,3 +89,11 @@ Both of the earlier build's failures were outside the model:
 - Two repository tests demanded at least one hand-ratified lock. #525 (merged as #531, D-0319) lets them pass when there is none.
 
 Keep the ratified amendment exactly as it was: the same statements, bounds and model (`sha256:58e3be24aa3e`). Draft it again so the factory builds it with the bounded gate.
+
+**@gitdek:**
+
+#539 failed for two reasons outside this amendment, both now in #540:
+- **Conformance:** the conformance check needs more than the 1.5 GiB heap each TLC slot gets under #497's budget, and it ran out of Java memory.
+- **Gobra:** the builder's gate calls timed out at the agent's 900-second tool limit, so it never saw Gobra reject `journal.go`'s plain `append`.
+
+I'm leaving #445 parked, with #539 open to read, until #540 lands. Then it needs a revise, unchanged, as before.
