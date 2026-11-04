@@ -616,17 +616,22 @@ func (c Client) runWithEnv(ctx context.Context, env []string, stdin io.Reader, a
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "(HTTP 404)") {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, msg)
-		}
-		if strings.Contains(msg, "Resource not accessible by integration") {
-			return nil, fmt.Errorf("%w: %s", ErrNoPermission, msg)
-		}
-		if msg == "" {
-			msg = strings.TrimSpace(stdout.String())
-		}
-		return nil, fmt.Errorf("%w: %s", err, msg)
+		return nil, ghFailure(err, stdout.String(), stderr.String())
 	}
 	return stdout.Bytes(), nil
+}
+
+// ghFailure is the error a failed gh run means, from what it printed.
+func ghFailure(err error, stdout, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if strings.Contains(msg, "(HTTP 404)") {
+		return fmt.Errorf("%w: %s", ErrNotFound, msg)
+	}
+	if strings.Contains(msg, "Resource not accessible by integration") {
+		return fmt.Errorf("%w: %s", ErrNoPermission, msg)
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(stdout)
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }

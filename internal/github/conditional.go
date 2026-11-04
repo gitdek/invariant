@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 )
@@ -122,7 +123,7 @@ func (c Client) get(ctx context.Context, path, accept string, wantJSON bool) (re
 		args = append(args, "-H", "If-None-Match: "+saved.etag)
 	}
 	args = append(args, path)
-	stdout, err := c.runWithEnv(ctx, env, nil, args...)
+	stdout, err := c.runIncluded(ctx, env, args...)
 	if err != nil {
 		return representation{}, err
 	}
@@ -162,6 +163,21 @@ func (c Client) get(ctx context.Context, path, accept string, wantJSON bool) (re
 		conditionalCache.put(key, r)
 	}
 	return r, nil
+}
+
+// runIncluded runs gh api --include. gh exits nonzero for every status
+// outside 2xx, 304 Not Modified included, after printing the response, so a
+// printed status line is GitHub's answer for get to read. A run that printed
+// none, or was cut off, failed in gh itself.
+func (c Client) runIncluded(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, c.gh(), args...)
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil && (ctx.Err() != nil || !bytes.HasPrefix(stdout.Bytes(), []byte("HTTP/"))) {
+		return nil, ghFailure(err, stdout.String(), stderr.String())
+	}
+	return stdout.Bytes(), nil
 }
 
 func environmentValue(env []string, name string) string {
