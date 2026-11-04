@@ -22,7 +22,7 @@ Waiting for a slot consumes neither the silence window nor `Runner.CheckWithin`'
 
 Java `OutOfMemoryError`, `Java heap space` and `GC overhead limit exceeded` produce operational failures naming the check. They override incomplete success and counterexample output and never trigger a stall retry. An unexpected exit 137 reports that the named check was killed, with possible memory exhaustion: the exit alone does not establish its cause. A kill caused by removing a stalled container still permits the stall retry unless its output reports Java memory exhaustion. These failures provide no partial model-violation evidence, and successful independent checks remain in the report.
 
-This policy builds on the pinned runner ([D-0016](../decisions/journal/D-0016.jsonl)), gate-owned configurations ([D-0017](../decisions/journal/D-0017.jsonl)), conformance batches ([D-0047](../decisions/journal/D-0047.jsonl)), the larger check ([D-0070](../decisions/journal/D-0070.jsonl)), cleanup ([D-0111](../decisions/journal/D-0111.jsonl)) and stall retries ([D-0306](../decisions/journal/D-0306.jsonl)). The merger must record the new resource-policy decision and complete its SPEC citation; this plumbing build cannot write decisions/.
+This policy builds on the pinned runner ([D-0016](../decisions/journal/D-0016.jsonl)), gate-owned configurations ([D-0017](../decisions/journal/D-0017.jsonl)), conformance batches ([D-0047](../decisions/journal/D-0047.jsonl)), the larger check ([D-0070](../decisions/journal/D-0070.jsonl)), cleanup ([D-0111](../decisions/journal/D-0111.jsonl)) and stall retries ([D-0306](../decisions/journal/D-0306.jsonl)). [D-0315](../decisions/journal/D-0315.jsonl) records the policy.
 
 ## Silent TLC checks
 
