@@ -30,6 +30,7 @@ import (
 // GitHub is what the factory does on GitHub. github.Client is the real one.
 type GitHub interface {
 	OpenIssues(ctx context.Context) ([]github.Issue, error)
+	ClosedIssues(ctx context.Context, since string) ([]github.Issue, error)
 	// Issues lists issues in every state; an empty label includes them all.
 	Issues(ctx context.Context, label string) ([]github.Issue, error)
 	// Issue reads one issue as it is now, open or closed.
@@ -176,6 +177,7 @@ type Factory struct {
 	asked      map[string]bool
 	mergeWait  map[string]bool
 	seenMerges map[int]bool
+	poll       polling // guarded by mu, shared by polls and their finishing steps
 	running    running
 	admission  admission
 	lease      lease
@@ -316,8 +318,8 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) (err error) {
 	}
 }
 
-// Poll starts a step on every issue it reads that has none running, in order
-// of number, and each step reads its issue again first. It reads the open
+// Poll starts a step on each changed or unfinished issue with none running,
+// in order of number, and each step reads its issue again first. It reads the open
 // issues, and the closed ones with something left to record (pollIssues).
 // With positive Parallel, Poll returns without waiting for its steps, so
 // they run across polls, and each logs its error as it ends. Only new agent
@@ -325,6 +327,13 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) (err error) {
 // are full (D-0113, #455). Otherwise Poll takes one step at a time, and
 // returns their errors once they've ended.
 func (f *Factory) Poll(ctx context.Context) error {
+	defer func() {
+		// Activity hears every poll, including a failed discovery.
+		f.running.mu.Lock()
+		f.tell()
+		f.running.mu.Unlock()
+	}()
+	startedAt := f.now()
 	f.mu.Lock()
 	if f.writers == nil {
 		f.writers = map[string]bool{}
@@ -355,7 +364,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 		case !started:
 			// Its last step is still running.
 		case f.Parallel <= 0:
-			err := f.safeStep(ctx, n)
+			err := f.pollStep(ctx, issue)
 			f.end(n, f.now())
 			f.sawMerge(merges[n], err)
 			if err != nil {
@@ -372,7 +381,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 					}
 					f.end(n, ended)
 				}()
-				err := f.safeStep(ctx, n)
+				err := f.pollStep(ctx, issue)
 				ended = f.now()
 				f.sawMerge(merges[n], err)
 				if err != nil {
@@ -381,22 +390,21 @@ func (f *Factory) Poll(ctx context.Context) error {
 			}()
 		}
 	}
-	// Activity hears the end of every poll, as the watcher's heartbeat.
-	f.running.mu.Lock()
-	f.tell()
-	f.running.mu.Unlock()
+	if len(errs) == 0 {
+		f.mu.Lock()
+		f.poll.since = startedAt.Add(-time.Minute).UTC().Format(time.RFC3339)
+		f.mu.Unlock()
+	}
 	return errors.Join(errs...)
 }
 
-// pollIssues is what a poll steps on: every open issue, and each closed one
-// with something left to record. That's one still carrying an active label,
-// because it closed mid-work or its labels outlived its final post, and the
-// issue of a factory pull request merged since the watcher started, as when
-// a person merges it after its issue's close was recorded (#434's review).
-// Merges maps each such issue to its pull request. Any other closed issue is
-// finished, and reading each one on every poll would spend a big
-// repository's whole rate limit.
+// pollIssues discovers changed issues and retains unfinished work. The
+// first closed scan includes all history; later scans overlap the last
+// successful poll. Merges are discovered independently of issue updates.
 func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, error) {
+	f.mu.Lock()
+	since := f.poll.since
+	f.mu.Unlock()
 	issues, err := f.GitHub.OpenIssues(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -405,16 +413,15 @@ func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, 
 	for _, issue := range issues {
 		seen[issue.Number] = true
 	}
-	for _, label := range activeLabels {
-		labeled, err := f.GitHub.Issues(ctx, label)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, issue := range labeled {
-			if issue.State == "closed" && !seen[issue.Number] {
-				seen[issue.Number] = true
-				issues = append(issues, issue)
-			}
+	closed, err := f.GitHub.ClosedIssues(ctx, since)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, issue := range closed {
+		if issue.State == "closed" && issue.PullRequest == nil && !seen[issue.Number] &&
+			slices.ContainsFunc(activeLabels, issue.HasLabel) {
+			seen[issue.Number] = true
+			issues = append(issues, issue)
 		}
 	}
 	prs, err := f.GitHub.MergedPullRequests(ctx)
@@ -435,7 +442,7 @@ func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, 
 			issues = append(issues, github.Issue{Number: n})
 		}
 	}
-	return issues, merges, nil
+	return f.poll.selectIssues(issues, merges), merges, nil
 }
 
 // sawMerge remembers that a step on the issue of merged pull request pr
@@ -829,6 +836,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	var stopped bool
 	ctx, stopped, err = f.effects(ctx, t)
 	if err != nil || stopped {
+		if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok && stopped && err == nil {
+			next.again = ctx.Value(effectsKey{}).(*issueEffects).retried
+		}
 		return err
 	}
 	// A retry's answer may have been posted while releasing a refusal.
@@ -839,6 +849,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		}
 	}
 	state, started := t.State()
+	if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok {
+		next.again = continues(t, state)
+	}
 	if issue.State == "closed" {
 		return f.closedIssue(ctx, t, state)
 	}
@@ -2929,6 +2942,11 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	ctx = f.inTenure(ctx)
 	issue, err := f.GitHub.Issue(ctx, n)
 	if err != nil {
+		// Only a merge's unlisted placeholder can disappear. A 404 for an
+		// issue the lists returned is a failed read, and must be retried.
+		if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok && next.unlisted && errors.Is(err, github.ErrNotFound) {
+			next.again, next.gone = false, true
+		}
 		return err
 	}
 	err = f.step(ctx, issue)

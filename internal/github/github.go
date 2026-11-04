@@ -44,6 +44,7 @@ type Issue struct {
 	Body        string    `json:"body"`
 	User        User      `json:"user"`
 	Labels      []Label   `json:"labels"`
+	Comments    int       `json:"comments"`
 	State       string    `json:"state"`
 	URL         string    `json:"html_url"`
 	CreatedAt   string    `json:"created_at"`
@@ -532,6 +533,16 @@ func (c Client) gh() string {
 // call makes one request. A body is sent as JSON, and a response is decoded
 // into out unless out is nil.
 func (c Client) call(ctx context.Context, method, path string, body, out any) error {
+	if method == "GET" && body == nil {
+		response, err := c.get(ctx, path, "application/vnd.github+json", true)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", path, err)
+		}
+		if out == nil || len(bytes.TrimSpace(response.body)) == 0 {
+			return nil
+		}
+		return json.Unmarshal(response.body, out)
+	}
 	args := []string{"api", "-X", method, "-H", "Accept: application/vnd.github+json", path}
 	var stdin io.Reader
 	if body != nil {
@@ -552,21 +563,25 @@ func (c Client) call(ctx context.Context, method, path string, body, out any) er
 	return json.Unmarshal(stdout, out)
 }
 
-// pages fetches every page of a list. gh prints each page as its own JSON
-// array.
+// pages revalidates each page separately and follows its current next link.
 func (c Client) pages(ctx context.Context, path string, out any) error {
-	stdout, err := c.run(ctx, nil, "api", "--paginate", "-H", "Accept: application/vnd.github+json", path)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
-	}
 	var all []json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(stdout))
-	for dec.More() {
+	seen := map[string]bool{}
+	for path != "" {
+		if seen[path] {
+			return fmt.Errorf("GET %s: repeated pagination link", path)
+		}
+		seen[path] = true
+		response, err := c.get(ctx, path, "application/vnd.github+json", true)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", path, err)
+		}
 		var page []json.RawMessage
-		if err := dec.Decode(&page); err != nil {
+		if err := json.Unmarshal(response.body, &page); err != nil {
 			return err
 		}
 		all = append(all, page...)
+		path = response.next
 	}
 	b, err := json.Marshal(all)
 	if err != nil {
@@ -576,29 +591,47 @@ func (c Client) pages(ctx context.Context, path string, out any) error {
 }
 
 func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.gh(), args...)
-	cmd.Stdin = stdin
+	env, err := c.environment(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.runWithEnv(ctx, env, stdin, args...)
+}
+
+func (c Client) environment(ctx context.Context) ([]string, error) {
+	env := os.Environ()
 	if c.Token != nil {
 		token, err := c.Token(ctx)
 		if err != nil {
 			return nil, err
 		}
-		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+		env = append(env, "GH_TOKEN="+token)
 	}
+	return env, nil
+}
+
+func (c Client) runWithEnv(ctx context.Context, env []string, stdin io.Reader, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, c.gh(), args...)
+	cmd.Stdin, cmd.Env = stdin, env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "(HTTP 404)") {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, msg)
-		}
-		if strings.Contains(msg, "Resource not accessible by integration") {
-			return nil, fmt.Errorf("%w: %s", ErrNoPermission, msg)
-		}
-		if msg == "" {
-			msg = strings.TrimSpace(stdout.String())
-		}
-		return nil, fmt.Errorf("%w: %s", err, msg)
+		return nil, ghFailure(err, stdout.String(), stderr.String())
 	}
 	return stdout.Bytes(), nil
+}
+
+// ghFailure is the error a failed gh run means, from what it printed.
+func ghFailure(err error, stdout, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if strings.Contains(msg, "(HTTP 404)") {
+		return fmt.Errorf("%w: %s", ErrNotFound, msg)
+	}
+	if strings.Contains(msg, "Resource not accessible by integration") {
+		return fmt.Errorf("%w: %s", ErrNoPermission, msg)
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(stdout)
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }
