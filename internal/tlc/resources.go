@@ -3,17 +3,46 @@ package tlc
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
+	"sync"
 )
 
 const mib = uint64(1 << 20)
 
 // Budget bounds the TLC containers of one gate invocation. Construct it with
-// NewBudget and share its pointer between runners; its fields are read-only.
+// NewBudget and share its pointer between runners; its exported limits are read-only.
 type Budget struct {
-	Parallel    int
-	MemoryBytes uint64
-	HeapBytes   uint64
-	slots       chan struct{}
+	Parallel        int
+	MemoryBytes     uint64
+	HeapBytes       uint64
+	exclusiveMemory uint64
+	mu              sync.Mutex
+	used            int
+	waiters         []*budgetWaiter
+	checks          []checkHistory
+	checkCounts     map[string]int
+}
+
+type checkHistory struct {
+	identity string
+	attempts []Attempt
+}
+
+type budgetWaiter struct {
+	slots int
+	ready chan struct{}
+}
+
+// Attempt records resource use separately from a check's model evidence.
+type Attempt struct {
+	Check       string  `json:"check"`
+	Module      string  `json:"module"`
+	Attempt     int     `json:"attempt"`
+	MemoryBytes uint64  `json:"memory_bytes"`
+	HeapBytes   uint64  `json:"heap_bytes"`
+	Outcome     Outcome `json:"outcome"`
+	Message     string  `json:"message"`
 }
 
 // NewBudget reserves a quarter of the daemon's memory and allows one 2 GiB
@@ -39,39 +68,130 @@ func NewBudget(cpus int, memoryBytes uint64, requestedParallel int) (*Budget, er
 	if requestedParallel > 0 {
 		parallel = min(parallel, requestedParallel)
 	}
-	return &Budget{Parallel: parallel, MemoryBytes: memory,
-		HeapBytes: memory / mib * 3 / 4 * mib, slots: make(chan struct{}, parallel)}, nil
+	b := &Budget{Parallel: parallel, MemoryBytes: memory, HeapBytes: memory / mib * 3 / 4 * mib}
+	if cpus > 0 && memoryBytes > 0 && available > memory {
+		b.exclusiveMemory = available
+	}
+	return b, nil
 }
 
 func (b *Budget) acquire(ctx context.Context) error {
+	return b.acquireSlots(ctx, 1)
+}
+
+// Both ordinary work and exclusive retries join the same FIFO. Once an
+// exclusive waiter reaches the front, active containers drain without new
+// admissions passing it; later ordinary work cannot be starved by retries.
+func (b *Budget) acquireSlots(ctx context.Context, slots int) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
 	if b == nil {
 		return nil
 	}
+	w := &budgetWaiter{slots: slots, ready: make(chan struct{})}
+	b.mu.Lock()
+	b.waiters = append(b.waiters, w)
+	b.admit()
+	b.mu.Unlock()
 	select {
-	case b.slots <- struct{}{}:
+	case <-w.ready:
 		// A cancellation can race admission. It must not start a container.
 		if err := context.Cause(ctx); err != nil {
-			b.release()
+			b.releaseSlots(slots)
 			return err
 		}
 		return nil
 	case <-ctx.Done():
+		b.mu.Lock()
+		if i := slices.Index(b.waiters, w); i >= 0 {
+			b.waiters = slices.Delete(b.waiters, i, i+1)
+		} else {
+			b.used -= slots // admission raced cancellation
+		}
+		b.admit()
+		b.mu.Unlock()
 		return context.Cause(ctx)
 	}
 }
 
 func (b *Budget) release() {
+	b.releaseSlots(1)
+}
+
+func (b *Budget) releaseSlots(slots int) {
 	if b != nil {
-		<-b.slots
+		b.mu.Lock()
+		b.used -= slots
+		b.admit()
+		b.mu.Unlock()
 	}
 }
 
-func (r Runner) limits() (memory, heap string) {
-	if r.Budget == nil {
-		return "1024m", "768m"
+// admit runs with mu held.
+func (b *Budget) admit() {
+	for len(b.waiters) > 0 {
+		w := b.waiters[0]
+		if w.slots > b.Parallel-b.used {
+			return
+		}
+		b.used += w.slots
+		b.waiters = slices.Delete(b.waiters, 0, 1)
+		close(w.ready)
 	}
-	return fmt.Sprintf("%dm", r.Budget.MemoryBytes/mib), fmt.Sprintf("%dm", r.Budget.HeapBytes/mib)
+}
+
+func (b *Budget) newCheck(name string) int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	i := len(b.checks)
+	if b.checkCounts == nil {
+		b.checkCounts = make(map[string]int)
+	}
+	b.checkCounts[name]++
+	b.checks = append(b.checks, checkHistory{identity: fmt.Sprintf("%s/%d", name, b.checkCounts[name])})
+	return i
+}
+
+func (b *Budget) record(check int, a Attempt) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a.Check = b.checks[check].identity
+	b.checks[check].attempts = append(b.checks[check].attempts, a)
+}
+
+// Attempts returns a detached history grouped by check, with ordered attempts.
+// The identity distinguishes separate batches even when their modules match.
+func (b *Budget) Attempts() []Attempt {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []Attempt
+	for _, check := range b.checks {
+		out = append(out, check.attempts...)
+	}
+	slices.SortFunc(out, func(a, b Attempt) int {
+		if a.Check != b.Check {
+			return strings.Compare(a.Check, b.Check)
+		}
+		return a.Attempt - b.Attempt
+	})
+	return out
+}
+
+func (r Runner) allocation() (memory, heap uint64) {
+	if r.Budget == nil {
+		return 1024 * mib, 768 * mib
+	}
+	return r.Budget.MemoryBytes, r.Budget.HeapBytes
+}
+
+func (r Runner) limits() (memory, heap string) {
+	m, h := r.allocation()
+	return fmt.Sprintf("%dm", m/mib), fmt.Sprintf("%dm", h/mib)
 }

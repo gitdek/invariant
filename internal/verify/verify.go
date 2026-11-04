@@ -93,6 +93,8 @@ type Report struct {
 	Assurance string    `json:"assurance"`
 	Build     Build     `json:"build"`
 	Toolchain Toolchain `json:"toolchain"`
+	// TLCAttempts is operational history, excluded from the evidence fingerprint.
+	TLCAttempts []tlc.Attempt `json:"tlc_attempts,omitempty"`
 	// Agent names the coding agent that wrote the code, and nothing else
 	// about it (#179): the one the project's manifest records, or the one
 	// that built it, where synthesis or the factory knows it. The gate
@@ -375,7 +377,8 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			return nil, err
 		}
 	}
-	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget}
+	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget, CheckRoot: work}
+	defer func() { r.TLCAttempts = budget.Attempts() }()
 	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}
 	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
@@ -787,11 +790,12 @@ func agree(d Design, e Exploration) Agreement {
 // results, file selection and verifier pins. Component reference sets are
 // canonicalized on a detached copy; invocation arguments, observations and
 // diagnostics stay ordered.
-// It leaves out timestamps, the build output and its test timings, the whole
-// version of the host's Go toolchain, where traces were written and the coding
+// It leaves out TLC resource history, timestamps, build output and test timings,
+// the whole version of the host's Go toolchain, where traces were written and the coding
 // agent that wrote the code, so a local run and a CI run of the same commit
 // have the same fingerprint.
 func Fingerprint(r Report) string {
+	r.TLCAttempts = nil
 	if r.Application != nil {
 		r.Application = portablePythonApplication(r.Application)
 	}

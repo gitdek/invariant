@@ -110,14 +110,35 @@ func Feedback(r *Report) string {
 	}
 	if len(failed) == 0 && r.ModelOnly {
 		return fmt.Sprintf("The model checks out. TLC explored %d states (depth %d) and found no invariant violated and no deadlock, "+
-			"every witness was reached,%s and every known bug was caught.", d.DistinctStates, d.Depth, properties)
+			"every witness was reached,%s and every known bug was caught.", d.DistinctStates, d.Depth, properties) + tlcAttemptsFeedback(r.TLCAttempts)
 	}
 	if len(failed) == 0 {
 		return fmt.Sprintf("The gate passed. Every check passed: TLC explored %d states (depth %d), every witness was reached,%s "+
 			"every known bug was caught, the code-level evidence holds (%s), and the build is green.",
-			d.DistinctStates, d.Depth, properties, r.Assurance)
+			d.DistinctStates, d.Depth, properties, r.Assurance) + tlcAttemptsFeedback(r.TLCAttempts)
 	}
-	return fmt.Sprintf("The gate failed. What to fix: %s.\n%s", strings.Join(failed, "; "), b.String())
+	return fmt.Sprintf("The gate failed. What to fix: %s.\n%s", strings.Join(failed, "; "), b.String()) + tlcAttemptsFeedback(r.TLCAttempts)
+}
+
+func tlcAttemptsFeedback(attempts []tlc.Attempt) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nTLC resource history (excluded from the evidence fingerprint):\n")
+	for _, a := range attempts {
+		kind := "attempt"
+		if a.Attempt > 1 {
+			kind = "retry"
+		}
+		fmt.Fprintf(&b, "- %s, module %s, %s %d: memory %d MiB, heap %d MiB; %s",
+			a.Check, a.Module, kind, a.Attempt, a.MemoryBytes/(1<<20), a.HeapBytes/(1<<20), a.Outcome)
+		if a.Message != "" {
+			fmt.Fprintf(&b, ": %s", a.Message)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // Failed names the checks a report failed.
