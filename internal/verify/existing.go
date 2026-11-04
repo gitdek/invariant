@@ -30,29 +30,33 @@ type ExistingTypeScript struct{}
 
 func (ExistingTypeScript) Verify(context.Context, string) (*Code, error) { return nil, nil }
 
-func (ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+func (t ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
+	return recordingBytes(t.checkRecording(ctx, p))
+}
+
+func (ExistingTypeScript) checkRecording(ctx context.Context, p *project.Project) (Build, recordedEvidence, error) {
 	root, rel, err := PackageRoot(p.Dir)
 	if err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	image, _, err := toolchain.DepsImage(ctx, root)
 	if err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	work, err := os.MkdirTemp("", "invariant-existing-")
 	if err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	defer os.RemoveAll(work)
 	src, out := filepath.Join(work, "src"), filepath.Join(work, "out")
 	if err := StagePackage(root, p.Manifest.Existing, src); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	if err := copyTree(p.Dir, filepath.Join(src, filepath.FromSlash(rel))); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	driver := path.Join(rel, p.Manifest.Conformance)
 
@@ -61,7 +65,7 @@ func (ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build,
 	b := Build{Passed: true}
 	reached, err := importedPaths(src, driver)
 	if err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	var missing []string
 	for _, e := range codeEntries(src, p.Manifest.Existing) {
@@ -79,7 +83,7 @@ func (ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build,
 	}
 	if !b.Passed {
 		b.Output = "The conformance driver doesn't import " + strings.Join(missing, ", ") + ", so its runs say nothing about that code."
-		return b, Evidence{Message: "the driver doesn't run all the code it checks"}, nil
+		return b, recordedEvidence{Evidence: Evidence{Message: "the driver doesn't run all the code it checks"}}, nil
 	}
 
 	var buf bytes.Buffer
@@ -94,18 +98,25 @@ func (ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Build,
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			return b, Evidence{}, fmt.Errorf("running the sandbox: %w", err)
+			return b, recordedEvidence{}, fmt.Errorf("running the sandbox: %w", err)
 		}
 	}
 	sections, err := splitMarkers(buf.String(), 1)
 	if err != nil {
-		return b, Evidence{}, err
+		return b, recordedEvidence{}, err
 	}
-	traces, readErr := os.ReadFile(filepath.Join(out, "traces.json"))
-	if sections[0].code != 0 || readErr != nil {
-		return b, Evidence{Message: "the conformance driver failed:\n" + lastLines(sections[0].out, 30)}, nil
+	failed := recordedEvidence{Evidence: Evidence{Message: "the conformance driver failed:\n" + lastLines(sections[0].out, 30)}}
+	if sections[0].code != 0 {
+		return b, failed, nil
 	}
-	return b, Evidence{Traces: traces}, nil
+	traces, err := takeRecording(ctx, filepath.Join(out, "traces.json"))
+	if err != nil {
+		if ctx.Err() != nil {
+			return b, recordedEvidence{}, ctx.Err()
+		}
+		return b, failed, nil
+	}
+	return b, recordedEvidence{recording: traces}, nil
 }
 
 // PackageRoot finds the package a project's existing code belongs to: the

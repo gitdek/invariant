@@ -255,13 +255,23 @@ var (
 )
 
 func (g Go) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	b, e, traces, err := g.check(ctx, p.Dir, p.CodeDir())
-	return b, Evidence{Exploration: &e, Traces: traces}, err
+	return recordingBytes(g.checkRecording(ctx, p))
+}
+
+func (g Go) checkRecording(ctx context.Context, p *project.Project) (Build, recordedEvidence, error) {
+	b, e, rec, err := g.checkRecordingPackage(ctx, p.Dir, p.CodeDir())
+	return b, recordedEvidence{Evidence: Evidence{Exploration: &e}, recording: rec}, err
 }
 
 // check builds, tests and explores a Go package. An explorer with Try also
 // records every step it tried, which the gate checks against the model.
 func (g Go) check(ctx context.Context, projectDir, pkg string) (Build, Exploration, []byte, error) {
+	b, e, rec, err := g.checkRecordingPackage(ctx, projectDir, pkg)
+	b, evidence, err := recordingBytes(b, recordedEvidence{recording: rec}, err)
+	return b, e, evidence.Traces, err
+}
+
+func (g Go) checkRecordingPackage(ctx context.Context, projectDir, pkg string) (Build, Exploration, *recording, error) {
 	root, err := moduleRoot(projectDir, pkg)
 	if err != nil {
 		return Build{}, Exploration{}, nil, err
@@ -316,8 +326,11 @@ func (g Go) check(ctx context.Context, projectDir, pkg string) (Build, Explorati
 	if err != nil || !tries || !e.OK {
 		return b, e, nil, err
 	}
-	traces, err := os.ReadFile(filepath.Join(out, "traces.json"))
+	traces, err := takeRecording(ctx, filepath.Join(out, "traces.json"))
 	if err != nil {
+		if ctx.Err() != nil {
+			return b, e, nil, ctx.Err()
+		}
 		e = Exploration{Message: "the explorer's attempts weren't written: " + err.Error()}
 		return b, e, nil, nil
 	}
@@ -496,7 +509,11 @@ type TypeScript struct{ Image string }
 func (TypeScript) Verify(context.Context, string) (*Code, error) { return nil, nil }
 
 func (t TypeScript) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, t.Image, p, []string{"node --test"}, `exec 2>&1
+	return recordingBytes(t.checkRecording(ctx, p))
+}
+
+func (t TypeScript) checkRecording(ctx context.Context, p *project.Project) (Build, recordedEvidence, error) {
+	return runConformanceRecording(ctx, t.Image, p, []string{"node --test"}, `exec 2>&1
 cd /src
 node --test ; echo "@@invariant test=$?"
 node "$DRIVER" ; echo "@@invariant conform=$?"
@@ -525,20 +542,28 @@ func (py Python) Check(ctx context.Context, p *project.Project) (Build, Evidence
 	if len(p.Manifest.Existing) > 0 {
 		return checkPythonApplication(ctx, p)
 	}
+	return recordingBytes(py.checkRecording(ctx, p))
+}
+
+func (py Python) checkRecording(ctx context.Context, p *project.Project) (Build, recordedEvidence, error) {
 	if !py.prepared {
 		deps, err := toolchain.PythonDepsImage(ctx, p.Dir)
 		if err != nil {
-			return Build{}, Evidence{}, err
+			return Build{}, recordedEvidence{}, err
 		}
 		if deps != nil {
 			py.Image = deps.Image
 		}
 	}
-	return checkPythonImage(ctx, py.Image, p)
+	return checkPythonImageRecording(ctx, py.Image, p)
 }
 
 func checkPythonImage(ctx context.Context, image string, p *project.Project) (Build, Evidence, error) {
-	return runConformance(ctx, image, p, []string{"compileall", "unittest"}, `exec 2>&1
+	return recordingBytes(checkPythonImageRecording(ctx, image, p))
+}
+
+func checkPythonImageRecording(ctx context.Context, image string, p *project.Project) (Build, recordedEvidence, error) {
+	return runConformanceRecording(ctx, image, p, []string{"compileall", "unittest"}, `exec 2>&1
 cd /src
 /usr/local/bin/python -S -s -P /runtime/invariant_python.py compileall > /dev/null ; echo "@@invariant compile=$?"
 /usr/local/bin/python -S -s -P /runtime/invariant_python.py unittest ; echo "@@invariant test=$?"
@@ -603,31 +628,35 @@ func writePythonLauncher(runtime string) error {
 // driver, in image, on a throwaway copy, with no network and none of the
 // host's environment. The driver writes its runs to $INVARIANT_TRACES.
 func runConformance(ctx context.Context, image string, p *project.Project, steps []string, script string) (Build, Evidence, error) {
+	return recordingBytes(runConformanceRecording(ctx, image, p, steps, script))
+}
+
+func runConformanceRecording(ctx context.Context, image string, p *project.Project, steps []string, script string) (Build, recordedEvidence, error) {
 	work, err := os.MkdirTemp("", "invariant-run-")
 	if err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	defer os.RemoveAll(work)
 	src, out, runtime := filepath.Join(work, "src"), filepath.Join(work, "out"), filepath.Join(work, "runtime")
 	if err := copyTree(p.Dir, src); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	// Python finds the nagini_contracts stand-in first, so proved cores run,
 	// and both languages find Invariant's own harness (D-0085).
 	if err := writeNaginiRuntime(runtime); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	if err := writeHarness(src, runtime, p); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	if err := writePythonLauncher(runtime); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	if err := os.MkdirAll(out, 0o777); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	if err := pulled(ctx, image); err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	var buf bytes.Buffer
 	args := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512"}
@@ -646,12 +675,12 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			return Build{}, Evidence{}, fmt.Errorf("running the sandbox: %w", err)
+			return Build{}, recordedEvidence{}, fmt.Errorf("running the sandbox: %w", err)
 		}
 	}
 	sections, err := splitMarkers(buf.String(), len(steps)+1)
 	if err != nil {
-		return Build{}, Evidence{}, err
+		return Build{}, recordedEvidence{}, err
 	}
 	var b Build
 	var output []string
@@ -664,9 +693,16 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	}
 	b.Output = strings.TrimSpace(strings.Join(output, "\n"))
 	driver := sections[len(steps)]
-	traces, readErr := os.ReadFile(filepath.Join(out, "traces.json"))
-	if driver.code != 0 || readErr != nil {
-		return b, Evidence{Message: "the conformance driver failed:\n" + lastLines(driver.out, 30)}, nil
+	failed := recordedEvidence{Evidence: Evidence{Message: "the conformance driver failed:\n" + lastLines(driver.out, 30)}}
+	if driver.code != 0 {
+		return b, failed, nil
 	}
-	return b, Evidence{Traces: traces}, nil
+	traces, err := takeRecording(ctx, filepath.Join(out, "traces.json"))
+	if err != nil {
+		if ctx.Err() != nil {
+			return b, recordedEvidence{}, ctx.Err()
+		}
+		return b, failed, nil
+	}
+	return b, recordedEvidence{recording: traces}, nil
 }
