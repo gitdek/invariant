@@ -303,7 +303,7 @@ func pythonApplicationHashExisting(root string, existing []string, files []proje
 	return out, nil
 }
 
-func runPythonApplication(ctx context.Context, p *project.Project, outDir string, tc toolchain.Toolchain) (*Report, error) {
+func runPythonApplication(ctx context.Context, p *project.Project, outDir string, tc toolchain.Toolchain, options Options) (*Report, error) {
 	if err := pythonApplicationPreflight(p); err != nil {
 		return nil, err
 	}
@@ -327,7 +327,11 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	}
 	dir, lock := p.Dir, p.Lock
 	p = s.project
-	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false)
+	budget, err := tlcBudget(ctx, options.TLCParallel)
+	if err != nil {
+		return nil, err
+	}
+	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false, options, budget)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -351,7 +355,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	r.Build.Passed = true
-	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
+	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget}
 	raw, err := os.ReadFile(p.ModulePath())
 	if err != nil {
 		return nil, err
@@ -522,12 +526,7 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		return err
 	}
 	timeouts := pythonApplicationLargerTimeouts
-	tctx, cancel := context.WithTimeout(ctx, timeouts.model)
-	res, err := runner.Check(tctx, d, p.ModuleName(), tlc.Config{Specification: p.SpecName(), Constants: larger, Invariants: p.Invariants()})
-	if err == nil && tctx.Err() != nil {
-		err = tctx.Err()
-	}
-	cancel()
+	res, err := runner.CheckWithin(ctx, d, p.ModuleName(), tlc.Config{Specification: p.SpecName(), Constants: larger, Invariants: p.Invariants()}, timeouts.model)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

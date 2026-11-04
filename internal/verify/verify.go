@@ -210,15 +210,15 @@ type Toolchain struct {
 
 // Run verifies the project in dir. When outDir isn't empty, it writes each
 // counterexample to outDir/traces as JSON.
-func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain) (*Report, error) {
-	return gate(ctx, dir, outDir, tc, false)
+func Run(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, options ...Options) (*Report, error) {
+	return gate(ctx, dir, outDir, tc, false, options...)
 }
 
 // RunModel checks the project's model alone: its pins, TLC, the witnesses and
 // the known bugs. The factory runs it on a draft before asking anyone to
 // ratify the draft's statements.
-func RunModel(ctx context.Context, dir string, tc toolchain.Toolchain) (*Report, error) {
-	return gate(ctx, dir, "", tc, true)
+func RunModel(ctx context.Context, dir string, tc toolchain.Toolchain, options ...Options) (*Report, error) {
+	return gate(ctx, dir, "", tc, true, options...)
 }
 
 // ErrComponents rejects explicit code modes without an execution adapter.
@@ -244,8 +244,12 @@ func Check(dir string) error {
 	return nil
 }
 
-func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool) (*Report, error) {
-	r, err := gateSelected(ctx, dir, outDir, tc, model, nil, false)
+func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, options ...Options) (*Report, error) {
+	o, err := gateOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	r, err := gateSelected(ctx, dir, outDir, tc, model, nil, false, o, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -254,14 +258,14 @@ func gate(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model
 
 // The gate retains one admitted immutable image for ordinary and larger runs.
 func gateWithPythonDependencies(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, deps *toolchain.PythonDependencies) (*Report, error) {
-	r, err := gateSelected(ctx, dir, outDir, tc, false, deps, true)
+	r, err := gateSelected(ctx, dir, outDir, tc, false, deps, true, Options{}, nil)
 	if err != nil {
 		return nil, err
 	}
 	return r, nil
 }
 
-func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, deps *toolchain.PythonDependencies, selected bool) (*Report, error) {
+func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, deps *toolchain.PythonDependencies, selected bool, options Options, budget *tlc.Budget) (*Report, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -274,7 +278,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		if len(p.Manifest.TLAPS) > 0 {
 			return nil, ErrTLAPSApplication
 		}
-		return runPythonApplication(ctx, p, outDir, tc)
+		return runPythonApplication(ctx, p, outDir, tc, options)
 	}
 	if !model && p.Manifest.Components != nil {
 		return nil, ErrComponents
@@ -365,7 +369,13 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			r.FileSelection = "git"
 		}
 	}
-	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
+	if budget == nil {
+		budget, err = tlcBudget(ctx, options.TLCParallel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget}
 	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}
 	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
@@ -390,8 +400,8 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 	var evidence Evidence
 
-	// Every check is independent, so they all run at once. Each goroutine
-	// writes only its own part of the report.
+	// Independent checks wait for TLC capacity without cancelling each other.
+	// Each goroutine writes only its own part of the report.
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -594,12 +604,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 				if err != nil {
 					return err
 				}
-				tctx, cancel := context.WithTimeout(ctx, largerTimeout)
-				defer cancel()
-				res, err := runner.Check(tctx, d, p.ModuleName(), tlc.Config{Specification: cfg.Specification, Constants: larger, Invariants: cfg.Invariants})
-				if err == nil && tctx.Err() != nil {
-					err = tctx.Err()
-				}
+				res, err := runner.CheckWithin(ctx, d, p.ModuleName(), tlc.Config{Specification: cfg.Specification, Constants: larger, Invariants: cfg.Invariants}, largerTimeout)
 				if err != nil {
 					mu.Lock()
 					largerError = fmt.Sprintf("TLC didn't finish one size larger within %s: %v", largerTimeout, err)
