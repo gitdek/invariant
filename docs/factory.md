@@ -266,7 +266,7 @@ When the whole step cannot fit one reviewable pull request, the planner asks a f
 
 Already-ratified nested plans remain executable under their original hashes, with no build or pull request of their own. A parent waits until the factory records its child's whole plan as complete under the child's ratified hash; an unfinished or stopped child plan holds its parent. Completion carries upward through nested plans on later polls, opening each step and recording each plan's completion once, including after a watcher restarts. Newly drafted leaves of those existing trees must still be one complete change.
 
-The merger must record #560's new restriction as a refinement of [D-0162](../decisions/journal/D-0162.jsonl), grounded in [D-0105](../decisions/D-0105-factory-takes-every-change.md) and [D-0147](../decisions/journal/D-0147.jsonl); this plumbing build cannot write `decisions/`.
+[D-0328](../decisions/journal/D-0328.jsonl) records #560's restriction, refining [D-0162](../decisions/journal/D-0162.jsonl), grounded in [D-0105](../decisions/D-0105-factory-takes-every-change.md) and [D-0147](../decisions/journal/D-0147.jsonl).
 
 ## Running the factory
 
