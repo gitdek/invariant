@@ -12,6 +12,9 @@ lane with an inactive follow-up **record**. `ChooseFollowup` is enabled only in
 that untouched state. Every ratified invariant, property, witness, known bug,
 and fairness assumption retains its definition.
 
+The amendment is pinned by [the ratification on #445](https://github.com/gitdek/invariant/issues/445#issuecomment-6623656033)
+to proposal `sha256:58e3be24aa3ec6c2c0ef6b1d996dfb5493dc03d4261b53c47c270889f895c0dd`.
+
 A follow-up's source obligation, branch and PR identity persist across draft and
 creation attempts, repairs, holds and reopening. Each operation has a separate
 identity. `FollowControl` computes guarded transitions; `FollowJournal.Save`
@@ -46,6 +49,9 @@ operation identities reject stale watchers and older results.
 agent results, lost responses, CI, external closure/merge/head changes, writer
 requests and watcher crashes. It contains all checking bounds and audit history;
 the core has caller-sized operation storage and a growing snapshot journal.
+`MaxFollowOps` is declared as a constructor parameter in the verification
+manifest. Exhausting that capacity refuses a new authorization without changing
+the journal; it does not renew an allowance or discard an earlier operation.
 The gate checks safety, progress under the existing fairness assumptions,
 reachability of all witnesses, every known bug, exact executable conformance,
 one-size-larger agreement, Gobra contracts, vet and tests. Human holds do not

@@ -324,3 +324,26 @@ func TestFollowJournalRejectsStaleCommitAndCapacity(t *testing.T) {
 		}
 	}
 }
+
+// Check the follow-up safety assertions over every offered environment
+// combination, including interleavings outside the directed regression paths.
+// TLC separately checks the ratified statements and exact model agreement.
+func TestFollowExplore(t *testing.T) {
+	s := followPick(t, Init(), "ChooseFollowup", func(n State) bool { return n.FollowLane })
+	seen := map[State]bool{s: true}
+	layer := []State{s}
+	for len(layer) > 0 {
+		var nextLayer []State
+		for _, s := range layer {
+			checkFollow(t, s)
+			Try(s, func(_ string, _ []any, next State) {
+				if !seen[next] {
+					seen[next] = true
+					nextLayer = append(nextLayer, next)
+				}
+			})
+		}
+		layer = nextLayer
+	}
+	t.Logf("%d follow-up states", len(seen))
+}

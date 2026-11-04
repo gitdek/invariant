@@ -2,5 +2,8 @@
   "name": "watcher crash recovery",
   "module": ".invariant/specs/WatcherRecovery.tla",
   "code": "recovery",
-  "language": "go"
+  "language": "go",
+  "parameters": [
+    "MaxFollowOps"
+  ]
 }
