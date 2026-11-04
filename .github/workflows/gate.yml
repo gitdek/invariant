@@ -123,10 +123,11 @@ jobs:
       - name: Vet and unit tests
         run: |
           go vet ./...
-          # internal/verify's tests take most of the time, so they run in
-          # shards of their own, in invariant/verify-tests (#345). The rest
-          # get the unit-test command's 20 minutes, not go test's ten (#557).
-          go test -timeout 20m $(go list ./... | grep -v '/internal/verify$')
+          # internal/verify's and internal/plumbing's tests take most of the
+          # time, so they run in shards of their own, in invariant/verify-tests
+          # (#345, #570). The rest get the unit-test command's 20 minutes, not
+          # go test's ten (#557).
+          go test -timeout 20m $(go list ./... | grep -v -e '/internal/verify$' -e '/internal/plumbing$')
 
       - name: Build the gate
         run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
@@ -173,7 +174,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['1/2', '2/2']
+        shard: ['1/4', '2/4', '3/4', '4/4']
     steps:
       - uses: actions/checkout@v7
         with:
@@ -188,8 +189,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: internal/verify's tests, shard ${{ matrix.shard }}
-        run: .github/shard-tests.sh "${{ matrix.shard }}" -timeout 20m -- ./internal/verify/
+      - name: internal/verify's and internal/plumbing's tests, shard ${{ matrix.shard }}
+        run: .github/shard-tests.sh "${{ matrix.shard }}" -timeout 20m -- ./internal/verify/ ./internal/plumbing/
 
   projects:
     # Every project in the repository, found rather than listed, so a factory
