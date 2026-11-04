@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,8 +17,8 @@ import (
 )
 
 // RepositoryAcceptanceAdapter is selected by the host, never by a candidate.
-// Select validates the captured invocation form and resolves one exact test.
-// There are no default adapters; framework discovery belongs to this boundary.
+// Select validates the captured invocation form and narrows its package scope.
+// There are no default adapters; discovery is an optional second boundary.
 type RepositoryAcceptanceAdapter interface {
 	Select(context.Context, repository.Part, Test) (RepositoryAcceptanceSelection, error)
 }
@@ -25,6 +26,40 @@ type RepositoryAcceptanceAdapter interface {
 type RepositoryAcceptanceSelection struct {
 	Package string
 	Argv    []string
+}
+
+// RepositoryAcceptanceDiscoverer confirms a declaration in the prepared part.
+// Discovery may replace only the binding's package, and is not runtime evidence.
+type RepositoryAcceptanceDiscoverer interface {
+	Discover(context.Context, repository.Part, RepositoryAcceptanceInvocation, RepositoryCheckEnvironment) (RepositoryAcceptanceDiscovery, error)
+}
+
+type RepositoryAcceptanceDiscovery struct {
+	Binding  RepositoryAcceptanceBinding
+	TestName string
+}
+
+// RepositoryAcceptanceFileEnvironment reads clean part-relative regular files
+// with safe ancestors from the same prepared environment that runs commands.
+type RepositoryAcceptanceFileEnvironment interface {
+	RepositoryCheckEnvironment
+	ReadFile(context.Context, string) ([]byte, error)
+}
+
+type RepositoryAcceptanceDiscoveryError struct {
+	Kind   string // refused or setup; neither is a completed test failure
+	Reason string
+	Err    error
+}
+
+func (e *RepositoryAcceptanceDiscoveryError) Error() string { return e.Kind + ": " + e.Reason }
+func (e *RepositoryAcceptanceDiscoveryError) Unwrap() error { return e.Err }
+
+func repositoryAcceptancePath(name string) bool {
+	if !nativeText(name) || strings.Contains(name, "\\") || path.IsAbs(name) || path.Clean(name) != name || name == "." || name == ".." || strings.HasPrefix(name, "../") {
+		return false
+	}
+	return !slices.Contains(strings.Split(name, "/"), ".git")
 }
 
 // RepositoryAcceptanceEnvironment supplies evidence separately from diagnostics.

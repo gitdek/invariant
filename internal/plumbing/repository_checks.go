@@ -186,7 +186,9 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			return result, nil
 		}
 		for i, selection := range selections {
-			result.TestResults[i].Package = selection.Package
+			if _, discovers := s.Repository.Adapters[plan.Tests[i].Framework].(RepositoryAcceptanceDiscoverer); !discovers {
+				result.TestResults[i].Package = selection.Package
+			}
 			result.TestResults[i].Reason = "acceptance invocation has not started"
 		}
 	}
@@ -310,15 +312,41 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			if !plan.Native() || test.Part != part.Name {
 				continue
 			}
+			invocation := repositoryInvocation(plan, test, selections[j])
+			if adapter, ok := s.Repository.Adapters[test.Framework].(RepositoryAcceptanceDiscoverer); ok {
+				startTests()
+				expected := invocation.Binding
+				input := invocation
+				input.Argv = slices.Clone(invocation.Argv)
+				discovery, err := adapter.Discover(execution, part, input, environment)
+				err = errors.Join(err, execution.Err())
+				if err == nil {
+					expected.Package = discovery.Binding.Package
+					if discovery.Binding != expected || !nativeText(expected.Package) || discovery.TestName != strings.Split(test.Selector, "/")[0] {
+						err = &RepositoryAcceptanceDiscoveryError{Kind: "refused", Reason: "discovery does not match this invocation, identity, source and configuration"}
+					}
+				}
+				if err != nil {
+					record := &result.TestResults[j]
+					record.Package, record.Kind, record.Status, record.Reason = "", "setup", "refused", err.Error()
+					var detail *RepositoryAcceptanceDiscoveryError
+					if errors.As(err, &detail) && detail.Kind == "refused" {
+						record.Kind = "test"
+					}
+					return result, fmt.Errorf("discover %s: %w", test.Identity(), err)
+				}
+				invocation.Binding = discovery.Binding
+				result.TestResults[j].Package = discovery.Binding.Package
+			}
 			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)
 			if !ok {
+				result.TestResults[j].Reason = "prepared environment has no runtime acceptance evidence collector"
 				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
 			}
 			startTests()
 			if err := execution.Err(); err != nil {
 				return result, err
 			}
-			invocation := repositoryInvocation(plan, test, selections[j])
 			expected := invocation.Binding
 			evidence, out, err := acceptance.RunAcceptance(execution, invocation)
 			result.Output += fmt.Sprintf("accept %s:\n%s\n", test.Identity(), out)
