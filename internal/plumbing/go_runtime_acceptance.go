@@ -53,7 +53,7 @@ func CollectGoAcceptance(expected RepositoryAcceptanceInvocation, stream GoAccep
 			running = len(evidence.Records)
 			evidence.Records = append(evidence.Records, RepositoryAcceptanceRecord{Binding: b, Kind: "test", Status: "running", Reason: "Go test " + b.Selector + " started"})
 		}
-		if test.terminal != "" {
+		if test.terminal != "" && event.Action != "output" {
 			status := map[string]string{"pass": "passed", "fail": "failed", "skip": "skipped"}[test.terminal]
 			reason := "Go test " + b.Selector + " " + status
 			if test.reason.Len() > 0 {
@@ -151,12 +151,28 @@ func goAcceptanceEvent(tests map[string]*goTestLifecycle, root string, event GoF
 		}
 		return test, nil
 	}
-	if test == nil || test.terminal != "" {
+	if test == nil {
 		return refuse("event has no unfinished start")
 	}
 	parent := ""
 	if test.parent != nil {
 		parent = test.parent.name
+	}
+	if test.terminal != "" {
+		// testing writes a finished subtest's late output, as through a saved
+		// Output writer, to its nearest unfinished ancestor, and panics when
+		// none is left, so only that output may follow a terminal.
+		live := test.parent
+		for live != nil && live.terminal != "" {
+			live = live.parent
+		}
+		if event.Action != "output" || live == nil || parent != event.Parent {
+			return refuse("event has no unfinished start")
+		}
+		for at := live; at != nil; at = at.parent {
+			at.reason.WriteString(event.Text)
+		}
+		return test, nil
 	}
 	if parent != event.Parent {
 		return refuse("actual parent changed")
@@ -165,6 +181,11 @@ func goAcceptanceEvent(tests map[string]*goTestLifecycle, root string, event GoF
 	case "pause":
 		if test.parallel || event.Text != "" {
 			return refuse("duplicate or malformed pause")
+		}
+		// A test calls Parallel inside its function, and its function's return
+		// is what releases its parallel children, so it can't pause after that.
+		if test.barrierReleased {
+			return refuse("pause after its parallel children were released")
 		}
 		test.parallel, test.paused = true, true
 		if test.parent != nil {
