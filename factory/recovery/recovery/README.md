@@ -12,7 +12,7 @@ lane with an inactive follow-up **record**. `ChooseFollowup` is enabled only in
 that untouched state. Every ratified invariant, property, witness, known bug,
 and fairness assumption retains its definition.
 
-The amendment is pinned by [the ratification on #445](https://github.com/gitdek/invariant/issues/445#issuecomment-6623656033)
+The amendment is pinned by [the ratification on #445](https://github.com/gitdek/invariant/issues/445#issuecomment-6629773797)
 to proposal `sha256:58e3be24aa3ec6c2c0ef6b1d996dfb5493dc03d4261b53c47c270889f895c0dd`.
 
 A follow-up's source obligation, branch and PR identity persist across draft and
@@ -22,6 +22,9 @@ retains the accepted snapshot and its effect ledger before an adapter dispatches
 work. The caller serializes the transaction under the repository lease and
 passes its current fence in `FollowSession`. This amendment defines recovery
 rules; later plumbing supplies the real durable records and remote effects.
+Journal extension copies the retained prefix into a fresh slice; its Gobra
+contract proves that earlier snapshots keep their contents and that exactly
+one new snapshot is appended. A rejected save leaves the journal unchanged.
 
 A dispatched effect stays pending until its durable result or a current GitHub
 observation reconciles it. A stopped run is not restarted. Failed drafting or
