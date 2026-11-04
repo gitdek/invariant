@@ -139,6 +139,41 @@ func graphFingerprint(t graphToken) bool {
 	return err == nil
 }
 
+// rankGroup reads one {rank = same; ID; ...} layout group, after its opening
+// brace. It adds nothing to the graph, but every ID must name a state the
+// cluster has already listed, as TLC writes the groups after its states.
+func (p *graphParser) rankGroup() error {
+	for _, want := range []string{"rank", "=", "same", ";"} {
+		if err := p.expect(want); err != nil {
+			return err
+		}
+	}
+	named := 0
+	for {
+		t, err := p.next()
+		if err != nil {
+			return err
+		}
+		switch {
+		case t.kind == "}":
+			if named == 0 {
+				return p.invalid("empty rank group")
+			}
+			return nil
+		case graphFingerprint(t):
+			if !p.states[t.text] {
+				return p.invalid("rank group names an unlisted state " + t.text)
+			}
+			if err := p.expect(";"); err != nil {
+				return err
+			}
+			named++
+		default:
+			return p.invalid("expected a state in a rank group")
+		}
+	}
+}
+
 func (p *graphParser) body(inCluster bool) error {
 	for {
 		t, err := p.next()
@@ -149,6 +184,16 @@ func (p *graphParser) body(inCluster bool) error {
 		case "}":
 			return nil
 		case ";":
+			continue
+		case "{":
+			// TLC ends its cluster with layout groups, one for each depth of
+			// its search, such as {rank = same; -6505866907456613820;}.
+			if !inCluster {
+				return p.invalid("unexpected rank group")
+			}
+			if err := p.rankGroup(); err != nil {
+				return err
+			}
 			continue
 		case "word":
 		default:
