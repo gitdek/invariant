@@ -267,8 +267,8 @@ func gateWithPythonDependencies(ctx context.Context, dir, outDir string, tc tool
 	return r, nil
 }
 
-func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, deps *toolchain.PythonDependencies, selected bool, options Options, budget *tlc.Budget) (*Report, error) {
-	dir, err := filepath.Abs(dir)
+func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchain, model bool, deps *toolchain.PythonDependencies, selected bool, options Options, budget *tlc.Budget) (report *Report, err error) {
+	dir, err = filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -401,7 +401,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	if len(properties) > 0 && specFairness(src, p) {
 		unfairSpec = "the spec states fairness itself. State it in fairness statements instead, so every check uses it and the gate can check it"
 	}
-	var evidence Evidence
+	var evidence recordedEvidence
 
 	// Independent checks wait for TLC capacity without cancelling each other.
 	// Each goroutine writes only its own part of the report.
@@ -564,7 +564,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			return err
 		})
 		spawn(func() (err error) {
-			r.Build, evidence, err = lang.Check(ctx, p)
+			r.Build, evidence, err = checkRecorded(ctx, lang, p)
 			return err
 		})
 	}
@@ -638,6 +638,10 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 
 	wg.Wait()
+	defer func() { err = errors.Join(err, evidence.recording.close()) }()
+	if ctx.Err() != nil {
+		return r, ctx.Err()
+	}
 	if firstErr != nil {
 		return r, firstErr
 	}
@@ -653,9 +657,9 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 	// A Go explorer with Try records its attempts as it explores, and they're
 	// checked as a driver's are (D-0090).
-	if evidence.Exploration == nil || evidence.Traces != nil {
+	if evidence.Exploration == nil || evidence.recording != nil || evidence.Traces != nil {
 		c := conformance.Result{ModelStates: r.Design.DistinctStates, Message: evidence.Message}
-		if evidence.Traces != nil {
+		if evidence.recording != nil || evidence.Traces != nil {
 			d, err := stage(work, "conformance", p, src, "")
 			if err != nil {
 				return nil, err
@@ -669,7 +673,12 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 					model.Problem = err.Error()
 				}
 			}
-			if c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, evidence.Traces, model); err != nil {
+			if evidence.recording != nil {
+				c, err = evidence.recording.check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, model)
+			} else {
+				c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, evidence.Traces, model)
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
