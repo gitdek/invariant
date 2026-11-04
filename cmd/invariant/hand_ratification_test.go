@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -287,9 +289,8 @@ func TestARatificationByHandNeedsADecisionAPersonRatified(t *testing.T) {
 	}
 }
 
-// The repository's own locks ratified by hand, factory/protocol's and
-// factory/recovery's since #271, pass the check as they are: each names a
-// decision @gitdek ratified for exactly its proposal (D-0208).
+// Every lock the repository tracks as ratified by hand must name a decision
+// @gitdek ratified for exactly its proposal (D-0208). A checkout may have none.
 func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -302,8 +303,7 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 		t.Skip(root + " isn't a git checkout, so the ratification check can't find its journal")
 	}
 	// Every project whose lock was ratified by hand, as git tracks them: a
-	// lock ratified on its issue, as #428 ratified factory/protocol's, is
-	// another test's to check (#440).
+	// lock ratified on its issue is another test's to check (#440).
 	tracked, err := exec.Command("git", "-C", root, "ls-files", "*/.invariant/invariant.json").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +326,89 @@ func TestTheRepositorysLocksRatifiedByHandHold(t *testing.T) {
 		}
 	}
 	if checked == 0 {
-		t.Fatal("the repository has no lock ratified by hand to check")
+		t.Log("the repository has no lock ratified by hand to check")
+	}
+}
+
+// Exercise the repository check in a checkout of its own, so it still
+// checks a hand ratification after the last real project is amended.
+func TestTheRepositorysLocksRatifiedByHandInAGitFixture(t *testing.T) {
+	dir, repo, store := handProject(t, "D-0001")
+	repo.Name = "invariant"
+	decide(t, store, repo, "proposed", "agent")
+	if err := store.RatifyProposal(repo, "D-0001", "@gitdek", proposalOf(t, dir)); err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GIT_") {
+			env = append(env, value)
+		}
+	}
+	env = append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CEILING_DIRECTORIES="+filepath.Dir(repo.Dir))
+	git := func(t *testing.T, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo.Dir}, args...)...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git(t, "remote", "set-url", "origin", "https://github.com/gitdek/invariant.git")
+	work := filepath.Join(repo.Dir, "cmd", "invariant")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name, want string
+		fails      bool
+		change     func(t *testing.T)
+	}{
+		{"no tracked locks", "no lock ratified by hand", false, func(t *testing.T) {}},
+		{"ratified for its proposal", "", false, func(t *testing.T) {
+			git(t, "add", "--", "factory/demo")
+		}},
+		{"edited after ratification", "isn't what @gitdek ratified", true, func(t *testing.T) {
+			editLock(t, dir)
+		}},
+		{"tracked lock missing", "ratified.lock", true, func(t *testing.T) {
+			if err := os.Remove(filepath.Join(dir, ".invariant", "ratified.lock")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"enumeration fails", "exit status", true, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(repo.Dir, ".git", "index"), []byte("invalid index"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		c.change(t)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		const target = "TestTheRepositorysLocksRatifiedByHandHold"
+		cmd := exec.CommandContext(ctx, exe, "-test.run=^"+target+"$", "-test.v", "-test.count=1", "-test.timeout=45s")
+		cmd.Dir, cmd.Env = work, env
+		out, err := cmd.CombinedOutput()
+		timedOut := ctx.Err()
+		cancel()
+		if timedOut != nil {
+			t.Fatalf("%s: repository check did not finish: %v\n%s", c.name, timedOut, out)
+		}
+		if c.fails {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), "--- FAIL: "+target+" ") {
+				t.Fatalf("%s: repository check should fail: %v\n%s", c.name, err, out)
+			}
+		} else if err != nil || !strings.Contains(string(out), "--- PASS: "+target+" ") {
+			t.Fatalf("%s: repository check should pass: %v\n%s", c.name, err, out)
+		}
+		if !strings.Contains(string(out), c.want) {
+			t.Errorf("%s: repository check didn't say %q:\n%s", c.name, c.want, out)
+		}
 	}
 }
 
