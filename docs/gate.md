@@ -28,7 +28,7 @@ Full, model-only and existing-Python gate JSON records every budgeted check atte
 
 This policy builds on the pinned runner ([D-0016](../decisions/journal/D-0016.jsonl)), gate-owned configurations ([D-0017](../decisions/journal/D-0017.jsonl)), conformance batches ([D-0047](../decisions/journal/D-0047.jsonl)), the larger check ([D-0070](../decisions/journal/D-0070.jsonl)), cleanup ([D-0111](../decisions/journal/D-0111.jsonl)) and stall retries ([D-0306](../decisions/journal/D-0306.jsonl)). [D-0315](../decisions/journal/D-0315.jsonl) records the policy.
 
-The merger must record #540's extension of D-0315 and D-0306, together with the [modeled gate timeout rule](factory.md#plumbing-builds) grounded in [D-0173](../decisions/journal/D-0173.jsonl). The plumbing build cannot write `decisions/`.
+[D-0322](../decisions/journal/D-0322.jsonl) records the memory retry and its reporting, together with the [modeled gate timeout rule](factory.md#plumbing-builds), extending [D-0315](../decisions/journal/D-0315.jsonl) and [D-0306](../decisions/journal/D-0306.jsonl).
 
 ## Silent TLC checks
 
