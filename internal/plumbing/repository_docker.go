@@ -1,9 +1,12 @@
 package plumbing
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"path"
 	"slices"
@@ -80,6 +83,63 @@ func (e *dockerRepositoryChecks) Run(ctx context.Context, argv []string) ([]byte
 	args = append(args, "/bin/sh", "-c", "exec \"$@\"", "invariant-check")
 	args = append(args, argv...)
 	return dependencyDocker(ctx, args...)
+}
+
+// The guard receives paths only as positional arguments. Docker cp without -L
+// retains a leaf link as a link; its archive is checked independently below.
+const repositorySourceGuard = `set -eu
+file=$1
+parent=${file%/*}
+while [ "$parent" != / ]; do
+  [ ! -L "$parent" ] && [ -d "$parent" ] || exit 1
+  parent=${parent%/*}
+  [ -n "$parent" ] || parent=/
+done
+[ ! -L "$file" ] && [ -f "$file" ] || exit 1
+[ "$(stat -c %h -- "$file")" = 1 ]
+`
+
+func (e *dockerRepositoryChecks) ReadFile(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if e.closed {
+		return nil, errors.New("repository check environment is closed")
+	}
+	if !repositoryAcceptancePath(name) {
+		return nil, fmt.Errorf("acceptance source must be a clean part-relative path: %q", name)
+	}
+	file := path.Join(dependencyWork, e.request.Directory, name)
+	guard := []string{"/bin/sh", "-c", repositorySourceGuard, "invariant-source", file}
+	if _, err := e.Run(ctx, guard); err != nil {
+		return nil, fmt.Errorf("acceptance source has unsafe ancestors or is not regular: %w", err)
+	}
+	out, err := dependencyDocker(ctx, "cp", e.request.Token+":"+file, "-")
+	if err != nil {
+		return nil, err
+	}
+	archive := tar.NewReader(bytes.NewReader(out))
+	header, err := archive.Next()
+	if err != nil {
+		return nil, fmt.Errorf("read acceptance source archive: %w", err)
+	}
+	if header.Name != path.Base(name) || header.Typeflag != tar.TypeReg || header.Linkname != "" {
+		return nil, errors.New("acceptance source archive must contain the requested regular file")
+	}
+	data, err := io.ReadAll(archive)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := archive.Next(); err != io.EOF {
+		return nil, errors.New("acceptance source archive contains extra or malformed entries")
+	}
+	if _, err := e.Run(ctx, guard); err != nil {
+		return nil, fmt.Errorf("acceptance source changed while reading: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (e *dockerRepositoryChecks) Close(ctx context.Context) error {
