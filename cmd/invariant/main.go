@@ -121,7 +121,12 @@ func main() {
 func verifyCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	out := fs.String("out", "", "write receipt.md, receipt.json and traces/ to this directory")
+	tlcParallel := fs.Int("tlc-parallel", 0, "lower the automatic TLC concurrency limit (0 selects automatically from Docker CPU and memory)")
 	fs.Parse(args)
+	if *tlcParallel < 0 {
+		fmt.Fprintln(os.Stderr, "invariant: -tlc-parallel must not be negative")
+		return 2
+	}
 	if fs.NArg() != 1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -137,7 +142,7 @@ func verifyCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	r, err := verify.Run(ctx, fs.Arg(0), *out, tc)
+	r, err := verify.Run(ctx, fs.Arg(0), *out, tc, verify.Options{TLCParallel: *tlcParallel})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
