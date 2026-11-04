@@ -22,8 +22,10 @@ import (
 // another watcher moved the ref first, the push fails. Git checks that on
 // the server, under the ref's lock.
 //
-// The holder renews it on every poll, agent runs included, and checks that
-// it still holds it just before each effect. It stops acting leaseSkew
+// The holder checks it on every poll, agent runs included, renews it once
+// half has gone, and checks that it still holds it just before each effect.
+// Failed reads and pushes other than a ref-moved refusal keep only the
+// last confirmed lease; they never extend it. It stops acting leaseSkew
 // before its lease runs out, by its own clock, and other watchers wait until
 // leaseSkew after, by theirs, so clocks that disagree by less than that
 // can't let two act at once. Each of its running steps checks for itself, so
@@ -174,7 +176,6 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	now := f.now()
 	sha, rec, err := f.Repo.Lease(ctx)
 	if err != nil {
-		f.lease.until = time.Time{}
 		return false, err
 	}
 	// A lease that says what this watcher last tried to push, when it never
@@ -201,11 +202,11 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	next := LeaseRecord{Holder: f.Holder, Until: now.Add(f.LeaseFor)}
 	pushed, err := f.Repo.PushLease(ctx, sha, next)
 	if err != nil {
-		f.lease.until = time.Time{}
 		// A push refused as moved never landed, but one it tried before,
 		// whose answer it lost, may have landed since its last read and
 		// moved the lease, so it still remembers that one (D-0245).
 		if errors.Is(err, ErrLeaseMoved) {
+			f.lease.until = time.Time{}
 			return false, nil
 		}
 		f.lease.tried = &triedLease{rec: next, takeover: sha != f.lease.sha}
