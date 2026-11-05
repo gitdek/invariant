@@ -172,4 +172,4 @@ This work rests on [D-0016](../decisions/journal/D-0016.jsonl), [D-0049](../deci
 
 [D-0343](../decisions/journal/D-0343.jsonl) records #586's JSON-view and rule-evidence policy, refining [D-0335](../decisions/journal/D-0335.jsonl).
 
-Proposal identity and amendments also rest on [D-0034](../decisions/journal/D-0034.jsonl) and [D-0045](../decisions/journal/D-0045.jsonl). The merger of #603 records the new proposal-view, artifact-binding and publication policy, including the nonblocking size limitation; this plumbing build cannot write the decision journal.
+Proposal identity and amendments also rest on [D-0034](../decisions/journal/D-0034.jsonl) and [D-0045](../decisions/journal/D-0045.jsonl). [D-0345](../decisions/journal/D-0345.jsonl) records #603's proposal-view, artifact-binding and publication policy, including the nonblocking size limitation, refining [D-0343](../decisions/journal/D-0343.jsonl).
