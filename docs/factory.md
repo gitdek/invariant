@@ -50,7 +50,7 @@ The real-image budget observer also checks cgroup-v2 `cpu.max` against this sett
 
 ### CPU comparison and merger evidence
 
-**Merger work, required before moving on:** record the new CPU policy decision under [D-0105](../decisions/D-0105-factory-takes-every-change.md) and [D-0122](../decisions/journal/D-0122.jsonl), then add its citation to SPEC. Preserve the resource, cleanup and budget decisions [D-0111](../decisions/journal/D-0111.jsonl), [D-0281](../decisions/journal/D-0281.jsonl), [D-0290](../decisions/journal/D-0290.jsonl), [D-0303](../decisions/journal/D-0303.jsonl), [D-0313](../decisions/journal/D-0313.jsonl) and [D-0315](../decisions/journal/D-0315.jsonl).
+[D-0350](../decisions/journal/D-0350.jsonl) records the CPU policy, under [D-0105](../decisions/D-0105-factory-takes-every-change.md) and [D-0122](../decisions/journal/D-0122.jsonl). It preserves the resource, cleanup and budget decisions [D-0111](../decisions/journal/D-0111.jsonl), [D-0281](../decisions/journal/D-0281.jsonl), [D-0290](../decisions/journal/D-0290.jsonl), [D-0303](../decisions/journal/D-0303.jsonl), [D-0313](../decisions/journal/D-0313.jsonl) and [D-0315](../decisions/journal/D-0315.jsonl).
 
 No Docker/network performance comparison was available in the offline #622 build. Its exported workspace has no Git metadata, so the exact uncapped base and candidate commit IDs must be filled from the PR before measurement. The candidate implements proposal `sha256:91179cd382e8e4cbd7b0978815faa26203d40a94670da8b36a99bb25b43a2ed3`. The effect on [#599](https://github.com/gitdek/invariant/issues/599)'s two-run and three-run budget check, representative plan checks and complete plumbing builds is **unmeasured**, not a pass or a speedup claim.
 
@@ -84,7 +84,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 
 Time that command externally and preserve its response and log; an MCP error is a failed check even if the server exits normally. Run once with a fresh cache and again with that cache reused, using fresh matching caches for the other revision. Unset the setting for the uncapped binary and set it to `4` for the candidate. For complete builds, replay the same ratified ordinary and verify-touching plans through the factory on an owner-approved fixture repository with matching initial state. Record the exact watcher command and issue/plan hashes, backend/model/effort, `-parallel`, `-check-parallel`, time allowance and every build/check/review transcript. Report total wall time separately from check execution, agent execution, check queue waits and excluded account waits; overlapping work must not be added as wall time. Repeat the pair with the same concurrency, and report every failure or timeout rather than only successful samples. Complete-build timings cannot be inferred from the standalone check command.
 
-The paired measurements and the real-image orphan-reaping check above remain merger work. Affected real Python and TLAPS suites remain required PR CI checks under [D-0291](../decisions/journal/D-0291.jsonl).
+The real-image orphan-reaping check passed on the candidate, `dac27a8`, on 2026-11-05. Its real `docker run` carried `--cpus 4` by default and `--cpus 2.5` with the setting at `2.5`. The paired measurements remain merger work. Affected real Python and TLAPS suites remain required PR CI checks under [D-0291](../decisions/journal/D-0291.jsonl).
 
 ## Repository check contract
 
