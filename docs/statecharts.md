@@ -220,4 +220,4 @@ Proposal identity and amendments also rest on [D-0034](../decisions/journal/D-00
 
 Standalone SVG implements #608's ratified plan on the graph and reader contracts in D-0335 and D-0343, under D-0105, D-0122 and D-0294. [D-0347](../decisions/journal/D-0347.jsonl) records the native-rendering decision, refining [D-0343](../decisions/journal/D-0343.jsonl).
 
-The reachability layout implements #613's ratified plan on D-0347 and D-0343, with documentation maintained under D-0122 and D-0294. The merger records the layout choice as a follow-up decision; the plumbing build cannot write `decisions/`.
+The reachability layout implements #613's ratified plan on D-0347 and D-0343, with documentation maintained under D-0122 and D-0294. [D-0349](../decisions/journal/D-0349.jsonl) records the layout choice, refining [D-0347](../decisions/journal/D-0347.jsonl).
