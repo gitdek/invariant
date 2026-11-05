@@ -57,7 +57,7 @@ This issue asks the factory to check code that already exists, without changing 
 %s%s
 # What to write
 
-Write two files in the current directory.
+Write three files in the current directory.
 
 1. **`+"`<Module>.tla`"+`**: one TLA+ module, named in CamelCase after what it models. For example, `+"`BoundedBuffer.tla`"+` holds `+"`---- MODULE BoundedBuffer ----`"+`. In it:
    - `+"`CONSTANTS`"+` for the sizes and sets the model is checked with, and `+"`VARIABLES`"+` for the state.
@@ -66,8 +66,19 @@ Write two files in the current directory.
    - A draft model: `+"`Init`"+`, one operator per action, and `+"`Next`"+`. Model what the issue asks for and nothing more. The code will be written to match it.
    - `+"`Spec == Init /\\ [][Next]_vars`"+`, last.
 
-   Start every top-level definition at column 0 and indent its continuation lines. That's how Invariant finds the definitions it pins. EXTEND only standard modules: Naturals, Integers, Sequences, FiniteSets and TLC.
+   Start every top-level definition at column 0 and indent its continuation lines. That's how Invariant finds the definitions it pins. Standard modules include Naturals, Integers, Sequences, FiniteSets and TLC. Any local TLA+ includes must be regular sibling .tla files; the check snapshots their exact bytes too.
 2. **`+"`proposal.json`"+`**, shaped like the example at the end. `+"`name`"+` is the project in a few plain words, `+"`slug`"+` a short kebab-case directory name, `+"`module`"+` the module's name and `+"`package`"+` a short lowercase package name for the code. `+"`bounds`"+` gives every CONSTANT a value, as a TLC config would. Undeclared names in a set, like `+"`p1`"+`, are model values.
+3. **`+"`view.json`"+`**: a pure reader view, beside the model. It supplies literal labels and optional step hiding, never graph edges, rule truth or computed artifacts. The factory computes Mermaid from TLC evidence; do not write Mermaid or reader.json yourself.
+
+The view has exactly `+"`version:1`"+`, `+"`state`"+` and `+"`step`"+`. Both mappings are nonempty ordered arrays of rules with `+"`id`"+`, `+"`when`"+` and `+"`label`"+`. IDs are unique per array; IDs and labels are nonblank strings. Only step rules may add boolean `+"`hide`"+` (default false). The first matching rule wins, and every state and step must match. For example:
+
+`+"```json"+`
+{"version":1,"state":[{"id":"all","when":true,"label":"Buffer"}],"step":[{"id":"all","when":true,"label":"Update buffer"}]}
+`+"```"+`
+
+Predicates are booleans, `+"`{\"eq\":[term,term]}`"+` for two like-typed terms, `+"`{\"all\":[predicate,...]}`"+`, `+"`{\"any\":[predicate,...]}`"+` or `+"`{\"not\":predicate}`"+`. Terms are literal strings or booleans, or a lookup: state rules use `+"`{\"var\":\"name\"}`"+`; step rules use `+"`{\"from\":\"name\"}`"+`, `+"`{\"to\":\"name\"}`"+` or `+"`{\"action\":true}`"+`. Lookups return exact TLC text as strings, including quotes around TLA+ strings. There is no numeric coercion, code execution, interpolation or I/O. Unknown fields, duplicate JSON keys, missing variables and mixed types refuse. All rules are statically checked, even after a catch-all. Hiding must cover a whole reader arrow, keep every chart state reachable from an initial state and keep an outgoing arrow wherever one existed; the check names the states, actions and view rules to repair.
+
+Charts are drawn for models of up to 500 states. Above that capacity, passing model checks save a successful too_large limitation with the reachable count and checked bounds. Still supply a well-formed view; its mappings and hiding are not evaluated above capacity. Keep faithful bounds; do not shrink the model to obtain a chart.
 
 # The statements
 
@@ -115,7 +126,7 @@ If the issue isn't something this factory can build as a new, self-contained pro
 
 # Check your draft
 
-The `+"`check`"+` tool pins your statements and runs the gate's model checks on your files. TLC must find no invariant violated and no deadlock, every witness must be reachable, every property must hold, every fairness statement's action must be a `+"`Next`"+` step, and every bug must be caught. You have %d checks, so reread your files before each one. If you're proposing statements, you're done when the check passes. Then reply with a two-sentence summary.
+The `+"`check`"+` tool pins your statements and runs the gate's model checks on your files, then checks view.json and computes the reader chart or size limitation. TLC must find no invariant violated and no deadlock, every witness must be reachable, every property must hold, every fairness statement's action must be a `+"`Next`"+` step, and every bug must be caught. Repair any view refusal as well as model failures. You have %d checks, so reread your files before each one. If you're proposing statements, you're done when the check passes. The factory independently recomputes from your final files. Then reply with a two-sentence summary.
 
 %s
 

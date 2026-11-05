@@ -661,7 +661,7 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, p
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
-			"the witnesses and the known bugs. It reports what failed, with counterexamples. You have %d checks in total.", maxRuns),
+			"the witnesses and the known bugs, then check view.json and compute its reader chart or size limitation. It reports what failed, with counterexamples and view repair details. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			runs, err := calls(ctx)
@@ -690,7 +690,11 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, p
 					"to model-check. If that's what you mean to send, you're done.\n\n(Check %d of %d.)", len(p.Forks), runs, maxRuns), false
 			}
 			record(r.Passed, verify.Failed(r)...)
-			return verify.Feedback(r) + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
+			feedback := verify.Feedback(r)
+			if p.Reader != nil {
+				feedback += "\n\n" + p.ReaderFeedback()
+			}
+			return feedback + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
 		},
 	}
 }

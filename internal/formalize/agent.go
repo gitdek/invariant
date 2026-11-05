@@ -60,6 +60,9 @@ type Current struct {
 	Manifest   project.Manifest
 	Lock       project.Lock
 	ModuleText string
+	View       string            `json:"view,omitempty"`
+	Includes   map[string]string `json:"includes,omitempty"`
+	Reader     *Reader           `json:"reader,omitempty"`
 }
 
 // ModuleName is the TLA+ module's name, from its file name.
@@ -184,6 +187,15 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 				return nil, err
 			}
 		}
+		if err := validateIncludes(p.Includes, p.Module); err != nil {
+			return nil, err
+		}
+		if err := writeIncludes(filepath.Join(ws, "previous"), p.Includes); err != nil {
+			return nil, err
+		}
+		if err := writeReader(filepath.Join(ws, "previous"), p.View, p.Reader); err != nil {
+			return nil, err
+		}
 	}
 	transcript, err := os.Create(filepath.Join(out, "transcript.jsonl"))
 	if err != nil {
@@ -241,7 +253,15 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		}
 	}
 	if p != nil && p.ModuleText != "" {
-		os.WriteFile(filepath.Join(out, p.Module+".tla"), []byte(p.ModuleText), 0o644)
+		if err := writeFile(filepath.Join(out, p.Module+".tla"), p.ModuleText); err != nil {
+			return nil, err
+		}
+		if err := writeIncludes(out, p.Includes); err != nil {
+			return nil, err
+		}
+		if err := writeReader(out, p.View, p.Reader); err != nil {
+			return nil, err
+		}
 	}
 	b, _ := json.MarshalIndent(r, "", "  ")
 	os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
@@ -332,6 +352,15 @@ func seedAmendment(ws string, c *Current) error {
 		return err
 	}
 	if err := writeFile(filepath.Join(ws, "proposal.json"), string(b)+"\n"); err != nil {
+		return err
+	}
+	if err := validateIncludes(c.Includes, d.Module); err != nil {
+		return err
+	}
+	if err := writeIncludes(ws, c.Includes); err != nil {
+		return err
+	}
+	if err := writeReader(ws, c.View, c.Reader); err != nil {
 		return err
 	}
 	return writeFile(filepath.Join(ws, d.Module+".tla"), c.ModuleText)

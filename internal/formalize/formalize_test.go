@@ -28,6 +28,13 @@ func workspace(t *testing.T, edits map[string]func(string) string) string {
 			t.Fatal(err)
 		}
 	}
+	view := `{"version":1,"state":[{"id":"all","when":true,"label":"Buffer"}],"step":[{"id":"all","when":true,"label":"Update buffer"}]}`
+	if edit, ok := edits["view.json"]; ok {
+		view = edit(view)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "view.json"), []byte(view), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return ws
 }
 
