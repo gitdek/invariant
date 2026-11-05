@@ -36,17 +36,15 @@ func (c *Result) SVG() (string, error) {
 	b.WriteString(svgEscape(string(data)))
 	b.WriteString(`</metadata><defs><marker id="chart-arrowhead" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#34495e"/></marker></defs>`)
 	fmt.Fprintf(&b, `<rect x="0" y="0" width="%g" height="%g" fill="#ffffff"/>`, l.width, l.height)
-	writeSVGText(&b, measureSVGText("Bounded reader statechart\nAll initial states and visible arrows; qualifications and evidence below."), svgMargin, svgMargin)
+	writeSVGText(&b, measureSVGText(svgHeading), svgMargin, svgMargin)
 	for i, a := range c.Arrows {
 		route := l.arrows[i]
-		right := l.nodes[l.index[a.From]].x + l.nodes[l.index[a.From]].width
 		fmt.Fprintf(&b, `<g id="arrow-%d" data-from="%s" data-to="%s" data-label="%s"><title>%s</title>`, i+1, svgEscape(a.From), svgEscape(a.To), svgEscape(a.Label), svgEscape(a.Label))
-		fmt.Fprintf(&b, `<desc>State %d to state %d; %d concrete step occurrences.</desc>`, l.index[a.From]+1, l.index[a.To]+1, a.Count)
-		writeSVGPath(&b, fmt.Sprintf("M %g %g L %g %g L %g %g L %g %g", right, route.fromY, route.laneX, route.fromY, route.laneX, route.toY, right, route.toY))
-		fmt.Fprintf(&b, `<circle cx="%g" cy="%g" r="3" fill="#34495e"/>`, right, route.fromY)
-		box := svgBox{right + svgPadding, route.fromY - route.text.height/2 - svgPadding/2, route.text.width + svgPadding, route.text.height + svgPadding}
-		writeSVGRect(&b, box, "#ffffff", "none")
-		writeSVGText(&b, route.text, box.x+svgPadding/2, box.y+svgPadding/2)
+		fmt.Fprintf(&b, `<desc>State %d to state %d; %s.</desc>`, l.index[a.From]+1, l.index[a.To]+1, svgCount(a.Count, "concrete step occurrence"))
+		writeSVGPath(&b, route.path)
+		fmt.Fprintf(&b, `<circle cx="%g" cy="%g" r="3" fill="#34495e"/>`, route.fromX, route.fromY)
+		writeSVGRect(&b, route.label, "#ffffff", "none")
+		writeSVGText(&b, route.text, route.label.x+svgPadding/2, route.label.y+svgPadding/2)
 		b.WriteString(`</g>`)
 	}
 	for i, s := range c.States {
@@ -70,10 +68,8 @@ func (c *Result) SVG() (string, error) {
 		b.WriteString(`</g>`)
 	}
 	b.WriteString(`<g id="chart-report">`)
-	y := l.reportY
 	for _, t := range l.report {
-		writeSVGText(&b, t, svgMargin, y)
-		y += t.height + svgPadding
+		writeSVGText(&b, t.text, t.x, t.y)
 	}
 	b.WriteString(`</g></svg>`)
 	return b.String(), nil
@@ -285,7 +281,7 @@ func svgReport(c *Result) []string {
 			out = append(out, "None.")
 		}
 		for i, a := range arrows {
-			out = append(out, fmt.Sprintf("%s arrow %d: state %d -> state %d; %d concrete occurrences", name, i+1, index[a.From], index[a.To], a.Count), a.Label)
+			out = append(out, fmt.Sprintf("%s arrow %d: state %d -> state %d; %s", name, i+1, index[a.From], index[a.To], svgCount(a.Count, "concrete occurrence")), a.Label)
 			if group == 1 {
 				out = append(out, "Hiding view rules: "+svgList(a.HidingRules))
 			}
@@ -340,4 +336,11 @@ func svgList(values []string) string {
 		return "none"
 	}
 	return strings.Join(values, ", ")
+}
+
+func svgCount(n int, noun string) string {
+	if n != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("%d %s", n, noun)
 }

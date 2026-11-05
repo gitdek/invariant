@@ -38,6 +38,54 @@ The opt-in real-image gate checks cold-run capacity on a cgroup-v2 Docker host, 
 
 The orphan-reaping acceptance test checks `--init` alongside the existing launch settings without Docker. Run `INVARIANT_PLUMBING_INIT_REAL=1 go test ./internal/plumbing -run '^TestSandboxReapsOrphanedProcesses$' -count=1 -timeout 20m` to also run a Go test in the pinned sandbox image: it waits for a child's parent to exit, kills the orphan, and requires `kill(pid, 0)` to report that the process is gone (`ESRCH`). The real-image check returns normally when it is not enabled.
 
+## Container CPU limits
+
+Under [#622's ratified plan](../.invariant/plans/issue-622.json), workload containers launched with Docker `run` or `create` default to **4 CPUs each**. Set `INVARIANT_CONTAINER_CPUS` in the host environment to change that default. Unset or empty means `4`; finite decimal counts of at least `0.01`, such as `0.5`, `2.5` or `8`, are accepted. Signs, exponents, nondecimal notation, whitespace, nonfinite values and smaller counts are refused with an error naming the setting before workload launch or its image acquisition. Cleanup remains available with an invalid setting.
+
+The shared Docker runner, configured dependency installation, one-shot checks and persistent check environments use the same setting. Explicit container CPU limits take precedence, including the Python application executor's **1 CPU**, 512 MiB and 128-process limits. Arguments after the image remain workload arguments. Memory and process limits, isolation, image acquisition, cleanup, eight sandbox workers, check concurrency and production deadlines retain their existing behavior. The quota is per container, not an aggregate host budget: two default containers can consume eight CPUs and three can consume twelve, subject to the daemon's capacity. Docker-managed image-build workers, including BuildKit workers, are outside this `run`/`create` policy; configure their resources through Docker separately.
+
+Both coding-agent backends explicitly pass the host setting, even when empty, in their MCP server environments alongside the existing tool allowance. Set the same value in the service environments for the watcher and dashboard and in the shell used for CLI checks. After changing it, [drain and restart the watcher](#draining-and-restarting), restart the dashboard and start new CLI and MCP processes. Changing a shell export does not update an already running service or container. For example, `export INVARIANT_CONTAINER_CPUS=4` selects the default explicitly before launching those processes.
+
+The real-image budget observer also checks cgroup-v2 `cpu.max` against this setting and reports the complete `cpu.stat`, including usage and throttling microseconds, alongside memory/process peaks and elapsed time. Throttling is measured, not treated as a test failure; the existing pass and deadline requirements still decide the result. The two timeout fixtures use a fifteen-second shared phase inside a ninety-second fixture run; the interrupted test blocks until canceled and all 128 queue tests sleep for three seconds. The acceptance reruns add three seconds of process startup while retaining healthy completion, named interrupted work, independent acceptance and unstarted queued work. These are fixture allowances only.
+
+### CPU comparison and merger evidence
+
+[D-0350](../decisions/journal/D-0350.jsonl) records the CPU policy, under [D-0105](../decisions/D-0105-factory-takes-every-change.md) and [D-0122](../decisions/journal/D-0122.jsonl). It preserves the resource, cleanup and budget decisions [D-0111](../decisions/journal/D-0111.jsonl), [D-0281](../decisions/journal/D-0281.jsonl), [D-0290](../decisions/journal/D-0290.jsonl), [D-0303](../decisions/journal/D-0303.jsonl), [D-0313](../decisions/journal/D-0313.jsonl) and [D-0315](../decisions/journal/D-0315.jsonl).
+
+No Docker/network performance comparison was available in the offline #622 build. Its exported workspace has no Git metadata, so the exact uncapped base and candidate commit IDs must be filled from the PR before measurement. The candidate implements proposal `sha256:91179cd382e8e4cbd7b0978815faa26203d40a94670da8b36a99bb25b43a2ed3`. The effect on [#599](https://github.com/gitdek/invariant/issues/599)'s two-run and three-run budget check, representative plan checks and complete plumbing builds is **unmeasured**, not a pass or a speedup claim.
+
+The offline acceptance run on 2026-11-05 passed `TestSandboxShardTimeoutWithSlowHealthyTest622` in **16.85s** and `TestSandboxSharedBudgetWithSlowQuickTests622` in **16.44s**. Both reran the exact existing fixtures with the three-second startup delay and every original assertion. They use real Go processes behind a Docker stand-in; these measured fixture times establish timeout reliability, not Docker capacity or a base/candidate performance comparison.
+
+| Workload | Uncapped base | 4-CPU candidate | Required evidence |
+| --- | --- | --- | --- |
+| #599 two simultaneous cold-cache runs | Unavailable | Unavailable | Both pass before 25m; each wall time, wave wall time, peaks and throttling |
+| #599 three simultaneous fresh-cache runs | Unavailable | Unavailable | All return before 26m15s; wall times, named partial results and any timeout |
+| Representative ordinary and `internal/verify` plan checks | Unavailable | Unavailable | Same staged drafts and repository snapshot, cold and warm checks, outcomes and wall times |
+| Complete plumbing builds of those workloads | Unavailable | Unavailable | Same ratified plans and base, agent/backend settings, check versus agent time, queue/account waits, repairs and timeouts |
+
+Use the same cgroup-v2 Docker host and daemon for both revisions. Record full Git SHAs, OS/architecture, Docker version/context, daemon `NCPU` and `MemTotal`, CPU setting, image digests, module/image cache state, fresh versus reused Go caches, concurrent host work, agent slots, `-check-parallel` and the eight queue workers. Acquire images and dependencies before timed checks and report acquisition separately. Keep one immutable workload snapshot and identical plan/test inventories across the pair; #622's newly added CPU acceptance tests deliberately fail on the uncapped implementation and are correctness evidence, not comparable benchmark work. Use a common measurement harness calling each revision's `Sandbox.Run` against that snapshot for the paired budget results; archive its source and exact commands with the results. Do not substitute `INVARIANT_CONTAINER_CPUS=0` for the uncapped base: zero is invalid.
+
+Commands for capacity, the candidate budget observer and the exact delayed fixture reruns are:
+
+```sh
+git rev-parse HEAD
+docker context show
+docker version
+docker info --format '{{json .}}'
+INVARIANT_CONTAINER_CPUS=4 INVARIANT_PLUMBING_REAL=1 go test ./internal/plumbing -run '^TestSandboxBudgetAndRealCheckout$' -count=1 -v -timeout 70m
+go test ./internal/plumbing -run '^TestSandboxNamesFailuresFromEveryShard$/^shard_timeout$|^TestSandboxQueueBudgetDoesNotRestartPerTest$|^TestSandboxShardTimeoutWithSlowHealthyTest622$|^TestSandboxSharedBudgetWithSlowQuickTests622$' -count=1 -v -timeout 10m
+```
+
+For representative plan checks, preserve a draft workspace containing `plan.json`, `tests/` and the fixed `repo/` snapshot. Build each revision's CLI and use the same workspace bytes. With `measure_bin`, `measure_workspace`, `measure_cache` and `measure_log` set to absolute paths for that run, this invokes the actual check tool without an agent:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cpu-measure","version":"1"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check","arguments":{}}}' | "$measure_bin" mcp -plan -max-runs 1 -cache "$measure_cache" -log "$measure_log" "$measure_workspace"
+```
+
+Time that command externally and preserve its response and log; an MCP error is a failed check even if the server exits normally. Run once with a fresh cache and again with that cache reused, using fresh matching caches for the other revision. Unset the setting for the uncapped binary and set it to `4` for the candidate. For complete builds, replay the same ratified ordinary and verify-touching plans through the factory on an owner-approved fixture repository with matching initial state. Record the exact watcher command and issue/plan hashes, backend/model/effort, `-parallel`, `-check-parallel`, time allowance and every build/check/review transcript. Report total wall time separately from check execution, agent execution, check queue waits and excluded account waits; overlapping work must not be added as wall time. Repeat the pair with the same concurrency, and report every failure or timeout rather than only successful samples. Complete-build timings cannot be inferred from the standalone check command.
+
+The real-image orphan-reaping check passed on the candidate, `dac27a8`, on 2026-11-05. Its real `docker run` carried `--cpus 4` by default and `--cpus 2.5` with the setting at `2.5`. The paired measurements remain merger work. Affected real Python and TLAPS suites remain required PR CI checks under [D-0291](../decisions/journal/D-0291.jsonl).
+
 ## Repository check contract
 
 Version 1 of `.invariant/repository.json` describes a repository's Go, Python and TypeScript parts, their checks, their owners and the files that supply check authority ([#461's ratified plan](../.invariant/plans/issue-461.json), [D-0301](../decisions/journal/D-0301.jsonl)). The shared `internal/repository` loader captures this contract from a caller-supplied committed base. It executes no declared commands. Plumbing on external repositories remains disabled ([D-0121](../decisions/journal/D-0121.jsonl)). Invariant continues to use its built-in plumbing runner, commands, sandbox limits and scope rules without requiring this file.

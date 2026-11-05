@@ -95,6 +95,10 @@ type Report struct {
 	Toolchain Toolchain `json:"toolchain"`
 	// TLCAttempts is operational history, excluded from the evidence fingerprint.
 	TLCAttempts []tlc.Attempt `json:"tlc_attempts,omitempty"`
+
+	// Reader is explanatory evidence with an independent identity.
+	Reader *Reader `json:"reader,omitempty"`
+
 	// Agent names the coding agent that wrote the code, and nothing else
 	// about it (#179): the one the project's manifest records, or the one
 	// that built it, where synthesis or the factory knows it. The gate
@@ -280,7 +284,9 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		if len(p.Manifest.TLAPS) > 0 {
 			return nil, ErrTLAPSApplication
 		}
-		return runPythonApplication(ctx, p, outDir, tc, options)
+		return completeReader(ctx, p, func(ctx context.Context) (*Report, error) {
+			return runPythonApplication(ctx, p, outDir, tc, options)
+		})
 	}
 	if !model && p.Manifest.Components != nil {
 		return nil, ErrComponents
@@ -303,7 +309,18 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(work)
+	completion, _ := ctx.Value(readerCompletionKey{}).(*readerCompletion)
+	if completion != nil {
+		completion.cleanup = func() { os.RemoveAll(work) }
+	} else {
+		defer os.RemoveAll(work)
+	}
+
+	modelDir, err := stage(work, "model-snapshot", p, src, "")
+	if err != nil {
+		return nil, err
+	}
+	reader := snapshotReader(p, modelDir, raw, completion)
 
 	r := &Report{
 		Project:   p.Manifest.Name,
@@ -379,6 +396,16 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget, CheckRoot: work}
 	defer func() { r.TLCAttempts = budget.Attempts() }()
+	defer func() {
+		if report != nil && err == nil {
+			compute := func() { r.Reader = reader.compute(ctx, runner, r.Design) }
+			if completion != nil {
+				completion.compute = compute
+			} else {
+				compute()
+			}
+		}
+	}()
 	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}
 	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
@@ -805,6 +832,7 @@ func agree(d Design, e Exploration) Agreement {
 // have the same fingerprint.
 func Fingerprint(r Report) string {
 	r.TLCAttempts = nil
+	r.Reader = nil
 	if r.Application != nil {
 		r.Application = portablePythonApplication(r.Application)
 	}
@@ -851,7 +879,8 @@ func checkPins(src string, statements []project.Statement) []Pin {
 
 // stage copies the project's TLA+ modules into a fresh directory, with the
 // main module replaced by src and, when wrapper isn't empty, a wrapper
-// module added.
+// module added. Once captured, the model snapshot supplies every check,
+// including property bugs and TLAPS proofs staged by helpers.
 func stage(work, name string, p *project.Project, src, wrapper string) (string, error) {
 	d := filepath.Join(work, name)
 	if err := os.MkdirAll(d, 0o755); err != nil {
@@ -861,6 +890,17 @@ func stage(work, name string, p *project.Project, src, wrapper string) (string, 
 	entries, err := os.ReadDir(specDir)
 	if err != nil {
 		return "", err
+	}
+	if name != "model-snapshot" {
+		// Preserve ordinary staging directory errors, while every source
+		// byte still comes from the captured generation.
+		snapshot := filepath.Join(work, "model-snapshot")
+		captured, err := os.ReadDir(snapshot)
+		if err == nil {
+			specDir, entries = snapshot, captured
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
 	}
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".tla") {

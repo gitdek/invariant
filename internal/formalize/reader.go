@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -29,51 +28,17 @@ type Reader struct {
 	Limitation  *ReaderLimitation  `json:"limitation,omitempty"`
 }
 
-type ReaderLimitation struct {
-	Code   string            `json:"code"`
-	Actual int               `json:"actual"`
-	Limit  int               `json:"limit"`
-	Source statechart.Source `json:"source"`
-}
+type ReaderLimitation = statechart.Limitation
 
 func (p *Proposal) computeReader(ctx context.Context, dir string, tc toolchain.Toolchain, states int64) error {
 	p.Reader = nil
-	cfg := tlc.Config{Constants: maps.Clone(p.Bounds)}
-	for _, s := range p.Statements {
-		switch s.Kind {
-		case project.Spec:
-			cfg.Specification = s.Name
-		case project.Invariant:
-			cfg.Invariants = append(cfg.Invariants, s.Name)
-		}
-	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
-	graph, err := runner.DumpGraph(ctx, dir, p.Module, cfg)
+	chart, limitation, err := statechart.Read(ctx, runner, dir, p.Module,
+		project.Lock{Bounds: p.Bounds, Statements: p.Statements}, []byte(p.View), states)
 	if err != nil {
-		return fmt.Errorf("reader graph: %w", err)
+		return err
 	}
-	if int64(graph.StateCount) != states {
-		return fmt.Errorf("reader graph: reachable count differs from the model check")
-	}
-	in := statechart.Input{Graph: *graph, Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}}
-	if graph.StateCount <= statechart.MaxStates {
-		in.Invariants, err = statechart.EvaluateRules(ctx, runner, dir, *graph, in.Lock)
-		if err != nil {
-			return err
-		}
-	}
-	// Compute validates the entire view before refusing an oversized graph.
-	// This keeps the grammar in one place without evaluating large mappings.
-	chart, err := statechart.Compute(ctx, in, []byte(p.View))
-	reader := &Reader{Version: 1, Chart: chart}
-	if err != nil {
-		var refusal *statechart.Refusal
-		if !errors.As(err, &refusal) || refusal.Code != "too_large" {
-			return err
-		}
-		reader.Limitation = &ReaderLimitation{Code: refusal.Code, Actual: refusal.Actual, Limit: refusal.Limit,
-			Source: statechart.Source{Module: graph.Module, Config: graph.Config, Tool: graph.Tool, TLC: graph.Run.Version}}
-	}
+	reader := &Reader{Version: 1, Chart: chart, Limitation: limitation}
 	p.Reader = reader
 	reader.Fingerprint, err = p.readerFingerprint()
 	if err != nil {

@@ -449,7 +449,7 @@ func TestSandboxNamesFailuresFromEveryShard(t *testing.T) {
 				body = "panic(\"fixture panic\")"
 			}
 			if kind == "shard_timeout" {
-				body, imports = "time.Sleep(60*time.Second)", "\"testing\"; \"time\""
+				body = "<-t.Context().Done()"
 			}
 			var src strings.Builder
 			fmt.Fprintf(&src, "package bad\nimport (%s)\n", imports)
@@ -469,10 +469,12 @@ func TestSandboxNamesFailuresFromEveryShard(t *testing.T) {
 				f.warm(t)
 			}
 			shardTimeout := 20 * time.Second
+			runTimeout := 35 * time.Second
 			if kind == "shard_timeout" {
-				shardTimeout = time.Second
+				shardTimeout = 15 * time.Second
+				runTimeout = 90 * time.Second
 			}
-			r := f.run(t, 35*time.Second, shardTimeout)
+			r := f.run(t, runTimeout, shardTimeout)
 			if r.Passed() || r.Tests || r.DeadlineExceeded {
 				t.Errorf("%s: Passed=%v Tests=%v DeadlineExceeded=%v\n%s", kind, r.Passed(), r.Tests, r.DeadlineExceeded, r.Output)
 			}
@@ -552,14 +554,14 @@ func TestSandboxQueueBudgetDoesNotRestartPerTest(t *testing.T) {
 	var src strings.Builder
 	src.WriteString("package alpha\nimport (\"testing\"; \"time\")\n")
 	for i := 0; i < 128; i++ {
-		fmt.Fprintf(&src, "func TestWork%03d(t *testing.T) { time.Sleep(200*time.Millisecond) }\n", i)
+		fmt.Fprintf(&src, "func TestWork%03d(t *testing.T) { time.Sleep(3*time.Second) }\n", i)
 	}
 	f.pkg(t, "alpha", src.String())
 	f.contract(t, false)
 	f.warm(t)
-	r := f.run(t, 30*time.Second, time.Second)
+	r := f.run(t, 90*time.Second, 15*time.Second)
 	if r.Passed() || r.Tests || r.DeadlineExceeded {
-		t.Fatalf("the shared one-second test budget must expire before the whole-run deadline: %+v\n%s", r, r.Output)
+		t.Fatalf("the shared fifteen-second test budget must expire before the whole-run deadline: %+v\n%s", r, r.Output)
 	}
 	passed, pending := 0, 0
 	for _, result := range r.TestResults {

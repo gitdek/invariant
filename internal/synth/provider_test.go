@@ -82,6 +82,7 @@ func TestClaudeRetriesAnOutageItReportsAsASuccessfulError(t *testing.T) {
 // job's allowance goes in the server's own configuration, after the server
 // itself, and a reviewer, with no server, names none.
 func TestCodexNamesTheAllowanceInItsServersEnvironment(t *testing.T) {
+	t.Setenv("INVARIANT_CONTAINER_CPUS", "")
 	c := Codex{Binary: "codex", Home: t.TempDir()}
 	job := Job{Workspace: t.TempDir(), Prompt: "build", GateServer: []string{"/bin/invariant", "mcp"}, allowance: "127.0.0.1:7"}
 	args, err := c.args(job, t.TempDir())
@@ -93,7 +94,7 @@ func TestCodexNamesTheAllowanceInItsServersEnvironment(t *testing.T) {
 		switch {
 		case strings.HasPrefix(a, "mcp_servers.invariant={"):
 			server = i
-		case a == `mcp_servers.invariant.env={INVARIANT_TOOL_ALLOWANCE="127.0.0.1:7"}`:
+		case a == `mcp_servers.invariant.env={INVARIANT_CONTAINER_CPUS="", INVARIANT_TOOL_ALLOWANCE="127.0.0.1:7"}`:
 			env = i
 		}
 	}
