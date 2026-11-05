@@ -2,6 +2,7 @@ package plumbing
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -43,6 +44,7 @@ func repositoryEvidence(expected RepositoryAcceptanceBinding, evidence Repositor
 // Trusted RunAcceptance environments retain their original terminal contract.
 func repositoryEvidenceMode(expected RepositoryAcceptanceBinding, evidence RepositoryAcceptanceEvidence, result TestResult, goRuntime bool) (TestResult, error) {
 	result.Package = expected.Package
+	result.Evidence = nil
 	refuse := func(reason string) (TestResult, error) {
 		result.Kind, result.Status, result.Reason = "evidence", "refused", reason
 		return result, fmt.Errorf("accept %s: %s", result.identity(), reason)
@@ -108,6 +110,9 @@ func repositoryEvidenceMode(expected RepositoryAcceptanceBinding, evidence Repos
 		result.Kind, result.Status, result.Reason = "setup", "refused", acceptanceReason(*terminal)
 		return result, fmt.Errorf("accept %s: %s", result.identity(), result.Reason)
 	}
+	if terminal.Kind == "compile" && (running != nil || len(evidence.Records) != 2 || evidence.ExitCode <= 0 || strings.TrimSpace(terminal.Reason) == "") {
+		return refuse("compiler evidence needs one attributed failure and a nonzero completed exit without runtime records: " + acceptanceReason(*terminal))
+	}
 	if goRuntime {
 		if terminal.Kind != "test" || running == nil {
 			return refuse("Go test completion needs authentic running evidence")
@@ -132,6 +137,10 @@ func repositoryEvidenceMode(expected RepositoryAcceptanceBinding, evidence Repos
 		return veto("nonzero exit without attributable test or compiler failure: " + acceptanceReason(*terminal))
 	}
 	result.Kind, result.Status, result.Reason = terminal.Kind, terminal.Status, acceptanceReason(*terminal)
+	if terminal.Kind == "compile" {
+		evidence.Records = slices.Clone(evidence.Records)
+		result.Evidence = &evidence
+	}
 	return result, nil
 }
 

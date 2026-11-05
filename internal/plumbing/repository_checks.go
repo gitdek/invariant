@@ -344,6 +344,14 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				input.Argv = slices.Clone(invocation.Argv)
 				discovery, err := adapter.Discover(execution, part, input, environment)
 				err = errors.Join(err, execution.Err())
+				var compilation *RepositoryAcceptanceEvidence
+				var failed *goCompilationFailure
+				if goRuntime && execution.Err() == nil && repositoryCommandFailed(err) && errors.As(err, &failed) {
+					var out []byte
+					discovery = failed.discovery
+					compilation, out, err = collectGoCompilation(execution, part, input, failed, transport)
+					result.Output += fmt.Sprintf("compile %s:\n%s\n", test.Identity(), out)
+				}
 				if err == nil {
 					expected.Package = discovery.Binding.Package
 					if discovery.Binding != expected || !nativeText(expected.Package) || discovery.TestName != strings.Split(test.Selector, "/")[0] {
@@ -366,6 +374,14 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				}
 				invocation.Binding = discovery.Binding
 				result.TestResults[j].Package = discovery.Binding.Package
+				if compilation != nil {
+					var evidenceErr error
+					result.TestResults[j], evidenceErr = repositoryEvidence(invocation.Binding, *compilation, result.TestResults[j])
+					if err := errors.Join(evidenceErr, execution.Err()); err != nil {
+						return result, err
+					}
+					continue
+				}
 				discovered = true
 			}
 			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)

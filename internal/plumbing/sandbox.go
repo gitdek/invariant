@@ -71,11 +71,12 @@ type TestResult struct {
 	Shard   int    `json:"shard,omitempty"`
 	File    string `json:"file,omitempty"`
 
-	Part      string `json:"part,omitempty"`
-	Framework string `json:"framework,omitempty"`
-	Selector  string `json:"selector,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	Kind      string `json:"kind,omitempty"`
+	Part      string                        `json:"part,omitempty"`
+	Framework string                        `json:"framework,omitempty"`
+	Selector  string                        `json:"selector,omitempty"`
+	Reason    string                        `json:"reason,omitempty"`
+	Kind      string                        `json:"kind,omitempty"`
+	Evidence  *RepositoryAcceptanceEvidence `json:"evidence,omitempty"`
 }
 
 // identity is the acceptance test a result is evidence for. A native
