@@ -11,11 +11,12 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // OpenChecks gives a part one writable container for all its commands. The
-// host owns sequencing and exit status; no language-specific runner is copied
-// into the image. The caller owns Close once opening succeeds.
+// host owns sequencing and exit status. Process helpers are staged lazily,
+// outside the candidate. The caller owns Close once opening succeeds.
 func (r *DockerDependencyRunner) OpenChecks(ctx context.Context, q DependencyRequest) (_ RepositoryCheckEnvironment, openErr error) {
 	if err := validateDependencyContainer(q, false); err != nil {
 		return nil, err
@@ -37,7 +38,13 @@ func (r *DockerDependencyRunner) OpenChecks(ctx context.Context, q DependencyReq
 	}()
 	// A fixed idle process keeps the container alive across docker exec calls.
 	// Repository arguments never enter this shell script.
-	if err := createDependencyContainer(ctx, q, "exec sleep 86400\n"); err != nil {
+	script := "exec sleep 86400\n"
+	if q.Env["GOTOOLCHAIN"] == "local" {
+		// Disable Go's detached telemetry sidecar in the disposable home before
+		// any loading or compilation, without invoking a language helper.
+		script = "set -eu\nmkdir -p /tmp/.config/go/telemetry\nprintf 'off\\n' > /tmp/.config/go/telemetry/mode\n" + script
+	}
+	if err := createDependencyContainer(ctx, q, script); err != nil {
 		return nil, err
 	}
 	// Root-owned, as installation's copy is: the container's root, with every
@@ -53,14 +60,27 @@ func (r *DockerDependencyRunner) OpenChecks(ctx context.Context, q DependencyReq
 }
 
 type dockerRepositoryChecks struct {
-	runner  *DockerDependencyRunner
-	request DependencyRequest
-	stage   string
-	closed  bool
-	err     error
+	mu                  sync.Mutex
+	runner              *DockerDependencyRunner
+	request             DependencyRequest
+	stage               string
+	closed              bool
+	err                 error
+	helperStage, helper string
+	prepared            []*dockerPreparedProcess
+	invocations         map[string]bool
+	cleanupMu           sync.Mutex
+	removed             bool
+	cleanupErr          error
 }
 
 func (e *dockerRepositoryChecks) Run(ctx context.Context, argv []string) ([]byte, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.run(ctx, argv)
+}
+
+func (e *dockerRepositoryChecks) run(ctx context.Context, argv []string) ([]byte, error) {
 	if e.closed {
 		return nil, errors.New("repository check environment is closed")
 	}
@@ -72,17 +92,30 @@ func (e *dockerRepositoryChecks) Run(ctx context.Context, argv []string) ([]byte
 			return nil, errors.New("repository check argument contains NUL")
 		}
 	}
-	q := e.request
-	args := []string{"exec", "--workdir", path.Join(dependencyWork, q.Directory), q.Token, "/usr/bin/env", "-i"}
-	env := dependencyContainerEnv(q)
-	for _, name := range slices.Sorted(maps.Keys(env)) {
-		args = append(args, name+"="+env[name])
-	}
+	args := e.execArgs("", nil, false)
 	// The fixed wrapper also keeps an executable containing '=' from being
 	// interpreted as an env assignment. Only positional arguments reach exec.
 	args = append(args, "/bin/sh", "-c", "exec \"$@\"", "invariant-check")
 	args = append(args, argv...)
-	return dependencyDocker(ctx, args...)
+	return e.command(ctx, args)
+}
+
+func (e *dockerRepositoryChecks) execArgs(dir string, extra map[string]string, interactive bool) []string {
+	args := []string{"exec"}
+	if interactive {
+		args = append(args, "--interactive")
+	}
+	args = append(args, "--workdir", path.Join(dependencyWork, e.request.Directory, dir), e.request.Token, "/usr/bin/env", "-i")
+	env := dependencyContainerEnv(e.request)
+	maps.Copy(env, extra)
+	if interactive {
+		// The process helper is executed directly, without a shell to set PWD.
+		env["PWD"] = path.Join(dependencyWork, e.request.Directory, dir)
+	}
+	for _, name := range slices.Sorted(maps.Keys(env)) {
+		args = append(args, name+"="+env[name])
+	}
+	return args
 }
 
 // The guard receives paths only as positional arguments. Docker cp without -L
@@ -103,7 +136,10 @@ func (e *dockerRepositoryChecks) ReadFile(ctx context.Context, name string) ([]b
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if e.closed {
+	e.mu.Lock()
+	closed := e.closed
+	e.mu.Unlock()
+	if closed {
 		return nil, errors.New("repository check environment is closed")
 	}
 	if !repositoryAcceptancePath(name) {
@@ -143,16 +179,31 @@ func (e *dockerRepositoryChecks) ReadFile(ctx context.Context, name string) ([]b
 }
 
 func (e *dockerRepositoryChecks) Close(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.closed {
 		return e.err
 	}
 	e.closed = true
-	ctx, done := context.WithTimeout(ctx, SandboxCleanupAllowance)
+	ctx, done := goProcessCleanupContext(ctx)
 	defer done()
-	err := e.runner.Cleanup(ctx, e.request.Token)
-	e.err = errors.Join(err, removeRepositoryStage(ctx, e.stage))
+	for _, p := range e.prepared {
+		e.err = errors.Join(e.err, p.Close(ctx))
+	}
+	e.err = errors.Join(e.err, e.removeContainer(ctx))
+	e.err = errors.Join(e.err, removeRepositoryStage(ctx, e.stage), removeRepositoryStage(ctx, e.helperStage))
 	if e.err != nil {
 		e.err = fmt.Errorf("remove repository check environment: %w", e.err)
 	}
 	return e.err
+}
+
+func (e *dockerRepositoryChecks) removeContainer(ctx context.Context) error {
+	e.cleanupMu.Lock()
+	defer e.cleanupMu.Unlock()
+	if !e.removed {
+		e.removed = true
+		e.cleanupErr = e.runner.Cleanup(ctx, e.request.Token)
+	}
+	return e.cleanupErr
 }
