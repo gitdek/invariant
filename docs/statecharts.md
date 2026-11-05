@@ -216,4 +216,4 @@ This work rests on [D-0016](../decisions/journal/D-0016.jsonl), [D-0049](../deci
 
 Proposal identity and amendments also rest on [D-0034](../decisions/journal/D-0034.jsonl) and [D-0045](../decisions/journal/D-0045.jsonl). [D-0345](../decisions/journal/D-0345.jsonl) records #603's proposal-view, artifact-binding and publication policy, including the nonblocking size limitation, refining [D-0343](../decisions/journal/D-0343.jsonl).
 
-Standalone SVG implements #608's ratified plan on the graph and reader contracts in D-0335 and D-0343, under D-0105, D-0122 and D-0294. The merger records the new native-rendering decision; this plumbing build cannot write `decisions/`.
+Standalone SVG implements #608's ratified plan on the graph and reader contracts in D-0335 and D-0343, under D-0105, D-0122 and D-0294. [D-0347](../decisions/journal/D-0347.jsonl) records the native-rendering decision, refining [D-0343](../decisions/journal/D-0343.jsonl).
