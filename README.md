@@ -86,7 +86,7 @@ Anyone can open an issue, but the factory takes one only when a writer labels it
 
 ## Watch it catch a bug
 
-The [bounded graph API](docs/statecharts.md) retains TLC's complete dumped states and action-labeled steps, with counts, configuration and tool provenance.
+The [reader statechart API](docs/statecharts.md) maps TLC's complete bounded graph into reader labels, preserves rule violations and concrete membership, and reports every hidden step. It supports up to 500 reachable states; about 20 arrows is advice, never a cutoff.
 
 <p align="center">
   <img src="docs/assets/counterexample.svg" alt="Replay of a real TLC counterexample. r1 prepares and the coordinator records its vote; r2 aborts on its own; the buggy coordinator commits anyway, on r1's vote alone; r1 commits. TCConsistent is violated in 5 steps." width="100%">
