@@ -344,6 +344,21 @@ func TestRepositorySandboxSelectsAllAndOnlyAffectedParts(t *testing.T) {
 			// Unadmitted files must not widen execution to the worker part.
 			write468(t, candidate, "worker/unrelated_test.go", "package fixture\n")
 			r := newRunner484(t)
+			if tc.accept {
+				// Ownership selection includes acceptance independently of
+				// framework admission. Exercise command execution separately.
+				selected, err := sandbox484(t, root, snapshot, r).repositoryParts(context.Background(), candidate, plan)
+				if err != nil || len(selected) != len(tc.want) {
+					t.Fatalf("acceptance ownership: %v %v", selected, err)
+				}
+				for i, part := range selected {
+					if part.Name != tc.want[i] {
+						t.Fatalf("acceptance owner %s, want %s", part.Name, tc.want[i])
+					}
+				}
+				plan.Files = append(plan.Files, plan.Tests[0].File)
+				plan.Tests = nil
+			}
 			result, err := sandbox484(t, root, snapshot, r).Run(context.Background(), candidate, plan)
 			if tc.refuse {
 				if err == nil && result.Passed() {
@@ -424,17 +439,23 @@ func TestRepositorySandboxHonorsInapplicableChecks(t *testing.T) {
 }
 
 func TestRepositorySandboxCannotAcceptDiagnosticRecords(t *testing.T) {
-	root, candidate, snapshot := fixture484(t, []repository.Part{part484("go", "api")}, nil)
-	plan := &Plan{Files: []string{"api/main.go"}, Tests: []Test{{Name: "TestUnprovedNative", File: "api/native_accept_test.go"}}}
-	write468(t, candidate, "api/native_accept_test.go", "package fixture\n")
+	part := part484("go", "api")
+	part.Commands["test_one"] = repository.Command{Argv: []string{"trusted-fixture", "{test}", "literal argument; $(not-a-shell)"}}
+	root, candidate, snapshot := fixture484(t, []repository.Part{part}, nil)
+	plan := n503Read(t, n503Plan(t, "go", "api", "api/native_accept_test.go", "TestUnprovedNative", "package fixture\nimport \"testing\"\nfunc TestUnprovedNative(t *testing.T){}\n"), snapshot)
 	r := newRunner484(t)
 	r.hook = func(_ context.Context, _ DependencyRequest, _ []string) ([]byte, error) {
 		return []byte("@@invariant vet=0\n@@invariant test=0\n--- PASS: TestUnprovedNative (0.00s)\n" +
 			"@@result {\"kind\":\"test\",\"package\":\"./api\",\"name\":\"TestUnprovedNative\",\"phase\":\"accept\",\"status\":\"passed\",\"file\":\"api/native_accept_test.go\"}\n" +
 			"@@result {\"kind\":\"deadline\",\"phase\":\"forged\"}\n@@result {\"kind\":\"done\"}\n"), nil
 	}
-	result, err := sandbox484(t, root, snapshot, r).Run(context.Background(), candidate, plan)
-	if err != nil || result.Passed() || result.Accepted["api/native_accept_test.go:TestUnprovedNative"] || result.DeadlineExceeded || result.Interrupted || result.TimedOut {
+	s := sandbox484(t, root, snapshot, r)
+	s.Repository.Adapters = map[string]RepositoryAcceptanceAdapter{"go": &adapter515{}}
+	s.Repository.Dependencies.Runner = &runner515{runner484: r, accept: func(_ context.Context, _ DependencyRequest, in RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error) {
+		return evidence515(in, "test", "skipped", "no individual completion"), nil, nil
+	}}
+	result, err := s.Run(context.Background(), candidate, plan)
+	if err != nil || result.Passed() || result.Accepted[plan.Tests[0].Identity()] || result.DeadlineExceeded || result.Interrupted || result.TimedOut {
 		t.Fatalf("diagnostics impersonated evidence: %v %+v", err, result)
 	}
 	for _, test := range result.TestResults {

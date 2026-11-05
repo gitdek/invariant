@@ -76,7 +76,8 @@ Spec == Init /\ [][Next]_vars
   ]
 }`
 	ws, bin := t.TempDir(), t.TempDir()
-	for name, body := range map[string]string{"SanyConsumer.tla": model, "proposal.json": proposalJSON} {
+	for name, body := range map[string]string{"SanyConsumer.tla": model, "proposal.json": proposalJSON,
+		"view.json": `{"version":1,"state":[{"id":"all","when":true,"label":"Counter"}],"step":[{"id":"all","when":true,"label":"Update"}]}`} {
 		if err := os.WriteFile(filepath.Join(ws, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}

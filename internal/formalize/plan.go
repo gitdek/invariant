@@ -19,6 +19,11 @@ import (
 // checkout of the base branch, which the agent reads and the factory checks
 // the plan against. Its transcript and draft land in out.
 func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*Result, error) {
+	if f.Sandbox.Repository != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = synth.WithExecutionBudget(ctx, f.Timeout)
+		defer cancel()
+	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
@@ -77,14 +82,21 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 		gateServer = append(gateServer[:len(gateServer)-1], "-check-queue", client.Address, "-check-build", client.Build, ws)
 		f.Sandbox.Checks = client
 	}
-	usage, runErr := f.Backend.Run(ctx, synth.Job{
+	job := synth.Job{
 		Workspace:  ws,
 		Prompt:     PlanPrompt(req, f.CheckRuns),
 		GateServer: gateServer,
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
-	})
+	}
+	if f.Sandbox.Repository != nil {
+		job.ToolTimeout = f.Timeout
+		if f.Timeout <= 0 {
+			job.ToolTimeout = -1
+		}
+	}
+	usage, _, runErr := synth.RunAgent(ctx, f.Backend, job, f.Timeout, "")
 	usage.Backend = f.Backend.Name()
 	r := &Result{Usage: usage}
 	r.CheckRuns, _ = readRuns(checkLog)
@@ -179,7 +191,7 @@ plan.json:
 - An acceptance test's expectations about behavior the plan keeps must agree with the existing tests that pin it. When the plan intentionally changes pinned behavior, say so in its summary and name those existing tests in its files.
 - Each test must fail on the code as it is. A test that already passes can't show anything.
 
-Native acceptance records explicitly add part, framework and selector together. Framework is go, pytest, vitest or jest; name is then only a display label. The full part/framework/file/selector identity and verbatim new source are pinned. Go selectors name a declared Test function and optional exact subtest path; pytest selectors are part-relative file::function or file::Class::method node IDs with concrete parameter cases; Vitest and Jest selectors are complete nested titles including a concrete case. Never supply execution, sources or trusted in plan.json: the caller captures authority. Native execution adapters are pending, so these drafts cannot yet qualify for proposal. Existing Invariant Go plans omit all native fields and keep the built-in runner. See docs/factory.md for the schema.
+Native acceptance records explicitly add part, framework and selector together. Framework is go, pytest, vitest or jest; name is then only a display label. The full part/framework/file/selector identity and verbatim new source are pinned. Go selectors name a declared Test function and optional exact subtest path; pytest selectors are part-relative file::function or file::Class::method node IDs with concrete parameter cases; Vitest and Jest selectors are complete nested titles including a concrete case. Never supply execution, sources or trusted in plan.json: the caller captures authority. Configured Go uses the default Go adapter and checks every selector against the independent captured base. Each needs exactly one completed test failure or attributable proposed production API compiler failure; passing, skipped, absent, unfinished or mismatched execution cannot qualify. Infrastructure, deadline, cancellation and cleanup failures veto the draft. The check tool and fresh final validation use the same retained authority. Pytest, Vitest, Jest and mixed unsupported plans are refused before preparation, as are configured legacy records. Unconfigured Invariant Go plans omit all native fields and keep the built-in runner, hashes and locks. External plumbing intake remains disabled. See docs/factory.md for the schema.
 
 After the build passes factory checks, a second agent reviews the whole candidate against the original checkout. Findings return to the same builder in its existing workspace under this unchanged plan for at most two repair attempts, each followed by fresh checks and, if they pass, a fresh review. Only final passing checks and approval produce a ready pull request; unresolved findings, failed checks or an exhausted time allowance leave a draft for a person. Decision recording and checks requiring unavailable Docker or network access belong under Merger work in the review, and do not by themselves require a repair. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, so they aren't Merger work.
 

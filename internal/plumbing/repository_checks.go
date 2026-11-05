@@ -2,10 +2,12 @@ package plumbing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -169,8 +171,9 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			return result, err
 		}
 	}
-	if base && !plan.Native() {
-		return result, errors.New("configured base acceptance needs native identities and an execution adapter")
+	if !plan.Native() && (base || len(plan.Tests) > 0) {
+		result.Problems = append(result.Problems, "configured acceptance needs native identities; legacy acceptance requires the unconfigured Go runner")
+		return result, nil
 	}
 	if err := plan.ValidateRepository(execution, s.Repository.Snapshot); err != nil {
 		return result, err
@@ -186,7 +189,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			return result, nil
 		}
 		for i, selection := range selections {
-			if _, discovers := s.Repository.Adapters[plan.Tests[i].Framework].(RepositoryAcceptanceDiscoverer); !discovers {
+			if _, discovers := s.repositoryAdapter(plan.Tests[i].Framework).(RepositoryAcceptanceDiscoverer); !discovers {
 				result.TestResults[i].Package = selection.Package
 			}
 			result.TestResults[i].Reason = "acceptance invocation has not started"
@@ -218,33 +221,82 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	if !ok {
 		return result, errors.New("repository dependency runner cannot open persistent checks")
 	}
-	work, err := stageDependencySource(execution, DependencyRequest{SourceDir: root, Directory: "."}, false)
+	var work string
+	if base || s.stage {
+		work, err = os.MkdirTemp("", "invariant-base-check-")
+	} else {
+		work, err = stageDependencySource(execution, DependencyRequest{SourceDir: root, Directory: "."}, false)
+	}
 	if err != nil {
 		return result, err
 	}
 	var environment RepositoryCheckEnvironment
 	activePart := ""
-	defer func() {
+	partWork := ""
+	cleanupWork := func(last bool) error {
 		cleanup, done := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
 		defer done()
+		var err error
 		if environment != nil {
-			if err := errors.Join(environment.Close(cleanup), cleanup.Err()); err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("part %q cleanup: %w", activePart, err))
-			}
+			err = errors.Join(environment.Close(cleanup), cleanup.Err())
+			environment = nil
 		}
-		if err := removeRepositoryStage(cleanup, work); err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("repository staging cleanup: %w", err))
+		if partWork != "" {
+			err = errors.Join(err, removeRepositoryStage(cleanup, partWork))
+			partWork = ""
+		}
+		if err != nil {
+			err = fmt.Errorf("part %q cleanup: %w", activePart, err)
+		}
+		if last || err != nil || execution.Err() != nil {
+			if stageErr := removeRepositoryStage(cleanup, work); stageErr != nil {
+				err = errors.Join(err, fmt.Errorf("repository staging cleanup: %w", stageErr))
+			}
+			work = ""
+		}
+		return err
+	}
+	defer func() {
+		if work != "" {
+			runErr = errors.Join(runErr, cleanupWork(true))
 		}
 	}()
 	src := filepath.Join(work, "invariant", "work")
+	if base {
+		if err := stageRepositoryBase(execution, s.Original, s.Repository.Snapshot, src); err != nil {
+			return result, err
+		}
+	} else if s.stage {
+		if err := Stage(execution, s.Original, root, plan, src); err != nil {
+			return result, err
+		}
+	}
 	if plan.Native() {
 		if err := stageRepositoryAcceptance(execution, src, plan); err != nil {
 			return result, err
 		}
+		if err := s.validateRepositoryInputs(execution, src, parts); err != nil {
+			return result, err
+		}
+	}
+	if base {
+		problem, err := checkPlanDecisions(src, src)
+		if err != nil {
+			return result, err
+		}
+		if problem != "" {
+			result.Problems = append(result.Problems, problem)
+			return result, nil
+		}
 	}
 	// All selection and safe staging finish before preparation. Prepare inherits
 	// the original deadline, including any shorter preparer allowance.
-	session, err := dependencies.Prepare(execution, s.Repository.Snapshot, names)
+	var session *DependencySession
+	if plan.Native() {
+		session, err = s.prepareRepositoryGo(execution, dependencies, parts)
+	} else {
+		session, err = dependencies.Prepare(execution, s.Repository.Snapshot, names)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -263,14 +315,18 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		}
 		prepared := session.parts[part.Name]
 		q := cloneDependencyRequest(prepared.request)
-		q.Image, q.SourceDir = prepared.artifact.Image, src
+		activePart = part.Name
+		partWork, err = stageDependencySource(execution, DependencyRequest{SourceDir: src, Directory: "."}, false)
+		if err != nil {
+			return result, err
+		}
+		q.Image, q.SourceDir = prepared.artifact.Image, filepath.Join(partWork, "invariant", "work")
 		q.Network, q.Pull, q.Argv = false, false, nil
 		q.Env = dependencyEnv(part.Language, false)
 		q.Token, err = dependencyToken()
 		if err != nil {
 			return result, err
 		}
-		activePart = part.Name
 		environment, err = runner.OpenChecks(execution, q)
 		if err != nil {
 			return result, fmt.Errorf("part %q startup: %w", part.Name, err)
@@ -313,13 +369,24 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				continue
 			}
 			invocation := repositoryInvocation(plan, test, selections[j])
-			if adapter, ok := s.Repository.Adapters[test.Framework].(RepositoryAcceptanceDiscoverer); ok {
+			transport, processCapable := environment.(RepositoryProcessTransport)
+			goRuntime := test.Framework == "go" && processCapable
+			discovered := false
+			if adapter, ok := s.repositoryAdapter(test.Framework).(RepositoryAcceptanceDiscoverer); ok {
 				startTests()
 				expected := invocation.Binding
 				input := invocation
 				input.Argv = slices.Clone(invocation.Argv)
 				discovery, err := adapter.Discover(execution, part, input, environment)
 				err = errors.Join(err, execution.Err())
+				var compilation *RepositoryAcceptanceEvidence
+				var failed *goCompilationFailure
+				if goRuntime && execution.Err() == nil && repositoryCommandFailed(err) && errors.As(err, &failed) {
+					var out []byte
+					discovery = failed.discovery
+					compilation, out, err = collectGoCompilation(execution, part, input, failed, transport)
+					result.Output += fmt.Sprintf("compile %s:\n%s\n", test.Identity(), out)
+				}
 				if err == nil {
 					expected.Package = discovery.Binding.Package
 					if discovery.Binding != expected || !nativeText(expected.Package) || discovery.TestName != strings.Split(test.Selector, "/")[0] {
@@ -333,13 +400,30 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 					if errors.As(err, &detail) && detail.Kind == "refused" {
 						record.Kind = "test"
 					}
+					if base && goRuntime && execution.Err() == nil && detail != nil && detail.Kind == "setup" && repositoryCommandFailed(err) {
+						// A selected package's compiler failure is a setup refusal,
+						// not evidence about any independent test or package.
+						continue
+					}
 					return result, fmt.Errorf("discover %s: %w", test.Identity(), err)
 				}
 				invocation.Binding = discovery.Binding
 				result.TestResults[j].Package = discovery.Binding.Package
+				if compilation != nil {
+					var evidenceErr error
+					result.TestResults[j], evidenceErr = repositoryEvidence(invocation.Binding, *compilation, result.TestResults[j])
+					if err := errors.Join(evidenceErr, execution.Err()); err != nil {
+						return result, err
+					}
+					continue
+				}
+				discovered = true
 			}
 			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)
-			if !ok {
+			if goRuntime && !discovered {
+				return result, fmt.Errorf("accept %s: Go process execution needs successful discovery", test.Identity())
+			}
+			if !goRuntime && !ok {
 				result.TestResults[j].Reason = "prepared environment has no runtime acceptance evidence collector"
 				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
 			}
@@ -348,28 +432,152 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				return result, err
 			}
 			expected := invocation.Binding
-			evidence, out, err := acceptance.RunAcceptance(execution, invocation)
+			var evidence RepositoryAcceptanceEvidence
+			var out []byte
+			var err error
+			if goRuntime {
+				evidence, out, err = runRepositoryGoAcceptance(execution, part, invocation, transport)
+			} else {
+				evidence, out, err = acceptance.RunAcceptance(execution, invocation)
+			}
 			result.Output += fmt.Sprintf("accept %s:\n%s\n", test.Identity(), out)
 			var evidenceErr error
-			result.TestResults[j], evidenceErr = repositoryEvidence(expected, evidence, result.TestResults[j])
+			result.TestResults[j], evidenceErr = repositoryEvidenceMode(expected, evidence, result.TestResults[j], goRuntime)
 			result.Accepted[test.Identity()] = result.TestResults[j].Status == "passed"
 			if err := errors.Join(err, evidenceErr, execution.Err()); err != nil {
 				return result, fmt.Errorf("accept %s: %w", test.Identity(), err)
 			}
 		}
-		// Close before opening another part. The last environment and source
-		// copy share the deferred cleanup reserve, even on cancellation.
+		// Close and remove this part's staging before opening another. A failed
+		// close and the final source copy share the same cleanup reserve.
 		if i+1 < len(parts) {
-			cleanup, done := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
-			err := errors.Join(environment.Close(cleanup), cleanup.Err())
-			done()
-			environment = nil
-			if err != nil {
-				return result, fmt.Errorf("part %q cleanup: %w", part.Name, err)
+			if err := cleanupWork(false); err != nil {
+				return result, err
+			}
+			if err := execution.Err(); err != nil {
+				return result, err
 			}
 		}
 	}
 	return result, nil
+}
+
+// Preparation uses captured inputs. The code under test must see those same
+// bytes, including lockfiles, rather than a candidate's replacement graph.
+func (s Sandbox) validateRepositoryInputs(ctx context.Context, root string, parts []repository.Part) error {
+	inputs := map[string]string{}
+	for _, part := range parts {
+		for _, name := range append(slices.Clone(part.Inputs), part.Lockfiles...) {
+			data, err := s.Repository.Snapshot.ReadFileContext(ctx, name)
+			if err != nil {
+				return err
+			}
+			inputs[name] = dependencyHash(data)
+		}
+	}
+	return verifyDependencyInputs(ctx, root, inputs)
+}
+
+// Native Go may declare its module identity while requiring no installation.
+// Seal that empty graph with the existing preparation, input verification and
+// cache machinery. Command-only checks retain their original install policy.
+func (s Sandbox) prepareRepositoryGo(ctx context.Context, preparer DependencyPreparer, parts []repository.Part) (*DependencySession, error) {
+	type emptyPart struct {
+		part    repository.Part
+		files   map[string][]byte
+		request DependencyRequest
+	}
+	var empty []emptyPart
+	var names []string
+	for _, part := range parts {
+		if part.Language != "go" || part.Commands["install"].NotApplicable == "" || len(part.Inputs)+len(part.Lockfiles) == 0 {
+			names = append(names, part.Name)
+			continue
+		}
+		files := map[string][]byte{}
+		for _, name := range append(slices.Clone(part.Inputs), part.Lockfiles...) {
+			data, err := s.Repository.Snapshot.ReadFileContext(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			files[name] = data
+		}
+		if err := repositoryGoEmptyInputs(part, files); err != nil {
+			return nil, fmt.Errorf("part %q: %w", part.Name, err)
+		}
+		q := DependencyRequest{Image: part.Image, Platform: preparer.Platform, Directory: part.Directory,
+			Env: dependencyEnv("go", false), Inputs: map[string]string{}, Pull: true,
+			Init: true, MemoryBytes: 4 << 30, PidsLimit: 1024}
+		for name, data := range files {
+			q.Inputs[name] = dependencyHash(data)
+		}
+		// Keep declared roles, exact bytes and the inapplicable reason in the
+		// recipe. This offline empty-graph recipe cannot reuse an install's key.
+		data, err := json.Marshal(struct {
+			Version       string
+			Inputs, Locks []string
+			Install       repository.Command
+			Request       DependencyRequest
+		}{dependencyRecipe + "/go-empty-v1", part.Inputs, part.Lockfiles, part.Commands["install"], q})
+		if err != nil {
+			return nil, err
+		}
+		q.Key = dependencyHash(data)
+		empty = append(empty, emptyPart{part, files, q})
+	}
+	if len(empty) > 0 && (!dependencyPlatform.MatchString(preparer.Platform) || preparer.CacheDir == "") {
+		return nil, errors.New("dependency preparation needs a cache directory and explicit Linux platform")
+	}
+	session, err := preparer.Prepare(ctx, s.Repository.Snapshot, names)
+	if err != nil {
+		return nil, err
+	}
+	if len(empty) > 0 {
+		if err := os.MkdirAll(preparer.CacheDir, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	for _, item := range empty {
+		artifact, err := preparer.prepare(ctx, session.runner, item.request, item.files)
+		if err != nil {
+			return nil, fmt.Errorf("prepare part %q: %w", item.part.Name, err)
+		}
+		session.parts[item.part.Name] = preparedDependency{part: item.part, request: item.request, artifact: cloneDependencyArtifact(artifact)}
+	}
+	return session, ctx.Err()
+}
+
+func repositoryGoEmptyInputs(part repository.Part, files map[string][]byte) error {
+	mod, sum := path.Join(part.Directory, "go.mod"), path.Join(part.Directory, "go.sum")
+	if !slices.Equal(part.Inputs, []string{mod}) || len(part.Lockfiles) > 1 || len(part.Lockfiles) == 1 && part.Lockfiles[0] != sum {
+		return errors.New("Go install.not_applicable permits only go.mod and an optional empty go.sum")
+	}
+	if err := goDependencyLock(part, files); err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(files[sum])) != "" {
+		return errors.New("Go install.not_applicable requires an empty dependency graph")
+	}
+	inRequire := false
+	for _, line := range strings.Split(string(files[mod]), "\n") {
+		line, _, _ = strings.Cut(line, "//")
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			continue
+		}
+		if inRequire {
+			if len(words) != 1 || words[0] != ")" {
+				return errors.New("Go install.not_applicable requires an empty dependency graph")
+			}
+			inRequire = false
+		} else if words[0] == "require" {
+			if len(words) != 2 || words[1] != "(" {
+				return errors.New("Go install.not_applicable requires an empty dependency graph")
+			}
+			inRequire = true
+		}
+	}
+	return nil
 }
 
 // Only a reported command exit may be expected on the base. Launch failures
@@ -467,7 +675,7 @@ func (r Result) repositorySummary() string {
 		fmt.Fprintln(&b, problem)
 	}
 	if failing := r.Failing(); len(failing) > 0 {
-		fmt.Fprintf(&b, "Acceptance tests without individual evidence: %s\n", strings.Join(failing, ", "))
+		fmt.Fprintf(&b, "Acceptance tests without a unique runtime pass: %s\n", strings.Join(failing, ", "))
 	}
 	return b.String()
 }

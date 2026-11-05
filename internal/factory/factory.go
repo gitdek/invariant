@@ -1296,12 +1296,27 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	case p.Plan != nil:
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, planComment(p, m), LabelProposal)
-	case p.Target != nil:
-		m.Kind, m.Proposal = KindProposal, p
-		return f.drafted(ctx, t, cause, base, m, amendmentComment(p, res.Report, res.Changes, m), LabelProposal)
 	default:
+		if err := p.ValidateReader(); err != nil {
+			m.Kind = KindStuck
+			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
+		}
 		m.Kind, m.Proposal = KindProposal, p
-		return f.drafted(ctx, t, cause, base, m, proposalComment(p, res.Report, m), LabelProposal)
+		// A compressed marker can fit the comment but exceed the reader's
+		// expanded size limit, leaving nothing recoverable or ratifiable.
+		if _, ok := DecodeMarker(m.encode()); !ok {
+			m.Kind, m.Proposal = KindStuck, nil
+			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification.", m), LabelHumanReview)
+		}
+		body := proposalComment(p, res.Report, m)
+		if p.Target != nil {
+			body = amendmentComment(p, res.Report, res.Changes, m)
+		}
+		if len(body) > maxComment {
+			m.Kind, m.Proposal = KindStuck, nil
+			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal and its reader evidence exceed the comment size limit; it cannot be published for ratification. Revise the presentation before publishing again.", m), LabelHumanReview)
+		}
+		return f.drafted(ctx, t, cause, base, m, body, LabelProposal)
 	}
 }
 
@@ -1474,6 +1489,17 @@ func (f *Factory) current(ctx context.Context, dir string) (*formalize.Current, 
 		return nil, err
 	}
 	c.ModuleText = string(b)
+	root, err := os.MkdirTemp("", "invariant-current-reader-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(root)
+	if err := f.Repo.Export(ctx, ref, []string{dir + "/.invariant", path.Join(dir, path.Dir(c.Manifest.Module))}, root); err != nil {
+		return nil, err
+	}
+	if err := c.ReadReader(filepath.Join(root, dir)); err != nil {
+		return nil, fmt.Errorf("%s's reader inputs: %w", dir, err)
+	}
 	return c, nil
 }
 

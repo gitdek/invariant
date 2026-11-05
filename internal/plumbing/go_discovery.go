@@ -127,11 +127,17 @@ func (a GoRepositoryAcceptanceAdapter) Discover(ctx context.Context, part reposi
 	}
 	argv = append([]string{"go", "test", "-c", "-o", "/dev/null"}, in.Argv[2:]...)
 	out, err = environment.Run(ctx, argv)
+	binding.Package = pkg.ImportPath
+	discovery := RepositoryAcceptanceDiscovery{Binding: binding, TestName: name}
 	if err := errors.Join(err, ctx.Err()); err != nil {
+		// Direct discovery still returns no selection on failure. Only the
+		// configured process lifecycle can investigate this completed attempt.
+		if ctx.Err() == nil && repositoryCommandFailed(err) {
+			err = &goCompilationFailure{discovery: discovery, err: err}
+		}
 		return fail("setup", "Go test compilation did not complete: "+strings.TrimSpace(string(out)), err)
 	}
-	binding.Package = pkg.ImportPath
-	return RepositoryAcceptanceDiscovery{Binding: binding, TestName: name}, nil
+	return discovery, nil
 }
 
 // This only consumes arguments that Select has validated, preserving spellings.

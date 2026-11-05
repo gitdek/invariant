@@ -17,6 +17,7 @@ type polling struct {
 	since    string
 	observed map[int]string
 	pending  map[int]github.Issue
+	listed   map[int]bool // the open issues GitHub's latest list named
 }
 
 func issueVersion(issue github.Issue) string {
@@ -30,12 +31,11 @@ func issueVersion(issue github.Issue) string {
 // selectIssues runs with the factory's mu held. Listing an update while a
 // step runs leaves that update pending, even if the next list omits it.
 func (p *polling) selectIssues(issues []github.Issue, merges map[int]int) []github.Issue {
-	if p.observed == nil {
-		p.observed = map[int]string{}
-		p.pending = map[int]github.Issue{}
-	}
+	p.init()
+	p.listed = map[int]bool{}
 	for _, issue := range issues {
 		n := issue.Number
+		p.listed[n] = p.listed[n] || issue.State == "open"
 		version := issueVersion(issue)
 		_, pending := p.pending[n]
 		if version == "" || p.observed[n] != version || pending || merges[n] != 0 {
@@ -51,6 +51,26 @@ func (p *polling) selectIssues(issues []github.Issue, merges map[int]int) []gith
 		work = append(work, issue)
 	}
 	return work
+}
+
+func (p *polling) init() {
+	if p.observed == nil {
+		p.observed = map[int]string{}
+		p.pending = map[int]github.Issue{}
+	}
+}
+
+// keepUnlisted has the next poll step open issue n even though GitHub's
+// latest list of open issues left it out, by its number, as for a merge.
+// GitHub's list once left out an issue the factory had just opened for a
+// plan's step for 23 minutes, though the issue read as open (#526).
+func (f *Factory) keepUnlisted(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.poll.init()
+	if _, pending := f.poll.pending[n]; !pending && !f.poll.listed[n] {
+		f.poll.pending[n] = github.Issue{Number: n}
+	}
 }
 
 type pollStepKey struct{}

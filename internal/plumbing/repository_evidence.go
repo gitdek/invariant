@@ -2,6 +2,7 @@ package plumbing
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -35,7 +36,15 @@ type RepositoryAcceptanceRecord struct {
 // repositoryEvidence consumes only the environment's evidence channel. Neither
 // an exit code alone nor any text in diagnostics establishes a test verdict.
 func repositoryEvidence(expected RepositoryAcceptanceBinding, evidence RepositoryAcceptanceEvidence, result TestResult) (TestResult, error) {
+	return repositoryEvidenceMode(expected, evidence, result, false)
+}
+
+// Real Go evidence has already passed CollectGoAcceptance. Its authentic
+// prefix survives an infrastructure veto, but completion still needs a start.
+// Trusted RunAcceptance environments retain their original terminal contract.
+func repositoryEvidenceMode(expected RepositoryAcceptanceBinding, evidence RepositoryAcceptanceEvidence, result TestResult, goRuntime bool) (TestResult, error) {
 	result.Package = expected.Package
+	result.Evidence = nil
 	refuse := func(reason string) (TestResult, error) {
 		result.Kind, result.Status, result.Reason = "evidence", "refused", reason
 		return result, fmt.Errorf("accept %s: %s", result.identity(), reason)
@@ -101,18 +110,37 @@ func repositoryEvidence(expected RepositoryAcceptanceBinding, evidence Repositor
 		result.Kind, result.Status, result.Reason = "setup", "refused", acceptanceReason(*terminal)
 		return result, fmt.Errorf("accept %s: %s", result.identity(), result.Reason)
 	}
-	// An interrupted process cannot establish a completed verdict. Its valid
-	// unfinished or setup evidence above still retains its status and reason.
+	if terminal.Kind == "compile" && (running != nil || len(evidence.Records) != 2 || evidence.ExitCode <= 0 || strings.TrimSpace(terminal.Reason) == "") {
+		return refuse("compiler evidence needs one attributed failure and a nonzero completed exit without runtime records: " + acceptanceReason(*terminal))
+	}
+	if goRuntime {
+		if terminal.Kind != "test" || running == nil {
+			return refuse("Go test completion needs authentic running evidence")
+		}
+		result.Kind, result.Status, result.Reason = terminal.Kind, terminal.Status, acceptanceReason(*terminal)
+	}
+	veto := func(reason string) (TestResult, error) {
+		if goRuntime {
+			return result, fmt.Errorf("accept %s: %s", result.identity(), reason)
+		}
+		return refuse(reason)
+	}
+	// Process and channel failures veto qualification. Only the real collector's
+	// authenticated terminal may survive them as completed work in the report.
 	if evidence.ExitCode < 0 {
-		return refuse("evidence has no completed process exit: " + acceptanceReason(*terminal))
+		return veto("evidence has no completed process exit: " + acceptanceReason(*terminal))
 	}
 	if !evidence.Complete {
-		return refuse("evidence channel did not complete: " + acceptanceReason(*terminal))
+		return veto("evidence channel did not complete: " + acceptanceReason(*terminal))
 	}
 	if evidence.ExitCode != 0 && terminal.Status != "failed" {
-		return refuse("nonzero exit without attributable test or compiler failure: " + acceptanceReason(*terminal))
+		return veto("nonzero exit without attributable test or compiler failure: " + acceptanceReason(*terminal))
 	}
 	result.Kind, result.Status, result.Reason = terminal.Kind, terminal.Status, acceptanceReason(*terminal)
+	if terminal.Kind == "compile" {
+		evidence.Records = slices.Clone(evidence.Records)
+		result.Evidence = &evidence
+	}
 	return result, nil
 }
 

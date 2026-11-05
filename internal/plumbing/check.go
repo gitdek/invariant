@@ -42,20 +42,23 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		c.Problem = "native acceptance needs the caller's captured repository authority"
 		return c, nil
 	}
+	if s.Repository != nil {
+		// ReadRepositoryDraft checked source absence in the captured commit.
+		// Working-tree files cannot replace that independent base.
+		s.Original = repo
+		c, err := s.checkRepositoryBase(ctx, repo, plan)
+		// Configured failures belong to the draft's report, including all
+		// completed evidence and the infrastructure reason that vetoed it.
+		if err != nil && c.Problem == "" {
+			c.Problem = "acceptance checks could not finish: " + err.Error()
+		}
+		return c, nil
+	}
 	for _, f := range plan.TestFiles() {
 		if _, err := os.Lstat(filepath.Join(repo, filepath.FromSlash(f))); err == nil {
 			c.Problem = fmt.Sprintf("acceptance test file %s is already in the repository; put the tests in a new file, which the build can't change", f)
 			return c, nil
 		}
-	}
-	if s.Repository != nil {
-		// No adapter collects individual acceptance evidence yet, so no
-		// configured run can show these tests fail on the code as it is.
-		// Refuse before copying the checkout or preparing dependencies; an
-		// adapter's issue lifts this for the frameworks it runs.
-		c.Run = unstartedAcceptance(plan)
-		c.Problem = "configured acceptance has no individual execution adapter yet, so no run can show these tests fail on the code as it is"
-		return c, nil
 	}
 	dir, err := os.MkdirTemp("", "invariant-plan-check-")
 	if err != nil {
@@ -170,6 +173,9 @@ func checkPlanDecisions(repo, dir string) (string, error) {
 func (c *Checked) Feedback() string {
 	if c.Problem != "" {
 		out := "The plan can't be proposed yet: " + c.Problem + "."
+		if c.Run.CommandResults != nil {
+			out += "\n\n" + c.Run.Summary()
+		}
 		if c.Run.Output != "" {
 			out += "\n\nThe acceptance tests, run on the code as it is:\n" + c.Run.Tail(4000)
 		}
@@ -179,6 +185,9 @@ func (c *Checked) Feedback() string {
 	out := fmt.Sprintf("The plan holds together: the build may write %d files, and its %d acceptance tests fail on the code as it is, as they should until the change is made.", len(p.Files), len(p.Tests))
 	if len(p.Trusted) > 0 {
 		out += fmt.Sprintf(" It touches the trusted base (%s), so a person merges it.", strings.Join(p.Trusted, ", "))
+	}
+	if c.Run.CommandResults != nil {
+		out += "\n\n" + c.Run.Summary()
 	}
 	return out
 }

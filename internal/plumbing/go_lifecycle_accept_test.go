@@ -189,24 +189,24 @@ func TestGoAcceptanceLifecycleDiscoversWithoutCompleting(t *testing.T) {
 			t.Fatal("discovery wrote the original checkout")
 		}
 		checked, err := Check(context.Background(), n503Draft(t, f.plan), f.root, f.sandbox)
-		if err != nil || checked == nil || checked.Problem == "" || len(f.runner.opens) != 1 {
-			t.Fatal("selection/discovery opened configured planning admission")
+		if err != nil || checked == nil || checked.Problem == "" || len(f.runner.opens) != 2 {
+			t.Fatal("public planning treated discovery as completed evidence")
 		}
 		// The lower-level base path also cannot qualify discovery as a failure.
 		base, _ := f.sandbox.checkRepositoryBase(context.Background(), f.root, f.plan)
 		if base == nil || base.Problem == "" || base.Run.Passed() {
 			t.Fatal("discovery qualified a base without runtime evidence")
 		}
-		if len(f.adapter.inputs) != 2 || f.adapter.inputs[1].Binding.InvocationID == in.Binding.InvocationID {
+		if len(f.adapter.inputs) != 3 || f.adapter.inputs[1].Binding.InvocationID == in.Binding.InvocationID || f.adapter.inputs[2].Binding.InvocationID == f.adapter.inputs[1].Binding.InvocationID {
 			t.Fatal("discovery reused invocation identity")
 		}
 		closed484(t, f.runner.runner484)
-		// Nil/default adapter still refuses before preparation.
+		// Default discovery also needs a runtime evidence collector.
 		f.sandbox.Repository.Adapters = nil
 		opens, installs := len(f.runner.opens), len(f.runner.installs)
 		refused, _ := f.sandbox.Run(context.Background(), f.candidate, f.plan)
-		if refused.Passed() || len(f.runner.opens) != opens || len(f.runner.installs) != installs {
-			t.Fatal("Go adapter was enabled by default")
+		if refused.Passed() || len(f.runner.opens) != opens+1 || len(f.runner.installs) != installs {
+			t.Fatal("default Go discovery supplied completion or lost dependency reuse")
 		}
 	}
 }

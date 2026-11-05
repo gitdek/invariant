@@ -121,6 +121,13 @@ func (f *Factory) WorkPlan(ctx context.Context, plan PlanOfIssues) error {
 			return err
 		}
 	}
+	// The poll finds work through GitHub's list of open issues, which can
+	// leave a step's open issue out for a while (#526).
+	for _, s := range run.steps {
+		if s.number != 0 && s.status == plans.Open {
+			f.keepUnlisted(s.number)
+		}
+	}
 	if k := run.opened(); !run.done && k == len(run.steps) && run.steps[k-1].status == plans.Merged {
 		return f.finishPlan(ctx, plan, run)
 	}

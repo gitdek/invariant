@@ -12,7 +12,74 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/regular"
+	"github.com/gitdek/invariant/internal/repository"
 )
+
+// stageRepositoryBase reads only the captured commit. Neither the planner's
+// workspace nor working-tree edits in the original checkout supply base code.
+func stageRepositoryBase(ctx context.Context, repo string, snapshot *repository.Snapshot, dst string) error {
+	read := func(args ...string) ([]byte, error) {
+		options := []string{"--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never"}
+		cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
+		cmd.Dir = repo
+		for _, variable := range os.Environ() {
+			if !strings.HasPrefix(variable, "GIT_") {
+				cmd.Env = append(cmd.Env, variable)
+			}
+		}
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+		out, err := cmd.Output()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return out, err
+	}
+	out, err := read("ls-tree", "-r", "-z", "--full-tree", snapshot.Commit())
+	if err != nil {
+		return fmt.Errorf("listing the captured base: %w", err)
+	}
+	for _, entry := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		metadata, name, ok := strings.Cut(entry, "\t")
+		fields := strings.Fields(metadata)
+		if !ok || len(fields) != 3 {
+			return fmt.Errorf("invalid captured base entry %q", entry)
+		}
+		if fields[1] != "blob" || fields[0] != "100644" && fields[0] != "100755" {
+			return fmt.Errorf("captured base entry %q is not a regular file (mode %s, type %s)", name, fields[0], fields[1])
+		}
+		local, err := filepath.Localize(name)
+		if err != nil || local == "." {
+			return fmt.Errorf("invalid captured base path %q", name)
+		}
+		for _, component := range strings.Split(name, "/") {
+			if strings.EqualFold(component, ".git") {
+				return fmt.Errorf("captured base path %q contains Git metadata", name)
+			}
+		}
+		oid := fields[2]
+		if len(oid) != 40 && len(oid) != 64 || strings.Trim(oid, "0123456789abcdef") != "" {
+			return fmt.Errorf("invalid captured base object %q", oid)
+		}
+		// Tree names are literal filenames, not declaration paths or globs.
+		// Read the captured object with the same isolation as the tree listing.
+		data, err := read("cat-file", "blob", oid)
+		if err != nil {
+			return fmt.Errorf("reading captured base file %q: %w", name, err)
+		}
+		to := filepath.Join(dst, local)
+		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+			return err
+		}
+		perm := os.FileMode(0o644)
+		if fields[0] == "100755" {
+			perm = 0o755
+		}
+		if err := os.WriteFile(to, data, perm); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
 
 // Stage lays out what a build made, for a test run or a commit: the
 // checkout at root as it is, the plan's record and acceptance tests
