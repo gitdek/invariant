@@ -34,6 +34,9 @@ type localGoTransport struct {
 	env                 map[string]string
 	onStart             func(context.Context, []string, int)
 	prepared            []*localPreparedProcess
+	part                repository.Part
+	invocation          RepositoryAcceptanceInvocation
+	acceptanceUsed      bool
 	closed              bool
 	err                 error
 }
@@ -77,6 +80,14 @@ func OpenLocalGoProcessTransport(ctx context.Context, options LocalGoProcessOpti
 		return nil, err
 	}
 	e := &localGoTransport{root: root, goExecutable: options.GoExecutable, onStart: options.OnStart}
+	e.invocation = cloneGoInvocation(options.Invocation)
+	e.part = options.Part
+	e.part.Inputs, e.part.Lockfiles = slices.Clone(e.part.Inputs), slices.Clone(e.part.Lockfiles)
+	e.part.Commands = maps.Clone(e.part.Commands)
+	for name, command := range e.part.Commands {
+		command.Argv = slices.Clone(command.Argv)
+		e.part.Commands[name] = command
+	}
 	fail := func(err error) (RepositoryProcessTransport, error) {
 		e.err = err
 		return e, err // The caller retains even partially acquired storage.
@@ -309,6 +320,71 @@ func (e *localGoTransport) Run(ctx context.Context, argv []string) ([]byte, erro
 	return append(out.Stdout, out.Stderr...), err
 }
 
+// RunAcceptance consumes the retained invocation once. Rediscovery uses the
+// original selection and captured part, never caller-supplied package authority.
+func (e *localGoTransport) RunAcceptance(ctx context.Context, in RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error) {
+	in = cloneGoInvocation(in)
+	fail := func(err error) (RepositoryAcceptanceEvidence, []byte, error) {
+		return RepositoryAcceptanceEvidence{ExitCode: -1, Records: []RepositoryAcceptanceRecord{{Binding: in.Binding, Kind: "setup", Status: "failed", Reason: err.Error()}}}, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	e.mu.Lock()
+	expected := cloneGoInvocation(e.invocation)
+	// The import path is established below by real discovery. Every other field
+	// must already agree with the original host selection before any work starts.
+	expected.Binding.Package = in.Binding.Package
+	if e.closed || e.err != nil || e.acceptanceUsed || !sameGoInvocation(expected, in) {
+		err := errors.Join(e.err, errors.New("local Go acceptance is closed, consumed or differs from its original invocation"))
+		e.mu.Unlock()
+		return fail(err)
+	}
+	e.acceptanceUsed = true
+	e.mu.Unlock()
+	b := expected.Binding
+	test := Test{Name: "Go acceptance", Part: b.Part, Framework: b.Framework, File: b.File, Selector: b.Selector}
+	adapter := GoRepositoryAcceptanceAdapter{}
+	selection, err := adapter.Select(ctx, e.part, test)
+	if err != nil {
+		return fail(err)
+	}
+	expected.Binding.Package = selection.Package
+	discovery, err := adapter.Discover(ctx, e.part, expected, e)
+	if err != nil {
+		return fail(err)
+	}
+	expected.Binding.Package = discovery.Binding.Package
+	if discovery.Binding != expected.Binding || discovery.TestName != strings.Split(b.Selector, "/")[0] || !sameGoInvocation(expected, in) {
+		return fail(errors.New("local Go acceptance differs from the discovered invocation"))
+	}
+	run := &GoAcceptanceRun{Invocation: cloneGoInvocation(expected), invocation: cloneGoInvocation(expected), environment: e}
+	startErr := run.start(ctx, e.part)
+	var stream GoAcceptanceStream
+	var waitErr error
+	if run.Process != nil {
+		stream, waitErr = run.Wait(ctx)
+	}
+	// The environment owns storage until its explicit Close. Release the runtime
+	// handle now, including any partial startup, within the cleanup reserve.
+	cleanup, done := goProcessCleanupContext(ctx)
+	defer done()
+	var closeErr error
+	if run.prepared != nil {
+		closeErr = run.prepared.Close(cleanup)
+	}
+	err = errors.Join(startErr, waitErr, closeErr, ctx.Err())
+	if run.Process == nil {
+		if err == nil {
+			err = errors.New("local Go acceptance did not start a process")
+		}
+		return fail(err)
+	}
+	evidence, collectErr := CollectGoAcceptance(expected, stream, err)
+	diagnostics := append(slices.Clone(stream.Output.Stdout), stream.Output.Stderr...)
+	return evidence, diagnostics, collectErr
+}
+
 func (e *localGoTransport) Close(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -316,10 +392,12 @@ func (e *localGoTransport) Close(ctx context.Context) error {
 		return e.err
 	}
 	e.closed = true
+	cleanup, done := goProcessCleanupContext(ctx)
+	defer done()
 	for _, p := range e.prepared {
-		e.err = errors.Join(e.err, p.Close(ctx))
+		e.err = errors.Join(e.err, p.Close(cleanup))
 	}
-	e.err = errors.Join(e.err, removeRepositoryStage(ctx, e.root))
+	e.err = errors.Join(e.err, removeRepositoryStage(cleanup, e.root))
 	return e.err
 }
 

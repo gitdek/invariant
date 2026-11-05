@@ -133,9 +133,12 @@ func pa321Fixture(t *testing.T, source, driver string) (string, *project.Project
 	return root, p
 }
 
+// pa321Context bounds one application test's run. No test expects it to
+// fire: it stops a run that hangs. CI runs these tests in shards beside
+// heavier ones, where a held-call run took 16 seconds (#583).
 func pa321Context(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }

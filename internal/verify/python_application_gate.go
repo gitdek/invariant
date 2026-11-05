@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -249,35 +250,14 @@ func pythonApplicationModelValue(value any) (any, error) {
 }
 
 func pythonApplicationTraces(x PythonApplicationExecutionResult) ([]byte, error) {
-	if !x.Success || !x.Complete || x.ObservationMode != "sampled" || len(x.Observations) == 0 {
+	if x.ObservationMode != "sampled" {
 		return nil, fmt.Errorf("no complete authenticated sampled observations")
 	}
-	t := conformance.Traces{}
-	for _, row := range x.Observations {
-		state := row.After
-		if row.Kind == "initial" {
-			state = row.State
-		}
-		if row.Form == "module" {
-			converted, err := pythonApplicationModelValue(state)
-			if err != nil {
-				return nil, err
-			}
-			state = converted.(map[string]any)
-		}
-		if row.Kind == "initial" {
-			if row.Run != len(t.Traces)+1 {
-				return nil, fmt.Errorf("invalid observation run")
-			}
-			t.Traces = append(t.Traces, []map[string]any{state})
-		} else {
-			if row.Run < 1 || row.Run > len(t.Traces) {
-				return nil, fmt.Errorf("invalid observation run")
-			}
-			t.Traces[row.Run-1] = append(t.Traces[row.Run-1], state)
-		}
+	var out bytes.Buffer
+	if err := writePythonApplicationRecording(context.Background(), &out, x); err != nil {
+		return nil, err
 	}
-	return json.Marshal(t)
+	return out.Bytes(), nil
 }
 
 // The session's sorted snapshot already selects every staged regular file.
@@ -398,18 +378,14 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				c.Model.Inputs = append(c.Model.Inputs, f)
 			}
 		}
-		var traces []byte
-		var traceErr error
+		recording, traceErr := pythonApplicationRecording(ctx, *x, v.Explored)
 		var model *conformance.Model
-		if !v.Explored {
-			traces, traceErr = pythonApplicationTraces(*x)
-		} else {
+		if v.Explored {
 			// An explored driver's attempts are checked as every exhaustive
 			// driver's are: against the model's named steps, with the
 			// environment's bounds one larger (D-0082, D-0085, #342).
 			c.Mode = "bounded-exhaustive"
 			c.Result.Exhaustive = true
-			traces, traceErr = pythonApplicationAttempts(*x)
 			model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
 			if steps, err := tla.Steps(string(raw)); err != nil {
 				model.Problem = err.Error()
@@ -420,10 +396,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		if traceErr == nil {
 			d, e := stage(work, fmt.Sprintf("conformance-%d", i), p, string(raw), "")
 			if e != nil {
-				return nil, e
+				return nil, errors.Join(e, recording.close())
 			}
 			checks := &pythonApplicationModelRunner{runner: runner, root: d}
-			c.Result, e = conformance.Check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, traces, model)
+			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, model)
 			if v.Explored {
 				// Attempts carry no runs; the exploration's are its replays.
 				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs

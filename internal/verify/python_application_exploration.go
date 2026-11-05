@@ -2,6 +2,7 @@ package verify
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -375,82 +376,14 @@ func (x *pythonApplicationExplorer) finish() (*PythonApplicationExploration, err
 // back, the ones runs started in, and every step the harness tried, in its
 // spec encoding. Replays repeat attempts, so only the attempts count.
 func pythonApplicationAttempts(x PythonApplicationExecutionResult) ([]byte, error) {
-	if !x.Success || !x.Complete || x.ObservationMode != "explored" || x.Exploration == nil || len(x.Observations) == 0 {
+	if x.ObservationMode != "explored" {
 		return nil, fmt.Errorf("no complete authenticated explored observations")
 	}
-	out := struct {
-		States   []map[string]any `json:"states"`
-		Init     []int            `json:"init"`
-		Attempts [][]any          `json:"attempts"`
-	}{States: []map[string]any{}, Init: []int{}, Attempts: [][]any{}}
-	index := map[string]int{}
-	add := func(row PythonApplicationObservation, state map[string]any) (int, error) {
-		key := pythonApplicationKey(state)
-		if i, ok := index[key]; ok {
-			return i, nil
-		}
-		if row.Form == "module" {
-			converted, err := pythonApplicationModelValue(state)
-			if err != nil {
-				return 0, err
-			}
-			state = converted.(map[string]any)
-		}
-		index[key] = len(out.States)
-		out.States = append(out.States, state)
-		return index[key], nil
+	var out bytes.Buffer
+	if err := writePythonApplicationRecording(context.Background(), &out, x); err != nil {
+		return nil, err
 	}
-	started := map[int]bool{}
-	declarations := map[string]*PythonApplicationRefusal{}
-	for _, step := range x.Exploration.Steps {
-		declarations[step.Name] = step.Refusal
-	}
-	for _, row := range x.Observations {
-		if row.Kind == "transition" {
-			if err := pythonApplicationOutcome(row, declarations[row.Step]); err != nil {
-				return nil, err
-			}
-		} else if row.Outcome != "" || row.Refusal != nil {
-			return nil, fmt.Errorf("refusal metadata outside an exploration transition")
-		}
-		switch {
-		case row.Kind == "initial":
-			i, err := add(row, row.State)
-			if err != nil {
-				return nil, err
-			}
-			if !started[i] {
-				started[i] = true
-				out.Init = append(out.Init, i)
-			}
-		case row.Kind == "transition" && row.Replay != nil && !*row.Replay:
-			from, err := add(row, row.Before)
-			if err != nil {
-				return nil, err
-			}
-			to, err := add(row, row.After)
-			if err != nil {
-				return nil, err
-			}
-			args := row.Args
-			if args == nil {
-				args = []any{}
-			}
-			attempt := []any{from, row.Step, args, to}
-			if row.Outcome != "" {
-				metadata := map[string]any{"outcome": row.Outcome}
-				if row.Refusal != nil {
-					metadata["refusal"] = row.Refusal
-				}
-				attempt = append(attempt, metadata)
-			}
-			out.Attempts = append(out.Attempts, attempt)
-		}
-	}
-	if len(out.Attempts) == 0 {
-		return nil, fmt.Errorf("no explored attempts")
-	}
-	return json.Marshal(out)
+	return out.Bytes(), nil
 }
 
 // mergePythonApplicationAttempts joins several explored executions' attempts
