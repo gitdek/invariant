@@ -224,16 +224,33 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	}
 	var environment RepositoryCheckEnvironment
 	activePart := ""
-	defer func() {
+	partWork := ""
+	cleanupWork := func(last bool) error {
 		cleanup, done := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
 		defer done()
+		var err error
 		if environment != nil {
-			if err := errors.Join(environment.Close(cleanup), cleanup.Err()); err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("part %q cleanup: %w", activePart, err))
-			}
+			err = errors.Join(environment.Close(cleanup), cleanup.Err())
+			environment = nil
 		}
-		if err := removeRepositoryStage(cleanup, work); err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("repository staging cleanup: %w", err))
+		if partWork != "" {
+			err = errors.Join(err, removeRepositoryStage(cleanup, partWork))
+			partWork = ""
+		}
+		if err != nil {
+			err = fmt.Errorf("part %q cleanup: %w", activePart, err)
+		}
+		if last || err != nil || execution.Err() != nil {
+			if stageErr := removeRepositoryStage(cleanup, work); stageErr != nil {
+				err = errors.Join(err, fmt.Errorf("repository staging cleanup: %w", stageErr))
+			}
+			work = ""
+		}
+		return err
+	}
+	defer func() {
+		if work != "" {
+			runErr = errors.Join(runErr, cleanupWork(true))
 		}
 	}()
 	src := filepath.Join(work, "invariant", "work")
@@ -263,14 +280,18 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		}
 		prepared := session.parts[part.Name]
 		q := cloneDependencyRequest(prepared.request)
-		q.Image, q.SourceDir = prepared.artifact.Image, src
+		activePart = part.Name
+		partWork, err = stageDependencySource(execution, DependencyRequest{SourceDir: src, Directory: "."}, false)
+		if err != nil {
+			return result, err
+		}
+		q.Image, q.SourceDir = prepared.artifact.Image, filepath.Join(partWork, "invariant", "work")
 		q.Network, q.Pull, q.Argv = false, false, nil
 		q.Env = dependencyEnv(part.Language, false)
 		q.Token, err = dependencyToken()
 		if err != nil {
 			return result, err
 		}
-		activePart = part.Name
 		environment, err = runner.OpenChecks(execution, q)
 		if err != nil {
 			return result, fmt.Errorf("part %q startup: %w", part.Name, err)
@@ -313,6 +334,9 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				continue
 			}
 			invocation := repositoryInvocation(plan, test, selections[j])
+			transport, processCapable := environment.(RepositoryProcessTransport)
+			goRuntime := test.Framework == "go" && processCapable
+			discovered := false
 			if adapter, ok := s.Repository.Adapters[test.Framework].(RepositoryAcceptanceDiscoverer); ok {
 				startTests()
 				expected := invocation.Binding
@@ -333,13 +357,22 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 					if errors.As(err, &detail) && detail.Kind == "refused" {
 						record.Kind = "test"
 					}
+					if base && goRuntime && execution.Err() == nil && detail != nil && detail.Kind == "setup" && repositoryCommandFailed(err) {
+						// A selected package's compiler failure is a setup refusal,
+						// not evidence about any independent test or package.
+						continue
+					}
 					return result, fmt.Errorf("discover %s: %w", test.Identity(), err)
 				}
 				invocation.Binding = discovery.Binding
 				result.TestResults[j].Package = discovery.Binding.Package
+				discovered = true
 			}
 			acceptance, ok := environment.(RepositoryAcceptanceEnvironment)
-			if !ok {
+			if goRuntime && !discovered {
+				return result, fmt.Errorf("accept %s: Go process execution needs successful discovery", test.Identity())
+			}
+			if !goRuntime && !ok {
 				result.TestResults[j].Reason = "prepared environment has no runtime acceptance evidence collector"
 				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
 			}
@@ -348,24 +381,30 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				return result, err
 			}
 			expected := invocation.Binding
-			evidence, out, err := acceptance.RunAcceptance(execution, invocation)
+			var evidence RepositoryAcceptanceEvidence
+			var out []byte
+			var err error
+			if goRuntime {
+				evidence, out, err = runRepositoryGoAcceptance(execution, part, invocation, transport)
+			} else {
+				evidence, out, err = acceptance.RunAcceptance(execution, invocation)
+			}
 			result.Output += fmt.Sprintf("accept %s:\n%s\n", test.Identity(), out)
 			var evidenceErr error
-			result.TestResults[j], evidenceErr = repositoryEvidence(expected, evidence, result.TestResults[j])
+			result.TestResults[j], evidenceErr = repositoryEvidenceMode(expected, evidence, result.TestResults[j], goRuntime)
 			result.Accepted[test.Identity()] = result.TestResults[j].Status == "passed"
 			if err := errors.Join(err, evidenceErr, execution.Err()); err != nil {
 				return result, fmt.Errorf("accept %s: %w", test.Identity(), err)
 			}
 		}
-		// Close before opening another part. The last environment and source
-		// copy share the deferred cleanup reserve, even on cancellation.
+		// Close and remove this part's staging before opening another. A failed
+		// close and the final source copy share the same cleanup reserve.
 		if i+1 < len(parts) {
-			cleanup, done := context.WithTimeout(context.Background(), SandboxCleanupAllowance)
-			err := errors.Join(environment.Close(cleanup), cleanup.Err())
-			done()
-			environment = nil
-			if err != nil {
-				return result, fmt.Errorf("part %q cleanup: %w", part.Name, err)
+			if err := cleanupWork(false); err != nil {
+				return result, err
+			}
+			if err := execution.Err(); err != nil {
+				return result, err
 			}
 		}
 	}

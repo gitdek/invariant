@@ -165,6 +165,25 @@ func repositoryInvocation(plan *Plan, test Test, selection RepositoryAcceptanceS
 	}
 }
 
+// The shared lifecycle has already selected and discovered this invocation.
+// The transport owns all acquired handles until the part's bounded cleanup;
+// the producer and collector reuse the host's binding without another attempt.
+func runRepositoryGoAcceptance(ctx context.Context, part repository.Part, in RepositoryAcceptanceInvocation, transport RepositoryProcessTransport) (RepositoryAcceptanceEvidence, []byte, error) {
+	run := &GoAcceptanceRun{Invocation: cloneGoInvocation(in), invocation: cloneGoInvocation(in), environment: transport}
+	startErr := run.start(ctx, part)
+	if run.Process == nil {
+		err := errors.Join(startErr, ctx.Err())
+		if err == nil {
+			err = errors.New("Go acceptance did not start a process")
+		}
+		return RepositoryAcceptanceEvidence{ExitCode: -1, Records: []RepositoryAcceptanceRecord{{Binding: in.Binding, Kind: "setup", Status: "failed", Reason: err.Error()}}}, nil, err
+	}
+	stream, waitErr := run.Wait(ctx)
+	evidence, err := CollectGoAcceptance(in, stream, errors.Join(startErr, waitErr, ctx.Err()))
+	out := append(slices.Clone(stream.Output.Stdout), stream.Output.Stderr...)
+	return evidence, out, err
+}
+
 // checkRepositoryBase is the lower-level failure-evidence path. Public Check
 // still refuses configured proposals until production adapters are admitted.
 func (s Sandbox) checkRepositoryBase(ctx context.Context, root string, plan *Plan) (*Checked, error) {

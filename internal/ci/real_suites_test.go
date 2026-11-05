@@ -33,6 +33,7 @@ func TestRealSuitesRunOnTheChangesTheyCover(t *testing.T) {
 		{"the toolchain", []string{"internal/toolchain/toolchain.go"}, true, true},
 		{"the gate's command", []string{"cmd/invariant/main.go"}, true, false},
 		{"running TLC", []string{"internal/tlc/tlc.go"}, true, true},
+		{"reader statecharts", []string{"internal/statechart/chart.go"}, true, true},
 		{"the decision store", []string{"internal/decisions/store.go"}, true, true},
 		{"a core the store runs on", []string{"factory/ids/ids/ids.go"}, true, true},
 		{"the TLAPS example's README", []string{"examples/05-connection-pool/README.md"}, false, false},

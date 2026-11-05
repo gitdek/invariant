@@ -86,6 +86,7 @@ const (
 	codeSANYFailed    = 3002
 	codeInitComputing = 2189
 	codeInitDone      = 2190
+	codeInitProgress  = 2269 // "Computed 2 initial states...", while TLC computes them (#594)
 	codeProgress      = 2200
 	codeRunning       = 2187
 	codeOutdegree     = 2268
@@ -104,7 +105,7 @@ const (
 var informational = map[int]bool{
 	codeVersion: true, codeSuccess: true, codeBehavior: true, codeTraceState: true,
 	codeStats: true, codeDepth: true, codeFinished: true, codeStarting: true,
-	codeSANYStart: true, codeSANYEnd: true, codeInitComputing: true, codeInitDone: true,
+	codeSANYStart: true, codeSANYEnd: true, codeInitComputing: true, codeInitDone: true, codeInitProgress: true,
 	codeProgress: true, codeRunning: true, codeOutdegree: true,
 	codeCounterexample: true, codeCheckingTemporal: true, codeTemporalDone: true, codeImplied: true,
 }
