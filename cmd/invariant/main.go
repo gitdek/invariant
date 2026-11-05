@@ -118,9 +118,11 @@ func main() {
 	os.Exit(code)
 }
 
+var verifyToolchain = toolchain.Ensure
+
 func verifyCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	out := fs.String("out", "", "write receipt.md, receipt.json and traces/ to this directory")
+	out := fs.String("out", "", "write receipt.md, receipt.json, reader.json, reader.svg and traces/ to this directory")
 	tlcParallel := fs.Int("tlc-parallel", 0, "lower the automatic TLC concurrency limit (0 selects automatically from Docker CPU and memory)")
 	fs.Parse(args)
 	if *tlcParallel < 0 {
@@ -137,7 +139,7 @@ func verifyCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	tc, err := toolchain.Ensure(ctx)
+	tc, err := verifyToolchain(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
@@ -150,17 +152,7 @@ func verifyCmd(ctx context.Context, args []string) int {
 	md := receipt.Markdown(r)
 	fmt.Print(md)
 	if *out != "" {
-		js, err := json.MarshalIndent(r, "", "  ")
-		if err == nil {
-			err = os.MkdirAll(*out, 0o755)
-		}
-		if err == nil {
-			err = os.WriteFile(filepath.Join(*out, "receipt.json"), append(js, '\n'), 0o644)
-		}
-		if err == nil {
-			err = os.WriteFile(filepath.Join(*out, "receipt.md"), []byte(md), 0o644)
-		}
-		if err != nil {
+		if err := receipt.Write(*out, r); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
 		}
@@ -311,16 +303,17 @@ func synthesizeCmd(ctx context.Context, args []string) int {
 		md := receipt.Markdown(r.Final)
 		summary := synth.Summary(r) + md
 		fmt.Print(summary)
-		js, _ := json.MarshalIndent(r.Final, "", "  ")
-		for name, text := range map[string]string{"synthesis.md": summary, "gate/receipt.md": md, "gate/receipt.json": string(js) + "\n"} {
-			path := filepath.Join(*out, name)
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
-				os.WriteFile(path, []byte(text), 0o644)
-			}
+		if err := os.WriteFile(filepath.Join(*out, "synthesis.md"), []byte(summary), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 2
 		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
+		var outputErr *os.PathError
+		if errors.As(err, &outputErr) {
+			return 2
+		}
 		if r == nil || r.Final == nil {
 			return 2
 		}

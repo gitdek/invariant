@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
@@ -494,6 +495,9 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	if gateErr == nil {
 		report.Agent = usage.Backend
 		r.Final = report
+		if err := receipt.Write(filepath.Join(out, "gate"), report); err != nil {
+			return r, err
+		}
 	}
 	if r.GateRuns, err = readGateRuns(gateLog); err != nil {
 		return nil, err
@@ -592,6 +596,9 @@ func copyOwned(p *project.Project, ws string) error {
 }
 
 func owned(m project.Manifest, rel string) bool {
+	if readerInput(m, rel) || rel == ".invariant/reader.json" || rel == ".invariant/reader.svg" || rel == "reader.json" || rel == "reader.svg" {
+		return false
+	}
 	if len(m.Existing) > 0 {
 		// A project that checks existing code holds only the model, the
 		// driver and its helpers (D-0054). The copies of the code in
@@ -631,6 +638,9 @@ func Prepare(p *project.Project, skeleton, ws string) error {
 			return err
 		}
 	}
+	if err := copyReaderInputs(p, ws); err != nil {
+		return err
+	}
 	if err := writeFile(filepath.Join(ws, p.Manifest.Module), skeleton); err != nil {
 		return err
 	}
@@ -661,6 +671,9 @@ func Assemble(p *project.Project, ws, dst string) error {
 		if err := copyFile(filepath.Join(p.Dir, rel), filepath.Join(dst, rel)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+	}
+	if err := copyReaderInputs(p, dst); err != nil {
+		return err
 	}
 	// The agent may name its code's parameters, and nothing else, in the
 	// manifest.
