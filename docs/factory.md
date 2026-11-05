@@ -264,7 +264,7 @@ Selection, staging, dependency preparation, discovery, both compilations, helper
 
 Separate default integration fixtures exercise these paths with real local Go, temporary modules and isolated caches, without Docker or network. Only dependency-image preparation uses a stand-in; runtime verdicts come from real processes. These supplement the unchanged acceptance, Go, native and trusted evidence fixtures. They establish no prepared-Docker runtime evidence. Compiler attribution and prepared-Docker process transport remain pending; default adapters, configured planning admission, external plumbing and production pytest/Vitest/Jest adapters remain disabled. Legacy Go execution, hashes and locks are unchanged.
 
-The merger records this integration refinement of [D-0316](../decisions/journal/D-0316.jsonl), [D-0321](../decisions/journal/D-0321.jsonl) and [D-0327](../decisions/journal/D-0327.jsonl), grounded in D-0107, D-0108, D-0110, D-0111, D-0121, D-0173, D-0281, D-0282, D-0301, D-0305, D-0311 and D-0314. Unavailable Docker or network checks remain merger work; affected real Python and TLAPS suites remain required in CI.
+[D-0337](../decisions/journal/D-0337.jsonl) records this integration refinement of [D-0316](../decisions/journal/D-0316.jsonl), [D-0321](../decisions/journal/D-0321.jsonl) and [D-0327](../decisions/journal/D-0327.jsonl), grounded in D-0107, D-0108, D-0110, D-0111, D-0121, D-0173, D-0281, D-0282, D-0301, D-0305, D-0311 and D-0314. Unavailable Docker or network checks remain merger work; affected real Python and TLAPS suites remain required in CI.
 
 ## Retries
 
