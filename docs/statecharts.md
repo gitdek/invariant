@@ -1,6 +1,18 @@
 # Reader statecharts and bounded graph data
 
-Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). Proposal rendering is not implemented; the dashboard retains its existing display and trace behavior.
+Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. The dashboard retains its existing display and trace behavior.
+
+## Modeled proposals
+
+The drafting agent writes a pure `view.json` beside the model and `proposal.json`, using the grammar below. Both the check tool and the independent final check snapshot the exact model, sibling TLA+ includes, view, statements and bounds. The existing model gate still checks pins, invariants, deadlock, witnesses, properties, fairness and known bugs. After it passes, the reader dumps the complete TLC graph at those bounds, replays invariants through TLC and computes the chart for graphs through **500 reachable concrete states**, inclusive. Missing, malformed or dishonest views refuse with the evaluator's actionable states, model actions and view-rule IDs. Derived files supplied by an agent are never evidence; final checking recomputes from the final source files.
+
+Above 500 states, passing model checks instead save a successful `too_large` limitation with the reachable count, capacity, module, configuration, Java image, jar hash and TLC version. The view must still be structurally and statically well-formed. Its lookups, totality and hiding are not evaluated at that size, and no chart is saved. Drafting keeps the guidance **thousands of states, not millions**: charts are drawn for models of up to 500 states, without asking models to shrink.
+
+`Proposal.view` holds the exact view text and `Proposal.includes` maps each sibling `.tla` filename to its exact bytes. `Proposal.reader` has `version:1`, a `sha256:` fingerprint and exactly one of `chart` or `limitation`. The fingerprint binds the full model, include names and bytes, exact view, bounds, pinned statements and wording, tool/configuration provenance and all artifact contents. It is separate from the proposal's statement hash and adds no proof claim. A change to any bound input or the artifact requires a fresh check.
+
+The view, includes and snapshot survive `formalization.json`, compressed proposal markers, completed-run recovery, `previous/` staging and amendments. Ratification writes the model and includes under the manifest's model directory, and `.invariant/view.json` and `.invariant/reader.json` beside the lock. Existing lock and amendment identities stay unchanged. Older stored proposals without reader evidence remain readable and writable; publishing a new modeled proposal, including a recovered draft, requires valid reader evidence. Input reads take only regular files, refusing symbolic and hard links without reading their contents.
+
+Supported proposals render literal-safe Mermaid `stateDiagram-v2`: aliases are generated independently of labels, every displayed arrow comes from the computed chart and every initial chart state has an initial arrow. Tables retain exact rule wording, per-state unavailable actions, all hidden step occurrences and separately defined TLC and chart counts. Mermaid and Markdown escaping preserves literal labels and wording, including text that resembles markup. Above capacity the proposal keeps its statement or amendment table, existing checks and ratification instructions, with a short note that TLC reached the recorded number of states at the checked bounds, more than the 500 charts are drawn for. Plumbing proposals and plans of issues have no chart. A complete modeled comment that exceeds the publication limit is explicitly refused for human review, never clipped into a usable ratification proposal. The saved marker must also read back within the existing 4 MiB expanded limit, regardless of its compressed size; a refusal omits the oversized proposal payload.
 
 ## Reader computation
 
@@ -123,6 +135,13 @@ Reader acceptance and regression tests exercise total and typed mapping, complet
 go test -timeout 20m ./internal/statechart ./internal/verify
 ```
 
+Proposal tests exercise view repair, the independent final computation, fingerprint invalidation, persistence, recovery, amendments, ratification, literal rendering and above-capacity publication offline. The formalize integration test also checks the chart against pinned TLC:
+
+```sh
+go test -timeout 20m ./internal/formalize ./internal/factory ./cmd/invariant
+go test -tags integration ./internal/formalize -run '^TestCheckRunsTheModelChecks$' -count=1 -timeout 5m
+```
+
 `TestReader586PinnedTLC` always exercises offline computation. Its opt-in real case evaluates two independently failing invariants and a structured payload, then checks that chart partitioning preserves both failures and all steps. `TestReader586ReplayValuesPinnedTLC` adds opt-in replay regressions for a one-state interval model, `RM = {z, a}` model values and a structured payload containing those values. Missing tools fail the opt-in cases. `TestReader586RealIntegration` and `TestReader586ReplayValuesRealIntegration` invoke them in CI's existing integration shards:
 
 ```sh
@@ -152,3 +171,5 @@ go test -tags integration ./internal/verify/ ./internal/conformance/
 This work rests on [D-0016](../decisions/journal/D-0016.jsonl), [D-0049](../decisions/journal/D-0049.jsonl), [D-0105](../decisions/journal/D-0105.jsonl), [D-0122](../decisions/journal/D-0122.jsonl) and [D-0294](../decisions/journal/D-0294.jsonl). [D-0335](../decisions/journal/D-0335.jsonl) records the graph-evidence policy. TLC ends its dump's cluster with `{rank = same; ...}` layout groups, one for each search depth, and the parser reads each strictly: every ID must name a state already listed.
 
 [D-0343](../decisions/journal/D-0343.jsonl) records #586's JSON-view and rule-evidence policy, refining [D-0335](../decisions/journal/D-0335.jsonl).
+
+Proposal identity and amendments also rest on [D-0034](../decisions/journal/D-0034.jsonl) and [D-0045](../decisions/journal/D-0045.jsonl). The merger of #603 records the new proposal-view, artifact-binding and publication policy, including the nonblocking size limitation; this plumbing build cannot write the decision journal.

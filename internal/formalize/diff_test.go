@@ -15,7 +15,7 @@ func current(t *testing.T) *Current {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Current{Dir: "examples/03-bounded-buffer", ModuleText: p.ModuleText,
+	return &Current{Dir: "examples/03-bounded-buffer", ModuleText: p.ModuleText, View: p.View, Includes: p.Includes,
 		Manifest: project.Manifest{Name: "bounded buffer", Module: ".invariant/specs/BoundedBuffer.tla", Code: "buffer", Language: "go"},
 		Lock:     project.Lock{Ratified: &project.Ratification{By: "gitdek", Issue: 1}, Bounds: p.Bounds, Statements: p.Statements}}
 }

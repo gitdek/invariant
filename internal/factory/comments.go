@@ -41,6 +41,11 @@ func post(title, body string, m Marker, closing ...string) string {
 		return header + title + "\n\n" + body + by + "\n\n" + marker + "\n"
 	}
 	out := compose(strings.TrimSpace(body + end))
+	// A new modeled proposal is an indivisible checked artifact. The caller
+	// refuses publication if the complete comment cannot fit.
+	if m.Kind == KindProposal && m.Proposal != nil && m.Proposal.Reader != nil {
+		return out
+	}
 	if len(out) <= maxComment {
 		return out
 	}
@@ -103,7 +108,7 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 		"Then %s.\n\n", p.Name, thenWhat(p, "write the code"))
 	b.WriteString("| Statement | Kind | Says |\n| :-- | :-- | :-- |\n")
 	for _, s := range p.Statements {
-		says := s.Says
+		says := tableLiteral(s.Says)
 		if s.Expect != "" {
 			says += fmt.Sprintf(" It must break `%s`.", s.Expect)
 		}
@@ -112,6 +117,7 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	if r != nil {
 		fmt.Fprintf(&b, "\n**Already checked** against a draft model, within %s: %s\n", bounds(p.Bounds), checked(r))
 	}
+	b.WriteString(readerComment(p))
 	if len(m.Answers) > 0 {
 		b.WriteString("\n**Decided on this issue:**\n\n")
 		for _, a := range m.Answers {
@@ -190,11 +196,11 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	for _, c := range ch.Statements {
 		switch c.How {
 		case formalize.Added:
-			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, c.New.Says)
+			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, tableLiteral(c.New.Says))
 		case formalize.Changed:
-			says := c.New.Says
+			says := tableLiteral(c.New.Says)
 			if c.Old.Says != c.New.Says {
-				says += " *(was: " + c.Old.Says + ")*"
+				says += " *(was: " + tableLiteral(c.Old.Says) + ")*"
 			}
 			how := "changed " + c.New.Kind
 			if c.OwnTextSame() && len(c.Through) > 0 {
@@ -202,7 +208,7 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", c.Name, how, says)
 		case formalize.Removed:
-			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, c.Old.Says)
+			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, tableLiteral(c.Old.Says))
 		}
 	}
 	if same := ch.Of(formalize.Unchanged); len(same) > 0 {
@@ -224,6 +230,7 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if r != nil {
 		fmt.Fprintf(&b, "\n**Already checked** against the amended model, within %s: %s\n", bounds(p.Bounds), checked(r))
 	}
+	b.WriteString(readerComment(p))
 	if len(m.Answers) > 0 {
 		b.WriteString("\n**Decided on this issue:**\n\n")
 		for _, a := range m.Answers {

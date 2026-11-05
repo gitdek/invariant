@@ -82,8 +82,11 @@ type Draft struct {
 // of their text, and Hash identifies the whole proposal.
 type Proposal struct {
 	Draft
-	ModuleText string `json:"module_text"` // the whole module: the statements and the draft model
-	Hash       string `json:"hash,omitempty"`
+	ModuleText string            `json:"module_text"` // the whole module: the statements and the draft model
+	Hash       string            `json:"hash,omitempty"`
+	View       string            `json:"view,omitempty"`
+	Includes   map[string]string `json:"includes,omitempty"`
+	Reader     *Reader           `json:"reader,omitempty"`
 	// Target is the existing project an amendment changes (D-0045). Dir is
 	// where a new project goes when its issue names one. Both are empty for
 	// a new project placed the usual way.
@@ -150,6 +153,15 @@ func Read(ws string) (*Proposal, error) {
 		return nil, fmt.Errorf("proposal.json names module %s, but %s.tla can't be read: %w", d.Module, d.Module, err)
 	}
 	p.ModuleText = string(text)
+	view, err := regular.ReadFile(ws, "view.json")
+	if err != nil {
+		return nil, fmt.Errorf("the modeled draft needs view.json: %w", err)
+	}
+	p.View = string(view)
+	p.Includes, err = readIncludes(ws, d.Module)
+	if err != nil {
+		return nil, err
+	}
 	return p, p.Pin()
 }
 
@@ -242,6 +254,14 @@ var Languages = map[string]string{
 // Write lays the proposal out as a project in dir: the manifest, the lock,
 // the module and the request. ratified is nil for a draft.
 func (p *Proposal) Write(dir, request string, ratified *project.Ratification) error {
+	if p.Reader != nil {
+		if err := p.ValidateReader(); err != nil {
+			return err
+		}
+	}
+	if err := validateIncludes(p.Includes, p.Module); err != nil {
+		return err
+	}
 	m := p.Manifest()
 	lock := project.Lock{Ratified: ratified, Bounds: p.Bounds, Statements: p.Statements}
 	for path, v := range map[string]any{".invariant/invariant.json": m, ".invariant/ratified.lock": lock} {
@@ -254,6 +274,18 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 		}
 	}
 	if err := writeFile(filepath.Join(dir, m.Module), p.ModuleText); err != nil {
+		return err
+	}
+	modelDir := filepath.Join(dir, filepath.Dir(m.Module))
+	if p.Reader != nil {
+		if err := removeOldIncludes(modelDir, p.Module, p.Includes); err != nil {
+			return err
+		}
+	}
+	if err := writeIncludes(modelDir, p.Includes); err != nil {
+		return err
+	}
+	if err := writeReader(filepath.Join(dir, ".invariant"), p.View, p.Reader); err != nil {
 		return err
 	}
 	return writeFile(filepath.Join(dir, ".invariant/request.md"), request)
@@ -278,6 +310,10 @@ func Check(ctx context.Context, ws string, tc toolchain.Toolchain) (*Proposal, *
 		return nil, nil, err
 	}
 	r, err := verify.RunModel(ctx, dir, tc)
+	if err != nil || r == nil || !r.Passed {
+		return p, r, err
+	}
+	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
 	return p, r, err
 }
 

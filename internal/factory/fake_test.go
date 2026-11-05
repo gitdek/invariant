@@ -2,6 +2,8 @@ package factory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,7 +18,10 @@ import (
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/statechart"
 	"github.com/gitdek/invariant/internal/synth"
+	"github.com/gitdek/invariant/internal/tlc"
+	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
 )
 
@@ -481,11 +486,67 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 		if err := p.Amend(c); err != nil {
 			return &formalize.Result{Problem: err.Error()}, nil
 		}
+		checkedBufferReader(s.t, p)
 		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
 	}
 	p := bufferProposal(s.t)
 	p.Language, p.Revised = req.Language, s.revised
+	checkedBufferReader(s.t, p)
 	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
+}
+
+// The factory double supplies checked evidence as the formalizer does. The
+// reader evaluator still computes the chart from the buffer's complete graph;
+// TLC and invariant replay themselves are exercised at the formalize boundary.
+func checkedBufferReader(t *testing.T, p *formalize.Proposal) {
+	t.Helper()
+	p.View = `{"version":1,"state":[{"id":"all","when":true,"label":"Buffer"}],"step":[{"id":"all","when":true,"label":"Update buffer"}]}`
+	g := tlc.GraphResult{Module: p.Module, Config: tlc.Config{Specification: "Spec", Constants: p.Bounds},
+		Tool: tlc.GraphTool{Image: toolchain.JavaImage, JarSHA256: toolchain.TLCJarSHA256},
+		Run:  tlc.Result{Outcome: tlc.Passed, Version: "TLC fixture", DistinctStates: 7, StatesGenerated: 13, Depth: 3}, StateCount: 7, StepCount: 12}
+	g.Graph.Initial = []string{"0"}
+	values := []string{"<<>>", "<<m1>>", "<<m2>>", "<<m1, m1>>", "<<m1, m2>>", "<<m2, m1>>", "<<m2, m2>>"}
+	matrix := map[string]map[string]bool{}
+	for i, value := range values {
+		id := fmt.Sprint(i)
+		g.Graph.States = append(g.Graph.States, tlc.GraphState{ID: id, Label: "buf = " + value, Values: map[string]string{"buf": value}})
+		matrix[id] = map[string]bool{}
+		for _, s := range p.Statements {
+			if s.Kind == project.Invariant {
+				matrix[id][s.Name] = true
+			}
+		}
+	}
+	for _, edge := range [][2]int{{0, 1}, {0, 2}, {1, 3}, {1, 4}, {2, 5}, {2, 6}} {
+		g.Graph.Steps = append(g.Graph.Steps, tlc.GraphStep{From: fmt.Sprint(edge[0]), To: fmt.Sprint(edge[1]), Action: "Put"})
+	}
+	for _, edge := range [][2]int{{1, 0}, {2, 0}, {3, 1}, {4, 2}, {5, 1}, {6, 2}} {
+		g.Graph.Steps = append(g.Graph.Steps, tlc.GraphStep{From: fmt.Sprint(edge[0]), To: fmt.Sprint(edge[1]), Action: "Take"})
+	}
+	chart, err := statechart.Compute(t.Context(), statechart.Input{Graph: g, Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}, Invariants: matrix}, []byte(p.View))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Reader = &formalize.Reader{Version: 1, Chart: chart}
+	// Encode the persisted fingerprint contract, just as a saved formalizer
+	// result would, without giving production callers a way to seal evidence.
+	b, err := json.Marshal(struct {
+		Version    int                 `json:"version"`
+		Module     string              `json:"module"`
+		Model      string              `json:"model"`
+		Includes   map[string]string   `json:"includes,omitempty"`
+		View       string              `json:"view"`
+		Bounds     map[string]string   `json:"bounds"`
+		Statements []project.Statement `json:"statements"`
+		Chart      *statechart.Result  `json:"chart,omitempty"`
+	}{1, p.Module, p.ModuleText, p.Includes, p.View, p.Bounds, p.Statements, chart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Reader.Fingerprint = fmt.Sprintf("sha256:%x", sha256.Sum256(b))
+	if err := p.ValidateReader(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // fakeBuilder writes a Go package into the ratified project, the way
