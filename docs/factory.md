@@ -333,7 +333,7 @@ INVARIANT_GO_ACCEPTANCE_PLATFORM=linux/amd64 \
 go test ./internal/plumbing -run '^TestConfiguredGoOfflinePinnedImage610$' -count=1 -timeout 20m
 ```
 
-Use the explicit Linux platform of the local pinned image. Enabling the opt-in makes an unavailable Docker CLI, daemon or pinned image a failure, never a skip. Recording the Go-admission refinement of D-0316 and D-0321 is merger work because plumbing cannot write `decisions/`; the existing Go evidence refinements are D-0327, D-0334, D-0337, D-0344 and D-0346.
+Use the explicit Linux platform of the local pinned image. Enabling the opt-in makes an unavailable Docker CLI, daemon or pinned image a failure, never a skip. [D-0348](../decisions/journal/D-0348.jsonl) records the Go-admission refinement of D-0316 and D-0321, after the Go evidence refinements D-0327, D-0334, D-0337, D-0344 and D-0346. On 2026-11-05 the merger ran this opt-in and the prepared Docker Go suite on linux/arm64.
 
 ## Retries
 
