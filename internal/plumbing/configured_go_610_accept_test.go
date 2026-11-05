@@ -216,6 +216,8 @@ func TestConfiguredGoPublicRefusalsAndVetoes610(t *testing.T) {
 		}
 		repositoryResult582(t, checked.Run, f.plan.Tests[0], "skipped", "no failure evidence")
 	})
+	// Pytest is supported, but n503Part's native-runner wrapper remains unsafe.
+	// Mixed plans must validate every captured command before preparing any part.
 	for _, framework := range []string{"pytest", "vitest", "jest"} {
 		for _, mixed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/mixed=%v", framework, mixed), func(t *testing.T) {
