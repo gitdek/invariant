@@ -15,6 +15,7 @@ import (
 
 // Markdown renders the report as a receipt.
 func Markdown(r *verify.Report) string {
+	r, _ = renderReader(r)
 	var b strings.Builder
 	explicit := hasComponentEvidence(r)
 	render := renderer{explicit: explicit || r.Application != nil}
@@ -162,6 +163,7 @@ func Markdown(r *verify.Report) string {
 		}
 		b.WriteString("\n</details>\n")
 	}
+	b.WriteString(readerMarkdown(r.Reader))
 	b.WriteString("\n<details>\n<summary>Ratified statements</summary>\n\n")
 	b.WriteString("| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n")
 	for _, p := range r.Pins {

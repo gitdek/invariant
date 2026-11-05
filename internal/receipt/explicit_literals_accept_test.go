@@ -255,7 +255,7 @@ func TestExplicitReceiptHostileLiteralsPreserveStructureAndLegacy(t *testing.T) 
 		})
 	}
 	// Existing successful Go, Python and TypeScript output stays byte-for-byte
-	// stable. The earlier component-table security tests stay in place too.
+	// stable apart from the no-reader explanation. Earlier security checks remain.
 	goldens := []struct{ fingerprint, markdown string }{
 		{"sha256:12362a3a9c164fea85ae6ea6ff4bf623d16ed3136adfbbdb211ea8161007453a", "fa2c20aa584f9ba051a6e8f89b97843086750f307ac6e09d0c1b646273381e15"},
 		{"sha256:8d0e0ac4ecf82433ffb6f0971b45a14bafc96fa10407766f3bcae0b76dc50fda", "dd24cf0587a3a16d7f372d38f562402c2f3a6738b4587ee064184dd192d91728"},
@@ -264,7 +264,7 @@ func TestExplicitReceiptHostileLiteralsPreserveStructureAndLegacy(t *testing.T) 
 	for i, r := range receiptAssuranceFixtures() {
 		r.Fingerprint = verify.Fingerprint(r)
 		md := explicit247RenderUnchanged(t, &r)
-		if r.Fingerprint != goldens[i].fingerprint || fmt.Sprintf("%x", sha256.Sum256([]byte(md))) != goldens[i].markdown {
+		if r.Fingerprint != goldens[i].fingerprint || fmt.Sprintf("%x", sha256.Sum256([]byte(reader615LegacyMarkdown(t, md)))) != goldens[i].markdown {
 			t.Errorf("legacy %s changed its fingerprint or Markdown", r.Project)
 		}
 	}

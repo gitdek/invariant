@@ -8,6 +8,16 @@ For projects without explicit components, code assurance comes from successful r
 
 Markdown receipts and the dashboard derive these claims from evidence even when an older JSON report contains a stale assurance label. **Proved at every size** additionally requires a successful check one size larger. The dashboard says **tested in every state** only for successful exhaustive conformance with positive, matching visited and model state counts and no failed attempt check. A failed attempt check still leaves evidence for the transitions that conformance successfully checked. This correction builds on the tool-output receipts in [D-0013](../decisions/D-0013-slice-plan.md), the proof and conformance paths in [D-0024](../decisions/D-0024-checking-typescript-and-python.md) and [D-0031](../decisions/journal/D-0031.jsonl), and the larger check in [D-0070](../decisions/journal/D-0070.jsonl).
 
+## Reader charts in receipts
+
+When a modeled project saves `.invariant/view.json`, verification recomputes its reader chart from the actual checked model, sibling TLA+ includes, lock and complete bounded TLC evidence. Model and view bytes are captured before checks run. Synthesis and factory builds retain the original project's view and includes, then recompute after the agent's model edits. A proposal's derived chart never supplies the final gate's chart.
+
+`verify -out DIR` and synthesis/factory gate directories save `receipt.json`, `receipt.md`, `reader.json` and, for a drawable chart, `reader.svg`. JSON carries an optional version-1 reader with explicit source hashes and a separate fingerprint binding inputs, tools and computed contents. Markdown includes literal-safe Mermaid and the full reader report; SVG is standalone, requires no network or rendering service and embeds the complete chart data. Existing whole-directory CI archives retain all four files, and directory reuse clears obsolete reader files.
+
+Charts account for every reachable state through 500, all hidden occurrences, unavailable model actions, exact rule wording, counts and bounds. Larger complete graphs yield an explicit `too_large` limitation. Missing views and old reports explicitly say no reader chart is available. Malformed or unsafe views and graph, replay or rendering failures retain separate diagnostics without a partial chart. The [reader format and provenance page](statecharts.md#verification-receipts) documents each field.
+
+This explanation adds no proof claim. Reader generation, rendering and diagnostics never change the gate's pass/fail verdict, assurance, verification fingerprint, locks or proposal identities. A failed gate stays failed even when its chart is drawable. Ordinary output errors still fail the output operation. Plumbing remains chart-free.
+
 ## Conformance recordings
 
 Under [#559's ratified plan](../.invariant/plans/issue-559.json), `conformance.CheckReader` takes the same arguments as `Check`, with an `io.Reader` in place of the recording's `[]byte`. `Check` is a compatibility wrapper. The checker reads incrementally, preserving exact canonical state equality, first-seen identities, JSON validation precedence and messages, counts, legacy stuttering, declared named-action outcomes and tried-step coverage.

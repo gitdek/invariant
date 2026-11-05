@@ -195,7 +195,7 @@ func TestComponentProofReceiptsShowCoverageAndPreserveLegacy(t *testing.T) {
 		for i, r := range receiptAssuranceFixtures() {
 			r.Fingerprint = verify.Fingerprint(r)
 			md := receipt.Markdown(&r)
-			if r.Fingerprint != goldens[i].fingerprint || fmt.Sprintf("%x", sha256.Sum256([]byte(md))) != goldens[i].markdown {
+			if r.Fingerprint != goldens[i].fingerprint || fmt.Sprintf("%x", sha256.Sum256([]byte(reader615LegacyMarkdown(t, md)))) != goldens[i].markdown {
 				t.Errorf("legacy %s changed its fingerprint or Markdown:\n%s", r.Project, md)
 			}
 			encoded, err := json.Marshal(r)

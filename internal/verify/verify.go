@@ -102,6 +102,8 @@ type Report struct {
 	Agent       string `json:"agent,omitempty"`
 	Fingerprint string `json:"fingerprint"`
 	GeneratedAt string `json:"generated_at"`
+	// Reader explains the bounded model and never contributes to assurance.
+	Reader *Reader `json:"reader,omitempty"`
 }
 
 // Pin compares a ratified statement's pinned hash with its text today,
@@ -304,6 +306,10 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		return nil, err
 	}
 	defer os.RemoveAll(work)
+	modelProject, reader, err := snapshotReader(work, p, src)
+	if err != nil {
+		return nil, err
+	}
 
 	r := &Report{
 		Project:   p.Manifest.Name,
@@ -379,6 +385,11 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget, CheckRoot: work}
 	defer func() { r.TLCAttempts = budget.Attempts() }()
+	defer func() {
+		if err == nil && report != nil {
+			r.Reader = reader.compute(ctx, runner, modelProject, r)
+		}
+	}()
 	cfg := tlc.Config{Specification: p.SpecName(), Constants: p.Lock.Bounds, Invariants: p.Invariants()}
 	witnesses, bugs := p.Of(project.Witness), p.Of(project.Bug)
 	r.Witnesses = make([]Witness, len(witnesses))
@@ -425,7 +436,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 
 	spawn(func() error {
-		d, err := stage(work, "design", p, src, "")
+		d, err := stage(work, "design", modelProject, src, "")
 		if err != nil {
 			return err
 		}
@@ -447,7 +458,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		spawn(func() error {
 			name, never := "Witness_"+w.Name, "Invariant_Never_"+w.Name
 			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\n%s == ~%s\n====\n", name, p.ModuleName(), never, w.Name)
-			d, err := stage(work, name, p, src, wrapper)
+			d, err := stage(work, name, modelProject, src, wrapper)
 			if err != nil {
 				return err
 			}
@@ -477,7 +488,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			}
 			name := "Property_" + s.Name
 			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\n%s\n====\n", name, p.ModuleName(), fairSpec("Invariant_FairSpec", cfg.Specification, p.FairnessNames()))
-			d, err := stage(work, name, p, src, wrapper)
+			d, err := stage(work, name, modelProject, src, wrapper)
 			if err != nil {
 				return err
 			}
@@ -505,7 +516,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			name := "Fairness_" + f.Name
 			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\nInvariant_WithAction == Init /\\ [][Next \\/ %s]_vars\nInvariant_InNext == %s\n====\n",
 				name, p.ModuleName(), c.steps(), c.inNext())
-			d, err := stage(work, name, p, src, wrapper)
+			d, err := stage(work, name, modelProject, src, wrapper)
 			if err != nil {
 				return err
 			}
@@ -523,13 +534,13 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			out := Bug{Name: b.Name, Label: kebab(b.Name), Says: b.Says, Expect: b.Expect}
 			defer func() { r.Bugs[i] = out }()
 			if isProperty[b.Expect] {
-				return checkPropertyBug(ctx, &out, b, work, outDir, p, src, runner, cfg, unfairSpec)
+				return checkPropertyBug(ctx, &out, b, work, outDir, modelProject, src, runner, cfg, unfairSpec)
 			}
 			// The bug runs alongside the model: every behavior the model allows,
 			// plus the bug's own steps.
 			name := "Bug_" + b.Name
 			wrapper := fmt.Sprintf("---- MODULE %s ----\nEXTENDS %s\nInvariant_BuggySpec == Init /\\ [][Next \\/ %s]_vars\n====\n", name, p.ModuleName(), b.Name)
-			d, err := stage(work, name, p, src, wrapper)
+			d, err := stage(work, name, modelProject, src, wrapper)
 			if err != nil {
 				return err
 			}
@@ -553,7 +564,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 
 	if !model && len(p.Manifest.TLAPS) > 0 {
 		spawn(func() (err error) {
-			r.TLAPS, r.Toolchain.TLAPS, err = proveTLAPS(ctx, work, p, src)
+			r.TLAPS, r.Toolchain.TLAPS, err = proveTLAPS(ctx, work, modelProject, src)
 			return err
 		})
 	}
@@ -603,7 +614,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		after := !isGo
 		if exploreLarger != nil {
 			spawn(func() error {
-				d, err := stage(work, "larger", p, src, "")
+				d, err := stage(work, "larger", modelProject, src, "")
 				if err != nil {
 					return err
 				}
@@ -660,7 +671,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	if evidence.Exploration == nil || evidence.recording != nil || evidence.Traces != nil {
 		c := conformance.Result{ModelStates: r.Design.DistinctStates, Message: evidence.Message}
 		if evidence.recording != nil || evidence.Traces != nil {
-			d, err := stage(work, "conformance", p, src, "")
+			d, err := stage(work, "conformance", modelProject, src, "")
 			if err != nil {
 				return nil, err
 			}
@@ -804,6 +815,7 @@ func agree(d Design, e Exploration) Agreement {
 // agent that wrote the code, so a local run and a CI run of the same commit
 // have the same fingerprint.
 func Fingerprint(r Report) string {
+	r.Reader = nil
 	r.TLCAttempts = nil
 	if r.Application != nil {
 		r.Application = portablePythonApplication(r.Application)

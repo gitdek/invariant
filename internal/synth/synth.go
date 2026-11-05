@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
@@ -494,6 +495,7 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	if gateErr == nil {
 		report.Agent = usage.Backend
 		r.Final = report
+		gateErr = receipt.Write(filepath.Join(out, "gate"), report)
 	}
 	if r.GateRuns, err = readGateRuns(gateLog); err != nil {
 		return nil, err
@@ -592,6 +594,9 @@ func copyOwned(p *project.Project, ws string) error {
 }
 
 func owned(m project.Manifest, rel string) bool {
+	if readerInput(m, rel) || rel == ".invariant/reader.json" || rel == ".invariant/reader.svg" {
+		return false
+	}
 	if len(m.Existing) > 0 {
 		// A project that checks existing code holds only the model, the
 		// driver and its helpers (D-0054). The copies of the code in
@@ -626,6 +631,9 @@ func owned(m project.Manifest, rel string) bool {
 // Prepare fills the agent's workspace: copies of the protected files, the
 // skeleton in place of the module, and an empty package directory.
 func Prepare(p *project.Project, skeleton, ws string) error {
+	if err := copyReaderInputs(p, ws); err != nil {
+		return err
+	}
 	for _, rel := range protected(p.Manifest.Language) {
 		if err := copyFile(filepath.Join(p.Dir, rel), filepath.Join(ws, rel)); err != nil && !os.IsNotExist(err) {
 			return err
@@ -655,6 +663,9 @@ func Prepare(p *project.Project, skeleton, ws string) error {
 // the request or the dependencies can reach the gate.
 func Assemble(p *project.Project, ws, dst string) error {
 	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if err := copyReaderInputs(p, dst); err != nil {
 		return err
 	}
 	for _, rel := range protected(p.Manifest.Language) {

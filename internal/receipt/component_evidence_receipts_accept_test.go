@@ -545,7 +545,7 @@ func TestComponentReceiptSelectionsCompatibilityAndNoFabricatedResults(t *testin
 		legacy.Fingerprint = verify.Fingerprint(legacy)
 		original := evidence296Clone(t, legacy)
 		got := evidence296Render(t, &legacy)
-		if legacy.Fingerprint != goldens[i].fp || fmt.Sprintf("%x", sha256.Sum256([]byte(got))) != goldens[i].md || !reflect.DeepEqual(legacy.Code, original.Code) {
+		if legacy.Fingerprint != goldens[i].fp || fmt.Sprintf("%x", sha256.Sum256([]byte(reader615LegacyMarkdown(t, got)))) != goldens[i].md || !reflect.DeepEqual(legacy.Code, original.Code) {
 			t.Errorf("legacy %s changed", legacy.Project)
 		}
 		b, _ := json.Marshal(legacy)

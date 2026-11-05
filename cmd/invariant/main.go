@@ -118,9 +118,11 @@ func main() {
 	os.Exit(code)
 }
 
+var verifyToolchain = toolchain.Ensure
+
 func verifyCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	out := fs.String("out", "", "write receipt.md, receipt.json and traces/ to this directory")
+	out := fs.String("out", "", "write receipt.md, receipt.json, reader artifacts and traces/ to this directory")
 	tlcParallel := fs.Int("tlc-parallel", 0, "lower the automatic TLC concurrency limit (0 selects automatically from Docker CPU and memory)")
 	fs.Parse(args)
 	if *tlcParallel < 0 {
@@ -137,7 +139,7 @@ func verifyCmd(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	tc, err := toolchain.Ensure(ctx)
+	tc, err := verifyToolchain(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
@@ -150,17 +152,7 @@ func verifyCmd(ctx context.Context, args []string) int {
 	md := receipt.Markdown(r)
 	fmt.Print(md)
 	if *out != "" {
-		js, err := json.MarshalIndent(r, "", "  ")
-		if err == nil {
-			err = os.MkdirAll(*out, 0o755)
-		}
-		if err == nil {
-			err = os.WriteFile(filepath.Join(*out, "receipt.json"), append(js, '\n'), 0o644)
-		}
-		if err == nil {
-			err = os.WriteFile(filepath.Join(*out, "receipt.md"), []byte(md), 0o644)
-		}
-		if err != nil {
+		if err := receipt.Write(*out, r); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 2
 		}

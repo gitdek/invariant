@@ -11,8 +11,9 @@ import (
 	"github.com/gitdek/invariant/internal/verify"
 )
 
-// Successful legacy reports retain every byte of their Markdown and their
-// fingerprints, including Go and Python proofs with unverified explorer code.
+// Successful legacy reports retain their evidence fingerprints and all
+// Markdown except the explicit no-reader explanation (#615), including
+// Go and Python proofs with unverified explorer code.
 // This compatibility slice corrects unsuccessful evidence; it does not assign
 // component assurance to those unverified neighbors yet.
 func TestReceiptsUseSuccessfulEvidenceAndPreserveLegacyOutput(t *testing.T) {
@@ -25,7 +26,7 @@ func TestReceiptsUseSuccessfulEvidenceAndPreserveLegacyOutput(t *testing.T) {
 		t.Logf("case: %s", r.Project)
 		r.Fingerprint = verify.Fingerprint(r)
 		md := receipt.Markdown(&r)
-		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(md)))
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(reader615LegacyMarkdown(t, md))))
 		if r.Fingerprint != goldens[i].fingerprint || digest != goldens[i].markdown {
 			t.Errorf("successful legacy output changed: fingerprint %s, Markdown SHA256 %s\n%s", r.Fingerprint, digest, md)
 		}

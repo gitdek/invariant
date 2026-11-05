@@ -1,6 +1,6 @@
 # Reader statecharts and bounded graph data
 
-Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. [#608's ratified plan](../.invariant/plans/issue-608.json) adds standalone SVG rendering through the shared Go API. The dashboard retains its existing display and trace behavior.
+Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. [#608's ratified plan](../.invariant/plans/issue-608.json) adds standalone SVG rendering through the shared Go API. [#615's ratified plan](../.invariant/plans/issue-615.json) adds reader data to verification, synthesis and factory gate receipts. The dashboard retains its existing display and trace behavior.
 
 ## Modeled proposals
 
@@ -13,6 +13,30 @@ Above 500 states, passing model checks instead save a successful `too_large` lim
 The view, includes and snapshot survive `formalization.json`, compressed proposal markers, completed-run recovery, `previous/` staging and amendments. Ratification writes the model and includes under the manifest's model directory, and `.invariant/view.json` and `.invariant/reader.json` beside the lock. Existing lock and amendment identities stay unchanged. Older stored proposals without reader evidence remain readable and writable; publishing a new modeled proposal, including a recovered draft, requires valid reader evidence. Input reads take only regular files, refusing symbolic and hard links without reading their contents.
 
 Supported proposals render literal-safe Mermaid `stateDiagram-v2`: aliases are generated independently of labels, every displayed arrow comes from the computed chart and every initial chart state has an initial arrow. Tables retain exact rule wording, per-state unavailable actions, all hidden step occurrences and separately defined TLC and chart counts. Mermaid and Markdown escaping preserves literal labels and wording, including text that resembles markup. Above capacity the proposal keeps its statement or amendment table, existing checks and ratification instructions, with a short note that TLC reached the recorded number of states at the checked bounds, more than the 500 charts are drawn for. Plumbing proposals and plans of issues have no chart. A complete modeled comment that exceeds the publication limit is explicitly refused for human review, never clipped into a usable ratification proposal. The saved marker must also read back within the existing 4 MiB expanded limit, regardless of its compressed size; a refusal omits the oversized proposal payload.
+
+## Verification receipts
+
+Modeled verification snapshots the checked model, sibling TLA+ includes, saved `.invariant/view.json` and loaded lock before checks run. Graph dumping and invariant replay use that same source snapshot and the bounded check's configuration. Receipts recompute from the final model even when a saved proposal has a chart. Synthesis copies the original project's view and includes into preparation and assembly, discards agent-supplied derived reader files and checks the assembled model again.
+
+Verification JSON has an optional `reader` field. New modeled reports use version 1:
+
+| Field | Meaning |
+| :-- | :-- |
+| `version` | `1` |
+| `fingerprint` | Separate `sha256:` identity for reader inputs and computed contents |
+| `inputs.module` | Checked model's module name |
+| `inputs.model_sha256` | SHA-256 of the exact model bytes |
+| `inputs.view_sha256` | SHA-256 of the exact saved view bytes, when readable |
+| `inputs.includes` | Sibling filenames mapped to SHA-256 hashes of their exact bytes |
+| `chart` | Complete `statechart.Result`, for an ordinary drawable chart |
+| `limitation` | `too_large`, actual state count, limit and source/tool provenance |
+| `unavailable` | Diagnostic `code` and `message`, with no invented or partial chart |
+
+Exactly one of `chart`, `limitation` or `unavailable` is present. The reader fingerprint binds the source hashes, lock bounds and statements and computed data, including the graph's configuration, Java image, actual jar hash and TLC version. It is excluded from the verification evidence fingerprint. Proposal identities, locks, `Passed` and assurance are unchanged. A failed build can retain a complete reader chart while still failing the gate. Impossible-action claims come only from complete exploration, before hiding.
+
+All ordinary graphs through **500 reachable states** are supported. A complete larger exploration saves a `too_large` report, including the actual count and limit. Malformed views, unsafe view links, failed graph generation, failed rule replay and rendering failures become separate reader diagnostics. Missing views use `missing_view`; no graph is dumped to invent a view. Legacy reports without the field remain readable and explicitly say no reader chart is available until a view is supplied and verification runs again.
+
+`invariant verify -out DIR PROJECT` and synthesis/factory `gate/` directories share one writer. They save `receipt.json`, `receipt.md`, `reader.json` and, only for a drawable chart, `reader.svg`. The standalone reader JSON is identical to the report's reader field. Markdown uses the same literal-safe Mermaid and report tables as proposals, preserving exact wording, unavailable actions, hidden occurrences, counts and bounds. SVG uses the native renderer below, works offline and carries the full chart in inert metadata. Directory reuse removes obsolete reader artifacts. Output filesystem errors remain errors; rendering failures only affect the explanatory reader record. The existing whole-directory CI archives carry these files without workflow changes. Plumbing receipts remain chart-free.
 
 ## Reader computation
 
@@ -60,7 +84,7 @@ The inspectable XML contract is:
 
 Element IDs are generated independently of reader labels and chart IDs. Text and attributes are XML-escaped, including markup-like text, quotes and URLs. Styling uses presentation attributes; arrowheads refer only to a local marker. There are no scripts, event handlers, stylesheets, links, foreign objects, embedded resources, DTDs or resource-loading attributes. Whitespace in rule wording and labels is preserved. Coordinates, ordering, colors, fonts and routing are implementation choices, not a pinned serialization format.
 
-Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Rendering adds no publication path: modeled proposals retain the existing Mermaid and Markdown behavior, and neither receipts nor the dashboard use this API.
+Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Modeled proposals retain the existing Mermaid and Markdown behavior. Verification receipts save this SVG for drawable charts; the dashboard retains its existing display.
 
 ## JSON view version 1
 
