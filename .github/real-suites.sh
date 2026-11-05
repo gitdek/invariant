@@ -24,7 +24,7 @@ while IFS= read -r f || [ -n "$f" ]; do
       tlaps=true ;;
     internal/verify/python*|internal/verify/*.py|internal/verify/declared_refusal*|cmd/invariant/*)
       python=true ;;
-    internal/verify/*|internal/conformance/*|internal/decisions/*|internal/gobra/*|internal/mcp/*|internal/project/*|internal/receipt/*|internal/tla/*|internal/tlc/*|internal/toolchain/*|factory/decision-state/*|factory/ids/*|factory/journal-merges/*|factory/store-journal/*|go.mod|go.sum|.github/*)
+    internal/verify/*|internal/conformance/*|internal/decisions/*|internal/gobra/*|internal/mcp/*|internal/project/*|internal/receipt/*|internal/statechart/*|internal/tla/*|internal/tlc/*|internal/toolchain/*|factory/decision-state/*|factory/ids/*|factory/journal-merges/*|factory/store-journal/*|go.mod|go.sum|.github/*)
       python=true tlaps=true ;;
   esac
 done
