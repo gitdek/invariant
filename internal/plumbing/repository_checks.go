@@ -371,6 +371,8 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			invocation := repositoryInvocation(plan, test, selections[j])
 			transport, processCapable := environment.(RepositoryProcessTransport)
 			goRuntime := test.Framework == "go" && processCapable
+			_, defaultPytest := s.repositoryAdapter(test.Framework).(PytestRepositoryAcceptanceAdapter)
+			pytestRuntime := defaultPytest && processCapable
 			discovered := false
 			if adapter, ok := s.repositoryAdapter(test.Framework).(RepositoryAcceptanceDiscoverer); ok {
 				startTests()
@@ -423,7 +425,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			if goRuntime && !discovered {
 				return result, fmt.Errorf("accept %s: Go process execution needs successful discovery", test.Identity())
 			}
-			if !goRuntime && !ok {
+			if !goRuntime && !pytestRuntime && !ok {
 				result.TestResults[j].Reason = "prepared environment has no runtime acceptance evidence collector"
 				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
 			}
@@ -437,6 +439,8 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			var err error
 			if goRuntime {
 				evidence, out, err = runRepositoryGoAcceptance(execution, part, invocation, transport)
+			} else if pytestRuntime {
+				evidence, out, err = runRepositoryPytestAcceptance(execution, part, invocation, transport)
 			} else {
 				evidence, out, err = acceptance.RunAcceptance(execution, invocation)
 			}
