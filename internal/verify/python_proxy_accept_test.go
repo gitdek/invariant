@@ -534,7 +534,7 @@ func pyDepsProxyRunArguments(args []string) ([]string, string, map[string]string
 		key, value, joined := strings.Cut(args[i], "=")
 		if !joined {
 			switch key {
-			case "--name", "--network", "--platform", "--memory", "--pids-limit", "-w", "--workdir", "--user", "--entrypoint", "--cap-drop", "--security-opt", "--tmpfs", "--pull", "--mount", "-e", "--env", "--env-file", "-v", "--volume":
+			case "--name", "--network", "--platform", "--memory", "--memory-swap", "--pids-limit", "-w", "--workdir", "--user", "--entrypoint", "--cap-drop", "--security-opt", "--tmpfs", "--pull", "--mount", "-e", "--env", "--env-file", "-v", "--volume":
 				i++
 				if i >= len(args) {
 					return nil, "", nil, fmt.Errorf("Docker option %s has no value", key)

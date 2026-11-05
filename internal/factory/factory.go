@@ -30,6 +30,7 @@ import (
 // GitHub is what the factory does on GitHub. github.Client is the real one.
 type GitHub interface {
 	OpenIssues(ctx context.Context) ([]github.Issue, error)
+	ClosedIssues(ctx context.Context, since string) ([]github.Issue, error)
 	// Issues lists issues in every state; an empty label includes them all.
 	Issues(ctx context.Context, label string) ([]github.Issue, error)
 	// Issue reads one issue as it is now, open or closed.
@@ -176,7 +177,9 @@ type Factory struct {
 	asked      map[string]bool
 	mergeWait  map[string]bool
 	seenMerges map[int]bool
+	poll       polling // guarded by mu, shared by polls and their finishing steps
 	running    running
+	admission  admission
 	lease      lease
 }
 
@@ -223,7 +226,7 @@ func (f *Factory) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// Watch polls until ctx ends, and then waits for its steps to end. With a
+// Watch polls until ctx ends or Drain finishes, then joins its steps. With a
 // lease, it polls only while it holds the lease, and checks it before each
 // effect. The first time it may act, before it starts any step, it clears
 // the clone's worktrees: the clone is the watcher's own, so any worktree
@@ -232,19 +235,45 @@ func (f *Factory) Prepare(ctx context.Context) error {
 // worktree of its own (D-0113). A one-off run doesn't clear them, since it
 // may share the clone with a running watcher. Then, for the same reasons,
 // it clears the Go build caches runs in its work directory left (#366).
-func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
+func (f *Factory) Watch(ctx context.Context, every time.Duration) (err error) {
+	drained := f.drainDone()
+	select {
+	case <-drained:
+		return ctx.Err()
+	default:
+	}
+	renewCtx, stopRenewal := context.WithCancel(ctx)
+	leaseDone := make(chan struct{})
+	defer func() {
+		f.Wait()
+		stopRenewal()
+		<-leaseDone
+		if f.LeaseFor > 0 {
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := f.releaseLease(cleanup); err != nil {
+				f.logf("release lease: %v", err)
+			}
+		}
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+	}()
 	if f.LeaseFor > 0 {
 		f.GitHub, f.Repo = leasedGitHub{f.GitHub, f}, leasedRepo{f.Repo, f}
 		if _, err := f.hold(ctx); err != nil {
 			f.logf("lease: %v", err)
 		}
 		go func() {
+			defer close(leaseDone)
 			select {
-			case <-ctx.Done():
+			case <-renewCtx.Done():
 			case <-time.After(every):
-				f.keepLease(ctx, every)
+				f.keepLease(renewCtx, every)
 			}
 		}()
+	} else {
+		close(leaseDone)
 	}
 	cleared := false
 	clearOnce := func() error {
@@ -265,6 +294,13 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		return err
 	}
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-drained:
+			return ctx.Err()
+		default:
+		}
 		if !f.holds() {
 			// Another watcher holds the lease. Wait for it to run out.
 		} else if err := clearOnce(); err != nil {
@@ -274,15 +310,16 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 		}
 		select {
 		case <-ctx.Done():
-			f.Wait()
+			return ctx.Err()
+		case <-drained:
 			return ctx.Err()
 		case <-time.After(every):
 		}
 	}
 }
 
-// Poll starts a step on every issue it reads that has none running, in order
-// of number, and each step reads its issue again first. It reads the open
+// Poll starts a step on each changed or unfinished issue with none running,
+// in order of number, and each step reads its issue again first. It reads the open
 // issues, and the closed ones with something left to record (pollIssues).
 // With positive Parallel, Poll returns without waiting for its steps, so
 // they run across polls, and each logs its error as it ends. Only new agent
@@ -290,6 +327,13 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) error {
 // are full (D-0113, #455). Otherwise Poll takes one step at a time, and
 // returns their errors once they've ended.
 func (f *Factory) Poll(ctx context.Context) error {
+	defer func() {
+		// Activity hears every poll, including a failed discovery.
+		f.running.mu.Lock()
+		f.tell()
+		f.running.mu.Unlock()
+	}()
+	startedAt := f.now()
 	f.mu.Lock()
 	if f.writers == nil {
 		f.writers = map[string]bool{}
@@ -320,7 +364,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 		case !started:
 			// Its last step is still running.
 		case f.Parallel <= 0:
-			err := f.safeStep(ctx, n)
+			err := f.pollStep(ctx, issue)
 			f.end(n, f.now())
 			f.sawMerge(merges[n], err)
 			if err != nil {
@@ -337,7 +381,7 @@ func (f *Factory) Poll(ctx context.Context) error {
 					}
 					f.end(n, ended)
 				}()
-				err := f.safeStep(ctx, n)
+				err := f.pollStep(ctx, issue)
 				ended = f.now()
 				f.sawMerge(merges[n], err)
 				if err != nil {
@@ -346,22 +390,21 @@ func (f *Factory) Poll(ctx context.Context) error {
 			}()
 		}
 	}
-	// Activity hears the end of every poll, as the watcher's heartbeat.
-	f.running.mu.Lock()
-	f.tell()
-	f.running.mu.Unlock()
+	if len(errs) == 0 {
+		f.mu.Lock()
+		f.poll.since = startedAt.Add(-time.Minute).UTC().Format(time.RFC3339)
+		f.mu.Unlock()
+	}
 	return errors.Join(errs...)
 }
 
-// pollIssues is what a poll steps on: every open issue, and each closed one
-// with something left to record. That's one still carrying an active label,
-// because it closed mid-work or its labels outlived its final post, and the
-// issue of a factory pull request merged since the watcher started, as when
-// a person merges it after its issue's close was recorded (#434's review).
-// Merges maps each such issue to its pull request. Any other closed issue is
-// finished, and reading each one on every poll would spend a big
-// repository's whole rate limit.
+// pollIssues discovers changed issues and retains unfinished work. The
+// first closed scan includes all history; later scans overlap the last
+// successful poll. Merges are discovered independently of issue updates.
 func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, error) {
+	f.mu.Lock()
+	since := f.poll.since
+	f.mu.Unlock()
 	issues, err := f.GitHub.OpenIssues(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -370,16 +413,15 @@ func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, 
 	for _, issue := range issues {
 		seen[issue.Number] = true
 	}
-	for _, label := range activeLabels {
-		labeled, err := f.GitHub.Issues(ctx, label)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, issue := range labeled {
-			if issue.State == "closed" && !seen[issue.Number] {
-				seen[issue.Number] = true
-				issues = append(issues, issue)
-			}
+	closed, err := f.GitHub.ClosedIssues(ctx, since)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, issue := range closed {
+		if issue.State == "closed" && issue.PullRequest == nil && !seen[issue.Number] &&
+			slices.ContainsFunc(activeLabels, issue.HasLabel) {
+			seen[issue.Number] = true
+			issues = append(issues, issue)
 		}
 	}
 	prs, err := f.GitHub.MergedPullRequests(ctx)
@@ -400,7 +442,7 @@ func (f *Factory) pollIssues(ctx context.Context) ([]github.Issue, map[int]int, 
 			issues = append(issues, github.Issue{Number: n})
 		}
 	}
-	return issues, merges, nil
+	return f.poll.selectIssues(issues, merges), merges, nil
 }
 
 // sawMerge remembers that a step on the issue of merged pull request pr
@@ -451,7 +493,64 @@ type running struct {
 	mu    sync.Mutex
 	steps map[int]Step
 	ended chan struct{} // closed, and made anew, each time a step ends
-	slots chan struct{} // shared by every kind of agent operation
+}
+
+// admission guards agent slots and drain requests separately from running,
+// whose activity callbacks may wait on IO. An admitted step stays here
+// through publication, even after its agent slot has been released.
+type admission struct {
+	mu    sync.Mutex
+	slots chan struct{}
+	drain chan struct{}
+	done  chan struct{}
+	steps map[int]bool
+}
+
+func (a *admission) init() {
+	if a.drain == nil {
+		a.drain, a.done = make(chan struct{}), make(chan struct{})
+		a.steps = map[int]bool{}
+	}
+}
+
+// finish closes done once draining has no admitted step left. Its caller
+// holds the admission lock.
+func (a *admission) finish() {
+	select {
+	case <-a.drain:
+		if len(a.steps) == 0 {
+			select {
+			case <-a.done:
+			default:
+				close(a.done)
+			}
+		}
+	default:
+	}
+}
+
+// Drain closes admission to new agent operations without waiting for work
+// to finish. It is safe to repeat, including before Watch starts. Admitted
+// steps finish normally; cancellation still stops them.
+func (f *Factory) Drain() {
+	a := &f.admission
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.init()
+	select {
+	case <-a.drain:
+	default:
+		close(a.drain)
+	}
+	a.finish()
+}
+
+func (f *Factory) drainDone() <-chan struct{} {
+	a := &f.admission
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.init()
+	return a.done
 }
 
 // list is the steps running, by issue.
@@ -488,9 +587,15 @@ func (f *Factory) Wait() {
 // issue n, unless its last step is still running. It says whether it
 // started one, and stops waiting when ctx ends. Zero means no limit.
 func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
+	drained := f.drainDone()
 	for {
 		if err := ctx.Err(); err != nil {
 			return false, err
+		}
+		select {
+		case <-drained:
+			return false, nil
+		default:
 		}
 		f.running.mu.Lock()
 		if f.running.steps == nil {
@@ -509,6 +614,8 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 		}
 		select {
 		case <-ended:
+		case <-drained:
+			return false, nil
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}
@@ -516,20 +623,30 @@ func (f *Factory) start(ctx context.Context, n, most int) (bool, error) {
 }
 
 var errIssueClosed = errors.New("the issue closed before its agent run started")
+var errDraining = errors.New("the watcher is draining, so this agent operation waits for its successor")
 
 // agentSlot waits for capacity for new agent work, then checks the issue
 // and the step's tenure again. Its caller defers the release through the
 // whole operation, including reviews, fallbacks and repairs. A wait starts
 // no run record or directory, and cancellation never starts a queued run.
 func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
-	f.running.mu.Lock()
-	if f.running.slots == nil {
-		f.running.slots = make(chan struct{}, max(f.Parallel, 1))
+	a := &f.admission
+	a.mu.Lock()
+	a.init()
+	if a.slots == nil {
+		a.slots = make(chan struct{}, max(f.Parallel, 1))
 	}
-	slots := f.running.slots
-	f.running.mu.Unlock()
+	slots, drain := a.slots, a.drain
+	a.mu.Unlock()
+	select {
+	case <-drain:
+		return nil, errDraining
+	default:
+	}
 	select {
 	case slots <- struct{}{}:
+	case <-drain:
+		return nil, errDraining
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -558,6 +675,16 @@ func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
 	if issue.State == "closed" {
 		return nil, errIssueClosed
 	}
+	// Admission and Drain share this lock, so a slot obtained just as drain
+	// begins cannot start another operation after the request.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	select {
+	case <-drain:
+		return nil, errDraining
+	default:
+	}
+	a.steps[n] = true
 	keep = true
 	return func() { <-slots }, nil
 }
@@ -566,6 +693,13 @@ func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
 func (f *Factory) end(n int, ended time.Time) {
 	f.running.mu.Lock()
 	defer f.running.mu.Unlock()
+	defer func() {
+		a := &f.admission
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		delete(a.steps, n)
+		a.finish()
+	}()
 	f.finished(f.running.steps[n], ended)
 	delete(f.running.steps, n)
 	f.tell()
@@ -702,6 +836,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	var stopped bool
 	ctx, stopped, err = f.effects(ctx, t)
 	if err != nil || stopped {
+		if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok && stopped && err == nil {
+			next.again = ctx.Value(effectsKey{}).(*issueEffects).retried
+		}
 		return err
 	}
 	// A retry's answer may have been posted while releasing a refusal.
@@ -712,6 +849,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		}
 	}
 	state, started := t.State()
+	if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok {
+		next.again = continues(t, state)
+	}
 	if issue.State == "closed" {
 		return f.closedIssue(ctx, t, state)
 	}
@@ -898,14 +1038,23 @@ func matches(args []string, hash string) bool {
 }
 
 // choose records people's answers to the open forks. Once every fork is
-// answered, it drafts again with the answers.
+// answered, or a following revise asks, it drafts again with the answers.
 func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Command) error {
 	f.doing(t.Issue.Number, "answering")
 	forks := state.Marker.Forks
+	if p := state.Marker.Proposal; p != nil && len(p.Forks) > 0 {
+		forks = p.Forks // a writer can correct a choice while other forks remain
+	}
 	chosen := map[string]formalize.Answer{}
 	var replyTo []int64
 	var last Command
+	var revision *Command
 	for _, c := range pending {
+		if c.Verb == Revise {
+			revision = &c
+			replyTo = append(replyTo, c.Comment)
+			break
+		}
 		if c.Verb != Choose {
 			continue
 		}
@@ -917,16 +1066,43 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 		chosen[strings.ToUpper(fork.ID)] = formalize.Answer{Fork: fork.ID, Question: fork.Question, Option: option.ID, Says: option.Says, By: c.By, Comment: c.URL}
 		replyTo = append(replyTo, c.Comment)
 	}
-	for _, fork := range forks {
-		if _, ok := chosen[strings.ToUpper(fork.ID)]; !ok {
-			return nil // wait for the rest
-		}
-	}
 	answers := append([]formalize.Answer(nil), state.Marker.Answers...)
 	for _, fork := range forks {
-		answers = append(answers, chosen[strings.ToUpper(fork.ID)])
+		a, ok := chosen[strings.ToUpper(fork.ID)]
+		if !ok {
+			continue
+		}
+		if i := slices.IndexFunc(answers, func(a formalize.Answer) bool { return strings.EqualFold(a.Fork, fork.ID) }); i >= 0 {
+			answers[i] = a
+		} else {
+			answers = append(answers, a)
+		}
 	}
-	return f.formalize(ctx, t, last, answers, nil, replyTo)
+	var remaining []formalize.Fork
+	for _, fork := range state.Marker.Forks {
+		if _, ok := chosen[strings.ToUpper(fork.ID)]; !ok {
+			remaining = append(remaining, fork)
+		}
+	}
+	if revision != nil {
+		return f.formalize(ctx, t, *revision, answers, state.Marker.Proposal, replyTo)
+	}
+	if len(remaining) == 0 {
+		return f.formalize(ctx, t, last, answers, nil, replyTo)
+	}
+	// The post is the saved state, so idle polls and another watcher keep
+	// the answers and never ask for the same choices again.
+	m := state.Marker.carried()
+	m.Forks, m.Answers, m.ReplyTo = remaining, answers, replyTo
+	from, to := viewOf(state, true, t.Stops()), viewOf(Post{Marker: m}, true, t.Stops())
+	to.directedBy = f.director(last.By)
+	if err := f.allowed(ctx, t.Issue.Number, "record partial choices", from, to); err != nil {
+		return err
+	}
+	if err := f.recovers(ctx, t.Issue.Number, "answer partial choices", f.canPost(noting(), recovery.Note)); err != nil {
+		return err
+	}
+	return f.say(ctx, t.Issue.Number, forksComment(remaining, m), LabelAsking)
 }
 
 func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formalize.Option, string, string) {
@@ -952,16 +1128,21 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// base is the project's lock on the base branch, which a draft amends.
 	var base string
 	stuck := func(problem string) error {
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo}
+		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous}
 		return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 	}
 	f.logf("#%d: formalizing", n)
 	f.doing(n, "formalizing")
 	req := f.request(t, answers, previous)
-	// Once a writer asks for a plan of issues, the issue is a PRD: its draft
-	// is a plan of issues, read against the base branch as it is, whatever
-	// its own Kind:, Project: and Code: lines say (#112).
-	prd := isPRD(t)
+	parent, _, err := f.plannedStep(ctx, t.Issue)
+	if err != nil {
+		return err
+	}
+	req.ParentPlan = parent
+	// A writer's /invariant plan makes an ordinary issue a PRD (#112).
+	// A recorded step still drafts one complete change, including after
+	// that command, an answer or a revision (#560).
+	prd := parent == 0 && isPRD(t)
 	if prd {
 		root, err := f.planBase(ctx)
 		if err != nil {
@@ -1060,12 +1241,17 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		// The issue's agent ran the draft that stopped, so its post names it
 		// (#179).
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Agent: agent}
+		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous, Agent: agent}
 		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the watcher running it stopped or lost the repository's lease.", m,
 			" Comment `/invariant revise` to draft again."), LabelHumanReview)
 	}
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
 		return err
+	}
+	// A returned or recovered draft must obey the same limit, even when
+	// its formalizer did not check it or it was saved before the limit.
+	if parent != 0 && res.Proposal != nil && res.Proposal.IssuePlan != nil {
+		res.Problem, res.Proposal = formalize.StepPlanProblem(parent), nil
 	}
 	if res.Proposal != nil && newDir != "" {
 		res.Proposal.Dir = newDir
@@ -1502,9 +1688,13 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 
 // branchFor picks the branch and project directory for a ratified proposal,
 // and the ref to start from. If an earlier attempt already pushed this
-// proposal's branch, it picks that up where it stopped; a branch left from a
-// different proposal gets a numbered successor.
+// proposal's branch in the directory it names, it picks that up where it
+// stopped; a different proposal or destination gets a numbered successor.
 func (f *Factory) branchFor(ctx context.Context, issue int, p *formalize.Proposal) (branch, dir, from string, err error) {
+	named := p.Dir
+	if p.Target != nil {
+		named = p.Target.Dir
+	}
 	for i := 1; ; i++ {
 		branch = fmt.Sprintf("invariant/issue-%d-%s", issue, p.Slug)
 		if i > 1 {
@@ -1518,7 +1708,7 @@ func (f *Factory) branchFor(ctx context.Context, issue int, p *formalize.Proposa
 		if err != nil {
 			return "", "", "", err
 		}
-		if sc.Project == "" {
+		if sc.Project == "" || named != "" && sc.Project != named {
 			continue
 		}
 		b, err := f.Repo.Show(ctx, "origin/"+branch, sc.Project+"/.invariant/ratified.lock")
@@ -2762,9 +2952,17 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	ctx = f.inTenure(ctx)
 	issue, err := f.GitHub.Issue(ctx, n)
 	if err != nil {
+		// Only a merge's unlisted placeholder can disappear. A 404 for an
+		// issue the lists returned is a failed read, and must be retried.
+		if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok && next.unlisted && errors.Is(err, github.ErrNotFound) {
+			next.again, next.gone = false, true
+		}
 		return err
 	}
 	err = f.step(ctx, issue)
+	if errors.Is(err, errDraining) {
+		return nil // no run started; leave the request for the next watcher
+	}
 	if errors.Is(err, errIssueClosed) {
 		// The queued operation released its slot without starting a run.
 		// Read the thread afresh to record the close and clean up labels.

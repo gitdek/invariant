@@ -10,17 +10,17 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/gitdek/invariant/internal/tlc"
 )
@@ -61,53 +61,89 @@ type Runner interface {
 	Check(ctx context.Context, dir, module string, cfg tlc.Config) (tlc.Result, error)
 }
 
-// Check tests what a driver recorded against module, staged in dir, with
-// TLC. A driver that records its attempts (D-0085) is also checked for
-// trying every step: model says what that needs, and nil skips it.
+// Check is the byte-input compatibility wrapper for CheckReader.
 func Check(ctx context.Context, runner Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, raw []byte, model *Model) (Result, error) {
-	r := Result{ModelStates: modelStates}
-	rec, problem := decode(raw, vars)
+	return CheckReader(ctx, runner, dir, module, bounds, vars, modelStates, bytes.NewReader(raw), model)
+}
+
+// CheckReader tests a recording against the staged model. Variable-size
+// recording contents live in invocation-private temporary storage; only
+// fixed-size indexes and active checking windows remain in memory.
+// The caller owns the reader and its files. Every exit joins started checks
+// and removes this invocation's storage and copied checking modules.
+func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds map[string]string, vars []string, modelStates int64, input io.Reader, model *Model) (r Result, err error) {
+	r.ModelStates = modelStates
+	s, err := newRecordingStore(ctx)
+	if err != nil {
+		return r, err
+	}
+	root := ""
+	defer func() {
+		err = errors.Join(err, ctx.Err(), s.close())
+		if root != "" {
+			err = errors.Join(err, os.RemoveAll(root))
+		}
+		if err != nil {
+			r = Result{ModelStates: modelStates}
+		}
+	}()
+	rec, problem, err := decodeReader(ctx, s, input, vars)
+	if err != nil {
+		return r, err
+	}
 	if problem != "" {
 		r.Message = problem
 		return r, nil
 	}
-	strict, problem := strictAttempts(rec, model)
+	problem, err = strictAttempts(ctx, rec, model)
+	if err != nil {
+		return r, err
+	}
 	if problem != "" {
 		r.Message = problem
 		return r, nil
 	}
-	states, pretty, starts, steps := rec.states, rec.pretty, rec.starts, rec.steps
 	r.Runs, r.Steps = rec.runs, rec.recorded
-	r.States, r.Transitions = len(states), len(steps)
+	r.States, r.Transitions = len(s.states), len(rec.steps)
 
 	values := modelValues(bounds)
-	cfgConstants := map[string]string{}
+	constants := map[string]string{}
 	for k, v := range bounds {
-		cfgConstants[k] = v
+		constants[k] = v
 	}
 	for _, mv := range values {
-		cfgConstants[mv] = mv
+		constants[mv] = mv
 	}
-	// TLC's standard module defines :> and @@, which the recorded functions use.
 	header := fmt.Sprintf("EXTENDS %s, TLC\n", module)
 	if len(values) > 0 {
 		header += "CONSTANTS " + strings.Join(values, ", ") + "\n"
 	}
-
-	// Every run must start where Init allows.
-	var startSet []string
-	for i := range starts {
-		startSet = append(startSet, states[i])
-	}
-	sort.Strings(startSet)
-	initModule := "---- MODULE Invariant_ConformanceInit ----\n" + header +
-		"Invariant_Starts == {" + strings.Join(startSet, ",\n  ") + "}\n" +
-		"Invariant_IInit == \\E s \\in Invariant_Starts : " + is("s", vars, false) + "\n" +
-		"Invariant_ISpec == Invariant_IInit /\\ [][UNCHANGED vars]_vars\n====\n"
-	if err := os.WriteFile(filepath.Join(dir, "Invariant_ConformanceInit.tla"), []byte(initModule), 0o644); err != nil {
+	// Keep batch paths inside the caller's staging directory, but never use
+	// or overwrite a path that another invocation or the caller owns.
+	root, err = batchRoot(ctx, dir)
+	if err != nil {
 		return r, err
 	}
-	res, err := runner.Check(ctx, dir, "Invariant_ConformanceInit", tlc.Config{Specification: "Invariant_ISpec", Constants: cfgConstants, Invariants: []string{"Init"}})
+
+	_, res, err := checkRanges(ctx, runner, "init", len(rec.starts), initBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_ConformanceInit",
+			tlc.Config{Specification: "Invariant_ISpec", Constants: constants, Invariants: []string{"Init"}}, func(w *moduleWriter) error {
+				w.text("---- MODULE Invariant_ConformanceInit ----\n" + header + "Invariant_Starts == {")
+				start := c.Range.Start
+				for i := start; i < start+c.Range.Count; i++ {
+					if i > start {
+						w.text(",\n  ")
+					}
+					w.value(s, s.states[rec.starts[i]].text)
+					if w.err != nil {
+						return w.err
+					}
+				}
+				w.text("}\nInvariant_IInit == \\E s \\in Invariant_Starts : " + is("s", vars, false) + "\n" +
+					"Invariant_ISpec == Invariant_IInit /\\ [][UNCHANGED vars]_vars\n====\n")
+				return nil
+			})
+	})
 	if err != nil {
 		return r, err
 	}
@@ -121,81 +157,93 @@ func Check(ctx context.Context, runner Runner, dir, module string, bounds map[st
 		return r, nil
 	}
 
-	// Every step that changed the state must be a Next step. TLC checks the
-	// steps in batches, each carrying only the states it uses, so memory
-	// stays flat however many steps the code took, and several batches at
-	// once, each in a directory of its own.
-	var all [][2]int
-	for p := range steps {
-		all = append(all, p)
-	}
-	sort.Slice(all, func(i, j int) bool { return all[i][0] < all[j][0] || all[i][0] == all[j][0] && all[i][1] < all[j][1] })
-	split := batches(all, stepBatch)
-	b, res, err := atOnce(ctx, len(split), func(ctx context.Context, b int) (tlc.Result, error) {
-		local, pairs := renumber(split[b])
-		used := make([]string, len(local))
-		for i, s := range local {
-			used[i] = states[s]
-		}
-		stepModule := "---- MODULE Invariant_Conformance ----\n" + header +
-			"VARIABLES invariant_source, invariant_target, invariant_done\n" +
-			"Invariant_States == <<" + strings.Join(used, ",\n  ") + ">>\n" +
-			"Invariant_Steps == {" + strings.Join(pairs, ", ") + "}\n" +
-			"Invariant_CInit == \\E p \\in Invariant_Steps :\n" +
-			"    /\\ " + is("Invariant_States[p[1]]", vars, false) + "\n" +
-			"    /\\ invariant_source = p[1]\n    /\\ invariant_target = p[2]\n    /\\ invariant_done = FALSE\n" +
-			"Invariant_CNext ==\n" +
-			"    \\/ /\\ ~invariant_done\n       /\\ Next\n" +
-			"       /\\ " + is("Invariant_States[invariant_target]", vars, true) + "\n" +
-			"       /\\ invariant_done' = TRUE\n       /\\ UNCHANGED <<invariant_source, invariant_target>>\n" +
-			"    \\/ /\\ invariant_done\n       /\\ UNCHANGED <<vars, invariant_source, invariant_target, invariant_done>>\n" +
-			"Invariant_CSpec == Invariant_CInit /\\ [][Invariant_CNext]_<<vars, invariant_source, invariant_target, invariant_done>>\n====\n"
-		d, err := batchDir(dir, fmt.Sprintf("steps-%d", b+1))
-		if err != nil {
-			return tlc.Result{}, err
-		}
-		if err := os.WriteFile(filepath.Join(d, "Invariant_Conformance.tla"), []byte(stepModule), 0o644); err != nil {
-			return tlc.Result{}, err
-		}
-		return runner.Check(ctx, d, "Invariant_Conformance", tlc.Config{Specification: "Invariant_CSpec", Constants: cfgConstants})
+	window, res, err := checkRanges(ctx, runner, "steps", len(rec.steps), stepBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		start := c.Range.Start
+		local, pairs := renumber(rec.steps[start : start+c.Range.Count])
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_Conformance",
+			tlc.Config{Specification: "Invariant_CSpec", Constants: constants}, func(w *moduleWriter) error {
+				w.text("---- MODULE Invariant_Conformance ----\n" + header +
+					"VARIABLES invariant_source, invariant_target, invariant_done\nInvariant_States == <<")
+				for i, id := range local {
+					if i > 0 {
+						w.text(",\n  ")
+					}
+					w.value(s, s.states[id].text)
+					if w.err != nil {
+						return w.err
+					}
+				}
+				w.text(">>\nInvariant_Steps == {" + strings.Join(pairs, ", ") + "}\n" +
+					"Invariant_CInit == \\E p \\in Invariant_Steps :\n" +
+					"    /\\ " + is("Invariant_States[p[1]]", vars, false) + "\n" +
+					"    /\\ invariant_source = p[1]\n    /\\ invariant_target = p[2]\n    /\\ invariant_done = FALSE\n" +
+					"Invariant_CNext ==\n" +
+					"    \\/ /\\ ~invariant_done\n       /\\ Next\n" +
+					"       /\\ " + is("Invariant_States[invariant_target]", vars, true) + "\n" +
+					"       /\\ invariant_done' = TRUE\n       /\\ UNCHANGED <<invariant_source, invariant_target>>\n" +
+					"    \\/ /\\ invariant_done\n       /\\ UNCHANGED <<vars, invariant_source, invariant_target, invariant_done>>\n" +
+					"Invariant_CSpec == Invariant_CInit /\\ [][Invariant_CNext]_<<vars, invariant_source, invariant_target, invariant_done>>\n====\n")
+				return nil
+			})
 	})
 	if err != nil {
 		return r, err
 	}
 	switch {
 	case res.Outcome == tlc.Deadlock && len(res.Trace) > 0:
-		// The stuck state is the start of a step no Next step can make; it
-		// carries the step's two ends as indexes into the batch's states.
-		local, _ := renumber(split[b])
+		start := window.Start
+		local, _ := renumber(rec.steps[start : start+window.Count])
 		stuck := res.Trace[len(res.Trace)-1]
 		step := &Step{From: stateText(stuck, vars)}
 		for _, v := range stuck.Vars {
-			i, err := strconv.Atoi(v.Value)
-			if err != nil || i < 1 || i > len(local) {
+			i, e := strconv.Atoi(v.Value)
+			if e != nil || i < 1 || i > len(local) {
 				continue
 			}
-			switch v.Name {
-			case "invariant_source":
-				step.From = pretty[local[i-1]]
-			case "invariant_target":
-				step.To = pretty[local[i-1]]
+			if v.Name == "invariant_source" || v.Name == "invariant_target" {
+				pretty, e := s.pretty(local[i-1])
+				if e != nil {
+					return r, e
+				}
+				if v.Name == "invariant_source" {
+					step.From = pretty
+				} else {
+					step.To = pretty
+				}
 			}
 		}
 		r.BadStep = step
 		r.Message = "the code took a step the model doesn't allow"
-		for _, a := range strict {
-			if rec.pretty[a.from] == step.From && rec.pretty[a.to] == step.To {
-				r.Message = fmt.Sprintf("declared %s attempt %s from %s to %s is not a model Next step", a.outcome, actionCall(a), step.From, step.To)
-				break
+		for _, id := range rec.strict {
+			e := rec.attempts[id]
+			from, err := s.pretty(e.from)
+			if err != nil {
+				return r, err
 			}
+			if from != step.From {
+				continue
+			}
+			to, err := s.pretty(e.to)
+			if err != nil {
+				return r, err
+			}
+			if to != step.To {
+				continue
+			}
+			a, err := s.attempt(e)
+			if err != nil {
+				return r, err
+			}
+			r.Message = fmt.Sprintf("declared %s attempt %s from %s to %s is not a model Next step", a.outcome, actionCall(a), step.From, step.To)
+			break
 		}
 		return r, nil
 	case res.Outcome != tlc.Passed:
 		r.Message = "TLC couldn't check the steps: " + res.Message
 		return r, nil
 	}
-	if len(strict) > 0 {
-		bad, message, err := checkStrictAttempts(ctx, runner, dir, header, cfgConstants, vars, rec, strict)
+	if len(rec.strict) > 0 {
+		bad, message, err := checkStrictAttempts(ctx, runner, dir, root, header, constants, vars, rec)
 		if err != nil {
 			return r, err
 		}
@@ -204,94 +252,142 @@ func Check(ctx context.Context, runner Runner, dir, module string, bounds map[st
 			return r, nil
 		}
 	}
-	r.Passed = true
-	if rec.attempts != nil && model != nil {
-		tried, err := checkTried(ctx, runner, dir, module, header, cfgConstants, vars, *model, rec)
+	if rec.hasAttempts && model != nil {
+		tried, err := checkTried(ctx, runner, dir, root, module, header, constants, vars, *model, rec)
 		if err != nil {
 			return r, err
 		}
 		r.Tried = &tried
 	}
+	r.Passed = true
 	return r, nil
 }
 
-// checkStrictAttempts retains each declared outcome, including multiple
-// actions and arguments with the same state pair. The extra done bit makes
-// an accepted read-only action a real transition of this checking module,
-// so TLC cannot excuse it as stuttering. A refusal instead needs the named
-// action to have no successor at all, including an unchanged successor.
-func checkStrictAttempts(ctx context.Context, runner Runner, dir, header string, constants map[string]string, vars []string, rec recorded, strict []attempt) (*Step, string, error) {
-	n := (len(strict) + stepBatch - 1) / stepBatch
-	b, res, err := atOnce(ctx, n, func(ctx context.Context, b int) (tlc.Result, error) {
-		start := b * stepBatch
-		batch := strict[start:min(start+stepBatch, len(strict))]
-		rows := make([]string, len(batch))
-		actions := map[string]string{}
-		for i, a := range batch {
-			name, _ := json.Marshal(a.step)
-			refused := "FALSE"
-			if a.outcome == "refused" {
-				refused = "TRUE"
-			}
-			rows[i] = "<<" + strings.Join([]string{rec.states[a.from], rec.states[a.to], string(name), "<<" + strings.Join(a.args, ", ") + ">>", refused}, ", ") + ">>"
-			args := make([]string, len(a.args))
-			for j := range args {
-				args[j] = fmt.Sprintf("Invariant_Attempts[invariant_i][4][%d]", j+1)
-			}
-			actions[a.step] = "Invariant_Attempts[invariant_i][3] = " + string(name) + " -> " + actionCall(attempt{step: a.step, args: args})
+const initBatch = 1000
+
+func checkBatch(ctx context.Context, runner Runner, source, root string, c tlc.ConformanceCheck, module string, cfg tlc.Config, emit func(*moduleWriter) error) (result tlc.Result, err error) {
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	dir, err := batchDir(ctx, source, root, c.Batch)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if cleanup := os.RemoveAll(dir); cleanup != nil {
+			err = errors.Join(err, cleanup)
 		}
-		cases := make([]string, 0, len(actions))
-		for _, expression := range actions {
-			cases = append(cases, expression)
-		}
-		sort.Strings(cases)
-		text := "---- MODULE Invariant_StrictAttempts ----\n" + header +
-			"VARIABLES invariant_i, invariant_done\n" +
-			"Invariant_Attempts == <<" + strings.Join(rows, ",\n  ") + ">>\n" +
-			"Invariant_Action == CASE " + strings.Join(cases, "\n  [] ") + "\n  [] OTHER -> FALSE\n" +
-			"Invariant_AInit == \\E i \\in DOMAIN Invariant_Attempts :\n" +
-			"    /\\ invariant_i = i\n    /\\ invariant_done = FALSE\n" +
-			"    /\\ " + is("Invariant_Attempts[i][1]", vars, false) + "\n" +
-			"Invariant_ANext ==\n" +
-			"    \\/ /\\ ~invariant_done\n" +
-			"       /\\ IF Invariant_Attempts[invariant_i][5]\n" +
-			"             THEN /\\ ~ENABLED (Invariant_Action /\\ UNCHANGED <<invariant_i, invariant_done>>)\n" +
-			"                  /\\ UNCHANGED vars\n" +
-			"             ELSE /\\ Invariant_Action\n" +
-			"                  /\\ " + is("Invariant_Attempts[invariant_i][2]", vars, true) + "\n" +
-			"       /\\ invariant_done' = TRUE\n       /\\ UNCHANGED invariant_i\n" +
-			"    \\/ /\\ invariant_done\n       /\\ UNCHANGED <<vars, invariant_i, invariant_done>>\n" +
-			"Invariant_ASpec == Invariant_AInit /\\ [][Invariant_ANext]_<<vars, invariant_i, invariant_done>>\n====\n"
-		d, err := batchDir(dir, fmt.Sprintf("strict-%d", b+1))
-		if err != nil {
-			return tlc.Result{}, err
-		}
-		if err := os.WriteFile(filepath.Join(d, "Invariant_StrictAttempts.tla"), []byte(text), 0o644); err != nil {
-			return tlc.Result{}, err
-		}
-		return runner.Check(ctx, d, "Invariant_StrictAttempts", tlc.Config{Specification: "Invariant_ASpec", Constants: constants})
+	}()
+	if err := writeModule(ctx, dir, module, emit); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if capable, ok := runner.(tlc.ConformanceRunner); ok {
+		return capable.CheckConformance(ctx, dir, module, cfg, c)
+	}
+	return runner.Check(ctx, dir, module, cfg)
+}
+
+// Declared outcomes retain their original order, including multiple actions
+// with the same state pair. The done bit prevents TLC from excusing an
+// accepted read-only action as stuttering; a refusal requires disabledness.
+func checkStrictAttempts(ctx context.Context, runner Runner, dir, root, header string, constants map[string]string, vars []string, rec recorded) (*Step, string, error) {
+	s := rec.store
+	window, res, err := checkRanges(ctx, runner, "strict", len(rec.strict), stepBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_StrictAttempts",
+			tlc.Config{Specification: "Invariant_ASpec", Constants: constants}, func(w *moduleWriter) error {
+				w.text("---- MODULE Invariant_StrictAttempts ----\n" + header + "VARIABLES invariant_i, invariant_done\nInvariant_Attempts == <<")
+				start := c.Range.Start
+				actions := map[string]string{}
+				for i := start; i < start+c.Range.Count; i++ {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					a, err := s.attempt(rec.attempts[rec.strict[i]])
+					if err != nil {
+						return err
+					}
+					name, _ := json.Marshal(a.step)
+					refused := "FALSE"
+					if a.outcome == "refused" {
+						refused = "TRUE"
+					}
+					if i > start {
+						w.text(",\n  ")
+					}
+					w.text("<<")
+					w.value(s, s.states[a.from].text)
+					w.text(", ")
+					w.value(s, s.states[a.to].text)
+					w.text(", " + string(name) + ", <<" + strings.Join(a.args, ", ") + ">>, " + refused + ">>")
+					if w.err != nil {
+						return w.err
+					}
+					args := make([]string, len(a.args))
+					for j := range args {
+						args[j] = fmt.Sprintf("Invariant_Attempts[invariant_i][4][%d]", j+1)
+					}
+					actions[a.step] = "Invariant_Attempts[invariant_i][3] = " + string(name) + " -> " + actionCall(attempt{step: a.step, args: args})
+				}
+				cases := make([]string, 0, len(actions))
+				for _, expression := range actions {
+					cases = append(cases, expression)
+				}
+				sort.Strings(cases)
+				w.text(">>\nInvariant_Action == CASE " + strings.Join(cases, "\n  [] ") + "\n  [] OTHER -> FALSE\n" +
+					"Invariant_AInit == \\E i \\in DOMAIN Invariant_Attempts :\n" +
+					"    /\\ invariant_i = i\n    /\\ invariant_done = FALSE\n" +
+					"    /\\ " + is("Invariant_Attempts[i][1]", vars, false) + "\n" +
+					"Invariant_ANext ==\n" +
+					"    \\/ /\\ ~invariant_done\n" +
+					"       /\\ IF Invariant_Attempts[invariant_i][5]\n" +
+					"             THEN /\\ ~ENABLED (Invariant_Action /\\ UNCHANGED <<invariant_i, invariant_done>>)\n" +
+					"                  /\\ UNCHANGED vars\n" +
+					"             ELSE /\\ Invariant_Action\n" +
+					"                  /\\ " + is("Invariant_Attempts[invariant_i][2]", vars, true) + "\n" +
+					"       /\\ invariant_done' = TRUE\n       /\\ UNCHANGED invariant_i\n" +
+					"    \\/ /\\ invariant_done\n       /\\ UNCHANGED <<vars, invariant_i, invariant_done>>\n" +
+					"Invariant_ASpec == Invariant_AInit /\\ [][Invariant_ANext]_<<vars, invariant_i, invariant_done>>\n====\n")
+				return nil
+			})
 	})
 	if err == nil && res.Outcome == tlc.Passed {
 		return nil, "", nil
 	}
-	i := stateIndex(res.Trace)
-	index := b * stepBatch
-	if i >= 1 && i <= stepBatch && index+i-1 < len(strict) {
+	if cause := ctx.Err(); cause != nil {
+		return nil, "", cause
+	}
+	b := window.Start / stepBatch
+	i, index := stateIndex(res.Trace), window.Start
+	if i >= 1 && i <= window.Count && index+i-1 < len(rec.strict) {
 		index += i - 1
 	}
-	a := strict[index]
-	description := fmt.Sprintf("declared %s attempt %s from %s to %s", a.outcome, actionCall(a), rec.pretty[a.from], rec.pretty[a.to])
+	a, readErr := s.attempt(rec.attempts[rec.strict[index]])
+	if readErr != nil {
+		return nil, "", errors.Join(err, readErr)
+	}
+	from, readErr := s.pretty(a.from)
+	if readErr != nil {
+		return nil, "", errors.Join(err, readErr)
+	}
+	to, readErr := s.pretty(a.to)
+	if readErr != nil {
+		return nil, "", errors.Join(err, readErr)
+	}
+	description := fmt.Sprintf("declared %s attempt %s from %s to %s", a.outcome, actionCall(a), from, to)
 	if err != nil {
 		return nil, "", fmt.Errorf("TLC couldn't check %s (batch %d): %w", description, b+1, err)
 	}
-	if res.Outcome == tlc.Deadlock && i >= 1 && i <= stepBatch && b*stepBatch+i-1 < len(strict) {
-		return &Step{From: rec.pretty[a.from], To: rec.pretty[a.to]}, description + " disagrees with the named model action", nil
+	if res.Outcome == tlc.Deadlock && i >= 1 && i <= window.Count && window.Start+i-1 < len(rec.strict) {
+		return &Step{From: from, To: to}, description + " disagrees with the named model action", nil
 	}
 	return nil, fmt.Sprintf("TLC couldn't check %s (batch %d): %s", description, b+1, res.Message), nil
 }
 
-// stepBatch is how many steps TLC checks at once. A batch's module holds
-// only the states its steps use, so its size doesn't grow with the model.
+// stepBatch bounds the steps and endpoints in one checking window.
+// An individual endpoint or attempt has no fixed byte ceiling.
 const stepBatch = 2000
 
 // batches splits steps into runs of at most n.
@@ -333,51 +429,37 @@ func renumber(batch [][2]int) (local []int, pairs []string) {
 // there, or n and a passing result. Once a batch fails, those after it don't
 // start and those running are stopped through their context, but every batch
 // before it runs to its end, and atOnce returns only once every batch it
-// started has.
+// started has. Operational errors survive an earlier semantic failure; only
+// cancellation caused by stopping a later batch is ignored.
 func atOnce(ctx context.Context, n int, check func(ctx context.Context, b int) (tlc.Result, error)) (int, tlc.Result, error) {
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		first    = n
-		found    = tlc.Result{Outcome: tlc.Passed}
-		foundErr error
-		cancels  = make([]context.CancelFunc, n)
-	)
-	// A batch holds a slot while it runs.
-	slots := make(chan struct{}, min(runtime.GOMAXPROCS(0), maxAtOnce))
-	for b := range n {
-		slots <- struct{}{}
-		mu.Lock()
-		if first < b {
-			mu.Unlock()
-			break
-		}
-		batchCtx, cancel := context.WithCancel(ctx)
-		cancels[b] = cancel
-		mu.Unlock()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-slots }()
-			defer cancel()
-			res, err := check(batchCtx, b)
-			if err == nil && res.Outcome == tlc.Passed {
-				return
-			}
-			mu.Lock()
-			if b < first {
-				first, found, foundErr = b, res, err
-				for _, later := range cancels[b+1:] {
-					if later != nil {
-						later()
-					}
-				}
-			}
-			mu.Unlock()
-		}()
+	window, result, err := checkRanges(ctx, nil, "batch", n, 1, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return check(ctx, c.Range.Start)
+	})
+	if ctx.Err() != nil {
+		result = tlc.Result{}
 	}
-	wg.Wait()
-	return first, found, foundErr
+	return window.Start, result, err
+}
+
+var errLaterBatch = errors.New("an earlier conformance batch failed")
+
+// A canceled write can also fail while flushing or closing its file. Those
+// joined storage errors must not be mistaken for scheduler cancellation.
+func batchCancellationOnly(err error) bool {
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := e.Unwrap()
+		for _, child := range children {
+			if !batchCancellationOnly(child) {
+				return false
+			}
+		}
+		return len(children) > 0
+	case interface{ Unwrap() error }:
+		return batchCancellationOnly(e.Unwrap())
+	default:
+		return err == context.Canceled || err == errLaterBatch
+	}
 }
 
 // maxAtOnce is the most batches checked at once, however many CPUs there
@@ -386,35 +468,6 @@ func atOnce(ctx context.Context, n int, check func(ctx context.Context, b int) (
 // killed partway through a batch (#142). Four at once checked
 // factory/protocol there in 258 seconds, against 371 one at a time.
 const maxAtOnce = 4
-
-// batchDir makes dir/name, the directory one batch is checked in, holding
-// copies of every .tla file directly in dir. The runner writes its config
-// beside the module it checks, so batches checked at once each need a
-// directory, and TLC's container sees only that one, so links out of it
-// wouldn't do.
-func batchDir(dir, name string) (string, error) {
-	d := filepath.Join(dir, name)
-	if err := os.MkdirAll(d, 0o755); err != nil {
-		return "", err
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tla") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(filepath.Join(d, e.Name()), b, 0o644); err != nil {
-			return "", err
-		}
-	}
-	return d, nil
-}
 
 // is states that the variables equal the fields of record expression s, or,
 // when primed, that the next values do.
@@ -433,11 +486,23 @@ func is(s string, vars []string, primed bool) string {
 // encodeState renders a recorded state as a TLA+ record, and readably as
 // name = value pairs.
 func encodeState(s map[string]any, vars []string) (record, readable string, err error) {
+	return renderState(s, vars, true)
+}
+
+func encodeRecord(s map[string]any, vars []string) (string, error) {
+	record, _, err := renderState(s, vars, false)
+	return record, err
+}
+
+func renderState(s map[string]any, vars []string, pretty bool) (record, readable string, err error) {
 	if len(s) != len(vars) {
 		return "", "", fmt.Errorf("want exactly the spec's variables %v, got %d fields", vars, len(s))
 	}
 	fields := make([]string, len(vars))
-	pairs := make([]string, len(vars))
+	var pairs []string
+	if pretty {
+		pairs = make([]string, len(vars))
+	}
 	for i, v := range vars {
 		value, ok := s[v]
 		if !ok {
@@ -448,7 +513,9 @@ func encodeState(s map[string]any, vars []string) (record, readable string, err 
 			return "", "", fmt.Errorf("%s: %w", v, err)
 		}
 		fields[i] = v + " |-> " + text
-		pairs[i] = v + " = " + text
+		if pretty {
+			pairs[i] = v + " = " + text
+		}
 	}
 	return "[" + strings.Join(fields, ", ") + "]", strings.Join(pairs, ", "), nil
 }

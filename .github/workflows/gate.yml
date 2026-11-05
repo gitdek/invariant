@@ -123,9 +123,11 @@ jobs:
       - name: Vet and unit tests
         run: |
           go vet ./...
-          # internal/verify's tests take most of the time, so they run in
-          # shards of their own, in invariant/verify-tests (#345).
-          go test $(go list ./... | grep -v '/internal/verify$')
+          # internal/verify's and internal/plumbing's tests take most of the
+          # time, so they run in shards of their own, in invariant/verify-tests
+          # (#345, #570). The rest get the unit-test command's 20 minutes, not
+          # go test's ten (#557).
+          go test -timeout 20m $(go list ./... | grep -v -e '/internal/verify$' -e '/internal/plumbing$')
 
       - name: Build the gate
         run: go build -o "$RUNNER_TEMP/invariant" ./cmd/invariant
@@ -172,7 +174,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ['1/2', '2/2']
+        shard: ['1/4', '2/4', '3/4', '4/4']
     steps:
       - uses: actions/checkout@v7
         with:
@@ -187,8 +189,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: internal/verify's tests, shard ${{ matrix.shard }}
-        run: .github/shard-tests.sh "${{ matrix.shard }}" -timeout 20m -- ./internal/verify/
+      - name: internal/verify's and internal/plumbing's tests, shard ${{ matrix.shard }}
+        run: .github/shard-tests.sh "${{ matrix.shard }}" -timeout 20m -- ./internal/verify/ ./internal/plumbing/
 
   projects:
     # Every project in the repository, found rather than listed, so a factory
@@ -391,6 +393,33 @@ jobs:
           INVARIANT_PYTHON_PINNED: '1'
         run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/verify/pythongate/ ./internal/project/ ./cmd/invariant/
 
+  python-latest:
+    # The same Python tests under the newest Python Invariant supports, 3.14
+    # (#479), beside invariant/verify's 3.12 and invariant/python's pinned
+    # 3.13, so CI tests every supported version.
+    name: invariant/python-latest ${{ matrix.shard }}
+    needs: changes
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1/2', '2/2']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Python tests under Python 3.14, shard ${{ matrix.shard }}
+        run: .github/shard-tests.sh "${{ matrix.shard }}" -run Python -count=1 -timeout 25m -- ./internal/verify/ ./internal/verify/pythongate/ ./internal/project/ ./cmd/invariant/
+
   real-python:
     # The Python tests again, with every opt-in for real Docker, TLC, Nagini
     # and wheels set, which a person used to run by hand before merging a
@@ -449,6 +478,9 @@ jobs:
       - name: TLAPS with the pinned tlapm
         env:
           INVARIANT_TLAPS_REAL: '1'
+          # The soundness test reads tlapm's tests through GitHub's API, whose
+          # unauthenticated limit shared runners use up (#491).
+          GITHUB_TOKEN: ${{ github.token }}
         run: go test ./internal/verify -run '^TestTLAPSReal' -count=1 -timeout 30m
 
   gate:
@@ -459,7 +491,7 @@ jobs:
     # matrix job's result is success only when every shard's was. Skipped
     # only when the change is docs alone.
     name: invariant/gate
-    needs: [changes, verify, verify-tests, python, projects, project, receipts, integration, real-python, real-tlaps]
+    needs: [changes, verify, verify-tests, python, python-latest, projects, project, receipts, integration, real-python, real-tlaps]
     if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -469,6 +501,7 @@ jobs:
           VERIFY: ${{ needs.verify.result }}
           VERIFY_TESTS: ${{ needs.verify-tests.result }}
           PYTHON: ${{ needs.python.result }}
+          PYTHON_LATEST: ${{ needs.python-latest.result }}
           PROJECTS: ${{ needs.projects.result }}
           FOUND: ${{ needs.projects.outputs.projects }}
           PROJECT: ${{ needs.project.result }}
@@ -477,8 +510,8 @@ jobs:
           REAL_PYTHON: ${{ needs.real-python.result }}
           REAL_TLAPS: ${{ needs.real-tlaps.result }}
         run: |
-          echo "Checks: $VERIFY. internal/verify's tests: $VERIFY_TESTS. Python tests under the pinned image's Python: $PYTHON. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION. Real Python: $REAL_PYTHON. Real TLAPS: $REAL_TLAPS."
-          [ "$VERIFY" = success ] && [ "$VERIFY_TESTS" = success ] && [ "$PYTHON" = success ] && [ "$PROJECTS" = success ] || exit 1
+          echo "Checks: $VERIFY. internal/verify's tests: $VERIFY_TESTS. Python tests under the pinned image's Python: $PYTHON. Under Python 3.14: $PYTHON_LATEST. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION. Real Python: $REAL_PYTHON. Real TLAPS: $REAL_TLAPS."
+          [ "$VERIFY" = success ] && [ "$VERIFY_TESTS" = success ] && [ "$PYTHON" = success ] && [ "$PYTHON_LATEST" = success ] && [ "$PROJECTS" = success ] || exit 1
           # A repository with no projects has nothing to verify or gather.
           if [ "$FOUND" != "[]" ]; then [ "$PROJECT" = success ] && [ "$RECEIPTS" = success ] || exit 1; fi
           [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ] || exit 1

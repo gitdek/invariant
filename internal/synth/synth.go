@@ -323,14 +323,23 @@ type Fallback struct {
 func RunAgent(ctx context.Context, backend Backend, job Job, timeout time.Duration, fallback string) (Usage, *Fallback, error) {
 	job.Timeout = timeout
 	budget, _ := ctx.Value(executionBudgetKey{}).(*executionBudget)
+	modeledGate := !job.ReadOnly && len(job.GateServer) > 0 && (len(job.Tools) == 0 || slices.Contains(job.Tools, "gate"))
 	run := func() (Usage, error) {
+		if budget != nil {
+			job.Timeout = budget.limit(timeout)
+		}
+		if modeledGate {
+			job.ToolTimeout = job.Timeout
+			if job.ToolTimeout <= 0 {
+				job.ToolTimeout = -1 // an uncut build uses the longest safe tool timer
+			}
+		}
 		if budget == nil {
 			return backend.Run(ctx, job)
 		}
 		if err := ctx.Err(); err != nil {
 			return Usage{}, err
 		}
-		job.Timeout = budget.limit(timeout)
 		// Only Codex waits for an account turn. Its existing within call
 		// resumes the clock after that wait; other backends and stand-ins
 		// spend their allowance from entry, even if they never call within.

@@ -33,15 +33,32 @@ printf '%s\n' "$@" > "$root/args-$attempt"
 shift
 name=
 work=
+config=
+dump=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --name) shift; name="$1" ;;
         -v) shift; case "$1" in *:/work) work="${1%:/work}" ;; esac ;;
+        -config) shift; config="$1" ;;
+        -dump) shift; [ "$1" = dot,actionlabels ] || exit 96; shift; dump="$1" ;;
     esac
     shift
 done
-if [ -z "$name" ] || [ -z "$work" ]; then exit 95; fi
-cp "$work/Invariant.cfg" "$root/config-$attempt"
+if [ -z "$name" ] || [ -z "$work" ] || [ -z "$config" ]; then exit 95; fi
+case "$config" in
+    /work/*) config="$work/${config#/work/}" ;;
+    /*) exit 96 ;;
+    *) config="$work/$config" ;;
+esac
+if [ -n "$dump" ]; then
+    case "$dump" in
+        /work/*) dump="$work/${dump#/work/}" ;;
+        /*) exit 96 ;;
+        *) dump="$work/$dump" ;;
+    esac
+    case "$dump" in *.dot) ;; *) dump="$dump.dot" ;; esac
+fi
+cp "$config" "$root/config-$attempt"
 printf 'run %s %s\n' "$attempt" "$name" >> "$root/events"
 `
 
@@ -103,6 +120,9 @@ func stall470Read(t *testing.T, file string) string {
 
 // A stopped attempt must be removed before the next starts. Finished attempts
 // need no extra rm, and every attempt must have a different container name.
+// Removing a container again is harmless, and toolchain.Docker removes a
+// cancelled one both before and after its client exits (#433), so repeated
+// removals of one container, one right after another, count once (#488).
 func (f stall470Fixture) events(t *testing.T, runs, removed int) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(f.root, "events"))
@@ -112,7 +132,13 @@ func (f stall470Fixture) events(t *testing.T, runs, removed int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if strings.HasPrefix(line, "rm ") && len(lines) > 0 && lines[len(lines)-1] == line {
+			continue
+		}
+		lines = append(lines, line)
+	}
 	var want []string
 	seen := map[string]bool{}
 	for i := 1; i <= runs; i++ {

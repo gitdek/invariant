@@ -21,6 +21,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/repository"
 )
 
 // Result is what a pull request changes, and anything out of bounds.
@@ -366,6 +367,20 @@ func plan(g git, base, head string, issue int, r Result) Result {
 		r.Problems = append(r.Problems, "the original file inventory can't be read: "+err.Error())
 		return r
 	}
+	if lock.Plan.Native() {
+		snapshot, err := repository.Load(g.ctx, g.dir, from)
+		if err == nil {
+			err = lock.Plan.ValidateRepository(g.ctx, snapshot)
+		}
+		if err != nil {
+			r.Problems = append(r.Problems, "its native execution authority differs from the original baseline: "+err.Error())
+		}
+		for _, file := range lock.Plan.TestFiles() {
+			if _, exists := before[file]; exists {
+				r.Problems = append(r.Problems, "its native acceptance source already exists in the original baseline: "+file)
+			}
+		}
+	}
 	after, err := g.treeModes(head)
 	if err != nil {
 		r.Problems = append(r.Problems, "the candidate file inventory can't be read: "+err.Error())
@@ -396,7 +411,7 @@ func plan(g git, base, head string, issue int, r Result) Result {
 	}
 	// The acceptance tests are the plan's, as ratified.
 	for f, src := range lock.Plan.Sources {
-		if got, err := g.show(head, f); err != nil || got != src || (after[f] != "100644" && after[f] != "100755") {
+		if got, err := g.show(head, f); err != nil || !plumbing.SameSource(got, src) || (after[f] != "100644" && after[f] != "100755") {
 			r.Problems = append(r.Problems, "its acceptance test "+f+" isn't the one ratified")
 		}
 	}

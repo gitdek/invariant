@@ -52,13 +52,13 @@ func TestDeclaredAttemptMetadataFailsBeforeTools(t *testing.T) {
 	// Exception evidence accepts all finite JSON scalars, independently of
 	// TLA+'s more restrictive state/argument encoding, without rounding ints.
 	raw := []byte(`{"states":[{"n":0}],"init":[0],"attempts":[[0,"Read",[],0,{"outcome":"refused","refusal":{"type":"x.outer.<locals>.Error","attributes":{"none":null,"bool":true,"text":"x","int":90071992547409931234567890,"float":1.25}}}]]}`)
-	if _, problem := decode(raw, []string{"n"}); problem != "" {
+	if _, problem := decodeForTest(t, raw, []string{"n"}); problem != "" {
 		t.Fatal(problem)
 	}
 	// Opting out retains the legacy JSON decoder's handling of repeated keys
 	// in argument records; this strict validation concerns metadata alone.
 	legacy := []byte(`{"states":[{"n":0}],"init":[0],"attempts":[[0,"Read",[{"code":500,"code":409}],0]]}`)
-	if _, problem := decode(legacy, []string{"n"}); problem != "" {
+	if _, problem := decodeForTest(t, legacy, []string{"n"}); problem != "" {
 		t.Fatalf("legacy argument decoding changed: %s", problem)
 	}
 }

@@ -382,10 +382,6 @@ func (c Codex) attempt(ctx context.Context, job Job, steps int, first bool) try 
 	cmd := exec.CommandContext(run, c.Binary, args...)
 	cmd.Dir = job.Workspace
 	cmd.Env = c.codexEnv()
-	// Codex's agent has a shell, so stopping the run stops everything it
-	// started, not codex alone.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	// Given an input, exec reads it as more of the prompt.
 	cmd.Stdin = nil
 	stdout, err := cmd.StdoutPipe()
@@ -394,10 +390,12 @@ func (c Codex) attempt(ctx context.Context, job Job, steps int, first bool) try 
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
+	stopWatching, err := startProcessGroup(run, cmd)
+	if err != nil {
 		// A run whose deadline has passed starts nothing.
 		return try{err: err, cut: ctx.Err() != nil}
 	}
+	defer stopWatching()
 	// Codex's events carry no time and no workspace, which the live view
 	// needs, so the transcript starts with the workspace, and each event is
 	// stamped with when it came (#153).

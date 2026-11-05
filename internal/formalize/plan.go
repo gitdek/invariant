@@ -61,10 +61,26 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	}
 	defer transcript.Close()
 	checkLog := filepath.Join(out, "check-runs.jsonl")
+	gateServer := []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", cache, "-parent-plan", fmt.Sprint(req.ParentPlan), ws}
+	if f.Sandbox.Repository != nil {
+		queue, err := plumbing.NewCheckQueue(1)
+		if err != nil {
+			return nil, err
+		}
+		defer queue.Close()
+		f.Sandbox.Original = repo
+		client, finish, err := queue.RegisterPlan(ctx, f.Sandbox, repo)
+		if err != nil {
+			return nil, err
+		}
+		defer finish()
+		gateServer = append(gateServer[:len(gateServer)-1], "-check-queue", client.Address, "-check-build", client.Build, ws)
+		f.Sandbox.Checks = client
+	}
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     PlanPrompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-plan", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-cache", cache, ws},
+		GateServer: gateServer,
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
@@ -91,6 +107,9 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 		}
 		r.Problem = problem
 		return r, nil
+	}
+	if err := CheckStepDraft(ws, req.ParentPlan); err != nil {
+		return fail(err.Error())
 	}
 	if _, err := os.Stat(filepath.Join(ws, "plan.json")); err != nil {
 		if _, err := os.Stat(filepath.Join(ws, "issues.json")); err == nil {
@@ -128,13 +147,17 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 // PlanPrompt is the task for the agent that plans a plumbing change.
 func PlanPrompt(req Request, checks int) string {
 	var b strings.Builder
+	scope := "Cover the whole issue. If all the work fits in one reviewable pull request, write plan.json and its acceptance tests. Otherwise write issues.json, a plan of issues that together cover all the work, as described below. Write only one kind of plan."
+	if req.ParentPlan != 0 {
+		scope = "Cover the whole step in one reviewable pull request. Write plan.json and its acceptance tests, or proposal.json with forks to ask." + stepPrompt(req.ParentPlan)
+	}
 	fmt.Fprintf(&b, `You're planning a change to this repository for issue #%d. It isn't a state machine to model and prove. It's plumbing: code that's tested, not proved (D-0105). A person ratifies your plan by its hash, and then another agent builds exactly what it says, so the plan is the contract.
 
 request.md holds the issue, what's been decided, and the discussion. repo/ is the repository as it is on the base branch. Read what the change touches, and AGENTS.md for the repository's rules. Don't change anything in repo/: it's there to read.
 
 # Write the plan
 
-Cover the whole issue. If all the work fits in one reviewable pull request, write plan.json and its acceptance tests. Otherwise write issues.json, a plan of issues that together cover all the work, as described below. Write only one kind of plan.
+%s
 
 plan.json:
 
@@ -149,14 +172,23 @@ plan.json:
 }
 `+"```"+`
 
+- Before naming files, look for the existing tests and fakes that check the behavior the change alters, including command lines, flags and output a fake validates. Name every existing test file the change needs in the plan's files.
 - **files** names the files the build may change or add. Name every production file and existing test the change needs, and nothing it doesn't. Paths are from the repository's root. Nothing under .github/.
 - The build may also add new regular Go `+"`*_test.go`"+` regression files in packages the plan touches, including the nearest Go package owning a planned embedded asset and new packages the plan names. These need not be listed in **files**. The original checkout stays the baseline across repairs, so the builder may correct or remove its own new tests. This allowance never permits changes to existing unnamed tests, the ratified acceptance tests or plan, other production files or unrelated packages.
 - **tests** are the acceptance tests: Go test functions that show the change works, each in a new file that isn't in repo/ yet, named like `+"`*_accept_test.go`"+`. Write each file under tests/, at its path in the repository: tests/internal/dashboard/graph_accept_test.go. The build can't change them, so write them against the change's intended API, and test what it does, not how.
+- An acceptance test's expectations about behavior the plan keeps must agree with the existing tests that pin it. When the plan intentionally changes pinned behavior, say so in its summary and name those existing tests in its files.
 - Each test must fail on the code as it is. A test that already passes can't show anything.
+
+Native acceptance records explicitly add part, framework and selector together. Framework is go, pytest, vitest or jest; name is then only a display label. The full part/framework/file/selector identity and verbatim new source are pinned. Go selectors name a declared Test function and optional exact subtest path; pytest selectors are part-relative file::function or file::Class::method node IDs with concrete parameter cases; Vitest and Jest selectors are complete nested titles including a concrete case. Never supply execution, sources or trusted in plan.json: the caller captures authority. Native execution adapters are pending, so these drafts cannot yet qualify for proposal. Existing Invariant Go plans omit all native fields and keep the built-in runner. See docs/factory.md for the schema.
 
 After the build passes factory checks, a second agent reviews the whole candidate against the original checkout. Findings return to the same builder in its existing workspace under this unchanged plan for at most two repair attempts, each followed by fresh checks and, if they pass, a fresh review. Only final passing checks and approval produce a ready pull request; unresolved findings, failed checks or an exhausted time allowance leave a draft for a person. Decision recording and checks requiring unavailable Docker or network access belong under Merger work in the review, and do not by themselves require a repair. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, so they aren't Merger work.
 
 SPEC.md and the README describe Invariant as it is, and a change that makes either one wrong fixes it in the same change (D-0122). When yours does, name that file among the plan's files, and say in the summary what changes there. The README is the front page, at most 400 lines, so detail belongs in the page under docs/ it links, which describes Invariant as it is too: name that page instead when the detail is what changes (D-0294). A new or changed SPEC bullet cites the decisions it rests on, as `+"`decisions check`"+` requires. A plumbing build can't write decisions/, so when the change needs a decision no one has recorded yet, say so in the summary, and whoever merges it records the decision.
+`, req.Issue, scope)
+	issueCheck := ""
+	if req.ParentPlan == 0 {
+		issueCheck = "For issues.json, it checks the existing plan-of-issues format and rules, without running acceptance tests. "
+		fmt.Fprintf(&b, `
 
 # When the work needs several pull requests
 
@@ -173,13 +205,16 @@ Write issues.json instead of plan.json and tests/:
 }
 `+"```"+`
 
-- **issues** are 1 to %d, in the order they're taken. Each is opened once the one before it has merged, so it can build on the ones before it, and never on one after. Together they cover the whole issue; don't leave work for an unplanned follow-up. Each plumbing issue will get its own plan, and can itself become a plan of issues if needed.
+- **issues** are 1 to %d, in the order they're taken. Each is opened once the one before it has merged, so it can build on the ones before it, and never on one after. Together they cover the whole issue; don't leave work for an unplanned follow-up. Each step must fit one complete plumbing or modeled change in one reviewable pull request and cannot become another plan of issues.
 - Each **title** is one line. Each **body** is the whole issue: what changes and why, complete enough that someone who hasn't read this issue can take it on, with the decisions it rests on.
 - Each body has either a `+"`Kind: plumbing`"+` line for tested code, with no `+"`Code:`"+` line, or a `+"`Project: <directory>`"+` line for a state machine whose rules are worth proving, never both. A project directory is a clean path inside the repository, outside .git/ and .github/.
 - No body has an `+"`/invariant`"+` command on a line of its own. The factory takes each issue itself.
 - The name, summary, titles and bodies together come to at most %d bytes, so the proposal fits in one comment. None has an HTML comment, which the proposal wouldn't show.
 
-A person ratifies this plan's hash before any issue opens. A nested plan counts as complete for its parent only when the factory posts completion for its ratified hash; an unfinished or stopped plan holds its parent.
+A person ratifies this plan's hash before any issue opens.
+`, MaxIssues, MaxPlanText)
+	}
+	fmt.Fprintf(&b, `
 
 # Ask when you must
 
@@ -193,10 +228,10 @@ Don't ask about names or code structure: choose those yourself. If the issue isn
 
 # Check your plan
 
-The `+"`check`"+` tool reads plan.json and tests/, checks that the plan holds together, and runs the acceptance tests on the code in repo/, where they must fail. For issues.json, it checks the existing plan-of-issues format and rules, without running acceptance tests. You have %d checks in total across both kinds of plan, so reread your files before each. When the check passes, you're done. Then reply with a two-sentence summary.
+The `+"`check`"+` tool reads plan.json and tests/, checks that the plan holds together, and runs the acceptance tests on the code in repo/, where they must fail. %sYou have %d checks in total, so reread your files before each. When the check passes, you're done. Then reply with a two-sentence summary.
 
 %s
-`, req.Issue, MaxIssues, MaxPlanText, checks, synth.WriteAsYouGo("", "checks"))
+`, issueCheck, checks, synth.WriteAsYouGo("", "checks"))
 	if req.Previous != nil && req.Previous.Plan != nil {
 		b.WriteString("\n# The plan people asked to revise\n\nprevious/plan.json is the plan before. Keep what the discussion didn't ask to change.\n")
 	} else if req.Previous != nil && req.Previous.IssuePlan != nil {

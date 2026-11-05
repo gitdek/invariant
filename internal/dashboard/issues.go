@@ -9,6 +9,7 @@ import (
 
 	"github.com/gitdek/invariant/internal/factory"
 	"github.com/gitdek/invariant/internal/github"
+	"github.com/gitdek/invariant/internal/plumbing"
 )
 
 // Stages an issue moves through, as the page draws them.
@@ -133,6 +134,11 @@ type PlanView struct {
 	Summary string   `json:"summary"`
 	Files   []string `json:"files"`
 	Trusted []string `json:"trusted,omitempty"`
+
+	Tests     []plumbing.Test     `json:"tests,omitempty"`
+	Sources   map[string]string   `json:"sources,omitempty"`
+	Languages map[string]string   `json:"languages,omitempty"`
+	Execution *plumbing.Execution `json:"execution,omitempty"`
 }
 
 // IssuePlanView is what a plan of issues says: what the issues do together,
@@ -425,7 +431,10 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 			w.Statements = append(w.Statements, Said{Name: s.Name, Kind: s.Kind, Says: s.Says})
 		}
 		if pl := p.Plan; pl != nil {
-			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted}
+			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted, Tests: pl.Tests, Sources: pl.Sources, Execution: pl.Execution, Languages: map[string]string{}}
+			for _, file := range pl.TestFiles() {
+				w.Plan.Languages[file] = pl.SourceLanguage(file)
+			}
 			for _, t := range pl.Tests {
 				w.Statements = append(w.Statements, Said{Name: t.Name, Kind: "test", Says: t.Says})
 			}

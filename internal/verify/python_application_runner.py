@@ -151,17 +151,30 @@ assertions = [None]
 # thread inside one hands the test method nothing.
 handed = None
 runner_globals = globals()
+method_sources = {}
 
 
 def own_method(function, cls, name=None):
-    """Whether a function is compiled in a class's own body, by the qualified
-    name its code was compiled under, which no assignment changes: code from
-    elsewhere, a base class's, total_ordering's, a factory's or a dataclass's
-    generated methods, isn't the class's own."""
+    """Whether a function matches a declaration compiled in a class's own
+    source body. Generated methods and annotation helpers can have the same
+    qualified names, but aren't declarations in that source."""
     if not inspect.isfunction(function):
         return False
-    qualname = function.__code__.co_qualname
-    return qualname == cls.__qualname__ + "." + name if name else qualname.rpartition(".")[0] == cls.__qualname__
+    code = function.__code__
+    qualname = code.co_qualname
+    if not (qualname == cls.__qualname__ + "." + name if name else qualname.rpartition(".")[0] == cls.__qualname__):
+        return False
+    filename = code.co_filename
+    if filename not in method_sources:
+        try:
+            with open(filename, "rb") as stream:
+                raw = stream.read()
+            locations = lexical_locations(ast.parse(raw, filename))
+            method_sources[filename] = [original for original in compiled_methods(compile(raw, filename, "exec"))
+                                        if (original.co_firstlineno, original.co_name) in locations]
+        except (OSError, SyntaxError, ValueError):
+            method_sources[filename] = []
+    return code in method_sources[filename]
 
 
 def boundary_implementation(target, owner, name):

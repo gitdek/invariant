@@ -249,7 +249,7 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     IssuesPrompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-issues", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, ws},
+		GateServer: []string{f.Binary, "mcp", "-issues", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan), ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
@@ -277,6 +277,9 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 		r.Problem = problem
 		return r, nil
 	}
+	if err := CheckStepDraft(ws, req.ParentPlan); err != nil {
+		return fail(err.Error())
+	}
 	if _, err := os.Stat(filepath.Join(ws, "issues.json")); err != nil {
 		// No plan: forks to ask, or why the factory can't take the issue.
 		p, err := Read(ws)
@@ -300,6 +303,9 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 
 // IssuesPrompt is the task for the agent that plans a PRD's issues.
 func IssuesPrompt(req Request, checks int) string {
+	if req.ParentPlan != 0 {
+		return stepPrompt(req.ParentPlan) + "\nWrite proposal.json with the fork to resolve before this step can be planned as one complete change.\n"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, `You're planning the issues that carry out a PRD in this repository, for issue #%d. A writer asked for a plan of issues: the changes that together do what the PRD asks, each one an issue of its own, taken one at a time, in order. A person ratifies your plan by its hash, and each issue is then opened exactly as you write it, so the plan is the contract.
 
@@ -320,7 +326,7 @@ issues.json:
 }
 `+"```"+`
 
-- **issues** are 1 to %d, in the order they're taken. Each is opened once the one before it has merged, so it can build on the ones before it, and never on one after. Keep each small enough to review as one pull request. If the PRD needs more than %d, plan the first %d, and say in the summary what's left.
+- **issues** are 1 to %d, in the order they're taken. Each is opened once the one before it has merged, so it can build on the ones before it, and never on one after. Each step must fit one complete plumbing or modeled change in one reviewable pull request and cannot become another plan of issues. If the PRD needs more than %d, plan the first %d, and say in the summary what's left.
 - Each **title** is one line.
 - Each **body** is the whole issue: what changes and why, complete enough that someone who hasn't read the PRD can take it on, with what's been decided that it rests on. A line of its own says how the factory takes it:
   - **Modeled**, for a state machine whose rules are worth proving: a `+"`Project: <directory>`"+` line naming where its project goes, or the existing project it changes. The directory is a clean path inside the repository, and not under .github/. People ratify statements for it, and its code is proved or checked against them.

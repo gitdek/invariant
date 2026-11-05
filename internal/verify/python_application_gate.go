@@ -1,11 +1,14 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -13,7 +16,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,35 +249,14 @@ func pythonApplicationModelValue(value any) (any, error) {
 }
 
 func pythonApplicationTraces(x PythonApplicationExecutionResult) ([]byte, error) {
-	if !x.Success || !x.Complete || x.ObservationMode != "sampled" || len(x.Observations) == 0 {
+	if x.ObservationMode != "sampled" {
 		return nil, fmt.Errorf("no complete authenticated sampled observations")
 	}
-	t := conformance.Traces{}
-	for _, row := range x.Observations {
-		state := row.After
-		if row.Kind == "initial" {
-			state = row.State
-		}
-		if row.Form == "module" {
-			converted, err := pythonApplicationModelValue(state)
-			if err != nil {
-				return nil, err
-			}
-			state = converted.(map[string]any)
-		}
-		if row.Kind == "initial" {
-			if row.Run != len(t.Traces)+1 {
-				return nil, fmt.Errorf("invalid observation run")
-			}
-			t.Traces = append(t.Traces, []map[string]any{state})
-		} else {
-			if row.Run < 1 || row.Run > len(t.Traces) {
-				return nil, fmt.Errorf("invalid observation run")
-			}
-			t.Traces[row.Run-1] = append(t.Traces[row.Run-1], state)
-		}
+	var out bytes.Buffer
+	if err := writePythonApplicationRecording(context.Background(), &out, x); err != nil {
+		return nil, err
 	}
-	return json.Marshal(t)
+	return out.Bytes(), nil
 }
 
 // The session's sorted snapshot already selects every staged regular file.
@@ -303,7 +284,7 @@ func pythonApplicationHashExisting(root string, existing []string, files []proje
 	return out, nil
 }
 
-func runPythonApplication(ctx context.Context, p *project.Project, outDir string, tc toolchain.Toolchain) (*Report, error) {
+func runPythonApplication(ctx context.Context, p *project.Project, outDir string, tc toolchain.Toolchain, options Options) (*Report, error) {
 	if err := pythonApplicationPreflight(p); err != nil {
 		return nil, err
 	}
@@ -327,13 +308,18 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	}
 	dir, lock := p.Dir, p.Lock
 	p = s.project
-	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false)
+	budget, err := tlcBudget(ctx, options.TLCParallel)
+	if err != nil {
+		return nil, err
+	}
+	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false, options, budget)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	if r == nil {
 		return nil, err
 	}
+	defer func() { r.TLCAttempts = budget.Attempts() }()
 	// The gate ran on the staged copy, outside the repository, so the lock's
 	// ratification is read where the project is.
 	ratification(ctx, r, dir, lock)
@@ -351,7 +337,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		return nil, err
 	}
 	r.Build.Passed = true
-	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar}
+	runner := tlc.Runner{Image: tc.JavaImage, Jar: tc.TLCJar, Budget: budget, CheckRoot: work}
 	raw, err := os.ReadFile(p.ModulePath())
 	if err != nil {
 		return nil, err
@@ -391,18 +377,14 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				c.Model.Inputs = append(c.Model.Inputs, f)
 			}
 		}
-		var traces []byte
-		var traceErr error
+		recording, traceErr := pythonApplicationRecording(ctx, *x, v.Explored)
 		var model *conformance.Model
-		if !v.Explored {
-			traces, traceErr = pythonApplicationTraces(*x)
-		} else {
+		if v.Explored {
 			// An explored driver's attempts are checked as every exhaustive
 			// driver's are: against the model's named steps, with the
 			// environment's bounds one larger (D-0082, D-0085, #342).
 			c.Mode = "bounded-exhaustive"
 			c.Result.Exhaustive = true
-			traces, traceErr = pythonApplicationAttempts(*x)
 			model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
 			if steps, err := tla.Steps(string(raw)); err != nil {
 				model.Problem = err.Error()
@@ -413,10 +395,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		if traceErr == nil {
 			d, e := stage(work, fmt.Sprintf("conformance-%d", i), p, string(raw), "")
 			if e != nil {
-				return nil, e
+				return nil, errors.Join(e, recording.close())
 			}
 			checks := &pythonApplicationModelRunner{runner: runner, root: d}
-			c.Result, e = conformance.Check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, traces, model)
+			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, model)
 			if v.Explored {
 				// Attempts carry no runs; the exploration's are its replays.
 				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs
@@ -427,6 +409,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				}
 			}
 			c.Checks = checks.results
+			c.LogicalChecks = checks.logical
 			slices.SortFunc(c.Checks, func(a, b PythonApplicationModelCheck) int {
 				return strings.Compare(a.Batch+"/"+a.Module, b.Batch+"/"+b.Module)
 			})
@@ -522,12 +505,7 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		return err
 	}
 	timeouts := pythonApplicationLargerTimeouts
-	tctx, cancel := context.WithTimeout(ctx, timeouts.model)
-	res, err := runner.Check(tctx, d, p.ModuleName(), tlc.Config{Specification: p.SpecName(), Constants: larger, Invariants: p.Invariants()})
-	if err == nil && tctx.Err() != nil {
-		err = tctx.Err()
-	}
-	cancel()
+	res, err := runner.CheckWithin(ctx, d, p.ModuleName(), tlc.Config{Specification: p.SpecName(), Constants: larger, Invariants: p.Invariants()}, timeouts.model)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -587,78 +565,55 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 	return nil
 }
 
-// Batch completion order is not evidence order. Retain each actual TLC
-// invocation, then sort by its stable relative batch path for the receipt.
+// Actual completed windows and original logical obligations are separate
+// evidence. The scheduler uses one worker here to retain the deterministic
+// invocation prefix on failure, including through a recovery tree.
 type pythonApplicationModelRunner struct {
-	mu      sync.Mutex
-	runner  conformance.Runner
-	root    string
-	results []PythonApplicationModelCheck
-	phase   int
-	next    int
-	changed chan struct{}
-	failed  bool
+	mu           sync.Mutex
+	runner       conformance.Runner
+	root         string
+	results      []PythonApplicationModelCheck
+	logical      []PythonApplicationLogicalCheck
+	logicalIndex map[string]int
 }
 
 func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module string, cfg tlc.Config) (tlc.Result, error) {
-	// The shared checker can schedule batches concurrently. Execute application
-	// batches in order so a failure has a deterministic actual invocation prefix,
-	// with no schedule-dependent canceled TLC runs in its provenance. Starting
-	// states come first, then the steps, declared outcomes and tried steps.
-	batch, _ := filepath.Rel(r.root, dir)
-	phase, order := 0, 0
-	for i, prefix := range []string{"steps-", "strict-", "tried-"} {
-		if module == []string{"Invariant_Conformance", "Invariant_StrictAttempts", "Invariant_Tried"}[i] {
-			var err error
-			phase = i + 1
-			order, err = strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), prefix))
-			if err != nil {
-				return tlc.Result{}, err
-			}
-		}
-	}
+	c := tlc.ConformanceCheck{Batch: filepath.Base(dir), Recovery: &tlc.ConformanceRecovery{}}
+	result, err := r.CheckConformance(ctx, dir, module, cfg, c)
+	r.CompleteConformance(c, result, err)
+	return result, err
+}
+
+func (r *pythonApplicationModelRunner) ConformanceConcurrency() int { return 1 }
+
+func (r *pythonApplicationModelRunner) CheckConformance(ctx context.Context, dir, module string, cfg tlc.Config, c tlc.ConformanceCheck) (tlc.Result, error) {
 	r.mu.Lock()
-	if phase < r.phase {
-		r.mu.Unlock()
-		return tlc.Result{}, fmt.Errorf("an application model batch ran out of order")
-	}
-	if phase > r.phase {
-		r.phase, r.next = phase, 1
-	}
-	for order != r.next && !r.failed && ctx.Err() == nil {
-		if r.changed == nil {
-			r.changed = make(chan struct{})
-		}
-		changed := r.changed
-		r.mu.Unlock()
-		select {
-		case <-ctx.Done():
-		case <-changed:
-		}
-		r.mu.Lock()
-	}
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return tlc.Result{}, err
 	}
-	if r.failed {
-		return tlc.Result{}, fmt.Errorf("an earlier application model batch failed")
-	}
-	defer func() {
-		r.next++
-		if r.changed != nil {
-			close(r.changed)
-			r.changed = nil
+	inputHash, err := pythonApplicationModelHash(ctx, filepath.Join(dir, module+".tla"))
+	if c.ParentAttempt == 0 {
+		if r.logicalIndex == nil {
+			r.logicalIndex = map[string]int{}
 		}
-	}()
-	raw, err := os.ReadFile(filepath.Join(dir, module+".tla"))
+		r.logicalIndex[c.Batch] = len(r.logical)
+		r.logical = append(r.logical, PythonApplicationLogicalCheck{Module: module, Batch: c.Batch, InputSHA256: inputHash, Config: cfg})
+	}
 	if err != nil {
-		r.failed = true
 		return tlc.Result{}, err
 	}
-	result, err := r.runner.Check(ctx, dir, module, cfg)
-	r.failed = err != nil || result.Outcome != tlc.Passed
-	record := PythonApplicationModelCheck{Module: module, Batch: filepath.ToSlash(batch), InputSHA256: pythonApplicationHash(raw), Config: cfg, Result: result}
+	var result tlc.Result
+	if capable, ok := r.runner.(tlc.ConformanceRunner); ok && c.Range.Kind != "" {
+		result, err = capable.CheckConformance(ctx, dir, module, cfg, c)
+	} else {
+		result, err = r.runner.Check(ctx, dir, module, cfg)
+	}
+	var exhausted *tlc.MemoryExhaustion
+	if errors.As(err, &exhausted) {
+		return result, err
+	}
+	record := PythonApplicationModelCheck{Module: module, Batch: c.Batch, InputSHA256: inputHash, Config: cfg, Result: result}
 	// TLC's unstructured progress includes temporary extraction paths. Retain
 	// its parsed verdict, diagnostics and counterexample, not progress output.
 	record.Result.Printed = nil
@@ -667,6 +622,52 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 	}
 	r.results = append(r.results, record)
 	return result, err
+}
+
+func (r *pythonApplicationModelRunner) CompleteConformance(c tlc.ConformanceCheck, result tlc.Result, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i, ok := r.logicalIndex[c.Batch]; ok {
+		l := &r.logical[i]
+		l.Outcome = result.Outcome
+		if result.Outcome != tlc.Passed {
+			l.Invariant, l.Property, l.Message = result.Invariant, result.Property, result.Message
+			l.Trace, l.Loop, l.Stutters = result.Trace, result.Loop, result.Stutters
+		}
+		if err != nil {
+			l.Outcome = tlc.Failed
+			l.Error = strings.ReplaceAll(err.Error(), r.root, "/model")
+		}
+		delete(r.logicalIndex, c.Batch)
+	}
+	if capable, ok := r.runner.(tlc.ConformanceRunner); ok {
+		capable.CompleteConformance(c, result, err)
+	}
+}
+
+// A tried-state window can contain arbitrarily many action instances. Hash
+// its generated module without retaining those recording contents in memory.
+func pythonApplicationModelHash(ctx context.Context, path string) (sum string, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+	h := sha256.New()
+	var buffer [32 << 10]byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buffer[:])
+		h.Write(buffer[:n])
+		if err == io.EOF {
+			return "sha256:" + hex.EncodeToString(h.Sum(nil)), ctx.Err()
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 }
 
 func checkPythonApplication(ctx context.Context, p *project.Project) (Build, Evidence, error) {

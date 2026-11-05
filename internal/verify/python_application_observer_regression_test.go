@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // These cases exercise refusals beyond the acceptance fixture through the
@@ -185,15 +183,15 @@ func TestPythonApplicationExecutionObservationCancellation(t *testing.T) {
 			root, p := pa318Fixture(t, false, strings.Replace(pa318Functional, "    drive()", "    drive()\n    import time\n    time.sleep(300)", 1), false)
 			before := pa315Tree(t, root)
 			s := pa315Prepare(t, p, pa318Options(t, real, new(int)))
-			containers := func() string {
+			containers := func() map[string]bool {
 				if !real {
-					return ""
+					return nil
 				}
-				b, err := toolchain.Docker(context.Background(), "ps", "-aq", "--filter", "name=invariant-").CombinedOutput()
+				m, err := pythonApplicationContainers(context.Background())
 				if err != nil {
-					t.Fatalf("list containers: %v %s", err, b)
+					t.Fatalf("list containers: %v", err)
 				}
-				return string(b)
+				return m
 			}
 			oldContainers := containers()
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -203,8 +201,8 @@ func TestPythonApplicationExecutionObservationCancellation(t *testing.T) {
 			if ctx.Err() == nil {
 				t.Fatal("execution was not cancelled")
 			}
-			for _, id := range strings.Fields(containers()) {
-				if !strings.Contains(oldContainers, id) {
+			for id := range containers() {
+				if !oldContainers[id] {
 					t.Fatalf("cancelled container remains: %s", id)
 				}
 			}

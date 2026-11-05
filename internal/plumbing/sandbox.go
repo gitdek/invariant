@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,11 +22,13 @@ import (
 )
 
 const (
-	SandboxShards           = 8
-	SandboxTimeout          = 12 * time.Minute
-	SandboxShardTimeout     = 10 * time.Minute
-	SandboxStartupAllowance = time.Minute
-	SandboxCleanupAllowance = 15 * time.Second
+	SandboxShards             = 8
+	SandboxTimeout            = 12 * time.Minute
+	SandboxShardTimeout       = 10 * time.Minute
+	SandboxVerifyTimeout      = 25 * time.Minute
+	SandboxVerifyShardTimeout = 20 * time.Minute
+	SandboxStartupAllowance   = time.Minute
+	SandboxCleanupAllowance   = 15 * time.Second
 )
 
 //go:embed sandbox_runner.py
@@ -34,13 +37,17 @@ var sandboxRunner string
 // Sandbox runs a checkout's checks on a throwaway copy of it, in the
 // pinned Go image, with no network and none of the host's environment
 // (D-0014). The host's module cache is mounted read-only, so the
-// repository's own dependencies build offline.
+// repository's own dependencies build offline. Repository opts into captured
+// repository checks instead, with prepared dependencies and no host caches.
 type Sandbox struct {
 	Image    string // the Go image, pinned by digest
 	ModCache string // the host's module cache, as go env GOMODCACHE
 	// Checks sends a build's checks to its watcher's queue. Direct sandbox
 	// checks, including the real-image budget checks, leave it nil.
 	Checks *CheckClient
+	// Repository is explicit execution policy supplied by the trusted caller.
+	// Nil retains Invariant's built-in Go selection and scheduling.
+	Repository *RepositoryChecks
 	// Cache is a build cache kept between one build's runs, so each run
 	// doesn't compile everything again. Empty, each run starts cold.
 	Cache string
@@ -54,7 +61,7 @@ type Sandbox struct {
 }
 
 // TestResult identifies a test independently of other packages and phases.
-// Status is passed, failed, skipped, running, or not_run; Shard identifies
+// Status is passed, failed, skipped, refused, running, or not_run; Shard identifies
 // one of the eight queue workers in the ordinary test phase.
 type TestResult struct {
 	Package string `json:"package"`
@@ -63,6 +70,18 @@ type TestResult struct {
 	Status  string `json:"status"`
 	Shard   int    `json:"shard,omitempty"`
 	File    string `json:"file,omitempty"`
+
+	Part      string `json:"part,omitempty"`
+	Framework string `json:"framework,omitempty"`
+	Selector  string `json:"selector,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+}
+
+// identity is the acceptance test a result is evidence for. A native
+// result's label is display text, so only the full tuple selects its test.
+func (r TestResult) identity() string {
+	return Test{Name: r.Name, File: r.File, Part: r.Part, Framework: r.Framework, Selector: r.Selector}.Identity()
 }
 
 // Result is what one run found.
@@ -76,20 +95,38 @@ type Result struct {
 	Interrupted      bool
 	TimedOut         bool // a phase exhausted its budget before the whole-run deadline
 	TestResults      []TestResult
-	Problems         []string // phase, build and worker failures retained in summaries
+	CommandResults   []CommandResult // non-nil for captured repository checks
+	Problems         []string        // phase, build and worker failures retained in summaries
 }
 
 // Passed says whether everything passed.
 func (r Result) Passed() bool {
-	if r.DeadlineExceeded || r.Interrupted || r.TimedOut || len(r.Problems) > 0 || len(r.Gofmt) > 0 || !r.Vet || !r.Tests {
+	if r.DeadlineExceeded || r.Interrupted || r.TimedOut || len(r.Problems) > 0 || len(r.Gofmt) > 0 {
 		return false
 	}
-	for _, ok := range r.Accepted {
-		if !ok {
+	if r.CommandResults == nil && (!r.Vet || !r.Tests) {
+		return false
+	}
+	for _, command := range r.CommandResults {
+		if command.Status != "passed" && command.Status != "skipped" {
 			return false
 		}
 	}
+	if r.CommandResults == nil {
+		for _, ok := range r.Accepted {
+			if !ok {
+				return false
+			}
+		}
+	} else if len(r.missingEvidence()) > 0 {
+		return false
+	}
 	for _, test := range r.TestResults {
+		// Built-in Go runs keep their rule: a passing acceptance test may
+		// skip a subtest. Configured acceptance needs every record passed.
+		if r.CommandResults != nil && test.Phase == "accept" && test.Status != "passed" {
+			return false
+		}
 		if test.Status != "passed" && test.Status != "skipped" {
 			return false
 		}
@@ -97,9 +134,43 @@ func (r Result) Passed() bool {
 	return true
 }
 
+// missingEvidence is every configured acceptance identity without an
+// individual pass, including those no result names at all.
+func (r Result) missingEvidence() []string {
+	passed := map[string]bool{}
+	for _, result := range r.TestResults {
+		if result.Phase == "accept" && result.Status == "passed" {
+			passed[result.identity()] = true
+		}
+	}
+	var out []string
+	for identity := range r.Accepted {
+		if !passed[identity] {
+			out = append(out, identity)
+		}
+	}
+	return out
+}
+
 // Failing is every acceptance test that didn't pass.
 func (r Result) Failing() []string {
 	var out []string
+	if r.CommandResults != nil {
+		failing := map[string]bool{}
+		for _, result := range r.TestResults {
+			if result.Phase == "accept" && result.Status != "passed" {
+				failing[result.identity()] = true
+			}
+		}
+		for _, identity := range r.missingEvidence() {
+			failing[identity] = true
+		}
+		for identity := range failing {
+			out = append(out, identity)
+		}
+		sort.Strings(out)
+		return out
+	}
 	for t, ok := range r.Accepted {
 		if !ok {
 			out = append(out, t)
@@ -120,18 +191,33 @@ var (
 // Run copies the checkout at root, and runs gofmt, go vet, the tests of
 // every package the change touches, and the plan's acceptance tests on the
 // copy.
-func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Result, runErr error) {
+func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (Result, error) {
 	if s.Checks != nil {
 		return s.Checks.run(ctx, root)
 	}
-	end := time.Now().Add(sandboxLimit(s.Timeout, SandboxTimeout))
+	if s.Repository != nil {
+		return s.runRepository(ctx, root, plan)
+	}
+	if plan.Native() || plan != nil && plan.Execution != nil {
+		result := unstartedAcceptance(plan)
+		result.Problems = append(result.Problems, "native acceptance needs captured repository authority and an execution adapter")
+		return result, nil
+	}
+	return s.run(ctx, root, plan, time.Now())
+}
+
+func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.Time) (result Result, runErr error) {
+	// Discovery has the ordinary limit until ownership establishes the
+	// exception. Both deadlines count from the same entry time.
+	end := started.Add(sandboxLimit(s.Timeout, SandboxTimeout))
+	parent := ctx
 	ownDeadline := true
 	if parentEnd, ok := ctx.Deadline(); ok && parentEnd.Before(end) {
 		ownDeadline = false
 	}
 	ctx, cancel := context.WithDeadline(ctx, end)
 	defer cancel()
-	defer func() {
+	report := func() {
 		if !ownDeadline && result.DeadlineExceeded {
 			result.DeadlineExceeded = false
 			result.Interrupted = true
@@ -149,23 +235,45 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 			// tool can deliver the report even when staging never finished.
 			runErr = nil
 		}
-	}()
+	}
+	names, err := sandboxFiles(ctx, root)
+	if err != nil {
+		defer report()
+		return Result{}, err
+	}
+	dirs := plan.packagesIn(names)
+	if err := ctx.Err(); err != nil {
+		defer report()
+		return Result{}, err
+	}
+	timeout, shardTimeout := sandboxBudgets(dirs)
+	end = started.Add(sandboxLimit(s.Timeout, timeout))
+	if parentEnd, ok := parent.Deadline(); ok {
+		ownDeadline = !parentEnd.Before(end)
+	}
+	ctx, cancelRun := context.WithDeadline(parent, end)
+	cancel()
+	defer cancelRun()
+	defer report()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	work, err := os.MkdirTemp("", "invariant-plumbing-")
 	if err != nil {
 		return Result{}, err
 	}
 	defer os.RemoveAll(work)
 	src := filepath.Join(work, "src")
-	if err := copyCheckout(ctx, root, src); err != nil {
+	if err := copyCheckoutFiles(ctx, root, src, names); err != nil {
 		return Result{}, err
 	}
 	formatted, err := goFiles(ctx, s.Original, src, plan)
 	if err != nil {
 		return Result{}, err
 	}
-	pkgs, err := packages(ctx, src, plan)
-	if err != nil {
-		return Result{}, err
+	var pkgs []string
+	for _, dir := range dirs {
+		pkgs = append(pkgs, "./"+dir)
 	}
 	// Stage the embedded runner separately from the checkout's code. The
 	// config uses arrays, not shell words, for all paths and test names.
@@ -184,7 +292,7 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 		Deadline     float64  `json:"deadline"`
 		ShardTimeout float64  `json:"shard_timeout"`
 		Workers      int      `json:"workers"`
-	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, SandboxShardTimeout).Seconds(), SandboxShards}
+	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, shardTimeout).Seconds(), SandboxShards}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return Result{}, err
@@ -253,6 +361,13 @@ func (s Sandbox) Run(ctx context.Context, root string, plan *Plan) (result Resul
 		}
 	}
 	return result, nil
+}
+
+func sandboxBudgets(dirs []string) (time.Duration, time.Duration) {
+	if slices.Contains(dirs, "internal/verify") {
+		return SandboxVerifyTimeout, SandboxVerifyShardTimeout
+	}
+	return SandboxTimeout, SandboxShardTimeout
 }
 
 func sandboxLimit(override, limit time.Duration) time.Duration {
@@ -463,6 +578,9 @@ const summaryNamed = 100
 // (#408). A run that didn't pass names them after the rest, up to
 // summaryNamed. TestResults keeps every record.
 func (r Result) Summary() string {
+	if r.CommandResults != nil {
+		return r.repositorySummary()
+	}
 	var b strings.Builder
 	switch {
 	case r.Passed():
@@ -550,22 +668,54 @@ func (r Result) Tail(n int) string {
 // ignore, which is everything the build could have written. A directory
 // that isn't a checkout is copied whole, but for .git.
 func copyCheckout(ctx context.Context, root, dst string) error {
+	names, err := sandboxFiles(ctx, root)
+	if err != nil {
+		return err
+	}
+	return copyCheckoutFiles(ctx, root, dst, names)
+}
+
+// sandboxFiles is the regular-file inventory both ownership and copying use.
+func sandboxFiles(ctx context.Context, root string) ([]string, error) {
 	var names []string
 	if exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--show-prefix").Run() == nil && isTop(ctx, root) {
 		out, err := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "-c", "-o", "--exclude-standard").Output()
 		if err != nil {
-			return fmt.Errorf("listing the checkout's files: %w", err)
+			return nil, fmt.Errorf("listing the checkout's files: %w", err)
 		}
 		names = strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
 	} else {
 		all, err := sandboxWalk(ctx, root)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for f := range all {
 			names = append(names, f)
 		}
 	}
+	var regular []string
+	for _, f := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if f == "" {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(f)))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode().IsRegular() {
+			regular = append(regular, f)
+		}
+	}
+	return regular, nil
+}
+
+func copyCheckoutFiles(ctx context.Context, root, dst string, names []string) error {
 	for _, f := range names {
 		if err := ctx.Err(); err != nil {
 			return err

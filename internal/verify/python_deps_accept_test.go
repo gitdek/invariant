@@ -1224,7 +1224,7 @@ func pyDepsDocker(args []string) int {
 				continue
 			}
 			switch a {
-			case "--name", "--network", "--platform", "--memory", "--pids-limit", "-w", "--workdir", "--user", "--entrypoint", "--cap-drop", "--security-opt", "--tmpfs", "--pull", "--mount", "-e", "--env", "-v", "--volume":
+			case "--name", "--network", "--platform", "--memory", "--memory-swap", "--pids-limit", "-w", "--workdir", "--user", "--entrypoint", "--cap-drop", "--security-opt", "--tmpfs", "--pull", "--mount", "-e", "--env", "-v", "--volume":
 				if i+1 >= len(args) {
 					return fail("missing Docker option value")
 				}

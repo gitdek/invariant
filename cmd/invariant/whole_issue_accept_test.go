@@ -22,7 +22,7 @@ func TestPlumbingCheckValidatesIssuePlansWithinItsBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	check := planTool(ws, plumbing.Sandbox{}, 2, logPath)
+	check := planTool(ws, plumbing.Sandbox{}, 2, logPath, 0)
 	write(`{"name":"all the work","summary":"Implement both parts.","issues":[]}`)
 	feedback, _ := check.Call(context.Background(), json.RawMessage(`{}`))
 	if !strings.Contains(feedback, "no issues") {

@@ -6,14 +6,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	_ "embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // Pins. Changing any of them changes what a receipt certifies, so each change
@@ -83,35 +86,76 @@ func fetch(ctx context.Context, url, path, want string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		retry, err := fetchOnce(ctx, url, path, want)
+		if !retry || attempt == 3 {
+			return err
+		}
+		if err := acquisitionBackoff(ctx, attempt); err != nil {
+			return err
+		}
+	}
+}
+
+// acquisitionBackoff waits one then two seconds, without extending the caller's
+// deadline. Only file downloads and pinned image pulls use it.
+func acquisitionBackoff(ctx context.Context, attempt int) error {
+	timer := time.NewTimer(time.Duration(attempt) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
+}
+
+func fetchOnce(ctx context.Context, url, path, want string) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return false, fmt.Errorf("download %s: unsupported protocol scheme %q", url, req.URL.Scheme)
+	}
+	if req.URL.Host == "" {
+		return false, fmt.Errorf("download %s: missing host", url)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		// A redirect refusal has a response; retrying it cannot repair the URL.
+		var certificateErr *tls.CertificateVerificationError
+		return resp == nil && !errors.As(err, &certificateErr), err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: %s", url, resp.Status)
+		retry := resp.StatusCode >= 500 && resp.StatusCode <= 599 || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden
+		return retry, fmt.Errorf("download %s: %s", url, resp.Status)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".download-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(tmp.Name())
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
 		tmp.Close()
-		return err
+		var fileErr *os.PathError
+		return !errors.As(err, &fileErr), err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != want {
-		return fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, want)
+		return false, fmt.Errorf("checksum mismatch for %s: got %s, want %s", url, got, want)
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return false, os.Rename(tmp.Name(), path)
 }
 
 func fileSHA256(path string) (string, error) {

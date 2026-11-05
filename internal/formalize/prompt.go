@@ -10,9 +10,9 @@ import (
 // Prompt is the formalization task: the request, what to write, the rules
 // the gate enforces, and a worked example.
 func Prompt(req Request, checks int) string {
-	previous := ""
+	previous := stepPrompt(req.ParentPlan)
 	if req.Previous != nil {
-		previous = "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
+		previous += "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
 	}
 	language := req.Language

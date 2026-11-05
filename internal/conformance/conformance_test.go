@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"context"
 	"encoding/json"
 	"github.com/gitdek/invariant/internal/tla"
 	"reflect"
@@ -80,21 +81,43 @@ func TestBatches(t *testing.T) {
 	}
 }
 
+func decodeForTest(t *testing.T, raw []byte, vars []string) (recorded, string) {
+	t.Helper()
+	s, err := newRecordingStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	rec, problem, err := decodeReader(context.Background(), s, strings.NewReader(string(raw)), vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec, problem
+}
+
 func TestDecodeReadsAttempts(t *testing.T) {
 	raw := `{"states": [{"n": 0}, {"n": 1}, {"n": 0}], "init": [0],
 		"attempts": [[0, "Up", [], 1], [1, "Up", [], 1], [1, "Down", [{"$mv": "a1"}], 2]]}`
-	rec, problem := decode([]byte(raw), []string{"n"})
+	rec, problem := decodeForTest(t, []byte(raw), []string{"n"})
 	if problem != "" {
 		t.Fatal(problem)
 	}
 	// States 0 and 2 are the same state, so the step back lands on 0.
-	if len(rec.states) != 2 || !rec.starts[0] || rec.recorded != 3 || len(rec.attempts) != 3 {
+	if len(rec.store.states) != 2 || !reflect.DeepEqual(rec.starts, []int{0}) || rec.recorded != 3 || len(rec.attempts) != 3 {
 		t.Fatalf("recorded %+v", rec)
 	}
-	if !rec.steps[[2]int{0, 1}] || !rec.steps[[2]int{1, 0}] || len(rec.steps) != 2 {
+	if !reflect.DeepEqual(rec.steps, [][2]int{{0, 1}, {1, 0}}) {
 		t.Errorf("steps %v; a refusal isn't a step", rec.steps)
 	}
-	if a := rec.attempts[2]; a.step != "Down" || len(a.args) != 1 || a.args[0] != "a1" || a.from != 1 || a.to != 0 {
+	a, err := rec.store.attempt(rec.attempts[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.step != "Down" || len(a.args) != 1 || a.args[0] != "a1" || a.from != 1 || a.to != 0 {
 		t.Errorf("attempt %+v", a)
 	}
 	for _, bad := range []string{
@@ -103,13 +126,13 @@ func TestDecodeReadsAttempts(t *testing.T) {
 		`{"states": [{"n": 0}], "init": [0], "attempts": [[0, "Up", 1]]}`,
 		`{"states": [{"n": 0}], "init": [], "attempts": []}`,
 	} {
-		if _, problem := decode([]byte(bad), []string{"n"}); problem == "" {
+		if _, problem := decodeForTest(t, []byte(bad), []string{"n"}); problem == "" {
 			t.Errorf("decode(%s) found no problem", bad)
 		}
 	}
 	// Runs, as drivers wrote them before attempts.
-	rec, problem = decode([]byte(`{"traces": [[{"n": 0}, {"n": 1}, {"n": 1}]]}`), []string{"n"})
-	if problem != "" || rec.attempts != nil || rec.runs != 1 || rec.recorded != 2 || len(rec.steps) != 1 {
+	rec, problem = decodeForTest(t, []byte(`{"traces": [[{"n": 0}, {"n": 1}, {"n": 1}]]}`), []string{"n"})
+	if problem != "" || rec.hasAttempts || rec.runs != 1 || rec.recorded != 2 || len(rec.steps) != 1 {
 		t.Errorf("runs: %+v, %s", rec, problem)
 	}
 }

@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/regular"
+	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/synth"
 )
 
@@ -74,6 +77,13 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		return nil, err
 	}
 	plan := &lock.Plan
+	var snapshot *repository.Snapshot
+	if b.Sandbox.Repository != nil {
+		snapshot = b.Sandbox.Repository.Snapshot
+	}
+	if err := plan.ValidateRepository(ctx, snapshot); err != nil {
+		return nil, err
+	}
 	ctx, cancel := synth.WithExecutionBudget(ctx, b.Timeout)
 	defer cancel()
 	if err := os.MkdirAll(out, 0o755); err != nil {
@@ -105,6 +115,15 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	// records stay (#366). Deferred before the build's record is written,
 	// it's removed after it.
 	defer RemoveCache(b.Sandbox.Cache)
+	// Execution policy stays in this process. Even a standalone configured
+	// builder gives its separate test-tool process the same queue endpoint.
+	if b.Checks == nil && b.Sandbox.Repository != nil {
+		b.Checks, err = NewCheckQueue(1)
+		if err != nil {
+			return nil, err
+		}
+		defer b.Checks.Close()
+	}
 	var checks *checkBuild
 	if b.Checks != nil {
 		checks, err = b.Checks.register(ctx, b.Sandbox, plan)
@@ -128,6 +147,14 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		}
 		// Flags precede the positional workspace, as flag.Parse requires.
 		job.GateServer = append(job.GateServer[:len(job.GateServer)-1], "-check-queue", b.Sandbox.Checks.Address, "-check-build", checks.id, ws)
+	} else {
+		names, err := sandboxFiles(ctx, ws)
+		if err != nil {
+			return nil, err
+		}
+		if timeout := buildSandboxTimeout(plan, names); timeout > SandboxTimeout {
+			job.ToolTimeout = timeout + SandboxStartupAllowance + SandboxCleanupAllowance
+		}
 	}
 	r := &BuildResult{Tests: len(plan.Tests)}
 	defer func() {
@@ -255,6 +282,30 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	return r, nil
 }
 
+func buildSandboxTimeout(plan *Plan, names []string) time.Duration {
+	// A plan can delete a child's last Go file, leaving verify to own its
+	// paths. Size the tool for that candidate too, retaining any Go files
+	// the plan could keep or add in verify itself and all pinned tests.
+	writable := map[string]bool{}
+	for _, f := range plan.Files {
+		writable[f] = true
+	}
+	var possible []string
+	for _, f := range names {
+		if !writable[f] || path.Dir(f) == "internal/verify" {
+			possible = append(possible, f)
+		}
+	}
+	for _, f := range plan.Files {
+		if path.Dir(f) == "internal/verify" {
+			possible = append(possible, f)
+		}
+	}
+	possible = append(possible, plan.TestFiles()...)
+	timeout, _ := sandboxBudgets(plan.packagesIn(possible))
+	return timeout
+}
+
 // apply copies the named files and admitted regressions into root, removing
 // the ones the build removed. extra comes from Diff against the original root.
 func apply(root, ws string, plan *Plan, extra ...string) error {
@@ -268,7 +319,7 @@ func apply(root, ws string, plan *Plan, extra ...string) error {
 
 // ReadLockFile reads issue n's ratified plan from the checkout at root.
 func ReadLockFile(root string, n int) (*Lock, error) {
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(LockPath(n))))
+	b, err := regular.ReadFile(root, LockPath(n))
 	if err != nil {
 		return nil, fmt.Errorf("the ratified plan's record: %w", err)
 	}

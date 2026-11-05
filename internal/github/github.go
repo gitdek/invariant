@@ -44,6 +44,7 @@ type Issue struct {
 	Body        string    `json:"body"`
 	User        User      `json:"user"`
 	Labels      []Label   `json:"labels"`
+	Comments    int       `json:"comments"`
 	State       string    `json:"state"`
 	URL         string    `json:"html_url"`
 	CreatedAt   string    `json:"created_at"`
@@ -144,7 +145,7 @@ var ErrNoPermission = errors.New("the App isn't allowed to do this")
 
 // Transient says err looks like GitHub failing for a moment, rather than
 // refusing the request, so the same request may well succeed if made
-// again (#369's review, #376). The HTTP status gh's error carries decides
+// again (#369's review, #376, #545). The HTTP status gh or git carries decides
 // first: a 5xx, a 429, a 408, which asks for the request again, and a 403
 // that says it's a rate limit are GitHub failing for a moment, and any
 // other 4xx, such as a 405, a 409 or a 422, is a refusal, whatever else its
@@ -153,21 +154,28 @@ var ErrNoPermission = errors.New("the App isn't allowed to do this")
 // out, a connection dropped, refused, reset or never made, a request that
 // timed out on the client, a name that didn't resolve, gh killed by a
 // signal, and a rate limit, secondary or primary. ErrNotFound and
-// ErrNoPermission are refusals, whatever else they say.
+// ErrNoPermission and git's explicit rejections are refusals, whatever else
+// they say. Git's commit_refs_rules failure, timeout and dropped connection
+// diagnostics also count as momentary failures.
 func Transient(err error) bool {
 	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoPermission) {
 		return false
 	}
 	msg := err.Error()
+	if gitRefusal.MatchString(msg) {
+		return false
+	}
 	limited := primaryLimit.MatchString(msg) || secondaryLimit.MatchString(msg)
+	failed := false
 	for _, m := range httpStatus.FindAllStringSubmatch(msg, -1) {
 		switch code, _ := strconv.Atoi(m[1]); {
-		case code == 403 && limited, code == 408, code == 429:
+		case code == 403 && limited, code == 408, code == 429, code >= 500 && code < 600:
+			failed = true
 		case code >= 400 && code < 500:
 			return false
 		}
 	}
-	return limited || transient.MatchString(msg)
+	return failed || limited || transient.MatchString(msg)
 }
 
 // RateLimited says err is GitHub's primary rate limit: the App, or whoever
@@ -180,9 +188,18 @@ func RateLimited(err error) bool {
 	return Transient(err) && primaryLimit.MatchString(err.Error())
 }
 
-// httpStatus is the HTTP status gh's error carries, as gh writes it: "(HTTP
-// 422)" after GitHub's message, or "HTTP 502" where GitHub gave none.
-var httpStatus = regexp.MustCompile(`(?i)\bHTTP (\d{3})\b`)
+// httpStatus is the HTTP status gh or git writes, including git's numeric
+// "The requested URL returned error: 502" without an HTTP prefix.
+var httpStatus = regexp.MustCompile(`(?i)\b(?:HTTP |The requested URL returned error: )(\d{3})\b`)
+
+// A remote rejection alone can be a server failure, as commit_refs_rules
+// reports one. Explicit refusals still win over any transient words.
+var gitRefusal = regexp.MustCompile(`(?im)` + strings.Join([]string{
+	`\[rejected\]`, `\bstale info\b`, `\bnon-fast-forward\b`, `\bfetch first\b`,
+	`authentication failed`, `permission (to [^\r\n]* )?denied`,
+	`\bGH00[16]\b`, `\bGH013\b`, `repository rule violations`, `protected branch`,
+	`(?:pre-receive |update )?hook declined`, `SSL certificate problem`,
+}, "|"))
 
 // transient is what gh says of a request GitHub failed for a moment: a 5xx
 // or 408 answer, a 429's reason, or GitHub's own words for its REST or
@@ -193,15 +210,16 @@ var httpStatus = regexp.MustCompile(`(?i)\bHTTP (\d{3})\b`)
 // resolve, of which gh says only that it couldn't connect; and gh killed by
 // a signal before it heard GitHub's answer.
 var transient = regexp.MustCompile(`(?im)` + strings.Join([]string{
-	`\bHTTP 5\d\d\b`, `bad gateway`, `service unavailable`, `gateway time-?out`, `internal server error`,
+	`bad gateway`, `service unavailable`, `gateway time-?out`, `internal server error`, `fatal error in commit_refs_rules`,
 	`couldn't respond to your request in time`, `something went wrong while executing your query`,
 	`connection reset`, `connection refused`, `broken pipe`, `unexpected eof`, `: EOF$`, `server closed idle connection`,
+	`the remote end hung up unexpectedly`, `empty reply from server`, `transfer closed with outstanding read data remaining`,
 	`http2: client connection lost`, `server sent GOAWAY`, `stream error: stream ID \d+; INTERNAL_ERROR`,
 	`(remote|local) error: tls: `, `network is unreachable`, `no route to host`,
 	`i/o timeout`, `tls handshake timeout`, `timeout awaiting response headers`, `Client\.Timeout exceeded`,
-	`context deadline exceeded`, `operation timed out`, `connection timed out`, `\bHTTP 408\b`,
+	`context deadline exceeded`, `operation timed out`, `connection timed out`, `\bcurl 28\b`,
 	`error connecting to`, `check your internet connection`, `no such host`, `temporary failure in name resolution`, `server misbehaving`,
-	`(^|: )signal: [a-z]`, `\bHTTP 429\b`, `too many requests`,
+	`(^|: )signal: [a-z]`, `too many requests`,
 }, "|"))
 
 // secondaryLimit is how GitHub says a secondary rate limit, which asks for
@@ -532,6 +550,16 @@ func (c Client) gh() string {
 // call makes one request. A body is sent as JSON, and a response is decoded
 // into out unless out is nil.
 func (c Client) call(ctx context.Context, method, path string, body, out any) error {
+	if method == "GET" && body == nil {
+		response, err := c.get(ctx, path, "application/vnd.github+json", true)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", path, err)
+		}
+		if out == nil || len(bytes.TrimSpace(response.body)) == 0 {
+			return nil
+		}
+		return json.Unmarshal(response.body, out)
+	}
 	args := []string{"api", "-X", method, "-H", "Accept: application/vnd.github+json", path}
 	var stdin io.Reader
 	if body != nil {
@@ -552,21 +580,25 @@ func (c Client) call(ctx context.Context, method, path string, body, out any) er
 	return json.Unmarshal(stdout, out)
 }
 
-// pages fetches every page of a list. gh prints each page as its own JSON
-// array.
+// pages revalidates each page separately and follows its current next link.
 func (c Client) pages(ctx context.Context, path string, out any) error {
-	stdout, err := c.run(ctx, nil, "api", "--paginate", "-H", "Accept: application/vnd.github+json", path)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
-	}
 	var all []json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(stdout))
-	for dec.More() {
+	seen := map[string]bool{}
+	for path != "" {
+		if seen[path] {
+			return fmt.Errorf("GET %s: repeated pagination link", path)
+		}
+		seen[path] = true
+		response, err := c.get(ctx, path, "application/vnd.github+json", true)
+		if err != nil {
+			return fmt.Errorf("GET %s: %w", path, err)
+		}
 		var page []json.RawMessage
-		if err := dec.Decode(&page); err != nil {
+		if err := json.Unmarshal(response.body, &page); err != nil {
 			return err
 		}
 		all = append(all, page...)
+		path = response.next
 	}
 	b, err := json.Marshal(all)
 	if err != nil {
@@ -576,29 +608,47 @@ func (c Client) pages(ctx context.Context, path string, out any) error {
 }
 
 func (c Client) run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.gh(), args...)
-	cmd.Stdin = stdin
+	env, err := c.environment(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.runWithEnv(ctx, env, stdin, args...)
+}
+
+func (c Client) environment(ctx context.Context) ([]string, error) {
+	env := os.Environ()
 	if c.Token != nil {
 		token, err := c.Token(ctx)
 		if err != nil {
 			return nil, err
 		}
-		cmd.Env = append(os.Environ(), "GH_TOKEN="+token)
+		env = append(env, "GH_TOKEN="+token)
 	}
+	return env, nil
+}
+
+func (c Client) runWithEnv(ctx context.Context, env []string, stdin io.Reader, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, c.gh(), args...)
+	cmd.Stdin, cmd.Env = stdin, env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "(HTTP 404)") {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, msg)
-		}
-		if strings.Contains(msg, "Resource not accessible by integration") {
-			return nil, fmt.Errorf("%w: %s", ErrNoPermission, msg)
-		}
-		if msg == "" {
-			msg = strings.TrimSpace(stdout.String())
-		}
-		return nil, fmt.Errorf("%w: %s", err, msg)
+		return nil, ghFailure(err, stdout.String(), stderr.String())
 	}
 	return stdout.Bytes(), nil
+}
+
+// ghFailure is the error a failed gh run means, from what it printed.
+func ghFailure(err error, stdout, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if strings.Contains(msg, "(HTTP 404)") {
+		return fmt.Errorf("%w: %s", ErrNotFound, msg)
+	}
+	if strings.Contains(msg, "Resource not accessible by integration") {
+		return fmt.Errorf("%w: %s", ErrNoPermission, msg)
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(stdout)
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }
