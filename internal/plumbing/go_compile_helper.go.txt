@@ -290,6 +290,14 @@ func analyze(in request, out *report) error {
 		return fmt.Errorf("no completed failing compiler process: %v", err)
 	}
 	out.ExitCode = exit.ExitCode()
+	// Both test packages share one importer, so each dependency is one package.
+	// go test compiles external tests against the package with its internal
+	// tests' declarations, so they import the one checked from those sources.
+	imported, ok := importer.ForCompiler(positions, "gc", lookup).(types.ImporterFrom)
+	if !ok {
+		return errors.New("compiler analysis has no source-aware importer")
+	}
+	var tested *types.Package
 	var reasons []string
 	for group, tests := range [][]*ast.File{internal, external} {
 		if len(tests) == 0 {
@@ -297,13 +305,16 @@ func analyze(in request, out *report) error {
 		}
 		files := tests
 		name := pkg.ImportPath + "_test"
+		var imports types.Importer = imported
 		if group == 0 {
 			files = append(slices.Clone(production), tests...)
 			name = pkg.ImportPath
+		} else if tested != nil {
+			imports = testedImporter{imported, tested}
 		}
 		info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Scopes: map[ast.Node]*types.Scope{}}
 		var failures []types.Error
-		config := types.Config{Importer: importer.ForCompiler(positions, "gc", lookup), Sizes: types.SizesFor("gc", runtime.GOARCH), Error: func(err error) {
+		config := types.Config{Importer: imports, Sizes: types.SizesFor("gc", runtime.GOARCH), Error: func(err error) {
 			if typed, ok := err.(types.Error); ok {
 				failures = append(failures, typed)
 			} else {
@@ -316,6 +327,9 @@ func analyze(in request, out *report) error {
 		checked, checkErr := config.Check(name, positions, files, info)
 		if checkErr != nil && len(failures) == 0 {
 			return errors.New("type analysis failed without source positions")
+		}
+		if group == 0 {
+			tested = checked
 		}
 		uses := map[token.Pos]string{}
 		selected := map[token.Pos]bool{}
@@ -353,7 +367,7 @@ func analyze(in request, out *report) error {
 						expr = n.Type
 						literalType = true
 					}
-					id := proposedAPI(expr, literalType, info, checked, pkg.ImportPath, group == 0, positions, productionFiles)
+					id := proposedAPI(expr, literalType, info, checked, pkg.ImportPath, group == 0, tested, positions, productionFiles)
 					if id != nil {
 						at := positions.PositionFor(id.Pos(), false)
 						uses[id.Pos()] = fmt.Sprintf("%s:%d:%d: %s directly uses proposed production API %s", in.File, at.Line, at.Column, fn.Name.Name, id.Name)
@@ -436,7 +450,26 @@ func testingFunction(fn *ast.FuncDecl, info *types.Info, kind string) bool {
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "testing" && named.Obj().Name() == kind
 }
 
-func proposedAPI(expr ast.Expr, literalType bool, info *types.Info, pkg *types.Package, production string, internal bool, positions *token.FileSet, productionFiles map[string]bool) *ast.Ident {
+// testedImporter resolves the package under test to tested, its production
+// and internal test declarations, and every other import as imported does.
+type testedImporter struct {
+	types.ImporterFrom
+	tested *types.Package
+}
+
+func (t testedImporter) Import(path string) (*types.Package, error) {
+	return t.ImportFrom(path, "", 0)
+}
+
+func (t testedImporter) ImportFrom(path, dir string, mode types.ImportMode) (*types.Package, error) {
+	if path == t.tested.Path() {
+		return t.tested, nil
+	}
+	return t.ImporterFrom.ImportFrom(path, dir, mode)
+}
+
+// tested, when not nil, is the package under test as checked from its sources.
+func proposedAPI(expr ast.Expr, literalType bool, info *types.Info, pkg *types.Package, production string, internal bool, tested *types.Package, positions *token.FileSet, productionFiles map[string]bool) *ast.Ident {
 	switch expr := expr.(type) {
 	case *ast.Ident:
 		if !internal || !ast.IsExported(expr.Name) || info.Uses[expr] != nil || info.Defs[expr] != nil {
@@ -484,7 +517,9 @@ func proposedAPI(expr ast.Expr, literalType bool, info *types.Info, pkg *types.P
 		if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != production {
 			return nil
 		}
-		if internal && !productionFiles[positions.PositionFor(named.Obj().Pos(), false).Filename] {
+		// A test file's type is not production API, and a dependency's own copy
+		// of the package under test may lack its test declarations.
+		if tested != nil && (named.Obj().Pkg() != tested || !productionFiles[positions.PositionFor(named.Obj().Pos(), false).Filename]) {
 			return nil
 		}
 		return expr.Sel
