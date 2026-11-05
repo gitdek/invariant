@@ -139,6 +139,10 @@ func (c Clone) auth(ctx context.Context) ([]string, error) {
 
 // lease is a watcher's hold on its repository's lease.
 type lease struct {
+	// renewal runs renewals and the release one at a time, held through
+	// their git calls. mu guards the fields below and is never held across
+	// a git call, so a permission check never waits for git (#555).
+	renewal sync.Mutex
 	mu      sync.Mutex
 	sha     string    // the lease it last pushed
 	until   time.Time // when its lease runs out, by its own clock; zero when it holds none
@@ -169,15 +173,55 @@ func (f *Factory) inTenure(ctx context.Context) context.Context {
 }
 
 // hold takes the lease, or renews it, unless another watcher holds it. It
-// says whether this watcher holds it now.
+// says whether this watcher holds it now. It holds the lease lock only
+// between its git calls, so steps go on checking their permission against
+// the lease it last confirmed while it reads and pushes.
 func (f *Factory) hold(ctx context.Context) (bool, error) {
-	f.lease.mu.Lock()
-	defer f.lease.mu.Unlock()
+	f.lease.renewal.Lock()
+	defer f.lease.renewal.Unlock()
 	now := f.now()
 	sha, rec, err := f.Repo.Lease(ctx)
 	if err != nil {
 		return false, err
 	}
+	next, takeover, held := f.nextLease(now, sha, rec)
+	if next == nil {
+		return held, nil
+	}
+	pushed, err := f.Repo.PushLease(ctx, sha, *next)
+	f.lease.mu.Lock()
+	defer f.lease.mu.Unlock()
+	if err != nil {
+		// A push refused as moved never landed, but one it tried before,
+		// whose answer it lost, may have landed since its last read and
+		// moved the lease, so it still remembers that one (D-0245).
+		if errors.Is(err, ErrLeaseMoved) {
+			f.lease.until = time.Time{}
+			return false, nil
+		}
+		f.lease.tried = &triedLease{rec: *next, takeover: takeover}
+		return false, err
+	}
+	f.lease.tried = nil
+	if rec.Holder != f.Holder || sha == "" {
+		f.logf("holding the lease on %s as %s", f.Repository, f.Holder)
+	}
+	// The lease isn't where this watcher left it, so another watcher may
+	// have acted on its issues since: a new tenure begins.
+	if takeover {
+		f.lease.tenure++
+	}
+	f.lease.sha, f.lease.until, f.lease.waiting = pushed, next.Until, ""
+	return true, nil
+}
+
+// nextLease decides, from the lease read at sha, what lease to push, if
+// any, and whether that push takes the lease from somewhere other than
+// where this watcher left it. With nothing to push, held says whether this
+// watcher holds the lease.
+func (f *Factory) nextLease(now time.Time, sha string, rec LeaseRecord) (next *LeaseRecord, takeover, held bool) {
+	f.lease.mu.Lock()
+	defer f.lease.mu.Unlock()
 	// A lease that says what this watcher last tried to push, when it never
 	// learned whether the push landed, is the one it pushed: its own, and a
 	// new tenure only if that push took the lease from elsewhere.
@@ -189,7 +233,7 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 	}
 	// It renews only once half its lease has gone, to push less often.
 	if sha != "" && sha == f.lease.sha && rec.Holder == f.Holder && f.lease.until.Sub(now) > f.LeaseFor/2 {
-		return true, nil
+		return nil, false, true
 	}
 	if sha != "" && rec.Holder != f.Holder && now.Before(rec.Until.Add(leaseSkew)) {
 		f.lease.until = time.Time{}
@@ -197,32 +241,9 @@ func (f *Factory) hold(ctx context.Context) (bool, error) {
 			f.logf("waiting: %s holds the lease on %s until %s", rec.Holder, f.Repository, rec.Until.Format(time.RFC3339))
 			f.lease.waiting = rec.Holder
 		}
-		return false, nil
+		return nil, false, false
 	}
-	next := LeaseRecord{Holder: f.Holder, Until: now.Add(f.LeaseFor)}
-	pushed, err := f.Repo.PushLease(ctx, sha, next)
-	if err != nil {
-		// A push refused as moved never landed, but one it tried before,
-		// whose answer it lost, may have landed since its last read and
-		// moved the lease, so it still remembers that one (D-0245).
-		if errors.Is(err, ErrLeaseMoved) {
-			f.lease.until = time.Time{}
-			return false, nil
-		}
-		f.lease.tried = &triedLease{rec: next, takeover: sha != f.lease.sha}
-		return false, err
-	}
-	f.lease.tried = nil
-	if rec.Holder != f.Holder || sha == "" {
-		f.logf("holding the lease on %s as %s", f.Repository, f.Holder)
-	}
-	// The lease isn't where this watcher left it, so another watcher may
-	// have acted on its issues since: a new tenure begins.
-	if sha != f.lease.sha {
-		f.lease.tenure++
-	}
-	f.lease.sha, f.lease.until, f.lease.waiting = pushed, next.Until, ""
-	return true, nil
+	return &LeaseRecord{Holder: f.Holder, Until: now.Add(f.LeaseFor)}, sha != f.lease.sha, false
 }
 
 // holds says whether this watcher may act: it holds the lease, with time to
@@ -245,11 +266,6 @@ func (f *Factory) mayAct(ctx context.Context) error {
 	}
 	f.lease.mu.Lock()
 	defer f.lease.mu.Unlock()
-	return f.mayActLocked(ctx)
-}
-
-// mayActLocked is mayAct, for a call that holds the lease lock.
-func (f *Factory) mayActLocked(ctx context.Context) error {
 	if !f.now().Before(f.lease.until.Add(-leaseSkew)) {
 		return errLeaseLost
 	}
@@ -307,9 +323,11 @@ func (f *Factory) keepLease(ctx context.Context, every time.Duration) {
 // replaces only this watcher's lease, using the same compare-and-swap as
 // renewal. A zero record is already expired, including the skew window.
 func (f *Factory) releaseLease(ctx context.Context) error {
-	f.lease.mu.Lock()
-	defer f.lease.mu.Unlock()
+	f.lease.renewal.Lock()
+	defer f.lease.renewal.Unlock()
 	defer func() {
+		f.lease.mu.Lock()
+		defer f.lease.mu.Unlock()
 		f.lease.sha, f.lease.until, f.lease.tried = "", time.Time{}, nil
 	}()
 	sha, rec, err := f.Repo.Lease(ctx)
@@ -402,33 +420,21 @@ type leasedRepo struct {
 // can try its push again after waiting. Each attempt checks the same step.
 type runPermissionKey struct{}
 
-// lockRun checks permission after taking the clone lock. Renewal takes the
-// lease lock first, so a busy lease lock means giving the clone back before
-// waiting for it. Permission is checked again once both locks are held.
+// lockRun checks permission after taking the clone lock. The lease lock is
+// never held across a git call, so the check doesn't wait for a renewal's
+// git, and nothing that holds it waits for the clone (#555).
 func (c Clone) lockRun(ctx context.Context) (func(), error) {
-	f, _ := ctx.Value(runPermissionKey{}).(*Factory)
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		unlock := c.lock()
-		if f == nil || f.LeaseFor == 0 {
-			return unlock, nil
-		}
-		if f.lease.mu.TryLock() {
-			err := f.mayActLocked(ctx)
-			f.lease.mu.Unlock()
-			if err != nil {
-				unlock()
-				return nil, err
-			}
-			return unlock, nil
-		}
-		unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock := c.lock()
+	if f, _ := ctx.Value(runPermissionKey{}).(*Factory); f != nil {
 		if err := f.mayAct(ctx); err != nil {
+			unlock()
 			return nil, err
 		}
 	}
+	return unlock, nil
 }
 
 func (r leasedRepo) Push(ctx context.Context, worktree, branch string) error {
