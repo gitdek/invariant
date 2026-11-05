@@ -90,7 +90,7 @@ func sameReaderJSON(a, b any) bool { return bytes.Equal(readerJSON(a), readerJSO
 func (e readerEvidence) checked() (status, message, svg string) {
 	bad := func(code, why string) (string, string, string) { return code, why, "" }
 	if e.Problem == "missing_archive" {
-		return bad("missing_artifacts", "The gate's receipt archive is missing or expired. Verify again to publish the complete evidence.")
+		return bad("missing_artifacts", "The gate's receipt archive is missing or expired, or holds no receipt.json. Verify again to publish the complete evidence.")
 	}
 	if e.Problem != "" {
 		return bad(e.Problem, "Reader evidence is unavailable: the saved artifacts cannot identify this project's receipt. Verify again to replace them.")
@@ -346,7 +346,8 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 
 // Validate each persisted entry against both its immutable URL and the snapshot
 // card. Restore receipt sources too, so a failed refresh retains that evidence.
-func (s *Server) restoreReaders(snap *Snapshot) {
+// restoreReaders reports whether it rejected any cached reader evidence.
+func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 	evidence := map[string][]readerEvidence{}
 	runs := map[string]*RunRef{}
 	for _, rs := range snap.Repos {
@@ -387,6 +388,7 @@ func (s *Server) restoreReaders(snap *Snapshot) {
 				}
 			}
 			if !ok {
+				rejected = true
 				e = readerEvidence{Format: readerFormat, Repo: p.Repo, Dir: p.Dir, Commit: old.Commit,
 					Manifest: project.Manifest{Name: p.Name, Language: p.Language}, Lock: project.Lock{Bounds: p.Bounds}, Problem: "cached_evidence"}
 				if run != nil {
@@ -430,4 +432,5 @@ func (s *Server) restoreReaders(snap *Snapshot) {
 		}
 		r.src.receipts, r.src.projects = set, sources
 	}
+	return rejected
 }

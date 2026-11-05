@@ -580,7 +580,13 @@ func (s *Server) loadSnapshot() {
 	if json.Unmarshal(js, &snap) != nil || snap.Repo != s.Repos[0].Name {
 		return
 	}
-	s.restoreReaders(&snap)
+	// The snapshot's totals and tiles still count evidence a restart rejects,
+	// and can't be recomputed without the receipts, so serve nothing from it
+	// then: the first read of GitHub publishes the whole page afresh.
+	if s.restoreReaders(&snap) {
+		s.logf("not serving the last snapshot: its cached reader evidence is damaged or obsolete")
+		return
+	}
 	js, err = json.Marshal(snap)
 	if err != nil {
 		return
@@ -629,13 +635,16 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 		}
 	}
 	var set *receiptSet
+	var missing error
 	if id != 0 {
 		raw, err := r.GitHub.Download(ctx, id)
 		if err != nil {
 			return err
 		}
 		set, err = readReceiptZip(raw)
-		if err != nil {
+		if errors.Is(err, errNoReceiptJSON) {
+			set, missing = nil, err
+		} else if err != nil {
 			return err
 		}
 	}
@@ -643,10 +652,13 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 	if err != nil {
 		return err
 	}
-	var missing error
-	if id == 0 {
-		if len(projects) != 0 {
-			missing = errors.New("the gate's receipt archive is missing or expired")
+	if set == nil {
+		if len(projects) == 0 {
+			missing = nil
+		} else {
+			if missing == nil {
+				missing = errors.New("the gate's receipt archive is missing or expired")
+			}
 			if r.src.receipts != nil && len(r.src.projects) != 0 {
 				return missing // retain the last receipt evidence
 			}
@@ -676,6 +688,10 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 	r.src.receipts, r.src.projects = set, projects
 	return missing
 }
+
+// errNoReceiptJSON is a receipt archive that holds no receipt.json. Like an
+// absent archive, it's missing evidence: the projects still show, and say so.
+var errNoReceiptJSON = errors.New("the receipts hold no receipt.json")
 
 func readReceiptZip(raw []byte) (*receiptSet, error) {
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
@@ -737,7 +753,7 @@ func readReceiptZip(raw []byte) (*receiptSet, error) {
 		}
 	}
 	if len(set.reports) == 0 {
-		return nil, errors.New("the receipts hold no receipt.json")
+		return nil, errNoReceiptJSON
 	}
 	return set, nil
 }
