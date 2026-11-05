@@ -14,7 +14,7 @@ Reader URLs and ETags bind the repository and full project path, receipt commit,
 
 **Raw state graph detail** remains a separately labeled view with its existing exploration/edge coverage and traces. It may compact graph display data; neither reader charts nor claims about unavailable actions are reconstructed from `Graph.Compact`. The [example inventory and validation command](statecharts.md#example-inventory) cover all ten examples and all nine qualifying siblings.
 
-This presentation implements [#631's ratified plan](../.invariant/plans/issue-631.json), on [D-0343](../decisions/journal/D-0343.jsonl), [D-0347](../decisions/journal/D-0347.jsonl), [D-0349](../decisions/journal/D-0349.jsonl) and [D-0351](../decisions/journal/D-0351.jsonl). The merger records its new dashboard presentation and cache policy decision; this plumbing build cannot write decisions/.
+This presentation implements [#631's ratified plan](../.invariant/plans/issue-631.json), on [D-0343](../decisions/journal/D-0343.jsonl), [D-0347](../decisions/journal/D-0347.jsonl), [D-0349](../decisions/journal/D-0349.jsonl) and [D-0351](../decisions/journal/D-0351.jsonl). [D-0353](../decisions/journal/D-0353.jsonl) records the presentation and cache policy.
 
 ## Factory activity
 

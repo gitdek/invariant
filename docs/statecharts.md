@@ -65,9 +65,9 @@ INVARIANT_DASHBOARD_READER_REAL=1 go test ./internal/dashboard \
   -run '^TestReader631ExampleViews$' -count=1 -timeout 30m
 ```
 
-The opt-in cannot skip missing tools. It completely explores every example at the unchanged bounds with pinned TLC, checks the inventoried counts, runs the model gate and common reader, and requires a drawable chart for every qualifying sibling. Production receipt writing then carries those records through a whole-directory ZIP archive into visible dashboard images and evidence pages with separate sibling identities. The rate limiter must retain its explicit missing-view diagnostic. The merge's full gate must also publish chart-bearing verification receipts for all nine qualifying siblings, with the existing real Python and TLAPS suites required where applicable. Docker validation that cannot run in the plumbing sandbox is merger work in this same change, not evidence supplied by the offline grammar check.
+The opt-in cannot skip missing tools. It completely explores every example at the unchanged bounds with pinned TLC, checks the inventoried counts, runs the model gate and common reader, and requires a drawable chart for every qualifying sibling. Production receipt writing then carries those records through a whole-directory ZIP archive into visible dashboard images and evidence pages with separate sibling identities. The rate limiter must retain its explicit missing-view diagnostic. The merge's full gate must also publish chart-bearing verification receipts for all nine qualifying siblings, with the existing real Python and TLAPS suites required where applicable. Docker validation that cannot run in the plumbing sandbox is merger work in this same change, not evidence supplied by the offline grammar check. On 2026-11-05 it passed on #634's merged head, after #636's replay fix, for all nine qualifying siblings.
 
-The dashboard's [presentation and cache policy](dashboard.md#reader-evidence) rests on D-0343, D-0347, D-0349 and D-0351. The merger records the new decision for #631 because this plumbing build cannot write decisions/.
+The dashboard's [presentation and cache policy](dashboard.md#reader-evidence) rests on D-0343, D-0347, D-0349 and D-0351. [D-0353](../decisions/journal/D-0353.jsonl) records it, refining [D-0351](../decisions/journal/D-0351.jsonl).
 
 ## Reader computation
 
