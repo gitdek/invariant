@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "state": [
+    {
+      "id": "retry",
+      "when": {
+        "eq": [
+          {
+            "var": "retrying"
+          },
+          "TRUE"
+        ]
+      },
+      "label": "Oldest buffered line awaits retry"
+    },
+    {
+      "id": "empty",
+      "when": {
+        "eq": [
+          {
+            "var": "buf"
+          },
+          "<<>>"
+        ]
+      },
+      "label": "Buffer empty"
+    },
+    {
+      "id": "buffered",
+      "when": true,
+      "label": "Lines buffered for shipping"
+    }
+  ],
+  "step": [
+    {
+      "id": "write",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Write"
+        ]
+      },
+      "label": "Producer writes a line into the buffer"
+    },
+    {
+      "id": "ship",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Ship"
+        ]
+      },
+      "label": "Ship the oldest line"
+    },
+    {
+      "id": "retry",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "ShipFail"
+        ]
+      },
+      "label": "Send fails; keep the line for retry"
+    },
+    {
+      "id": "done",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Done"
+        ]
+      },
+      "label": "All lines shipped"
+    }
+  ]
+}

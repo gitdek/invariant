@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "state": [
+    {
+      "id": "all-committed",
+      "when": {"eq": [{"var": "rmState"}, "(r1 :> \"committed\" @@ r2 :> \"committed\" @@ r3 :> \"committed\")"]},
+      "label": "Every resource manager committed"
+    },
+    {
+      "id": "all-aborted",
+      "when": {"eq": [{"var": "rmState"}, "(r1 :> \"aborted\" @@ r2 :> \"aborted\" @@ r3 :> \"aborted\")"]},
+      "label": "Every resource manager aborted"
+    },
+    {
+      "id": "preparing",
+      "when": {
+        "eq": [
+          {
+            "var": "tmState"
+          },
+          "\"init\""
+        ]
+      },
+      "label": "Preparing; coordinator has not decided"
+    },
+    {
+      "id": "decided",
+      "when": true,
+      "label": "Commit or abort decided"
+    }
+  ],
+  "step": [
+    {
+      "id": "commit",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "TMCommit"
+        ]
+      },
+      "label": "Commit after every resource manager prepares"
+    },
+    {
+      "id": "abort",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "TMAbort"
+        ]
+      },
+      "label": "Coordinator aborts"
+    },
+    {
+      "id": "prepare",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "RMPrepare"
+        ]
+      },
+      "label": "Resource manager prepares"
+    },
+    {
+      "id": "choose-abort",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "RMChooseToAbort"
+        ]
+      },
+      "label": "Resource manager chooses to abort"
+    },
+    {
+      "id": "receive-prepared",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "TMRcvPrepared"
+        ]
+      },
+      "label": "Coordinator receives prepared message"
+    },
+    {
+      "id": "receive-commit",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "RMRcvCommitMsg"
+        ]
+      },
+      "label": "Resource manager receives commit"
+    },
+    {
+      "id": "receive-abort",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "RMRcvAbortMsg"
+        ]
+      },
+      "label": "Resource manager receives abort"
+    }
+  ]
+}

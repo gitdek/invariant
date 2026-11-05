@@ -1,6 +1,6 @@
 # Reader statecharts and bounded graph data
 
-Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. [#608's ratified plan](../.invariant/plans/issue-608.json) adds standalone SVG rendering through the shared Go API. The dashboard retains its existing display and trace behavior.
+Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. [#608's ratified plan](../.invariant/plans/issue-608.json) adds standalone SVG rendering through the shared Go API. [#631's ratified plan](../.invariant/plans/issue-631.json) connects receipt archives to [dashboard evidence cards](dashboard.md#reader-evidence), script-free pages and standalone SVG. Raw state graphs remain separate detail.
 
 ## Modeled proposals
 
@@ -39,7 +39,35 @@ Every ordinary graph through 500 reachable concrete states is supported. Impossi
 | `reader.json` | The same standalone reader record, when one is present |
 | `reader.svg` | A drawable chart and report from the native Go renderer, with the complete result as inert metadata |
 
-The SVG works offline and contains no active content or external resources. Reusing an output directory removes obsolete reader JSON and SVG before writing current artifacts. Ordinary filesystem output errors are still errors. Existing whole-directory CI uploads and archives retain these files without workflow changes. Factory pull request bodies use the final gate receipt, even when a proposal has a different chart; plumbing receipts remain chart-free. Reader diagnostics and rendering add no proof claim and never upgrade or fail the verification verdict. The dashboard retains its existing display behavior.
+The SVG works offline and contains no active content or external resources. Reusing an output directory removes obsolete reader JSON and SVG before writing current artifacts. Ordinary filesystem output errors are still errors. Existing whole-directory CI uploads and archives retain these files without workflow changes. Factory pull request bodies use the final gate receipt, even when a proposal has a different chart; plumbing receipts remain chart-free. Reader diagnostics and rendering add no proof claim and never upgrade or fail the verification verdict. The dashboard validates these companions and their source snapshot at the receipt commit before presenting the chart.
+
+## Example inventory
+
+All ten modeled examples keep their original model and ratified-lock bytes and bounds. Nine have a pure `.invariant/view.json`; language and synthesized siblings each carry their own view and receipt identity. Labels use the examples' ordinary vocabulary. Two-phase commit distinguishes preparing, a coordinator decision, all committed and all aborted; log buffers distinguish empty, buffered and awaiting retry; the connection pool distinguishes all connections free from clients holding connections. Only the pool requests hiding, for `Refuse` self-loops, which remain in the complete report. The common reader checks total mappings and hiding on complete exploration, never on a compacted graph or a sample.
+
+| Example | Unchanged ratified bounds | Reachable states | Saved view |
+| :-- | :-- | --: | :-- |
+| `02-twophase-commit` | `RM = {r1, r2, r3}` | 288 | Yes |
+| `02-twophase-commit-py` | `RM = {r1, r2, r3}` | 288 | Yes |
+| `02-twophase-commit-py-proved` | `RM = {r1, r2, r3}` | 288 | Yes |
+| `02-twophase-commit-synthesized` | `RM = {r1, r2, r3}` | 288 | Yes |
+| `02-twophase-commit-ts` | `RM = {r1, r2, r3}` | 288 | Yes |
+| `03-log-buffer` | `Producers = {p1, p2}`, `Capacity = 2`, `MaxLines = 2` | 87 | Yes |
+| `03-log-buffer-py` | `Producers = {p1, p2}`, `Capacity = 2`, `MaxLines = 2` | 87 | Yes |
+| `03-log-buffer-ts` | `Producers = {p1, p2}`, `Capacity = 2`, `MaxLines = 2` | 87 | Yes |
+| `04-api-rate-limiter` | `Apis = {a1, a2}`, `Capacity = 2`, `MaxCalls = 5`, `MaxTime = 3`, `MaxWaiting = 2` | 19,489 | No; above chart capacity |
+| `05-connection-pool` | `Clients = {c1, c2, c3}`, `Size = 2` | 13 | Yes |
+
+The default acceptance test checks the inventory, protected model/lock hashes, pure view grammar and vocabulary. It does **not** claim a completed TLC exploration. Before merging this change, the merger must complete the following pinned-tool validation with Docker:
+
+```sh
+INVARIANT_DASHBOARD_READER_REAL=1 go test ./internal/dashboard \
+  -run '^TestReader631ExampleViews$' -count=1 -timeout 30m
+```
+
+The opt-in cannot skip missing tools. It completely explores every example at the unchanged bounds with pinned TLC, checks the inventoried counts, runs the model gate and common reader, and requires a drawable chart for every qualifying sibling. Production receipt writing then carries those records through a whole-directory ZIP archive into visible dashboard images and evidence pages with separate sibling identities. The rate limiter must retain its explicit missing-view diagnostic. The merge's full gate must also publish chart-bearing verification receipts for all nine qualifying siblings, with the existing real Python and TLAPS suites required where applicable. Docker validation that cannot run in the plumbing sandbox is merger work in this same change, not evidence supplied by the offline grammar check.
+
+The dashboard's [presentation and cache policy](dashboard.md#reader-evidence) rests on D-0343, D-0347, D-0349 and D-0351. The merger records the new decision for #631 because this plumbing build cannot write decisions/.
 
 ## Reader computation
 
@@ -89,7 +117,7 @@ The inspectable XML contract is:
 
 Element IDs are generated independently of reader labels and chart IDs. Text and attributes are XML-escaped, including markup-like text, quotes and URLs. Styling uses presentation attributes; arrowheads refer only to a local marker. There are no scripts, event handlers, stylesheets, links, foreign objects, embedded resources, DTDs or resource-loading attributes. Whitespace in rule wording and labels is preserved. Coordinates, ordering, colors, fonts and routing are implementation choices, not a pinned serialization format.
 
-Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Verification receipts save this SVG beside their JSON and Markdown. Modeled proposals retain Mermaid publication, and the dashboard retains its existing rendering.
+Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Verification receipts save this SVG beside their JSON and Markdown. Modeled proposals retain Mermaid publication; the dashboard serves the same native SVG on modeled evidence cards.
 
 ## JSON view version 1
 

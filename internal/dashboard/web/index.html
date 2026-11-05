@@ -111,7 +111,7 @@
   <section class="block" id="states">
     <header>
       <div>
-        <h2>Every state it checked</h2>
+        <h2>Raw state graph detail</h2>
         <p class="lede">Each dot is one state of a model, exactly as TLC explored it. Each ring is one more step from where the model starts, and the point in the middle is the invariant, true in every one of them. Bright points are the model running. <b>Red is a planted bug:</b> TLC catches it the step it breaks a rule.</p>
       </div>
       <div class="tabs" id="tabs" role="group" aria-label="Choose a model"></div>
@@ -146,7 +146,7 @@
     <header>
       <div>
         <h2>What's proved</h2>
-        <p class="lede">Every project in the repository, from the receipt CI wrote on main. The factory never writes its own receipt.</p>
+        <p class="lede">Every modeled project, from CI's last passing gate receipt. Each checked reader chart links to its complete evidence page and standalone image. When a chart is unavailable, its card explains why. Raw state graphs are separate detail.</p>
       </div>
       <div class="viewtoggle" role="group" aria-label="Show projects as"><button type="button" data-view="cards">Cards</button><button type="button" data-view="table">Table</button></div>
     </header>

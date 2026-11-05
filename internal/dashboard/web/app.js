@@ -115,13 +115,13 @@
     if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
     if (ACT && changed("untaken", [scope, state?.repo])) untaken.paint();
-    if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
+    if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
     // The headline counts what needs a person, which a post from /act
     // changes at once without changing anything else it draws (#175).
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
     if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
-    if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states])])) renderTabs(s);
+    if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states, p.receiptMissing])])) renderTabs(s);
     if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
     if (changed("projects", [scope, pview, s.projects])) renderProjects(s);
     if (changed("road", s.slices)) renderRoad(s.slices);
@@ -798,7 +798,7 @@
   function models(s) {
     const byKey = new Map();
     for (const p of s.projects) {
-      if (!inScope(p.repo)) continue;
+      if (!inScope(p.repo) || p.receiptMissing) continue;
       if (!byKey.has(p.model)) byKey.set(p.model, { key: p.model, projects: [], meta: p });
       const m = byKey.get(p.model);
       m.projects.push(p);
@@ -901,6 +901,16 @@
   }
 
   // ---------- projects ----------
+  function readerEvidence(p) {
+    const r = p.reader;
+    if (!r) return '<p class="reader-note">This legacy snapshot has no reader evidence. Waiting for a receipt refresh.</p>';
+    const image = r.status === "chart" && r.svg
+      ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
+    return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>
+      <a href="${esc(r.page)}">Read model evidence</a>${r.svg ? ` · <a href="${esc(r.svg)}">Standalone SVG</a>` : ""}
+      <p class="fp">Receipt commit <code>${esc(r.commit)}</code></p></div>`;
+  }
+
   function renderProjects(s) {
     const r = s.receipts;
     $("#receipts").innerHTML = r ? `Receipts from CI's gate on <code>${esc(r.sha.slice(0, 7))}</code>` : "";
@@ -918,12 +928,12 @@
       let prov = "Hand-built, before the factory";
       if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
       else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
-      return `<article class="card${quiet(p.repo)}" ${tag(p.repo)} data-model="${p.model}" tabindex="0">
-        <canvas class="thumb" data-model="${p.model}" width="150" height="150"></canvas>
-        <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${esc(p.assurance)}</span></div>
+      return `<article class="card${quiet(p.repo)}" ${tag(p.repo)}>
+        <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${p.receiptMissing ? "Receipt unavailable" : esc(p.assurance)}</span></div>
         <h3>${esc(cap(p.name))}</h3>
         <p class="dir">${p.repo && p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</p>
-        <dl class="metrics">
+        ${readerEvidence(p)}
+        ${p.receiptMissing ? "" : `<dl class="metrics">
           <div><dt>States</dt><dd>${nf.format(p.states)}</dd></div>
           <div><dt>Statements</dt><dd>${p.statements.length}</dd></div>
           <div><dt>Bugs caught</dt><dd class="${caught === p.bugs.length ? "holds" : ""}">${caught}/${p.bugs.length}</dd></div>
@@ -931,12 +941,12 @@
         </dl>
         <p class="prov">${prov}</p>
         <p class="fp">${esc(p.fingerprint.slice(0, 19))} · ${p.passed ? '<span class="ok">passed</span>' : '<span class="bad">failed</span>'}</p>
+        <button type="button" class="btn raw-graph" data-model="${esc(p.model)}">Raw state graph detail</button>`}
       </article>`;
     }).join("");
-    document.querySelectorAll("#projects .card").forEach((el) => {
+    document.querySelectorAll("#projects .raw-graph").forEach((el) => {
       const go = () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); };
       el.addEventListener("click", go);
-      el.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
     });
     thumbs(s);
   }
@@ -1779,9 +1789,9 @@
       const start = (i * 137.5 + k * 40) % 360, period = 46 + i * 23;
       const moons = merged.filter((m) => m.project === p.dir);
       const moonSvg = moons.map((m, j) => `<g>${spin(j * 120, 7 + j * 3)}<circle class="moon2" cx="${pr + 7 + j * 3}" cy="0" r="2"><title>${esc(ref(m.repo, m.number))} ${esc(m.title)}</title></circle></g>`).join("");
-      const tip = `${cap(p.name)} · ${p.dir}\n${nf.format(p.states)} states · ${p.assurance}\n${p.bugs.filter((b) => b.caught).length}/${p.bugs.length} planted bugs caught`;
+      const tip = `${cap(p.name)} · ${p.dir}\n` + (p.receiptMissing ? "Receipt unavailable" : `${nf.format(p.states)} states · ${p.assurance}\n${p.bugs.filter((b) => b.caught).length}/${p.bugs.length} planted bugs caught`);
       g += `<g transform="translate(${c} ${c})"><g transform="rotate(${start})">${spin(start, period)}<g class="planet" data-model="${esc(p.model)}" transform="translate(${orr} 0)"><title>${esc(tip)}</title>
-        <circle class="${p.passed ? "holds" : "fails"}" r="${pr + 4}"/><circle class="body ${langClass(p.language)}" r="${pr}"/>${moonSvg}</g></g></g>`;
+        <circle class="${p.receiptMissing ? "orbitline" : p.passed ? "holds" : "fails"}" r="${pr + 4}"/><circle class="body ${langClass(p.language)}" r="${pr}"/>${moonSvg}</g></g></g>`;
     });
     // Comets: open issues on the outer orbit, parked at their stage.
     open.forEach((is, j) => {
@@ -1815,10 +1825,10 @@
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
-        <td>${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}</td><td class="num">${nf.format(p.states)}</td><td class="num">${p.statements.length}</td>
-        <td class="num ${caught === p.bugs.length ? "ok" : ""}">${caught}/${p.bugs.length}</td><td>${who}</td></tr>`;
+        <td>${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${readerEvidence(p)}${p.receiptMissing ? "" : `<button type="button" class="btn raw-graph" data-model="${esc(p.model)}">Raw state graph detail</button>`}</td><td class="num">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="num">${p.receiptMissing ? "—" : p.statements.length}</td>
+        <td class="num ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
-    box.querySelectorAll("tr[data-model]").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
+    box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
   }
   document.querySelectorAll(".viewtoggle button").forEach((b) => {
     b.setAttribute("aria-pressed", String(b.dataset.view === pview));
