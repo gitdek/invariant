@@ -33,15 +33,32 @@ printf '%s\n' "$@" > "$root/args-$attempt"
 shift
 name=
 work=
+config=
+dump=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --name) shift; name="$1" ;;
         -v) shift; case "$1" in *:/work) work="${1%:/work}" ;; esac ;;
+        -config) shift; config="$1" ;;
+        -dump) shift; [ "$1" = dot,actionlabels ] || exit 96; shift; dump="$1" ;;
     esac
     shift
 done
-if [ -z "$name" ] || [ -z "$work" ]; then exit 95; fi
-cp "$work/Invariant.cfg" "$root/config-$attempt"
+if [ -z "$name" ] || [ -z "$work" ] || [ -z "$config" ]; then exit 95; fi
+case "$config" in
+    /work/*) config="$work/${config#/work/}" ;;
+    /*) exit 96 ;;
+    *) config="$work/$config" ;;
+esac
+if [ -n "$dump" ]; then
+    case "$dump" in
+        /work/*) dump="$work/${dump#/work/}" ;;
+        /*) exit 96 ;;
+        *) dump="$work/$dump" ;;
+    esac
+    case "$dump" in *.dot) ;; *) dump="$dump.dot" ;; esac
+fi
+cp "$config" "$root/config-$attempt"
 printf 'run %s %s\n' "$attempt" "$name" >> "$root/events"
 `
 
