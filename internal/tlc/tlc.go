@@ -64,17 +64,22 @@ func (c Config) render() string {
 // Check model-checks module (a file in dir) against cfg, with no network.
 // Deadlock checking is always on: Check never passes -deadlock.
 func (r Runner) Check(ctx context.Context, dir, module string, cfg Config) (Result, error) {
-	return r.check(ctx, dir, module, cfg, 0)
+	return r.check(ctx, dir, module, cfg, 0, nil)
 }
 
 // CheckWithin gives an admitted check its own execution allowance. Queueing
 // for the first attempt does not consume it. Retries and their admission waits
 // share that allowance and the caller's overall deadline.
 func (r Runner) CheckWithin(ctx context.Context, dir, module string, cfg Config, timeout time.Duration) (Result, error) {
-	return r.check(ctx, dir, module, cfg, timeout)
+	return r.check(ctx, dir, module, cfg, timeout, nil)
 }
 
-func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeout time.Duration) (Result, error) {
+func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeout time.Duration, conformance *ConformanceCheck) (Result, error) {
+	if conformance != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = conformance.Recovery.context(ctx, false)
+		defer cancel()
+	}
 	if err := r.Budget.acquire(ctx); err != nil {
 		return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
 	}
@@ -91,6 +96,11 @@ func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeo
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	if conformance != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = conformance.Recovery.context(ctx, true)
+		defer cancel()
+	}
 	if err := context.Cause(ctx); err != nil {
 		return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
 	}
@@ -103,20 +113,27 @@ func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeo
 	}
 	name := module
 	if r.CheckRoot != "" {
-		if rel, err := filepath.Rel(r.CheckRoot, dir); err == nil {
+		if rel, err := filepath.Rel(r.CheckRoot, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			name = filepath.ToSlash(filepath.Join(rel, module))
 		}
 	}
 	check := r.Budget.newCheck(name)
 	memory, heap := r.allocation()
 	stallRetried, memoryRetried := false, false
+	if conformance != nil {
+		stallRetried = conformance.StallRetried
+	}
 	for attempt := 1; ; attempt++ {
 		if err := context.Cause(ctx); err != nil {
 			return Result{}, fmt.Errorf("TLC check %s cut off: %w", module, err)
 		}
 		record := func(result Result) {
-			r.Budget.record(check, Attempt{Module: module, Attempt: attempt,
-				MemoryBytes: memory, HeapBytes: heap, Outcome: result.Outcome, Message: result.Message})
+			a := Attempt{Module: module, Attempt: attempt,
+				MemoryBytes: memory, HeapBytes: heap, Outcome: result.Outcome, Message: result.Message}
+			if conformance != nil {
+				a.ParentCheck, a.ParentAttempt, a.Range = conformance.ParentCheck, conformance.ParentAttempt, &conformance.Range
+			}
+			r.Budget.record(check, a)
 		}
 		out, stalled, err := r.run(ctx, dir, module, silence, memory, heap)
 		// Cancellation takes priority even when it arrives during stall cleanup.
@@ -143,7 +160,10 @@ func (r Runner) check(ctx context.Context, dir, module string, cfg Config, timeo
 			}
 			failure.ExitCode = exitCode
 			record(failure)
-			if confirmed && !memoryRetried && r.Budget != nil && r.Budget.exclusiveMemory > memory {
+			if confirmed && conformance != nil && conformance.Range.Count > 1 {
+				return Result{}, &MemoryExhaustion{Check: r.Budget.checkIdentity(check), Attempt: attempt, Result: failure, StallRetried: stallRetried, budget: r.Budget, check: check}
+			}
+			if confirmed && (conformance == nil || conformance.Range.Count == 1) && !memoryRetried && r.Budget != nil && r.Budget.exclusiveMemory > memory {
 				memoryRetried = true
 				r.Budget.releaseSlots(slots)
 				slots = 0

@@ -133,6 +133,15 @@ func tlcAttemptsFeedback(attempts []tlc.Attempt) string {
 		}
 		fmt.Fprintf(&b, "- %s, module %s, %s %d: memory %d MiB, heap %d MiB; %s",
 			a.Check, a.Module, kind, a.Attempt, a.MemoryBytes/(1<<20), a.HeapBytes/(1<<20), a.Outcome)
+		if a.Range != nil {
+			fmt.Fprintf(&b, "; range %s [%d,%d)", a.Range.Kind, a.Range.Start, a.Range.Start+a.Range.Count)
+		}
+		if a.ParentCheck != "" {
+			fmt.Fprintf(&b, "; parent %s attempt %d", a.ParentCheck, a.ParentAttempt)
+		}
+		if a.Split {
+			b.WriteString("; split into ordinary halves after memory exhaustion")
+		}
 		if a.Message != "" {
 			fmt.Fprintf(&b, ": %s", a.Message)
 		}

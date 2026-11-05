@@ -18,7 +18,6 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,12 +125,12 @@ func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds 
 		return r, err
 	}
 
-	_, res, err := atOnce(ctx, max(1, batchCount(len(rec.starts), initBatch)), func(ctx context.Context, b int) (tlc.Result, error) {
-		return checkBatch(ctx, runner, dir, root, fmt.Sprintf("init-%d", b+1), "Invariant_ConformanceInit",
+	_, res, err := checkRanges(ctx, runner, "init", len(rec.starts), initBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_ConformanceInit",
 			tlc.Config{Specification: "Invariant_ISpec", Constants: constants, Invariants: []string{"Init"}}, func(w *moduleWriter) error {
 				w.text("---- MODULE Invariant_ConformanceInit ----\n" + header + "Invariant_Starts == {")
-				start := b * initBatch
-				for i := start; i < min(start+initBatch, len(rec.starts)); i++ {
+				start := c.Range.Start
+				for i := start; i < start+c.Range.Count; i++ {
 					if i > start {
 						w.text(",\n  ")
 					}
@@ -158,10 +157,10 @@ func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds 
 		return r, nil
 	}
 
-	b, res, err := atOnce(ctx, batchCount(len(rec.steps), stepBatch), func(ctx context.Context, b int) (tlc.Result, error) {
-		start := b * stepBatch
-		local, pairs := renumber(rec.steps[start:min(start+stepBatch, len(rec.steps))])
-		return checkBatch(ctx, runner, dir, root, fmt.Sprintf("steps-%d", b+1), "Invariant_Conformance",
+	window, res, err := checkRanges(ctx, runner, "steps", len(rec.steps), stepBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		start := c.Range.Start
+		local, pairs := renumber(rec.steps[start : start+c.Range.Count])
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_Conformance",
 			tlc.Config{Specification: "Invariant_CSpec", Constants: constants}, func(w *moduleWriter) error {
 				w.text("---- MODULE Invariant_Conformance ----\n" + header +
 					"VARIABLES invariant_source, invariant_target, invariant_done\nInvariant_States == <<")
@@ -192,8 +191,8 @@ func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds 
 	}
 	switch {
 	case res.Outcome == tlc.Deadlock && len(res.Trace) > 0:
-		start := b * stepBatch
-		local, _ := renumber(rec.steps[start:min(start+stepBatch, len(rec.steps))])
+		start := window.Start
+		local, _ := renumber(rec.steps[start : start+window.Count])
 		stuck := res.Trace[len(res.Trace)-1]
 		step := &Step{From: stateText(stuck, vars)}
 		for _, v := range stuck.Vars {
@@ -266,20 +265,27 @@ func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds 
 
 const initBatch = 1000
 
-func checkBatch(ctx context.Context, runner Runner, source, root, batch, module string, cfg tlc.Config, emit func(*moduleWriter) error) (result tlc.Result, err error) {
+func checkBatch(ctx context.Context, runner Runner, source, root string, c tlc.ConformanceCheck, module string, cfg tlc.Config, emit func(*moduleWriter) error) (result tlc.Result, err error) {
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	dir, err := batchDir(ctx, source, root, batch)
+	dir, err := batchDir(ctx, source, root, c.Batch)
 	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	defer func() {
+		if cleanup := os.RemoveAll(dir); cleanup != nil {
+			err = errors.Join(err, cleanup)
+		}
+	}()
 	if err := writeModule(ctx, dir, module, emit); err != nil {
 		return result, err
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
+	}
+	if capable, ok := runner.(tlc.ConformanceRunner); ok {
+		return capable.CheckConformance(ctx, dir, module, cfg, c)
 	}
 	return runner.Check(ctx, dir, module, cfg)
 }
@@ -289,13 +295,13 @@ func checkBatch(ctx context.Context, runner Runner, source, root, batch, module 
 // accepted read-only action as stuttering; a refusal requires disabledness.
 func checkStrictAttempts(ctx context.Context, runner Runner, dir, root, header string, constants map[string]string, vars []string, rec recorded) (*Step, string, error) {
 	s := rec.store
-	b, res, err := atOnce(ctx, batchCount(len(rec.strict), stepBatch), func(ctx context.Context, b int) (tlc.Result, error) {
-		return checkBatch(ctx, runner, dir, root, fmt.Sprintf("strict-%d", b+1), "Invariant_StrictAttempts",
+	window, res, err := checkRanges(ctx, runner, "strict", len(rec.strict), stepBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_StrictAttempts",
 			tlc.Config{Specification: "Invariant_ASpec", Constants: constants}, func(w *moduleWriter) error {
 				w.text("---- MODULE Invariant_StrictAttempts ----\n" + header + "VARIABLES invariant_i, invariant_done\nInvariant_Attempts == <<")
-				start := b * stepBatch
+				start := c.Range.Start
 				actions := map[string]string{}
-				for i := start; i < min(start+stepBatch, len(rec.strict)); i++ {
+				for i := start; i < start+c.Range.Count; i++ {
 					if err := ctx.Err(); err != nil {
 						return err
 					}
@@ -353,8 +359,9 @@ func checkStrictAttempts(ctx context.Context, runner Runner, dir, root, header s
 	if cause := ctx.Err(); cause != nil {
 		return nil, "", cause
 	}
-	i, index := stateIndex(res.Trace), b*stepBatch
-	if i >= 1 && i <= stepBatch && index+i-1 < len(rec.strict) {
+	b := window.Start / stepBatch
+	i, index := stateIndex(res.Trace), window.Start
+	if i >= 1 && i <= window.Count && index+i-1 < len(rec.strict) {
 		index += i - 1
 	}
 	a, readErr := s.attempt(rec.attempts[rec.strict[index]])
@@ -373,7 +380,7 @@ func checkStrictAttempts(ctx context.Context, runner Runner, dir, root, header s
 	if err != nil {
 		return nil, "", fmt.Errorf("TLC couldn't check %s (batch %d): %w", description, b+1, err)
 	}
-	if res.Outcome == tlc.Deadlock && i >= 1 && i <= stepBatch && b*stepBatch+i-1 < len(rec.strict) {
+	if res.Outcome == tlc.Deadlock && i >= 1 && i <= window.Count && window.Start+i-1 < len(rec.strict) {
 		return &Step{From: from, To: to}, description + " disagrees with the named model action", nil
 	}
 	return nil, fmt.Sprintf("TLC couldn't check %s (batch %d): %s", description, b+1, res.Message), nil
@@ -425,52 +432,13 @@ func renumber(batch [][2]int) (local []int, pairs []string) {
 // started has. Operational errors survive an earlier semantic failure; only
 // cancellation caused by stopping a later batch is ignored.
 func atOnce(ctx context.Context, n int, check func(ctx context.Context, b int) (tlc.Result, error)) (int, tlc.Result, error) {
-	type completion struct {
-		batch  int
-		result tlc.Result
-		err    error
+	window, result, err := checkRanges(ctx, nil, "batch", n, 1, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return check(ctx, c.Range.Start)
+	})
+	if ctx.Err() != nil {
+		result = tlc.Result{}
 	}
-	limit := min(runtime.GOMAXPROCS(0), maxAtOnce)
-	done := make(chan completion, limit)
-	active := map[int]context.CancelCauseFunc{}
-	next, first, firstErr := 0, n, n
-	found, foundErr := tlc.Result{Outcome: tlc.Passed}, error(nil)
-	for next < first || len(active) > 0 {
-		for ctx.Err() == nil && next < first && len(active) < limit {
-			b := next
-			batchCtx, cancel := context.WithCancelCause(ctx)
-			active[b] = cancel
-			next++
-			go func() {
-				res, err := check(batchCtx, b)
-				if context.Cause(batchCtx) == errLaterBatch && batchCancellationOnly(err) {
-					err = nil
-				}
-				done <- completion{b, res, err}
-			}()
-		}
-		if len(active) == 0 {
-			break
-		}
-		c := <-done
-		active[c.batch](nil)
-		delete(active, c.batch)
-		if c.err != nil && c.batch < firstErr {
-			firstErr, foundErr = c.batch, c.err
-		}
-		if (c.err != nil || c.result.Outcome != tlc.Passed) && c.batch < first {
-			first, found = c.batch, c.result
-			for b, cancel := range active {
-				if b > first {
-					cancel(errLaterBatch)
-				}
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return first, tlc.Result{}, errors.Join(foundErr, err)
-	}
-	return first, found, foundErr
+	return window.Start, result, err
 }
 
 var errLaterBatch = errors.New("an earlier conformance batch failed")
