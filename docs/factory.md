@@ -406,7 +406,7 @@ INVARIANT_PYTEST_ACCEPTANCE_PLATFORM=linux/amd64 \
 go test ./internal/plumbing -run '^TestPytestOffline' -count=1 -timeout 30m
 ```
 
-Use `linux/arm64` instead when that is the image's platform. The opt-in fails on absent Docker, daemon, pinned image, Python or pytest; it never downloads prerequisites. It covers exact independent results across parts/files/methods/parameters, missing API attribution and reachability, refusals, evidence authority, lifetime and builder/final-check behavior. Affected real Python and TLAPS suites remain required in CI. The merger records the new pytest, transport-freshness and import-reachability refinements; this plumbing change cannot write decisions. Recorded grounds include D-0107, D-0108, D-0121, D-0173, D-0281, D-0282, D-0301, D-0305 and the native/Go refinements D-0311, D-0314, D-0316, D-0321, D-0327, D-0334, D-0337, D-0344, D-0346 and D-0348.
+Use `linux/arm64` instead when that is the image's platform. The opt-in fails on absent Docker, daemon, pinned image, Python or pytest; it never downloads prerequisites. It covers exact independent results across parts/files/methods/parameters, missing API attribution and reachability, refusals, evidence authority, lifetime and builder/final-check behavior. Affected real Python and TLAPS suites remain required in CI. [D-0352](../decisions/journal/D-0352.jsonl) records the pytest, transport-freshness and import-reachability refinements. Recorded grounds include D-0107, D-0108, D-0121, D-0173, D-0281, D-0282, D-0301, D-0305 and the native/Go refinements D-0311, D-0314, D-0316, D-0321, D-0327, D-0334, D-0337, D-0344, D-0346 and D-0348.
 
 ## Retries
 
