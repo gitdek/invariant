@@ -98,6 +98,8 @@ func (s *Server) Handler() http.Handler {
 			}
 			h.Set("Cache-Control", "public, max-age=86400, immutable")
 			serveGzip(w, r, "application/json", body)
+		case readerPath.MatchString(p):
+			s.serveReader(w, r)
 		case p == "/" || p == "/index.html":
 			page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
 			h.Set("Cache-Control", "no-cache")

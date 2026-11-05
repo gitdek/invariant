@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -60,6 +61,7 @@ type Server struct {
 	issues  []Issue           // the latest snapshot's issues, which say what each is waiting for
 	holders map[string]string // each repository's lease holder, as last read, whose watcher the page follows
 	graphs  map[string][]byte
+	readers map[string]readerPage
 	drawing map[string]bool
 	failed  map[string]time.Time // graphs TLC couldn't draw, and when
 	pending chan graphJob
@@ -138,17 +140,23 @@ type journalFile struct {
 
 type receiptSet struct {
 	run     github.Run
+	retry   bool                                // reload damaged cached evidence even for the same run
 	reports map[string]*verify.Report           // by project directory name
 	traces  map[string]map[string]tlc.TraceFile // by project directory name, then trace file
+	readers map[string]readerArtifacts
 }
 
 type projectSource struct {
-	dir      string
-	manifest project.Manifest
-	lock     project.Lock
-	key      string            // identifies the model: its module text, spec and bounds
-	files    map[string][]byte // the model's .tla files, for drawing its graph
-	module   string
+	dir           string
+	manifest      project.Manifest
+	lock          project.Lock
+	key           string            // identifies the model: its module text, spec and bounds
+	files         map[string][]byte // the model's .tla files, for drawing its graph
+	module        string
+	view          []byte
+	lockBytes     []byte
+	manifestBytes []byte
+	reader        *ReaderPresentation
 }
 
 type graphJob struct {
@@ -301,28 +309,30 @@ type RunRef struct {
 
 // Project is one project's evidence, from CI's receipt for it.
 type Project struct {
-	Repo        string            `json:"repo"`
-	Dir         string            `json:"dir"`
-	Name        string            `json:"name"`
-	Language    string            `json:"language"`
-	Assurance   string            `json:"assurance"` // proved, tested in every state, tested, or unchecked; empty for model-only
-	Passed      bool              `json:"passed"`
-	States      int64             `json:"states"`
-	Depth       int               `json:"depth"`
-	Visited     int64             `json:"visited,omitempty"` // states the code reached, for conformance and agreement
-	Statements  []Statement       `json:"statements"`
-	Witnesses   []Witness         `json:"witnesses"`
-	Bugs        []Bug             `json:"bugs"`
-	Verifier    string            `json:"verifier,omitempty"`
-	Verified    int               `json:"verified,omitempty"`
-	Unverified  []string          `json:"unverified,omitempty"`
-	Bounds      map[string]string `json:"bounds"`
-	Ratified    *Provenance       `json:"ratified,omitempty"`
-	Decision    string            `json:"decision,omitempty"`
-	Fingerprint string            `json:"fingerprint"`
-	Model       string            `json:"model"`           // shared by projects that check the same model
-	Graph       bool              `json:"graph,omitempty"` // its state graph is ready
-	Factory     bool              `json:"factory"`         // built by the factory from an issue
+	Repo           string              `json:"repo"`
+	Dir            string              `json:"dir"`
+	Name           string              `json:"name"`
+	Language       string              `json:"language"`
+	Assurance      string              `json:"assurance"` // proved, tested in every state, tested, or unchecked; empty for model-only
+	Passed         bool                `json:"passed"`
+	ReceiptMissing bool                `json:"receiptMissing,omitempty"` // no verification results are available
+	States         int64               `json:"states"`
+	Depth          int                 `json:"depth"`
+	Visited        int64               `json:"visited,omitempty"` // states the code reached, for conformance and agreement
+	Statements     []Statement         `json:"statements"`
+	Witnesses      []Witness           `json:"witnesses"`
+	Bugs           []Bug               `json:"bugs"`
+	Verifier       string              `json:"verifier,omitempty"`
+	Verified       int                 `json:"verified,omitempty"`
+	Unverified     []string            `json:"unverified,omitempty"`
+	Bounds         map[string]string   `json:"bounds"`
+	Ratified       *Provenance         `json:"ratified,omitempty"`
+	Decision       string              `json:"decision,omitempty"`
+	Fingerprint    string              `json:"fingerprint"`
+	Model          string              `json:"model"`           // shared by projects that check the same model
+	Graph          bool                `json:"graph,omitempty"` // its state graph is ready
+	Factory        bool                `json:"factory"`         // built by the factory from an issue
+	Reader         *ReaderPresentation `json:"reader,omitempty"`
 }
 
 type Statement struct {
@@ -570,6 +580,21 @@ func (s *Server) loadSnapshot() {
 	if json.Unmarshal(js, &snap) != nil || snap.Repo != s.Repos[0].Name {
 		return
 	}
+	// The snapshot's totals and tiles still count evidence a restart rejects,
+	// and can't be recomputed without the receipts, so serve nothing from it
+	// then: the first read of GitHub publishes the whole page afresh.
+	if s.restoreReaders(&snap) {
+		s.logf("not serving the last snapshot: its cached reader evidence is damaged or obsolete")
+		return
+	}
+	js, err = json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	gz, err = gzipped(js)
+	if err != nil {
+		return
+	}
 	s.resume(snap, gz)
 }
 
@@ -596,7 +621,7 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 	if run == nil {
 		return nil // no gate run on the branch has passed yet, so there are no receipts
 	}
-	if r.src.receipts != nil && r.src.receipts.run.ID == run.ID {
+	if r.src.receipts != nil && r.src.receipts.run.ID == run.ID && !r.src.receipts.retry {
 		return nil
 	}
 	arts, err := r.GitHub.Artifacts(ctx, run.ID)
@@ -609,57 +634,113 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 			id = a.ID
 		}
 	}
-	if id == 0 {
-		// A gate run with no projects to check has nothing to receipt.
-		r.src.receipts, r.src.projects = &receiptSet{run: *run, reports: map[string]*verify.Report{}, traces: map[string]map[string]tlc.TraceFile{}}, nil
-		return nil
+	var set *receiptSet
+	var missing error
+	if id != 0 {
+		raw, err := r.GitHub.Download(ctx, id)
+		if err != nil {
+			return err
+		}
+		set, err = readReceiptZip(raw)
+		if errors.Is(err, errNoReceiptJSON) {
+			set, missing = nil, err
+		} else if err != nil {
+			return err
+		}
 	}
-	raw, err := r.GitHub.Download(ctx, id)
-	if err != nil {
-		return err
-	}
-	set, err := readReceiptZip(raw)
-	if err != nil {
-		return err
-	}
-	set.run = *run
 	projects, err := s.readProjects(ctx, r, run.HeadSHA)
 	if err != nil {
 		return err
 	}
+	if set == nil {
+		if len(projects) == 0 {
+			missing = nil
+		} else {
+			if missing == nil {
+				missing = errors.New("the gate's receipt archive is missing or expired")
+			}
+			if r.src.receipts != nil && len(r.src.projects) != 0 {
+				return missing // retain the last receipt evidence
+			}
+		}
+		// A fresh start still shows the discovered projects and their missing
+		// evidence. A gate with no projects has nothing to receipt or retry.
+		set = &receiptSet{retry: missing != nil, reports: map[string]*verify.Report{}, traces: map[string]map[string]tlc.TraceFile{}}
+	}
+	set.run = *run
+	names := map[string]int{}
+	for _, p := range projects {
+		names[path.Base(p.dir)]++
+	}
+	for i := range projects {
+		p := &projects[i]
+		name := path.Base(p.dir)
+		e := readerEvidence{Format: readerFormat, Repo: r.Name, Dir: p.dir, Commit: run.HeadSHA,
+			Manifest: p.manifest, Lock: p.lock, ManifestBytes: p.manifestBytes, LockBytes: p.lockBytes,
+			Files: p.files, View: p.view, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name]}
+		if missing != nil {
+			e.Problem = "missing_archive"
+		} else if names[name] > 1 {
+			e.Problem = "ambiguous_artifacts"
+		}
+		p.reader = s.keepReader(e)
+	}
 	r.src.receipts, r.src.projects = set, projects
-	return nil
+	return missing
 }
+
+// errNoReceiptJSON is a receipt archive that holds no receipt.json. Like an
+// absent archive, it's missing evidence: the projects still show, and say so.
+var errNoReceiptJSON = errors.New("the receipts hold no receipt.json")
 
 func readReceiptZip(raw []byte) (*receiptSet, error) {
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		return nil, err
 	}
-	set := &receiptSet{reports: map[string]*verify.Report{}, traces: map[string]map[string]tlc.TraceFile{}}
+	set := &receiptSet{reports: map[string]*verify.Report{}, traces: map[string]map[string]tlc.TraceFile{}, readers: map[string]readerArtifacts{}}
+	seen := map[string]bool{}
 	for _, f := range zr.File {
 		parts := strings.Split(strings.Trim(f.Name, "/"), "/")
-		if len(parts) < 2 || f.UncompressedSize64 > 8<<20 {
+		if len(parts) < 2 {
 			continue
+		}
+		if seen[f.Name] {
+			return nil, fmt.Errorf("duplicate receipt archive entry %s", f.Name)
+		}
+		seen[f.Name] = true
+		if f.UncompressedSize64 > 64<<20 {
+			return nil, fmt.Errorf("receipt archive entry too large: %s", f.Name)
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return nil, err
 		}
 		var b bytes.Buffer
-		_, err = b.ReadFrom(rc)
+		_, err = b.ReadFrom(io.LimitReader(rc, (64<<20)+1))
 		rc.Close()
 		if err != nil {
 			return nil, err
+		}
+		if b.Len() > 64<<20 {
+			return nil, fmt.Errorf("receipt archive entry too large: %s", f.Name)
 		}
 		name := parts[0]
 		switch {
 		case len(parts) == 2 && parts[1] == "receipt.json":
 			var r verify.Report
-			if err := json.Unmarshal(b.Bytes(), &r); err != nil {
+			if err := decodeReaderJSON(b.Bytes(), &r); err != nil {
 				return nil, fmt.Errorf("%s: %w", f.Name, err)
 			}
 			set.reports[name] = &r
+		case len(parts) == 2 && (parts[1] == "reader.json" || parts[1] == "reader.svg"):
+			a := set.readers[name]
+			if parts[1] == "reader.json" {
+				a.JSON = b.Bytes()
+			} else {
+				a.SVG = b.Bytes()
+			}
+			set.readers[name] = a
 		case len(parts) == 3 && parts[1] == "traces" && strings.HasSuffix(parts[2], ".json"):
 			var t tlc.TraceFile
 			if err := json.Unmarshal(b.Bytes(), &t); err != nil {
@@ -672,7 +753,7 @@ func readReceiptZip(raw []byte) (*receiptSet, error) {
 		}
 	}
 	if len(set.reports) == 0 {
-		return nil, errors.New("the receipts hold no receipt.json")
+		return nil, errNoReceiptJSON
 	}
 	return set, nil
 }
@@ -686,10 +767,13 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 	}
 	var out []projectSource
 	for _, e := range tree {
-		if e.Type != "blob" || !strings.HasSuffix(e.Path, "/.invariant/invariant.json") {
+		if e.Type != "blob" || (e.Path != ".invariant/invariant.json" && !strings.HasSuffix(e.Path, "/.invariant/invariant.json")) {
 			continue
 		}
 		dir := strings.TrimSuffix(e.Path, "/.invariant/invariant.json")
+		if e.Path == ".invariant/invariant.json" {
+			dir = "."
+		}
 		p := projectSource{dir: dir, files: map[string][]byte{}}
 		raw, err := s.file(ctx, r, sha, e.Path)
 		if err != nil {
@@ -698,11 +782,21 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 		if err := json.Unmarshal(raw, &p.manifest); err != nil {
 			return nil, fmt.Errorf("%s: %w", e.Path, err)
 		}
-		if raw, err = s.file(ctx, r, sha, dir+"/.invariant/ratified.lock"); err != nil {
+		p.manifestBytes = raw
+		if raw, err = s.file(ctx, r, sha, path.Join(dir, ".invariant/ratified.lock")); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &p.lock); err != nil {
 			return nil, fmt.Errorf("%s's lock: %w", dir, err)
+		}
+		p.lockBytes = raw
+		for _, f := range tree {
+			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/view.json") {
+				p.view, err = s.file(ctx, r, sha, f.Path)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		modulePath := path.Join(dir, p.manifest.Module)
 		p.module = strings.TrimSuffix(path.Base(modulePath), ".tla")
@@ -816,6 +910,9 @@ func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("%s at %s: %w", p, sha[:7], err)
 	}
+	if r.src.files == nil {
+		r.src.files = map[string][]byte{}
+	}
 	r.src.files[key] = b
 	return b, nil
 }
@@ -921,14 +1018,17 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			}
 			for _, ps := range r.src.projects {
 				rep := set.reports[path.Base(ps.dir)]
+				p := projectOf(ps, rep)
+				p.Repo = r.Name
+				p.Reader = ps.reader
+				p.Graph = rep != nil && (ready[ps.key] || s.cached(ps.key))
+				snap.Projects = append(snap.Projects, p)
+				rs.Projects++
+				snap.Totals.Projects++
+				rs.Totals.Projects++
 				if rep == nil {
 					continue
 				}
-				p := projectOf(ps, rep)
-				p.Repo = r.Name
-				p.Graph = ready[ps.key] || s.cached(ps.key)
-				snap.Projects = append(snap.Projects, p)
-				rs.Projects++
 				for _, pin := range rep.Pins {
 					pins[pin.Want] = true
 					repoPins[pin.Want] = true
@@ -943,7 +1043,6 @@ func (s *Server) assemble(now time.Time) Snapshot {
 					seen map[string]bool
 				}{{&snap.Totals, models}, {&rs.Totals, repoModels}} {
 					t := c.t
-					t.Projects++
 					t.Proved += p.Verified
 					countLock(t, rep)
 					if c.seen[ps.key] {
@@ -1185,13 +1284,19 @@ func issueRef(repo, primary string, n int) string {
 
 func projectOf(ps projectSource, r *verify.Report) Project {
 	p := Project{
-		Dir: ps.dir, Name: r.Project, Language: ps.manifest.Language, Passed: r.Passed,
-		States: r.Design.DistinctStates, Depth: r.Design.Depth, Bounds: r.Bounds, Decision: r.Decision,
-		Fingerprint: r.Fingerprint, Model: ps.key, Statements: []Statement{}, Witnesses: []Witness{}, Bugs: []Bug{},
+		Dir: ps.dir, Name: ps.manifest.Name, Language: ps.manifest.Language, Bounds: ps.lock.Bounds,
+		Model: ps.key, Statements: []Statement{}, Witnesses: []Witness{}, Bugs: []Bug{},
 	}
 	if p.Language == "" {
 		p.Language = "go"
 	}
+	if r == nil {
+		p.ReceiptMissing = true
+		return p
+	}
+	p.Name, p.Passed = r.Project, r.Passed
+	p.States, p.Depth, p.Bounds = r.Design.DistinctStates, r.Design.Depth, r.Bounds
+	p.Decision, p.Fingerprint = r.Decision, r.Fingerprint
 	for _, pin := range r.Pins {
 		p.Statements = append(p.Statements, Statement{Name: pin.Name, Kind: pin.Kind, Says: pin.Says})
 	}
