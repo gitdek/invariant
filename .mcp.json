@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "invariant-decisions": {
-      "command": "go",
-      "args": ["run", "./cmd/invariant", "mcp", "-decisions", "-write"]
-    }
-  }
-}
