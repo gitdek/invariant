@@ -215,6 +215,7 @@ func Markdown(r *verify.Report) string {
 		qualification = ". Assumptions are assumed / unverified; the component API runs no tools"
 	}
 	fmt.Fprintf(&b, "\n</details>\n\n<sub>Generated %s from %s. Fingerprint %s%s</sub>\n", render.text(r.GeneratedAt), sources, render.literal(r.Fingerprint), qualification)
+	b.WriteString(readerMarkdown(r.Reader))
 	return b.String()
 }
 

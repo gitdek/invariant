@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // Codex runs OpenAI's Codex CLI headlessly, with codex exec, its documented
@@ -255,11 +257,13 @@ func (c Codex) args(job Job, tmp string) ([]string, error) {
 		server := fmt.Sprintf(`mcp_servers.%s={command=%s, args=%s, required=true, default_tools_approval_mode="approve", enabled_tools=%s, startup_timeout_sec=60, tool_timeout_sec=%d}`,
 			codexServer, tomlString(job.GateServer[0]), tomlStrings(job.GateServer[1:]), tomlStrings(tools), timeout)
 		args = append(args, "-c", server)
-		// Codex starts its servers with only the environment it names, so the
-		// run's allowance goes in the server's own (#261).
+		// Codex filters inherited environment, so name both host settings in
+		// the server's configuration, including an empty CPU default.
+		env := []string{toolchain.ContainerCPUsEnv + "=" + tomlString(os.Getenv(toolchain.ContainerCPUsEnv))}
 		if job.allowance != "" {
-			args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.env={%s=%s}", codexServer, ToolAllowanceEnv, tomlString(job.allowance)))
+			env = append(env, ToolAllowanceEnv+"="+tomlString(job.allowance))
 		}
+		args = append(args, "-c", fmt.Sprintf("mcp_servers.%s.env={%s}", codexServer, strings.Join(env, ", ")))
 	}
 	if c.Model != "" {
 		args = append(args, "-m", c.Model)

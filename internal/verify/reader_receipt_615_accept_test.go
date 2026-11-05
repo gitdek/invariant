@@ -1,0 +1,650 @@
+package verify_test
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/receipt"
+	"github.com/gitdek/invariant/internal/statechart"
+	"github.com/gitdek/invariant/internal/tla"
+	"github.com/gitdek/invariant/internal/toolchain"
+	"github.com/gitdek/invariant/internal/verify"
+)
+
+const reader615Model = `---- MODULE Reader615 ----
+EXTENDS Naturals, Helper615
+CONSTANT Limit
+VARIABLE n
+vars == <<n>>
+Init == n = Zero
+Advance == /\ n < Limit /\ n' = n + 1
+Reset == /\ n = Limit /\ n' = Zero
+Poll == UNCHANGED n
+Next == Advance \/ Reset \/ Poll
+Safe == n \in 0..Limit
+Spec == Init /\ [][Next]_vars
+====
+`
+const reader615Include = "---- MODULE Helper615 ----\nZero == 0\n====\n"
+const reader615View = `{
+ "version":1,
+ "state":[
+  {"id":"ready","when":{"eq":[{"var":"n"},"0"]},"label":"Ready"},
+  {"id":"working","when":{"eq":[{"var":"n"},"1"]},"label":"Working"},
+  {"id":"done","when":true,"label":"Done"}],
+ "step":[
+  {"id":"poll","when":{"eq":[{"action":true},"Poll"]},"label":"Internal poll","hide":true},
+  {"id":"advance","when":{"eq":[{"action":true},"Advance"]},"label":"Continue"},
+  {"id":"reset","when":true,"label":"Start again"}]
+}
+`
+
+func reader615Write(t *testing.T, file, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+func init() {
+	if os.Getenv("INVARIANT_READER615_DOCKER") == "1" {
+		os.Exit(reader615Docker(os.Args[1:]))
+	}
+}
+func reader615Tools(t *testing.T) (toolchain.Toolchain, string) {
+	t.Helper()
+	bin := t.TempDir()
+	log := t.TempDir()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nexport INVARIANT_READER615_DOCKER=1\nexec '" + strings.ReplaceAll(exe, "'", "'\"'\"'") + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("INVARIANT_READER615_LOG", log)
+	jar := filepath.Join(t.TempDir(), "tla2tools.jar")
+	reader615Write(t, jar, "fixture TLC jar 615")
+	return toolchain.Toolchain{JavaImage: toolchain.JavaImage, TLCJar: jar, GoImage: toolchain.GoImage, GobraImage: toolchain.GobraImage}, log
+}
+func reader615Docker(args []string) int {
+	fail := func(s string) int { fmt.Fprintln(os.Stderr, "reader615 Docker double: "+s); return 91 }
+	if len(args) == 0 {
+		return fail("no command")
+	}
+	switch args[0] {
+	case "info":
+		fmt.Println(`{"NCPU":2,"MemTotal":4294967296}`)
+		return 0
+	case "image", "inspect", "pull", "rm":
+		return 0
+	case "run":
+	default:
+		return fail("unexpected command " + args[0])
+	}
+	joinedArgs := " " + strings.Join(args, " ") + " "
+	if strings.Contains(joinedArgs, " "+toolchain.GobraImage+" ") {
+		if !strings.Contains(joinedArgs, " --overflow ") || !strings.Contains(joinedArgs, " --network none ") {
+			return fail("Gobra sandbox changed")
+		}
+		fmt.Println("Gobra found 0 errors")
+		return 0
+	}
+	if strings.Contains(joinedArgs, " "+toolchain.GoImage+" ") {
+		if !strings.Contains(joinedArgs, " --network none ") || !strings.Contains(joinedArgs, "go vet ./...") || !strings.Contains(joinedArgs, "TestInvariantAgreement") {
+			return fail("Go sandbox changed")
+		}
+		n := os.Getenv("INVARIANT_READER615_CODE_STATES")
+		if n == "" {
+			n = "3"
+		}
+		status := "0"
+		if os.Getenv("INVARIANT_READER615_BUILD_FAIL") == "1" {
+			status = "1"
+		}
+		fmt.Printf("@@invariant vet=0\n@@invariant test=%s\ninvariant-agreement states=%s depth=%s\n@@invariant agree=0\n", status, n, n)
+		return 0
+	}
+	var work, cfg, dump, name string
+	for i, a := range args {
+		if i+1 >= len(args) {
+			continue
+		}
+		switch a {
+		case "-v", "--volume":
+			if strings.HasSuffix(args[i+1], ":/work") {
+				work = strings.TrimSuffix(args[i+1], ":/work")
+			}
+		case "-config":
+			cfg = args[i+1]
+		case "-dump":
+			if i+2 < len(args) && args[i+1] == "dot,actionlabels" {
+				dump = args[i+2]
+			}
+		case "--name":
+			name = args[i+1]
+		}
+	}
+	joined := " " + strings.Join(args, " ") + " "
+	if work == "" || cfg == "" || !strings.Contains(joined, " tlc2.TLC ") || !strings.Contains(joined, " --network none ") || !strings.Contains(joined, " -workers 1 ") || strings.Contains(joined, " -deadlock ") {
+		return fail("lost TLC invocation contract: " + joined)
+	}
+	local := func(p string) string { return filepath.Join(work, strings.TrimPrefix(p, "/work/")) }
+	config, err := os.ReadFile(local(cfg))
+	if err != nil {
+		return fail(err.Error())
+	}
+	module := strings.TrimSuffix(args[len(args)-1], ".tla")
+	src, err := os.ReadFile(filepath.Join(work, module+".tla"))
+	if err != nil {
+		return fail(err.Error())
+	}
+	main, err := os.ReadFile(filepath.Join(work, "Reader615.tla"))
+	if err != nil {
+		return fail("main model absent: " + err.Error())
+	}
+	helper, err := os.ReadFile(filepath.Join(work, "Helper615.tla"))
+	if err != nil {
+		return fail("include absent: " + err.Error())
+	}
+	match := regexp.MustCompile(`(?m)^CONSTANT Limit = ([0-9]+)$`).FindStringSubmatch(string(config))
+	if len(match) != 2 {
+		return fail("bounds absent: " + string(config))
+	}
+	limit, _ := strconv.Atoi(match[1])
+	start := 0
+	if strings.Contains(string(main), "Init == n = 1") {
+		start = 1
+	}
+	n := limit + 1 - start
+	if n < 1 || n > 502 {
+		return fail("unexpected fixture size")
+	}
+	record, _ := json.Marshal(map[string]string{"module": module, "config": string(config), "main": string(main), "include": string(helper), "dump": dump, "args": joined})
+	if err := os.WriteFile(filepath.Join(os.Getenv("INVARIANT_READER615_LOG"), name+".json"), record, 0600); err != nil {
+		return fail(err.Error())
+	}
+	if module == "Reader615" && dump == "" {
+		if original := os.Getenv("INVARIANT_READER615_MUTATE"); original != "" {
+			if err := os.WriteFile(filepath.Join(original, ".invariant/view.json"), []byte(strings.ReplaceAll(reader615View, "Ready", "Changed during run")), 0600); err != nil {
+				return fail(err.Error())
+			}
+			if err := os.WriteFile(filepath.Join(original, ".invariant/specs/Helper615.tla"), []byte(reader615Include+"\n\\* edited during run\n"), 0600); err != nil {
+				return fail(err.Error())
+			}
+		}
+	}
+	initial, steps := 1, 2*n
+	if dump != "" {
+		if os.Getenv("INVARIANT_READER615_GRAPH_FAIL") == "1" && module == "Reader615" {
+			return fail("requested reader graph failure")
+		}
+		if os.Getenv("INVARIANT_READER615_REPLAY_FAIL") == "1" && module != "Reader615" {
+			return fail("requested reader replay failure")
+		}
+		var b strings.Builder
+		b.WriteString("strict digraph DiskGraph {\nsubgraph cluster_graph {\n")
+		replay := module != "Reader615"
+		var idVar, rulesVar string
+		if replay {
+			m := regexp.MustCompile(`(?m)^VARIABLES ([A-Za-z0-9_]+), ([A-Za-z0-9_]+)$`).FindStringSubmatch(string(src))
+			if len(m) != 3 {
+				return fail("missing rule replay variables")
+			}
+			idVar, rulesVar = m[1], m[2]
+			initial, steps = n, n
+			if !strings.Contains(string(src), "Safe |-> Safe") || !strings.Contains(string(src), "UNCHANGED") {
+				return fail("invariant replay does not evaluate Safe")
+			}
+		}
+		quote := func(s string) string {
+			return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s) + `"`
+		}
+		for i := 0; i < n; i++ {
+			label := fmt.Sprintf("n = %d", i+start)
+			style := ""
+			if i == 0 || replay {
+				style = ",style=filled"
+			}
+			if replay {
+				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", i+start, idVar, i+1, rulesVar)
+			}
+			fmt.Fprintf(&b, "%d [label=%s%s];\n", i+1, quote(label), style)
+		}
+		for i := 0; i < n; i++ {
+			if replay {
+				fmt.Fprintf(&b, "%d -> %d [label=\"Stay\"];\n", i+1, i+1)
+				continue
+			}
+			action := "Advance"
+			if i == n-1 {
+				action = "Reset"
+			}
+			fmt.Fprintf(&b, "%d -> %d [label=\"%s\"];\n%d -> %d [label=\"Poll\"];\n", i+1, (i+1)%n+1, action, i+1, i+1)
+		}
+		b.WriteString("}\n}\n")
+		if err := os.WriteFile(local(dump)+".dot", []byte(b.String()), 0600); err != nil {
+			return fail(err.Error())
+		}
+	}
+	frame := func(code int, body string) {
+		fmt.Printf("@!@!@STARTMSG %d:0 @!@!@\n%s\n@!@!@ENDMSG %d @!@!@\n", code, body, code)
+	}
+	frame(2262, "TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)")
+	frame(2190, fmt.Sprintf("Finished computing initial states: %d distinct states generated at 2026-11-05 00:00:00.", initial))
+	frame(2193, "Model checking completed. No error has been found.")
+	frame(2199, fmt.Sprintf("%d states generated, %d distinct states found, 0 states left on queue.", initial+steps, n))
+	frame(2194, fmt.Sprintf("The depth of the complete state graph search is %d.", n))
+	frame(2186, "Finished in 10ms at (2026-11-05 00:00:00)")
+	return 0
+}
+func reader615Calls(t *testing.T, dir string) []map[string]string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]string
+	for _, file := range files {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// Receipt wire contract. Input digests describe the exact bytes used, not paths
+// on a build machine; the separate reader fingerprint also covers bounds,
+// statements, tool/configuration provenance and the computed artifact.
+type reader615Record struct {
+	Version     int    `json:"version"`
+	Fingerprint string `json:"fingerprint"`
+	Inputs      struct {
+		Module   string            `json:"module"`
+		Model    string            `json:"model_sha256"`
+		View     string            `json:"view_sha256"`
+		Includes map[string]string `json:"includes"`
+	} `json:"inputs"`
+	Chart      *statechart.Result `json:"chart,omitempty"`
+	Limitation *struct {
+		Code   string            `json:"code"`
+		Actual int               `json:"actual"`
+		Limit  int               `json:"limit"`
+		Source statechart.Source `json:"source"`
+	} `json:"limitation,omitempty"`
+	Unavailable *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"unavailable,omitempty"`
+}
+
+func reader615JSON(t *testing.T, value any) []byte {
+	t.Helper()
+	b, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+func reader615Hash(b []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(b)) }
+func reader615RecordOf(t *testing.T, r *verify.Report) reader615Record {
+	t.Helper()
+	var wire struct {
+		Reader *reader615Record `json:"reader"`
+	}
+	if err := json.Unmarshal(reader615JSON(t, r), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Reader == nil {
+		t.Fatal("verification receipt has no reader record")
+	}
+	got := *wire.Reader
+	if got.Version != 1 {
+		t.Fatalf("reader version = %d", got.Version)
+	}
+	alternatives := 0
+	if got.Chart != nil {
+		alternatives++
+	}
+	if got.Limitation != nil {
+		alternatives++
+	}
+	if got.Unavailable != nil {
+		alternatives++
+	}
+	if alternatives != 1 {
+		t.Fatalf("reader must have exactly one outcome: %+v", got)
+	}
+	if got.Unavailable == nil && !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(got.Fingerprint) {
+		t.Fatalf("missing reader identity: %+v", got)
+	}
+	return got
+}
+func reader615Without(t *testing.T, r *verify.Report) verify.Report {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(reader615JSON(t, r), &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, "reader")
+	var out verify.Report
+	if err := json.Unmarshal(reader615JSON(t, m), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+func reader615Project(t *testing.T, limit int) string {
+	t.Helper()
+	dir := t.TempDir()
+	m := project.Manifest{Name: "receipt reader", Module: ".invariant/specs/Reader615.tla", Code: "machine", Language: "go"}
+	lock := project.Lock{Decision: "receipt-fixture", Bounds: map[string]string{"Limit": strconv.Itoa(limit)}, Statements: []project.Statement{
+		{Name: "Spec", Kind: project.Spec, Says: "Advance, reset or poll."},
+		{Name: "Safe", Kind: project.Invariant, Says: "The count stays within its limit.\nKeep <literal> | `words` & spaces."},
+	}}
+	for i := range lock.Statements {
+		h, err := tla.PinHash(reader615Model, lock.Statements[i].Name, project.Model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lock.Statements[i].SHA256 = h
+	}
+	for name, text := range map[string]string{
+		".invariant/invariant.json":      string(reader615JSON(t, m)),
+		".invariant/ratified.lock":       string(reader615JSON(t, lock)),
+		".invariant/request.md":          "Build a small lifecycle.",
+		".invariant/view.json":           reader615View,
+		".invariant/specs/Reader615.tla": reader615Model,
+		".invariant/specs/Helper615.tla": reader615Include,
+		// This derived file is deliberately invalid. Verification must ignore it.
+		".invariant/reader.json": `{"chart":"stale proposal must never be reused"}`,
+		"go.mod":                 "module example/receipt\n\ngo 1.27.1\n",
+		"machine/machine.go":     "package machine\ntype State int\nfunc Init() State { return 0 }\nfunc Successors(s State) []State { return []State{(s+1)%3} }\n",
+	} {
+		reader615Write(t, filepath.Join(dir, name), text)
+	}
+	return dir
+}
+func reader615Run(t *testing.T, dir string, tc toolchain.Toolchain, model bool) *verify.Report {
+	t.Helper()
+	var r *verify.Report
+	var err error
+	if model {
+		r, err = verify.RunModel(t.Context(), dir, tc)
+	} else {
+		r, err = verify.Run(t.Context(), dir, "", tc)
+	}
+	if err != nil || r == nil {
+		t.Fatalf("gate returned no usable receipt: %v %+v", err, r)
+	}
+	return r
+}
+func reader615Inputs(t *testing.T, got reader615Record, model, view, include string) {
+	t.Helper()
+	if got.Inputs.Module != "Reader615" || got.Inputs.Model != reader615Hash([]byte(model)) || got.Inputs.View != reader615Hash([]byte(view)) || !reflect.DeepEqual(got.Inputs.Includes, map[string]string{"Helper615.tla": reader615Hash([]byte(include))}) {
+		t.Fatalf("reader source hashes do not identify exact checked bytes: %+v", got.Inputs)
+	}
+}
+func reader615Chart(t *testing.T, got reader615Record, states int) *statechart.Result {
+	t.Helper()
+	if got.Chart == nil {
+		t.Fatalf("ordinary graph lost its chart: %+v", got)
+	}
+	c := got.Chart
+	if c.Report.Counts["tlc_states"] != int64(states) || c.Report.Counts["tlc_steps"] != int64(2*states) || c.Report.Counts["tlc_generated_states"] != int64(2*states+1) || c.Report.Counts["hidden_steps"] != int64(states) || c.Report.Counts["shown_steps"] != int64(states) {
+		t.Fatalf("lost graph accounting: %+v", c.Report.Counts)
+	}
+	members, hidden := 0, 0
+	for _, s := range c.States {
+		members += len(s.Members)
+	}
+	for _, a := range c.Report.Hidden {
+		hidden += len(a.Members)
+		if !slices.Contains(a.HidingRules, "poll") {
+			t.Fatal("lost hiding rule")
+		}
+	}
+	if members != states || hidden != states || len(c.Initial) != 1 {
+		t.Fatalf("partial chart: members=%d hidden=%d initial=%v", members, hidden, c.Initial)
+	}
+	source := c.Report.Source
+	if source.Module != "Reader615" || source.Config.Constants["Limit"] == "" || source.Tool.Image != toolchain.JavaImage || source.Tool.JarSHA256 != strings.TrimPrefix(reader615Hash([]byte("fixture TLC jar 615")), "sha256:") || source.TLC == "" {
+		t.Fatalf("lost tool/bounds provenance: %+v", source)
+	}
+	return c
+}
+
+func TestReader615VerifiedChart(t *testing.T) {
+	tc, log := reader615Tools(t)
+	dir := reader615Project(t, 2)
+	r := reader615Run(t, dir, tc, false)
+	if !r.Passed {
+		t.Fatalf("fixture gate failed: %+v", r)
+	}
+	got := reader615RecordOf(t, r)
+	c := reader615Chart(t, got, 3)
+	reader615Inputs(t, got, reader615Model, reader615View, reader615Include)
+	p, err := project.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.Report.Rules, p.Lock.Statements) {
+		t.Fatal("chart changed the locked says words or pins")
+	}
+	for _, s := range c.States {
+		want := "Reset"
+		if s.Label == "Done" {
+			want = "Advance"
+		}
+		if !reflect.DeepEqual(s.UnavailableActions, []string{want}) {
+			t.Fatalf("unavailable actions at %s = %v", s.Label, s.UnavailableActions)
+		}
+	}
+	plain := reader615Without(t, r)
+	if verify.Fingerprint(*r) != verify.Fingerprint(plain) || r.Fingerprint != verify.Fingerprint(plain) || r.Claim() != plain.Claim() || r.CodeAssurance() != plain.CodeAssurance() {
+		t.Fatal("reader changed verification evidence or assurance")
+	}
+	var round verify.Report
+	if err := json.Unmarshal(reader615JSON(t, r), &round); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, reader615RecordOf(t, &round)) || receipt.Markdown(r) != receipt.Markdown(&round) {
+		t.Fatal("reader changed in receipt JSON round trip")
+	}
+	dumps, replays := 0, 0
+	for _, call := range reader615Calls(t, log) {
+		if call["dump"] != "" {
+			if call["module"] == "Reader615" {
+				dumps++
+			} else {
+				replays++
+			}
+		}
+	}
+	if dumps == 0 || replays == 0 {
+		t.Fatal("receipt was not computed through complete TLC graph and invariant replay")
+	}
+}
+
+func reader615ChangedModel() string {
+	s := strings.Replace(reader615Model, "Init == n = Zero", "Init == n = 1", 1)
+	return strings.Replace(s, "n' = Zero", "n' = 1", 1)
+}
+func TestReader615RecomputesChangedInputs(t *testing.T) {
+	tc, _ := reader615Tools(t)
+	dir := reader615Project(t, 2)
+	original := reader615RecordOf(t, reader615Run(t, dir, tc, true))
+	reader615Chart(t, original, 3)
+	changes := []struct {
+		path, text string
+		states     int
+	}{
+		{".invariant/specs/Reader615.tla", reader615ChangedModel(), 2},
+		{".invariant/view.json", strings.ReplaceAll(reader615View, "Working", "Building <&>"), 2},
+		{".invariant/specs/Helper615.tla", reader615Include + "\n\\* changed include bytes\n", 2},
+	}
+	previous := original.Fingerprint
+	for _, change := range changes {
+		reader615Write(t, filepath.Join(dir, change.path), change.text)
+		r := reader615Run(t, dir, tc, true)
+		if !r.Passed {
+			t.Fatalf("unpinned edit failed gate: %+v", r)
+		}
+		got := reader615RecordOf(t, r)
+		reader615Chart(t, got, change.states)
+		if got.Fingerprint == previous {
+			t.Fatalf("reader identity survived %s change", change.path)
+		}
+		previous = got.Fingerprint
+	}
+	final := reader615RecordOf(t, reader615Run(t, dir, tc, true))
+	if final.Fingerprint != previous {
+		t.Fatal("identical inputs changed reader identity")
+	}
+	reader615Inputs(t, final, reader615ChangedModel(), changes[1].text, changes[2].text)
+	for _, s := range final.Chart.States {
+		if s.Label == "Ready" || s.Label == "Working" {
+			t.Fatal("reused old chart labels or model states")
+		}
+	}
+}
+
+func TestReader615CapacityAndDiagnostics(t *testing.T) {
+	tc, _ := reader615Tools(t)
+	for _, count := range []int{500, 501} {
+		dir := reader615Project(t, count-1)
+		r := reader615Run(t, dir, tc, true)
+		if !r.Passed {
+			t.Fatal("chart capacity changed the gate verdict")
+		}
+		got := reader615RecordOf(t, r)
+		if count == 500 {
+			reader615Chart(t, got, count)
+			continue
+		}
+		if got.Limitation == nil || got.Limitation.Code != "too_large" || got.Limitation.Actual != 501 || got.Limitation.Limit != 500 || got.Limitation.Source.Config.Constants["Limit"] != "500" || got.Limitation.Source.Tool.JarSHA256 == "" {
+			t.Fatalf("missing explicit size/provenance report: %+v", got)
+		}
+		md := receipt.Markdown(r)
+		for _, word := range []string{"501", "500", "too_large"} {
+			if !strings.Contains(md, word) {
+				t.Fatalf("size report omits %s", word)
+			}
+		}
+		if strings.Contains(md, "stateDiagram-v2") {
+			t.Fatal("oversize result invented a diagram")
+		}
+	}
+	for _, mode := range []string{"invalid_view", "graph", "replay", "svg", "failed_build"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := reader615Project(t, 2)
+			switch mode {
+			case "invalid_view":
+				reader615Write(t, filepath.Join(dir, ".invariant/view.json"), `{"version":1,"state":[]}`)
+			case "graph":
+				t.Setenv("INVARIANT_READER615_GRAPH_FAIL", "1")
+			case "replay":
+				t.Setenv("INVARIANT_READER615_REPLAY_FAIL", "1")
+			case "svg":
+				reader615Write(t, filepath.Join(dir, ".invariant/view.json"), strings.ReplaceAll(reader615View, "Ready", `Ready\u0001`))
+			case "failed_build":
+				t.Setenv("INVARIANT_READER615_BUILD_FAIL", "1")
+			}
+			r := reader615Run(t, dir, tc, false)
+			got := reader615RecordOf(t, r)
+			if r.Passed != (mode != "failed_build") {
+				t.Fatalf("chart handling changed verdict: %+v", r)
+			}
+			if mode == "failed_build" {
+				reader615Chart(t, got, 3)
+				if !strings.Contains(receipt.Markdown(r), "❌ Fail") {
+					t.Fatal("chart upgraded failure")
+				}
+				return
+			}
+			if got.Unavailable == nil || got.Unavailable.Code == "" || got.Unavailable.Message == "" {
+				t.Fatalf("reader failure lacks separate diagnostic: %+v", got)
+			}
+			if mode == "invalid_view" && got.Unavailable.Code != "invalid_view" {
+				t.Fatalf("lost actionable refusal: %+v", got)
+			}
+			md := strings.ToLower(receipt.Markdown(r))
+			if !strings.Contains(md, "reader") || strings.Contains(md, "statediagram-v2") || !strings.Contains(md, strings.ToLower(got.Unavailable.Code)) {
+				t.Fatalf("reader diagnostic omitted or partial chart published: %s", md)
+			}
+		})
+	}
+}
+
+func TestReader615MissingViewAndSnapshot(t *testing.T) {
+	tc, log := reader615Tools(t)
+	t.Run("no saved view", func(t *testing.T) {
+		dir := reader615Project(t, 2)
+		if err := os.Remove(filepath.Join(dir, ".invariant/view.json")); err != nil {
+			t.Fatal(err)
+		}
+		before := len(reader615Calls(t, log))
+		r := reader615Run(t, dir, tc, true)
+		got := reader615RecordOf(t, r)
+		if !r.Passed || got.Unavailable == nil || got.Unavailable.Code != "missing_view" {
+			t.Fatalf("legacy project not explicitly chartless: %+v", got)
+		}
+		for _, call := range reader615Calls(t, log)[before:] {
+			if call["dump"] != "" {
+				t.Fatal("invented a view from raw TLA labels")
+			}
+		}
+	})
+	t.Run("one snapshot", func(t *testing.T) {
+		dir := reader615Project(t, 2)
+		t.Setenv("INVARIANT_READER615_MUTATE", dir)
+		r := reader615Run(t, dir, tc, true)
+		got := reader615RecordOf(t, r)
+		reader615Chart(t, got, 3)
+		reader615Inputs(t, got, reader615Model, reader615View, reader615Include)
+	})
+	for _, hard := range []bool{false, true} {
+		t.Run(fmt.Sprintf("view link %v", hard), func(t *testing.T) {
+			dir := reader615Project(t, 2)
+			view := filepath.Join(dir, ".invariant/view.json")
+			if err := os.Remove(view); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), "not-project-data")
+			reader615Write(t, target, strings.ReplaceAll(reader615View, "Ready", "outside sentinel"))
+			var err error
+			if hard {
+				err = os.Link(target, view)
+			} else {
+				err = os.Symlink(target, view)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := reader615Run(t, dir, tc, true)
+			got := reader615RecordOf(t, r)
+			if !r.Passed || got.Unavailable == nil || strings.Contains(string(reader615JSON(t, got)), "outside sentinel") {
+				t.Fatal("reader followed an unsafe view or changed assurance")
+			}
+		})
+	}
+}
