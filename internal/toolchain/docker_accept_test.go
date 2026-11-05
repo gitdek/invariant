@@ -28,9 +28,10 @@ func runName(t *testing.T, args []string) string {
 }
 
 func TestDockerRunIsNamedAndKeepsItsArguments(t *testing.T) {
+	t.Setenv(ContainerCPUsEnv, "")
 	cmd := Docker(context.Background(), "run", "--rm", "--network", "none", "-v", "/a:/b", "img", "sh", "-c", "echo hi")
 	runName(t, cmd.Args)
-	want := []string{"--rm", "--network", "none", "-v", "/a:/b", "img", "sh", "-c", "echo hi"}
+	want := []string{"--cpus", "4", "--rm", "--network", "none", "-v", "/a:/b", "img", "sh", "-c", "echo hi"}
 	want = append(dockerProxyOverrides("--env"), want...)
 	if got := cmd.Args[4:]; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("run's other arguments = %q, want %q", got, want)

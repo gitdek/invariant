@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // ClaudeCode runs the official Claude Code CLI headlessly (claude -p), on the
@@ -73,10 +75,11 @@ func (c ClaudeCode) args(job Job) ([]string, error) {
 			"--no-session-persistence",
 		}, c.effort(job)...), nil
 	}
-	server := map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:]}
+	env := map[string]string{toolchain.ContainerCPUsEnv: os.Getenv(toolchain.ContainerCPUsEnv)}
 	if job.allowance != "" {
-		server["env"] = map[string]string{ToolAllowanceEnv: job.allowance}
+		env[ToolAllowanceEnv] = job.allowance
 	}
+	server := map[string]any{"command": job.GateServer[0], "args": job.GateServer[1:], "env": env}
 	config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"invariant": server}})
 	if err != nil {
 		return nil, err

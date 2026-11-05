@@ -41,6 +41,17 @@ type DockerCommand struct {
 // client and after it exits. Only acquisition of digest-pinned images retries;
 // builds and workloads execute once, and normally completed runs are left alone.
 func Docker(ctx context.Context, args ...string) *DockerCommand {
+	if len(args) > 0 && (args[0] == "run" || args[0] == "create") {
+		cpus, err := ContainerCPUs()
+		if err != nil {
+			cmd := exec.CommandContext(ctx, "docker", args...)
+			cmd.Err = err
+			return &DockerCommand{Cmd: cmd, ctx: ctx}
+		}
+		if _, _, _, explicit := dockerOptions(args[1:]); !explicit {
+			args = append([]string{args[0], "--cpus", cpus}, args[1:]...)
+		}
+	}
 	// Explicit empty values override client config.json proxy defaults without
 	// changing the user's configuration, credentials or daemon selection.
 	if len(args) > 0 && (args[0] == "run" || args[0] == "build") {
@@ -86,6 +97,9 @@ func (c *DockerCommand) client(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 func (c *DockerCommand) Start() error {
+	if c.Err != nil {
+		return c.Err
+	}
 	if c.Process != nil {
 		return errors.New("exec: already started")
 	}
@@ -289,6 +303,11 @@ func (c *DockerCommand) acquire(args []string) error {
 // dockerImage stops at the image operand, never at an option's value or a
 // workload argument. Unknown split options are left to Docker to interpret.
 func dockerImage(args []string) (image, platform, pull string) {
+	image, platform, pull, _ = dockerOptions(args)
+	return
+}
+
+func dockerOptions(args []string) (image, platform, pull string, cpuLimit bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -298,7 +317,8 @@ func dockerImage(args []string) (image, platform, pull string) {
 			return
 		}
 		if !strings.HasPrefix(arg, "-") {
-			return arg, platform, pull
+			image = arg
+			return
 		}
 		key, value, equal := strings.Cut(arg, "=")
 		if !equal {
@@ -341,6 +361,10 @@ func dockerImage(args []string) (image, platform, pull string) {
 		}
 		if key == "--pull" {
 			pull = value
+		}
+		switch key {
+		case "--cpus", "--cpu-quota", "--cpuset-cpus", "--cpu-count", "--cpu-percent":
+			cpuLimit = true
 		}
 	}
 	return

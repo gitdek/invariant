@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/internal/regular"
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // DockerDependencyRunner keeps installed dependencies in immutable image
@@ -580,11 +581,15 @@ func copyDependencyBytes(ctx context.Context, dst io.Writer, src io.Reader, size
 }
 
 func createDependencyContainer(ctx context.Context, q DependencyRequest, script string) error {
+	cpus, err := toolchain.ContainerCPUs()
+	if err != nil {
+		return err
+	}
 	network := "none"
 	if q.Network {
 		network = "bridge"
 	}
-	args := []string{"create", "--name", q.Token, "--init", "--network", network, "--pull", "never",
+	args := []string{"create", "--name", q.Token, "--cpus", cpus, "--init", "--network", network, "--pull", "never",
 		"--platform", q.Platform, "--hostname", "localhost", "--memory", "4g", "--pids-limit", "1024",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "0:0",
 		"--entrypoint", "/usr/bin/env", "--workdir", path.Join(dependencyWork, q.Directory)}
@@ -599,7 +604,7 @@ func createDependencyContainer(ctx context.Context, q DependencyRequest, script 
 	}
 	args = append(args, "/bin/sh", "-c", script, "invariant-dependencies")
 	args = append(args, q.Argv...)
-	_, err := dependencyDocker(ctx, args...)
+	_, err = dependencyDocker(ctx, args...)
 	return err
 }
 
@@ -655,6 +660,9 @@ func validateDependencyRequest(q DependencyRequest, install bool) error {
 
 // Persistent checks open an environment before supplying any command.
 func validateDependencyContainer(q DependencyRequest, install bool) error {
+	if _, err := toolchain.ContainerCPUs(); err != nil {
+		return err
+	}
 	if !dependencyContainer.MatchString(q.Token) || !dependencyPlatform.MatchString(q.Platform) || !dependencyRelative(q.Directory, true) || q.SourceDir == "" || !q.Init || q.MemoryBytes != 4<<30 || q.PidsLimit != 1024 {
 		return errors.New("invalid dependency container request")
 	}
