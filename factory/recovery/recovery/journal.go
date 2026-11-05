@@ -47,7 +47,7 @@ func NewFollowJournal(identity FollowIdentity, capacity int) (j FollowJournal) {
 // @ decreases
 func appendSnapshot(snapshots []FollowSnapshot, snapshot FollowSnapshot) (next []FollowSnapshot) {
 	next = make([]FollowSnapshot, len(snapshots)+1)
-	copy(next, snapshots /*@, 1/2 @*/)
+	copy(next, snapshots /*@, perm(1/2) @*/)
 	next[len(snapshots)] = snapshot
 	return next
 }
