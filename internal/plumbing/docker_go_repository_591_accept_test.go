@@ -258,26 +258,26 @@ func TestDockerGoRepositoryOutcomes591(t *testing.T) {
 			docker591CheckStaging(t, h.runner)
 		})
 	}
-	// Existing admission remains closed even though explicit execution now works.
-	for _, mode := range []string{"no adapter", "planning"} {
+	// Public admission and the default Go adapter use the prepared transport.
+	for _, mode := range []string{"default adapter", "planning"} {
 		t.Run(mode, func(t *testing.T) {
 			h := newDocker591Repository(t, b, []docker591Case{docker591Control()}, false)
 			h.value(7)
 			if mode == "planning" {
 				c, err := Check(t.Context(), n503Draft(t, h.plan), h.root, h.sandbox)
-				if err != nil || c == nil || c.Problem == "" {
-					t.Fatalf("configured planning enabled: %v %+v", err, c)
+				if err != nil || c == nil || c.Problem != "" {
+					t.Fatalf("configured planning lost base failure: %v %+v", err, c)
 				}
 			} else {
 				h.sandbox.Repository.Adapters = nil
 				r, _, _ := h.run(t.Context(), false)
-				if r.Passed() {
-					t.Fatal("default adapter enabled")
+				if !r.Passed() {
+					t.Fatal("default Go adapter lost runtime evidence")
 				}
 			}
 			opened, _ := h.runner.requests()
-			if len(opened) != 0 {
-				t.Fatal("admission refusal prepared a check environment")
+			if len(opened) != 1 {
+				t.Fatal("admission did not use one prepared check environment")
 			}
 		})
 	}

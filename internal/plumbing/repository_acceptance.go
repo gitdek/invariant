@@ -18,7 +18,7 @@ import (
 
 // RepositoryAcceptanceAdapter is selected by the host, never by a candidate.
 // Select validates the captured invocation form and narrows its package scope.
-// There are no default adapters; discovery is an optional second boundary.
+// Go is enabled by default; discovery is an optional second boundary.
 type RepositoryAcceptanceAdapter interface {
 	Select(context.Context, repository.Part, Test) (RepositoryAcceptanceSelection, error)
 }
@@ -90,13 +90,23 @@ func cloneRepositoryPlan(plan *Plan) *Plan {
 	return &p
 }
 
+func (s Sandbox) repositoryAdapter(framework string) RepositoryAcceptanceAdapter {
+	if adapter := s.Repository.Adapters[framework]; adapter != nil {
+		return adapter
+	}
+	if framework == "go" {
+		return GoRepositoryAcceptanceAdapter{}
+	}
+	return nil
+}
+
 func (s Sandbox) selectRepositoryAcceptance(ctx context.Context, plan *Plan) ([]RepositoryAcceptanceSelection, error) {
 	selections := make([]RepositoryAcceptanceSelection, len(plan.Tests))
 	for i, test := range plan.Tests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		adapter := s.Repository.Adapters[test.Framework]
+		adapter := s.repositoryAdapter(test.Framework)
 		if adapter == nil {
 			return nil, fmt.Errorf("individual acceptance execution adapter is not available for %s", test.Identity())
 		}
@@ -184,8 +194,7 @@ func runRepositoryGoAcceptance(ctx context.Context, part repository.Part, in Rep
 	return evidence, out, err
 }
 
-// checkRepositoryBase is the lower-level failure-evidence path. Public Check
-// still refuses configured proposals until production adapters are admitted.
+// checkRepositoryBase requires one eligible failure for every planned identity.
 func (s Sandbox) checkRepositoryBase(ctx context.Context, root string, plan *Plan) (*Checked, error) {
 	run, err := s.runRepositoryMode(ctx, root, plan, true)
 	c := &Checked{Plan: plan, Run: run}
@@ -196,9 +205,20 @@ func (s Sandbox) checkRepositoryBase(ctx context.Context, root string, plan *Pla
 	if run.DeadlineExceeded || run.TimedOut || run.Interrupted {
 		problems = append(problems, "acceptance checks exhausted their allowance or were interrupted")
 	}
-	for _, result := range run.TestResults {
-		if result.Phase == "accept" && (result.Status != "failed" || result.Kind != "test" && result.Kind != "compile") {
-			problems = append(problems, fmt.Sprintf("%s did not complete with attributable failure: %s (%s)", result.identity(), result.Status, result.Reason))
+	for _, test := range plan.Tests {
+		var matches []TestResult
+		for _, result := range run.TestResults {
+			if result.Phase == "accept" && result.identity() == test.Identity() {
+				matches = append(matches, result)
+			}
+		}
+		if len(matches) != 1 {
+			problems = append(problems, fmt.Sprintf("%s needs exactly one completed failure, received %d results", test.Identity(), len(matches)))
+			continue
+		}
+		result := matches[0]
+		if result.Status != "failed" || result.Kind != "test" && result.Kind != "compile" {
+			problems = append(problems, fmt.Sprintf("%s did not complete with attributable failure: %s (%s)", test.Identity(), result.Status, result.Reason))
 		}
 	}
 	c.Problem = strings.Join(problems, "; ")

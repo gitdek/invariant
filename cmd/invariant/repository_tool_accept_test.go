@@ -75,9 +75,10 @@ func TestRepositoryTestToolUsesConfiguredSandbox(t *testing.T) {
 		}
 	}
 	part := repository.Part{Name: "api", Directory: "api", Language: "go", Image: "registry.example/go@sha256:" + strings.Repeat("a", 64), Inputs: []string{}, Lockfiles: []string{}, Commands: map[string]repository.Command{}}
-	for _, phase := range []string{"install", "test_one"} {
+	for _, phase := range []string{"install"} {
 		part.Commands[phase] = repository.Command{NotApplicable: "Not required by this fixture."}
 	}
+	part.Commands["test_one"] = repository.Command{Argv: []string{"go", "test", "./...", "-run", "{test}"}}
 	for _, phase := range []string{"format", "lint", "build", "test"} {
 		part.Commands[phase] = repository.Command{Argv: []string{"fixture-check", phase}}
 	}
@@ -89,12 +90,8 @@ func TestRepositoryTestToolUsesConfiguredSandbox(t *testing.T) {
 	write(root, repository.Path, string(data))
 	write(root, "api/main.go", "package fixture\n")
 	const accept = "package fixture\n\nimport \"testing\"\n\nfunc TestToolNative(t *testing.T) {}\n"
-	plan := plumbing.Plan{Name: "configured tool", Summary: "Run the captured checks on candidate files.", Files: []string{"api/main.go"}, Tests: []plumbing.Test{{Name: "TestToolNative", File: "api/tool_native_accept_test.go", Says: "Individual evidence is added in the next issue."}}, Sources: map[string]string{"api/tool_native_accept_test.go": accept}}
+	plan := plumbing.Plan{Name: "configured tool", Summary: "Run the captured checks on candidate files.", Files: []string{"api/main.go"}, Tests: []plumbing.Test{{Name: "TestToolNative", Part: "api", Framework: "go", Selector: "TestToolNative", File: "api/tool_native_accept_test.go", Says: "A command failure prevents individual execution."}}, Sources: map[string]string{"api/tool_native_accept_test.go": accept}}
 	if err := plan.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	lock := plumbing.Lock{Plan: plan, Ratified: plumbing.Ratification{By: "fixture", Issue: 484, Comment: "https://github.com/o/r/issues/484#issuecomment-1", Proposal: plan.Hash()}}
-	if err := lock.Write(root); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"init", "-q"}, {"add", "--all"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "fixture"}} {
@@ -106,6 +103,27 @@ func TestRepositoryTestToolUsesConfiguredSandbox(t *testing.T) {
 	}
 	snapshot, err := repository.Load(context.Background(), root, "HEAD")
 	if err != nil {
+		t.Fatal(err)
+	}
+	draft := t.TempDir()
+	data, err = json.Marshal(struct {
+		Name    string          `json:"name"`
+		Summary string          `json:"summary"`
+		Files   []string        `json:"files"`
+		Tests   []plumbing.Test `json:"tests"`
+	}{plan.Name, plan.Summary, plan.Files, plan.Tests})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(draft, "plan.json", string(data))
+	write(draft, "tests/api/tool_native_accept_test.go", accept)
+	bound, err := plumbing.ReadRepositoryDraft(context.Background(), draft, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan = *bound
+	lock := plumbing.Lock{Plan: plan, Ratified: plumbing.Ratification{By: "fixture", Issue: 484, Comment: "https://github.com/o/r/issues/484#issuecomment-1", Proposal: plan.Hash()}}
+	if err := lock.Write(root); err != nil {
 		t.Fatal(err)
 	}
 	if err := plumbing.CopyCheckout(context.Background(), root, candidate); err != nil {

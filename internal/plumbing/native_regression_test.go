@@ -118,10 +118,11 @@ func TestConfiguredResultsRequireEachExactAcceptanceIdentity(t *testing.T) {
 	r.Accepted[first.Identity()], r.Accepted[second.Identity()] = true, true
 	r.TestResults = r.TestResults[:1]
 	r.TestResults[0].Status = "passed"
+	r.TestResults[0].Kind = "test"
 	if r.Passed() {
 		t.Fatal("another file's suite or legacy boolean supplied individual evidence")
 	}
-	r.TestResults = append(r.TestResults, TestResult{Name: second.Name, Part: second.Part, Framework: second.Framework, File: second.File, Selector: second.Selector, Phase: "accept", Status: "passed"})
+	r.TestResults = append(r.TestResults, TestResult{Name: second.Name, Part: second.Part, Framework: second.Framework, File: second.File, Selector: second.Selector, Phase: "accept", Status: "passed", Kind: "test"})
 	if !r.Passed() {
 		t.Fatal("complete exact individual evidence was refused")
 	}

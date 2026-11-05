@@ -109,24 +109,30 @@ func TestGoCompilerAuthorityAndFreshness604(t *testing.T) {
 	}
 	build.finish()
 
-	for _, mode := range []string{"missing adapter", "wrong digest", "configured planning"} {
+	for _, mode := range []string{"default adapter", "wrong digest", "configured planning"} {
 		t.Run(mode, func(t *testing.T) {
 			g := newRepositoryFixture582(t, cache, []repositoryCase582{compilerCase604("nested")}, false, nil, nil)
 			switch mode {
-			case "missing adapter":
+			case "default adapter":
 				g.sandbox.Repository.Adapters = nil
 			case "wrong digest":
 				g.plan.Execution.Digest = dependencyHash([]byte("replacement authority"))
 			case "configured planning":
 				checked, err := Check(context.Background(), n503Draft(t, g.plan), g.root, g.sandbox)
-				if err == nil && (checked == nil || checked.Problem == "") {
-					t.Fatal("this step enabled planning admission")
+				if err != nil || checked == nil || checked.Problem != "" {
+					t.Fatal("public planning lost attributable compiler failure")
 				}
+				compilerRecord604(t, checked.Run, g.plan, g.plan.Tests[0], "Future604")
+				return
 			}
 			if mode != "configured planning" {
 				r, _, _ := g.run(t.Context(), false)
 				if r.Passed() {
 					t.Fatal("unadmitted authority qualified")
+				}
+				if mode == "default adapter" {
+					compilerRecord604(t, r, g.plan, g.plan.Tests[0], "Future604")
+					return
 				}
 			}
 			if len(g.runner.observed) != 0 {

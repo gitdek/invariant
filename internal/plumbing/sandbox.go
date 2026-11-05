@@ -48,6 +48,9 @@ type Sandbox struct {
 	// Repository is explicit execution policy supplied by the trusted caller.
 	// Nil retains Invariant's built-in Go selection and scheduling.
 	Repository *RepositoryChecks
+	// stage is set only by builder registration, which retains Original and
+	// the plan. Direct callers supply an already admitted candidate tree.
+	stage bool
 	// Cache is a build cache kept between one build's runs, so each run
 	// doesn't compile everything again. Empty, each run starts cold.
 	Cache string
@@ -125,8 +128,10 @@ func (r Result) Passed() bool {
 	for _, test := range r.TestResults {
 		// Built-in Go runs keep their rule: a passing acceptance test may
 		// skip a subtest. Configured acceptance needs every record passed.
-		if r.CommandResults != nil && test.Phase == "accept" && test.Status != "passed" {
-			return false
+		if r.CommandResults != nil && test.Phase == "accept" {
+			if _, expected := r.Accepted[test.identity()]; !expected || test.Status != "passed" || test.Kind != "test" {
+				return false
+			}
 		}
 		if test.Status != "passed" && test.Status != "skipped" {
 			return false
@@ -135,18 +140,21 @@ func (r Result) Passed() bool {
 	return true
 }
 
-// missingEvidence is every configured acceptance identity without an
-// individual pass, including those no result names at all.
+// missingEvidence is every configured acceptance identity without a
+// unique runtime pass, including those no result names at all. Accepted's
+// keys retain the expected identities; its booleans never supply evidence.
 func (r Result) missingEvidence() []string {
+	counts := map[string]int{}
 	passed := map[string]bool{}
 	for _, result := range r.TestResults {
-		if result.Phase == "accept" && result.Status == "passed" {
-			passed[result.identity()] = true
+		if result.Phase == "accept" {
+			counts[result.identity()]++
+			passed[result.identity()] = result.Status == "passed" && result.Kind == "test"
 		}
 	}
 	var out []string
 	for identity := range r.Accepted {
-		if !passed[identity] {
+		if counts[identity] != 1 || !passed[identity] {
 			out = append(out, identity)
 		}
 	}
