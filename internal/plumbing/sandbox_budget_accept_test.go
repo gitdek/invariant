@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,7 +143,11 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 					Cache: filepath.Join(t.TempDir(), "cold-cache"), Original: root,
 				}
 			}
-			t.Logf("running %d concurrent cold-cache containers, each with 8 global queue workers, 4 GiB and 1024 PIDs: aggregate caps %d GiB and %d PIDs; sandbox deadline %s, outer budget %s", wave.runs, wave.runs*4, wave.runs*1024, plumbing.SandboxVerifyTimeout, budget)
+			cpus, err := toolchain.ContainerCPUs()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("running %d concurrent cold-cache containers, each with %s CPUs, 8 global queue workers, 4 GiB and 1024 PIDs: aggregate memory/process caps %d GiB and %d PIDs; sandbox deadline %s, outer budget %s", wave.runs, cpus, wave.runs*4, wave.runs*1024, plumbing.SandboxVerifyTimeout, budget)
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			ready := make(chan struct{}, wave.runs)
 			start := make(chan struct{})
@@ -294,20 +299,47 @@ func sandboxBudgetCheckResources(t *testing.T, run int, output string) {
 		return
 	}
 	var usage struct {
-		MemoryPeak  int64  `json:"memory_peak"`
-		MemoryLimit int64  `json:"memory_limit"`
-		PIDsPeak    int64  `json:"pids_peak"`
-		PIDsLimit   int64  `json:"pids_limit"`
-		OOMs        int64  `json:"oom"`
-		OOMKills    int64  `json:"oom_kill"`
-		PIDsDenied  int64  `json:"pids_denied"`
-		Error       string `json:"error"`
+		MemoryPeak  int64             `json:"memory_peak"`
+		MemoryLimit int64             `json:"memory_limit"`
+		PIDsPeak    int64             `json:"pids_peak"`
+		PIDsLimit   int64             `json:"pids_limit"`
+		OOMs        int64             `json:"oom"`
+		OOMKills    int64             `json:"oom_kill"`
+		PIDsDenied  int64             `json:"pids_denied"`
+		Error       string            `json:"error"`
+		CPUMax      string            `json:"cpu_max"`
+		CPUStat     map[string]uint64 `json:"cpu_stat"`
+		Elapsed     float64           `json:"elapsed_seconds"`
 	}
 	if err := json.Unmarshal([]byte(reports[0]), &usage); err != nil || usage.Error != "" {
 		t.Errorf("real sandbox %d could not measure resource peaks: %v; %s", run, err, reports[0])
 		return
 	}
 	t.Logf("real sandbox %d: peak memory %d / %d bytes, peak processes %d / %d, OOM events %d, OOM kills %d, denied processes %d", run, usage.MemoryPeak, usage.MemoryLimit, usage.PIDsPeak, usage.PIDsLimit, usage.OOMs, usage.OOMKills, usage.PIDsDenied)
+	t.Logf("real sandbox %d: elapsed %.3fs, cpu.max %q, cpu.stat %v (usage and throttling times in microseconds)", run, usage.Elapsed, usage.CPUMax, usage.CPUStat)
+	cpus, err := toolchain.ContainerCPUs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := strconv.ParseFloat(cpus, 64)
+	fields := strings.Fields(usage.CPUMax)
+	if len(fields) != 2 {
+		t.Errorf("real sandbox %d has malformed cpu.max: %q", run, usage.CPUMax)
+	} else {
+		quota, quotaErr := strconv.ParseInt(fields[0], 10, 64)
+		period, periodErr := strconv.ParseInt(fields[1], 10, 64)
+		if quotaErr != nil || periodErr != nil || quota <= 0 || period <= 0 || math.Abs(float64(quota)-want*float64(period)) > 1 {
+			t.Errorf("real sandbox %d cpu.max = %q, want %s CPUs", run, usage.CPUMax, cpus)
+		}
+	}
+	for _, key := range []string{"usage_usec", "user_usec", "system_usec", "nr_periods", "nr_throttled", "throttled_usec"} {
+		if _, ok := usage.CPUStat[key]; !ok {
+			t.Errorf("real sandbox %d cpu.stat lacks %s", run, key)
+		}
+	}
+	if usage.Elapsed <= 0 || usage.CPUStat["usage_usec"] == 0 {
+		t.Errorf("real sandbox %d has no measured elapsed time or CPU usage: %+v", run, usage)
+	}
 	if usage.MemoryLimit != 4*1024*1024*1024 || usage.PIDsLimit != 1024 {
 		t.Errorf("real sandbox %d did not enforce 4 GiB and 1024 PIDs: %+v", run, usage)
 	}
@@ -337,6 +369,7 @@ try:
     pids = events("pids.events")
     report = dict(memory_peak=counter("memory.peak"), memory_limit=counter("memory.max"),
                   pids_peak=counter("pids.peak"), pids_limit=counter("pids.max"),
+                  cpu_max=(root / "cpu.max").read_text().strip(), cpu_stat=events("cpu.stat"),
                   oom=memory["oom"], oom_kill=memory["oom_kill"], pids_denied=pids["max"])
 except Exception as error:
     report = dict(error=str(error))
@@ -351,6 +384,11 @@ def save(cid, report):
         unknown = cid
         cid = "observer-error-" + uuid.uuid4().hex
         report = dict(error="cannot identify observed container: " + repr(unknown), detail=report)
+    for registration in root.glob("run-*.json"):
+        run = json.loads(registration.read_text())
+        if cid == (run.get("cid") or read_cid(run["cidfile"])):
+            report["elapsed_seconds"] = time.monotonic() - run["started"]
+            break
     path = reports / (cid + ".json")
     with (reports / (cid + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -361,7 +399,10 @@ def save(cid, report):
                     return # An already recorded natural exit can race rm.
                 for key in ("memory_peak", "pids_peak", "oom", "oom_kill", "pids_denied"):
                     report[key] = max(prior[key], report[key])
-                if any(prior[key] != report[key] for key in ("memory_limit", "pids_limit")):
+                for key, value in prior["cpu_stat"].items():
+                    report["cpu_stat"][key] = max(value, report["cpu_stat"].get(key, 0))
+                report["elapsed_seconds"] = max(prior["elapsed_seconds"], report["elapsed_seconds"])
+                if any(prior[key] != report[key] for key in ("memory_limit", "pids_limit", "cpu_max")):
                     report["error"] = "container limits changed between observations"
         atomic(path, report)
 def read_cid(path):
@@ -410,7 +451,7 @@ if args and args[0] == "run":
         cidfile = str(root / ("cid-" + uuid.uuid4().hex))
         args[1:1] = ["--cidfile", cidfile]
     registration = root / ("run-" + uuid.uuid4().hex + ".json")
-    identity = dict(cidfile=cidfile, name=value("--name"))
+    identity = dict(cidfile=cidfile, name=value("--name"), started=time.monotonic())
     atomic(registration, identity)
     args[-1] = "sh -c " + shlex.quote(args[-1]) + "\ns397_status=$?\npython3 -c " + shlex.quote(probe) + '\nexit "$s397_status"\n'
     process = subprocess.Popen([real, *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
