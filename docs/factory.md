@@ -289,7 +289,7 @@ go test ./internal/plumbing -run '^TestDockerGoOfflineReal591$' -count=1 -timeou
 
 The default daemon-free control is mandatory even without the opt-in. The real-image cases check base failure, production correction, an exact child, skip, abrupt exit and forged output through the same production transport. Default adapters, configured planning admission and external plumbing stay disabled; legacy Go is unchanged.
 
-The recorded grounds are [D-0311](../decisions/journal/D-0311.jsonl), [D-0314](../decisions/journal/D-0314.jsonl), [D-0316](../decisions/journal/D-0316.jsonl), [D-0321](../decisions/journal/D-0321.jsonl), [D-0327](../decisions/journal/D-0327.jsonl) and [D-0334](../decisions/journal/D-0334.jsonl). Recording this Docker transport refinement and verification requiring unavailable Docker or network access remain merger work. Affected real Python and TLAPS suites remain CI requirements.
+The recorded grounds are [D-0311](../decisions/journal/D-0311.jsonl), [D-0314](../decisions/journal/D-0314.jsonl), [D-0316](../decisions/journal/D-0316.jsonl), [D-0321](../decisions/journal/D-0321.jsonl), [D-0327](../decisions/journal/D-0327.jsonl) and [D-0334](../decisions/journal/D-0334.jsonl). [D-0344](../decisions/journal/D-0344.jsonl) records this Docker transport refinement, refining [D-0337](../decisions/journal/D-0337.jsonl). On 2026-11-05 the offline opt-in passed against a prepared pinned Go image on linux/arm64. Affected real Python and TLAPS suites remain CI requirements.
 
 ## Retries
 
