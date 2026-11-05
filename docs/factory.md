@@ -10,7 +10,7 @@ Charts are drawn for models of up to 500 reachable states. Above that capacity, 
 
 The chart shows initial states and computed arrows, with literal labels, exact rule wording, unavailable actions, hidden steps and separate TLC and chart counts. The size note keeps the statement or amendment table, existing checks and ratification instructions. A separate fingerprint binds all reader inputs, pinned tools and chart or limitation contents without changing statement hashes, locks or proof claims. Exact views, includes and evidence survive markers, recovery, previous drafts and amendments, and ratification writes `.invariant/view.json`, `.invariant/reader.json` and the sibling includes into the project. Older stored proposals remain readable, but missing or stale reader evidence refuses new publication, including after recovery. An oversized modeled comment is explicitly refused instead of truncating it while offering ratification. Publication also checks that the saved marker can be read back within its existing 4 MiB expanded limit, even when compression makes it fit in the comment. A refusal carries no oversized proposal payload. Plumbing and plans of issues remain chart-free.
 
-This delivers [#603's ratified plan](../.invariant/plans/issue-603.json). Its merger records the proposal-view, artifact-binding and publication policy, including the nonblocking size limitation, in the decision journal.
+This delivers [#603's ratified plan](../.invariant/plans/issue-603.json). [D-0345](../decisions/journal/D-0345.jsonl) records its proposal-view, artifact-binding and publication policy, including the nonblocking size limitation.
 
 ## Plumbing builds
 
