@@ -1,6 +1,6 @@
 # Reader statecharts and bounded graph data
 
-Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. The dashboard retains its existing display and trace behavior.
+Invariant's `internal/statechart` package computes reader charts from the complete bounded TLC graph, a lock and TLC-evaluated rule evidence. [#586's ratified plan](../.invariant/plans/issue-586.json) delivers this computation. The graph foundation in `internal/tlc` comes from [#575's ratified plan](../.invariant/plans/issue-575.json). [#603's ratified plan](../.invariant/plans/issue-603.json) connects that evidence to modeled proposals, revisions and amendments. [#608's ratified plan](../.invariant/plans/issue-608.json) adds standalone SVG rendering through the shared Go API. The dashboard retains its existing display and trace behavior.
 
 ## Modeled proposals
 
@@ -25,6 +25,42 @@ Every concrete step occurrence belongs to one `Arrow`, partitioned by `(from cha
 `unavailable_actions` lists original model action names that occur elsewhere in the reachable graph but at no member of that chart state. It is computed before hiding: an action enabled at even one member is available, including when all its occurrences are hidden.
 
 The current limit is **500 reachable concrete states**, inclusive, regardless of how many chart states or arrows result. Larger graphs return `too_large` with `Actual` and `Limit`. The target of **20 visible arrows** is only advice (`arrow_target` and `over_arrow_target`); exceeding it never truncates evidence.
+
+## Standalone SVG
+
+`(*statechart.Result).SVG() (string, error)` renders a complete checked ordinary chart and its report as self-contained SVG XML. Call it on the result of `Compute`:
+
+```go
+chart, err := statechart.Compute(ctx, input, viewJSON)
+if err != nil {
+    return err
+}
+svg, err := chart.SVG()
+if err != nil {
+    return err
+}
+// The caller can save or serve svg as image/svg+xml.
+```
+
+Layout and XML serialization run entirely in Go, without host fonts, a browser, rendering executables, network access or external resources. Repeated and concurrent calls on the same input return identical bytes and never mutate any part of the result. Callers must not mutate it during rendering. The renderer checks structure and representability; the caller still owns the checked evidence, snapshot association, ratification and tool pins. Rendering a hand-built result does not authenticate it.
+
+Every chart state, initial and visible arrow is drawn, including all self-loops, parallel arrows and reverse arrows. States form a vertical column with rectangular outlines. Each arrow incidence has a separate connection point, each outgoing label has a reserved row, and vertical routes use lanes beyond the label area. Lanes are reused only for disjoint routes. Nodes and label rows grow with their text; explicit newlines become positioned SVG lines, and long lines remain complete. This favors a complete, inspectable drawing over compactness: large charts and long labels can produce large images. The viewBox contains the entire drawing and report. The existing 500-concrete-state capacity applies, with no additional arrow cutoff or sampling; the 20-arrow target remains visible advice.
+
+The report displays bounded-model qualifications, constants, verbatim locked wording and pins, state membership and initial membership, violated invariant rules, unavailable model actions, every visible and hidden concrete step occurrence (including duplicates), hiding view-rule IDs, independent counts and their exact meanings, source configuration and tool provenance. Temporal counterexamples include their ordered states, values and loop or stutter as trace facts; they do not become state violations. Neither the image nor the report adds a proof claim. `metadata#statechart-data` contains the entire `Result` as inert JSON text, preserving all fields and occurrences.
+
+The inspectable XML contract is:
+
+| Element | Meaning |
+| :-- | :-- |
+| `g[data-state-id]` | One per checked state, with one rectangular outline, its exact label in `title`, and visible text |
+| `g[data-initial]` | One per initial chart ID, with a directed path to its state |
+| `g[data-from][data-to][data-label]` | One per visible arrow, with its exact label in `title`, visible text and a directed path |
+| `metadata#statechart-data` | Full checked result as JSON, XML-escaped as text |
+| Root `title` and `desc` | Meaningful accessible text, linked by `aria-labelledby` and `aria-describedby`; the root has `role="img"` |
+
+Element IDs are generated independently of reader labels and chart IDs. Text and attributes are XML-escaped, including markup-like text, quotes and URLs. Styling uses presentation attributes; arrowheads refer only to a local marker. There are no scripts, event handlers, stylesheets, links, foreign objects, embedded resources, DTDs or resource-loading attributes. Whitespace in rule wording and labels is preserved. Coordinates, ordering, colors, fonts and routing are implementation choices, not a pinned serialization format.
+
+Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Rendering adds no publication path: modeled proposals retain the existing Mermaid and Markdown behavior, and neither receipts nor the dashboard use this API.
 
 ## JSON view version 1
 
@@ -129,6 +165,12 @@ These results describe the explored model within the supplied bounds, with TLC's
 
 ## Tests
 
+SVG acceptance and regression tests inspect parsed XML for complete topology, actual endpoints, distinct routes, label spacing, literal multiline and Unicode text, accessible names, the full metadata snapshot, visible qualifications and local resource references. They render a 500-state, 999-arrow computed chart and exercise repeated and concurrent calls with no executables on PATH. Refusal cases include inconsistent structure and XML-inexpressible text in both drawn and metadata-only data. Factory acceptance checks compare the SVG's states, initials and labeled directed arrows with the unchanged published Mermaid:
+
+```sh
+go test -timeout 20m ./internal/statechart ./internal/factory
+```
+
 Reader acceptance and regression tests exercise total and typed mapping, complete concrete accounting, every hiding refusal, invariant signatures, temporal isolation, deterministic replay and concurrent evaluation, exact rule wording, detached snapshots, size boundaries and the advisory arrow target. Fake replay tests validate pins, generated TLA+ requests, complete identity/value joins, boolean evidence, cancellation and cleanup without changing the graph runner's fake contract. Value regressions cover intervals, reordered model-value sets and nested mappings, while refusing changed tuple order, types, string contents, interval endpoints and malformed values:
 
 ```sh
@@ -173,3 +215,5 @@ This work rests on [D-0016](../decisions/journal/D-0016.jsonl), [D-0049](../deci
 [D-0343](../decisions/journal/D-0343.jsonl) records #586's JSON-view and rule-evidence policy, refining [D-0335](../decisions/journal/D-0335.jsonl).
 
 Proposal identity and amendments also rest on [D-0034](../decisions/journal/D-0034.jsonl) and [D-0045](../decisions/journal/D-0045.jsonl). [D-0345](../decisions/journal/D-0345.jsonl) records #603's proposal-view, artifact-binding and publication policy, including the nonblocking size limitation, refining [D-0343](../decisions/journal/D-0343.jsonl).
+
+Standalone SVG implements #608's ratified plan on the graph and reader contracts in D-0335 and D-0343, under D-0105, D-0122 and D-0294. The merger records the new native-rendering decision; this plumbing build cannot write `decisions/`.
