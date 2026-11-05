@@ -78,7 +78,7 @@ func (a *drafter503) Run(ctx context.Context, job synth.Job) (synth.Usage, error
 		return synth.Usage{}, fmt.Errorf("check process used a different execution contract")
 	}
 	if a.checked.Problem == "" {
-		return synth.Usage{}, fmt.Errorf("unsupported native execution became proposable")
+		return synth.Usage{}, fmt.Errorf("unsupported pytest wrapper became proposable")
 	}
 	return synth.Usage{}, nil
 }
@@ -89,7 +89,9 @@ func TestConfiguredPlanningCarriesCapturedAuthorityThroughChecksAndRevisions(t *
 	for _, phase := range []string{"install", "format", "lint", "build", "test"} {
 		commands[phase] = repository.Command{NotApplicable: "No execution in this fixture."}
 	}
-	commands["test_one"] = repository.Command{Argv: []string{"pytest", "{test}"}}
+	// Pytest itself is supported; an opaque wrapper must still refuse before
+	// preparation while preserving captured authority through both checks.
+	commands["test_one"] = repository.Command{Argv: []string{"native-runner", "pytest", "{test}"}}
 	config := repository.Config{Version: 1, Parts: []repository.Part{{Name: "app", Directory: "app", Language: "python", Image: "python@sha256:" + strings.Repeat("a", 64), Lockfiles: []string{}, Inputs: []string{}, Commands: commands}}, AgentRules: []string{}, CurrentState: []string{}, TrustedPaths: []string{}, SharedPaths: []repository.SharedPath{}}
 	data, _ := json.Marshal(config)
 	write503(t, root, repository.Path, string(data))
@@ -135,6 +137,6 @@ func TestConfiguredPlanningCarriesCapturedAuthorityThroughChecksAndRevisions(t *
 		t.Fatal(err)
 	}
 	if saved.Proposal != nil || saved.Problem == "" {
-		t.Fatal("saved final result requalified unsupported execution")
+		t.Fatal("saved final result requalified an unsupported pytest wrapper")
 	}
 }

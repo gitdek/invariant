@@ -27,6 +27,9 @@ import (
 //go:embed docker_process_helper.go.txt
 var dockerProcessHelper []byte
 
+//go:embed docker_process_helper.py
+var dockerPythonProcessHelper []byte
+
 const dockerProcessProtocol = "invariant-process-v1\n"
 const dockerProcessFrameLimit = 64 << 10
 
@@ -96,8 +99,9 @@ func (e *dockerRepositoryChecks) Prepare(ctx context.Context, spec RepositoryPro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off" {
-		return nil, errors.New("Docker process transport requires the prepared offline Go environment")
+	python := e.request.Env["PIP_NO_INDEX"] == "1"
+	if !python && (e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off") {
+		return nil, errors.New("Docker process transport requires a prepared offline Go or Python environment")
 	}
 	if len(spec.Argv) == 0 || spec.Argv[0] == "" || strings.HasPrefix(spec.Argv[0], "-") {
 		return nil, errors.New("process preparation needs an executable")
@@ -141,7 +145,9 @@ done
 	if out, err := e.Run(ctx, []string{"/bin/sh", "-c", guard, "invariant-directory", directory}); err != nil {
 		return nil, fmt.Errorf("unsafe process directory: %w: %s", err, out)
 	}
-	// Compilation is lazy and serialized independently of command ownership.
+	// Every invocation receives authoritative host bytes at a new private path.
+	// A workload can replace even a root-owned running helper by renaming it.
+	// Never reuse or copy that helper, including for later selectors in a part.
 	e.prepareMu.Lock()
 	defer e.prepareMu.Unlock()
 	e.mu.Lock()
@@ -150,8 +156,15 @@ done
 	if closed {
 		return nil, errors.New("repository check environment is closed")
 	}
-	if e.helper == "" {
-		private := "transport-" + rand.Text()
+	private := "transport-" + rand.Text()
+	var helper string
+	if python {
+		var err error
+		helper, err = e.Stage(ctx, private+"/transport.py", dockerPythonProcessHelper)
+		if err != nil {
+			return nil, err
+		}
+	} else {
 		source, err := e.Stage(ctx, private+"/main.go", dockerProcessHelper)
 		if err != nil {
 			return nil, err
@@ -163,10 +176,10 @@ done
 		if out, err := e.Run(ctx, []string{"go", "build", "-o", binary, source}); err != nil {
 			return nil, fmt.Errorf("compile Docker process transport: %w: %s", err, out)
 		}
-		e.helper = binary
+		helper = binary
 	}
 	spec.Argv, spec.Env = slices.Clone(spec.Argv), maps.Clone(spec.Env)
-	p := &dockerPreparedProcess{owner: e, spec: spec, helper: e.helper}
+	p := &dockerPreparedProcess{owner: e, spec: spec, helper: helper, python: python}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -180,6 +193,9 @@ done
 // literal selection and source in this part; never read candidate policy or
 // replace its invocation ID. Shared repository orchestration uses the same run.
 func (e *dockerRepositoryChecks) RunAcceptance(ctx context.Context, in RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error) {
+	if in.Binding.Framework == "pytest" {
+		return e.runPytestAcceptance(ctx, in)
+	}
 	in = cloneGoInvocation(in)
 	fail := func(err error) (RepositoryAcceptanceEvidence, []byte, error) {
 		return RepositoryAcceptanceEvidence{ExitCode: -1, Records: []RepositoryAcceptanceRecord{{Binding: in.Binding, Kind: "setup", Status: "failed", Reason: err.Error()}}}, nil, err
@@ -410,6 +426,7 @@ type dockerPreparedProcess struct {
 	owner        *dockerRepositoryChecks
 	spec         RepositoryProcessSpec
 	helper       string
+	python       bool
 	process      *dockerRepositoryProcess
 	closed, used bool
 	err          error
@@ -427,6 +444,9 @@ func (p *dockerPreparedProcess) Start(ctx context.Context) (RepositoryProcess, e
 	p.used = true
 	args := p.owner.execArgs(p.spec.Directory, p.spec.Env)
 	args = append([]string{"exec", "--interactive"}, args[1:]...)
+	if p.python {
+		args = append(args, "python3", "-I", "-B")
+	}
 	args = append(args, p.helper, p.spec.EventEnv)
 	args = append(args, p.spec.Argv...)
 	process := &dockerRepositoryProcess{done: make(chan struct{}), invalid: make(chan struct{}), output: RepositoryProcessOutput{ExitCode: -1}}
