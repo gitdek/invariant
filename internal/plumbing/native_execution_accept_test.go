@@ -14,8 +14,8 @@ import (
 )
 
 func TestNativeExecutionRefusesBeforePreparationAndKeepsIdentity(t *testing.T) {
-	// Go is supported, but this fixture's native-runner wrapper is not.
-	// The other frameworks still have no production adapter.
+	// Go and pytest are supported, but this fixture's native-runner wrapper
+	// is not. TypeScript frameworks still have no production adapter.
 	for _, framework := range []string{"go", "pytest", "vitest", "jest"} {
 		t.Run(framework, func(t *testing.T) {
 			language, file, selector, src := "typescript", "app/ready.test.ts", "outer handles $() ; [case one]", "// exact native source\n"

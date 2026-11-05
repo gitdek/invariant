@@ -27,6 +27,9 @@ import (
 //go:embed docker_process_helper.go.txt
 var dockerProcessHelper []byte
 
+//go:embed docker_process_helper.py
+var dockerPythonProcessHelper []byte
+
 const dockerProcessProtocol = "invariant-process-v1\n"
 const dockerProcessFrameLimit = 64 << 10
 
@@ -96,8 +99,9 @@ func (e *dockerRepositoryChecks) Prepare(ctx context.Context, spec RepositoryPro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off" {
-		return nil, errors.New("Docker process transport requires the prepared offline Go environment")
+	python := e.request.Env["PIP_NO_INDEX"] == "1"
+	if !python && (e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off") {
+		return nil, errors.New("Docker process transport requires a prepared offline Go or Python environment")
 	}
 	if len(spec.Argv) == 0 || spec.Argv[0] == "" || strings.HasPrefix(spec.Argv[0], "-") {
 		return nil, errors.New("process preparation needs an executable")
@@ -150,6 +154,13 @@ done
 	if closed {
 		return nil, errors.New("repository check environment is closed")
 	}
+	if e.helper == "" && python {
+		helper, err := e.Stage(ctx, "transport-"+rand.Text()+"/transport.py", dockerPythonProcessHelper)
+		if err != nil {
+			return nil, err
+		}
+		e.helper = helper
+	}
 	if e.helper == "" {
 		private := "transport-" + rand.Text()
 		source, err := e.Stage(ctx, private+"/main.go", dockerProcessHelper)
@@ -192,12 +203,16 @@ func (e *dockerRepositoryChecks) RunAcceptance(ctx context.Context, in Repositor
 	if e.used == nil {
 		e.used = map[string]bool{}
 	}
-	if e.closed || e.used[b.InvocationID] || !nativeText(b.InvocationID) || b.Framework != "go" {
+	python := e.request.Env["PIP_NO_INDEX"] == "1"
+	if e.closed || e.used[b.InvocationID] || !nativeText(b.InvocationID) || (python && b.Framework != "pytest") || (!python && b.Framework != "go") {
 		e.mu.Unlock()
-		return fail(errors.New("Docker Go acceptance is closed, consumed or invalid"))
+		return fail(errors.New("Docker acceptance is closed, consumed or invalid"))
 	}
 	e.used[b.InvocationID] = true
 	e.mu.Unlock()
+	if python {
+		return e.runPytestAcceptance(ctx, in)
+	}
 	command := slices.Clone(in.Argv)
 	for i := 2; i < len(command); i++ {
 		if command[i] == "-run" && i+1 < len(command) {
@@ -427,6 +442,9 @@ func (p *dockerPreparedProcess) Start(ctx context.Context) (RepositoryProcess, e
 	p.used = true
 	args := p.owner.execArgs(p.spec.Directory, p.spec.Env)
 	args = append([]string{"exec", "--interactive"}, args[1:]...)
+	if p.owner.request.Env["PIP_NO_INDEX"] == "1" {
+		args = append(args, "python3", "-I")
+	}
 	args = append(args, p.helper, p.spec.EventEnv)
 	args = append(args, p.spec.Argv...)
 	process := &dockerRepositoryProcess{done: make(chan struct{}), invalid: make(chan struct{}), output: RepositoryProcessOutput{ExitCode: -1}}
