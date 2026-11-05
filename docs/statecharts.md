@@ -14,6 +14,33 @@ The view, includes and snapshot survive `formalization.json`, compressed proposa
 
 Supported proposals render literal-safe Mermaid `stateDiagram-v2`: aliases are generated independently of labels, every displayed arrow comes from the computed chart and every initial chart state has an initial arrow. Tables retain exact rule wording, per-state unavailable actions, all hidden step occurrences and separately defined TLC and chart counts. Mermaid and Markdown escaping preserves literal labels and wording, including text that resembles markup. Above capacity the proposal keeps its statement or amendment table, existing checks and ratification instructions, with a short note that TLC reached the recorded number of states at the checked bounds, more than the 500 charts are drawn for. Plumbing proposals and plans of issues have no chart. A complete modeled comment that exceeds the publication limit is explicitly refused for human review, never clipped into a usable ratification proposal. The saved marker must also read back within the existing 4 MiB expanded limit, regardless of its compressed size; a refusal omits the oversized proposal payload.
 
+## Verification receipts
+
+[#615's ratified plan](../.invariant/plans/issue-615.json) connects the same graph, invariant replay and view evaluation to modeled verification, synthesis and factory gate receipts. Before checks begin, verification captures the actual model, its sibling TLA+ includes, the loaded lock and the optional `.invariant/view.json`. All bounded model checks and the reader use those captured source bytes. A saved proposal's `.invariant/reader.json` is never substituted for the final model. Synthesis supplies the original project's view and sibling includes during preparation and assembly, discards workspace reader artifacts and recomputes after the model changes.
+
+Verification JSON has an optional `reader` object. New modeled receipts use version 1, with a separate `sha256:` fingerprint and `inputs`: `module`, `model_sha256`, `view_sha256`, and `includes`, a map of sibling filenames to byte hashes. The reader fingerprint binds these exact inputs, the lock's bounds and statements, tool/configuration provenance and computed contents. It does not change the verification fingerprint, proposal identity, lock, pass/fail result or code assurance.
+
+Exactly one outcome is present:
+
+| Field | Contents |
+| :-- | :-- |
+| `chart` | The full `statechart.Result`, including all state memberships, hidden occurrences, exact says words, unavailable actions, counts and bounds |
+| `limitation` | `code: "too_large"`, `actual`, `limit: 500`, and `source` with module, bounds/configuration, Java image, jar hash and TLC version |
+| `unavailable` | A diagnostic `code` and `message`, plus `source` tool/configuration provenance when a completed graph is available, without an invented or partial chart |
+
+Every ordinary graph through 500 reachable concrete states is supported. Impossible-action statements require complete exploration and are computed before hiding. The 20-arrow target never truncates a chart. Above 500, the view is checked for well-formedness but its mappings and hiding are not evaluated. Missing views report `missing_view`; unsafe file links are refused without reading their contents. Malformed views, graph or invariant replay failures and SVG rendering failures retain separate reader diagnostics. A failed build can still carry a complete model chart, and remains failed. A failed design check carries no chart. Old reports without reader data still decode with their original evidence identity and explicitly explain that a view and a fresh verification are needed.
+
+`verify -out DIR` and synthesis/factory `gate/` directories use the same writer:
+
+| File | Contents |
+| :-- | :-- |
+| `receipt.json` | Complete verification report, including its reader record |
+| `receipt.md` | Verification evidence plus literal-safe Mermaid and reader report, or a size/absence explanation |
+| `reader.json` | The same standalone reader record, when one is present |
+| `reader.svg` | A drawable chart and report from the native Go renderer, with the complete result as inert metadata |
+
+The SVG works offline and contains no active content or external resources. Reusing an output directory removes obsolete reader JSON and SVG before writing current artifacts. Ordinary filesystem output errors are still errors. Existing whole-directory CI uploads and archives retain these files without workflow changes. Factory pull request bodies use the final gate receipt, even when a proposal has a different chart; plumbing receipts remain chart-free. Reader diagnostics and rendering add no proof claim and never upgrade or fail the verification verdict. The dashboard retains its existing display behavior.
+
 ## Reader computation
 
 `Compute(context.Context, Input, []byte) (*Result, error)` is a pure evaluator. `Input` contains `Graph tlc.GraphResult`, `Lock project.Lock`, `Invariants map[string]map[string]bool` (concrete ID to invariant name to truth), and `Temporal []tlc.TraceFile`. The byte slice is a JSON view. Inputs and results share no mutable data; repeated and concurrent calls serialize identically when the graph entries are reordered. Callers must not mutate inputs during a call.
@@ -62,7 +89,7 @@ The inspectable XML contract is:
 
 Element IDs are generated independently of reader labels and chart IDs. Text and attributes are XML-escaped, including markup-like text, quotes and URLs. Styling uses presentation attributes; arrowheads refer only to a local marker. There are no scripts, event handlers, stylesheets, links, foreign objects, embedded resources, DTDs or resource-loading attributes. Whitespace in rule wording and labels is preserved. Coordinates, ordering, colors, fonts and routing are implementation choices, not a pinned serialization format.
 
-Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Rendering adds no publication path: modeled proposals retain the existing Mermaid and Markdown behavior, and neither receipts nor the dashboard use this API.
+Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Verification receipts save this SVG beside their JSON and Markdown. Modeled proposals retain Mermaid publication, and the dashboard retains its existing rendering.
 
 ## JSON view version 1
 
