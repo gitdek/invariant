@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,16 +64,32 @@ func split578Bytes(s string) uint64 {
 	return n * mult
 }
 
+// split578Lock runs fn holding an exclusive flock, which the kernel releases
+// when a fake Docker process dies holding it, as a canceled batch's run is
+// killed. A lock directory stayed behind then, and every later process
+// waited out its ten seconds (#601).
 func split578Lock(root string, fn func()) {
-	until := time.Now().Add(10 * time.Second)
-	for os.Mkdir(filepath.Join(root, "lock"), 0700) != nil {
-		if time.Now().After(until) {
-			panic("fake Docker lock timed out")
-		}
-		time.Sleep(time.Millisecond)
+	f, err := os.OpenFile(filepath.Join(root, "lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		panic(err)
 	}
-	defer os.Remove(filepath.Join(root, "lock"))
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		panic(err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	fn()
+}
+
+// split578Write replaces name whole, so a process killed while writing it
+// leaves the previous contents.
+func split578Write(name string, b []byte) {
+	if e := os.WriteFile(name+".tmp", b, 0600); e != nil {
+		panic(e)
+	}
+	if e := os.Rename(name+".tmp", name); e != nil {
+		panic(e)
+	}
 }
 
 func split578Event(root, event string) {
@@ -101,9 +118,7 @@ func split578WaitFile(root, name string) {
 
 func split578Save(root string, r split578Run) {
 	b, _ := json.Marshal(r)
-	if e := os.WriteFile(filepath.Join(root, r.Name+".json"), b, 0600); e != nil {
-		panic(e)
-	}
+	split578Write(filepath.Join(root, r.Name+".json"), b)
 }
 
 func split578Docker(args []string) int {
@@ -212,7 +227,7 @@ func split578Docker(args []string) int {
 		raw, _ := os.ReadFile(filepath.Join(root, key))
 		r.Attempt, _ = strconv.Atoi(string(raw))
 		r.Attempt++
-		os.WriteFile(filepath.Join(root, key), []byte(strconv.Itoa(r.Attempt)), 0600)
+		split578Write(filepath.Join(root, key), []byte(strconv.Itoa(r.Attempt)))
 		split578Save(root, r)
 	})
 	split578Event(root, "start "+r.Name)
