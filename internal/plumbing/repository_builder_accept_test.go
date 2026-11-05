@@ -57,15 +57,17 @@ func (b *builder484) Run(ctx context.Context, job synth.Job) (synth.Usage, error
 func TestRepositoryBuilderUsesSameChecksForToolAndFinalRun(t *testing.T) {
 	for _, shared := range []bool{false, true} {
 		t.Run(fmt.Sprintf("shared=%v", shared), func(t *testing.T) {
-			root, _, snapshot := fixture484(t, []repository.Part{part484("go", "api")}, nil)
+			part := part484("go", "api")
+			part.Commands["test_one"] = repository.Command{Argv: []string{"trusted-fixture", "{test}", "literal argument; $(not-a-shell)"}}
+			root, _, snapshot := fixture484(t, []repository.Part{part}, nil)
 			const source = "package fixture\n\nimport \"testing\"\n\nfunc TestBuilderNative(t *testing.T) {}\n"
-			plan := Plan{Name: "configured builder", Summary: "Exercise declared repository checks.", Files: []string{"api/main.go"},
-				Tests:   []Test{{Name: "TestBuilderNative", File: "api/builder_native_accept_test.go", Says: "A future step supplies individual native evidence."}},
-				Sources: map[string]string{"api/builder_native_accept_test.go": source}}
+			plan := n503Read(t, &Plan{Name: "configured builder", Summary: "Exercise declared repository checks.", Files: []string{"api/main.go"},
+				Tests:   []Test{{Name: "TestBuilderNative", Part: "api", Framework: "go", Selector: "TestBuilderNative", File: "api/builder_native_accept_test.go", Says: "Suite success cannot replace a skipped selection."}},
+				Sources: map[string]string{"api/builder_native_accept_test.go": source}}, snapshot)
 			if err := plan.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			lock := Lock{Plan: plan, Ratified: Ratification{By: "fixture", Issue: 484, Comment: "https://github.com/o/r/issues/484#issuecomment-1", Proposal: plan.Hash()}}
+			lock := Lock{Plan: *plan, Ratified: Ratification{By: "fixture", Issue: 484, Comment: "https://github.com/o/r/issues/484#issuecomment-1", Proposal: plan.Hash()}}
 			if err := lock.Write(root); err != nil {
 				t.Fatal(err)
 			}
@@ -80,6 +82,10 @@ func TestRepositoryBuilderUsesSameChecksForToolAndFinalRun(t *testing.T) {
 			}
 			agent := &builder484{}
 			b := Builder{Backend: agent, Reviewer: agent, Binary: "unused-fixture-binary", TestRuns: 2, Timeout: 3 * time.Second, Sandbox: sandbox484(t, root, snapshot, r)}
+			b.Sandbox.Repository.Adapters = map[string]RepositoryAcceptanceAdapter{"go": &adapter515{}}
+			b.Sandbox.Repository.Dependencies.Runner = &runner515{runner484: r, accept: func(_ context.Context, _ DependencyRequest, in RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error) {
+				return evidence515(in, "test", "skipped", "no individual completion"), nil, nil
+			}}
 			if shared {
 				q, err := NewCheckQueue(1)
 				if err != nil {
@@ -108,7 +114,7 @@ func TestRepositoryBuilderUsesSameChecksForToolAndFinalRun(t *testing.T) {
 					t.Fatal("tool or final checks renewed the build's shared execution allowance")
 				}
 			}
-			if built.Built() || built.Final.Accepted["api/builder_native_accept_test.go:TestBuilderNative"] {
+			if built.Built() || built.Final.Accepted[plan.Tests[0].Identity()] || result515(t, built.Final, plan.Tests[0]).Status != "skipped" {
 				t.Fatal("suite results alone falsely approved individual native acceptance")
 			}
 			closed484(t, r)

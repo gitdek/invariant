@@ -14,7 +14,7 @@ package plumbing
 // error) to RepositoryCheckEnvironment. The byte slice is diagnostics only;
 // the error is an execution/infrastructure error, not a test verdict. Existing
 // Run/Close-only environments remain usable for suites and explicitly refuse
-// individual acceptance. There is no default adapter or output parser.
+// individual acceptance. Go now has a default adapter; there is no output parser.
 //
 // RepositoryAcceptanceInvocation has Binding RepositoryAcceptanceBinding,
 // Argv []string and Source string. Binding is a comparable value containing
@@ -48,9 +48,8 @@ package plumbing
 // failure and no infrastructure/allowance/cancellation/cleanup veto occurred.
 // Sandbox.Run is the candidate path for an explicitly host-configured adapter;
 // it requires all applicable commands plus all acceptance selectors to pass.
-// Both paths share validation, staging, evidence, deadlines and cleanup. Public
-// Check continues refusing configured drafts, even with a fake adapter supplied.
-// Nil/default adapters preserve every existing native refusal and legacy suite.
+// Both paths and public Check share validation, staging, evidence, deadlines
+// and cleanup. Explicit trusted adapters still override the Go default.
 
 import (
 	"context"
@@ -417,11 +416,12 @@ func TestConfiguredAcceptanceValidatesBeforePreparation(t *testing.T) {
 		}
 	}
 	closed484(t, f.runner.runner484)
-	// The public proposal path remains closed even for a trusted fake adapter.
+	// Public planning uses the same trusted adapter and independent base rules.
 	f = newFixture515(t)
+	allFail515(f.runner)
 	checked, err := Check(context.Background(), n503Draft(t, f.plan), f.root, f.sandbox)
-	if err != nil || checked == nil || checked.Problem == "" || len(f.runner.installs) != 0 {
-		t.Fatalf("lower-level API accidentally admitted configured planning: %v %+v", err, checked)
+	if err != nil || checked == nil || checked.Problem != "" || len(f.runner.installs) != 1 {
+		t.Fatalf("public planning lost trusted Go failures: %v %+v", err, checked)
 	}
 }
 

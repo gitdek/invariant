@@ -14,6 +14,8 @@ import (
 )
 
 func TestNativeExecutionRefusesBeforePreparationAndKeepsIdentity(t *testing.T) {
+	// Go is supported, but this fixture's native-runner wrapper is not.
+	// The other frameworks still have no production adapter.
 	for _, framework := range []string{"go", "pytest", "vitest", "jest"} {
 		t.Run(framework, func(t *testing.T) {
 			language, file, selector, src := "typescript", "app/ready.test.ts", "outer handles $() ; [case one]", "// exact native source\n"
@@ -78,7 +80,7 @@ func TestNativeExecutionRefusesBeforePreparationAndKeepsIdentity(t *testing.T) {
 	}
 }
 
-func TestNativeBuildCannotBecomeReadyWithoutAnAdapter(t *testing.T) {
+func TestNativeBuildCannotBecomeReadyWithUnsupportedInvocation(t *testing.T) {
 	root, _, snapshot := fixture484(t, []repository.Part{n503Part("go", "api")}, nil)
 	p := n503Read(t, n503Plan(t, "go", "api", "api/native_accept_test.go", "TestReady", "package fixture\nimport \"testing\"\nfunc TestReady(t *testing.T) {}\n"), snapshot)
 	lock := Lock{Plan: *p, Ratified: Ratification{Issue: 503, Proposal: p.Hash()}}

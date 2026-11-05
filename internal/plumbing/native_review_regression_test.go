@@ -35,7 +35,7 @@ func TestConfiguredEvidenceIsMatchedByIdentity(t *testing.T) {
 	other := ready
 	other.Selector = "test_ready.py::test_other"
 	result := func(t Test, name string) TestResult {
-		return TestResult{Name: name, Part: t.Part, Framework: t.Framework, File: t.File, Selector: t.Selector, Phase: "accept", Status: "passed"}
+		return TestResult{Name: name, Part: t.Part, Framework: t.Framework, File: t.File, Selector: t.Selector, Phase: "accept", Status: "passed", Kind: "test"}
 	}
 	if result(ready, "test_ready").identity() != ready.Identity() {
 		t.Fatal("a result's runner title changed its identity")
@@ -237,16 +237,16 @@ func TestNativeStagingRunsRatifiedBytesUnderLineEndingNormalization(t *testing.T
 	}
 }
 
-// Until an adapter exists, configured planning refuses before copying the
-// checkout or preparing dependencies, even when the suite would pass.
+// Configured legacy planning refuses before copying the checkout or preparing
+// dependencies, even when the suite would pass. Nothing migrates its identity.
 func TestConfiguredPlanningRefusesBeforePreparation(t *testing.T) {
 	root, _, snapshot := fixture484(t, []repository.Part{part484("go", "api")}, nil)
 	file := "api/unproved_accept_test.go"
 	p := &Plan{Name: "legacy shape", Summary: "Refuse cheaply.", Files: []string{"api/main.go"}, Tests: []Test{{Name: "TestUnproved", File: file, Says: "This test fails on the base."}}, Sources: map[string]string{file: "package fixture\nimport \"testing\"\nfunc TestUnproved(t *testing.T) { t.Fatal(\"pending\") }\n"}}
 	runner := newRunner484(t)
 	checked, err := Check(context.Background(), n503Draft(t, p), root, sandbox484(t, root, snapshot, runner))
-	if err != nil || checked == nil || !strings.Contains(checked.Problem, "no individual execution adapter") {
-		t.Fatalf("configured draft wasn't refused for its missing adapter: %+v, %v", checked, err)
+	if err != nil || checked == nil || !strings.Contains(checked.Problem, "native identities") {
+		t.Fatalf("configured legacy draft wasn't refused: %+v, %v", checked, err)
 	}
 	if len(runner.installs) != 0 || len(runner.inspections) != 0 || len(runner.opens) != 0 || len(runner.calls) != 0 {
 		t.Fatal("a refusal that was already certain prepared dependencies or ran commands")

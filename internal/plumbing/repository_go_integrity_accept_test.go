@@ -124,8 +124,8 @@ func TestRepositoryGoEvidenceIntegrity582(t *testing.T) {
 			})
 		}
 	}
-	// The new capability does not admit configured proposals or silently enable
-	// defaults. Pinned byte and policy mismatches fail before a runtime starts.
+	// Public planning and default Go use the same evidence. Pinned byte and
+	// policy mismatches still fail before a runtime starts.
 	for _, mode := range []string{"planning", "default adapter", "source change", "execution digest"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newRepositoryFixture582(t, cache, []repositoryCase582{repositoryControl582()}, false, nil, nil)
@@ -133,8 +133,8 @@ func TestRepositoryGoEvidenceIntegrity582(t *testing.T) {
 			switch mode {
 			case "planning":
 				checked, err := Check(context.Background(), n503Draft(t, f.plan), f.root, f.sandbox)
-				if err != nil || checked == nil || checked.Problem == "" || len(f.runner.envs) > 0 {
-					t.Fatal("configured planning was enabled")
+				if err != nil || checked == nil || checked.Problem != "" || len(f.runner.envs) != 1 {
+					t.Fatal("configured planning lost independent failure evidence")
 				}
 				return
 			case "default adapter":
@@ -145,6 +145,12 @@ func TestRepositoryGoEvidenceIntegrity582(t *testing.T) {
 				f.plan.Execution.Digest = hash468("candidate replacement policy")
 			}
 			r, _, _ := f.run(t.Context(), false)
+			if mode == "default adapter" {
+				if !r.Passed() || len(f.runner.envs) != 1 {
+					t.Fatal("default Go lost real completion")
+				}
+				return
+			}
 			if r.Passed() || len(f.runner.envs) > 0 {
 				t.Fatal("unadmitted authority reached real execution")
 			}

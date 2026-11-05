@@ -32,7 +32,7 @@ func BuildPrompt(plan *Plan, n, runs int) string {
 		}
 	}
 	if plan.Execution != nil {
-		fmt.Fprintf(&b, "\nCaptured execution: %s (base provenance %s). Native selectors and verbatim sources stay pinned. Individual execution adapters are pending; suite success cannot supply acceptance evidence.\n", plan.Execution.Digest, plan.Execution.Base)
+		fmt.Fprintf(&b, "\nCaptured execution: %s (base provenance %s). Native selectors and verbatim sources stay pinned. Configured Go uses the default adapter under captured policy. Every applicable command and exactly one runtime pass per selector must complete; compilation success, diagnostics and suite success cannot supply acceptance evidence. Tool and fresh final checks stage only planned files, pinned acceptance and allowed new Go regressions against the original checkout. Candidate configuration and replacement locks cannot supply authority. Pytest, Vitest, Jest, mixed unsupported plans and configured legacy acceptance are refused before preparation. External plumbing intake remains disabled.\n", plan.Execution.Digest, plan.Execution.Base)
 	}
 	fmt.Fprintf(&b, `
 The plan's record is `+"`%s`"+`.

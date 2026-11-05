@@ -130,6 +130,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		if err != nil {
 			return nil, err
 		}
+		checks.sandbox.stage = b.Sandbox.Repository != nil
 		b.Sandbox.Checks = &CheckClient{Address: b.Checks.listener.Addr().String(), Build: checks.id}
 	}
 	job := synth.Job{
