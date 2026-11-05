@@ -22,9 +22,9 @@ retains the accepted snapshot and its effect ledger before an adapter dispatches
 work. The caller serializes the transaction under the repository lease and
 passes its current fence in `FollowSession`. This amendment defines recovery
 rules; later plumbing supplies the real durable records and remote effects.
-Journal extension copies the retained prefix into a fresh slice; its Gobra
-contract proves that earlier snapshots keep their contents and that exactly
-one new snapshot is appended. A rejected save leaves the journal unchanged.
+Journal extension copies the retained prefix into a fresh slice, so earlier
+snapshots keep their contents and exactly one new snapshot is appended. A
+rejected save leaves the journal unchanged.
 
 A dispatched effect stays pending until its durable result or a current GitHub
 observation reconciles it. A stopped run is not restarted. Failed drafting or
@@ -59,3 +59,14 @@ The gate checks safety, progress under the existing fairness assumptions,
 reachability of all witnesses, every known bug, exact executable conformance,
 one-size-larger agreement, Gobra contracts, vet and tests. Human holds do not
 assume a person will act.
+
+Gobra proves `recovery.go`, the recovery core, and `followstate.go`, the
+follow-up journal's state, the files that carry the `// +gobra` header. The
+journal in `journal.go` and the follow-up logic in `followup.go` are plain Go,
+and conformance checks them against the model in every state the explorer
+reaches, since the explorer saves every follow-up transition through
+`FollowJournal.Save`. Proving them in place ran past Gobra's 20-minute limit:
+all of `followup.go` took more than 35 minutes, and `journal.go`'s quantified
+slice contracts alone more than 25. So on 2026-11-05 @gitdek chose to prove the
+core and check the follow-up logic by conformance. The ratified statements are
+unchanged.
