@@ -144,7 +144,7 @@ func EvaluateRules(ctx context.Context, runner GraphDumper, dir string, graph tl
 	for _, id := range slices.Sorted(maps.Keys(states)) {
 		b.WriteString("    \\/ /\\ " + idVar + " = " + strconv.Quote(id) + "\n")
 		for _, name := range variables {
-			value := replaceModelValues(states[id].Values[name], func(name string) string { return modelValues[name] })
+			value := oneLine(replaceModelValues(states[id].Values[name], func(name string) string { return modelValues[name] }))
 			fmt.Fprintf(&b, "       /\\ %s = (%s)\n", name, value)
 		}
 		fmt.Fprintf(&b, "       /\\ %s = [%s]\n", rulesVar, strings.Join(fields, ", "))
@@ -210,6 +210,15 @@ func EvaluateRules(ctx context.Context, runner GraphDumper, dir string, graph tl
 	}
 	return matrix, nil
 }
+
+var wrapped = regexp.MustCompile(`\s*\n\s*`)
+
+// oneLine is a TLC value on a single line. TLC wraps a long value over
+// several lines, and a continuation line that starts left of its junction
+// list's bullet would end that list, so the replay module wouldn't parse
+// (#636). A printed TLA+ string never spans lines, so only TLC's own
+// wrapping changes, and the replay's typed comparison ignores it.
+func oneLine(value string) string { return wrapped.ReplaceAllString(value, " ") }
 
 var valueToken = regexp.MustCompile(`"(?:[^"\\]|\\.)*"|[A-Za-z_][A-Za-z0-9_]*`)
 

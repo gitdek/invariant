@@ -200,7 +200,7 @@ SVG acceptance and regression tests inspect parsed XML for complete topology, ac
 go test -timeout 20m ./internal/statechart ./internal/factory
 ```
 
-Reader acceptance and regression tests exercise total and typed mapping, complete concrete accounting, every hiding refusal, invariant signatures, temporal isolation, deterministic replay and concurrent evaluation, exact rule wording, detached snapshots, size boundaries and the advisory arrow target. Fake replay tests validate pins, generated TLA+ requests, complete identity/value joins, boolean evidence, cancellation and cleanup without changing the graph runner's fake contract. Value regressions cover intervals, reordered model-value sets and nested mappings, while refusing changed tuple order, types, string contents, interval endpoints and malformed values:
+Reader acceptance and regression tests exercise total and typed mapping, complete concrete accounting, every hiding refusal, invariant signatures, temporal isolation, deterministic replay and concurrent evaluation, exact rule wording, detached snapshots, size boundaries and the advisory arrow target. Fake replay tests validate pins, generated TLA+ requests, complete identity/value joins, boolean evidence, cancellation and cleanup without changing the graph runner's fake contract. Value regressions cover intervals, reordered model-value sets, nested mappings and values TLC wraps over several lines, which the replay module joins onto one line so its junction lists still parse (#636), while refusing changed tuple order, types, string contents, interval endpoints and malformed values:
 
 ```sh
 go test -timeout 20m ./internal/statechart ./internal/verify
