@@ -48,18 +48,18 @@ func TestDockerProcessFramingPreservesPrefix(t *testing.T) {
 	}
 }
 
-func TestDockerNonGoKeepsCommandCapability(t *testing.T) {
+func TestDockerPythonAndTypeScriptCommandCapability(t *testing.T) {
 	_, logs := docker484(t)
 	for _, language := range []string{"python", "typescript"} {
 		e, err := (&DockerDependencyRunner{}).OpenChecks(t.Context(), request484(t, language))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := e.(RepositoryProcessTransport); ok {
-			t.Fatal("non-Go environment acquired a Go process capability")
+		if _, ok := e.(RepositoryProcessTransport); ok != (language == "python") {
+			t.Fatal("only prepared Python should acquire process capability")
 		}
-		if _, ok := e.(RepositoryAcceptanceEnvironment); ok {
-			t.Fatal("non-Go environment acquired a Go collector")
+		if _, ok := e.(RepositoryAcceptanceEnvironment); ok != (language == "python") {
+			t.Fatal("only prepared Python should acquire acceptance capability")
 		}
 		if out, err := e.Run(t.Context(), []string{"fixture-check"}); err != nil || !strings.Contains(string(out), "container diagnostic") {
 			t.Fatalf("command behavior changed: %v %s", err, out)

@@ -217,6 +217,8 @@ func TestConfiguredGoPublicRefusalsAndVetoes610(t *testing.T) {
 		repositoryResult582(t, checked.Run, f.plan.Tests[0], "skipped", "no failure evidence")
 	})
 	for _, framework := range []string{"pytest", "vitest", "jest"} {
+		// Pytest refuses this fixture's native-runner wrapper; the TypeScript
+		// frameworks have no default adapter. Neither may partially execute.
 		for _, mixed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/mixed=%v", framework, mixed), func(t *testing.T) {
 				lang, file, selector, source := "typescript", "app/ready.test.ts", "outer ready one", "// pending\n"

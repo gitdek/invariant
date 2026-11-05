@@ -27,6 +27,9 @@ import (
 //go:embed docker_process_helper.go.txt
 var dockerProcessHelper []byte
 
+//go:embed docker_process_helper.py
+var dockerPythonProcessHelper []byte
+
 const dockerProcessProtocol = "invariant-process-v1\n"
 const dockerProcessFrameLimit = 64 << 10
 
@@ -96,8 +99,9 @@ func (e *dockerRepositoryChecks) Prepare(ctx context.Context, spec RepositoryPro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off" {
-		return nil, errors.New("Docker process transport requires the prepared offline Go environment")
+	python := e.request.Env["PIP_NO_INDEX"] == "1"
+	if !python && (e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off") {
+		return nil, errors.New("Docker process transport requires a prepared offline Go or Python environment")
 	}
 	if len(spec.Argv) == 0 || spec.Argv[0] == "" || strings.HasPrefix(spec.Argv[0], "-") {
 		return nil, errors.New("process preparation needs an executable")
@@ -141,7 +145,8 @@ done
 	if out, err := e.Run(ctx, []string{"/bin/sh", "-c", guard, "invariant-directory", directory}); err != nil {
 		return nil, fmt.Errorf("unsafe process directory: %w: %s", err, out)
 	}
-	// Compilation is lazy and serialized independently of command ownership.
+	// Supply authoritative bytes at a fresh path for every invocation. A prior
+	// workload can replace even a root-owned running executable by renaming it.
 	e.prepareMu.Lock()
 	defer e.prepareMu.Unlock()
 	e.mu.Lock()
@@ -150,8 +155,15 @@ done
 	if closed {
 		return nil, errors.New("repository check environment is closed")
 	}
-	if e.helper == "" {
-		private := "transport-" + rand.Text()
+	private := "transport-" + rand.Text()
+	var helper string
+	if python {
+		var err error
+		helper, err = e.Stage(ctx, private+"/transport.py", dockerPythonProcessHelper)
+		if err != nil {
+			return nil, err
+		}
+	} else {
 		source, err := e.Stage(ctx, private+"/main.go", dockerProcessHelper)
 		if err != nil {
 			return nil, err
@@ -163,10 +175,10 @@ done
 		if out, err := e.Run(ctx, []string{"go", "build", "-o", binary, source}); err != nil {
 			return nil, fmt.Errorf("compile Docker process transport: %w: %s", err, out)
 		}
-		e.helper = binary
+		helper = binary
 	}
 	spec.Argv, spec.Env = slices.Clone(spec.Argv), maps.Clone(spec.Env)
-	p := &dockerPreparedProcess{owner: e, spec: spec, helper: e.helper}
+	p := &dockerPreparedProcess{owner: e, spec: spec, helper: helper, python: python}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -192,13 +204,25 @@ func (e *dockerRepositoryChecks) RunAcceptance(ctx context.Context, in Repositor
 	if e.used == nil {
 		e.used = map[string]bool{}
 	}
-	if e.closed || e.used[b.InvocationID] || !nativeText(b.InvocationID) || b.Framework != "go" {
+	if e.closed || e.used[b.InvocationID] || !nativeText(b.InvocationID) || b.Framework != "go" && b.Framework != "pytest" {
 		e.mu.Unlock()
 		return fail(errors.New("Docker Go acceptance is closed, consumed or invalid"))
 	}
 	e.used[b.InvocationID] = true
 	e.mu.Unlock()
 	command := slices.Clone(in.Argv)
+	if b.Framework == "pytest" {
+		if e.request.Env["PIP_NO_INDEX"] != "1" {
+			return fail(errors.New("pytest acceptance needs the prepared Python environment"))
+		}
+		for i := range command {
+			if command[i] == b.Selector {
+				command[i] = "{test}"
+			}
+		}
+		part := repository.Part{Name: b.Part, Directory: e.request.Directory, Language: "python", Commands: map[string]repository.Command{"test_one": {Argv: command}}}
+		return runRepositoryPytestAcceptance(ctx, part, in, e)
+	}
 	for i := 2; i < len(command); i++ {
 		if command[i] == "-run" && i+1 < len(command) {
 			i++
@@ -410,6 +434,7 @@ type dockerPreparedProcess struct {
 	owner        *dockerRepositoryChecks
 	spec         RepositoryProcessSpec
 	helper       string
+	python       bool
 	process      *dockerRepositoryProcess
 	closed, used bool
 	err          error
@@ -427,6 +452,9 @@ func (p *dockerPreparedProcess) Start(ctx context.Context) (RepositoryProcess, e
 	p.used = true
 	args := p.owner.execArgs(p.spec.Directory, p.spec.Env)
 	args = append([]string{"exec", "--interactive"}, args[1:]...)
+	if p.python {
+		args = append(args, "python3", "-I", "-B")
+	}
 	args = append(args, p.helper, p.spec.EventEnv)
 	args = append(args, p.spec.Argv...)
 	process := &dockerRepositoryProcess{done: make(chan struct{}), invalid: make(chan struct{}), output: RepositoryProcessOutput{ExitCode: -1}}

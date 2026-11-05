@@ -18,7 +18,7 @@ import (
 
 // RepositoryAcceptanceAdapter is selected by the host, never by a candidate.
 // Select validates the captured invocation form and narrows its package scope.
-// Go is enabled by default; discovery is an optional second boundary.
+// Go and pytest are enabled by default; discovery is an optional boundary.
 type RepositoryAcceptanceAdapter interface {
 	Select(context.Context, repository.Part, Test) (RepositoryAcceptanceSelection, error)
 }
@@ -96,6 +96,9 @@ func (s Sandbox) repositoryAdapter(framework string) RepositoryAcceptanceAdapter
 	}
 	if framework == "go" {
 		return GoRepositoryAcceptanceAdapter{}
+	}
+	if framework == "pytest" {
+		return PytestRepositoryAcceptanceAdapter{}
 	}
 	return nil
 }

@@ -50,13 +50,13 @@ func (r *DockerDependencyRunner) OpenChecks(ctx context.Context, q DependencyReq
 	if _, err := dependencyDocker(ctx, "start", q.Token); err != nil {
 		return nil, err
 	}
-	if q.Env["GOTOOLCHAIN"] != "local" {
+	if q.Env["GOTOOLCHAIN"] != "local" && q.Env["PIP_NO_INDEX"] != "1" {
 		return dockerRepositoryCommands{e}, nil
 	}
 	return e, nil
 }
 
-// Non-Go environments retain only their existing command and file capability.
+// Other languages retain only their existing command and file capability.
 type dockerRepositoryCommands struct {
 	RepositoryAcceptanceFileEnvironment
 }
@@ -70,7 +70,6 @@ type dockerRepositoryChecks struct {
 	closed      bool
 	err         error
 	helpers     string
-	helper      string
 	staged      map[string]bool
 	used        map[string]bool
 	prepared    []*dockerPreparedProcess
