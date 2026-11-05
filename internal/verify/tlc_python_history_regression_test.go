@@ -29,7 +29,11 @@ func TestPythonApplicationTLCMemoryHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 			script := strings.Replace(string(raw), "print('pa327 deliberately unavailable Docker'); sys.exit(73)", "print(json.dumps({'NCPU':8,'MemTotal':17179869184})); sys.exit(0)", 1)
-			script = strings.Replace(script, "    msg(2262,'TLC2 Version", `    if os.environ.get('PA540_MEMORY')=='1' and module in ('Lifecycle','Invariant_Conformance') and args[args.index('--memory')+1]=='2048m':
+			script = strings.Replace(script, "    msg(2262,'TLC2 Version", `    count=0
+    if module=='Invariant_Conformance':
+        pairs=body.split('Invariant_Steps == {',1)[1].split('}',1)[0]
+        count=pairs.count('<<')
+    if os.environ.get('PA540_MEMORY')=='1' and (module=='Lifecycle' or count>1) and args[args.index('--memory')+1]=='2048m':
         print('java.lang.OutOfMemoryError: Java heap space'); sys.exit(1)
     msg(2262,'TLC2 Version`, 1)
 			if err := os.WriteFile(file, []byte(script), 0600); err != nil {
@@ -60,13 +64,31 @@ func TestPythonApplicationTLCMemoryHistory(t *testing.T) {
 					continue
 				}
 				seen[module] = true
+				if module == "Invariant_Conformance" {
+					if len(group) != 1 || group[0].MemoryBytes != 2<<30 || group[0].HeapBytes != 1536<<20 || group[0].Outcome != tlc.Passed && group[0].Outcome != tlc.Failed {
+						t.Fatalf("application conformance did not split at ordinary limits: %+v", group)
+					}
+					continue
+				}
 				if len(group) != 2 || group[0].Outcome != tlc.Failed || group[1].Outcome != tlc.Passed ||
 					group[0].MemoryBytes != 2<<30 || group[1].MemoryBytes != 12<<30 || group[1].HeapBytes != 9<<30 {
-					t.Fatalf("application lost model or conformance memory retry: %+v", group)
+					t.Fatalf("application lost model memory retry: %+v", group)
 				}
 			}
 			if !seen["Lifecycle"] || !seen["Invariant_Conformance"] {
 				t.Fatal("application omitted a phase's resource history")
+			}
+			splits := 0
+			for _, a := range r.TLCAttempts {
+				if a.Split {
+					splits++
+					if a.Module != "Invariant_Conformance" || a.Range == nil || a.Range.Count != 2 || a.MemoryBytes != 2<<30 || !strings.Contains(a.Message, "memory") {
+						t.Fatalf("invalid conformance split history: %+v", a)
+					}
+				}
+			}
+			if splits != len(r.Application.Conformance) {
+				t.Fatal("application omitted exhausted conformance parents")
 			}
 			var decoded verify.Report
 			if err := json.Unmarshal(wire, &decoded); err != nil {

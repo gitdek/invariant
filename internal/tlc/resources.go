@@ -36,13 +36,17 @@ type budgetWaiter struct {
 
 // Attempt records resource use separately from a check's model evidence.
 type Attempt struct {
-	Check       string  `json:"check"`
-	Module      string  `json:"module"`
-	Attempt     int     `json:"attempt"`
-	MemoryBytes uint64  `json:"memory_bytes"`
-	HeapBytes   uint64  `json:"heap_bytes"`
-	Outcome     Outcome `json:"outcome"`
-	Message     string  `json:"message"`
+	Check         string            `json:"check"`
+	Module        string            `json:"module"`
+	Attempt       int               `json:"attempt"`
+	MemoryBytes   uint64            `json:"memory_bytes"`
+	HeapBytes     uint64            `json:"heap_bytes"`
+	Outcome       Outcome           `json:"outcome"`
+	Message       string            `json:"message"`
+	ParentCheck   string            `json:"parent_check,omitempty"`
+	ParentAttempt int               `json:"parent_attempt,omitempty"`
+	Range         *ConformanceRange `json:"range,omitempty"`
+	Split         bool              `json:"split,omitempty"`
 }
 
 // NewBudget reserves a quarter of the daemon's memory and allows one 2 GiB
@@ -163,7 +167,20 @@ func (b *Budget) record(check int, a Attempt) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	a.Check = b.checks[check].identity
+	if a.Range != nil {
+		window := *a.Range
+		a.Range = &window
+	}
 	b.checks[check].attempts = append(b.checks[check].attempts, a)
+}
+
+func (b *Budget) checkIdentity(check int) string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.checks[check].identity
 }
 
 // Attempts returns a detached history grouped by check, with ordered attempts.
@@ -173,7 +190,13 @@ func (b *Budget) Attempts() []Attempt {
 	defer b.mu.Unlock()
 	var out []Attempt
 	for _, check := range b.checks {
-		out = append(out, check.attempts...)
+		for _, a := range check.attempts {
+			if a.Range != nil {
+				window := *a.Range
+				a.Range = &window
+			}
+			out = append(out, a)
+		}
 	}
 	slices.SortFunc(out, func(a, b Attempt) int {
 		if a.Check != b.Check {

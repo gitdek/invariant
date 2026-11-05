@@ -348,10 +348,10 @@ func checkTried(ctx context.Context, runner Runner, dir, root, module, header st
 		larger += " WITH " + strings.Join(subs, ", ")
 	}
 	untried := untriedText(m.Steps)
-	b, res, err := atOnce(ctx, batchCount(len(s.states), triedBatch), func(ctx context.Context, b int) (tlc.Result, error) {
-		return checkBatch(ctx, runner, dir, root, fmt.Sprintf("tried-%d", b+1), "Invariant_Tried",
+	window, res, err := checkRanges(ctx, runner, "tried", len(s.states), triedBatch, func(ctx context.Context, c tlc.ConformanceCheck) (tlc.Result, error) {
+		return checkBatch(ctx, runner, dir, root, c, "Invariant_Tried",
 			tlc.Config{Specification: "Invariant_TSpec", Constants: constants, Invariants: []string{"Invariant_EveryStepTried"}}, func(w *moduleWriter) error {
-				start, end := b*triedBatch, min((b+1)*triedBatch, len(s.states))
+				start, end := c.Range.Start, c.Range.Start+c.Range.Count
 				w.text("---- MODULE Invariant_Tried ----\n" + header + "VARIABLE invariant_i\n" + larger + "\nInvariant_States == <<")
 				for i := start; i < end; i++ {
 					if i > start {
@@ -392,8 +392,8 @@ func checkTried(ctx context.Context, runner Runner, dir, root, module, header st
 	switch {
 	case res.Outcome == tlc.Violated && res.Invariant == "Invariant_EveryStepTried":
 		t.Untried = printedUntried(res.Printed)
-		start := b * triedBatch
-		if i := stateIndex(res.Trace); i >= 1 && start+i-1 < len(s.states) {
+		start := window.Start
+		if i := stateIndex(res.Trace); i >= 1 && i <= window.Count && start+i-1 < len(s.states) {
 			t.In, err = s.pretty(start + i - 1)
 			if err != nil {
 				return t, err

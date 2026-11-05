@@ -145,9 +145,19 @@ func Markdown(r *verify.Report) string {
 			if a.Attempt > 1 {
 				outcome = "retry: " + outcome
 			}
-			diagnostic := componentText(a.Message)
+			detail := a.Message
+			if a.Range != nil {
+				detail += fmt.Sprintf("; range %s [%d,%d)", a.Range.Kind, a.Range.Start, a.Range.Start+a.Range.Count)
+			}
+			if a.ParentCheck != "" {
+				detail += fmt.Sprintf("; parent %s attempt %d", a.ParentCheck, a.ParentAttempt)
+			}
+			if a.Split {
+				detail += "; split into ordinary halves after memory exhaustion"
+			}
+			diagnostic := componentText(detail)
 			fmt.Fprintf(&b, "| %s | %s | %d | %d MiB | %d MiB | %s | %s |\n",
-				render.literal(a.Check), render.literal(a.Module), a.Attempt,
+				tlcCheckLiteral(a.Check), render.literal(a.Module), a.Attempt,
 				a.MemoryBytes/(1<<20), a.HeapBytes/(1<<20), render.text(outcome), diagnostic)
 		}
 		b.WriteString("\n</details>\n")
@@ -216,6 +226,18 @@ func hasComponentEvidence(r *verify.Report) bool {
 // their existing text and backtick spans.
 type renderer struct {
 	explicit bool
+}
+
+var portableTLCCheck = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// Keep generated check identities searchable verbatim in Markdown as well
+// as in JSON. Decoded reports may carry arbitrary text, which still needs
+// the full table and markup escaping used for other source-derived values.
+func tlcCheckLiteral(s string) string {
+	if portableTLCCheck.MatchString(s) {
+		return "`" + s + "`"
+	}
+	return componentLiteral(s)
 }
 
 func (render renderer) text(s string) string {

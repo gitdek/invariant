@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -410,6 +409,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				}
 			}
 			c.Checks = checks.results
+			c.LogicalChecks = checks.logical
 			slices.SortFunc(c.Checks, func(a, b PythonApplicationModelCheck) int {
 				return strings.Compare(a.Batch+"/"+a.Module, b.Batch+"/"+b.Module)
 			})
@@ -565,78 +565,55 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 	return nil
 }
 
-// Batch completion order is not evidence order. Retain each actual TLC
-// invocation, then sort by its stable relative batch path for the receipt.
+// Actual completed windows and original logical obligations are separate
+// evidence. The scheduler uses one worker here to retain the deterministic
+// invocation prefix on failure, including through a recovery tree.
 type pythonApplicationModelRunner struct {
-	mu      sync.Mutex
-	runner  conformance.Runner
-	root    string
-	results []PythonApplicationModelCheck
-	phase   int
-	next    int
-	changed chan struct{}
-	failed  bool
+	mu           sync.Mutex
+	runner       conformance.Runner
+	root         string
+	results      []PythonApplicationModelCheck
+	logical      []PythonApplicationLogicalCheck
+	logicalIndex map[string]int
 }
 
 func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module string, cfg tlc.Config) (tlc.Result, error) {
-	// The shared checker can schedule batches concurrently. Execute application
-	// batches in order so a failure has a deterministic actual invocation prefix,
-	// with no schedule-dependent canceled TLC runs in its provenance. Starting
-	// states come first, then the steps, declared outcomes and tried steps.
-	batch := filepath.Base(dir)
-	phase, order := 0, 0
-	for i, prefix := range []string{"init-", "steps-", "strict-", "tried-"} {
-		if module == []string{"Invariant_ConformanceInit", "Invariant_Conformance", "Invariant_StrictAttempts", "Invariant_Tried"}[i] {
-			var err error
-			phase = i + 1
-			order, err = strconv.Atoi(strings.TrimPrefix(filepath.Base(dir), prefix))
-			if err != nil {
-				return tlc.Result{}, err
-			}
-		}
-	}
+	c := tlc.ConformanceCheck{Batch: filepath.Base(dir), Recovery: &tlc.ConformanceRecovery{}}
+	result, err := r.CheckConformance(ctx, dir, module, cfg, c)
+	r.CompleteConformance(c, result, err)
+	return result, err
+}
+
+func (r *pythonApplicationModelRunner) ConformanceConcurrency() int { return 1 }
+
+func (r *pythonApplicationModelRunner) CheckConformance(ctx context.Context, dir, module string, cfg tlc.Config, c tlc.ConformanceCheck) (tlc.Result, error) {
 	r.mu.Lock()
-	if phase < r.phase {
-		r.mu.Unlock()
-		return tlc.Result{}, fmt.Errorf("an application model batch ran out of order")
-	}
-	if phase > r.phase {
-		r.phase, r.next = phase, 1
-	}
-	for order != r.next && !r.failed && ctx.Err() == nil {
-		if r.changed == nil {
-			r.changed = make(chan struct{})
-		}
-		changed := r.changed
-		r.mu.Unlock()
-		select {
-		case <-ctx.Done():
-		case <-changed:
-		}
-		r.mu.Lock()
-	}
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return tlc.Result{}, err
 	}
-	if r.failed {
-		return tlc.Result{Outcome: tlc.Failed, Message: "an earlier application model batch failed"}, nil
-	}
-	defer func() {
-		r.next++
-		if r.changed != nil {
-			close(r.changed)
-			r.changed = nil
-		}
-	}()
 	inputHash, err := pythonApplicationModelHash(ctx, filepath.Join(dir, module+".tla"))
+	if c.ParentAttempt == 0 {
+		if r.logicalIndex == nil {
+			r.logicalIndex = map[string]int{}
+		}
+		r.logicalIndex[c.Batch] = len(r.logical)
+		r.logical = append(r.logical, PythonApplicationLogicalCheck{Module: module, Batch: c.Batch, InputSHA256: inputHash, Config: cfg})
+	}
 	if err != nil {
-		r.failed = true
 		return tlc.Result{}, err
 	}
-	result, err := r.runner.Check(ctx, dir, module, cfg)
-	r.failed = err != nil || result.Outcome != tlc.Passed
-	record := PythonApplicationModelCheck{Module: module, Batch: filepath.ToSlash(batch), InputSHA256: inputHash, Config: cfg, Result: result}
+	var result tlc.Result
+	if capable, ok := r.runner.(tlc.ConformanceRunner); ok && c.Range.Kind != "" {
+		result, err = capable.CheckConformance(ctx, dir, module, cfg, c)
+	} else {
+		result, err = r.runner.Check(ctx, dir, module, cfg)
+	}
+	var exhausted *tlc.MemoryExhaustion
+	if errors.As(err, &exhausted) {
+		return result, err
+	}
+	record := PythonApplicationModelCheck{Module: module, Batch: c.Batch, InputSHA256: inputHash, Config: cfg, Result: result}
 	// TLC's unstructured progress includes temporary extraction paths. Retain
 	// its parsed verdict, diagnostics and counterexample, not progress output.
 	record.Result.Printed = nil
@@ -645,6 +622,27 @@ func (r *pythonApplicationModelRunner) Check(ctx context.Context, dir, module st
 	}
 	r.results = append(r.results, record)
 	return result, err
+}
+
+func (r *pythonApplicationModelRunner) CompleteConformance(c tlc.ConformanceCheck, result tlc.Result, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i, ok := r.logicalIndex[c.Batch]; ok {
+		l := &r.logical[i]
+		l.Outcome = result.Outcome
+		if result.Outcome != tlc.Passed {
+			l.Invariant, l.Property, l.Message = result.Invariant, result.Property, result.Message
+			l.Trace, l.Loop, l.Stutters = result.Trace, result.Loop, result.Stutters
+		}
+		if err != nil {
+			l.Outcome = tlc.Failed
+			l.Error = strings.ReplaceAll(err.Error(), r.root, "/model")
+		}
+		delete(r.logicalIndex, c.Batch)
+	}
+	if capable, ok := r.runner.(tlc.ConformanceRunner); ok {
+		capable.CompleteConformance(c, result, err)
+	}
 }
 
 // A tried-state window can contain arbitrarily many action instances. Hash

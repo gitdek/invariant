@@ -33,14 +33,15 @@ type PythonApplicationConformance struct {
 	// Mode is "bounded-exhaustive" for an explored invocation, whose
 	// attempts TLC also checks for every step tried (#342). A sampled
 	// invocation leaves it empty.
-	Mode             string                        `json:"mode,omitempty"`
-	Result           conformance.Result            `json:"result"`
-	Model            ComponentConformanceModel     `json:"model"`
-	Bounds           map[string]string             `json:"bounds"`
-	BoundsSources    []project.ComponentFile       `json:"bounds_sources"`
-	Tool             *ComponentProofTool           `json:"tool,omitempty"`
-	Checks           []PythonApplicationModelCheck `json:"checks,omitempty"`
-	OperationalError bool                          `json:"operational_error,omitempty"`
+	Mode             string                          `json:"mode,omitempty"`
+	Result           conformance.Result              `json:"result"`
+	Model            ComponentConformanceModel       `json:"model"`
+	Bounds           map[string]string               `json:"bounds"`
+	BoundsSources    []project.ComponentFile         `json:"bounds_sources"`
+	Tool             *ComponentProofTool             `json:"tool,omitempty"`
+	Checks           []PythonApplicationModelCheck   `json:"checks,omitempty"`
+	LogicalChecks    []PythonApplicationLogicalCheck `json:"logical_checks,omitempty"`
+	OperationalError bool                            `json:"operational_error,omitempty"`
 }
 
 // PythonApplicationLarger is an explored invocation's run one size larger:
@@ -77,6 +78,24 @@ type PythonApplicationModelCheck struct {
 	Config      tlc.Config `json:"config"`
 	Result      tlc.Result `json:"result"`
 	Error       string     `json:"error,omitempty"`
+}
+
+// PythonApplicationLogicalCheck binds the original module and configuration
+// to the aggregate verdict of its completed windows. It claims no physical
+// TLC counts, and keeps counterexamples only when a completed leaf failed.
+type PythonApplicationLogicalCheck struct {
+	Module      string      `json:"module"`
+	Batch       string      `json:"batch"`
+	InputSHA256 string      `json:"input_sha256"`
+	Config      tlc.Config  `json:"config"`
+	Outcome     tlc.Outcome `json:"outcome"`
+	Invariant   string      `json:"invariant,omitempty"`
+	Property    string      `json:"property,omitempty"`
+	Message     string      `json:"message,omitempty"`
+	Trace       []tlc.State `json:"trace,omitempty"`
+	Loop        int         `json:"loop,omitempty"`
+	Stutters    bool        `json:"stutters,omitempty"`
+	Error       string      `json:"error,omitempty"`
 }
 
 func (a *PythonApplicationReport) tested() bool {
@@ -118,10 +137,16 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 		p := &out.Proofs[i]
 		p.Image, p.Command, p.Output = "", nil, ""
 	}
-	// A check's batch is how the conformance checker scheduled its TLC work,
-	// not what the work found, so a change to the batching leaves identical
-	// evidence's fingerprint alone (#572). The receipt still shows it.
+	// Recovery changes physical windows and their counts. Bind the original
+	// logical inputs, configurations and verdicts instead. Older reports still
+	// bind their existing evidence. Scheduling paths remain receipt-only.
 	for i := range out.Conformance {
+		if len(out.Conformance[i].LogicalChecks) > 0 {
+			out.Conformance[i].Checks = nil
+			for j := range out.Conformance[i].LogicalChecks {
+				out.Conformance[i].LogicalChecks[j].Batch = ""
+			}
+		}
 		for j := range out.Conformance[i].Checks {
 			out.Conformance[i].Checks[j].Batch = ""
 		}

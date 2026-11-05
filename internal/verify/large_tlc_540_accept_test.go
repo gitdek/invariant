@@ -105,6 +105,15 @@ func tlc540Docker(args []string) int {
 		wait("release")
 	}
 	target := strings.Contains(","+os.Getenv("TLC540_TARGET")+",", ","+module+",")
+	if target && module == "Invariant_Conformance" {
+		body, err := os.ReadFile(filepath.Join(work, module+".tla"))
+		if err != nil {
+			panic(err)
+		}
+		_, pairs, _ := strings.Cut(string(body), "Invariant_Steps == {")
+		pairs, _, _ = strings.Cut(pairs, "}")
+		target = strings.Count(pairs, "<<") > 600
+	}
 	if target {
 		large := memory > 2<<30
 		if !large && os.Getenv("TLC540_INITIAL_BARRIER") == "1" {
@@ -492,10 +501,16 @@ func TestTLC540GateRecordsMemoryAttempts(t *testing.T) {
 					grouped[a.Check] = append(grouped[a.Check], a)
 				}
 			}
-			if len(grouped) != wantChecks {
+			if tc.model && len(grouped) != wantChecks || !tc.model && len(grouped) <= wantChecks {
 				t.Fatalf("lost or conflated same-named checks: %v", grouped)
 			}
 			for _, pair := range grouped {
+				if !tc.model {
+					if len(pair) != 1 || pair[0].Attempt != 1 || pair[0].MemoryBytes != 2<<30 || pair[0].HeapBytes != 1536<<20 || pair[0].Outcome != tlc.Passed && pair[0].Outcome != tlc.Failed {
+						t.Fatalf("conformance did not recover at ordinary limits: %+v", pair)
+					}
+					continue
+				}
 				if len(pair) != 2 || pair[0].Attempt != 1 || pair[1].Attempt != 2 || pair[0].MemoryBytes != 2<<30 || pair[0].HeapBytes != 1536<<20 || pair[1].MemoryBytes != 12<<30 || pair[1].HeapBytes != 9<<30 || pair[0].Outcome != tlc.Failed || !strings.Contains(strings.ToLower(pair[0].Message), "memory") {
 					t.Fatalf("missing first failure or allocated limits: %+v", pair)
 				}
@@ -505,6 +520,20 @@ func TestTLC540GateRecordsMemoryAttempts(t *testing.T) {
 				}
 				if pair[1].Outcome != want {
 					t.Fatalf("retry lost its actual completed outcome: %+v", pair[1])
+				}
+			}
+			if !tc.model {
+				splits := 0
+				for _, a := range r.TLCAttempts {
+					if a.Split {
+						splits++
+						if a.Range == nil || a.Range.Count <= 1 || a.Outcome != tlc.Failed || !strings.Contains(a.Message, "memory") {
+							t.Fatalf("split parent lost exhaustion: %+v", a)
+						}
+					}
+				}
+				if splits != 9 {
+					t.Fatalf("want nine exhausted windows, got %d", splits)
 				}
 			}
 			var decoded verify.Report
@@ -520,7 +549,13 @@ func TestTLC540GateRecordsMemoryAttempts(t *testing.T) {
 			}
 			for label, text := range map[string]string{"receipt": receipt.Markdown(&decoded), "gate feedback": verify.Feedback(&decoded)} {
 				// Allocation values are MiB in the human-facing resource history.
-				for _, value := range []string{tc.module, "2048", "1536", "12288", "9216", "MiB", "memory"} {
+				values := []string{tc.module, "2048", "1536", "MiB", "memory"}
+				if tc.model {
+					values = append(values, "12288", "9216")
+				} else {
+					values = append(values, "split", "parent", "range")
+				}
+				for _, value := range values {
 					if !strings.Contains(text, value) {
 						t.Errorf("%s omitted %q from its resource history:\n%s", label, value, text)
 					}
