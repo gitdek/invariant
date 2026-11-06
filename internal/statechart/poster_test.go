@@ -75,6 +75,11 @@ func TestPosterDrawsTheWholeChart(t *testing.T) {
 	if !strings.Contains(animated, "<animateMotion") || !strings.Contains(animated, "replays one real behavior") {
 		t.Error("the animated poster has no replay")
 	}
+	// Its static attributes are the finished chart, for viewers that don't
+	// animate SVG; only the animations hide and reveal.
+	if regexp.MustCompile(`<g data-state-id="[^"]*" opacity="0"`).MatchString(animated) || strings.Contains(animated, `stroke-dashoffset="1"`) {
+		t.Error("the animated poster hides its chart until it animates")
+	}
 	still, err := c.Poster(PosterOptions{Title: "poster fixture"})
 	if err != nil {
 		t.Fatal(err)

@@ -613,6 +613,21 @@ func (p *poster) highlight(id string) string {
 	return fmt.Sprintf(`<animate attributeName="opacity" dur="%.1fs" repeatCount="indefinite" values="%s" keyTimes="%s"/>`, p.dur, strings.Join(values, ";"), strings.Join(keys, ";"))
 }
 
+// Entrances start with the document and hold their first frame until their
+// delay, so the static attributes stay the finished chart: a viewer that
+// doesn't animate SVG still sees every card and arrow.
+func riseIn(delay float64) string {
+	total := delay + 0.7
+	k := delay / total
+	return fmt.Sprintf(`<animate attributeName="opacity" values="0;0;1" keyTimes="0;%.3f;1" dur="%.2fs" fill="freeze"/><animateTransform attributeName="transform" type="translate" values="0 14;0 14;0 0" keyTimes="0;%.3f;1" dur="%.2fs" fill="freeze"/>`, k, total, k, total)
+}
+
+func drawIn(delay float64) string {
+	total := delay + 0.9
+	k := delay / total
+	return fmt.Sprintf(`<animate attributeName="stroke-dasharray" values="1;1" dur="%.2fs" fill="freeze"/><animate attributeName="stroke-dashoffset" values="1;1;0" keyTimes="0;%.3f;1" dur="%.2fs" fill="freeze"/>`, total, k, total)
+}
+
 func (p *poster) strokeW(count int) float64 {
 	return 1.7 + 3.4*math.Log1p(float64(count))/math.Log1p(float64(max(p.maxStep, 1)))
 }
@@ -738,8 +753,7 @@ func (p *poster) draw() string {
 		add(`<g data-from="%s" data-to="%s" data-label="%s"><title>%s: %s</title>`, svgEscape(e.arrow.From), svgEscape(e.arrow.To), svgEscape(e.arrow.Label), svgEscape(e.arrow.Label), plural(int64(e.arrow.Count), "concrete step"))
 		add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-opacity="0.32" stroke-width="%.1f" stroke-linecap="round" filter="url(#poster-glow)"/>`, d, i, sw+5)
 		if animated {
-			begin := 0.35 + 0.22*float64(p.layer[e.arrow.From])
-			add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-width="%.1f" stroke-linecap="round" marker-end="url(#poster-head-%s)" pathLength="1" stroke-dasharray="1" stroke-dashoffset="1"><animate attributeName="stroke-dashoffset" values="1;0" dur="0.9s" begin="%.2fs" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.2 1"/></path>`, d, i, sw, p.roles[e.arrow.To], begin)
+			add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-width="%.1f" stroke-linecap="round" marker-end="url(#poster-head-%s)" pathLength="1">%s</path>`, d, i, sw, p.roles[e.arrow.To], drawIn(0.35+0.22*float64(p.layer[e.arrow.From])))
 		} else {
 			add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-width="%.1f" stroke-linecap="round" marker-end="url(#poster-head-%s)"/>`, d, i, sw, p.roles[e.arrow.To])
 		}
@@ -818,8 +832,7 @@ func (p *poster) draw() string {
 		role := p.roles[s.ID]
 		c := posterColor(role)
 		if animated {
-			begin := 0.22 * float64(p.layer[s.ID])
-			add(`<g data-state-id="%s" opacity="0"><title>%s</title><animate attributeName="opacity" values="0;1" dur="0.7s" begin="%.2fs" fill="freeze"/><animateTransform attributeName="transform" type="translate" values="0 14;0 0" dur="0.7s" begin="%.2fs" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.2 0.8 0.2 1"/>`, svgEscape(s.ID), svgEscape(s.Label), begin, begin)
+			add(`<g data-state-id="%s"><title>%s</title>%s`, svgEscape(s.ID), svgEscape(s.Label), riseIn(0.22*float64(p.layer[s.ID])))
 		} else {
 			add(`<g data-state-id="%s"><title>%s</title>`, svgEscape(s.ID), svgEscape(s.Label))
 		}
