@@ -577,8 +577,10 @@ func (p *localRepositoryProcess) collect(ctx context.Context, cmd *exec.Cmd, rea
 	}
 	// Even a normal exit with EOF on every pipe can leave silent compilers or
 	// grandchildren. The group, not the pipe lifetime, owns termination.
+	// Darwin answers EPERM while a group's last members are reaped; reaping
+	// below still waits for the whole group to disappear (#516).
 	killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+	if killErr != nil && !errors.Is(killErr, syscall.ESRCH) && !errors.Is(killErr, syscall.EPERM) {
 		err = errors.Join(err, killErr)
 	}
 	cleanup, done := context.WithTimeout(context.Background(), 2*time.Second)
@@ -680,9 +682,11 @@ func localReapGroup(ctx context.Context, group int) error {
 				break
 			}
 		}
+		// EPERM, as Darwin answers while the last members are reaped, means
+		// the group is still there: keep reaping until it disappears (#516).
 		if err := syscall.Kill(-group, 0); errors.Is(err, syscall.ESRCH) {
 			return nil
-		} else if err != nil {
+		} else if err != nil && !errors.Is(err, syscall.EPERM) {
 			return err
 		}
 		if err := ctx.Err(); err != nil {

@@ -363,8 +363,9 @@ func TestReady(t *testing.T){
 			readyUntil := time.Now().Add(15 * time.Second)
 			for _, name := range []string{"child567.pid", "grandchild567.pid", "runtime567.pid"} {
 				for {
+					// A loaded machine can show the file before its writer fills it.
 					b, readErr := os.ReadFile(filepath.Join(pkg, name))
-					if readErr == nil {
+					if readErr == nil && len(b) > 0 {
 						pid, err := strconv.Atoi(string(b))
 						if err != nil || pid <= 0 {
 							t.Fatalf("bad real descendant PID: %q", b)
