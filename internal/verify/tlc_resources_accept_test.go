@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,26 +25,26 @@ import (
 
 // The executable stands in for Docker at its command boundary. No daemon,
 // JVM, Python interpreter or network is needed, and every launched process is
-// owned by the runner. Cross-process event writes use a directory lock.
+// owned by the runner. Cross-process event writes use a file lock.
 func init() {
 	if os.Getenv("INVARIANT_TLC497_DOCKER") == "1" {
 		os.Exit(tlc497Docker(os.Args[1:]))
 	}
 }
 
+// The kernel releases a flock when its holder dies. Cancellation kills a
+// later batch's run, and a lock that outlived it would keep the gate's
+// removal after the client exits from logging the container's end (#641).
 func tlc497Locked(root string, fn func()) {
-	lock := filepath.Join(root, "lock")
-	until := time.Now().Add(15 * time.Second)
-	for {
-		if err := os.Mkdir(lock, 0700); err == nil {
-			break
-		}
-		if time.Now().After(until) {
-			panic("fake Docker event lock timed out")
-		}
-		time.Sleep(time.Millisecond)
+	f, err := os.OpenFile(filepath.Join(root, "lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		panic(err)
 	}
-	defer os.Remove(lock)
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		panic(err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	fn()
 }
 
