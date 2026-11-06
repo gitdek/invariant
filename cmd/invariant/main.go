@@ -610,13 +610,13 @@ func checkIssues(ws string, run, maxRuns int, logPath string) string {
 
 // testTool runs a plumbing build's checks for its agent: the ratified plan
 // and its acceptance tests from the checkout at root, and the agent's
-// changes to the files the plan names, in the sandbox.
+// changes to named files and regressions admitted by captured conventions.
 func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, logPath string) mcp.Tool {
 	// The original checkout tells the tests the agent adds from the ones it
 	// may not edit, which never fail its formatting (#298).
 	sb.Original = root
 	calls := toolCalls("test", maxRuns)
-	description := "Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files, in a sandbox with no network."
+	description := "Run gofmt on the files the change touches, go vet ./..., the tests of every package it touches, and the acceptance tests, on your changes to the plan's files and allowed new regression tests, in a sandbox with no network."
 	if sb.Repository != nil || sb.Checks != nil {
 		description = "Run the build's configured repository checks on staged changes to the plan's files and allowed new regression tests, offline. Report command or test failures and unfinished acceptance evidence."
 	}

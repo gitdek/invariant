@@ -271,6 +271,11 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			return result, err
 		}
 	}
+	if !base {
+		if err := checkRegressionPolicy(execution, s.Original, src, plan); err != nil {
+			return result, err
+		}
+	}
 	if plan.Native() {
 		if err := stageRepositoryAcceptance(execution, src, plan); err != nil {
 			return result, err
@@ -650,7 +655,7 @@ func (s Sandbox) repositoryParts(ctx context.Context, root string, plan *Plan) (
 	// change whose owner runs checks. Only explicit files and admitted tests
 	// enter ownership selection.
 	paths := append(slices.Clone(plan.Files), plan.TestFiles()...)
-	base, err := checkoutNames(ctx, s.Original)
+	scope, err := checkoutRegressionScope(ctx, s.Original, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -662,7 +667,7 @@ func (s Sandbox) repositoryParts(ctx context.Context, root string, plan *Plan) (
 	for name := range files {
 		candidates = append(candidates, name)
 	}
-	paths = append(paths, plan.RegressionFiles(base, candidates)...)
+	paths = append(paths, scope.Files(candidates)...)
 	return s.Repository.Snapshot.PartsFor(paths)
 }
 

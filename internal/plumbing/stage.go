@@ -84,7 +84,7 @@ func stageRepositoryBase(ctx context.Context, repo string, snapshot *repository.
 // Stage lays out what a build made, for a test run or a commit: the
 // checkout at root as it is, the plan's record and acceptance tests
 // included, with named writable files and new regression tests in the
-// plan's packages taken from the workspace. root remains the original
+// captured test conventions taken from the workspace. root remains the original
 // checkout throughout repairs. Nothing else the build wrote counts.
 func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
 	if plan.Native() {
@@ -119,7 +119,7 @@ func Stage(ctx context.Context, root, ws string, plan *Plan, dst string) error {
 			return err
 		}
 	}
-	return nil
+	return checkRegressionPolicy(ctx, root, dst, plan)
 }
 
 // SameSource says whether data is a ratified acceptance source as git may
@@ -131,7 +131,7 @@ func SameSource(data, source string) bool {
 }
 
 func writableFiles(ctx context.Context, root, ws string, plan *Plan) ([]string, error) {
-	base, err := checkoutNames(ctx, root)
+	scope, err := checkoutRegressionScope(ctx, root, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,19 @@ func writableFiles(ctx context.Context, root, ws string, plan *Plan) ([]string, 
 	for f := range now {
 		candidates = append(candidates, f)
 	}
-	return append(append([]string(nil), plan.Files...), plan.RegressionFiles(base, candidates)...), nil
+	return append(append([]string(nil), plan.Files...), scope.Files(candidates)...), nil
+}
+
+func checkRegressionPolicy(ctx context.Context, original, candidate string, plan *Plan) error {
+	scope, err := checkoutRegressionScope(ctx, original, plan)
+	if err != nil {
+		return err
+	}
+	names, err := checkoutNames(ctx, candidate)
+	if err != nil {
+		return err
+	}
+	return scope.CheckPolicy(names, func(file string) ([]byte, error) { return regular.ReadFile(candidate, file) })
 }
 
 // take copies a file the plan names from the build's workspace to to, or
@@ -200,9 +212,9 @@ func Diff(ctx context.Context, root, ws string, plan *Plan) (Changes, error) {
 		seen[f] = true
 	}
 	for f := range seen {
-		a, aok := was[f]
-		b, bok := now[f]
-		if aok == bok && (!aok || bytes.Equal(read(a), read(b))) {
+		_, aok := was[f]
+		_, bok := now[f]
+		if aok == bok && (!aok || bytes.Equal(read(root, f), read(ws, f))) {
 			continue
 		}
 		if allowed[f] {
@@ -216,8 +228,8 @@ func Diff(ctx context.Context, root, ws string, plan *Plan) (Changes, error) {
 	return c, nil
 }
 
-func read(p string) []byte {
-	b, _ := os.ReadFile(p)
+func read(root, file string) []byte {
+	b, _ := regular.ReadFile(root, file)
 	return b
 }
 

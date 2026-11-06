@@ -428,7 +428,7 @@ func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, e
 		}
 	}
 	if original != "" {
-		base, err := checkoutNames(ctx, original)
+		scope, err := checkoutRegressionScope(ctx, original, plan)
 		if err != nil {
 			return nil, err
 		}
@@ -441,8 +441,10 @@ func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, e
 			names = append(names, f)
 		}
 		// As staging admits them, against the same original inventory.
-		for _, f := range plan.RegressionFiles(base, names) {
-			add(f)
+		for _, f := range scope.Files(names) {
+			if strings.HasSuffix(f, ".go") {
+				add(f)
+			}
 		}
 		sort.Strings(out)
 		return out, nil
