@@ -901,57 +901,122 @@
   }
 
   // ---------- projects ----------
-  function readerEvidence(p, compact) {
+  // A proposal's reader evidence: its checked chart, its note and a link to
+  // the evidence page. A project's chart is in its row's tile (#675).
+  function readerEvidence(p) {
     const r = p.reader;
     if (!r) return '<p class="reader-note">This legacy snapshot has no reader evidence. Waiting for a receipt refresh.</p>';
-    // A poster draws the checked chart for reading, and its still twin
-    // serves readers who prefer reduced motion. The complete evidence image
-    // is on the page it links.
-    const image = r.status === "chart" && p.poster
-      ? `<a href="${esc(r.page)}"><picture><source media="(prefers-reduced-motion: reduce)" srcset="${esc(p.poster.still)}"><img class="reader-image reader-poster${compact ? " compact" : ""}" src="${esc(p.poster.animated)}" alt="Checked reader chart for ${esc(p.name)}" loading="lazy"></picture></a>`
-      : r.status === "chart" && r.svg
+    const image = r.status === "chart" && r.svg
       ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
     return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>
-      <a href="${esc(r.page)}">Read model evidence</a>${r.svg ? ` · <a href="${esc(r.svg)}">Standalone SVG</a>` : ""}
+      <a href="${esc(r.page)}">Read model evidence</a>
       <p class="fp">Receipt commit <code>${esc(r.commit)}</code></p></div>`;
   }
+
+  // Projects whose models are identical share a row, in the order they
+  // come: the examples, then Invariant's own parts, then other repositories.
+  function modelRows(ps, primary) {
+    const rows = [], at = new Map();
+    for (const p of ps) {
+      const key = `${p.repo}\u0000${p.model}`;
+      let row = at.get(key);
+      if (!row) {
+        const top = (p.dir || "").split("/")[0];
+        const group = p.repo && p.repo !== primary ? short(p.repo) : top === "examples" ? "Examples" : top === "factory" ? "Invariant's own parts" : "Projects";
+        row = { key, group, ps: [] };
+        at.set(key, row);
+        rows.push(row);
+      }
+      row.ps.push(p);
+    }
+    return rows;
+  }
+  const baseName = (name) => cap((name || "").replace(/\s*\([^)]*\)\s*$/, ""));
+  const variant = (p) => {
+    const m = /\(([^)]*)\)\s*$/.exec(p.name || "");
+    return m ? m[1] : langName[p.language] || p.language;
+  };
+  function codeEvidence(p) {
+    if (p.assurance === "proved") return `${p.verified} function${p.verified === 1 ? "" : "s"} proved`;
+    if (p.assurance === "tested in every state") return "every state reached";
+    if (p.assurance === "tested") return `${nf.format(p.visited || 0)}/${nf.format(p.states)} states run`;
+    return "code unchecked";
+  }
+  const provOf = (p) => p.ratified ? `@${p.ratified.by} on ${ref(p.repo, p.ratified.issue)}${p.ratified.previous ? `, amending ${p.ratified.previous}` : ""}`
+    : p.decision ? `${p.decision}, by hand` : "";
+  // Who ratified a row's models, each person and amendment once: "@gitdek
+  // on #65, #51 and #50, amending D-0027".
+  function provenance(ps) {
+    const by = new Map(), hand = new Set();
+    for (const p of ps) {
+      if (p.decision && !p.ratified) { hand.add(p.decision); continue; }
+      if (!p.ratified) continue;
+      const k = `${p.ratified.by}\u0000${p.ratified.previous || ""}`;
+      if (!by.has(k)) by.set(k, { who: p.ratified.by, previous: p.ratified.previous, issues: [] });
+      by.get(k).issues.push(esc(ref(p.repo, p.ratified.issue)));
+    }
+    const and = (xs) => xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
+    const parts = [...by.values()].map((r) => `<b>@${esc(r.who)}</b> on ${and(r.issues)}${r.previous ? `, amending ${esc(r.previous)}` : ""}`);
+    const said = parts.length ? `Ratified by ${parts.join("; ")}` : "";
+    const hands = hand.size ? `Ratified in <b>${[...hand].map(esc).join(", ")}</b>, by hand` : "";
+    return [said, hands].filter(Boolean).join(". ") || "Hand-built, before the factory";
+  }
+  // The row's tile: its poster, framed to the chart, for a checked reader
+  // chart, or else why there's none, with the model's size. A tile never
+  // stands a raw graph in for a reader chart (D-0353); that stays the
+  // separately labeled detail.
+  const NO_CHART = { missing_view: "No saved view at this receipt", too_large: "Too many states to chart" };
+  function tile(p, title) {
+    const r = p.reader;
+    if (r && r.status === "chart" && p.poster) {
+      const src = REDUCED ? p.poster.still : p.poster.animated;
+      return `<a class="tile chart" href="${esc(r.page)}" data-peek="${esc(src)}" data-name="${esc(title)}" title="${esc(r.message)}" aria-label="${esc(title)}: checked state chart. Open its evidence page.">
+        <img src="${esc(src)}" alt="" loading="lazy" decoding="async">
+        <span class="tag">State chart</span><span class="zoom" aria-hidden="true">${ICON_ZOOM}</span></a>`;
+    }
+    const why = r ? NO_CHART[r.status] || "No checked chart at this receipt" : "No reader evidence yet";
+    const body = `<span class="none-head">No reader chart</span>${p.receiptMissing ? "" : `<span class="none-n">${nf.format(p.states)}</span><span class="none-l">checked states</span>`}<span class="none-why">${esc(why)}</span>`;
+    return r ? `<a class="tile none" href="${esc(r.page)}" title="${esc(r.message)}" aria-label="${esc(title)}: no reader chart. Open its evidence page.">${body}</a>`
+      : `<div class="tile none">${body}</div>`;
+  }
+  const ICON_ZOOM = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
 
   function renderProjects(s) {
     const r = s.receipts;
     $("#receipts").innerHTML = r ? `Receipts from CI's gate on <code>${esc(r.sha.slice(0, 7))}</code>` : "";
-    const order = (p) => (p.factory ? 0 : 1);
-    const ps = s.projects.filter((p) => inScope(p.repo)).sort((a, b) => (a.repo === s.repo ? 0 : 1) - (b.repo === s.repo ? 0 : 1) || order(a) - order(b) || b.states - a.states);
+    const ps = s.projects.filter((p) => inScope(p.repo)).sort((a, b) => (a.repo === s.repo ? 0 : 1) - (b.repo === s.repo ? 0 : 1) || (a.repo || "").localeCompare(b.repo || "") || (a.dir || "").localeCompare(b.dir || ""));
     if (pview === "table") return renderTable(s, ps);
-    $("#projects").className = "cards";
-    // Siblings that check the same model draw the same chart: the first card
-    // shows its poster in full, and the rest show the top of it.
-    const drawn = new Set();
-    $("#projects").innerHTML = ps.map((p) => {
-      const first = !!p.poster && !drawn.has(p.model);
-      if (p.poster) drawn.add(p.model);
-      const assure = p.assurance === "proved" ? "proved" : p.assurance === "tested in every state" ? "every" : p.assurance === "tested" ? "tested" : "unchecked";
+    $("#projects").className = "models";
+    let group = "";
+    $("#projects").innerHTML = modelRows(ps, s.repo).map((row) => {
+      const p = row.ps[0], title = baseName(p.name);
+      const head = row.group !== group ? `<h4 class="group">${esc(row.group)}</h4>` : "";
+      group = row.group;
+      const same = (f) => row.ps.every((q) => f(q) === f(p));
+      const tally = (q) => `${q.bugs.filter((b) => b.caught).length}/${q.bugs.length}`;
       const caught = p.bugs.filter((b) => b.caught).length;
-      let evidence = ["unchecked", "Code evidence"];
-      if (p.assurance === "proved") evidence = [`${p.verified}`, "Functions proved"];
-      else if (p.assurance === "tested in every state") evidence = ["every state", "Code reached"];
-      else if (p.assurance === "tested") evidence = [`${nf.format(p.visited || 0)}/${nf.format(p.states)}`, "States the code ran"];
-      let prov = "Hand-built, before the factory";
-      if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
-      else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
-      return `<article class="card${quiet(p.repo)}${first ? " charted" : ""}" ${tag(p.repo)}>
-        <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${p.receiptMissing ? "Receipt unavailable" : esc(p.assurance)}</span></div>
-        <h3>${esc(cap(p.name))}</h3>
-        <p class="dir">${p.repo && p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</p>
-        ${readerEvidence(p, !!p.poster && !first)}
-        ${p.receiptMissing ? "" : `<dl class="metrics">
+      const facts = p.receiptMissing ? `<p class="prov">Receipt unavailable</p>` : `<dl class="facts">
           <div><dt>States</dt><dd>${nf.format(p.states)}</dd></div>
           <div><dt>Statements</dt><dd>${p.statements.length}</dd></div>
-          <div><dt>Bugs caught</dt><dd class="${caught === p.bugs.length ? "holds" : ""}">${caught}/${p.bugs.length}</dd></div>
-          <div><dt>${esc(evidence[1])}</dt><dd>${evidence[0]}</dd></div>
-        </dl>
-        <p class="prov">${prov}</p>
-        <p class="fp">${esc(p.fingerprint.slice(0, 19))} · ${p.passed ? '<span class="ok">passed</span>' : '<span class="bad">failed</span>'}</p>
-        <button type="button" class="btn raw-graph" data-model="${esc(p.model)}">Raw state graph detail</button>`}
+          ${same(tally) ? `<div><dt>Bugs caught</dt><dd class="${caught === p.bugs.length ? "holds" : ""}">${tally(p)}</dd></div>` : ""}
+        </dl>`;
+      const prov = provenance(row.ps);
+      const chips = row.ps.map((q) => {
+        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" ? "tested" : "unchecked";
+        const label = q.receiptMissing ? "receipt unavailable" : q.assurance;
+        const tip = [q.dir, q.fingerprint ? q.fingerprint.slice(0, 19) : "", provOf(q)].filter(Boolean).join(" · ");
+        const href = q.reader ? q.reader.page : "";
+        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? "passed" : "failed"}</span>`}`;
+        return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}</li>`;
+      }).join("");
+      return `${head}<article class="model${quiet(p.repo)}" ${tag(p.repo)}>
+        ${tile(p, title)}
+        <div class="model-body">
+          <div class="model-head"><h3>${esc(title)}</h3><p class="dir">${p.repo && p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}${row.ps.length > 1 ? ` <span class="more">+${row.ps.length - 1}</span>` : ""}</p>${p.receiptMissing ? "" : `<button type="button" class="btn raw-graph side" data-model="${esc(p.model)}">Raw state graph detail</button>`}</div>
+          ${facts}
+          <p class="prov">${prov}</p>
+          <ul class="impls" aria-label="Implementations">${chips}</ul>
+        </div>
       </article>`;
     }).join("");
     document.querySelectorAll("#projects .raw-graph").forEach((el) => {
@@ -960,6 +1025,88 @@
     });
     thumbs(s);
   }
+
+  // A chart tile frames the top of its poster's chart: its first states,
+  // below the poster's own header, which ends above y = 124 at every size
+  // (#665's layout), and across the middle of a wide poster.
+  function frameTile(img) {
+    const W = img.naturalWidth, tw = img.parentElement.clientWidth;
+    if (!W || !tw) return;
+    const shown = Math.min(W, Math.max(620, tw * 2.6)), k = tw / shown;
+    img.style.width = `${W * k}px`;
+    img.style.transform = `translate(${(-(W - shown) / 2) * k}px, ${-124 * k}px)`;
+  }
+  document.addEventListener("load", (e) => {
+    if (e.target instanceof HTMLImageElement && e.target.closest(".tile.chart")) frameTile(e.target);
+  }, true);
+  window.addEventListener("resize", () => document.querySelectorAll(".tile.chart img").forEach(frameTile));
+
+  // While a chart tile is hovered or focused, its poster shows whole beside
+  // it; a click still follows the tile to the evidence page (#675). Touch
+  // goes straight to the page.
+  const peek = document.createElement("div");
+  peek.className = "peek";
+  peek.setAttribute("aria-hidden", "true");
+  peek.innerHTML = '<img alt=""><p></p>';
+  document.body.appendChild(peek);
+  let peekTile = null, peekWait = 0, peekIntent = 0, peekArmed = null, scrolled = 0;
+  function placePeek() {
+    if (!peekTile) return;
+    const img = peek.firstChild, m = 12, gap = 16, pad = 10, cap = 34;
+    const box = peekTile.getBoundingClientRect(), vw = document.documentElement.clientWidth, vh = window.innerHeight;
+    const nw = img.naturalWidth || 920, nh = img.naturalHeight || 1100;
+    const k = Math.min(1, Math.min(600, vw - 2 * m - 2 * pad) / nw, (vh - 2 * m - 2 * pad - cap) / nh);
+    const w = Math.round(nw * k), h = Math.round(nh * k), W = w + 2 * pad, H = h + 2 * pad + cap;
+    img.style.width = `${w}px`;
+    img.style.height = `${h}px`;
+    let left = box.right + gap;
+    if (left + W > vw - m) left = box.left - gap - W;
+    if (left < m) left = Math.max(m, Math.min(vw - m - W, box.left));
+    const top = Math.max(m, Math.min(box.top + box.height / 2 - H / 2, vh - m - H));
+    peek.style.left = `${Math.round(left)}px`;
+    peek.style.top = `${Math.round(top)}px`;
+  }
+  function showPeek(t) {
+    clearTimeout(peekWait);
+    if (peekTile === t) return;
+    peekTile = t;
+    const img = peek.firstChild;
+    peek.lastChild.textContent = `${t.dataset.name} · click to open its evidence`;
+    peek.classList.remove("on");
+    const open = () => { if (peekTile !== t) return; placePeek(); requestAnimationFrame(() => peek.classList.add("on")); };
+    if (img.getAttribute("src") !== t.dataset.peek) {
+      img.onload = open;
+      img.src = t.dataset.peek;
+      if (img.complete && img.naturalWidth) open();
+    } else open();
+  }
+  function hidePeek(now) {
+    clearTimeout(peekWait);
+    const go = () => { peekTile = null; peek.classList.remove("on"); };
+    if (now) go(); else peekWait = setTimeout(go, 90);
+  }
+  // A mouse that moves onto a tile and rests opens its peek; one that only
+  // crosses it, or a tile the page scrolls under a still pointer, doesn't.
+  document.addEventListener("pointermove", (e) => {
+    const t = e.target instanceof Element && e.target.closest(".tile.chart");
+    if (!t || e.pointerType !== "mouse" || peekTile === t || peekArmed === t || performance.now() - scrolled < 250) return;
+    clearTimeout(peekIntent);
+    peekArmed = t;
+    peekIntent = setTimeout(() => { peekArmed = null; showPeek(t); }, peekTile ? 0 : 120);
+  });
+  document.addEventListener("pointerout", (e) => {
+    const t = e.target instanceof Element && e.target.closest(".tile.chart");
+    if (t && !(e.relatedTarget instanceof Node && t.contains(e.relatedTarget))) { clearTimeout(peekIntent); peekArmed = null; hidePeek(false); }
+  });
+  document.addEventListener("focusin", (e) => {
+    const t = e.target instanceof Element && e.target.closest(".tile.chart");
+    if (t && t.matches(":focus-visible")) showPeek(t);
+  });
+  document.addEventListener("focusout", (e) => { if (e.target instanceof Element && e.target.closest(".tile.chart")) hidePeek(true); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hidePeek(true); });
+  window.addEventListener("scroll", () => { scrolled = performance.now(); clearTimeout(peekIntent); peekArmed = null; if (peekTile) hidePeek(true); }, { passive: true });
+  window.addEventListener("resize", () => { if (peekTile) hidePeek(true); });
+
   function thumbs(s) {
     const ready = new Set(s.projects.filter((p) => p.graph).map((p) => p.model));
     document.querySelectorAll("canvas.thumb").forEach((cv) => {
@@ -1835,8 +1982,8 @@
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
-        <td>${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${readerEvidence(p)}${p.receiptMissing ? "" : `<button type="button" class="btn raw-graph" data-model="${esc(p.model)}">Raw state graph detail</button>`}</td><td class="num">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="num">${p.receiptMissing ? "—" : p.statements.length}</td>
-        <td class="num ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
+        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
+        <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
   }
