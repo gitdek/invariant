@@ -77,7 +77,9 @@ func ParseSlices(readme, prd string) []Slice {
 		s := Slice{ID: m[2], Title: plain(m[3]), Detail: firstSentence(plain(m[4])), Status: "done"}
 		if m[1] == " " {
 			s.Status = "later"
-			if !now {
+			// The first slice still to do is in progress, and so is any later
+			// one the README says is in progress (#681).
+			if !now || strings.Contains(m[4], "In progress") {
 				s.Status, now = "now", true
 			}
 		}
