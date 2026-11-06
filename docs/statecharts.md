@@ -155,6 +155,14 @@ Element IDs are generated independently of reader labels and chart IDs. Text and
 
 Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Verification receipts save this SVG beside their JSON and Markdown. Modeled proposals retain Mermaid publication; the dashboard serves the same native SVG on modeled evidence cards.
 
+## Posters
+
+`(*statechart.Result).Poster(statechart.PosterOptions{Title, Animated}) (string, error)` draws the same checked chart for people to read. The complete report stays in the standalone SVG and the reader record; a poster leaves it out, so its size follows the chart, not the TLC graph. It validates the result exactly as `SVG` does, and refuses an unprintable title.
+
+A poster reads top to bottom. States are layered by their longest path from the initial states and ordered within each layer by their neighbors. An arrow that skips layers threads through a slot of its own in each, clear of the cards it passes, and arrows that close a cycle sweep around the right, with their labels outside the arc. Each state is a card colored by its role: start, ordinary, final (no arrow leaves it) or breaking a rule. Its caption counts the concrete states it holds, and the steps that stay in it are chips inside the card, each with a small loop of its own and its count. An arrow's width follows its concrete steps, and its label pill carries its exact label and count. A poster keeps the standalone SVG's inspectable `g[data-state-id]`, `g[data-initial]` and `g[data-from][data-to][data-label]` elements, with exact labels in `title`, but not its `metadata`.
+
+Animated, light flows along every arrow in its direction, the start pulses, a soft background drifts, and a token replays one real behavior: concrete steps the chart retains, chained from an initial concrete state. A small beam search keeps the walk that visits the most chart states, then the most arrows, then the shortest, and each card lights up as the token reaches it. The legend says how many steps the behavior takes. The motion is declarative SVG animation, with no script, stylesheet or outside resource. A still poster draws the same chart without motion, for readers who prefer reduced motion. The same chart always draws the same poster, and neither adds a proof claim. [D-0364](../decisions/journal/D-0364.jsonl) records posters, refining D-0353.
+
 ## JSON view version 1
 
 The root has exactly `version`, `state` and `step`:

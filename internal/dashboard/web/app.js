@@ -904,7 +904,12 @@
   function readerEvidence(p) {
     const r = p.reader;
     if (!r) return '<p class="reader-note">This legacy snapshot has no reader evidence. Waiting for a receipt refresh.</p>';
-    const image = r.status === "chart" && r.svg
+    // A poster draws the checked chart for reading, and its still twin
+    // serves readers who prefer reduced motion. The complete evidence image
+    // is on the page it links.
+    const image = r.status === "chart" && p.poster
+      ? `<a href="${esc(r.page)}"><picture><source media="(prefers-reduced-motion: reduce)" srcset="${esc(p.poster.still)}"><img class="reader-image reader-poster" src="${esc(p.poster.animated)}" alt="Checked reader chart for ${esc(p.name)}" loading="lazy"></picture></a>`
+      : r.status === "chart" && r.svg
       ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
     return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>
       <a href="${esc(r.page)}">Read model evidence</a>${r.svg ? ` · <a href="${esc(r.svg)}">Standalone SVG</a>` : ""}
@@ -928,7 +933,7 @@
       let prov = "Hand-built, before the factory";
       if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
       else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
-      return `<article class="card${quiet(p.repo)}" ${tag(p.repo)}>
+      return `<article class="card${quiet(p.repo)}${p.poster ? " charted" : ""}" ${tag(p.repo)}>
         <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${p.receiptMissing ? "Receipt unavailable" : esc(p.assurance)}</span></div>
         <h3>${esc(cap(p.name))}</h3>
         <p class="dir">${p.repo && p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</p>

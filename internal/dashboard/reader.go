@@ -39,6 +39,14 @@ type ReaderPresentation struct {
 	SVG         string `json:"svg,omitempty"`
 }
 
+// PosterLinks draw a checked chart for people to read: an animated poster,
+// and the same poster without motion for readers who prefer reduced motion.
+// The presentation's SVG stays the complete evidence image.
+type PosterLinks struct {
+	Animated string `json:"animated"`
+	Still    string `json:"still"`
+}
+
 type readerArtifacts struct {
 	JSON []byte
 	SVG  []byte
@@ -63,9 +71,10 @@ type readerEvidence struct {
 }
 
 type readerPage struct {
-	repo         string
-	presentation ReaderPresentation
-	html, svg    []byte
+	repo                     string
+	presentation             ReaderPresentation
+	posters                  *PosterLinks
+	html, svg, poster, still []byte
 }
 
 func readerHash(b []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(b)) }
@@ -264,11 +273,12 @@ func (e readerEvidence) checked() (status, message, svg string) {
 const readerHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Evidence.Manifest.Name}} — reader evidence</title>
-<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:100rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}code{overflow-wrap:anywhere}dt{font-weight:bold}dd{margin-bottom:1rem}</style></head>
+<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:100rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}img.poster{width:auto;max-width:100%;margin:1rem auto;border-radius:28px;box-shadow:0 24px 60px rgba(9,13,28,.35)}code{overflow-wrap:anywhere}dt{font-weight:bold}dd{margin-bottom:1rem}</style></head>
 <body><main><h1>{{.Evidence.Manifest.Name}}</h1><p>{{.Evidence.Repo}} · {{.Evidence.Dir}}</p>
 <p>Receipt commit: <code>{{.Presentation.Commit}}</code></p>
 <p>{{.Presentation.Message}}</p>
-{{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}
+{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked reader chart for {{.Evidence.Manifest.Name}}"></picture>
+<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}
 <h2>Checked bounds</h2><dl>{{range $name, $value := .Evidence.Lock.Bounds}}<dt>{{$name}}</dt><dd><pre>{{$value}}</pre></dd>{{end}}</dl>
 <h2>Locked rules</h2>{{range .Evidence.Lock.Statements}}<h3>{{.Name}} ({{.Kind}})</h3><pre>{{.Says}}</pre><p>Pin: <code>{{.SHA256}}</code></p>{{end}}
 {{if .Record}}<details><summary>Complete receipt reader record</summary><pre>{{.Record}}</pre></details>{{end}}
@@ -277,20 +287,46 @@ const readerHTML = `<!doctype html>
 </main></body></html>`
 
 var readerTemplate = template.Must(template.New("reader").Parse(readerHTML))
-var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg)$`)
+var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg|poster\.svg|still\.svg)$`)
+
+// posters draws a checked chart's animated and still posters, or neither.
+func (e readerEvidence) posters(status string) (string, string) {
+	if status != "chart" || e.Report == nil || e.Report.Reader == nil || e.Report.Reader.Chart == nil {
+		return "", ""
+	}
+	c := e.Report.Reader.Chart
+	poster, err := c.Poster(statechart.PosterOptions{Title: e.Manifest.Name, Animated: true})
+	if err != nil {
+		return "", ""
+	}
+	still, err := c.Poster(statechart.PosterOptions{Title: e.Manifest.Name})
+	if err != nil {
+		return "", ""
+	}
+	return poster, still
+}
 
 func makeReader(e readerEvidence) readerPage {
 	status, message, svg := e.checked()
+	poster, still := e.posters(status)
+	if poster != "" {
+		message = strings.Replace(message, "the full report is included in the image", "the poster's light replays one real behavior from TLC's graph, and the evidence page holds the full report", 1)
+	}
 	p := ReaderPresentation{Status: status, Message: message, Commit: e.Commit, Format: readerFormat}
 	key := readerHash(readerJSON(struct {
 		Evidence                       readerEvidence
 		Status, Message, SVG, Template string
-	}{e, status, message, svg, readerHTML}))
+		Poster, Still                  string `json:",omitempty"`
+	}{e, status, message, svg, readerHTML, poster, still}))
 	p.Fingerprint = key
 	base := "/reader/" + strings.TrimPrefix(key, "sha256:")
 	p.Page = base + ".html"
 	if svg != "" {
 		p.SVG = base + ".svg"
+	}
+	var posters *PosterLinks
+	if poster != "" {
+		posters = &PosterLinks{Animated: base + ".poster.svg", Still: base + ".still.svg"}
 	}
 	record := ""
 	if e.Report != nil && e.Report.Reader != nil {
@@ -301,9 +337,10 @@ func makeReader(e readerEvidence) readerPage {
 	_ = readerTemplate.Execute(&b, struct {
 		Evidence     readerEvidence
 		Presentation ReaderPresentation
+		Posters      *PosterLinks
 		Record       string
-	}{e, p, record})
-	return readerPage{repo: e.Repo, presentation: p, html: b.Bytes(), svg: []byte(svg)}
+	}{e, p, posters, record})
+	return readerPage{repo: e.Repo, presentation: p, posters: posters, html: b.Bytes(), svg: []byte(svg), poster: []byte(poster), still: []byte(still)}
 }
 
 func (s *Server) keepReader(e readerEvidence) *ReaderPresentation {
@@ -331,6 +368,16 @@ func (s *Server) keepReader(e readerEvidence) *ReaderPresentation {
 	return &page.presentation
 }
 
+// postersFor returns the poster links of a kept reader page, if it has any.
+func (s *Server) postersFor(r *ReaderPresentation) *PosterLinks {
+	if r == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.readers[strings.TrimPrefix(r.Fingerprint, "sha256:")].posters
+}
+
 func (s *Server) readerFile(key string) string { return filepath.Join(s.Cache, "readers", key+".json") }
 
 func (s *Server) readerRepo(name string) bool {
@@ -352,8 +399,13 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, ct := p.html, "text/html; charset=utf-8"
-	if parts[2] == "svg" {
+	switch parts[2] {
+	case "svg":
 		body, ct = p.svg, "image/svg+xml; charset=utf-8"
+	case "poster.svg":
+		body, ct = p.poster, "image/svg+xml; charset=utf-8"
+	case "still.svg":
+		body, ct = p.still, "image/svg+xml; charset=utf-8"
 	}
 	if len(body) == 0 {
 		http.NotFound(w, r)
@@ -419,10 +471,12 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 					}
 					s.readers[parts[1]] = page
 					s.mu.Unlock()
+					p.Poster = page.posters
 				}
 			}
 			if !ok {
 				rejected = true
+				p.Poster = nil
 				e = readerEvidence{Format: readerFormat, Repo: p.Repo, Dir: p.Dir, Commit: old.Commit,
 					Manifest: project.Manifest{Name: p.Name, Language: p.Language}, Lock: project.Lock{Bounds: p.Bounds}, Problem: "cached_evidence"}
 				if run != nil {
