@@ -153,7 +153,7 @@ func togetherSend(h http.Handler, tok, path, body string, headers map[string]str
 func TestAPublicCardLinksToItsCardOnAct(t *testing.T) {
 	team := newAccessTeam(t)
 	issues, comments := togetherThreads(t)
-	s := &Server{Repos: []*Repo{{Name: "o/r"}}, Access: team.access(), Log: t.Logf}
+	s := &Server{Repos: []*Repo{{Name: "o/r", FactoryLogin: "invariant-code-factory[bot]"}}, Access: team.access(), Log: t.Logf}
 	r := s.Repos[0]
 	r.src.issues = issues
 	r.src.comments = map[int]cachedComments{}

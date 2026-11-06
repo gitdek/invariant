@@ -99,7 +99,7 @@ func TestRepositoryBuilderUsesSameChecksForToolAndFinalRun(t *testing.T) {
 			if err != nil || built == nil || agent.toolErr != nil || built.AgentError != "" {
 				t.Fatalf("configured builder: %v, tool=%v, built=%+v", err, agent.toolErr, built)
 			}
-			if len(r.calls) != 8 || len(r.opens) != 2 {
+			if len(r.calls) != 8 || len(r.opens) != 4 {
 				t.Fatalf("tool and final check did not both execute all commands: calls=%d environments=%d", len(r.calls), len(r.opens))
 			}
 			for _, result := range []Result{agent.tool, built.Final} {

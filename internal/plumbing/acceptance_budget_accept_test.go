@@ -114,7 +114,7 @@ func TestConfiguredAcceptanceSharesWholeRunAndPhaseDeadlines(t *testing.T) {
 			if checked.Problem == "" || (!checked.Run.TimedOut && !checked.Run.DeadlineExceeded) || checked.Run.Interrupted {
 				t.Fatalf("deadline did not veto base qualification: %+v", checked)
 			}
-			if len(f.runner.invocations) != 2 || len(f.runner.closed) != 1 {
+			if len(f.runner.invocations) != 2 || len(f.runner.closed) != 4 {
 				t.Fatal("later timeout lost earlier execution/cleanup or ran later selectors")
 			}
 			for _, test := range f.plan.Tests {
@@ -183,13 +183,13 @@ func TestConfiguredAcceptanceInfrastructureVetoesBaseQualification(t *testing.T)
 				if cleanup.Err() != nil || time.Until(deadline515(t, cleanup)) > 15*time.Second+time.Second {
 					t.Error("cleanup did not receive a fresh bounded context")
 				}
-				if mode == "cancel in cleanup" {
+				if mode == "cancel in cleanup" && len(f.runner.invocations) > 0 {
 					cancel()
 					if cleanup.Err() != nil {
 						t.Error("cleanup was canceled with its caller")
 					}
 				}
-				if mode == "cleanup" {
+				if mode == "cleanup" && len(f.runner.invocations) > 0 {
 					return errors.New("cleanup failed after completed tests")
 				}
 				return nil
@@ -303,7 +303,13 @@ func TestConfiguredAcceptanceQueueRetainsAuthorityAndCleanupOwnership(t *testing
 			return cleanup.Err()
 		}
 	}
-	second.runner.openHook = func(context.Context, DependencyRequest) error { secondOpened <- struct{}{}; return nil }
+	second.runner.openHook = func(context.Context, DependencyRequest) error {
+		select {
+		case secondOpened <- struct{}{}:
+		default:
+		}
+		return nil
+	}
 	firstBuild, err := queue.register(ctx, first.sandbox, first.plan)
 	if err != nil {
 		t.Fatal(err)

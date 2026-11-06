@@ -1057,6 +1057,25 @@ func (s *Server) watcherOf(r *Repo) (Status, string) {
 	return Status{}, ""
 }
 
+// factoryOf is the account r's factory posts as: the one r names, or else
+// the one in its shown watcher's status, or else in any of its watchers'
+// statuses. Empty means none is known, and the page reads no factory
+// markers for r rather than any commenter's (#666).
+func (s *Server) factoryOf(r *Repo) string {
+	if r.FactoryLogin != "" {
+		return r.FactoryLogin
+	}
+	if st, _ := s.watcherOf(r); st.Login != "" {
+		return st.Login
+	}
+	for _, w := range s.Works {
+		if st, err := ReadStatus(StatusPath(w, r.Name)); err == nil && st.Login != "" {
+			return st.Login
+		}
+	}
+	return ""
+}
+
 // holding keeps who holds repo's lease, as the dashboard last read it, where
 // the live view, which is served apart from the reads, can see it.
 func (s *Server) holding(repo string, l *Lease) {

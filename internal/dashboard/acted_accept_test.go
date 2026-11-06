@@ -188,7 +188,7 @@ func atOnceStart(t *testing.T, every time.Duration) *atOnceFake {
 	team := newAccessTeam(t)
 	f.owner = team.token(t, team.key, "RS256", team.claims(nil))
 	gh := github.Client{Repo: "o/r", GH: filepath.Join(dir, "gh")}
-	f.s = &Server{Repos: []*Repo{{Name: "o/r", GitHub: gh}}, Branch: "main", Every: every, Access: team.access(), Post: f.post, Log: f.logf}
+	f.s = &Server{Repos: []*Repo{{Name: "o/r", GitHub: gh, FactoryLogin: "invariant-code-factory[bot]"}}, Branch: "main", Every: every, Access: team.access(), Post: f.post, Log: f.logf}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()

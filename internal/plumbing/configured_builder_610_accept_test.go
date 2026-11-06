@@ -109,8 +109,12 @@ func TestConfiguredGoBuilderToolAndFreshFinal610(t *testing.T) {
 				if r.Built() != want || r.Passed != want || r.Approved != want || (agent.reviews == 1) != want {
 					t.Fatalf("final checks failed to gate review/readiness for %s: %+v reviews=%d", mode, r, agent.reviews)
 				}
-				if len(f.runner.envs) != 2 {
-					t.Fatalf("want separate tool and fresh final execution, got %d", len(f.runner.envs))
+				wantEnvs := 4 // Commands and acceptance, for both tool and final checks.
+				if mode == "final command failure" || mode == "edit after tool" {
+					wantEnvs--
+				}
+				if len(f.runner.envs) != wantEnvs {
+					t.Fatalf("want %d independent command/acceptance environments, got %d", wantEnvs, len(f.runner.envs))
 				}
 				for _, env := range f.runner.envs {
 					if !env.closed {

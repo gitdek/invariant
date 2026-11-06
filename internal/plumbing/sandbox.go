@@ -34,6 +34,14 @@ const (
 //go:embed sandbox_runner.py
 var sandboxRunner string
 
+// sandboxGit is git configuration every process in the sandbox gets from
+// its environment, which git reads even when a test blanks its global and
+// system config: no background maintenance or garbage collection. A commit
+// otherwise starts git's maintenance detached, and it writes into the
+// test's repository while the test's temporary directory is being removed
+// (#687).
+var sandboxGit = []string{"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false", "GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0"}
+
 // Sandbox runs a checkout's checks on a throwaway copy of it, in the
 // pinned Go image, with no network and none of the host's environment
 // (D-0014). The host's module cache is mounted read-only, so the
@@ -322,6 +330,9 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 		"-e", "CGO_ENABLED=0", "-e", "GOMODCACHE=/gomod", "-e", "GOCACHE=/gocache",
 		"-e", "GOFMT_FILES=" + strings.Join(formatted, " "), "-e", "TEST_PKGS=" + strings.Join(pkgs, " "),
 		"-v", src + ":/src", "-v", s.ModCache + ":/gomod:ro"}
+	for _, e := range sandboxGit {
+		args = append(args, "-e", e)
+	}
 	// The code runs as the user who runs the sandbox, not as root, so what
 	// it leaves in the build cache stays that user's to remove.
 	if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {

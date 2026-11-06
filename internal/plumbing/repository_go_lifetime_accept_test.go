@@ -57,10 +57,10 @@ func TestRepositoryGoSharedLifetime582(t *testing.T) {
 					if o.end.After(started.Add(SandboxTimeout + time.Second)) {
 						t.Fatalf("%s renewed/exceeded whole run: %v", o.stage, o.end)
 					}
-					if phase.IsZero() && (suite && o.stage == "suite" || !suite && o.stage == "read") {
+					if phase.IsZero() && (suite && o.stage == "suite" || !suite && o.stage == "open") {
 						phase = o.end
 						if phase.After(o.at.Add(SandboxShardTimeout)) || phase.After(whole) || o.at.Add(SandboxShardTimeout).Sub(phase) > 2*time.Second {
-							t.Fatal("first suite/discovery did not start one ten-minute phase")
+							t.Fatal("first suite/invocation startup did not start one ten-minute phase")
 						}
 					}
 					if phase.IsZero() {

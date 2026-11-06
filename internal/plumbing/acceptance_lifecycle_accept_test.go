@@ -87,6 +87,7 @@ type runner515 struct {
 	invocations []RepositoryAcceptanceInvocation
 	noEvidence  bool
 	partialOpen bool
+	openHook    func(context.Context, DependencyRequest) error
 	accept      func(context.Context, DependencyRequest, RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error)
 }
 
@@ -94,6 +95,13 @@ func (r *runner515) OpenChecks(ctx context.Context, q DependencyRequest) (Reposi
 	environment, err := r.runner484.OpenChecks(ctx, q)
 	if err != nil {
 		return environment, err
+	}
+	// Startup can fail after acquiring a handle. Keep it caller-owned so
+	// timeout fixtures exercise bounded cleanup of the attempted invocation.
+	if r.openHook != nil {
+		if err := r.openHook(ctx, q); err != nil {
+			return environment, err
+		}
 	}
 	if r.noEvidence {
 		return environment, nil
@@ -250,7 +258,7 @@ func TestConfiguredAcceptanceBaseCollectsIndependentFailures(t *testing.T) {
 					t.Fatalf("lost attributable failure: %+v", r)
 				}
 			}
-			if len(f.runner.opens) != 2 || f.runner.maxActive != 1 {
+			if len(f.runner.opens) != 2+len(f.plan.Tests) || f.runner.maxActive != 1 {
 				t.Fatal("independent parts did not run serially")
 			}
 			assertBindings515(t, f)
@@ -469,7 +477,7 @@ func TestConfiguredAcceptanceStagesPinnedSources(t *testing.T) {
 			write468(t, f.candidate, repository.Path, `{"candidate":"cannot register adapters or replace commands"}`)
 			result, err := f.sandbox.Run(context.Background(), f.candidate, f.plan)
 			if mode == "absent" || mode == "line endings" {
-				if err != nil || !result.Passed() || staged != 1 {
+				if err != nil || !result.Passed() || staged != 1+len(f.plan.Tests) {
 					t.Fatalf("safe source did not run: %v\n%s", err, result.Summary())
 				}
 				// Repeated runs must not accept stale records from a prior attempt.
