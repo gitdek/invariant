@@ -323,6 +323,13 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		q.Image, q.SourceDir = prepared.artifact.Image, filepath.Join(partWork, "invariant", "work")
 		q.Network, q.Pull, q.Argv = false, false, nil
 		q.Env = dependencyEnv(part.Language, false)
+		// Installed Node dependencies come only from the prepared image. A
+		// candidate's node_modules must not overlay that captured preparation.
+		if part.Language == "typescript" {
+			if err := os.RemoveAll(filepath.Join(q.SourceDir, filepath.FromSlash(part.Directory), "node_modules")); err != nil {
+				return result, err
+			}
+		}
 		q.Token, err = dependencyToken()
 		if err != nil {
 			return result, err
@@ -333,6 +340,18 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		}
 		if environment == nil {
 			return result, fmt.Errorf("part %q startup returned no environment", part.Name)
+		}
+		nodeSeal := ""
+		for _, test := range plan.Tests {
+			if test.Part == part.Name && defaultNodeAdapter(s.repositoryAdapter(test.Framework)) {
+				if _, ok := environment.(RepositoryProcessTransport); ok {
+					nodeSeal, err = sealNodeDependencies(execution, environment)
+					if err != nil {
+						return result, err
+					}
+				}
+				break
+			}
 		}
 		for j, phase := range repositoryPhases {
 			command := &result.CommandResults[i*len(repositoryPhases)+j]
@@ -373,6 +392,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			goRuntime := test.Framework == "go" && processCapable
 			_, defaultPytest := s.repositoryAdapter(test.Framework).(PytestRepositoryAcceptanceAdapter)
 			pytestRuntime := defaultPytest && processCapable
+			nodeRuntime := defaultNodeAdapter(s.repositoryAdapter(test.Framework)) && processCapable
 			discovered := false
 			if adapter, ok := s.repositoryAdapter(test.Framework).(RepositoryAcceptanceDiscoverer); ok {
 				startTests()
@@ -425,7 +445,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			if goRuntime && !discovered {
 				return result, fmt.Errorf("accept %s: Go process execution needs successful discovery", test.Identity())
 			}
-			if !goRuntime && !pytestRuntime && !ok {
+			if !goRuntime && !pytestRuntime && !nodeRuntime && !ok {
 				result.TestResults[j].Reason = "prepared environment has no runtime acceptance evidence collector"
 				return result, fmt.Errorf("part %q environment cannot supply individual acceptance evidence", part.Name)
 			}
@@ -441,6 +461,14 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				evidence, out, err = runRepositoryGoAcceptance(execution, part, invocation, transport)
 			} else if pytestRuntime {
 				evidence, out, err = runRepositoryPytestAcceptance(execution, part, invocation, transport)
+			} else if nodeRuntime {
+				if err = checkNodeDependencies(execution, environment, nodeSeal); err == nil {
+					err = checkNodeInputs(execution, s.Repository.Snapshot, part, transport)
+				}
+				if err == nil {
+					evidence, out, err = runRepositoryNodeAcceptance(execution, part, invocation, transport)
+					err = errors.Join(err, checkNodeInputs(execution, s.Repository.Snapshot, part, transport), checkNodeDependencies(execution, environment, nodeSeal))
+				}
 			} else {
 				evidence, out, err = acceptance.RunAcceptance(execution, invocation)
 			}
