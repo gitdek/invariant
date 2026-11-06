@@ -494,13 +494,14 @@ func TestNodeOfflineRefusals633(t *testing.T) {
 				}
 			})
 		}
-		t.Run(framework+"/missing locked runtime", func(t *testing.T) {
+		t.Run(framework+"/command deletion cannot remove acceptance runtime", func(t *testing.T) {
 			f := fixture633(t, tools, nodeCases633(framework), nil, func(c *repository.Config) {
 				c.Parts[0].Commands["build"] = repository.Command{Argv: []string{"node", "-e", "require('node:fs').rmSync('node_modules/" + framework + "',{recursive:true,force:true})"}}
 			})
-			check633(t, f, false)
-			if r, _ := f.sandbox.Run(t.Context(), f.candidate, f.plan); r.Passed() {
-				t.Fatal("missing prepared framework qualified")
+			check633(t, f, true)
+			fix633(t, f)
+			if r, err := f.sandbox.Run(t.Context(), f.candidate, f.plan); err != nil || !r.Passed() {
+				t.Fatalf("command deletion affected independent acceptance: %v\n%s", err, r.Summary())
 			}
 		})
 	}
