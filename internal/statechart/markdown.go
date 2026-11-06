@@ -46,6 +46,76 @@ func BoundsMarkdown(bounds map[string]string) string {
 	return "Checked bounds: " + strings.Join(values, ", ") + ".\n\n"
 }
 
+// Keep the ordinary complete candidate above this annotated comparison. Node
+// aliases and styles are generated; source labels pass through the same literal
+// encoder as ordinary charts. Removed arrows retain their direction, dashed.
+func (c *Comparison) changeMermaid() string {
+	var b strings.Builder
+	b.WriteString("Added and removed annotations (green solid additions; red dashed removals):\n\n```mermaid\nflowchart LR\n")
+	edge := 0
+	var styles []string
+	for side, s := range []ComparisonSnapshot{c.Candidate, c.Baseline} {
+		if s.Chart == nil {
+			continue
+		}
+		states, arrows := map[string]string{}, map[arrowIdentity]string{}
+		changedStates, changedArrows, change, title := c.Visible.AddedStates, c.Visible.AddedArrows, "added", "Candidate"
+		if side == 1 {
+			changedStates, changedArrows, change, title = c.Visible.RemovedStates, c.Visible.RemovedArrows, "removed", "Baseline"
+		}
+		for _, x := range changedStates {
+			states[x.ID] = change
+		}
+		for _, x := range changedArrows {
+			arrows[arrowID(x)] = change
+		}
+		for _, x := range c.Visible.ChangedStates {
+			states[x.After.ID] = "changed"
+		}
+		for _, x := range c.Visible.ChangedArrows {
+			arrows[arrowID(x.After)] = "changed"
+		}
+		fmt.Fprintf(&b, "    subgraph side%d[\"%s\"]\n", side, title)
+		aliases := map[string]string{}
+		for i, x := range s.Chart.States {
+			alias := fmt.Sprintf("c%d_s%d", side, i)
+			aliases[x.ID] = alias
+			label := x.Label
+			if states[x.ID] != "" {
+				label = states[x.ID] + ": " + label
+			}
+			fmt.Fprintf(&b, "        %s[\"%s\"]\n", alias, mermaidLiteral(label))
+			if states[x.ID] != "" {
+				fmt.Fprintf(&b, "        class %s %s\n", alias, states[x.ID])
+			}
+		}
+		for _, a := range s.Chart.Arrows {
+			label := a.Label
+			change := arrows[arrowID(a)]
+			if change != "" {
+				label = change + ": " + label
+			}
+			if change == "removed" {
+				fmt.Fprintf(&b, "        %s -. \"%s\" .-> %s\n", aliases[a.From], mermaidLiteral(label), aliases[a.To])
+			} else {
+				fmt.Fprintf(&b, "        %s -->|\"%s\"| %s\n", aliases[a.From], mermaidLiteral(label), aliases[a.To])
+			}
+			color := map[string]string{"added": "#18743b", "removed": "#b42318", "changed": "#825600"}[change]
+			if color != "" {
+				styles = append(styles, fmt.Sprintf("    linkStyle %d stroke:%s,stroke-width:3px\n", edge, color))
+			}
+			edge++
+		}
+		b.WriteString("    end\n")
+	}
+	b.WriteString("    classDef added fill:#effaf1,stroke:#18743b,stroke-width:3px\n    classDef removed fill:#fff1ef,stroke:#b42318,stroke-width:3px,stroke-dasharray:8 5\n    classDef changed fill:#fff8dd,stroke:#825600,stroke-width:3px\n")
+	for _, style := range styles {
+		b.WriteString(style)
+	}
+	b.WriteString("```\n\n")
+	return b.String()
+}
+
 // Markdown renders only the supplied chart and report, without changing them.
 func (c *Result) Markdown() string {
 	var b strings.Builder

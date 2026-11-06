@@ -39,10 +39,11 @@ type Preview struct {
 // only changes that pass the factory's existing writer/comment/option checks.
 // The agent can select one of these through revised, but cannot authorize one.
 type CheckContext struct {
-	ParentPlan int               `json:"parent_plan,omitempty"`
-	Planning   string            `json:"planning,omitempty"`
-	Choices    map[string]string `json:"choices,omitempty"`
-	Revisions  []Revision        `json:"revisions,omitempty"`
+	Baseline   *statechart.ComparisonSnapshot `json:"baseline,omitempty"`
+	ParentPlan int                            `json:"parent_plan,omitempty"`
+	Planning   string                         `json:"planning,omitempty"`
+	Choices    map[string]string              `json:"choices,omitempty"`
+	Revisions  []Revision                     `json:"revisions,omitempty"`
 }
 
 var checkContexts sync.Map
@@ -58,10 +59,18 @@ func (r Request) CheckContext() CheckContext {
 	for _, a := range r.Answers {
 		c.Choices[a.Fork] = a.Option
 	}
+	c.Baseline = r.comparisonBaseline()
+	if c.Baseline != nil {
+		// Only sources are authority. Both checks recompute the graph, and
+		// sending a saved dump in the check process's arguments can exceed
+		// the operating system's argument limit even below chart capacity.
+		c.Baseline.Chart, c.Baseline.Limitation = nil, nil
+	}
 	return c
 }
 
 func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
+	c.Baseline = detachedSnapshot(c.Baseline)
 	b, err := json.Marshal(c)
 	if err != nil {
 		return "", nil, err
@@ -73,6 +82,10 @@ func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
 	// The separate MCP process receives the same bytes in its launch arguments,
 	// not by rereading an agent-writable context file.
 	checkContexts.Store(ws, c)
+	if err := stageBaseline(ws, c.Baseline); err != nil {
+		checkContexts.Delete(ws)
+		return "", nil, err
+	}
 	return string(b), func() { checkContexts.Delete(ws) }, nil
 }
 

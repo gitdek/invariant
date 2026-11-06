@@ -1408,7 +1408,7 @@
         return `<div class="alternative"><button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`}) : ""}</div>`;
       }).join("")}</div>`).join("") + `<div class="cmds">${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "proposal") {
-      body = `${proposalText(w, repo, "a person")}${said(w)}
+      body = `${proposalText(w, repo, "a person")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name}) : ""}
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>
@@ -1504,7 +1504,7 @@
         : `<button class="cmd act primary" type="button" disabled>Choose ${forks.length === 1 ? "an answer" : `all ${forks.length}`} to post</button>`;
       if (takes(w, "revise")) actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
-      body = `${proposalText(w, repo, "you")}${said(w)}`;
+      body = `${proposalText(w, repo, "you")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name}) : ""}`;
       actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>`;

@@ -15,16 +15,19 @@ const noReader = "\nNo reader chart is available. Supply .invariant/view.json an
 // Rendering is read-only, including for reports decoded from older archives.
 // An undrawable supplied chart produces a diagnostic copy, never a partial chart.
 func renderReader(r *verify.Reader) (*verify.Reader, string) {
-	if r == nil || r.Chart == nil {
+	if r == nil || (r.Chart == nil && r.Comparison == nil) {
 		return r, ""
 	}
-	svg, err := r.Chart.SVG()
+	svg, err := r.SVG()
 	if err == nil {
 		return r, svg
 	}
 	copyReader := *r
 	copyReader.Chart, copyReader.Limitation, copyReader.Fingerprint = nil, nil, ""
-	copyReader.Unavailable = &verify.ReaderDiagnostic{Code: "reader_render", Message: err.Error(), Source: &r.Chart.Report.Source}
+	copyReader.Unavailable = &verify.ReaderDiagnostic{Code: "reader_render", Message: err.Error()}
+	if r.Chart != nil {
+		copyReader.Unavailable.Source = &r.Chart.Report.Source
+	}
 	data, marshalErr := json.Marshal(struct {
 		Reader     *verify.Reader           `json:"reader"`
 		Diagnostic *verify.ReaderDiagnostic `json:"diagnostic"`
@@ -41,6 +44,12 @@ func readerMarkdown(r *verify.Reader) string {
 		return noReader
 	}
 	var b strings.Builder
+	for _, line := range r.ComparisonNotes() {
+		b.WriteString("\n" + statechart.TableLiteral(line) + "\n")
+	}
+	if r.Comparison != nil {
+		b.WriteString("\n" + r.Comparison.Markdown() + "\n**Final-model reader chart**\n")
+	}
 	if !r.Preview.IsZero() {
 		b.WriteString("\n" + statechart.TableLiteral(r.Preview.Description()) + "\n")
 	}

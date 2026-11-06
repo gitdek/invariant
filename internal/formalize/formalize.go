@@ -18,6 +18,7 @@ import (
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/regular"
+	"github.com/gitdek/invariant/internal/statechart"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
@@ -90,6 +91,8 @@ type Proposal struct {
 	View       string            `json:"view,omitempty"`
 	Includes   map[string]string `json:"includes,omitempty"`
 	Reader     *Reader           `json:"reader,omitempty"`
+	// Baseline carries the last selected model through an intervening question.
+	Baseline *statechart.ComparisonSnapshot `json:"comparison_baseline,omitempty"`
 	// Target is the existing project an amendment changes (D-0045). Dir is
 	// where a new project goes when its issue names one. Both are empty for
 	// a new project placed the usual way.
@@ -112,10 +115,27 @@ type Proposal struct {
 // Target is the project an amendment changes, as it stood when the
 // amendment was drafted.
 type Target struct {
+	Baseline *Current         `json:"baseline,omitempty"`
 	Dir      string           `json:"dir"`
 	Manifest project.Manifest `json:"manifest"`
 	Amends   string           `json:"amends"`   // the ProposalHash of the lock it replaces
 	Previous string           `json:"previous"` // where that lock was ratified: "#3", or "D-0027"
+}
+
+// Carrier is what an answered question passes on to the draft that follows
+// it: the selected baseline and the captured target, with no draft to
+// revise.
+func (p *Proposal) Carrier() *Proposal {
+	if p == nil || p.Baseline == nil && p.Target == nil {
+		return nil
+	}
+	return &Proposal{Baseline: p.Baseline, Target: p.Target}
+}
+
+// drafted says whether the proposal holds a draft to revise, rather than
+// only what an answered question carries on.
+func (p *Proposal) drafted() bool {
+	return p.ModuleText != "" || len(p.Forks) > 0 || p.Plan != nil || p.IssuePlan != nil || p.Unsupported != ""
 }
 
 // Ratifiable says whether the proposal is one a person can ratify: nothing
@@ -269,6 +289,11 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 		return err
 	}
 	m := p.Manifest()
+	if ratified != nil && ratified.Proposal == "" {
+		copyRatification := *ratified
+		copyRatification.Proposal = project.ProposalHash(p.Bounds, p.Statements)
+		ratified = &copyRatification
+	}
 	lock := project.Lock{Ratified: ratified, Bounds: p.Bounds, Statements: p.Statements}
 	for path, v := range map[string]any{".invariant/invariant.json": m, ".invariant/ratified.lock": lock} {
 		b, err := json.MarshalIndent(v, "", "  ")
@@ -317,6 +342,7 @@ func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 		return nil, nil, err
 	}
 	if len(p.Forks) > 0 {
+		p.Baseline = detachedSnapshot(authority.Baseline)
 		return p, nil, p.checkPreviews(ctx, tc, authority)
 	}
 	if !p.Ratifiable() {
@@ -335,6 +361,9 @@ func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 		return p, r, err
 	}
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
+	if err == nil {
+		err = p.computeComparison(ctx, ws, tc, authority)
+	}
 	return p, r, err
 }
 
