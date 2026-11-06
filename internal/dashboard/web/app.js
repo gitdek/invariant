@@ -901,10 +901,15 @@
   }
 
   // ---------- projects ----------
-  function readerEvidence(p) {
+  function readerEvidence(p, compact) {
     const r = p.reader;
     if (!r) return '<p class="reader-note">This legacy snapshot has no reader evidence. Waiting for a receipt refresh.</p>';
-    const image = r.status === "chart" && r.svg
+    // A poster draws the checked chart for reading, and its still twin
+    // serves readers who prefer reduced motion. The complete evidence image
+    // is on the page it links.
+    const image = r.status === "chart" && p.poster
+      ? `<a href="${esc(r.page)}"><picture><source media="(prefers-reduced-motion: reduce)" srcset="${esc(p.poster.still)}"><img class="reader-image reader-poster${compact ? " compact" : ""}" src="${esc(p.poster.animated)}" alt="Checked reader chart for ${esc(p.name)}" loading="lazy"></picture></a>`
+      : r.status === "chart" && r.svg
       ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
     return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>
       <a href="${esc(r.page)}">Read model evidence</a>${r.svg ? ` · <a href="${esc(r.svg)}">Standalone SVG</a>` : ""}
@@ -918,7 +923,12 @@
     const ps = s.projects.filter((p) => inScope(p.repo)).sort((a, b) => (a.repo === s.repo ? 0 : 1) - (b.repo === s.repo ? 0 : 1) || order(a) - order(b) || b.states - a.states);
     if (pview === "table") return renderTable(s, ps);
     $("#projects").className = "cards";
+    // Siblings that check the same model draw the same chart: the first card
+    // shows its poster in full, and the rest show the top of it.
+    const drawn = new Set();
     $("#projects").innerHTML = ps.map((p) => {
+      const first = !!p.poster && !drawn.has(p.model);
+      if (p.poster) drawn.add(p.model);
       const assure = p.assurance === "proved" ? "proved" : p.assurance === "tested in every state" ? "every" : p.assurance === "tested" ? "tested" : "unchecked";
       const caught = p.bugs.filter((b) => b.caught).length;
       let evidence = ["unchecked", "Code evidence"];
@@ -928,11 +938,11 @@
       let prov = "Hand-built, before the factory";
       if (p.ratified) prov = `Ratified by <b>@${esc(p.ratified.by)}</b> on ${esc(ref(p.repo, p.ratified.issue))}${p.ratified.previous ? `, amending ${esc(p.ratified.previous)}` : ""}`;
       else if (p.decision) prov = `Ratified in <b>${esc(p.decision)}</b>, by hand`;
-      return `<article class="card${quiet(p.repo)}" ${tag(p.repo)}>
+      return `<article class="card${quiet(p.repo)}${first ? " charted" : ""}" ${tag(p.repo)}>
         <div class="top"><span class="lang ${esc(p.language)}">${esc(langName[p.language] || p.language)}</span><span class="assure ${assure}">${p.receiptMissing ? "Receipt unavailable" : esc(p.assurance)}</span></div>
         <h3>${esc(cap(p.name))}</h3>
         <p class="dir">${p.repo && p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</p>
-        ${readerEvidence(p)}
+        ${readerEvidence(p, !!p.poster && !first)}
         ${p.receiptMissing ? "" : `<dl class="metrics">
           <div><dt>States</dt><dd>${nf.format(p.states)}</dd></div>
           <div><dt>Statements</dt><dd>${p.statements.length}</dd></div>

@@ -334,6 +334,7 @@ type Project struct {
 	Graph          bool                `json:"graph,omitempty"` // its state graph is ready
 	Factory        bool                `json:"factory"`         // built by the factory from an issue
 	Reader         *ReaderPresentation `json:"reader,omitempty"`
+	Poster         *PosterLinks        `json:"poster,omitempty"`
 }
 
 type Statement struct {
@@ -1032,6 +1033,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 				p := projectOf(ps, rep)
 				p.Repo = r.Name
 				p.Reader = ps.reader
+				p.Poster = s.postersFor(ps.reader)
 				p.Graph = rep != nil && (ready[ps.key] || s.cached(ps.key))
 				snap.Projects = append(snap.Projects, p)
 				rs.Projects++
