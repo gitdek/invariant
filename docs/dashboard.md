@@ -24,7 +24,7 @@ Preview cache identities bind repository, issue, containing fork and option IDs 
 
 Restart restores and revalidates each option separately from project receipts. A swapped snapshot, changed source, missing cache record or corrupted option gets its own diagnostic page and no image. Healthy siblings retain their evidence and stable conditional responses, including through another restart. Partial answers hide only the answered questions and keep the remaining snapshots' original choice context until another draft is checked. This separate option recovery preserves the existing project policy: damaged project evidence discards the saved whole-page snapshot until a refresh can recompute totals. Plumbing, PRD and authenticated D-0328 step-fit questions have no charts.
 
-This behavior implements [#639's ratified plan](../.invariant/plans/issue-639.json) on D-0002, D-0307, D-0328, D-0345, D-0347, D-0351 and D-0353. The merger records the new option-preview and cache policy decision and runs the [pinned-TLC integration](statecharts.md#modeled-alternatives) when Docker is unavailable to the builder.
+This behavior implements [#639's ratified plan](../.invariant/plans/issue-639.json) on D-0002, D-0307, D-0328, D-0345, D-0347, D-0351 and D-0353. D-0355 records the option-preview and cache policy, and the merger runs the [pinned-TLC integration](statecharts.md#modeled-alternatives) when Docker is unavailable to the builder.
 
 ## Factory activity
 
