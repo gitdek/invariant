@@ -8,6 +8,11 @@ package verify
 // At GOMAXPROCS=1/GOGC=100 and TLCParallel=1, both 256 and 512 MiB payloads
 // must fit the same 192 MiB heap ceiling. This is a workload ceiling, not a
 // promise about unbounded individual values, index counts, or Python receipts.
+//
+// The ceiling bounds the heap the gate keeps: the most live heap any
+// collection marks during the run. The peak including garbage the collector
+// hasn't freed yet depends on when it runs, so identical runs measured 57 and
+// 212 MiB. That peak is reported, not judged (#697).
 import (
 	"context"
 	"encoding/json"
@@ -17,8 +22,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -56,15 +64,25 @@ func gate569Memory(t *testing.T, refused bool) {
 		fdBase := fdCount()
 		var fdPeak atomic.Int64
 		var ticks atomic.Uint64
-		var peak atomic.Uint64
-		sample := func() {
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			for old := peak.Load(); m.HeapAlloc > old; old = peak.Load() {
-				if peak.CompareAndSwap(old, m.HeapAlloc) {
+		var kept, peak atomic.Uint64
+		raise := func(top *atomic.Uint64, v uint64) {
+			for old := top.Load(); v > old; old = top.Load() {
+				if top.CompareAndSwap(old, v) {
 					break
 				}
 			}
+		}
+		// Each collection publishes the live heap it marked, and sampling
+		// every millisecond sees each one long before the next replaces it.
+		var start runtime.MemStats
+		runtime.ReadMemStats(&start)
+		live := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+		sample := func() {
+			metrics.Read(live)
+			raise(&kept, live[0].Value.Uint64())
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			raise(&peak, m.HeapAlloc)
 			if ticks.Add(1)%50 == 0 {
 				n := fdCount()
 				for old := fdPeak.Load(); n > old; old = fdPeak.Load() {
@@ -91,9 +109,12 @@ func gate569Memory(t *testing.T, refused bool) {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
 		r, err := Run(ctx, p.Dir, "", tc, Options{TLCParallel: 1})
-		sample()
 		close(done)
 		<-joined
+		sample()
+		var end runtime.MemStats
+		runtime.ReadMemStats(&end)
+		collections := end.NumGC - start.NumGC
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,13 +126,17 @@ func gate569Memory(t *testing.T, refused bool) {
 				t.Fatal("recording tail was not checked")
 			}
 		}
-		if got := peak.Load(); got > gate569Ceiling {
-			t.Errorf("%s/%s n=%d peak=%d MiB exceeds fixed %d MiB ceiling", route, kind, n, got>>20, gate569Ceiling>>20)
+		// A run the collector never visited can't say what the gate kept.
+		if collections == 0 {
+			t.Fatalf("%s/%s n=%d finished without a collection", route, kind, n)
+		}
+		if got := kept.Load(); got > gate569Ceiling {
+			t.Errorf("%s/%s n=%d kept=%d MiB exceeds fixed %d MiB ceiling", route, kind, n, got>>20, gate569Ceiling>>20)
 		}
 		if fdBase >= 0 && fdPeak.Load() > fdBase+24 {
 			t.Errorf("recording descriptors accumulated: baseline=%d peak=%d", fdBase, fdPeak.Load())
 		}
-		t.Logf("%s/%s n=%d bad=%v peak=%d bytes", route, kind, n, bad, peak.Load())
+		t.Logf("%s/%s n=%d bad=%v kept=%d bytes peak=%d bytes collections=%d", route, kind, n, bad, kept.Load(), peak.Load(), collections)
 		return
 	}
 	routes := []string{"go", "typescript"}
@@ -135,27 +160,60 @@ func gate569Memory(t *testing.T, refused bool) {
 			}
 			for _, bad := range badCases {
 				t.Run(fmt.Sprintf("%s/%d/bad=%v", route, n, bad), func(t *testing.T) {
-					exe, err := os.Executable()
-					if err != nil {
-						t.Fatal(err)
-					}
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-					defer cancel()
-					cmd := exec.CommandContext(ctx, exe, "-test.run=^"+strings.Split(t.Name(), "/")[0]+"$", "-test.v", "-test.count=1", "-test.timeout=4m30s")
-					cmd.Env = append(os.Environ(), "INVARIANT_569_MEASURE=1", "INVARIANT_569_COUNT="+strconv.Itoa(n), "INVARIANT_569_ROUTE="+route, "INVARIANT_569_BAD="+strconv.FormatBool(bad), "INVARIANT_569_INPUT="+path, "GOMAXPROCS=1", "GOGC=100", "GOMEMLIMIT=off")
-					out, err := cmd.CombinedOutput()
-					if err != nil {
-						t.Fatalf("measured gate: %v\n%s", err, out)
-					}
-					t.Logf("%s", out)
+					t.Logf("%s", gate569Measured(t, strings.Split(t.Name(), "/")[0], route, n, bad, path))
 				})
 			}
 		}
 	}
 }
 
+// gate569Measured runs one workload in a process of its own, under the
+// measured settings, and returns its output.
+func gate569Measured(t *testing.T, test, route string, n int, bad bool, path string) []byte {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^"+test+"$", "-test.v", "-test.count=1", "-test.timeout=4m30s")
+	cmd.Env = append(os.Environ(), "INVARIANT_569_MEASURE=1", "INVARIANT_569_COUNT="+strconv.Itoa(n), "INVARIANT_569_ROUTE="+route, "INVARIANT_569_BAD="+strconv.FormatBool(bad), "INVARIANT_569_INPUT="+path, "GOMAXPROCS=1", "GOGC=100", "GOMEMLIMIT=off")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("measured gate: %v\n%s", err, out)
+	}
+	return out
+}
+
 func TestGateRecordingPeakHeap(t *testing.T)        { gate569Memory(t, false) }
 func TestGateRefusedRecordingPeakHeap(t *testing.T) { gate569Memory(t, true) }
+
+var gate697Measure = regexp.MustCompile(`go/attempts n=65536 bad=true kept=(\d+) bytes peak=(\d+) bytes`)
+
+// Identical runs of the 65,536-entry late-bad Go case, each in a process of
+// its own, all stay under the ceiling. The spread of what the gate kept, and
+// of the peak including garbage, is reported (#697).
+func TestGateRecordingKeptHeapIsStable697(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recording.json")
+	gate569Record(t, path, "attempts", 65536, gate569Padding)
+	var kept, peak []uint64
+	for range 3 {
+		out := gate569Measured(t, "TestGateRecordingPeakHeap", "go", 65536, true, path)
+		m := gate697Measure.FindSubmatch(out)
+		if m == nil {
+			t.Fatalf("measured gate reported no heap:\n%s", out)
+		}
+		k, _ := strconv.ParseUint(string(m[1]), 10, 64)
+		p, _ := strconv.ParseUint(string(m[2]), 10, 64)
+		kept, peak = append(kept, k), append(peak, p)
+	}
+	mib := func(v []uint64) string {
+		lo, hi := slices.Min(v), slices.Max(v)
+		return fmt.Sprintf("%d to %d MiB (spread %d MiB)", lo>>20, hi>>20, (hi-lo)>>20)
+	}
+	t.Logf("%d runs: kept %s against the %d MiB ceiling; peak including garbage %s", len(kept), mib(kept), gate569Ceiling>>20, mib(peak))
+}
 
 func TestPythonApplicationConversionPeakHeap(t *testing.T) {
 	if os.Getenv("APP569_MEASURE") == "1" {
