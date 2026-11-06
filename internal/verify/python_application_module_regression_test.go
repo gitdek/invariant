@@ -139,7 +139,7 @@ func TestPythonApplicationExecutionModuleCancellation(t *testing.T) {
 			continue
 		}
 		source := pa321State + pa321Worker + "\nasync def forever(request, *, status):\n    await asyncio.Event().wait()\n"
-		driver := strings.ReplaceAll(strings.Replace(pa321Driver, "timeout=2", "timeout=60", 1), "app.submit", "app.forever")
+		driver := strings.ReplaceAll(strings.Replace(pa321Deadline, "timeout=2", "timeout=60", 1), "app.submit", "app.forever")
 		_, p := pa321Fixture(t, source, driver)
 		opts := pa318Options(t, real, new(int))
 		execute := opts.Execute
@@ -238,7 +238,7 @@ async def submit(request, *, status):
 				if name == "unfinished target coroutine" {
 					source = pa321State + strings.Split(pa321Async, "@register\nasync def submit")[0] + body
 				}
-				_, p := pa321Fixture(t, source, strings.Replace(pa321Driver, "timeout=2", "timeout=0.2", 1))
+				_, p := pa321Fixture(t, source, strings.Replace(pa321Deadline, "timeout=2", "timeout=0.2", 1))
 				s := pa315Prepare(t, p, pa318Options(t, real, new(int)))
 				ctx := pa321Context(t)
 				r, err := s.Run(ctx, pa318Driver(t, s).Key)
