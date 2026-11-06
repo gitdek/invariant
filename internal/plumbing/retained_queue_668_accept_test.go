@@ -92,7 +92,10 @@ func TestRetainedQueueRegistrationModes668(t *testing.T) {
 			if tool.Plan.Hash() != final.Plan.Hash() || tool.Plan.Hash() != f.plan.Hash() || !reflect.DeepEqual(tool.Plan.Sources, final.Plan.Sources) {
 				t.Fatal("tool/final authority diverged")
 			}
-			if len(f.runner.opens) != 2 || len(f.runner.closed) != 2 {
+			// Each of the two checks, the tool's and the fresh final one,
+			// opens its commands' container and, since #621 (D-0371, D-0375), a
+			// fresh container for each of the plan's two acceptance tests.
+			if len(f.runner.opens) != 6 || len(f.runner.closed) != 6 {
 				t.Fatal("tool and final did not execute and clean up afresh")
 			}
 			assertBindings515(t, f)
