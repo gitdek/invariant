@@ -351,7 +351,10 @@ func TestConfiguredRegressionBuild654(t *testing.T) {
 						t.Errorf("tool disagreed with final: %s", r.Summary())
 					}
 				}
-				if len(f.runner.opens) != 4 || len(f.runner.calls) != 16 {
+				// Each of the four checks, the tool's and the fresh final one in
+				// both rounds, opens its commands' shared container and, since
+				// #621 (D-0371, D-0373), a fresh container for its acceptance invocation.
+				if len(f.runner.opens) != 8 || len(f.runner.calls) != 16 {
 					t.Errorf("expected tool and fresh final commands each round: opens=%d calls=%d", len(f.runner.opens), len(f.runner.calls))
 				}
 				a.inspect(f.root, 2)

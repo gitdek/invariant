@@ -515,7 +515,7 @@ The original checkout supplies both novelty and policy throughout repairs; CI re
 
 Mandatory offline regressions cover these discovery refusals and staging against captured policy. `TestPytestOfflineRegressionDiscovery654` and `TestNodeOfflineRegressionDiscovery654` also use the existing Python and Node acceptance-image opt-ins to run the real frameworks: the unsupported configurations hide failing tests or rewrite them through Babel, and supported configurations expose the failures. These opt-ins require the already-local pinned images described above and never install or download tools.
 
-The merger records this step and F1 A before the next parent step; this plumbing build cannot write `decisions/`. Existing grounds are [D-0173](../decisions/journal/D-0173.jsonl), [D-0190](../decisions/journal/D-0190.jsonl), [D-0301](../decisions/journal/D-0301.jsonl) and [D-0311](../decisions/journal/D-0311.jsonl).
+[D-0372](../decisions/journal/D-0372.jsonl) records this step and F1 A, on [D-0173](../decisions/journal/D-0173.jsonl), [D-0190](../decisions/journal/D-0190.jsonl), [D-0301](../decisions/journal/D-0301.jsonl) and [D-0311](../decisions/journal/D-0311.jsonl). With #621's fresh acceptance containers, a configured build's check opens its commands' container and one per acceptance invocation ([D-0373](../decisions/journal/D-0373.jsonl)).
 
 ## Time, usage and the provider
 
