@@ -433,6 +433,14 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 			return err
 		}
 	}
+	// A pull request a crash left open may lack this build's handoff, its
+	// trusted paths included, or carry a stale one: it gets the description
+	// a new one would. Setting it again is harmless.
+	if found && pr.State == "open" {
+		if pr, err = f.GitHub.DescribePullRequest(ctx, pr.Number, planPullRequestBody(t, next, res, sc.Trusted)); err != nil {
+			return err
+		}
+	}
 	var refusal error
 	if found && ok && !held && pr.State == "open" {
 		if pr, refusal, err = f.markReady(ctx, n, ratified, pr); err != nil {

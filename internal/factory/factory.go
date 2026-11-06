@@ -47,6 +47,9 @@ type GitHub interface {
 	RemoveLabel(ctx context.Context, issue int, label string) error
 	CreatePullRequest(ctx context.Context, pr github.NewPullRequest) (github.PullRequest, error)
 	PullRequest(ctx context.Context, n int) (github.PullRequest, error)
+	// DescribePullRequest replaces a pull request's description, as
+	// publication does for one a crash left open without its handoff.
+	DescribePullRequest(ctx context.Context, n int, body string) (github.PullRequest, error)
 	// OpenPullRequest finds the open pull request from a branch, if there is one.
 	OpenPullRequest(ctx context.Context, branch string) (github.PullRequest, bool, error)
 	// PullRequestFrom finds the newest pull request from a branch, in any

@@ -243,6 +243,15 @@ func (g *fakeGitHub) CreatePullRequest(_ context.Context, pr github.NewPullReque
 	return *out, nil
 }
 
+func (g *fakeGitHub) DescribePullRequest(_ context.Context, n int, body string) (github.PullRequest, error) {
+	pr, ok := g.prs[n]
+	if !ok {
+		return github.PullRequest{}, fmt.Errorf("no pull request #%d", n)
+	}
+	g.bodies[n] = body
+	return *pr, nil
+}
+
 func (g *fakeGitHub) OpenPullRequest(_ context.Context, branch string) (github.PullRequest, bool, error) {
 	for _, pr := range g.prs {
 		if pr.State == "open" && pr.Head.Ref == branch {

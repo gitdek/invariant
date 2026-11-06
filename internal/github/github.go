@@ -377,6 +377,12 @@ func (c Client) PullRequestFrom(ctx context.Context, branch string) (PullRequest
 // as it is then. Closing one that's already closed changes nothing, and one
 // that's merged stays merged: the caller reads Merged to tell, as when
 // someone merges it just before the close.
+// DescribePullRequest replaces pull request n's description.
+func (c Client) DescribePullRequest(ctx context.Context, n int, body string) (PullRequest, error) {
+	var out PullRequest
+	return out, c.call(ctx, "PATCH", c.path(fmt.Sprintf("pulls/%d", n)), map[string]string{"body": body}, &out)
+}
+
 func (c Client) ClosePullRequest(ctx context.Context, n int) (PullRequest, error) {
 	pr, err := c.PullRequest(ctx, n)
 	if err != nil || pr.Merged || pr.State == "closed" {
