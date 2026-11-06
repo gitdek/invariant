@@ -7,13 +7,35 @@ import (
 	"strings"
 )
 
+// DirectoryOwner returns an independent copy of the deepest enclosing part.
+// Safe new or deleted paths use the same rule; a safe path outside all part
+// directories returns false, even if it has shared or dependency check owners.
+func (s *Snapshot) DirectoryOwner(name string) (Part, bool, error) {
+	if err := s.checkPath(name, false, false); err != nil {
+		return Part{}, false, err
+	}
+	deepest := -1
+	for i, part := range s.config.Parts {
+		if part.Directory == "." || strings.HasPrefix(name, part.Directory+"/") {
+			if deepest < 0 || s.config.Parts[deepest].Directory == "." || len(part.Directory) > len(s.config.Parts[deepest].Directory) {
+				deepest = i
+			}
+		}
+	}
+	if deepest < 0 {
+		return Part{}, false, nil
+	}
+	return clonePart(s.config.Parts[deepest]), true, nil
+}
+
 // PartsFor selects the checks affected by every touched file using the captured
 // configuration. A new or deleted file has the same owners as an existing file
 // at that path. An unsafe or unowned path invalidates the entire selection.
 func (s *Snapshot) PartsFor(paths []string) ([]Part, error) {
 	selected := make(map[string]bool)
 	for _, name := range paths {
-		if err := s.checkPath(name, false, false); err != nil {
+		owner, owned, err := s.DirectoryOwner(name)
+		if err != nil {
 			return nil, err
 		}
 		if name == Path || slices.Contains(s.config.AgentRules, name) || slices.Contains(s.config.CurrentState, name) {
@@ -23,22 +45,14 @@ func (s *Snapshot) PartsFor(paths []string) ([]Part, error) {
 			continue
 		}
 
-		owned := false
-		deepest := -1
-		for i, part := range s.config.Parts {
-			if part.Directory == "." || strings.HasPrefix(name, part.Directory+"/") {
-				if deepest < 0 || s.config.Parts[deepest].Directory == "." || len(part.Directory) > len(s.config.Parts[deepest].Directory) {
-					deepest = i
-				}
-			}
+		if owned {
+			selected[owner.Name] = true
+		}
+		for _, part := range s.config.Parts {
 			if slices.Contains(part.Lockfiles, name) || slices.Contains(part.Inputs, name) {
 				selected[part.Name] = true
 				owned = true
 			}
-		}
-		if deepest >= 0 {
-			selected[s.config.Parts[deepest].Name] = true
-			owned = true
 		}
 		for _, shared := range s.config.SharedPaths {
 			if selectorMatches(name, shared.Path) {

@@ -3,8 +3,6 @@ package plumbing
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -279,11 +277,9 @@ func ReadRepositoryDraft(ctx context.Context, ws string, snapshot *repository.Sn
 		return p, err
 	}
 	for _, file := range p.TestFiles() {
-		// PartsFor already rejected links, directories and unsafe ancestors.
-		// A missing leaf is the only non-file case still possible here.
 		if _, err := snapshot.ReadFileContext(ctx, file); err == nil {
 			return p, fmt.Errorf("acceptance file %s already exists in the captured base", file)
-		} else if err.Error() != fmt.Sprintf("repository path %q is not a committed regular file", file) {
+		} else if !errors.Is(err, repository.ErrFileMissing) {
 			return p, err
 		}
 	}
@@ -311,6 +307,9 @@ func (p *Plan) ValidateRepository(ctx context.Context, snapshot *repository.Snap
 }
 
 func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapshot) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if snapshot == nil {
 		return "", errors.New("native acceptance needs the caller's captured repository snapshot")
 	}
@@ -328,16 +327,11 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 		if err := t.validateNative(); err != nil {
 			return "", err
 		}
-		var owner *repository.Part
-		for i := range config.Parts {
-			part := &config.Parts[i]
-			if part.Directory == "." || strings.HasPrefix(t.File, part.Directory+"/") {
-				if owner == nil || owner.Directory == "." || len(part.Directory) > len(owner.Directory) {
-					owner = part
-				}
-			}
+		owner, ok, err := snapshot.DirectoryOwner(t.File)
+		if err != nil {
+			return "", err
 		}
-		if owner == nil || owner.Name != t.Part {
+		if !ok || owner.Name != t.Part {
 			return "", fmt.Errorf("acceptance file %s must execute in its deepest owning part %q", t.File, t.Part)
 		}
 		owners[owner.Name] = true
@@ -401,8 +395,10 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return dependencyHash(data), nil
 }
 
 func nativeSourceEntries(ws string, sources map[string]string) error {
