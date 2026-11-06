@@ -395,8 +395,33 @@ func plan(g git, base, head string, issue int, r Result) Result {
 			candidates = append(candidates, f)
 		}
 	}
-	for _, f := range lock.Plan.RegressionFiles(baseFiles, candidates) {
+	readBase := func(file string) ([]byte, error) {
+		if before[file] != "100644" && before[file] != "100755" {
+			return nil, fmt.Errorf("%s is not a regular baseline file", file)
+		}
+		data, err := g.show(from, file)
+		return []byte(data), err
+	}
+	regressions, err := plumbing.NewRegressionScope(&lock.Plan, baseFiles, readBase)
+	if err != nil {
+		r.Problems = append(r.Problems, "the captured regression policy can't be read: "+err.Error())
+		return r
+	}
+	for _, f := range regressions.Files(candidates) {
 		touches[f] = true
+	}
+	var candidateFiles []string
+	for file := range after {
+		candidateFiles = append(candidateFiles, file)
+	}
+	if err := regressions.CheckPolicy(candidateFiles, func(file string) ([]byte, error) {
+		if after[file] != "100644" && after[file] != "100755" {
+			return nil, fmt.Errorf("%s is not a regular candidate file", file)
+		}
+		data, err := g.show(head, file)
+		return []byte(data), err
+	}); err != nil {
+		r.Problems = append(r.Problems, err.Error())
 	}
 	for _, f := range r.Files {
 		switch {

@@ -21,6 +21,7 @@ func TestNativeAcceptanceScopePinsIdentityAndOriginalBaseline(t *testing.T) {
 				commands[phase] = repository.Command{NotApplicable: "Not used in scope tests."}
 			}
 			commands["test_one"] = repository.Command{Argv: []string{"pytest", "{test}"}}
+			commands["test"] = repository.Command{Argv: []string{"pytest"}}
 			config := repository.Config{Version: 1, Parts: []repository.Part{{Name: "app", Directory: "app", Language: "python", Image: "python@sha256:" + strings.Repeat("a", 64), Lockfiles: []string{}, Inputs: []string{}, Commands: commands}}, AgentRules: []string{}, CurrentState: []string{}, TrustedPaths: []string{}, SharedPaths: []repository.SharedPath{}}
 			data, _ := json.Marshal(config)
 			write(t, root, map[string]string{repository.Path: string(data), "app/main.py": "value = 1\n", "app/embed.go": "package app\n", "app/existing_test.go": "package app\n"})
@@ -73,7 +74,7 @@ func TestNativeAcceptanceScopePinsIdentityAndOriginalBaseline(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			allowed := mode == "allowed" || mode == "new Go regression"
+			allowed := mode == "allowed" || mode == "new Go regression" || mode == "unnamed Python regression"
 			if result.OK() != allowed {
 				t.Fatalf("scope %s: allowed=%v, want %v: %+v", mode, result.OK(), allowed, result)
 			}

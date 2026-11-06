@@ -16,10 +16,11 @@ import (
 )
 
 type toolRunner484 struct {
-	t        *testing.T
-	artifact plumbing.DependencyArtifact
-	commands []string
-	opens    int
+	t          *testing.T
+	artifact   plumbing.DependencyArtifact
+	commands   []string
+	opens      int
+	regression string
 }
 
 func (r *toolRunner484) Install(_ context.Context, q plumbing.DependencyRequest) (plumbing.DependencyArtifact, error) {
@@ -41,6 +42,11 @@ func (r *toolRunner484) OpenChecks(_ context.Context, q plumbing.DependencyReque
 	b, err := os.ReadFile(filepath.Join(q.SourceDir, "api/main.go"))
 	if err != nil || !strings.Contains(string(b), "Candidate = true") {
 		return nil, errors.New("tool did not stage the candidate")
+	}
+	if r.regression != "" {
+		if data, err := os.ReadFile(filepath.Join(q.SourceDir, r.regression)); err != nil || !strings.Contains(string(data), "TestReview") {
+			return nil, errors.New("tool did not stage the allowed regression")
+		}
 	}
 	return &toolEnvironment484{r: r}, nil
 }
@@ -130,7 +136,8 @@ func TestRepositoryTestToolUsesConfiguredSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(candidate, "api/main.go", "package fixture\n\nconst Candidate = true\n")
-	runner := &toolRunner484{t: t}
+	write(candidate, "api/review_test.go", "package fixture\nimport \"testing\"\nfunc TestReview(t *testing.T) {}\n")
+	runner := &toolRunner484{t: t, regression: "api/review_test.go"}
 	sandbox := plumbing.Sandbox{Original: root, Timeout: 5 * time.Second, Repository: &plumbing.RepositoryChecks{Snapshot: snapshot, Dependencies: plumbing.DependencyPreparer{CacheDir: t.TempDir(), Platform: "linux/amd64", Runner: runner}}}
 	tool := testTool(root, 484, candidate, sandbox, 2, "")
 	if !strings.Contains(strings.ToLower(tool.Description), "repository") {

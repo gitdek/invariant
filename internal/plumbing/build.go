@@ -69,7 +69,7 @@ func (r *BuildResult) Built() bool {
 // Build implements issue n's ratified plan in the checkout at root, which
 // holds the plan's record and its acceptance tests. The agent works on a
 // copy outside the home directory. The named files and new regression tests
-// in the plan's packages come back into root after the last round. Its
+// under captured test conventions come back into root after the last round. Its
 // transcripts and checks land in out.
 func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *BuildResult, buildErr error) {
 	lock, err := ReadLockFile(root, n)
@@ -198,7 +198,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		if round == 0 {
 			fallback = b.FallbackEffort
 		} else {
-			job.Prompt = BuildPrompt(plan, n, b.TestRuns) + fmt.Sprintf("\nRepair attempt %d of 2. Continue in this workspace under the unchanged ratified plan. Address the latest review findings below, adding or correcting regression tests within the permitted packages. If a finding requires a different plan, explain what remains for a person.\n\n%s\n", round, r.Review)
+			job.Prompt = BuildPrompt(plan, n, b.TestRuns) + fmt.Sprintf("\nRepair attempt %d of 2. Continue in this workspace under the unchanged ratified plan. Address the latest review findings below, adding or correcting regression tests within the captured regression allowance. If a finding requires a different plan, explain what remains for a person.\n\n%s\n", round, r.Review)
 		}
 		usage, fb, runErr := synth.RunAgent(ctx, b.Backend, job, b.Timeout, fallback)
 		r.Usage = synth.AddUsage(r.Usage, usage)
