@@ -47,6 +47,28 @@ module.exports = class InvariantJestEnvironment extends Base {
     try { await super.teardown(); }
     finally { worker?.close(); }
   }
+  // The controller names this file as the TypeScript transformer too, wrapping
+  // locked ts-jest. Jest's worker keeps only an exec error's code, message and
+  // stack, so ts-jest's structured diagnostic codes travel in code.
+  static createTransformer(options) {
+    const tsJest = common.requireLocked('ts-jest');
+    const inner = (tsJest.default ?? tsJest).createTransformer(options);
+    const tagged = error => {
+      if (Array.isArray(error?.diagnosticCodes)) error.code = [...error.diagnosticCodes];
+      return error;
+    };
+    const wrapped = {canInstrument: inner.canInstrument};
+    for (const name of ['getCacheKey', 'getCacheKeyAsync']) {
+      if (typeof inner[name] === 'function') wrapped[name] = (...args) => inner[name](...args);
+    }
+    if (typeof inner.process === 'function') {
+      wrapped.process = (...args) => { try { return inner.process(...args); } catch (error) { throw tagged(error); } };
+    }
+    if (typeof inner.processAsync === 'function') {
+      wrapped.processAsync = async (...args) => { try { return await inner.processAsync(...args); } catch (error) { throw tagged(error); } };
+    }
+    return wrapped;
+  }
 };
 
 // jest-worker replaces a worker that exits nonzero and resends its request, so
@@ -89,7 +111,7 @@ async function run() {
     common.onlyKeys(config, ['testEnvironment', 'transform', 'testMatch', 'testRegex', 'moduleFileExtensions', 'testTimeout', 'clearMocks', 'resetMocks', 'restoreMocks'], 'Jest configuration');
     if (config.testEnvironment && config.testEnvironment !== 'node') throw new Error('acceptance requires the prepared Node environment');
     const transform = {};
-    let compiler;
+    let compiler, typeChecked = false;
     for (const [pattern, declared] of Object.entries(config.transform || {})) {
       const values = Array.isArray(declared) ? declared : [declared];
       if (values[0] !== 'ts-jest' || values.length > 2) throw new Error('Jest transformer must be locked ts-jest');
@@ -98,8 +120,14 @@ async function run() {
       if (options.tsconfig && (typeof options.tsconfig !== 'object' || Array.isArray(options.tsconfig))) throw new Error('ts-jest requires inline compiler settings');
       if (options.tsconfig?.plugins?.length) throw new Error('candidate TypeScript plugins are not acceptance observers');
       common.resolve('typescript');
-      transform[pattern] = [common.resolve('ts-jest'), options];
-      if (compiler === undefined && new RegExp(pattern).test(common.regular(input.File))) compiler = options.tsconfig || {};
+      common.resolve('ts-jest');
+      transform[pattern] = [__filename, options];
+      if (compiler === undefined && new RegExp(pattern).test(common.regular(input.File))) {
+        compiler = options.tsconfig || {};
+        // Only a type check refuses the selected file before any candidate code
+        // runs, so only then can its transform failure be attributed.
+        typeChecked = options.isolatedModules !== true && (options.diagnostics === undefined || options.diagnostics === true);
+      }
     }
     proposed = common.analyze(input, {compiler}).proposed;
     process.env.INVARIANT_NODE_WORKER = JSON.stringify({...input, Proposed: proposed, ControllerPID: process.pid});
@@ -120,8 +148,8 @@ async function run() {
     const result = results.testResults[0];
     if (result.testExecError) {
       const error = result.testExecError;
-      if (!proposed || !Array.isArray(error.diagnosticCodes) ||
-          error.diagnosticCodes.length !== 1 || error.diagnosticCodes[0] !== proposed.code) {
+      if (!proposed || !typeChecked || !Array.isArray(error.code) ||
+          error.code.length !== 1 || error.code[0] !== proposed.code) {
         throw new Error('Jest transform/import failure lacks structured selected API attribution');
       }
       session.emit('compile', {IDs: [input.Binding.Selector], Outcome: 'attributed', Reason: proposed.reason});

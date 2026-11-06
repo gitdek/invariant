@@ -4,8 +4,10 @@ import common from './node_runner_common.cjs';
 
 const isMain = process.argv[1] === fileURLToPath(import.meta.url);
 let worker, observation, input, proposed, fileFinished = false;
-const {VitestTestRunner} = await common.importLocked('vitest/runners');
-const {getFn} = await common.importLocked('@vitest/runner');
+// This file is also the controller, which only starts Vitest. Vitest's runner
+// API reads a worker's state as it loads, so only a worker imports it.
+const {VitestTestRunner} = isMain ? {VitestTestRunner: class {}} : await common.importLocked('vitest/runners');
+const {getFn} = isMain ? {} : await common.importLocked('@vitest/runner');
 
 function title(task) {
   const names = [task.name];
