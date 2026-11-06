@@ -40,7 +40,7 @@ Complete snapshots and diagnostics survive `formalization.json`, previous/propos
 
 `Proposal.WritePreviews(out)` validates the complete set and writes `previews/<fork>/<option>/preview.json`, `receipt.json`, `receipt.md`, `reader.json` and, when drawable, `reader.svg`. Formalization exports successful sets automatically. Each receipt is model-only; Markdown and script-free SVG identify the unratified alternative and candidate rules. Export reuse removes obsolete options. Failed formalization removes previous exports while retaining its exact inputs and diagnostics in the saved result. Selecting an option does not reuse its evidence for project verification: the selected model's final files produce a new ordinary chart with no preview metadata.
 
-The [dashboard comparison](dashboard.md#modeled-decisions) keeps separate immutable evidence for every option and diagnoses damaged cached options independently. This implements the ratified plan on D-0002, D-0094, D-0307, D-0328, D-0343, D-0345, D-0347, D-0351 and D-0353. The merger records the new option-preview and cache policy decision because the plumbing build cannot write decisions/.
+The [dashboard comparison](dashboard.md#modeled-decisions) keeps separate immutable evidence for every option and diagnoses damaged cached options independently. This implements the ratified plan on D-0002, D-0094, D-0307, D-0328, D-0343, D-0345, D-0347, D-0351 and D-0353. D-0355 records the option-preview and cache policy.
 
 The pinned-TLC integration covers distinct option bounds, complete graphs, candidate rules and exports. When Docker is unavailable to the builder, the merger runs:
 
