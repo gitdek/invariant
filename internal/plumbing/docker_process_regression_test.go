@@ -55,11 +55,11 @@ func TestDockerNonGoKeepsCommandCapability(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := e.(RepositoryProcessTransport); ok != (language == "python") {
-			t.Fatal("only prepared Python should expose the Python process capability")
+		if _, ok := e.(RepositoryProcessTransport); !ok {
+			t.Fatal("prepared Python and TypeScript should expose process capability")
 		}
-		if _, ok := e.(RepositoryAcceptanceEnvironment); ok != (language == "python") {
-			t.Fatal("only prepared Python should expose pytest acceptance")
+		if _, ok := e.(RepositoryAcceptanceEnvironment); !ok {
+			t.Fatal("prepared Python and TypeScript should expose native acceptance")
 		}
 		if out, err := e.Run(t.Context(), []string{"fixture-check"}); err != nil || !strings.Contains(string(out), "container diagnostic") {
 			t.Fatalf("command behavior changed: %v %s", err, out)

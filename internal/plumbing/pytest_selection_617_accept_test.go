@@ -99,7 +99,7 @@ func TestPytestLiteralSelection617(t *testing.T) {
 	}
 	override := &adapter515{}
 	s := Sandbox{Repository: &RepositoryChecks{Adapters: map[string]RepositoryAcceptanceAdapter{"pytest": override}}}
-	if s.repositoryAdapter("pytest") != override || s.repositoryAdapter("go") == nil || s.repositoryAdapter("vitest") != nil || s.repositoryAdapter("jest") != nil {
+	if s.repositoryAdapter("pytest") != override || s.repositoryAdapter("go") == nil || s.repositoryAdapter("vitest") == nil || s.repositoryAdapter("jest") == nil {
 		t.Fatal("default pytest changed trusted overrides or remaining framework support")
 	}
 }
@@ -140,7 +140,7 @@ func TestPytestPreparedPythonCapability617(t *testing.T) {
 		}
 		_, process := e.(RepositoryProcessTransport)
 		_, acceptance := e.(RepositoryAcceptanceEnvironment)
-		if process != (language == "python") || acceptance != (language == "python") {
+		if !process || !acceptance {
 			_ = e.Close(t.Context())
 			t.Fatalf("wrong prepared capability for %s: process=%v acceptance=%v", language, process, acceptance)
 		}
