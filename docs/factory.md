@@ -235,7 +235,7 @@ The verbose report names the pinned and prepared image IDs, platform and runtime
 
 Sum the two invocation totals for each repeat to compare complete runs; compare the second selector's rows to see the loss of writable-cache reuse. Dependency preparation and the common initial source capture are excluded equally from both arms. No wall-time threshold is a correctness assertion, and daemon-free timings are not a substitute for real-image costs. Real-image measurements remain merger verification when Docker or those local images are unavailable to the builder.
 
-This policy rests on [D-0108](../decisions/journal/D-0108.jsonl), [D-0311](../decisions/journal/D-0311.jsonl), [D-0316](../decisions/journal/D-0316.jsonl) and [D-0352](../decisions/journal/D-0352.jsonl). The merger must record #621's decided fresh-container policy on those grounds; the new decision is not yet in the journal.
+This policy rests on [D-0108](../decisions/journal/D-0108.jsonl), [D-0311](../decisions/journal/D-0311.jsonl), [D-0316](../decisions/journal/D-0316.jsonl) and [D-0352](../decisions/journal/D-0352.jsonl). [D-0371](../decisions/journal/D-0371.jsonl) records #621's fresh-container policy on those grounds, with the merger's real-image measurements: a fresh Go invocation recompiles, about 5.2 s more per extra selector, and a pytest one costs about 0.2 s more.
 
 ## Native acceptance plans
 
