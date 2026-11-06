@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -22,10 +23,11 @@ import (
 // Reader is computed by the check, never read from an agent's derived files.
 // Its fingerprint binds explanatory evidence independently of ratification.
 type Reader struct {
-	Version     int                `json:"version"`
-	Fingerprint string             `json:"fingerprint"`
-	Chart       *statechart.Result `json:"chart,omitempty"`
-	Limitation  *ReaderLimitation  `json:"limitation,omitempty"`
+	Comparison  *statechart.Comparison `json:"comparison,omitempty"`
+	Version     int                    `json:"version"`
+	Fingerprint string                 `json:"fingerprint"`
+	Chart       *statechart.Result     `json:"chart,omitempty"`
+	Limitation  *ReaderLimitation      `json:"limitation,omitempty"`
 }
 
 type ReaderLimitation = statechart.Limitation
@@ -51,16 +53,17 @@ func (p *Proposal) readerFingerprint() (string, error) {
 	// Factory metadata (target, language, agent, directory) can change after
 	// checking. Only the inputs to the computation and its output belong here.
 	b, err := json.Marshal(struct {
-		Version    int                 `json:"version"`
-		Module     string              `json:"module"`
-		Model      string              `json:"model"`
-		Includes   map[string]string   `json:"includes,omitempty"`
-		View       string              `json:"view"`
-		Bounds     map[string]string   `json:"bounds"`
-		Statements []project.Statement `json:"statements"`
-		Chart      *statechart.Result  `json:"chart,omitempty"`
-		Limitation *ReaderLimitation   `json:"limitation,omitempty"`
-	}{p.Reader.Version, p.Module, p.ModuleText, p.Includes, p.View, p.Bounds, p.Statements, p.Reader.Chart, p.Reader.Limitation})
+		Version    int                    `json:"version"`
+		Module     string                 `json:"module"`
+		Model      string                 `json:"model"`
+		Includes   map[string]string      `json:"includes,omitempty"`
+		View       string                 `json:"view"`
+		Bounds     map[string]string      `json:"bounds"`
+		Statements []project.Statement    `json:"statements"`
+		Chart      *statechart.Result     `json:"chart,omitempty"`
+		Limitation *ReaderLimitation      `json:"limitation,omitempty"`
+		Comparison *statechart.Comparison `json:"comparison,omitempty"`
+	}{p.Reader.Version, p.Module, p.ModuleText, p.Includes, p.View, p.Bounds, p.Statements, p.Reader.Chart, p.Reader.Limitation, p.Reader.Comparison})
 	if err != nil {
 		return "", err
 	}
@@ -82,6 +85,16 @@ func (p *Proposal) ValidateReader() error {
 	}
 	if l := r.Limitation; l != nil && (l.Code != "too_large" || l.Limit != statechart.MaxStates || l.Actual <= l.Limit) {
 		return fmt.Errorf("reader size limitation is invalid; check the draft again")
+	}
+	if c := r.Comparison; c != nil {
+		if err := c.Validate(); err != nil {
+			return err
+		}
+		s := p.comparisonSnapshot()
+		if !reflect.DeepEqual(s.Identity(), c.CandidateIdentity) || s.Module != c.Candidate.Module ||
+			!reflect.DeepEqual(s.Chart, c.Candidate.Chart) || !reflect.DeepEqual(s.Limitation, c.Candidate.Limitation) {
+			return fmt.Errorf("reader comparison candidate differs from checked proposal; check the captured baseline again")
+		}
 	}
 	want, err := p.readerFingerprint()
 	if err != nil {
@@ -109,6 +122,12 @@ func (p *Proposal) ReaderFeedback() string {
 	b.WriteString(" Checked bounds:")
 	for _, name := range slices.Sorted(maps.Keys(p.Bounds)) {
 		fmt.Fprintf(&b, " %s = %s;", name, p.Bounds[name])
+	}
+	if c := p.Reader.Comparison; c != nil {
+		fmt.Fprintf(&b, "\nComparison baseline: %s. View change: %t. Model-source change: %t. %s", c.Baseline.Name, c.ViewChanged, c.ModelChanged, c.Scope)
+		if c.Unavailable != nil {
+			b.WriteString(" " + c.Unavailable.Message)
+		}
 	}
 	return b.String()
 }
@@ -175,6 +194,11 @@ func removeOldIncludes(dir, module string, includes map[string]string) error {
 }
 
 func writeReader(dir, view string, reader *Reader) error {
+	for _, name := range []string{"reader.json", "reader.svg"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	if view != "" {
 		if err := writeFile(filepath.Join(dir, "view.json"), view); err != nil {
 			return err

@@ -105,3 +105,71 @@ func (c *Result) Markdown() string {
 	}
 	return b.String()
 }
+
+// Markdown retains the complete candidate chart before describing differences.
+// All source text uses the same literal encoders as ordinary charts.
+func (c *Comparison) Markdown() string {
+	if err := c.Validate(); err != nil {
+		return "Comparison unavailable: " + TableLiteral(err.Error()) + "\n"
+	}
+	var b strings.Builder
+	for _, line := range c.description() {
+		// Description values follow fixed prose prefixes, so an issue's #
+		// is literal here. Keep names copyable without relaxing the Mermaid
+		// or table encoders, or allowing source newlines to become headings.
+		b.WriteString(strings.ReplaceAll(TableLiteral(line), "&#35;", "#") + "\n\n")
+	}
+	if c.Candidate.Chart != nil {
+		b.WriteString(c.Candidate.Chart.Markdown())
+	}
+	if c.Unavailable == nil {
+		b.WriteString("\nComparison annotations (complete candidate and removed baseline context):\n\n```mermaid\nflowchart LR\n")
+		b.WriteString("    classDef added fill:#e4f5e9,stroke:#16733c\n    classDef removed fill:#fff0ee,stroke:#b42318,stroke-dasharray:5 4\n")
+		arrowIndex := 0
+		for side, snapshot := range []ComparisonSnapshot{c.Candidate, c.Baseline} {
+			prefix, change, states, arrows := "new", "added", c.Visible.AddedStates, c.Visible.AddedArrows
+			if side == 1 {
+				prefix, change, states, arrows = "old", "removed", c.Visible.RemovedStates, c.Visible.RemovedArrows
+			}
+			ids := map[string]string{}
+			fmt.Fprintf(&b, "    subgraph %s[\"%s\"]\n", prefix, mermaidLiteral(snapshot.Name))
+			for i, s := range snapshot.Chart.States {
+				ids[s.ID] = fmt.Sprintf("%ss%d", prefix, i)
+				label := s.Label
+				changed := slices.ContainsFunc(states, func(a State) bool { return a.ID == s.ID })
+				if changed {
+					label = change + ": " + label
+				}
+				fmt.Fprintf(&b, "    %s[\"%s\"]\n", ids[s.ID], mermaidLiteral(label))
+				if changed {
+					fmt.Fprintf(&b, "    class %s %s\n", ids[s.ID], change)
+				}
+			}
+			for _, a := range snapshot.Chart.Arrows {
+				changed := slices.ContainsFunc(arrows, func(b Arrow) bool { return arrowKey(a) == arrowKey(b) })
+				label, connector := a.Label, "-->"
+				if changed {
+					label = change + ": " + label
+					if side == 1 {
+						connector = "-.->"
+					}
+				}
+				fmt.Fprintf(&b, "    %s %s|\"%s\"| %s\n", ids[a.From], connector, mermaidLiteral(label), ids[a.To])
+				if changed {
+					style := "stroke:#16733c,stroke-width:3px"
+					if side == 1 {
+						style = "stroke:#b42318,stroke-width:3px,stroke-dasharray:5 4"
+					}
+					fmt.Fprintf(&b, "    linkStyle %d %s\n", arrowIndex, style)
+				}
+				arrowIndex++
+			}
+			b.WriteString("    end\n")
+		}
+		b.WriteString("```\n\n")
+	}
+	for _, line := range c.deltaDescription() {
+		b.WriteString(TableLiteral(line) + "\n\n")
+	}
+	return b.String()
+}

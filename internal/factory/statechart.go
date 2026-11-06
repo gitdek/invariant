@@ -32,6 +32,9 @@ func readerComment(p *formalize.Proposal) string {
 	if p.Reader == nil {
 		return ""
 	}
+	if c := p.Reader.Comparison; c != nil {
+		return "\n" + c.Markdown()
+	}
 	var b strings.Builder
 	b.WriteString("\n**Reader chart**\n\n")
 	b.WriteString(statechart.BoundsMarkdown(p.Bounds))

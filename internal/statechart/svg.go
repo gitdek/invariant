@@ -17,6 +17,16 @@ import (
 // Callers own evidence checking and must not mutate the result during a call.
 // Invalid structure or unrepresentable text returns an error and no SVG.
 func (c *Result) SVG() (string, error) {
+	return c.svg(nil)
+}
+
+type svgChanges struct {
+	change string
+	states []State
+	arrows []Arrow
+}
+
+func (c *Result) svg(changes *svgChanges) (string, error) {
 	if err := validateSVG(c); err != nil {
 		return "", err
 	}
@@ -41,9 +51,13 @@ func (c *Result) SVG() (string, error) {
 	writeSVGText(&b, measureSVGText(svgHeading), svgMargin, svgMargin)
 	for i, a := range c.Arrows {
 		route := l.arrows[i]
-		fmt.Fprintf(&b, `<g id="arrow-%d" data-from="%s" data-to="%s" data-label="%s"><title>%s</title>`, i+1, svgEscape(a.From), svgEscape(a.To), svgEscape(a.Label), svgEscape(a.Label))
+		change := ""
+		if changes != nil && slices.ContainsFunc(changes.arrows, func(v Arrow) bool { return arrowKey(v) == arrowKey(a) }) {
+			change = changes.change
+		}
+		fmt.Fprintf(&b, `<g id="arrow-%d" data-from="%s" data-to="%s" data-label="%s"%s><title>%s</title>`, i+1, svgEscape(a.From), svgEscape(a.To), svgEscape(a.Label), svgChangeAttr(change), svgEscape(a.Label))
 		fmt.Fprintf(&b, `<desc>State %d to state %d; %s.</desc>`, l.number[l.index[a.From]], l.number[l.index[a.To]], svgCount(a.Count, "concrete step occurrence"))
-		writeSVGPath(&b, route.path)
+		writeSVGChangedPath(&b, route.path, change)
 		fmt.Fprintf(&b, `<circle cx="%g" cy="%g" r="3" fill="#34495e"/>`, route.fromX, route.fromY)
 		writeSVGRect(&b, route.label, "#ffffff", "none")
 		writeSVGText(&b, route.text, route.label.x+svgPadding/2, route.label.y+svgPadding/2)
@@ -51,12 +65,23 @@ func (c *Result) SVG() (string, error) {
 	}
 	for i, s := range c.States {
 		n := l.nodes[i]
-		fmt.Fprintf(&b, `<g id="state-%d" data-state-id="%s"><title>%s</title>`, i+1, svgEscape(s.ID), svgEscape(s.Label))
+		change := ""
+		if changes != nil && slices.ContainsFunc(changes.states, func(v State) bool { return v.ID == s.ID }) {
+			change = changes.change
+		}
+		fmt.Fprintf(&b, `<g id="state-%d" data-state-id="%s"%s><title>%s</title>`, i+1, svgEscape(s.ID), svgChangeAttr(change), svgEscape(s.Label))
 		fill := "#f0f6fa"
 		if len(s.ViolatedRules) > 0 {
 			fill = "#fff0e8"
 		}
-		writeSVGRect(&b, n.svgBox, fill, "#34495e")
+		stroke := "#34495e"
+		if change == "added" {
+			fill, stroke = "#e4f5e9", "#16733c"
+		}
+		if change == "removed" {
+			fill, stroke = "#fff0ee", "#b42318"
+		}
+		writeSVGRect(&b, n.svgBox, fill, stroke)
 		writeSVGText(&b, n.text, n.x+svgPadding, n.y+(n.height-n.text.height)/2)
 		b.WriteString(`</g>`)
 	}
@@ -74,6 +99,100 @@ func (c *Result) SVG() (string, error) {
 		writeSVGText(&b, t.text, t.x, t.y)
 	}
 	b.WriteString(`</g></svg>`)
+	return b.String(), nil
+}
+
+func svgChangeAttr(change string) string {
+	if change == "" {
+		return ""
+	}
+	a := ` data-change="` + change + `"`
+	if change == "removed" {
+		a += ` stroke-dasharray="5 4"`
+	}
+	return a
+}
+
+func writeSVGChangedPath(b *strings.Builder, path, change string) {
+	if change == "" {
+		writeSVGPath(b, path)
+		return
+	}
+	color := "#16733c"
+	if change == "removed" {
+		color = "#b42318"
+	}
+	fmt.Fprintf(b, `<path d="%s" fill="none" stroke="%s" stroke-width="3" stroke-linejoin="round" marker-end="url(#chart-arrowhead)"/>`, path, color)
+}
+
+func (c *Comparison) SVG() (string, error) { return c.SVGWithFinal(nil, "") }
+
+// SVGWithFinal distinguishes retained proposal sources from a freshly checked
+// final chart. All panels use the ordinary native renderer and its validation.
+func (c *Comparison) SVGWithFinal(final *Result, identity string) (string, error) {
+	if err := c.Validate(); err != nil {
+		return "", err
+	}
+	lines := c.description()
+	if identity != "" {
+		lines = append(lines, "Final-model sources (checked separately from the retained proposal comparison):", identity)
+	}
+	delta := c.deltaDescription()
+	// Validate source names and qualifications too, before XML escaping.
+	if err := validateSVGText(reflect.ValueOf(append(slices.Clone(lines), delta...))); err != nil {
+		return "", err
+	}
+	header := measureSVGText(strings.Join(lines, "\n"))
+	width, height := header.width+2*svgMargin, header.height+2*svgMargin
+	type panel struct {
+		side, svg string
+		title     svgText
+		y         float64
+	}
+	var panels []panel
+	for i, chart := range []*Result{c.Candidate.Chart, c.Baseline.Chart, final} {
+		if chart == nil {
+			continue
+		}
+		side, title := "candidate", "Candidate chart: "+c.Candidate.Name
+		changes := &svgChanges{change: "added", states: c.Visible.AddedStates, arrows: c.Visible.AddedArrows}
+		if i == 1 {
+			side, changes = "baseline", &svgChanges{change: "removed", states: c.Visible.RemovedStates, arrows: c.Visible.RemovedArrows}
+			title = "Baseline chart: " + c.Baseline.Name
+		}
+		if i == 2 {
+			side, changes = "final", nil
+			title = "Final-model chart: recomputed separately from the proposal comparison"
+		}
+		svg, err := chart.svg(changes)
+		if err != nil {
+			return "", err
+		}
+		l := layoutSVG(chart)
+		l.layoutReport(svgReport(chart, l.index, l.number))
+		svg = strings.ReplaceAll(svg, ` id="`, ` id="`+side+`-`)
+		svg = strings.ReplaceAll(svg, "url(#", "url(#"+side+"-")
+		svg = strings.ReplaceAll(svg, `aria-labelledby="chart-title"`, `aria-labelledby="`+side+`-chart-title"`)
+		svg = strings.ReplaceAll(svg, `aria-describedby="chart-description"`, `aria-describedby="`+side+`-chart-description"`)
+		heading := measureSVGText(title)
+		panels = append(panels, panel{side, svg, heading, height})
+		width, height = max(width, l.width, heading.width+2*svgMargin), height+heading.height+l.height+2*svgMargin
+	}
+	report := svgLayout{width: width, height: height}
+	report.layoutReport(delta)
+	width, height = report.width, report.height
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Proposal comparison" viewBox="0 0 %g %g" width="%g" height="%g" font-family="monospace" font-size="14" fill="#17212b"><title>Proposal comparison</title><metadata>%s</metadata><rect width="%g" height="%g" fill="#ffffff"/>`, width, height, width, height, svgEscape(string(comparisonJSON(c))), width, height)
+	writeSVGText(&b, header, svgMargin, svgMargin)
+	for _, p := range panels {
+		fmt.Fprintf(&b, `<g data-comparison-side="%s" transform="translate(0 %g)">`, p.side, p.y)
+		writeSVGText(&b, p.title, svgMargin, 0)
+		fmt.Fprintf(&b, `<g transform="translate(0 %g)">%s</g></g>`, p.title.height+svgMargin, p.svg)
+	}
+	for _, t := range report.report {
+		writeSVGText(&b, t.text, t.x, t.y)
+	}
+	b.WriteString(`</svg>`)
 	return b.String(), nil
 }
 

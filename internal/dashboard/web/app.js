@@ -1328,8 +1328,9 @@
       const titles = w.issuePlan.issues || [];
       return `<p class="ask">A plan for ${name}: <strong>${titles.length}</strong> issue${titles.length === 1 ? "" : "s"}, in order. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.issuePlan.summary)}</p><ol class="planned">${titles.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>`;
     }
-    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
-    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
+    const reader = w.reader ? readerEvidence({reader: w.reader, name: w.name}) : "";
+    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them. The reader evidence below describes any model or view changes.</p>${reader}`;
+    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>${reader}`;
   }
   // Highlight escaped tokens only. Source and labels never become page markup.
   function planSource(source, language) {

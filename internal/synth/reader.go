@@ -11,13 +11,25 @@ import (
 )
 
 func readerInput(m project.Manifest, rel string) bool {
-	return rel == ".invariant/view.json" || rel != m.Module &&
+	return rel == ".invariant/view.json" || rel == ".invariant/comparison.json" || rel != m.Module &&
 		path.Dir(rel) == path.Dir(m.Module) && strings.HasSuffix(rel, ".tla")
 }
 
 // These inputs belong to the original project, even when the model itself
 // is rebuilt. Derived proposal files never supply the final gate's reader.
 func copyReaderInputs(p *project.Project, dst string) error {
+	comparison, err := regular.ReadFile(p.Dir, ".invariant/comparison.json")
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	name := filepath.Join(dst, ".invariant/comparison.json")
+	if err == nil {
+		if err := writeFile(name, string(comparison)); err != nil {
+			return err
+		}
+	} else if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	view, err := regular.ReadFile(p.Dir, ".invariant/view.json")
 	if err != nil && !os.IsNotExist(err) {
 		return err

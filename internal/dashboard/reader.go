@@ -27,7 +27,7 @@ import (
 // Change this when the presentation or its validation contract changes. The
 // identity also includes the actual SVG and page template, so renderer changes
 // cannot reuse an earlier explanation's URL.
-const readerFormat = "1: checked receipt, native SVG, complete report"
+const readerFormat = "2: checked receipt, retained proposal comparison, native SVG, complete report"
 
 type ReaderPresentation struct {
 	Status      string `json:"status"`
@@ -53,6 +53,7 @@ type readerEvidence struct {
 	ManifestBytes, LockBytes  []byte
 	Files                     map[string][]byte
 	View                      []byte
+	Comparison                []byte
 	Report                    *verify.Report
 	Artifacts                 readerArtifacts
 	Traces                    map[string]tlc.TraceFile
@@ -113,6 +114,17 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	if rr.Version != 1 {
 		return bad("unsupported_reader", "This receipt uses an unsupported reader format. Verify again with the current reader.")
 	}
+	if rr.Comparison != nil {
+		var saved statechart.Comparison
+		if decodeReaderJSON(e.Comparison, &saved) != nil || !sameReaderJSON(&saved, rr.Comparison) {
+			return bad("comparison_mismatch", "The captured .invariant/comparison.json at this commit is missing or differs from the receipt's proposal comparison.")
+		}
+		if err := rr.ValidateComparison(e.Lock); err != nil {
+			return bad("invalid_comparison", "Proposal comparison is damaged: "+err.Error())
+		}
+	} else if e.Comparison != nil && rr.ComparisonDiagnostic == nil {
+		return bad("missing_comparison", "The receipt omits the captured proposal comparison and its diagnostic. Verify again.")
+	}
 	module := strings.TrimSuffix(path.Base(e.Manifest.Module), ".tla")
 	model, exists := e.Files[module+".tla"]
 	inputs := verify.ReaderInputs{Module: module, Model: readerHash(model), Includes: map[string]string{}}
@@ -171,7 +183,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("snapshot_mismatch", "The checked reader fingerprint does not match its inputs, lock and complete contents.")
 	}
 	if d := rr.Unavailable; d != nil {
-		if len(e.Artifacts.SVG) != 0 {
+		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil {
 			return bad("artifact_mismatch", "The archive has an SVG beside an unavailable reader outcome.")
 		}
 		if d.Code == "" || d.Message == "" {
@@ -185,6 +197,9 @@ func (e readerEvidence) checked() (status, message, svg string) {
 				return bad("snapshot_mismatch", "The receipt reports a missing view, but this commit has a saved view.")
 			}
 			return bad("missing_view", "No saved reader view exists at this receipt commit. Supply .invariant/view.json and verify again.")
+		}
+		if rr.Comparison != nil {
+			return checkedComparisonSVG(e)
 		}
 		return bad(d.Code, d.Message)
 	}
@@ -206,9 +221,12 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("snapshot_mismatch", "The reader has no matching completed model check in the receipt.")
 	}
 	if l := rr.Limitation; l != nil {
-		if len(e.Artifacts.SVG) != 0 || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
+		if (len(e.Artifacts.SVG) != 0 && rr.Comparison == nil) || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
 			int64(l.Actual) != r.Design.DistinctStates || !sameReaderJSON(l.Source, source) {
 			return bad("snapshot_mismatch", "The reader limitation disagrees with the receipt's completed exploration or provenance.")
+		}
+		if rr.Comparison != nil {
+			return checkedComparisonSVG(e)
 		}
 		return bad("too_large", fmt.Sprintf("TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. The view's mappings and hiding were not evaluated; no partial chart is shown.", l.Actual, l.Limit))
 	}
@@ -217,14 +235,32 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		c.Report.Counts["tlc_states"] != r.Design.DistinctStates || c.Report.Counts["tlc_generated_states"] != r.Design.StatesGenerated {
 		return bad("snapshot_mismatch", "The chart's rules, counts or tool provenance disagree with the receipt and lock.")
 	}
-	svg, err := c.SVG()
+	svg, err := rr.SVG()
 	if err != nil {
 		return bad("reader_render", "Reader generation failed: "+err.Error())
 	}
 	if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
 		return bad("artifact_mismatch", "The archived SVG does not match the shared native renderer's complete checked result. Verify again with the current renderer.")
 	}
-	return "chart", "Checked bounded model; the full report is included in the image. This adds no proof claim.", svg
+	message = "Checked bounded model; the full report is included in the image. This adds no proof claim."
+	if rr.Comparison != nil {
+		message += " Retained proposal comparison and final-model chart have separate source identities; view changes and scope qualifications are included."
+	}
+	if rr.ComparisonDiagnostic != nil {
+		message += " Proposal comparison unavailable: " + rr.ComparisonDiagnostic.Message
+	}
+	return "chart", message, svg
+}
+
+func checkedComparisonSVG(e readerEvidence) (string, string, string) {
+	svg, err := e.Report.Reader.SVG()
+	if err != nil {
+		return "reader_render", err.Error(), ""
+	}
+	if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
+		return "artifact_mismatch", "The comparison SVG differs from its captured sources.", ""
+	}
+	return "chart", "Proposal comparison retained beside the separately identified final-model outcome. Bounds, view qualifications and final-model diagnostics remain explicit.", svg
 }
 
 const readerHTML = `<!doctype html>
@@ -235,6 +271,7 @@ const readerHTML = `<!doctype html>
 <p>Receipt commit: <code>{{.Presentation.Commit}}</code></p>
 <p>{{.Presentation.Message}}</p>
 {{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}
+{{if .Comparison}}<h2>Proposal comparison and final-model sources</h2><pre>{{.Comparison}}</pre>{{end}}
 <h2>Checked bounds</h2><dl>{{range $name, $value := .Evidence.Lock.Bounds}}<dt>{{$name}}</dt><dd><pre>{{$value}}</pre></dd>{{end}}</dl>
 <h2>Locked rules</h2>{{range .Evidence.Lock.Statements}}<h3>{{.Name}} ({{.Kind}})</h3><pre>{{.Says}}</pre><p>Pin: <code>{{.SHA256}}</code></p>{{end}}
 {{if .Record}}<details><summary>Complete receipt reader record</summary><pre>{{.Record}}</pre></details>{{end}}
@@ -264,11 +301,16 @@ func makeReader(e readerEvidence) readerPage {
 		record = string(b)
 	}
 	var b bytes.Buffer
+	comparison := ""
+	if e.Report != nil && e.Report.Reader != nil && e.Report.Reader.Comparison != nil {
+		comparison = e.Report.Reader.Comparison.Text() + "\n" + e.Report.Reader.FinalSources()
+	}
 	_ = readerTemplate.Execute(&b, struct {
 		Evidence     readerEvidence
 		Presentation ReaderPresentation
 		Record       string
-	}{e, p, record})
+		Comparison   string
+	}{e, p, record, comparison})
 	return readerPage{repo: e.Repo, presentation: p, html: b.Bytes(), svg: []byte(svg)}
 }
 
@@ -426,7 +468,7 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 				if p.Repo == r.Name && p.Dir == e.Dir {
 					sources = append(sources, projectSource{dir: e.Dir, manifest: e.Manifest, lock: e.Lock, key: p.Model,
 						files: e.Files, module: strings.TrimSuffix(path.Base(e.Manifest.Module), ".tla"), view: e.View,
-						manifestBytes: e.ManifestBytes, lockBytes: e.LockBytes, reader: p.Reader})
+						manifestBytes: e.ManifestBytes, lockBytes: e.LockBytes, comparison: e.Comparison, reader: p.Reader})
 				}
 			}
 		}

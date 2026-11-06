@@ -1191,9 +1191,15 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		if problem := badDir(dir); problem != "" {
 			return stuck("The issue names the project `" + dir + "`, but " + problem + ".")
 		}
-		cur, err := f.current(ctx, dir)
-		if err != nil {
-			return err
+		var cur *formalize.Current
+		if previous != nil && previous.Target != nil && previous.Target.Dir == dir && previous.Target.Baseline != nil {
+			cur = previous.Target.Baseline
+		} else {
+			var err error
+			cur, err = f.current(ctx, dir)
+			if err != nil {
+				return err
+			}
 		}
 		if cur != nil {
 			req.Current, req.Language = cur, cur.Manifest.Language
@@ -1324,6 +1330,10 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, planComment(p, m), LabelProposal)
 	default:
+		if err := p.ValidateComparisonContext(req.CheckContext()); err != nil {
+			m.Kind = KindStuck
+			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
+		}
 		if err := p.ValidateReader(); err != nil {
 			m.Kind = KindStuck
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
@@ -1497,12 +1507,15 @@ func (f *Factory) current(ctx context.Context, dir string) (*formalize.Current, 
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return nil, err
 	}
-	ref := "origin/" + f.Base
+	ref, err := f.Repo.RevParse(ctx, "origin/"+f.Base)
+	if err != nil {
+		return nil, err
+	}
 	b, err := f.Repo.Show(ctx, ref, dir+"/.invariant/invariant.json")
 	if err != nil {
 		return nil, nil
 	}
-	c := &formalize.Current{Dir: dir}
+	c := &formalize.Current{Dir: dir, Commit: ref}
 	if err := json.Unmarshal(b, &c.Manifest); err != nil {
 		return nil, fmt.Errorf("%s's manifest: %w", dir, err)
 	}
@@ -1634,6 +1647,10 @@ func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) e
 	}
 	posted, err := f.commitRatification(ctx, t, state, c)
 	if errors.Is(err, errStale) {
+		if p := state.Marker.Proposal; p != nil && p.Target != nil && p.Target.Baseline != nil {
+			return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything.",
+				" This proposal and its revisions keep their captured comparison baseline. Start a new amendment issue to capture the project's current ratification.")
+		}
 		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything.",
 			" Comment `/invariant revise` and I'll draft it again from the project as it is now.")
 	}

@@ -154,6 +154,7 @@ type projectSource struct {
 	files         map[string][]byte // the model's .tla files, for drawing its graph
 	module        string
 	view          []byte
+	comparison    []byte
 	lockBytes     []byte
 	manifestBytes []byte
 	reader        *ReaderPresentation
@@ -588,6 +589,7 @@ func (s *Server) loadSnapshot() {
 		return
 	}
 	s.restorePreviews(&snap)
+	s.restoreComparisons(&snap)
 	js, err = json.Marshal(snap)
 	if err != nil {
 		return
@@ -678,7 +680,7 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 		name := path.Base(p.dir)
 		e := readerEvidence{Format: readerFormat, Repo: r.Name, Dir: p.dir, Commit: run.HeadSHA,
 			Manifest: p.manifest, Lock: p.lock, ManifestBytes: p.manifestBytes, LockBytes: p.lockBytes,
-			Files: p.files, View: p.view, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name]}
+			Files: p.files, View: p.view, Comparison: p.comparison, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name]}
 		if missing != nil {
 			e.Problem = "missing_archive"
 		} else if names[name] > 1 {
@@ -792,6 +794,12 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 		}
 		p.lockBytes = raw
 		for _, f := range tree {
+			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/comparison.json") {
+				p.comparison, err = s.file(ctx, r, sha, f.Path)
+				if err != nil {
+					return nil, err
+				}
+			}
 			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/view.json") {
 				p.view, err = s.file(ctx, r, sha, f.Path)
 				if err != nil {
@@ -985,6 +993,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			l := Lane(is, r.src.comments[is.Number].comments, "", now)
 			l.Repo = r.Name
 			s.presentPreviews(&l)
+			s.presentProposalReader(&l)
 			for k := range l.Events {
 				l.Events[k].Repo = r.Name
 			}

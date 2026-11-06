@@ -39,10 +39,12 @@ type Preview struct {
 // only changes that pass the factory's existing writer/comment/option checks.
 // The agent can select one of these through revised, but cannot authorize one.
 type CheckContext struct {
-	ParentPlan int               `json:"parent_plan,omitempty"`
-	Planning   string            `json:"planning,omitempty"`
-	Choices    map[string]string `json:"choices,omitempty"`
-	Revisions  []Revision        `json:"revisions,omitempty"`
+	Baseline   *statechart.ComparisonSnapshot `json:"baseline,omitempty"`
+	Current    *Current                       `json:"current,omitempty"`
+	ParentPlan int                            `json:"parent_plan,omitempty"`
+	Planning   string                         `json:"planning,omitempty"`
+	Choices    map[string]string              `json:"choices,omitempty"`
+	Revisions  []Revision                     `json:"revisions,omitempty"`
 }
 
 var checkContexts sync.Map
@@ -58,6 +60,9 @@ func (r Request) CheckContext() CheckContext {
 	for _, a := range r.Answers {
 		c.Choices[a.Fork] = a.Option
 	}
+	if c.Planning == "" {
+		c.Baseline, c.Current = r.comparisonBaseline(), r.comparisonCurrent()
+	}
 	return c
 }
 
@@ -72,7 +77,11 @@ func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
 	// Direct Check calls and the independent final check retain this copy.
 	// The separate MCP process receives the same bytes in its launch arguments,
 	// not by rereading an agent-writable context file.
-	checkContexts.Store(ws, c)
+	var detached CheckContext
+	if err := json.Unmarshal(b, &detached); err != nil {
+		return "", nil, err
+	}
+	checkContexts.Store(ws, detached)
 	return string(b), func() { checkContexts.Delete(ws) }, nil
 }
 
@@ -169,7 +178,7 @@ func previewInput(f Fork, o Option, choices map[string]string) error {
 		return fmt.Errorf("preview choices omit, contradict or invent previously authorized answers")
 	}
 	m := v.Model
-	if len(m.Forks) != 0 || m.Plan != nil || m.IssuePlan != nil || m.Target != nil ||
+	if len(m.Forks) != 0 || m.Plan != nil || m.IssuePlan != nil || m.Target != nil || m.Baseline != nil ||
 		m.Unsupported != "" || len(m.Revised) != 0 || m.Dir != "" || m.Agent != "" || len(m.Existing) != 0 {
 		return fmt.Errorf("preview model must contain only the candidate draft and its inline sources, without forks, plans or authority")
 	}

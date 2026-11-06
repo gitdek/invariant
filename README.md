@@ -88,6 +88,8 @@ Anyone can open an issue, but the factory takes one only when a writer labels it
 
 Modeled proposals, [verification receipts](docs/statecharts.md#verification-receipts) and [dashboard evidence cards](docs/dashboard.md#reader-evidence) show checked reader statecharts from TLC's complete graph and the saved view, with bounds, exact rules, unavailable actions and hidden steps. Each project evidence chart links to a script-free evidence page and standalone SVG, checked against its receipt commit. Charts cover up to 500 reachable states; larger models carry a size note, and missing views or artifacts explain the absence. Nine [example views](docs/statecharts.md#example-inventory) cover every qualifying language and synthesized sibling at unchanged bounds. Reader evidence has its own fingerprint and adds no proof claim; about 20 arrows is advice, never a cutoff.
 
+[Revision comparisons](docs/statecharts.md#proposal-comparisons) retain the preceding selected proposal, or an amendment's captured ratification, beside the complete new chart. Added and removed states and arrows carry exact source identities, view-change and checking-scope qualifications, including changes before hiding. Receipts preserve that proposal comparison beside the recomputed final-model chart. Equal charts do not establish behavioral equivalence.
+
 <p align="center">
   <img src="docs/assets/counterexample.svg" alt="Replay of a real TLC counterexample. r1 prepares and the coordinator records its vote; r2 aborts on its own; the buggy coordinator commits anyway, on r1's vote alone; r1 commits. TCConsistent is violated in 5 steps." width="100%">
 </p>

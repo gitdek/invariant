@@ -57,6 +57,7 @@ type Existing struct {
 // Current is an existing project as it stands: what an amendment starts
 // from.
 type Current struct {
+	Commit     string `json:"commit,omitempty"`
 	Dir        string
 	Manifest   project.Manifest
 	Lock       project.Lock
@@ -153,17 +154,26 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
+	for _, name := range []string{"comparison.json", "reader.json", "reader.svg"} {
+		if err := os.Remove(filepath.Join(out, name)); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	ws, err := os.MkdirTemp("", "invariant-formalize-")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(ws)
 	authority := req.CheckContext()
+	req.Current = authority.Current
 	contextJSON, release, err := stageCheckContext(ws, authority)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
+	if err := stageBaseline(ws, authority.Baseline); err != nil {
+		return nil, err
+	}
 	if err := writeFile(filepath.Join(ws, "request.md"), req.Markdown()); err != nil {
 		return nil, err
 	}
@@ -236,10 +246,28 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			p.Existing, p.Language = e.Paths, "typescript"
 		}
 	}
-	if c := req.Current; c != nil && p != nil && err == nil {
-		if err = p.Amend(c); err == nil && p.Ratifiable() {
+	if c := req.Current; c != nil && p != nil {
+		if p.Reader != nil && p.Reader.Comparison != nil {
+			c = detachedCurrent(c)
+			c.View = p.Reader.Comparison.Baseline.View
+		}
+		amendErr := p.Amend(c)
+		if err == nil {
+			err = amendErr
+		}
+		if err == nil && p.Ratifiable() {
 			r.Changes = Diff(c, p)
 		}
+	}
+	if p == nil && authority.Baseline != nil {
+		p = &Proposal{}
+		if authority.Current != nil {
+			_ = p.Amend(authority.Current)
+		}
+	}
+	if err == nil && p != nil && p.Ratifiable() && authority.Baseline != nil && r.Changes == nil {
+		s := authority.Baseline
+		r.Changes = Diff(&Current{ModuleText: s.Model, Lock: s.Lock}, p)
 	}
 	r.Proposal, r.Report = p, report
 	switch {
@@ -253,6 +281,9 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		if report != nil && !report.Passed {
 			r.Problem = verify.Feedback(report)
 		}
+	}
+	if p != nil && (r.Problem != "" || !p.Ratifiable()) {
+		p.Baseline = authority.Baseline
 	}
 	// Remove previous exports even after a failed repair. Only a complete
 	// checked request may appear under previews/.
@@ -279,6 +310,9 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		if err := writeReader(out, p.View, p.Reader); err != nil {
 			return nil, err
 		}
+	}
+	if err := writeComparison(out, pReader(p)); err != nil {
+		return nil, err
 	}
 	b, _ := json.MarshalIndent(r, "", "  ")
 	os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
@@ -337,12 +371,19 @@ func readRuns(path string) ([]synth.GateRun, error) {
 // Amend makes a draft an amendment of the project c: it keeps the project's
 // name, module, package and language, and records which lock it replaces.
 func (p *Proposal) Amend(c *Current) error {
-	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous()}
+	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous(), Baseline: detachedCurrent(c)}
 	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), filepath.Base(c.Manifest.Code), c.Manifest.Language
 	if p.Ratifiable() && p.Module != c.ModuleName() {
 		return fmt.Errorf("an amendment keeps its module: %s, not %s", c.ModuleName(), p.Module)
 	}
 	return nil
+}
+
+func pReader(p *Proposal) *Reader {
+	if p == nil {
+		return nil
+	}
+	return p.Reader
 }
 
 // slugOf is a project directory's name without its number: log-buffer

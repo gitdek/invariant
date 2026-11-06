@@ -15,22 +15,39 @@ const noReader = "\nNo reader chart is available. Supply .invariant/view.json an
 // Rendering is read-only, including for reports decoded from older archives.
 // An undrawable supplied chart produces a diagnostic copy, never a partial chart.
 func renderReader(r *verify.Reader) (*verify.Reader, string) {
-	if r == nil || r.Chart == nil {
+	if r == nil {
 		return r, ""
 	}
-	svg, err := r.Chart.SVG()
+	if r.Comparison != nil {
+		if _, err := r.Comparison.SVG(); err != nil {
+			copyReader := *r
+			copyReader.Comparison = nil
+			copyReader.ComparisonDiagnostic = &verify.ReaderDiagnostic{Code: "comparison", Message: err.Error()}
+			r = &copyReader
+		}
+	}
+	svg, err := r.SVG()
 	if err == nil {
 		return r, svg
 	}
 	copyReader := *r
 	copyReader.Chart, copyReader.Limitation, copyReader.Fingerprint = nil, nil, ""
-	copyReader.Unavailable = &verify.ReaderDiagnostic{Code: "reader_render", Message: err.Error(), Source: &r.Chart.Report.Source}
+	copyReader.Unavailable = &verify.ReaderDiagnostic{Code: "reader_render", Message: err.Error()}
+	if r.Chart != nil {
+		copyReader.Unavailable.Source = &r.Chart.Report.Source
+	}
 	data, marshalErr := json.Marshal(struct {
 		Reader     *verify.Reader           `json:"reader"`
 		Diagnostic *verify.ReaderDiagnostic `json:"diagnostic"`
 	}{r, copyReader.Unavailable})
 	if marshalErr == nil {
 		copyReader.Fingerprint = fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+	}
+	if copyReader.Comparison != nil {
+		// A final-chart rendering failure does not erase the independently
+		// validated proposal comparison.
+		svg, _ := copyReader.SVG()
+		return &copyReader, svg
 	}
 	return &copyReader, ""
 }
@@ -41,6 +58,13 @@ func readerMarkdown(r *verify.Reader) string {
 		return noReader
 	}
 	var b strings.Builder
+	if r.Comparison != nil {
+		b.WriteString("\n" + r.Comparison.Markdown())
+		b.WriteString("\nThe final-model chart below is recomputed independently of the retained proposal comparison.\n\n" + statechart.TableLiteral(r.FinalSources()) + "\n")
+	}
+	if d := r.ComparisonDiagnostic; d != nil {
+		b.WriteString("\nProposal comparison unavailable: " + statechart.TableLiteral(d.Message) + "\n")
+	}
 	if !r.Preview.IsZero() {
 		b.WriteString("\n" + statechart.TableLiteral(r.Preview.Description()) + "\n")
 	}

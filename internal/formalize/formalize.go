@@ -18,6 +18,7 @@ import (
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/regular"
+	"github.com/gitdek/invariant/internal/statechart"
 	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
@@ -90,6 +91,8 @@ type Proposal struct {
 	View       string            `json:"view,omitempty"`
 	Includes   map[string]string `json:"includes,omitempty"`
 	Reader     *Reader           `json:"reader,omitempty"`
+	// Baseline carries the last selected proposal through an intervening fork.
+	Baseline *statechart.ComparisonSnapshot `json:"baseline,omitempty"`
 	// Target is the existing project an amendment changes (D-0045). Dir is
 	// where a new project goes when its issue names one. Both are empty for
 	// a new project placed the usual way.
@@ -112,6 +115,7 @@ type Proposal struct {
 // Target is the project an amendment changes, as it stood when the
 // amendment was drafted.
 type Target struct {
+	Baseline *Current         `json:"baseline,omitempty"`
 	Dir      string           `json:"dir"`
 	Manifest project.Manifest `json:"manifest"`
 	Amends   string           `json:"amends"`   // the ProposalHash of the lock it replaces
@@ -269,6 +273,14 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 		return err
 	}
 	m := p.Manifest()
+	if ratified != nil && ratified.Proposal == "" {
+		// The caller supplies attribution; bind an omitted proposal identity
+		// to precisely the statements and bounds being written, without
+		// changing a supplied hash or the caller's record.
+		copyRatification := *ratified
+		copyRatification.Proposal = project.ProposalHash(p.Bounds, p.Statements)
+		ratified = &copyRatification
+	}
 	lock := project.Lock{Ratified: ratified, Bounds: p.Bounds, Statements: p.Statements}
 	for path, v := range map[string]any{".invariant/invariant.json": m, ".invariant/ratified.lock": lock} {
 		b, err := json.MarshalIndent(v, "", "  ")
@@ -294,6 +306,9 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 	if err := writeReader(filepath.Join(dir, ".invariant"), p.View, p.Reader); err != nil {
 		return err
 	}
+	if err := writeComparison(filepath.Join(dir, ".invariant"), p.Reader); err != nil {
+		return err
+	}
 	return writeFile(filepath.Join(dir, ".invariant/request.md"), request)
 }
 
@@ -317,6 +332,7 @@ func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 		return nil, nil, err
 	}
 	if len(p.Forks) > 0 {
+		p.Baseline = authority.Baseline
 		return p, nil, p.checkPreviews(ctx, tc, authority)
 	}
 	if !p.Ratifiable() {
@@ -335,6 +351,13 @@ func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 		return p, r, err
 	}
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
+	if err == nil {
+		err = p.checkComparison(ctx, ws, tc, authority)
+	}
+	if err == nil && p.Reader.Comparison != nil && r.Reader != nil {
+		r.Reader.Comparison = p.Reader.Comparison
+		r.Reader.Fingerprint = receiptReaderFingerprint(r.Reader, project.Lock{Bounds: p.Bounds, Statements: p.Statements})
+	}
 	return p, r, err
 }
 

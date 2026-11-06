@@ -345,7 +345,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 	checkBuild := fs.String("check-build", "", "with -plan or -plumbing: the registration on the check queue")
 	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
 	parentPlan := fs.Int("parent-plan", 0, "with draft checks: the caller-authenticated parent plan's issue, or zero for an ordinary issue")
-	draftContext := fs.String("draft-context", "", "with -formalize: caller-owned choice and parent context")
+	draftContext := fs.String("draft-context", "", "with -formalize: caller-owned choices, parent and captured comparison baseline")
 	fs.Parse(args)
 	if (*checkQueue != "" || *checkBuild != "") && ((!*pipes && !*plan) || *checkQueue == "" || *checkBuild == "") {
 		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plan or -plumbing, -check-queue and -check-build")

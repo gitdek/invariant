@@ -437,6 +437,7 @@ func TestReader603PostsRevisionAndRatification(t *testing.T) {
 			if req.Previous == nil || !reflect.DeepEqual(reader603Saved(t, req.Previous), reader603Saved(t, p)) {
 				t.Fatal("revision lost previous chart")
 			}
+			reader603Comparison(t, req, p)
 		}
 		runs++
 		return &formalize.Result{Proposal: p, Report: report}, nil
@@ -529,6 +530,8 @@ func TestReader603AmendmentAndCurrent(t *testing.T) {
 		if req.Current == nil {
 			t.Fatal("amendment not staged as current project")
 		}
+		reader603Comparison(t, req, p)
+		changes = formalize.Diff(current, p)
 		return &formalize.Result{Proposal: p, Report: report, Changes: changes}, nil
 	}}
 	r.gh.open(603, "gitdek", "Clarify the count", "Project: "+dir+"\n\n/invariant solve")
@@ -822,6 +825,10 @@ func TestReader603LargePublicationAndRecovery(t *testing.T) {
 				if mode == "amendment" && req.Current == nil {
 					t.Fatal("amendment did not load current project")
 				}
+				reader603Comparison(t, req, q)
+				if req.Current != nil {
+					result.Changes = formalize.Diff(req.Current, q)
+				}
 				calls++
 				return result, nil
 			}}
@@ -978,4 +985,21 @@ func TestReader603LargePublicationAndRecovery(t *testing.T) {
 			})
 		}
 	}
+}
+
+// These publication doubles now supply the same captured comparison evidence
+// as a real revision or amendment, while retaining their original chart checks.
+func reader603Comparison(t *testing.T, req formalize.Request, p *formalize.Proposal) {
+	t.Helper()
+	s := req.CheckContext().Baseline
+	if s == nil {
+		return
+	}
+	if s.Chart == nil && s.Limitation == nil {
+		if req.Current == nil || req.Current.Reader == nil {
+			t.Fatal("fixture baseline has no checked reader")
+		}
+		s.Chart, s.Limitation = req.Current.Reader.Chart, req.Current.Reader.Limitation
+	}
+	attachFactoryComparison(t, p, *s)
 }

@@ -15,6 +15,9 @@ func Prompt(req Request, checks int) string {
 		previous += "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
 	}
+	if req.comparisonBaseline() != nil {
+		previous += "\nThe comparison baseline is captured in `baseline/`: its exact model, includes and `ratified.lock` stay fixed at their original bounds. A new-project revision compares with its immediately preceding selected modeled proposal; an amendment always compares with the captured ratification, including after answers and revisions. If the legacy baseline has no view, supply `baseline/view.json` for that old model. The check independently runs its model gate, complete TLC graph, invariant replay and hiding checks before comparing. Repair baseline diagnostics there; editing staged old model or lock files cannot replace caller-owned authority. Do not write comparison.json or derived reader evidence. Different bounds qualify the displayed scope, and equal charts do not establish behavioral equivalence.\n"
+	}
 	language := req.Language
 	if language == "" {
 		language = "go"

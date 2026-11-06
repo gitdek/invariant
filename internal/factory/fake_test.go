@@ -478,6 +478,12 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 	}
 	if len(req.Answers) < len(s.forks) {
 		p := &formalize.Proposal{Draft: formalize.Draft{Forks: checkedForks(s.t, s.forks, req.CheckContext().Choices)}}
+		p.Baseline = req.CheckContext().Baseline
+		if req.Current != nil {
+			if err := p.Amend(req.Current); err != nil {
+				s.t.Fatal(err)
+			}
+		}
 		return &formalize.Result{Proposal: p, Usage: synth.Usage{CostUSD: 0.10}}, nil
 	}
 	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
@@ -488,11 +494,13 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 			return &formalize.Result{Problem: err.Error()}, nil
 		}
 		checkedBufferReader(s.t, p)
+		checkedBufferComparison(s.t, req, p)
 		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
 	}
 	p := bufferProposal(s.t)
 	p.Language, p.Revised = req.Language, s.revised
 	checkedBufferReader(s.t, p)
+	checkedBufferComparison(s.t, req, p)
 	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
 }
 
@@ -532,18 +540,25 @@ func checkedBufferReader(t *testing.T, p *formalize.Proposal, scope ...statechar
 		chart.Preview = scope[0]
 	}
 	p.Reader = &formalize.Reader{Version: 1, Chart: chart}
+	sealFactoryReader(t, p)
+}
+
+func sealFactoryReader(t *testing.T, p *formalize.Proposal) {
+	t.Helper()
 	// Encode the persisted fingerprint contract, just as a saved formalizer
 	// result would, without giving production callers a way to seal evidence.
 	b, err := json.Marshal(struct {
-		Version    int                 `json:"version"`
-		Module     string              `json:"module"`
-		Model      string              `json:"model"`
-		Includes   map[string]string   `json:"includes,omitempty"`
-		View       string              `json:"view"`
-		Bounds     map[string]string   `json:"bounds"`
-		Statements []project.Statement `json:"statements"`
-		Chart      *statechart.Result  `json:"chart,omitempty"`
-	}{1, p.Module, p.ModuleText, p.Includes, p.View, p.Bounds, p.Statements, chart})
+		Version    int                    `json:"version"`
+		Module     string                 `json:"module"`
+		Model      string                 `json:"model"`
+		Includes   map[string]string      `json:"includes,omitempty"`
+		View       string                 `json:"view"`
+		Bounds     map[string]string      `json:"bounds"`
+		Statements []project.Statement    `json:"statements"`
+		Chart      *statechart.Result     `json:"chart,omitempty"`
+		Limitation *statechart.Limitation `json:"limitation,omitempty"`
+		Comparison *statechart.Comparison `json:"comparison,omitempty"`
+	}{1, p.Module, p.ModuleText, p.Includes, p.View, p.Bounds, p.Statements, p.Reader.Chart, p.Reader.Limitation, p.Reader.Comparison})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,6 +566,35 @@ func checkedBufferReader(t *testing.T, p *formalize.Proposal, scope ...statechar
 	if err := p.ValidateReader(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func checkedBufferComparison(t *testing.T, req formalize.Request, p *formalize.Proposal) {
+	t.Helper()
+	s := req.CheckContext().Baseline
+	if s == nil {
+		return
+	}
+	if s.Chart == nil && s.Limitation == nil {
+		old := &formalize.Proposal{Draft: formalize.Draft{Module: s.Module, Bounds: s.Lock.Bounds, Statements: s.Lock.Statements}, ModuleText: s.Model, Includes: s.Includes}
+		checkedBufferReader(t, old)
+		s.View, s.Chart = old.View, old.Reader.Chart
+	}
+	attachFactoryComparison(t, p, *s)
+}
+
+func attachFactoryComparison(t *testing.T, p *formalize.Proposal, s statechart.ComparisonSnapshot) {
+	t.Helper()
+	candidate := statechart.ComparisonSnapshot{Kind: "proposal", Name: "Proposal " + p.Hash, Module: p.Module, Model: p.ModuleText, Includes: p.Includes, View: p.View,
+		Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}, Chart: p.Reader.Chart, Limitation: p.Reader.Limitation}
+	var err error
+	p.Reader.Comparison, err = statechart.Compare(s, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Target != nil && p.Target.Baseline != nil {
+		p.Target.Baseline.View = s.View
+	}
+	sealFactoryReader(t, p)
 }
 
 // fakeBuilder writes a Go package into the ratified project, the way
