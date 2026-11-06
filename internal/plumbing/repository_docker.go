@@ -50,13 +50,13 @@ func (r *DockerDependencyRunner) OpenChecks(ctx context.Context, q DependencyReq
 	if _, err := dependencyDocker(ctx, "start", q.Token); err != nil {
 		return nil, err
 	}
-	if q.Env["GOTOOLCHAIN"] != "local" && q.Env["PIP_NO_INDEX"] != "1" {
+	if q.Env["GOTOOLCHAIN"] != "local" && q.Env["PIP_NO_INDEX"] != "1" && q.Env["NPM_CONFIG_OFFLINE"] != "true" {
 		return dockerRepositoryCommands{e}, nil
 	}
 	return e, nil
 }
 
-// TypeScript environments retain their command and file capability.
+// Environments without a supported runtime retain command and file capability.
 type dockerRepositoryCommands struct {
 	RepositoryAcceptanceFileEnvironment
 }

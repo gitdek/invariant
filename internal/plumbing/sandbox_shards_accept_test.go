@@ -728,14 +728,27 @@ sys.exit(code if code >= 0 else 128-code)
 // mounts, and Docker's important cancellation property: rm kills every process
 // belonging to the container. It never supplies fabricated test output.
 const s397Docker = `#!/usr/bin/env python3
-import json, os, pathlib, signal, subprocess, sys
+import json, os, pathlib, signal, subprocess, sys, time
 a = sys.argv[1:]
 control = pathlib.Path(os.environ["S397_CONTROL"])
+def drain(group):
+    # macOS answers EPERM while a group's last members are reaped (#516).
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try: os.killpg(group, 0)
+        except (ProcessLookupError, PermissionError): return
+        time.sleep(0.02)
 if a and a[0] == "rm":
     (control / "removed").write_text(" ".join(a))
+    # The runner starts each test binary in a session of its own, which only a
+    # container's end would also kill here. Signal it to stop them, then kill
+    # what is left of its group (#516).
     try:
-        os.killpg(int((control / "group").read_text()), signal.SIGKILL)
-    except (ProcessLookupError, FileNotFoundError):
+        group = int((control / "group").read_text())
+        os.killpg(group, signal.SIGTERM)
+        drain(group)
+        os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, FileNotFoundError):
         pass
     sys.exit(0)
 if not a or a[0] != "run":
@@ -765,7 +778,9 @@ p = subprocess.Popen(["sh", "-c", script], cwd=src, env=env, start_new_session=T
 try:
     code = p.wait()
 finally:
+    # A removal lets the runner finish stopping what it started first.
+    if (control / "removed").exists(): drain(p.pid)
     try: os.killpg(p.pid, signal.SIGKILL)
-    except ProcessLookupError: pass
+    except (ProcessLookupError, PermissionError): pass
 sys.exit(code if code >= 0 else 128-code)
 `

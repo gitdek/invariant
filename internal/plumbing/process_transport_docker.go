@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +30,9 @@ var dockerProcessHelper []byte
 
 //go:embed docker_process_helper.py
 var dockerPythonProcessHelper []byte
+
+//go:embed docker_process_helper.cjs
+var dockerNodeProcessHelper []byte
 
 const dockerProcessProtocol = "invariant-process-v1\n"
 const dockerProcessFrameLimit = 64 << 10
@@ -100,8 +104,22 @@ func (e *dockerRepositoryChecks) Prepare(ctx context.Context, spec RepositoryPro
 		return nil, err
 	}
 	python := e.request.Env["PIP_NO_INDEX"] == "1"
-	if !python && (e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off") {
-		return nil, errors.New("Docker process transport requires a prepared offline Go or Python environment")
+	node := e.request.Env["NPM_CONFIG_OFFLINE"] == "true"
+	spec.Argv, spec.Env = slices.Clone(spec.Argv), maps.Clone(spec.Env)
+	var authentication []byte
+	if encoded, ok := spec.Env[nodeAuthenticationEnv]; ok {
+		var err error
+		authentication, err = hex.DecodeString(encoded)
+		if !node || spec.EventEnv != nodeEventEnv || err != nil || len(authentication) != 32 {
+			return nil, errors.New("invalid Node lifecycle authentication")
+		}
+		delete(spec.Env, nodeAuthenticationEnv)
+	}
+	if node && spec.EventEnv == nodeEventEnv && len(authentication) != 32 {
+		return nil, errors.New("Node acceptance needs private lifecycle authentication")
+	}
+	if !python && !node && (e.request.Env["GOTOOLCHAIN"] != "local" || e.request.Env["GOPROXY"] != "off") {
+		return nil, errors.New("Docker process transport requires a prepared offline Go, Python or Node environment")
 	}
 	if len(spec.Argv) == 0 || spec.Argv[0] == "" || strings.HasPrefix(spec.Argv[0], "-") {
 		return nil, errors.New("process preparation needs an executable")
@@ -158,7 +176,13 @@ done
 	}
 	private := "transport-" + rand.Text()
 	var helper string
-	if python {
+	if node {
+		var err error
+		helper, err = e.Stage(ctx, private+"/transport.cjs", dockerNodeProcessHelper)
+		if err != nil {
+			return nil, err
+		}
+	} else if python {
 		var err error
 		helper, err = e.Stage(ctx, private+"/transport.py", dockerPythonProcessHelper)
 		if err != nil {
@@ -178,8 +202,7 @@ done
 		}
 		helper = binary
 	}
-	spec.Argv, spec.Env = slices.Clone(spec.Argv), maps.Clone(spec.Env)
-	p := &dockerPreparedProcess{owner: e, spec: spec, helper: helper, python: python}
+	p := &dockerPreparedProcess{owner: e, spec: spec, helper: helper, python: python, node: node, authentication: authentication}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -193,6 +216,9 @@ done
 // literal selection and source in this part; never read candidate policy or
 // replace its invocation ID. Shared repository orchestration uses the same run.
 func (e *dockerRepositoryChecks) RunAcceptance(ctx context.Context, in RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error) {
+	if in.Binding.Framework == "vitest" || in.Binding.Framework == "jest" {
+		return e.runNodeAcceptance(ctx, in)
+	}
 	if in.Binding.Framework == "pytest" {
 		return e.runPytestAcceptance(ctx, in)
 	}
@@ -378,7 +404,9 @@ func (c *dockerCheckClient) collect(ctx context.Context) {
 			grace.Stop()
 		}
 	}
-	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	// Darwin answers EPERM while the client's group is reaped; reaping below
+	// still waits for the group to disappear (#516).
+	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EPERM) {
 		c.joinErr = err
 	}
 	if !finished {
@@ -422,14 +450,16 @@ func (c *dockerCheckClient) join(ctx context.Context) error {
 }
 
 type dockerPreparedProcess struct {
-	mu           sync.Mutex
-	owner        *dockerRepositoryChecks
-	spec         RepositoryProcessSpec
-	helper       string
-	python       bool
-	process      *dockerRepositoryProcess
-	closed, used bool
-	err          error
+	mu             sync.Mutex
+	owner          *dockerRepositoryChecks
+	spec           RepositoryProcessSpec
+	helper         string
+	python         bool
+	node           bool
+	authentication []byte
+	process        *dockerRepositoryProcess
+	closed, used   bool
+	err            error
 }
 
 func (p *dockerPreparedProcess) Start(ctx context.Context) (RepositoryProcess, error) {
@@ -446,6 +476,8 @@ func (p *dockerPreparedProcess) Start(ctx context.Context) (RepositoryProcess, e
 	args = append([]string{"exec", "--interactive"}, args[1:]...)
 	if p.python {
 		args = append(args, "python3", "-I", "-B")
+	} else if p.node {
+		args = append(args, "node")
 	}
 	args = append(args, p.helper, p.spec.EventEnv)
 	args = append(args, p.spec.Argv...)
@@ -458,6 +490,15 @@ func (p *dockerPreparedProcess) Start(ctx context.Context) (RepositoryProcess, e
 	process.client = client
 	p.process = process
 	go process.collect()
+	if len(p.authentication) != 0 {
+		_, err = client.input.Write(p.authentication)
+		clear(p.authentication)
+		p.authentication = nil
+		if err != nil {
+			client.interrupt(fmt.Errorf("send Node lifecycle credential: %w", err))
+			return process, err
+		}
+	}
 	return process, nil
 }
 

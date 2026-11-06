@@ -102,6 +102,13 @@ func runCapturedDependencyInstaller(t *testing.T, launch []string, q DependencyR
 		t.Fatalf("missing installer arguments: %v", args)
 	}
 	args[start+1] = tool
+	// The host's tool may live outside the container's PATH, beside what its
+	// shebang runs, as Homebrew's npm and node do on macOS (#516).
+	for i, arg := range args[:start] {
+		if value, ok := strings.CutPrefix(arg, "PATH="); ok {
+			args[i] = "PATH=" + filepath.Dir(tool) + string(os.PathListSeparator) + value
+		}
+	}
 	if q.Argv[0] == "python3" {
 		args = append(args, "--no-index")
 	}

@@ -136,7 +136,9 @@ func run(c *connection) error {
 	}
 	// Pipe EOF alone does not establish ownership cleanup: a silent descendant
 	// may still be alive. Terminate and reap the workload's entire group first.
-	if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+	// Darwin answers EPERM while a group's last members are reaped, and reaping
+	// still waits for the group to disappear (#516).
+	if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) && !errors.Is(killErr, syscall.EPERM) {
 		err = errors.Join(err, killErr)
 	}
 	end := time.Now().Add(2 * time.Second)
@@ -212,7 +214,7 @@ func reap(group int, end time.Time) error {
 		}
 		if err := syscall.Kill(-group, 0); errors.Is(err, syscall.ESRCH) {
 			return nil
-		} else if err != nil {
+		} else if err != nil && !errors.Is(err, syscall.EPERM) {
 			return err
 		}
 		if !time.Now().Before(end) {
