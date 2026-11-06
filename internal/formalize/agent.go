@@ -57,6 +57,7 @@ type Existing struct {
 // Current is an existing project as it stands: what an amendment starts
 // from.
 type Current struct {
+	Commit     string `json:"commit,omitempty"`
 	Dir        string
 	Manifest   project.Manifest
 	Lock       project.Lock
@@ -133,12 +134,13 @@ type Formalizer struct {
 
 // Result is how a formalization went.
 type Result struct {
-	Proposal  *Proposal       `json:"proposal,omitempty"` // forks to ask, a reason the issue is unsupported, or a draft to ratify
-	Report    *verify.Report  `json:"report,omitempty"`   // the factory's own check of a draft to ratify
-	Problem   string          `json:"problem,omitempty"`  // why there's nothing to ask or ratify, when there isn't
-	Changes   *Changes        `json:"changes,omitempty"`  // what an amendment changes
-	Usage     synth.Usage     `json:"usage"`
-	CheckRuns []synth.GateRun `json:"check_runs,omitempty"`
+	CheckContext *CheckContext   `json:"check_context,omitempty"`
+	Proposal     *Proposal       `json:"proposal,omitempty"` // forks to ask, a reason the issue is unsupported, or a draft to ratify
+	Report       *verify.Report  `json:"report,omitempty"`   // the factory's own check of a draft to ratify
+	Problem      string          `json:"problem,omitempty"`  // why there's nothing to ask or ratify, when there isn't
+	Changes      *Changes        `json:"changes,omitempty"`  // what an amendment changes
+	Usage        synth.Usage     `json:"usage"`
+	CheckRuns    []synth.GateRun `json:"check_runs,omitempty"`
 }
 
 // Formalize runs the agent on a request. Its transcript and draft land in
@@ -150,6 +152,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	if req.Plumbing != "" {
 		return f.Plan(ctx, req, req.Plumbing, out)
 	}
+	req.Current = req.CapturedCurrent()
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
@@ -220,7 +223,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		Timeout:    f.Timeout,
 	})
 	usage.Backend = f.Backend.Name()
-	r := &Result{Usage: usage}
+	r := &Result{Usage: usage, CheckContext: &authority}
 	r.CheckRuns, _ = readRuns(checkLog)
 
 	var p *Proposal
@@ -230,16 +233,36 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	} else if err = CheckStepDraft(ws, req.ParentPlan); err == nil {
 		p, report, err = CheckWithContext(ctx, ws, f.Toolchain, authority)
 	}
+	// A failed repair is not a new selected baseline. Keep the caller's
+	// source even when no candidate could be read, so another revision can
+	// repair it without fetching a newer branch or inventing an empty model.
+	if (err != nil || report != nil && !report.Passed) && authority.Baseline != nil && !synth.ProviderUnavailable(runErr) {
+		if p == nil {
+			p = &Proposal{}
+		}
+		p.Baseline = detachedSnapshot(authority.Baseline)
+	}
 	if p != nil {
 		p.Language = req.Language
 		if e := req.Existing; e != nil {
 			p.Existing, p.Language = e.Paths, "typescript"
 		}
 	}
-	if c := req.Current; c != nil && p != nil && err == nil {
-		if err = p.Amend(c); err == nil && p.Ratifiable() {
+	if c := req.Current; c != nil && p != nil {
+		if err == nil && p.Reader != nil && p.Reader.Comparison != nil {
+			c.View = p.Reader.Comparison.Baseline.View
+		}
+		amendErr := p.Amend(c)
+		if err == nil {
+			err = amendErr
+		}
+		if err == nil && p.Ratifiable() {
 			r.Changes = Diff(c, p)
 		}
+	}
+	if req.Current == nil && p != nil && err == nil && p.Reader != nil && p.Reader.Comparison != nil {
+		s := p.Reader.Comparison.Baseline
+		r.Changes = Diff(&Current{ModuleText: s.Model, Lock: s.Lock}, p)
 	}
 	r.Proposal, r.Report = p, report
 	switch {
@@ -262,6 +285,11 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	if r.Problem == "" && p != nil && p.HasPreviews() {
 		if err := p.WritePreviews(out); err != nil {
 			r.Problem = err.Error()
+		}
+	}
+	for _, name := range []string{"reader.json", "comparison.json", "reader.svg"} {
+		if err := os.Remove(filepath.Join(out, name)); err != nil && !os.IsNotExist(err) {
+			return nil, err
 		}
 	}
 	for _, name := range []string{"proposal.json"} {
@@ -337,7 +365,7 @@ func readRuns(path string) ([]synth.GateRun, error) {
 // Amend makes a draft an amendment of the project c: it keeps the project's
 // name, module, package and language, and records which lock it replaces.
 func (p *Proposal) Amend(c *Current) error {
-	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous()}
+	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous(), Baseline: detachCurrent(c)}
 	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), filepath.Base(c.Manifest.Code), c.Manifest.Language
 	if p.Ratifiable() && p.Module != c.ModuleName() {
 		return fmt.Errorf("an amendment keeps its module: %s, not %s", c.ModuleName(), p.Module)

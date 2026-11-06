@@ -478,21 +478,29 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 	}
 	if len(req.Answers) < len(s.forks) {
 		p := &formalize.Proposal{Draft: formalize.Draft{Forks: checkedForks(s.t, s.forks, req.CheckContext().Choices)}}
+		p.Baseline = req.CheckContext().Baseline
+		if req.Current != nil {
+			if err := p.Amend(req.Current); err != nil {
+				s.t.Fatal(err)
+			}
+		}
 		return &formalize.Result{Proposal: p, Usage: synth.Usage{CostUSD: 0.10}}, nil
 	}
 	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
 		Witnesses: []verify.Witness{{Name: "CanFill", Reached: true, Steps: 2}}, Bugs: []verify.Bug{{Name: "PutWhenFull", Caught: true}}}
 	if c := req.Current; c != nil && s.amend != nil {
 		p := s.amend(c)
+		checkedBufferReader(s.t, p)
+		checkedBufferComparison(s.t, p, req)
 		if err := p.Amend(c); err != nil {
 			return &formalize.Result{Problem: err.Error()}, nil
 		}
-		checkedBufferReader(s.t, p)
 		return &formalize.Result{Proposal: p, Report: report, Changes: formalize.Diff(c, p)}, nil
 	}
 	p := bufferProposal(s.t)
 	p.Language, p.Revised = req.Language, s.revised
 	checkedBufferReader(s.t, p)
+	checkedBufferComparison(s.t, p, req)
 	return &formalize.Result{Proposal: p, Report: report, Usage: synth.Usage{CostUSD: 0.10}}, nil
 }
 
@@ -501,6 +509,9 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // TLC and invariant replay themselves are exercised at the formalize boundary.
 func checkedBufferReader(t *testing.T, p *formalize.Proposal, scope ...statechart.Preview) {
 	t.Helper()
+	target := p.Target
+	p.Target = nil
+	defer func() { p.Target = target }()
 	p.View = `{"version":1,"state":[{"id":"all","when":true,"label":"Buffer"}],"step":[{"id":"all","when":true,"label":"Update buffer"}]}`
 	g := tlc.GraphResult{Module: p.Module, Config: tlc.Config{Specification: "Spec", Constants: p.Bounds},
 		Tool: tlc.GraphTool{Image: toolchain.JavaImage, JarSHA256: toolchain.TLCJarSHA256},
@@ -551,6 +562,75 @@ func checkedBufferReader(t *testing.T, p *formalize.Proposal, scope ...statechar
 	if err := p.ValidateReader(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func checkedBufferComparison(t *testing.T, p *formalize.Proposal, req formalize.Request) {
+	t.Helper()
+	s := req.CheckContext().Baseline
+	if s == nil {
+		return
+	}
+	if s.Chart == nil && s.Limitation == nil {
+		old := &formalize.Proposal{Draft: p.Draft, ModuleText: s.Model, Includes: s.Includes}
+		old.Module, old.Bounds, old.Statements = s.Module, s.Lock.Bounds, s.Lock.Statements
+		checkedBufferReader(t, old)
+		if s.View == "" {
+			s.View = old.View
+		}
+		s.Chart, s.Limitation = old.Reader.Chart, old.Reader.Limitation
+	}
+	b := statechart.ComparisonSnapshot{Kind: "proposal", Name: "Proposal " + p.Hash, Module: p.Module, Model: p.ModuleText, Includes: p.Includes, View: p.View,
+		Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}, Chart: p.Reader.Chart, Limitation: p.Reader.Limitation}
+	c, err := statechart.Compare(*s, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Reader.Comparison = c
+	sealComparisonReader(t, p)
+}
+
+func sealComparisonReader(t *testing.T, p *formalize.Proposal) {
+	t.Helper()
+	b, err := json.Marshal(struct {
+		Version    int                    `json:"version"`
+		Module     string                 `json:"module"`
+		Model      string                 `json:"model"`
+		Includes   map[string]string      `json:"includes,omitempty"`
+		View       string                 `json:"view"`
+		Bounds     map[string]string      `json:"bounds"`
+		Statements []project.Statement    `json:"statements"`
+		Chart      *statechart.Result     `json:"chart,omitempty"`
+		Limitation *statechart.Limitation `json:"limitation,omitempty"`
+		Comparison *statechart.Comparison `json:"comparison,omitempty"`
+	}{1, p.Module, p.ModuleText, p.Includes, p.View, p.Bounds, p.Statements, p.Reader.Chart, p.Reader.Limitation, p.Reader.Comparison})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Reader.Fingerprint = fmt.Sprintf("sha256:%x", sha256.Sum256(b))
+	if err := p.ValidateReader(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Publication fixtures now obtain the comparison from the same checked sources
+// as a real formalizer, retaining their existing model assertions and reports.
+func reader603Compare(t *testing.T, tc toolchain.Toolchain, req formalize.Request, p *formalize.Proposal) {
+	t.Helper()
+	if req.CheckContext().Baseline == nil {
+		return
+	}
+	ws := t.TempDir()
+	reader603Write(t, filepath.Join(ws, "proposal.json"), string(reader603JSON(t, p.Draft)))
+	reader603Write(t, filepath.Join(ws, p.Module+".tla"), p.ModuleText)
+	reader603Write(t, filepath.Join(ws, "view.json"), p.View)
+	for name, text := range p.Includes {
+		reader603Write(t, filepath.Join(ws, name), text)
+	}
+	checked, r, err := formalize.CheckWithContext(t.Context(), ws, tc, req.CheckContext())
+	if err != nil || r == nil || !r.Passed {
+		t.Fatalf("comparison fixture: %+v %v", r, err)
+	}
+	p.Reader = checked.Reader
 }
 
 // fakeBuilder writes a Go package into the ratified project, the way

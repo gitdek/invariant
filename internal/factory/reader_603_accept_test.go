@@ -439,6 +439,7 @@ func TestReader603PostsRevisionAndRatification(t *testing.T) {
 			}
 		}
 		runs++
+		reader603Compare(t, tc, req, p)
 		return &formalize.Result{Proposal: p, Report: report}, nil
 	}}
 	r.gh.open(603, "gitdek", "Reader chart", "A lifecycle.\n\n/invariant solve")
@@ -529,6 +530,8 @@ func TestReader603AmendmentAndCurrent(t *testing.T) {
 		if req.Current == nil {
 			t.Fatal("amendment not staged as current project")
 		}
+		reader603Compare(t, tc, req, p)
+		changes = formalize.Diff(req.Current, p)
 		return &formalize.Result{Proposal: p, Report: report, Changes: changes}, nil
 	}}
 	r.gh.open(603, "gitdek", "Clarify the count", "Project: "+dir+"\n\n/invariant solve")
@@ -823,6 +826,10 @@ func TestReader603LargePublicationAndRecovery(t *testing.T) {
 					t.Fatal("amendment did not load current project")
 				}
 				calls++
+				reader603Compare(t, tc, req, q)
+				if req.Current != nil {
+					result.Changes = formalize.Diff(req.Current, q)
+				}
 				return result, nil
 			}}
 			r.f.Formalizer = form

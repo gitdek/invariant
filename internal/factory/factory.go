@@ -1088,7 +1088,7 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 		return f.formalize(ctx, t, *revision, answers, state.Marker.Proposal, replyTo)
 	}
 	if len(remaining) == 0 {
-		return f.formalize(ctx, t, last, answers, nil, replyTo)
+		return f.formalize(ctx, t, last, answers, state.Marker.Proposal, replyTo)
 	}
 	// The post is the saved state, so idle polls and another watcher keep
 	// the answers and never ask for the same choices again.
@@ -1191,7 +1191,15 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		if problem := badDir(dir); problem != "" {
 			return stuck("The issue names the project `" + dir + "`, but " + problem + ".")
 		}
-		cur, err := f.current(ctx, dir)
+		cur := req.CapturedCurrent()
+		// An explicit different Project: starts an amendment of that project;
+		// revisions of the same target keep their original captured source.
+		if cur != nil && cur.Dir != dir {
+			cur = nil
+		}
+		if cur == nil {
+			cur, err = f.current(ctx, dir)
+		}
 		if err != nil {
 			return err
 		}
@@ -1328,6 +1336,14 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 			m.Kind = KindStuck
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
+		authority := req.CheckContext()
+		if res.CheckContext != nil {
+			authority = *res.CheckContext
+		}
+		if err := p.ValidateComparisonContext(authority); err != nil {
+			m.Kind = KindStuck
+			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
+		}
 		m.Kind, m.Proposal = KindProposal, p
 		// A compressed marker can fit the comment but exceed the reader's
 		// expanded size limit, leaving nothing recoverable or ratifiable.
@@ -1361,6 +1377,7 @@ func draftStepName(cause Command) string {
 // It returns nil for a run recorded and never finished. The run's record
 // and its result name the agent (#179).
 func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request) (*formalize.Result, error) {
+	authority := req.CheckContext()
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -1409,6 +1426,7 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	// paths on this machine as localPaths does, whether it's the formalizer's
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
+	res.CheckContext = &authority
 	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
 		return nil, err
@@ -1497,12 +1515,15 @@ func (f *Factory) current(ctx context.Context, dir string) (*formalize.Current, 
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return nil, err
 	}
-	ref := "origin/" + f.Base
+	ref, err := f.Repo.RevParse(ctx, "origin/"+f.Base)
+	if err != nil {
+		return nil, err
+	}
 	b, err := f.Repo.Show(ctx, ref, dir+"/.invariant/invariant.json")
 	if err != nil {
 		return nil, nil
 	}
-	c := &formalize.Current{Dir: dir}
+	c := &formalize.Current{Dir: dir, Commit: ref}
 	if err := json.Unmarshal(b, &c.Manifest); err != nil {
 		return nil, fmt.Errorf("%s's manifest: %w", dir, err)
 	}

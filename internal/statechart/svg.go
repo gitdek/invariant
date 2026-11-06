@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"maps"
 	"reflect"
 	"slices"
@@ -17,6 +18,10 @@ import (
 // Callers own evidence checking and must not mutate the result during a call.
 // Invalid structure or unrepresentable text returns an error and no SVG.
 func (c *Result) SVG() (string, error) {
+	return c.svg(nil)
+}
+
+func (c *Result) svg(marks *comparisonSVG) (string, error) {
 	if err := validateSVG(c); err != nil {
 		return "", err
 	}
@@ -30,6 +35,15 @@ func (c *Result) SVG() (string, error) {
 		return "", err
 	}
 	l := layoutSVG(c)
+	heading := svgHeading
+	if marks != nil {
+		if marks.side == "candidate" {
+			heading = "Candidate: " + marks.name + "\nComplete new chart; green additions and amber changes."
+		} else {
+			heading = "Baseline: " + marks.name + "\nComplete captured chart; red dashed removals and amber changes."
+		}
+		l.width = max(l.width, measureSVGText(heading).width+2*svgMargin)
+	}
 	l.layoutReport(svgReport(c, l.index, l.number))
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="chart-title" aria-describedby="chart-description" viewBox="0 0 %g %g" width="%g" height="%g" font-family="monospace" font-size="14" fill="#17212b">`, l.width, l.height, l.width, l.height)
@@ -38,25 +52,27 @@ func (c *Result) SVG() (string, error) {
 	b.WriteString(svgEscape(string(data)))
 	b.WriteString(`</metadata><defs><marker id="chart-arrowhead" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 Z" fill="#34495e"/></marker></defs>`)
 	fmt.Fprintf(&b, `<rect x="0" y="0" width="%g" height="%g" fill="#ffffff"/>`, l.width, l.height)
-	writeSVGText(&b, measureSVGText(svgHeading), svgMargin, svgMargin)
+	writeSVGText(&b, measureSVGText(heading), svgMargin, svgMargin)
 	for i, a := range c.Arrows {
 		route := l.arrows[i]
-		fmt.Fprintf(&b, `<g id="arrow-%d" data-from="%s" data-to="%s" data-label="%s"><title>%s</title>`, i+1, svgEscape(a.From), svgEscape(a.To), svgEscape(a.Label), svgEscape(a.Label))
+		attrs, color := marks.annotation("", arrowID(a))
+		fmt.Fprintf(&b, `<g id="arrow-%d" data-from="%s" data-to="%s" data-label="%s"%s><title>%s</title>`, i+1, svgEscape(a.From), svgEscape(a.To), svgEscape(a.Label), attrs, svgEscape(a.Label))
 		fmt.Fprintf(&b, `<desc>State %d to state %d; %s.</desc>`, l.number[l.index[a.From]], l.number[l.index[a.To]], svgCount(a.Count, "concrete step occurrence"))
-		writeSVGPath(&b, route.path)
-		fmt.Fprintf(&b, `<circle cx="%g" cy="%g" r="3" fill="#34495e"/>`, route.fromX, route.fromY)
+		writeSVGColoredPath(&b, route.path, color)
+		fmt.Fprintf(&b, `<circle cx="%g" cy="%g" r="3" fill="%s"/>`, route.fromX, route.fromY, color)
 		writeSVGRect(&b, route.label, "#ffffff", "none")
 		writeSVGText(&b, route.text, route.label.x+svgPadding/2, route.label.y+svgPadding/2)
 		b.WriteString(`</g>`)
 	}
 	for i, s := range c.States {
 		n := l.nodes[i]
-		fmt.Fprintf(&b, `<g id="state-%d" data-state-id="%s"><title>%s</title>`, i+1, svgEscape(s.ID), svgEscape(s.Label))
+		attrs, color := marks.annotation(s.ID, arrowIdentity{})
+		fmt.Fprintf(&b, `<g id="state-%d" data-state-id="%s"%s><title>%s</title>`, i+1, svgEscape(s.ID), attrs, svgEscape(s.Label))
 		fill := "#f0f6fa"
 		if len(s.ViolatedRules) > 0 {
 			fill = "#fff0e8"
 		}
-		writeSVGRect(&b, n.svgBox, fill, "#34495e")
+		writeSVGRect(&b, n.svgBox, fill, color)
 		writeSVGText(&b, n.text, n.x+svgPadding, n.y+(n.height-n.text.height)/2)
 		b.WriteString(`</g>`)
 	}
@@ -100,7 +116,11 @@ func writeSVGRect(b *strings.Builder, r svgBox, fill, stroke string) {
 }
 
 func writeSVGPath(b *strings.Builder, d string) {
-	fmt.Fprintf(b, `<path d="%s" fill="none" stroke="#34495e" stroke-width="2" stroke-linejoin="round" marker-end="url(#chart-arrowhead)"/>`, d)
+	writeSVGColoredPath(b, d, "#34495e")
+}
+
+func writeSVGColoredPath(b *strings.Builder, d, color string) {
+	fmt.Fprintf(b, `<path d="%s" fill="none" stroke="%s" stroke-width="2" stroke-linejoin="round" marker-end="url(#chart-arrowhead)"/>`, d, color)
 }
 
 func validateSVG(c *Result) error {
@@ -364,4 +384,177 @@ func svgCount(n int, noun string) string {
 		noun += "s"
 	}
 	return fmt.Sprintf("%d %s", n, noun)
+}
+
+type comparisonSVG struct {
+	side   string
+	name   string
+	states map[string]string
+	arrows map[arrowIdentity]string
+}
+
+func (m *comparisonSVG) annotation(state string, arrow arrowIdentity) (string, string) {
+	if m == nil {
+		return "", "#34495e"
+	}
+	change := m.arrows[arrow]
+	if state != "" {
+		change = m.states[state]
+	}
+	attrs := ` data-comparison-side="` + m.side + `"`
+	color := "#34495e"
+	if change != "" {
+		attrs += ` data-change="` + change + `"`
+	}
+	switch change {
+	case "added":
+		color = "#18743b"
+	case "removed":
+		color = "#b42318"
+		attrs += ` stroke-dasharray="8 5"`
+	case "changed":
+		color = "#825600"
+	}
+	return attrs, color
+}
+
+func (c *Comparison) SVG() (string, error) {
+	if err := c.Validate(); err != nil {
+		return "", err
+	}
+	report, err := TextSVG(c.reportLines())
+	if err != nil {
+		return "", err
+	}
+	parts := []string{report}
+	for i, s := range []ComparisonSnapshot{c.Candidate, c.Baseline} {
+		if s.Chart == nil {
+			continue
+		}
+		m := &comparisonSVG{side: "candidate", name: s.Name, states: map[string]string{}, arrows: map[arrowIdentity]string{}}
+		states, arrows, change := c.Visible.AddedStates, c.Visible.AddedArrows, "added"
+		if i == 1 {
+			m.side = "baseline"
+			states, arrows, change = c.Visible.RemovedStates, c.Visible.RemovedArrows, "removed"
+		}
+		for _, s := range states {
+			m.states[s.ID] = change
+		}
+		for _, a := range arrows {
+			m.arrows[arrowID(a)] = change
+		}
+		for _, s := range c.Visible.ChangedStates {
+			m.states[s.After.ID] = "changed"
+		}
+		for _, a := range c.Visible.ChangedArrows {
+			m.arrows[arrowID(a.After)] = "changed"
+		}
+		svg, err := s.Chart.svg(m)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, svg)
+	}
+	return StackSVG(parts...)
+}
+
+// TextSVG uses the native renderer's literal text layout for provenance and
+// qualifications shared by comparison and receipt presentations.
+func TextSVG(lines []string) (string, error) {
+	if err := validateSVGText(reflect.ValueOf(lines)); err != nil {
+		return "", err
+	}
+	l := svgLayout{}
+	l.layoutReport(lines)
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %g %g" width="%g" height="%g" font-family="monospace" font-size="14" fill="#17212b">`, l.width, l.height, l.width, l.height)
+	fmt.Fprintf(&b, `<rect width="%g" height="%g" fill="#ffffff"/>`, l.width, l.height)
+	for _, t := range l.report {
+		writeSVGText(&b, t.text, t.x, t.y)
+	}
+	b.WriteString(`</svg>`)
+	return b.String(), nil
+}
+
+// StackSVG composes native documents without scripts, external references or
+// duplicate IDs. Only documents generated by this package belong here.
+func StackSVG(parts ...string) (string, error) {
+	var body strings.Builder
+	width, height := 0.0, 0.0
+	for i, part := range parts {
+		d := xml.NewDecoder(strings.NewReader(part))
+		tok, err := d.Token()
+		if err != nil {
+			return "", err
+		}
+		root, ok := tok.(xml.StartElement)
+		if !ok || root.Name.Local != "svg" {
+			return "", fmt.Errorf("expected native SVG root")
+		}
+		w, h := 0.0, 0.0
+		for _, a := range root.Attr {
+			if a.Name.Local == "viewBox" {
+				if _, err := fmt.Sscanf(a.Value, "0 0 %f %f", &w, &h); err != nil {
+					return "", err
+				}
+			}
+		}
+		if w <= 0 || h <= 0 {
+			return "", fmt.Errorf("invalid native SVG dimensions")
+		}
+		// Decode and re-encode so only ID attributes and local references change.
+		var content strings.Builder
+		e := xml.NewEncoder(&content)
+		prefix := fmt.Sprintf("panel%d-", i)
+		depth := 0
+		for {
+			t, err := d.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", err
+			}
+			if el, ok := t.(xml.StartElement); ok {
+				depth++
+				// The enclosing native root supplies SVG's namespace. Removing
+				// repeated declarations also makes nested compositions valid XML.
+				el.Name.Space = ""
+				attrs := el.Attr[:0]
+				for _, a := range el.Attr {
+					if a.Name.Local != "xmlns" && a.Name.Space != "xmlns" {
+						attrs = append(attrs, a)
+					}
+				}
+				el.Attr = attrs
+				for j, a := range el.Attr {
+					switch a.Name.Local {
+					case "id", "aria-labelledby", "aria-describedby":
+						el.Attr[j].Value = prefix + a.Value
+					case "marker-end":
+						el.Attr[j].Value = strings.ReplaceAll(a.Value, "url(#", "url(#"+prefix)
+					}
+				}
+				t = el
+			}
+			if end, ok := t.(xml.EndElement); ok {
+				if depth == 0 {
+					break
+				}
+				depth--
+				end.Name.Space = ""
+				t = end
+			}
+			if err := e.EncodeToken(t); err != nil {
+				return "", err
+			}
+		}
+		if err := e.Flush(); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&body, `<g transform="translate(0 %g)">%s</g>`, height, content.String())
+		width = max(width, w)
+		height += h
+	}
+	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 %g %g" width="%g" height="%g" font-family="monospace" font-size="14" fill="#17212b">%s</svg>`, width, height, width, height, body.String()), nil
 }

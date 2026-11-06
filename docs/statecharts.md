@@ -254,6 +254,30 @@ Graph runs share the runner's TLC admission budget and container and Java heap l
 
 These results describe the explored model within the supplied bounds, with TLC's fingerprint identities and guarantees. They are not an unbounded proof. The existing `Runner.Dump` returns raw DOT without claiming the completion guarantee. The dashboard continues to parse and compact its own display graph and match traces as before; its compaction does not alter this reusable graph.
 
+## Proposal comparisons
+
+`Compare(baseline, candidate ComparisonSnapshot) (*Comparison, error)` returns a detached, canonical version-1 comparison. Each snapshot contains `kind` (`proposal` or `ratification`), a human-readable `name`, module, exact model/includes/view bytes, captured lock and exactly one complete chart or explicit size limitation. Neither snapshot contains earlier comparisons. The comparison fingerprint binds both snapshots, identities, deltas and qualifications; `Validate()` recomputes that binding and checks source pins and chart consistency without running a verifier.
+
+`baseline_identity` and `candidate_identity` contain SHA-256 identities for model, view, every include and the complete lock, plus the statement/bound proposal hash. `visible` and `before_hiding` contain added/removed states and arrows and changed records with complete `before`/`after` evidence. State identity is `State.ID`; arrow identity is `(From, Label, To)`. Members and step occurrences are sorted, preserving duplicates. Before-hiding comparison combines visible and hidden buckets and ignores hiding rule IDs. A changed hidden model action remains evidence even when the reader label stays the same.
+
+Revisions of new projects use the immediately preceding selected modeled proposal, including view-only revisions with the same statement hash. An intervening question retains that selected source; a fork-only first draft is not an empty graph. Amendments capture the ratified project at one resolved commit, retaining it in `Target.baseline` across revisions, answers, saved results and restarts. Moving the branch does not change that baseline. Both drafting checks and the independent final check use detached caller-owned authority. Staged `baseline/` files, `previous/`, `proposal.json`, `reader.json` and `check-context.json` cannot replace it.
+
+A legacy source without a view needs a drafting-supplied `baseline/view.json`. It is checked against the captured model/includes and original lock and bounds through the existing model gate, complete TLC graph, invariant replay and hiding checks. Missing or invalid views produce actionable baseline diagnostics. Repair the view and check again; do not change the captured source or shrink bounds. Above 500 states, the well-formed view and successful complete exploration retain a `too_large` limitation. A comparison with a limited side has no invented delta; it still retains the complete candidate when drawable and both scopes.
+
+`Comparison.Markdown()` and `Comparison.SVG()` present the complete candidate and baseline, exact identities, both bounds and a visible legend. Added marks are green; removed marks are red and dashed. SVG groups retain ordinary state/arrow attributes and add `data-comparison-side="baseline|candidate"` and `data-change="added|removed|changed"`. All text stays literal; the shared native renderer adds no scripts or external resources. `view_changed` qualifies relabeling and hiding, `model_changed` identifies exact source changes, and differing bounds carry a displayed-scope qualification. Equal charts do not establish behavioral equivalence, even with equal bounds.
+
+`formalize.Reader.comparison` and `formalize.Changes.reader` retain the same checked comparison. Publication rejects missing or stale required evidence, and the complete comment and expanded marker must fit their existing limits. Ratification writes the comparison separately to `.invariant/comparison.json`; it does not enter the lock or statement hash. Synthesis protects and carries the original bytes, discarding replacement provenance from its workspace. Verification snapshots and validates this optional file before checks, retains it as `verify.Reader.comparison`, and recomputes `Reader.chart` from the final model as before. Damaged provenance produces `comparison_diagnostic` without displacing a healthy final chart. Comparison presence or damage never changes verdicts, assurance or verification fingerprints.
+
+Structured receipts, Markdown, reader JSON/SVG companions and dashboard proposal and receipt pages retain both sources. When final model/include/view identities differ, they explicitly distinguish the retained proposal comparison from the independent final-model chart. Reusing output directories clears stale comparison exports. Dashboard immutable identities bind source snapshots and rendered contents, and restart revalidates saved comparisons; damage gets a visible diagnostic and no misleading comparison image.
+
+The merger records the new comparison and baseline policy decision for #648 because plumbing cannot write `decisions/`. If Docker is unavailable to the builder, the merger runs the added pinned-TLC coverage before merging:
+
+```sh
+go test -tags integration ./internal/formalize -run '^TestComparison648PinnedTLC$' -count=1 -timeout 10m
+```
+
+The full gate and applicable real Python and TLAPS suites remain required.
+
 ## Tests
 
 SVG acceptance and regression tests inspect parsed XML for complete topology, actual endpoints, distinct routes, shortest-distance columns, branch ordering, independent state sizing, label and route clearance, compact complete reports, count grammar, literal multiline and Unicode text, accessible names, the full metadata snapshot, visible qualifications and local resource references. They render a 500-state, 999-arrow computed chart and exercise repeated and concurrent calls with no executables on PATH. Refusal cases include inconsistent structure and XML-inexpressible text in both drawn and metadata-only data. Factory acceptance checks compare the SVG's states, initials and labeled directed arrows with the unchanged published Mermaid:

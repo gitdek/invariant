@@ -20,13 +20,15 @@ import (
 // Reader explains the checked bounded model. Its identity and diagnostics
 // never participate in the gate's verdict or verification fingerprint.
 type Reader struct {
-	Preview     statechart.Preview     `json:"preview,omitzero"`
-	Version     int                    `json:"version"`
-	Fingerprint string                 `json:"fingerprint"`
-	Inputs      ReaderInputs           `json:"inputs"`
-	Chart       *statechart.Result     `json:"chart,omitempty"`
-	Limitation  *statechart.Limitation `json:"limitation,omitempty"`
-	Unavailable *ReaderDiagnostic      `json:"unavailable,omitempty"`
+	Preview              statechart.Preview     `json:"preview,omitzero"`
+	Version              int                    `json:"version"`
+	Fingerprint          string                 `json:"fingerprint"`
+	Inputs               ReaderInputs           `json:"inputs"`
+	Chart                *statechart.Result     `json:"chart,omitempty"`
+	Limitation           *statechart.Limitation `json:"limitation,omitempty"`
+	Unavailable          *ReaderDiagnostic      `json:"unavailable,omitempty"`
+	Comparison           *statechart.Comparison `json:"comparison,omitempty"`
+	ComparisonDiagnostic *ReaderDiagnostic      `json:"comparison_diagnostic,omitempty"`
 }
 
 type ReaderInputs struct {
@@ -54,10 +56,12 @@ type readerCompletionKey struct{}
 // The application gate calls the model gate before checking code. Keep its
 // snapshot alive and defer explanatory work until the entire gate finishes.
 type readerCompletion struct {
-	compute func()
-	cleanup func()
-	view    []byte
-	viewErr error
+	compute       func()
+	cleanup       func()
+	view          []byte
+	viewErr       error
+	comparison    []byte
+	comparisonErr error
 }
 
 func completeReader(ctx context.Context, p *project.Project, gate func(context.Context) (*Report, error)) (*Report, error) {
@@ -65,6 +69,7 @@ func completeReader(ctx context.Context, p *project.Project, gate func(context.C
 	// Validate the original file before application staging can turn a link
 	// into a regular copy. Reader input errors remain explanatory only.
 	c.view, c.viewErr = readReaderView(p.Dir)
+	c.comparison, c.comparisonErr = readReaderFile(p.Dir, ".invariant/comparison.json")
 	defer func() {
 		if c.cleanup != nil {
 			c.cleanup()
@@ -84,6 +89,14 @@ func readerHash(data []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum
 func snapshotReader(p *project.Project, dir string, model []byte, completion *readerCompletion) readerSnapshot {
 	s := readerSnapshot{dir: dir, lock: p.Lock, reader: Reader{Version: 1,
 		Inputs: ReaderInputs{Module: p.ModuleName(), Model: readerHash(model), Includes: map[string]string{}}}}
+	var comparison []byte
+	var comparisonErr error
+	if completion != nil {
+		comparison, comparisonErr = completion.comparison, completion.comparisonErr
+	} else {
+		comparison, comparisonErr = readReaderFile(p.Dir, ".invariant/comparison.json")
+	}
+	s.reader.captureComparison(comparison, comparisonErr, p.Lock)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		s.reader.Unavailable = &ReaderDiagnostic{Code: "reader_inputs", Message: err.Error()}
@@ -120,12 +133,15 @@ func snapshotReader(p *project.Project, dir string, model []byte, completion *re
 // Keep this fixed input inside the project, without following symbolic links
 // or accepting hard links. The opened file must be the regular file inspected.
 func readReaderView(dir string) ([]byte, error) {
+	return readReaderFile(dir, ".invariant/view.json")
+}
+
+func readReaderFile(dir, name string) ([]byte, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	const name = ".invariant/view.json"
 	var last os.FileInfo
 	for _, part := range []string{".invariant", name} {
 		info, err := root.Lstat(part)
