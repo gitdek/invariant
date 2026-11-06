@@ -79,6 +79,8 @@ The SVG works offline and contains no active content or external resources. Reus
 
 All ten modeled examples keep their original model and ratified-lock bytes and bounds. Nine have a pure `.invariant/view.json`; language and synthesized siblings each carry their own view and receipt identity. Labels use the examples' ordinary vocabulary. Two-phase commit distinguishes preparing, a coordinator decision, all committed and all aborted; log buffers distinguish empty, buffered and awaiting retry; the connection pool distinguishes all connections free from clients holding connections. Only the pool requests hiding, for `Refuse` self-loops, which remain in the complete report. The common reader checks total mappings and hiding on complete exploration, never on a compacted graph or a sample.
 
+Two of the factory's own models are small enough to draw, and carry views of their own at unchanged bounds (#671). `factory/decision-state` (43 states) charts a decision's lifecycle by status: nothing recorded, proposed, decided, ratified by a person and superseded. Only a two-way door reaches "decided", so its one-way rule shows in the picture. `factory/store-journal` (144 states) charts how many lines the store has journaled, from none to all four. Writing a line is the only step that moves forward, and taking lines in or abandoning a branch loops in place, so the chart shows that the store's journal only grows. It hides the `Done` stutter, which stays in the report. The other factory models and the rate limiter exceed 500 states.
+
 | Example | Unchanged ratified bounds | Reachable states | Saved view |
 | :-- | :-- | --: | :-- |
 | `02-twophase-commit` | `RM = {r1, r2, r3}` | 288 | Yes |

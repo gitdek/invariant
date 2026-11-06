@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "state": [
+    {
+      "id": "none",
+      "when": {
+        "eq": [
+          {
+            "var": "status"
+          },
+          "\"none\""
+        ]
+      },
+      "label": "No decision recorded"
+    },
+    {
+      "id": "proposed",
+      "when": {
+        "eq": [
+          {
+            "var": "status"
+          },
+          "\"proposed\""
+        ]
+      },
+      "label": "Proposed, awaiting a person"
+    },
+    {
+      "id": "decided",
+      "when": {
+        "eq": [
+          {
+            "var": "status"
+          },
+          "\"decided\""
+        ]
+      },
+      "label": "Decided: a two-way door"
+    },
+    {
+      "id": "ratified",
+      "when": {
+        "eq": [
+          {
+            "var": "status"
+          },
+          "\"ratified\""
+        ]
+      },
+      "label": "Ratified by a person"
+    },
+    {
+      "id": "superseded",
+      "when": {
+        "eq": [
+          {
+            "var": "status"
+          },
+          "\"superseded\""
+        ]
+      },
+      "label": "Superseded by a later decision"
+    }
+  ],
+  "step": [
+    {
+      "id": "decide",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Decide"
+        ]
+      },
+      "label": "Record the decision"
+    },
+    {
+      "id": "ratify",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Ratify"
+        ]
+      },
+      "label": "A person ratifies it"
+    },
+    {
+      "id": "supersede",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Supersede"
+        ]
+      },
+      "label": "A later decision supersedes it"
+    },
+    {
+      "id": "done",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Done"
+        ]
+      },
+      "label": "Nothing more is recorded"
+    }
+  ]
+}
