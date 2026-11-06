@@ -644,7 +644,20 @@ func (b *docker591Boundary) policy(q DependencyRequest, in RepositoryAcceptanceI
 		if a[0] == "pull" || a[0] == "build" || a[0] == "commit" {
 			b.t.Fatalf("runtime acquired/published an image: %q", a)
 		}
-		for _, s := range a {
+		// Workload arguments are literal data, not Docker options. In particular,
+		// Go's -v is verbosity, not a host volume mount.
+		options := a
+		switch a[0] {
+		case "create", "run":
+			if at := slices.IndexFunc(a, dependencyID.MatchString); at >= 0 {
+				options = a[:at]
+			}
+		case "exec":
+			if at := slices.IndexFunc(a, dependencyContainer.MatchString); at >= 0 {
+				options = a[:at]
+			}
+		}
+		for _, s := range options {
 			if s == "--mount" || s == "--volume" || s == "-v" || s == "--privileged" || strings.HasPrefix(s, "--mount=") || strings.Contains(s, "host-secret-591") || strings.Contains(s, "forged-host-command-591") || strings.Contains(s, "python") {
 				b.t.Fatalf("host/runtime authority leak: %q", a)
 			}
@@ -698,7 +711,7 @@ func (b *docker591Boundary) policy(q DependencyRequest, in RepositoryAcceptanceI
 				}
 			}
 			i := slices.IndexFunc(a, func(s string) bool { return strings.HasSuffix(s, "/acceptance.test") })
-			if i < 0 || !slices.Equal(a[i:], goTestingArguments(a[i], in.Argv)) {
+			if i < 1 || !strings.HasSuffix(a[i-1], "/launch") || !slices.Equal(a[i:], goTestingArguments(a[i], in.Argv)) {
 				b.t.Fatalf("runtime changed literal selection or captured flags: %q", a)
 			}
 		}

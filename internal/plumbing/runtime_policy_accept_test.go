@@ -32,7 +32,7 @@ func runtimeHasTestStart567(f *runtimeFixture567) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, argv := range f.starts {
-		if len(argv) > 0 && strings.HasSuffix(argv[0], "acceptance.test") {
+		if len(argv) > 1 && strings.HasSuffix(argv[0], "/launch") && strings.HasSuffix(argv[1], "/acceptance.test") {
 			return true
 		}
 	}

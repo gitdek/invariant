@@ -16,7 +16,36 @@ import (
 )
 
 const goTestingEventEnv = "INVARIANT_GO_TESTING_EVENTS"
+const goTestingOwnerEnv = "INVARIANT_GO_TESTING_OWNER"
 const goTestingProtocol = "invariant-go-testing-v1\n"
+
+// Exec preserves the transport-owned PID and process group. Bind the handoff
+// before loading any candidate package, including dependencies of testing.
+const goTestingLauncher = `package main
+import ("os"; "strconv"; "syscall")
+func main() {
+ if len(os.Args) < 2 || os.Getenv("INVARIANT_GO_TESTING_EVENTS") == "" { panic("missing host Go testing launch arguments or endpoint") }
+ if err := os.Setenv("INVARIANT_GO_TESTING_OWNER", strconv.Itoa(os.Getpid())); err != nil { panic(err) }
+ if err := syscall.Exec(os.Args[1], os.Args[1:], os.Environ()); err != nil { panic(err) }
+}
+`
+
+func prepareGoTestingLauncher(ctx context.Context, env RepositoryProcessTransport, in RepositoryAcceptanceInvocation) (string, error) {
+	private := "go-producer-" + in.Binding.InvocationID
+	source, err := env.Stage(ctx, private+"/launch.go", []byte(goTestingLauncher))
+	if err != nil {
+		return "", err
+	}
+	launcher, err := env.Stage(ctx, private+"/launch", nil)
+	if err != nil {
+		return "", err
+	}
+	out, err := env.Run(ctx, []string{"go", "build", "-o", launcher, source})
+	if err := errors.Join(err, ctx.Err()); err != nil {
+		return "", fmt.Errorf("compile Go testing launcher: %w: %s", err, out)
+	}
+	return launcher, nil
+}
 
 // Read inside the prepared environment: neither GOROOT nor helper paths need
 // to be paths on the host of a future transport. No candidate code is loaded.
@@ -175,18 +204,19 @@ func validateGoTesting(source string) error {
 
 // Four length-prefixed strings per record keep arbitrary log bytes intact.
 // Only this testing hook writes the protocol; diagnostic framing is irrelevant.
-// The endpoint is captured during testing initialization, before candidate init.
-// Consume the handoff so re-executed test helpers run without producing events.
+// Testing may initialize after candidate dependencies. Only the launched process
+// owns the handoff; re-executed helpers must not open or write its endpoint.
 const goTestingHook = `
 var invariantEventMu sync.Mutex
 var invariantEventFile = func() *os.File {
  name := os.Getenv("INVARIANT_GO_TESTING_EVENTS")
- if name == "" { return nil }
+ if name == "" || os.Getenv("INVARIANT_GO_TESTING_OWNER") != strconv.Itoa(os.Getpid()) { return nil }
  if err := os.Unsetenv("INVARIANT_GO_TESTING_EVENTS"); err != nil { panic(err) }
+ if err := os.Unsetenv("INVARIANT_GO_TESTING_OWNER"); err != nil { panic(err) }
  f, err := os.OpenFile(name, os.O_WRONLY, 0)
  if err != nil { panic(err) }
  // OpenFile gives us a close-on-exec descriptor. Release the transport's
- // inherited descriptor too, before any test initialization can start helpers.
+ // inherited descriptor too, now that its owner has consumed the handoff.
  if value, ok := strings.CutPrefix(name, "/dev/fd/"); ok {
   fd, err := strconv.Atoi(value)
   if err != nil || fd < 3 { panic("invalid host Go testing event descriptor") }
