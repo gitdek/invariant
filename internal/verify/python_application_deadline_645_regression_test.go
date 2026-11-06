@@ -33,7 +33,7 @@ func TestPythonApplicationModuleDeadlineStartsWithItsWatchdog(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, p := pa321Fixture(t, pa321State+pa321Worker, pa321Driver)
+	_, p := pa321Fixture(t, pa321State+pa321Worker, pa321Deadline)
 	s := pa315Prepare(t, p, pa318Options(t, false, new(int)))
 	r := pa318Success(t, pa321Context(t), s)
 	if len(r.Observations) != 3 {
@@ -56,7 +56,7 @@ func TestPythonApplicationModuleTimeoutReportsTheStop(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, p := pa321Fixture(t, source, strings.Replace(pa321Driver, "timeout=2", "timeout=0.5", 1))
+			_, p := pa321Fixture(t, source, strings.Replace(pa321Deadline, "timeout=2", "timeout=0.5", 1))
 			s := pa315Prepare(t, p, pa318Options(t, false, new(int)))
 			ctx := pa321Context(t)
 			r, err := s.Run(ctx, pa318Driver(t, s).Key)
