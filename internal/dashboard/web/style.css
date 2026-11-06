@@ -366,7 +366,7 @@ h2 { margin: 0; font-size: clamp(24px, 3vw, 34px); font-weight: 600; letter-spac
 .key i { width: 18px; height: 6px; border-radius: 2px; display: inline-block; }
 
 /* Project cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); grid-auto-flow: dense; gap: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); grid-auto-flow: dense; align-items: start; gap: 14px; }
 .card {
   position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
   overflow: hidden; cursor: pointer; transition: border-color 0.25s, transform 0.25s;
