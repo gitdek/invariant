@@ -107,13 +107,19 @@ func CI(name string) bool {
 		name == ".gitlab-ci.yml" || name == ".circleci" || strings.HasPrefix(name, ".circleci/")
 }
 
+// agentPath says whether a file supplies a coding agent's instructions or
+// tools, in any directory: AGENTS.md and the AGENTS.override.md Codex reads
+// in its place, CLAUDE.md and CLAUDE.local.md, .mcp.json, and anything under
+// .codex/ or .claude/. Names match whatever their case, since a
+// case-insensitive file system, as macOS's, serves app/agents.md to an agent
+// that asks for app/AGENTS.md.
 func agentPath(name string) bool {
-	switch path.Base(name) {
-	case "AGENTS.md", "CLAUDE.md", ".mcp.json":
+	switch strings.ToLower(path.Base(name)) {
+	case "agents.md", "agents.override.md", "claude.md", "claude.local.md", ".mcp.json":
 		return true
 	}
 	for _, part := range strings.Split(name, "/") {
-		if part == ".codex" || part == ".claude" {
+		if p := strings.ToLower(part); p == ".codex" || p == ".claude" {
 			return true
 		}
 	}

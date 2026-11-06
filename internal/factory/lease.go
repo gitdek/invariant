@@ -396,6 +396,13 @@ func (g leasedGitHub) MarkReady(ctx context.Context, n int) error {
 	return g.GitHub.MarkReady(ctx, n)
 }
 
+func (g leasedGitHub) DescribePullRequest(ctx context.Context, n int, body string) (github.PullRequest, error) {
+	if err := g.f.mayAct(ctx); err != nil {
+		return github.PullRequest{}, err
+	}
+	return g.GitHub.DescribePullRequest(ctx, n, body)
+}
+
 func (g leasedGitHub) ClosePullRequest(ctx context.Context, n int) (github.PullRequest, error) {
 	if err := g.f.mayAct(ctx); err != nil {
 		return github.PullRequest{}, err

@@ -433,14 +433,6 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 			return err
 		}
 	}
-	// A pull request a crash left open may lack this build's handoff, its
-	// trusted paths included, or carry a stale one: it gets the description
-	// a new one would. Setting it again is harmless.
-	if found && pr.State == "open" {
-		if pr, err = f.GitHub.DescribePullRequest(ctx, pr.Number, planPullRequestBody(t, next, res, sc.Trusted)); err != nil {
-			return err
-		}
-	}
 	var refusal error
 	if found && ok && !held && pr.State == "open" {
 		if pr, refusal, err = f.markReady(ctx, n, ratified, pr); err != nil {
@@ -450,6 +442,15 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	next.PR = pr.Number
 	if still, err := f.stillBuilding(ctx, n, ratified); err != nil || !still {
 		return err
+	}
+	// A held draft a crash left open may lack this build's handoff, which
+	// names the trusted paths a person must review: it gets the description
+	// a new one would. Setting it again is harmless, and no other recovered
+	// pull request's description is touched.
+	if found && held && pr.State == "open" {
+		if pr, err = f.GitHub.DescribePullRequest(ctx, pr.Number, planPullRequestBody(t, next, res, sc.Trusted)); err != nil {
+			return err
+		}
 	}
 	if err := f.recovers(ctx, n, "say how the build went", f.canPost(openedAs(pr), recovery.Build)); err != nil {
 		return err
