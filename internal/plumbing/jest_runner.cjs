@@ -1,5 +1,6 @@
 'use strict';
 const common = require('./node_runner_common.cjs');
+const childProcess = require('node:child_process');
 const path = require('node:path');
 const {isMainThread} = require('node:worker_threads');
 let input;
@@ -48,6 +49,33 @@ module.exports = class InvariantJestEnvironment extends Base {
   }
 };
 
+// jest-worker replaces a worker that exits nonzero and resends its request, so
+// a candidate that crashes once before collection could hide behind the
+// replacement's complete lifecycle. The controller watches every worker it
+// forks: exactly one, which must exit normally at shutdown without a kill.
+function watchWorkers() {
+  const workers = [];
+  const fork = childProcess.fork;
+  childProcess.fork = function (...args) {
+    const child = fork.apply(this, args);
+    const watched = {exited: false, code: null, signal: null, killed: false};
+    workers.push(watched);
+    const kill = child.kill;
+    child.kill = function (...signal) {
+      watched.killed = true;
+      return kill.apply(this, signal);
+    };
+    child.once('exit', (code, signal) => Object.assign(watched, {exited: true, code, signal}));
+    return child;
+  };
+  return () => {
+    childProcess.fork = fork;
+    if (workers.length !== 1 || workers.some(w => !w.exited || w.code !== 0 || w.signal !== null || w.killed)) {
+      throw new Error('Jest worker died, restarted or was killed: ' + JSON.stringify(workers));
+    }
+  };
+}
+
 async function run() {
   input = JSON.parse(process.argv[2]);
   const endpoint = process.env.INVARIANT_NODE_EVENTS;
@@ -82,8 +110,10 @@ async function run() {
       testRunner: common.resolve('jest-circus/runner'), reporters: [], cache: false,
       testNamePattern: policy.testNamePattern};
     if (policy.testTimeout) effective.testTimeout = policy.testTimeout;
+    const settled = watchWorkers();
     const {results} = await runCLI({_: [common.regular(input.File)], $0: 'jest', maxWorkers: 1,
       runTestsByPath: true, watch: false, watchAll: false, listTests: false, config: JSON.stringify(effective)}, [common.root]);
+    settled();
     if (results.testResults.length !== 1 || results.testResults[0].testFilePath !== common.regular(input.File) || results.wasInterrupted) {
       throw new Error('Jest did not complete the exact file');
     }

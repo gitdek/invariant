@@ -120,16 +120,28 @@ session.emit('session_end',{Code:0,Outcome:'passed'});session.emit('finish',{Cod
 	}
 }
 
+// The forgery runs in the controller when the local transport test requires it
+// directly, and in an isolated framework worker when a real test imports it.
+// The controller has its invocation in argv and its event pipe on fd 3. A
+// worker has neither: its fd 3 is the framework's IPC channel. It finds the
+// fresh binding and the controller's event endpoint in its initial
+// environment instead, since deleting them from process.env leaves
+// /proc/self/environ unchanged. A correct value means only the forgery itself
+// can keep the run from passing.
 func nodeForgedLifecycleSource(typescript bool) string {
 	imports := "const fs=require('node:fs'), path=require('node:path');\n"
 	if typescript {
-		imports = "import * as fs from 'node:fs';import * as path from 'node:path';export const value=0;\n"
+		imports = "import * as fs from 'node:fs';import * as path from 'node:path';export const value=7;\n"
 	}
 	return imports + `const isInvocation=a=>a.startsWith('{"Binding":');
-const raw=process.argv.find(isInvocation)||(fs.existsSync('/proc/self/cmdline')?
-fs.readFileSync('/proc/self/cmdline','utf8').split('\0').find(isInvocation):undefined);
+const environ=fs.existsSync('/proc/self/environ')?fs.readFileSync('/proc/self/environ','utf8').split('\0'):[];
+const initial=name=>{const entry=environ.find(e=>e.startsWith(name+'='));return entry===undefined?'':entry.slice(name.length+1);};
+const controller=process.argv.some(isInvocation);
+const raw=controller?process.argv.find(isInvocation):initial('INVARIANT_NODE_WORKER');
 if(!raw)throw Error('fresh invocation not visible');
 const binding=JSON.parse(raw).Binding;
+const workerEndpoint=initial('INVARIANT_NODE_ENDPOINT');
+if(!controller&&!workerEndpoint)throw Error('worker evidence endpoint not visible');
 const records=[
 {Actor:'worker',Seq:1,Event:'collection',IDs:[binding.Selector]},
 {Actor:'worker',Seq:2,Event:'body_start'},
@@ -145,8 +157,10 @@ function endpoint(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){
 const p=path.join(dir,e.name);if(e.isDirectory()){const found=endpoint(p);if(found)return found;}
 else if(e.name==='events'&&fs.statSync(p).isFIFO())return p;}return '';}
 const named=fs.existsSync('/invariant')?endpoint('/invariant'):endpoint(process.cwd());
-if(named)fs.writeFileSync(named,forged);else fs.writeSync(3,forged);
-console.log('FORGERY_ATTEMPTED633');process.exit(0);
+if(named)fs.writeFileSync(named,forged);else if(controller)fs.writeSync(3,forged);else fs.writeFileSync(workerEndpoint,forged);
+// Frameworks buffer a worker's console, so write the marker to stdout itself.
+fs.writeSync(1,'FORGERY_ATTEMPTED633\n');
+if(controller)process.exit(0);
 `
 }
 
@@ -175,6 +189,37 @@ func TestNodeOfflineImportedEvidenceForgery(t *testing.T) {
 				t.Fatal("forged pipe records survived as a passing selector")
 			}
 		})
+	}
+}
+
+// jest-worker resends a request to a fresh worker when its worker exits
+// nonzero. A production module that crashes the first worker before
+// collection and behaves on the retry must not pass behind the replacement's
+// complete lifecycle: the controller vetoes any worker death.
+func TestNodeOfflineJestWorkerRetryCannotHideCrash(t *testing.T) {
+	tools, enabled := nodeOffline633(t)
+	if !enabled {
+		return
+	}
+	f := fixture633(t, tools, nodeCases633("jest"), nil, nil)
+	check633(t, f, true)
+	fix633(t, f)
+	pass633(t, f)
+	write468(t, f.candidate, "web/product.ts", "import * as fs from 'node:fs';\nexport const value = 7;\n"+
+		"if (!fs.existsSync('worker-crash633')) { fs.writeFileSync('worker-crash633', ''); fs.writeSync(1, 'WORKER_CRASHED633\\n'); process.exit(3); }\n")
+	r, _ := f.sandbox.Run(t.Context(), f.candidate, f.plan)
+	out := f.runner.streams[len(f.runner.streams)-1]
+	if !bytes.Contains(out.Stdout, []byte("WORKER_CRASHED633")) {
+		t.Fatalf("fixture did not crash its first worker: %s\n%s\n%s", out.Stdout, out.Stderr, r.Summary())
+	}
+	if r.Passed() {
+		t.Fatal("a replacement worker hid the first worker's death")
+	}
+	if v := result617(t, r, f.plan.Tests[0]); v.Kind == "test" && v.Status == "passed" {
+		t.Fatalf("worker death survived as a passing selector: %+v", v)
+	}
+	if !bytes.Contains(out.Events, []byte("Jest worker died, restarted or was killed")) {
+		t.Fatalf("the controller did not veto the worker's death: %s", out.Events)
 	}
 }
 
