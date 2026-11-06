@@ -57,7 +57,7 @@ func TestDockerGoLifetimeAndQueue591(t *testing.T) {
 	if len(requests) != 2 || len(deadlines) != 2 {
 		t.Fatalf("wrong part count: %v", requests)
 	}
-	if deadlines[0].IsZero() || deadlines[0].After(start.Add(SandboxTimeout+time.Second)) || deadlines[1].After(start.Add(SandboxShardTimeout+5*time.Second)) || !deadlines[1].Before(deadlines[0]) {
+	if deadlines[0].IsZero() || deadlines[0].After(start.Add(SandboxShardTimeout+5*time.Second)) || !deadlines[1].Equal(deadlines[0]) {
 		t.Fatalf("renewed run or phase: %v", deadlines)
 	}
 	// Every preceding part must finish removal before the next create begins.
