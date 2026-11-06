@@ -86,7 +86,6 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 			return nil, err
 		}
 		defer queue.Close()
-		f.Sandbox.Original = repo
 		client, finish, err := queue.RegisterPlan(ctx, f.Sandbox, repo)
 		if err != nil {
 			return nil, err

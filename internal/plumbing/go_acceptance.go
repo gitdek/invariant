@@ -16,7 +16,7 @@ import (
 )
 
 // GoRepositoryAcceptanceAdapter validates captured commands and discovers Go
-// declarations. It supplies no runtime evidence and is never enabled by default.
+// declarations. It supplies no runtime evidence.
 type GoRepositoryAcceptanceAdapter struct{}
 
 func (GoRepositoryAcceptanceAdapter) Select(ctx context.Context, part repository.Part, test Test) (RepositoryAcceptanceSelection, error) {
@@ -26,7 +26,8 @@ func (GoRepositoryAcceptanceAdapter) Select(ctx context.Context, part repository
 	if err := ctx.Err(); err != nil {
 		return RepositoryAcceptanceSelection{}, err
 	}
-	if part.Language != "go" || test.Framework != "go" || part.Name != test.Part {
+	definition, _ := lookupAcceptanceFramework("go")
+	if part.Language != definition.language || test.Framework != "go" || part.Name != test.Part {
 		return refuse("Go acceptance needs its captured Go owner and framework")
 	}
 	if err := test.validateNative(); err != nil {

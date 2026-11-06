@@ -129,77 +129,84 @@ func (a *plannerAgent610) Run(ctx context.Context, job synth.Job) (synth.Usage, 
 
 func TestConfiguredGoPlannerToolAndProposalAgree610(t *testing.T) {
 	cache := t.TempDir()
-	for _, mode := range []string{"propose", "already passes", "changes after tool"} {
-		t.Run(mode, func(t *testing.T) {
-			root := t.TempDir()
-			part := repository.Part{Name: "api", Directory: "api", Language: "go", Image: "go@sha256:" + strings.Repeat("a", 64), Inputs: []string{"api/go.mod"}, Lockfiles: []string{"api/go.sum"}, Commands: map[string]repository.Command{}}
-			for _, phase := range []string{"install", "format", "lint", "build", "test"} {
-				part.Commands[phase] = repository.Command{NotApplicable: "Empty dependency graph and selector-only fixture."}
-			}
-			part.Commands["test_one"] = repository.Command{Argv: []string{"go", "test", "./...", "-run", "{test}", "-count=1"}}
-			config := repository.Config{Version: 1, Parts: []repository.Part{part}, AgentRules: []string{}, CurrentState: []string{}, TrustedPaths: []string{}, SharedPaths: []repository.SharedPath{}}
-			data, _ := json.Marshal(config)
-			write503(t, root, repository.Path, string(data))
-			write503(t, root, "api/value.go", "package fixture\nconst Value=0\n")
-			write503(t, root, "api/go.mod", "module example.invalid/planner610\n\ngo 1.27.1\n")
-			write503(t, root, "api/go.sum", "")
-			for _, args := range [][]string{{"init", "-q"}, {"add", "--all"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "base"}} {
-				cmd := exec.Command("git", args...)
-				cmd.Dir = root
-				cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-				if out, err := cmd.CombinedOutput(); err != nil {
-					t.Fatalf("git: %v %s", err, out)
-				}
-			}
-			snapshot, err := repository.Load(t.Context(), root, "HEAD")
-			if err != nil {
-				t.Fatal(err)
-			}
-			ws := t.TempDir()
-			write503(t, ws, "plan.json", plannerDraft610)
-			write503(t, ws, "tests/api/value_accept_test.go", plannerSource610(7))
-			plan, err := plumbing.ReadRepositoryDraft(t.Context(), ws, snapshot)
-			if err != nil {
-				t.Fatal(err)
-			}
-			exe, err := exec.LookPath("go")
-			if err != nil {
-				t.Fatal(err)
-			}
-			exe, err = filepath.EvalSymlinks(exe)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runner := &plannerRunner610{t: t, part: part, plan: plan, cache: cache, executable: exe}
-			agent := &plannerAgent610{t: t, mode: mode}
-			f := Formalizer{Backend: agent, Binary: "unused", CheckRuns: 2, Timeout: 4 * time.Minute, Sandbox: plumbing.Sandbox{Repository: &plumbing.RepositoryChecks{Snapshot: snapshot, Dependencies: plumbing.DependencyPreparer{CacheDir: t.TempDir(), Platform: "linux/amd64", Runner: runner}}}}
-			out := t.TempDir()
-			r, err := f.Plan(t.Context(), Request{Issue: 610, ParentPlan: 564}, root, out)
-			if err != nil || r == nil || agent.tool == nil {
-				t.Fatalf("planner did not complete: %v %+v", err, r)
-			}
-			if (agent.tool.Problem == "") != (mode != "already passes") {
-				t.Fatalf("tool gave wrong Go base verdict: %s", agent.tool.Feedback())
-			}
-			if (r.Proposal != nil) != (mode == "propose") || (r.Problem == "") != (mode == "propose") {
-				t.Fatalf("fresh proposal validation gave wrong verdict: %+v", r)
-			}
-			if runner.opens != 2 || runner.closes != 2 {
-				t.Fatalf("tool/final did not execute and clean up independently: opens=%d closes=%d", runner.opens, runner.closes)
-			}
-			if r.Proposal != nil && (r.Proposal.Hash != agent.tool.Plan.Hash() || r.Proposal.Plan.Sources["api/value_accept_test.go"] != plannerSource610(7)) {
-				t.Fatal("proposal lost pinned source or authority")
-			}
-			data, err = os.ReadFile(filepath.Join(out, "formalization.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var saved Result
-			if err = json.Unmarshal(data, &saved); err != nil {
-				t.Fatal(err)
-			}
-			if (saved.Proposal != nil) != (mode == "propose") {
-				t.Fatal("persisted proposal disagrees with final checks")
+	for _, original := range []string{"empty", "conflicting"} {
+		t.Run(original, func(t *testing.T) {
+			for _, mode := range []string{"propose", "already passes", "changes after tool"} {
+				t.Run(mode, func(t *testing.T) {
+					root := t.TempDir()
+					part := repository.Part{Name: "api", Directory: "api", Language: "go", Image: "go@sha256:" + strings.Repeat("a", 64), Inputs: []string{"api/go.mod"}, Lockfiles: []string{"api/go.sum"}, Commands: map[string]repository.Command{}}
+					for _, phase := range []string{"install", "format", "lint", "build", "test"} {
+						part.Commands[phase] = repository.Command{NotApplicable: "Empty dependency graph and selector-only fixture."}
+					}
+					part.Commands["test_one"] = repository.Command{Argv: []string{"go", "test", "./...", "-run", "{test}", "-count=1"}}
+					config := repository.Config{Version: 1, Parts: []repository.Part{part}, AgentRules: []string{}, CurrentState: []string{}, TrustedPaths: []string{}, SharedPaths: []repository.SharedPath{}}
+					data, _ := json.Marshal(config)
+					write503(t, root, repository.Path, string(data))
+					write503(t, root, "api/value.go", "package fixture\nconst Value=0\n")
+					write503(t, root, "api/go.mod", "module example.invalid/planner610\n\ngo 1.27.1\n")
+					write503(t, root, "api/go.sum", "")
+					for _, args := range [][]string{{"init", "-q"}, {"add", "--all"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "base"}} {
+						cmd := exec.Command("git", args...)
+						cmd.Dir = root
+						cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+						if out, err := cmd.CombinedOutput(); err != nil {
+							t.Fatalf("git: %v %s", err, out)
+						}
+					}
+					snapshot, err := repository.Load(t.Context(), root, "HEAD")
+					if err != nil {
+						t.Fatal(err)
+					}
+					ws := t.TempDir()
+					write503(t, ws, "plan.json", plannerDraft610)
+					write503(t, ws, "tests/api/value_accept_test.go", plannerSource610(7))
+					plan, err := plumbing.ReadRepositoryDraft(t.Context(), ws, snapshot)
+					if err != nil {
+						t.Fatal(err)
+					}
+					exe, err := exec.LookPath("go")
+					if err != nil {
+						t.Fatal(err)
+					}
+					exe, err = filepath.EvalSymlinks(exe)
+					if err != nil {
+						t.Fatal(err)
+					}
+					runner := &plannerRunner610{t: t, part: part, plan: plan, cache: cache, executable: exe}
+					agent := &plannerAgent610{t: t, mode: mode}
+					f := Formalizer{Backend: agent, Binary: "unused", CheckRuns: 2, Timeout: 4 * time.Minute, Sandbox: plumbing.Sandbox{Repository: &plumbing.RepositoryChecks{Snapshot: snapshot, Dependencies: plumbing.DependencyPreparer{CacheDir: t.TempDir(), Platform: "linux/amd64", Runner: runner}}}}
+					if original == "conflicting" {
+						f.Sandbox.Original = t.TempDir()
+					}
+					out := t.TempDir()
+					r, err := f.Plan(t.Context(), Request{Issue: 610, ParentPlan: 564}, root, out)
+					if err != nil || r == nil || agent.tool == nil {
+						t.Fatalf("planner did not complete: %v %+v", err, r)
+					}
+					if (agent.tool.Problem == "") != (mode != "already passes") {
+						t.Fatalf("tool gave wrong Go base verdict: %s", agent.tool.Feedback())
+					}
+					if (r.Proposal != nil) != (mode == "propose") || (r.Problem == "") != (mode == "propose") {
+						t.Fatalf("fresh proposal validation gave wrong verdict: %+v", r)
+					}
+					if runner.opens != 2 || runner.closes != 2 {
+						t.Fatalf("tool/final did not execute and clean up independently: opens=%d closes=%d", runner.opens, runner.closes)
+					}
+					if r.Proposal != nil && (r.Proposal.Hash != agent.tool.Plan.Hash() || r.Proposal.Plan.Sources["api/value_accept_test.go"] != plannerSource610(7)) {
+						t.Fatal("proposal lost pinned source or authority")
+					}
+					data, err = os.ReadFile(filepath.Join(out, "formalization.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					var saved Result
+					if err = json.Unmarshal(data, &saved); err != nil {
+						t.Fatal(err)
+					}
+					if (saved.Proposal != nil) != (mode == "propose") {
+						t.Fatal("persisted proposal disagrees with final checks")
+					}
+				})
 			}
 		})
 	}
