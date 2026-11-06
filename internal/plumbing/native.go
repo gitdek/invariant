@@ -6,9 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"os"
 	"path"
@@ -107,15 +104,8 @@ func (t Test) Identity() string {
 func (p *Plan) SourceLanguage(file string) string {
 	for _, t := range p.Tests {
 		if t.File == file {
-			switch t.Framework {
-			case "pytest":
-				return "python"
-			case "vitest", "jest":
-				switch path.Ext(file) {
-				case ".js", ".jsx", ".mjs", ".cjs":
-					return "javascript"
-				}
-				return "typescript"
+			if definition, ok := lookupAcceptanceFramework(t.Framework); ok {
+				return definition.sourceLanguage(file)
 			}
 		}
 	}
@@ -144,103 +134,11 @@ func (t Test) validateNative() error {
 	if c, err := clean(t.File); err != nil || c != t.File || strings.ContainsAny(t.File, `\*?[]:`) || !nativeText(t.File) {
 		return fmt.Errorf("native acceptance file %q must be a clean repository path", t.File)
 	}
-	valid := false
-	switch t.Framework {
-	case "go":
-		valid = strings.HasSuffix(t.File, "_test.go") && testName.MatchString(strings.Split(t.Selector, "/")[0])
-		for _, segment := range strings.Split(t.Selector, "/") {
-			valid = valid && strings.TrimSpace(segment) != ""
-		}
-	case "pytest":
-		base := path.Base(t.File)
-		valid = strings.HasSuffix(base, ".py") && (strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py"))
-		_, node, found := strings.Cut(t.Selector, "::")
-		// The final node must select a function or a concrete parameter case,
-		// not a file or class. Discovery belongs to the execution adapter.
-		declaration, _, _ := strings.Cut(node, "[")
-		segments := strings.Split(declaration, "::")
-		valid = valid && found && strings.HasPrefix(segments[len(segments)-1], "test")
-		for _, segment := range segments {
-			valid = valid && segment != ""
-		}
-	case "vitest", "jest":
-		ext := path.Ext(t.File)
-		switch ext {
-		case ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs":
-			stem := strings.TrimSuffix(t.File, ext)
-			valid = strings.HasSuffix(stem, ".test") || strings.HasSuffix(stem, ".spec") || strings.Contains("/"+t.File, "/__tests__/")
-		}
-	default:
+	definition, ok := lookupAcceptanceFramework(t.Framework)
+	if !ok {
 		return fmt.Errorf("unsupported acceptance framework %q", t.Framework)
 	}
-	if !valid {
-		return fmt.Errorf("invalid native acceptance file or selector: %s", t.Identity())
-	}
-	return nil
-}
-
-func acceptanceDeclarations(file, src string, tests []Test) error {
-	var selected []Test
-	native := false
-	for _, t := range tests {
-		if t.File != file {
-			continue
-		}
-		if t.Native() {
-			if !utf8.ValidString(src) {
-				return fmt.Errorf("native acceptance file %s must be UTF-8", file)
-			}
-			if t.Framework != "go" {
-				return nil
-			}
-			native = true
-			t.Name = strings.Split(t.Selector, "/")[0]
-		}
-		selected = append(selected, t)
-	}
-	if !native {
-		return declares(file, src, selected)
-	}
-	f, err := parser.ParseFile(token.NewFileSet(), file, src, parser.SkipObjectResolution)
-	if err != nil {
-		return fmt.Errorf("acceptance file %s: %w", file, err)
-	}
-	testingName := ""
-	for _, imp := range f.Imports {
-		if imp.Path.Value == `"testing"` {
-			testingName = "testing"
-			if imp.Name != nil {
-				testingName = imp.Name.Name
-			}
-		}
-	}
-	have := map[string]int{}
-	valid := map[string]bool{}
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Recv != nil {
-			continue
-		}
-		have[fn.Name.Name]++
-		if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 || len(fn.Type.Params.List[0].Names) > 1 || fn.Type.Results != nil || fn.Type.TypeParams != nil {
-			continue
-		}
-		if star, ok := fn.Type.Params.List[0].Type.(*ast.StarExpr); ok {
-			if sel, ok := star.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "T" {
-				if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == testingName {
-					valid[fn.Name.Name] = true
-				}
-			} else if ident, ok := star.X.(*ast.Ident); ok && ident.Name == "T" && testingName == "." {
-				valid[fn.Name.Name] = true
-			}
-		}
-	}
-	for _, t := range selected {
-		if have[t.Name] != 1 || !valid[t.Name] {
-			return fmt.Errorf("acceptance file %s must declare exactly one func %s(t *testing.T)", file, t.Name)
-		}
-	}
-	return nil
+	return definition.validateFileSelector(t)
 }
 
 var executionDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -335,19 +233,9 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 			return "", fmt.Errorf("acceptance file %s must execute in its deepest owning part %q", t.File, t.Part)
 		}
 		owners[owner.Name] = true
-		language := map[string]string{"go": "go", "pytest": "python", "vitest": "typescript", "jest": "typescript"}[t.Framework]
-		if owner.Language != language || len(owner.Commands["test_one"].Argv) == 0 || owner.Commands["test_one"].NotApplicable != "" {
-			return "", fmt.Errorf("part %q needs language %s and an applicable test_one for %s", owner.Name, language, t.Identity())
-		}
-		if t.Framework == "pytest" {
-			rel := t.File
-			if owner.Directory != "." {
-				rel = strings.TrimPrefix(rel, owner.Directory+"/")
-			}
-			file, _, _ := strings.Cut(t.Selector, "::")
-			if file != rel {
-				return "", fmt.Errorf("pytest selector must start with part-relative file %s::", rel)
-			}
+		definition, _ := lookupAcceptanceFramework(t.Framework) // validateNative checked it.
+		if err := definition.validateOwner(owner, t); err != nil {
+			return "", err
 		}
 		identities = append(identities, t.identity())
 	}
