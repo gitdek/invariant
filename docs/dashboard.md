@@ -32,6 +32,10 @@ Restart restores and revalidates each option separately from project receipts. A
 
 This behavior implements [#639's ratified plan](../.invariant/plans/issue-639.json) on D-0002, D-0307, D-0328, D-0345, D-0347, D-0351 and D-0353. D-0355 records the option-preview and cache policy, and the merger runs the [pinned-TLC integration](statecharts.md#modeled-alternatives) when Docker is unavailable to the builder.
 
+## Restarts
+
+A restart serves the last run's snapshot at once, while it reads GitHub again, unless its cached reader evidence is damaged or obsolete, as after a change to how reader pages are drawn; then it serves a notice until that first read finishes. The dashboard also keeps two of GitHub's reads beside the snapshot: each issue's comments as of the issue's last update, and each merged pull request's head and whether its gate passed. So the first read after a restart asks GitHub only for what changed since the last run, rather than every issue's comments and every merge again. A damaged file keeps nothing, and the first read reads everything ([D-0368](../decisions/journal/D-0368.jsonl)).
+
 ## Factory activity
 
 The page reads the factory's state, each card's stage, the proposal it asks to ratify, its modeled options and its comparison, only from markers the repository's factory posted itself, as the factory reads only its own. The watcher names the account it posts as in its status file: its App's bot, or gh's user when it runs without an App. A marker anyone else posts, a person or another App, drives nothing, and a repository whose account no watcher has named shows no factory state rather than trusting any commenter. People's commands still count from people's own comments ([D-0365](../decisions/journal/D-0365.jsonl)).

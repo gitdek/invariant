@@ -103,6 +103,7 @@ type sources struct {
 	readme   string
 	prd      string
 	merges   map[int]mergeCheck
+	changed  bool // comments or merges read since they were last kept (#674)
 	lease    *Lease
 	// gates says, for each finished gate run looked at, whether the gate
 	// ran in it: gateRan, gateSkipped or gateRefused. A finished run never
@@ -413,13 +414,7 @@ type Who struct {
 
 // Start reads everything once, then keeps it fresh until ctx ends.
 func (s *Server) Start(ctx context.Context) {
-	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
-	for _, r := range s.Repos {
-		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
-		r.src.gates, r.src.journal = map[int64]string{}, map[string]journalFile{}
-	}
-	s.pending = make(chan graphJob, 64)
-	s.loadSnapshot()
+	s.prepare()
 	go s.drawGraphs(ctx)
 	go func() {
 		for {
@@ -435,6 +430,19 @@ func (s *Server) Start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// prepare makes the server's caches, filled with what the last run kept,
+// and serves the last run's snapshot until the first refresh.
+func (s *Server) prepare() {
+	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
+	for _, r := range s.Repos {
+		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
+		r.src.gates, r.src.journal = map[int64]string{}, map[string]journalFile{}
+	}
+	s.pending = make(chan graphJob, 64)
+	s.loadSources()
+	s.loadSnapshot()
 }
 
 func (s *Server) refresh(ctx context.Context) error {
@@ -466,6 +474,7 @@ func (s *Server) refresh(ctx context.Context) error {
 					continue
 				}
 				r.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
+				r.src.changed = true
 			}
 			for _, is := range others {
 				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt && !commanded(c.comments) {
@@ -541,6 +550,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		return err
 	}
 	s.saveSnapshot(gz)
+	s.saveSources()
 	return nil
 }
 
@@ -958,6 +968,7 @@ func (s *Server) checkMerges(ctx context.Context, r *Repo) {
 			}
 		}
 		r.src.merges[l.PR] = mergeCheck{sha: pr.Head.SHA, green: green}
+		r.src.changed = true
 	}
 }
 
