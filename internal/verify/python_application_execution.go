@@ -380,6 +380,12 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	var protocolErr error
 	if key.Kind == "conformance" {
 		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r, check, drivers, invocation.Explored)
+		// A runner that stopped partway, as a step's deadline stops one, never
+		// sealed its stream. That's the failure to report, not a forgery.
+		var unsealed pythonApplicationUnsealed
+		if errors.As(protocolErr, &unsealed) && (executionErr != nil || process.ExitCode != 0) {
+			protocolErr = fmt.Errorf("the Python application runner stopped before sealing its observations")
+		}
 	} else {
 		protocolErr = s.observe(c, req.Boundary, process.Events, r)
 	}

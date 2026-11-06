@@ -827,19 +827,21 @@ class _ModuleLifecycle(_Lifecycle):
         _collector.misuse = "module event loop reported failed work"
         loop.default_exception_handler(context)
 
-    def watchdog(self, deadline):
+    def watchdog(self):
         # A separate interpreter enforces the deadline even while application
         # C code holds this interpreter's GIL. EOF cancels it on normal cleanup
-        # or parent death; no application thread can catch SIGKILL.
+        # or parent death; no application thread can catch SIGKILL. The
+        # deadline starts once the watchdog runs, so its own start on a loaded
+        # machine spends none of the application's time (#645).
         program = """import os, select, signal, sys, time
-parent, deadline = int(sys.argv[1]), float(sys.argv[2])
+parent, deadline = int(sys.argv[1]), time.monotonic() + float(sys.argv[2])
 os.write(1, b'1')
 if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
     if os.getppid() == parent:
         os.write(2, b'module observation timed out or left unfinished work\\n')
         os.kill(parent, signal.SIGKILL)
 """
-        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid()), str(deadline)],
+        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid()), str(self.timeout)],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         if process.stdout.read(1) != b"1":
             process.stdin.close()
@@ -847,7 +849,7 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
             process.wait()
             raise ValueError("module deadline watchdog failed to start")
         process.stdout.close()
-        return process
+        return process, time.monotonic() + self.timeout
 
     @guarded
     def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
@@ -923,8 +925,7 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
             self.coroutines.update(releasing["coroutines"])
             self.coroutine_workers.update(releasing["coroutines"])
         existing_coroutines = coroutine_objects()
-        deadline = time.monotonic() + self.timeout
-        watchdog = self.watchdog(deadline)
+        watchdog, deadline = self.watchdog()
         loop = None
         succeeded = False
         c.active = self

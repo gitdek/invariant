@@ -151,6 +151,10 @@ func pythonApplicationState(state map[string]any, reader map[string]string, modu
 	return true
 }
 
+// pythonApplicationUnsealed is a collector stream with no authentication
+// footer, as a runner stopped partway leaves one (#645).
+type pythonApplicationUnsealed struct{ error }
+
 // observeTransitions accepts an authenticated collector stream for c. check
 // and drivers are the declarations of the driver this execution ran, which
 // a larger run's copy keeps with its own hash. An explored stream is also
@@ -169,12 +173,12 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 	// Authenticate the exact ordered stream before accepting any of its rows.
 	// The footer is transport only, like the execution nonce in begin.
 	if len(events) == 0 || events[len(events)-1] != '\n' {
-		return fmt.Errorf("missing Python application collector authentication")
+		return pythonApplicationUnsealed{fmt.Errorf("missing Python application collector authentication")}
 	}
 	end := bytes.LastIndexByte(events[:len(events)-1], '\n') + 1
 	footer := events[end : len(events)-1]
 	if _, err := pythonApplicationJSON(footer, "type", "hmac_sha256"); err != nil {
-		return fmt.Errorf("invalid Python application collector authentication: %w", err)
+		return pythonApplicationUnsealed{fmt.Errorf("invalid Python application collector authentication: %w", err)}
 	}
 	var seal struct {
 		Type string `json:"type"`
