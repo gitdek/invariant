@@ -8,7 +8,7 @@ import (
 	"github.com/gitdek/invariant/internal/synth"
 )
 
-const stepFork560 = `{"forks":[{"id":"F1","question":"The storage and UI work will not fit one reviewable pull request; should these become two steps of parent #10?","options":[{"id":"A","says":"Build the complete step as one change."},{"id":"B","says":"A writer stops parent #10 with /invariant stop and requests a replacement plan on a new issue with /invariant plan, splitting storage and UI into sibling steps."}]}]}`
+const stepFork560 = `{"forks":[{"id":"F1","kind":"step_fit","question":"The storage and UI work will not fit one reviewable pull request; should these become two steps of parent #10?","options":[{"id":"A","says":"Build the complete step as one change."},{"id":"B","says":"A writer stops parent #10 with /invariant stop and requests a replacement plan on a new issue with /invariant plan, splitting storage and UI into sibling steps."}]}]}`
 
 // ParentPlan is caller-supplied provenance, never parsed from request.md by
 // the agent's checker. Zero preserves ordinary issue planning.

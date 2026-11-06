@@ -917,3 +917,6 @@ footer p { margin: 0; max-width: 60em; }
   .file { grid-template-columns: 1fr auto; }
   .file .size { display: none; }
 }
+.alternative { min-width: 0; }
+.alternative > .opt { width: 100%; }
+.alternative .reader-evidence { margin: .75rem 0 1.5rem; }

@@ -1405,7 +1405,7 @@
     if (w.kind === "forks") {
       body = (w.forks || []).map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const c = `/invariant choose ${q.id} ${o.id}`;
-        return `<button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>`;
+        return `<div class="alternative"><button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`}) : ""}</div>`;
       }).join("")}</div>`).join("") + `<div class="cmds">${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "proposal") {
       body = `${proposalText(w, repo, "a person")}${said(w)}
@@ -1495,7 +1495,7 @@
       const forks = w.forks || [];
       body = forks.map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const on = a.chosen[q.id] === o.id;
-        return `<button class="opt pick${on ? " chosen" : ""}" type="button" aria-pressed="${on}" data-act-key="${esc(key)}" data-act-pick="${esc(q.id)} ${esc(o.id)}"><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">${on ? "chosen" : "choose"}</span></button>`;
+        return `<div class="alternative"><button class="opt pick${on ? " chosen" : ""}" type="button" aria-pressed="${on}" data-act-key="${esc(key)}" data-act-pick="${esc(q.id)} ${esc(o.id)}"><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">${on ? "chosen" : "choose"}</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`}) : ""}</div>`;
       }).join("")}</div>`).join("");
       const picked = forks.filter((q) => a.chosen[q.id]);
       const lines = picked.map((q) => `/invariant choose ${q.id} ${a.chosen[q.id]}`).join("\n");

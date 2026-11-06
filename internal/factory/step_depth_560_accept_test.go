@@ -146,7 +146,7 @@ func (f questionThenChange560) Formalize(ctx context.Context, req formalize.Requ
 		f.t.Error("the step's instructions still invite a nested split")
 	}
 	if len(req.Answers) == 0 {
-		fork := formalize.Fork{ID: "F1", Question: "Storage and display do not fit one reviewable pull request; should they be two sibling steps in parent #10?", Options: []formalize.Option{
+		fork := formalize.Fork{ID: "F1", Kind: "step_fit", Question: "Storage and display do not fit one reviewable pull request; should they be two sibling steps in parent #10?", Options: []formalize.Option{
 			{ID: "A", Says: "Build the complete step as one change."},
 			{ID: "B", Says: "A writer stops parent #10 with /invariant stop and requests a replacement plan on a new issue with /invariant plan, with storage and display as separate steps."},
 		}}

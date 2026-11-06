@@ -46,6 +46,9 @@ func post(title, body string, m Marker, closing ...string) string {
 	if m.Kind == KindProposal && m.Proposal != nil && m.Proposal.Reader != nil {
 		return out
 	}
+	if m.Kind == KindForks && m.Proposal.HasPreviews() {
+		return out
+	}
 	if len(out) <= maxComment {
 		return out
 	}
@@ -78,6 +81,9 @@ func byline(m Marker) string {
 }
 
 func forksComment(forks []formalize.Fork, m Marker) string {
+	if m.Proposal.HasPreviews() {
+		return previewForksComment(forks, m)
+	}
 	var b strings.Builder
 	b.WriteString("Before I write down what must be true for this issue, I need you to decide:\n")
 	for _, f := range forks {

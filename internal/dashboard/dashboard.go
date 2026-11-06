@@ -587,6 +587,7 @@ func (s *Server) loadSnapshot() {
 		s.logf("not serving the last snapshot: its cached reader evidence is damaged or obsolete")
 		return
 	}
+	s.restorePreviews(&snap)
 	js, err = json.Marshal(snap)
 	if err != nil {
 		return
@@ -983,6 +984,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		for _, is := range r.src.issues {
 			l := Lane(is, r.src.comments[is.Number].comments, "", now)
 			l.Repo = r.Name
+			s.presentPreviews(&l)
 			for k := range l.Events {
 				l.Events[k].Repo = r.Name
 			}

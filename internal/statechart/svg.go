@@ -256,7 +256,14 @@ func svgReport(c *Result) []string {
 	for _, name := range slices.Sorted(maps.Keys(r.Source.Config.Constants)) {
 		out = append(out, name+" = "+r.Source.Config.Constants[name])
 	}
-	out = append(out, "Locked rules (verbatim wording)")
+	if c.Preview.IsZero() {
+		out = append(out, "Locked rules (verbatim wording)")
+	} else {
+		out = append(out, c.Preview.Description(), "Candidate rules (verbatim wording)")
+		for _, fork := range slices.Sorted(maps.Keys(c.Preview.Choices)) {
+			out = append(out, "Previously authorized choice: "+fork+" = "+c.Preview.Choices[fork])
+		}
+	}
 	for _, rule := range r.Rules {
 		out = append(out, rule.Name+" ("+rule.Kind+")", rule.Says, "SHA-256: "+rule.SHA256)
 		if rule.Expect != "" {

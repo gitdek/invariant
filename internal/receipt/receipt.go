@@ -17,13 +17,16 @@ import (
 func Markdown(r *verify.Report) string {
 	var b strings.Builder
 	explicit := hasComponentEvidence(r)
-	render := renderer{explicit: explicit || r.Application != nil}
+	preview := r.Reader != nil && !r.Reader.Preview.IsZero()
+	render := renderer{explicit: explicit || r.Application != nil || preview}
 	writeRow := func(check string, ok bool, result, evidence string) {
 		row(&b, check, ok, result, evidence)
 	}
 	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", render.text(r.Project))
 	if r.Passed && explicit {
 		fmt.Fprintf(&b, "**✅ Pass.** Gate passed. Assurance: **component evidence**. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
+	} else if r.Passed && preview {
+		fmt.Fprintf(&b, "**✅ Pass.** Unratified alternative; model-only checks passed for candidate rules. No code was checked. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
 	} else if r.Passed {
 		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint %s\n\n", r.Claim(), render.literal(short(r.Fingerprint)))
 	} else {
@@ -162,7 +165,11 @@ func Markdown(r *verify.Report) string {
 		}
 		b.WriteString("\n</details>\n")
 	}
-	b.WriteString("\n<details>\n<summary>Ratified statements</summary>\n\n")
+	if preview {
+		b.WriteString("\n<details>\n<summary>Candidate rules</summary>\n\n")
+	} else {
+		b.WriteString("\n<details>\n<summary>Ratified statements</summary>\n\n")
+	}
 	b.WriteString("| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n")
 	for _, p := range r.Pins {
 		fmt.Fprintf(&b, "| %s | %s | %s | %s %s |\n", render.literal(p.Name), render.text(p.Kind), render.text(p.Says), mark(p.Match), render.literal(short(p.Want)))

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gitdek/invariant/internal/factory"
+	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
 )
@@ -151,14 +152,17 @@ type IssuePlanView struct {
 // Question is one fork the factory asked about.
 type Question struct {
 	ID       string   `json:"id"`
+	Kind     string   `json:"kind,omitempty"`
 	Question string   `json:"question"`
 	Options  []Choice `json:"options"`
 }
 
 // Choice is one of a question's options.
 type Choice struct {
-	ID   string `json:"id"`
-	Says string `json:"says"`
+	ID      string              `json:"id"`
+	Says    string              `json:"says"`
+	Preview *formalize.Preview  `json:"preview,omitempty"`
+	Reader  *ReaderPresentation `json:"reader,omitempty"`
 }
 
 // Said is one statement of a proposal, in plain language.
@@ -399,9 +403,9 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 	switch m.Kind {
 	case factory.KindForks:
 		for _, f := range m.Forks {
-			q := Question{ID: f.ID, Question: f.Question}
+			q := Question{ID: f.ID, Kind: f.Kind, Question: f.Question}
 			for _, o := range f.Options {
-				q.Options = append(q.Options, Choice{ID: o.ID, Says: o.Says})
+				q.Options = append(q.Options, Choice{ID: o.ID, Says: o.Says, Preview: o.Preview})
 			}
 			w.Forks = append(w.Forks, q)
 		}

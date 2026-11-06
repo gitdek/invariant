@@ -20,6 +20,7 @@ import (
 // Reader explains the checked bounded model. Its identity and diagnostics
 // never participate in the gate's verdict or verification fingerprint.
 type Reader struct {
+	Preview     statechart.Preview     `json:"preview,omitzero"`
 	Version     int                    `json:"version"`
 	Fingerprint string                 `json:"fingerprint"`
 	Inputs      ReaderInputs           `json:"inputs"`

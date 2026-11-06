@@ -40,7 +40,7 @@ Invariant splits the work where it belongs:
 </picture>
 
 1. **Formalize.** Invariant drafts the properties an issue implies. Writing a formal spec forces every ambiguity into the open. You can't model a buffer, for example, without deciding what happens when it's full.
-2. **Ask.** When Invariant hits a fork it can't resolve, it posts the question back on the issue as a decision request. It doesn't pick an answer for you.
+2. **Ask.** When Invariant hits a fork it can't resolve, it posts the question back on the issue as a decision request. Modeled alternatives each show a [checked, unratified preview](docs/statecharts.md#modeled-alternatives), together on the issue and dashboard. You choose the behavior.
 3. **Ratify.** A person approves each statement. The approval is recorded along with where the statement came from, and the statement is pinned by hash.
 4. **Synthesize.** Invariant writes the implementation, in Go, TypeScript or Python, and the TLA+ model. It keeps repairing them against counterexamples until the gate passes.
 5. **Gate and merge.** CI re-runs every check on the committed artifacts. The pull request merges only if every check passes.
@@ -86,7 +86,7 @@ Anyone can open an issue, but the factory takes one only when a writer labels it
 
 ## Watch it catch a bug
 
-Modeled proposals, [verification receipts](docs/statecharts.md#verification-receipts) and [dashboard evidence cards](docs/dashboard.md#reader-evidence) show checked reader statecharts from TLC's complete graph and the saved view, with bounds, exact rules, unavailable actions and hidden steps. Each dashboard chart links to a script-free evidence page and standalone SVG, checked against its receipt commit. Charts cover up to 500 reachable states; larger models carry a size note, and missing views or artifacts explain the absence. Nine [example views](docs/statecharts.md#example-inventory) cover every qualifying language and synthesized sibling at unchanged bounds. Reader evidence has its own fingerprint and adds no proof claim; about 20 arrows is advice, never a cutoff.
+Modeled proposals, [verification receipts](docs/statecharts.md#verification-receipts) and [dashboard evidence cards](docs/dashboard.md#reader-evidence) show checked reader statecharts from TLC's complete graph and the saved view, with bounds, exact rules, unavailable actions and hidden steps. Each project evidence chart links to a script-free evidence page and standalone SVG, checked against its receipt commit. Charts cover up to 500 reachable states; larger models carry a size note, and missing views or artifacts explain the absence. Nine [example views](docs/statecharts.md#example-inventory) cover every qualifying language and synthesized sibling at unchanged bounds. Reader evidence has its own fingerprint and adds no proof claim; about 20 arrows is advice, never a cutoff.
 
 <p align="center">
   <img src="docs/assets/counterexample.svg" alt="Replay of a real TLC counterexample. r1 prepares and the coordinator records its vote; r2 aborts on its own; the buggy coordinator commits anyway, on r1's vote alone; r1 commits. TCConsistent is violated in 5 steps." width="100%">

@@ -14,6 +14,40 @@ The view, includes and snapshot survive `formalization.json`, compressed proposa
 
 Supported proposals render literal-safe Mermaid `stateDiagram-v2`: aliases are generated independently of labels, every displayed arrow comes from the computed chart and every initial chart state has an initial arrow. Tables retain exact rule wording, per-state unavailable actions, all hidden step occurrences and separately defined TLC and chart counts. Mermaid and Markdown escaping preserves literal labels and wording, including text that resembles markup. Above capacity the proposal keeps its statement or amendment table, existing checks and ratification instructions, with a short note that TLC reached the recorded number of states at the checked bounds, more than the 500 charts are drawn for. Plumbing proposals and plans of issues have no chart. A complete modeled comment that exceeds the publication limit is explicitly refused for human review, never clipped into a usable ratification proposal. The saved marker must also read back within the existing 4 MiB expanded limit, regardless of its compressed size; a refusal omits the oversized proposal payload.
 
+## Modeled alternatives
+
+Under [#639's ratified plan](../.invariant/plans/issue-639.json), every option offering a different modeled behavior has a checked preview before a new decision request can publish. The alternatives remain unratified and model-only: checking them chooses nothing, ratifies no rules and starts no build. Plumbing and PRD forks stay chart-free. A fork with `kind: "step_fit"` is also chart-free only under caller-authenticated parent context, with two options: “Build the complete step as one change.” or a writer stopping that parent with `/invariant stop` and requesting a replacement plan on a new issue with `/invariant plan`. It cannot exempt a behavior choice. D-0328 and the one-level planning limit are unchanged.
+
+The option wire schema is:
+
+| Field | Input or saved result |
+| :-- | :-- |
+| `id`, `says` | The option ID and exact behavior words, inside a fork with its own `id` and `question` |
+| `preview.fork`, `preview.option` | Exact containing IDs, also safe single path components for export |
+| `preview.choices` | Every effective previously authorized fork ID mapped to its option ID; no invented answer for another unanswered fork |
+| `preview.model` | Ordinary proposal snapshot: draft fields and candidate statements, exact `module_text`, `view` JSON text and `includes` mapping sibling .tla filenames to exact source text |
+| `preview.receipt` | Computed model-only verification report, without ratification or code evidence |
+| `preview.problem` | That option's diagnostic when checking failed |
+| `preview.fingerprint` | Computed binding of containing IDs and words, choices, exact snapshot, diagnostics, receipt and reader evidence |
+
+Models cannot contain nested forks, plans or authority. Each option is staged in its own temporary project, so sibling options may use identical module/include names without sharing files. Supplied pins, hashes, readers, receipts and fingerprints grant no authority: the check pins candidates and recomputes all evidence. The caller stages parent, prior choices and permitted revisions before the agent runs. The visible `check-context.json` is guidance; direct checks retain caller context in memory, and the MCP checker receives it in its launch arguments. Final checking uses the retained original context. A revision must pass the existing writer, prior-fork and valid-option checks; its effective choices must match every preview exactly.
+
+All independent options run the ordinary model gate, complete graph exploration, rule replay and pure-view/hiding checks. One request consumes one existing check allowance and returns every option failure together. Healthy sibling evidence stays in failed results for repair, but partial success cannot publish or export. Repair the named option's model, includes or view and check again. Bounds stay faithful; above 500 states a successful `too_large` limitation replaces only that option's chart, with the existing count and provenance and without evaluating mappings or hiding.
+
+Checked previews retain `model.reader` and `receipt.reader` with the same chart or limitation. The receipt reader and chart carry `preview: {fork, option, choices}`. `statechart.Result.Preview` is a value with `json:",omitzero"`; ordinary chart JSON and SVG metadata omit it. Candidate labels, IDs and rule wording are literal text in Mermaid, Markdown and native SVG. The complete report preserves bounds, unavailable actions, hidden occurrences, independent counts and pinned tools. Preview evidence has its own identity and changes no statement hash, lock or ordinary verification fingerprint.
+
+Complete snapshots and diagnostics survive `formalization.json`, previous/proposal.json, saved factory runs, compressed markers and partial-answer/revision recovery. A partial answer removes the answered question from display while preserving the original checked choice context of every snapshot; a newly checked draft binds the new effective choices. New publication rejects missing, swapped or stale previews and refuses an oversized complete request or a marker that cannot read back within 4 MiB. It never clips preview alternatives into a usable decision request. Preview-less comments retain their original text, clipping and closing instructions.
+
+`Proposal.WritePreviews(out)` validates the complete set and writes `previews/<fork>/<option>/preview.json`, `receipt.json`, `receipt.md`, `reader.json` and, when drawable, `reader.svg`. Formalization exports successful sets automatically. Each receipt is model-only; Markdown and script-free SVG identify the unratified alternative and candidate rules. Export reuse removes obsolete options. Failed formalization removes previous exports while retaining its exact inputs and diagnostics in the saved result. Selecting an option does not reuse its evidence for project verification: the selected model's final files produce a new ordinary chart with no preview metadata.
+
+The [dashboard comparison](dashboard.md#modeled-decisions) keeps separate immutable evidence for every option and diagnoses damaged cached options independently. This implements the ratified plan on D-0002, D-0094, D-0307, D-0328, D-0343, D-0345, D-0347, D-0351 and D-0353. The merger records the new option-preview and cache policy decision because the plumbing build cannot write decisions/.
+
+The pinned-TLC integration covers distinct option bounds, complete graphs, candidate rules and exports. When Docker is unavailable to the builder, the merger runs:
+
+```sh
+go test -tags integration ./internal/formalize -run '^TestPreview639PinnedTLC$' -count=1 -timeout 5m
+```
+
 ## Verification receipts
 
 [#615's ratified plan](../.invariant/plans/issue-615.json) connects the same graph, invariant replay and view evaluation to modeled verification, synthesis and factory gate receipts. Before checks begin, verification captures the actual model, its sibling TLA+ includes, the loaded lock and the optional `.invariant/view.json`. All bounded model checks and the reader use those captured source bytes. A saved proposal's `.invariant/reader.json` is never substituted for the final model. Synthesis supplies the original project's view and sibling includes during preparation and assembly, discards workspace reader artifacts and recomputes after the model changes.

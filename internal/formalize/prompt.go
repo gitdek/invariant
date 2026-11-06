@@ -112,7 +112,13 @@ Look for every place where the issue allows materially different behavior that a
 ]
 `+"```"+`
 
-Each option says in one plain sentence what the system would do. When you ask, leave `+"`statements`"+` empty and don't write the module: people answer first, and you'll be asked again with their answers. Don't ask about anything that doesn't change what must be true, such as names, data structures or the checking bounds. Choose those yourself. Never ask again about something already decided above.
+Each option says in one plain sentence what the system would do and supplies a preview. Leave top-level statements empty. Inside EVERY option add a preview object with fork and option matching its containing IDs, choices mapping every previously authorized fork ID to its option ID, and model holding an ordinary draft with name, slug, module, package, bounds and candidate statements, plus exact module_text, view text and includes (sibling .tla filenames mapped to source text). Each model is isolated, so options may reuse module names. Do not put nested forks, plans, ratification, receipts, fingerprints or reader output in a preview. All alternatives are unratified, model-only candidates; checking them neither chooses an answer nor starts a build.
+
+check-context.json describes the caller-owned parent and prior choices staged before your run. Include all effective prior choices, including authorized revisions declared below, and no unanswered fork in choices. The illustrated alternative is identified separately by fork/option. Do not invent an answer for another unanswered fork: model only this option's behavior and the decisions already made. The checker retains its own authority independently of files you write.
+
+The check tool independently checks EVERY option's inline snapshot and reports all failures together, under one whole-request check allowance. Repair every option failure; no partial option set can publish. The final check recomputes every option before publication. Keep faithful bounds even when a chart exceeds 500 states.
+
+Don't ask about anything that doesn't change what must be true, such as names, data structures or the checking bounds. Choose those yourself. Never ask again about something already decided above. Plumbing, PRD and authenticated step_fit questions stay chart-free.
 
 If a person's later comment in the discussion changes a decision above, follow the comment, and record the change in `+"`revised`"+`, so the record says what was decided:
 
