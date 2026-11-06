@@ -35,6 +35,23 @@ var details = regexp.MustCompile(`(?s)\n*<details>.*?</details>\n*`)
 // post is shortened. Only the caller supplies instructions; the body may
 // quote commands without asking anyone to run them.
 func post(title, body string, m Marker, closing ...string) string {
+	out := clippedPost(title, body, m, closing...)
+	// A stuck draft's proposal only seeds a revision, and its run's saved
+	// result keeps it whole. Clipping never shortens the marker, so a marker
+	// that can't be read back, or a post still beyond the limit, as a failed
+	// preview's snapshots can make either, leaves the proposal out instead.
+	if m.Kind == KindStuck && m.Proposal != nil {
+		if _, ok := DecodeMarker(m.encode()); !ok || len(out) > maxComment {
+			m.Proposal = nil
+			return clippedPost(title, body, m, closing...)
+		}
+	}
+	return out
+}
+
+// clippedPost composes a post, clipping its body to GitHub's limit unless
+// the post is an indivisible checked artifact.
+func clippedPost(title, body string, m Marker, closing ...string) string {
 	marker, by := m.encode(), byline(m)
 	end := strings.Join(closing, "")
 	compose := func(body string) string {
