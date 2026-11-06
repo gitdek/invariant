@@ -21,6 +21,7 @@ type Status struct {
 	PID       int        `json:"pid"`
 	Repo      string     `json:"repo"`
 	Holder    string     `json:"holder,omitempty"` // its name on the repository's lease, whose holder the page follows
+	Login     string     `json:"login,omitempty"`  // the account it posts as, its App's bot or else gh's user: the only one whose markers the page reads (#666)
 	Started   time.Time  `json:"started"`
 	Heartbeat time.Time  `json:"heartbeat"`
 	Every     float64    `json:"every"`              // seconds between polls

@@ -78,7 +78,10 @@ type Repo struct {
 	Name   string // owner/name
 	GitHub github.Client
 	Status string // its watcher's status file
-	src    sources
+	// FactoryLogin is the account its factory posts as, when the caller
+	// knows it; otherwise its watchers' status files say (#666).
+	FactoryLogin string
+	src          sources
 }
 
 // Short is the repository's name without its owner.
@@ -931,8 +934,9 @@ func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, erro
 // CI's gate passed on the head it merged. A merged pull request never
 // changes, so each is checked once.
 func (s *Server) checkMerges(ctx context.Context, r *Repo) {
+	login := s.factoryOf(r)
 	for _, is := range r.src.issues {
-		l := Lane(is, r.src.comments[is.Number].comments, "", time.Now())
+		l := factoryLane(is, r.src.comments[is.Number].comments, login, time.Now())
 		if l.Stage != StageMerged || l.PR == 0 {
 			continue
 		}
@@ -990,8 +994,9 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		}
 		watchers = append(watchers, namedWatcher{repo: r.Name, w: rs.Factory})
 
+		login := s.factoryOf(r)
 		for _, is := range r.src.issues {
-			l := Lane(is, r.src.comments[is.Number].comments, "", now)
+			l := factoryLane(is, r.src.comments[is.Number].comments, login, now)
 			l.Repo = r.Name
 			s.presentPreviews(&l)
 			s.presentComparison(&l)
