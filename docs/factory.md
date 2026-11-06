@@ -68,7 +68,7 @@ go test ./internal/verify -run '^(TestPythonApplicationConversionValidation|Test
 go test -race ./internal/verify -run '^(TestPythonApplicationConversionValidation|TestGateRecordingOwnershipAndCompatibility|TestPythonApplicationRecordingTransport|TestPythonRecording.*|TestRecordingCompatibilityCleanup|TestRecordingLinkedOutput)$' -shuffle=on -count=3 -timeout 20m
 ```
 
-This changes test scheduling only. The four-CPU default, eight sandbox workers, 4 GiB and 1,024-process limits, check queue and ordinary and verify deadlines remain as recorded by [D-0281](../decisions/journal/D-0281.jsonl), [D-0313](../decisions/journal/D-0313.jsonl) and [D-0350](../decisions/journal/D-0350.jsonl). The merger must record the scheduling decision refining [D-0333](../decisions/journal/D-0333.jsonl); this plumbing build cannot write `decisions/`.
+This changes test scheduling only. The four-CPU default, eight sandbox workers, 4 GiB and 1,024-process limits, check queue and ordinary and verify deadlines remain as recorded by [D-0281](../decisions/journal/D-0281.jsonl), [D-0313](../decisions/journal/D-0313.jsonl) and [D-0350](../decisions/journal/D-0350.jsonl). [D-0377](../decisions/journal/D-0377.jsonl) records this scheduling, refining [D-0333](../decisions/journal/D-0333.jsonl).
 
 ## Container CPU limits
 
