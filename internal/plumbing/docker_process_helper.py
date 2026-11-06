@@ -15,9 +15,10 @@ def frame(kind, data=b""):
 
 
 def kill_group(pid):
+    # Darwin answers EPERM while a group's last members are reaped (#516).
     try:
         os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -32,6 +33,8 @@ def reap_group(pid, end):
             os.killpg(pid, 0)
         except ProcessLookupError:
             return
+        except PermissionError:
+            pass  # still there, as Darwin reports it while reaping
         if time.monotonic() >= end:
             raise RuntimeError("process descendants did not exit")
         kill_group(pid)

@@ -454,9 +454,15 @@ func newDocker591(t *testing.T) *docker591Boundary {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &docker591Boundary{t: t, root: t.TempDir(), goexe: exe, bin: t.TempDir()}
-	b.hostTmp = filepath.Join(b.root, "host-staging")
-	if err := os.MkdirAll(b.hostTmp, 0700); err != nil {
+	b := &docker591Boundary{t: t, root: resolvedTempDir516(t), goexe: exe, bin: t.TempDir()}
+	// Production stages Unix sockets under TMPDIR, and a test's temporary
+	// directory is too deep for macOS's 104-byte socket paths (#516).
+	host, err := os.MkdirTemp("/tmp", "s591-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(host) })
+	if b.hostTmp, err = filepath.EvalSymlinks(host); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", b.hostTmp)

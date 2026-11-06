@@ -404,7 +404,9 @@ func (c *dockerCheckClient) collect(ctx context.Context) {
 			grace.Stop()
 		}
 	}
-	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	// Darwin answers EPERM while the client's group is reaped; reaping below
+	// still waits for the group to disappear (#516).
+	if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EPERM) {
 		c.joinErr = err
 	}
 	if !finished {

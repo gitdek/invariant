@@ -141,7 +141,11 @@ func fixtureFor538(t *testing.T, cache, source string) *fixture538 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture538{t: t, root: t.TempDir(), cache: cache, executable: exe, source: source}
+	// Go reports resolved paths, which macOS's linked /var changes (#516).
+	if cache, err = filepath.EvalSymlinks(cache); err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture538{t: t, root: resolvedTempDir516(t), cache: cache, executable: exe, source: source}
 	f.part = repository.Part{Name: "api", Directory: "api", Language: "go", Commands: map[string]repository.Command{
 		"test_one": {Argv: []string{"go", "test", "./...", "-run", "^{test}$", "-count=1", "-v=false"}},
 	}}
