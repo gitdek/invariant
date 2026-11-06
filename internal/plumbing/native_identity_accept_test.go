@@ -474,7 +474,10 @@ func TestNativeSourcesRefuseLinksExistingFilesAndExtraEntries(t *testing.T) {
 }
 
 func TestNativeStagingProtectsSourcesSelectorsAndOriginalRegressionScope(t *testing.T) {
-	root, _, p := n503BindFixture(t)
+	part := n503Part("python", "worker")
+	part.Commands["test"] = repository.Command{Argv: []string{"pytest"}}
+	root, _, snapshot := fixture484(t, []repository.Part{part}, nil)
+	p := n503Read(t, n503Plan(t, "pytest", "worker", "worker/test_accept.py", "test_accept.py::test_ready", "def test_ready():\n    assert False\n"), snapshot)
 	lock := Lock{Plan: *p, Ratified: Ratification{Issue: 503, Proposal: p.Hash()}}
 	if err := lock.Write(root); err != nil {
 		t.Fatal(err)
@@ -510,12 +513,18 @@ func TestNativeStagingProtectsSourcesSelectorsAndOriginalRegressionScope(t *test
 		if _, err := os.Stat(filepath.Join(dst, "worker/review_test.go")); (err == nil) != (round == 0) {
 			t.Fatal("new regression cannot be added then removed against original baseline")
 		}
-		for _, f := range []string{"worker/test_unplanned.py", "unrelated/new_test.go"} {
+		if _, err := os.Stat(filepath.Join(dst, "worker/test_unplanned.py")); (err == nil) != (round == 0) {
+			t.Fatal("captured Python regression cannot be added then removed")
+		}
+		for _, f := range []string{"unrelated/new_test.go"} {
 			if _, err := os.Stat(filepath.Join(dst, f)); !os.IsNotExist(err) {
 				t.Fatalf("regression allowance widened: %s", f)
 			}
 		}
 		if round == 0 {
+			if err := os.Remove(filepath.Join(ws, "worker/test_unplanned.py")); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Remove(filepath.Join(ws, "worker/review_test.go")); err != nil {
 				t.Fatal(err)
 			}
