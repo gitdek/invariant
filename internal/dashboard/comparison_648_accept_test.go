@@ -103,7 +103,7 @@ func TestComparison648DashboardProposalAndRestart(t *testing.T) {
 	const at = "2026-11-05T12:00:00Z"
 	is := github.Issue{Number: 648, Title: "Compare revisions", State: "open", CreatedAt: at, Labels: []github.Label{{Name: factory.LabelProposal}}}
 	m := factory.Marker{Kind: factory.KindProposal, Proposal: r.Proposal}
-	repo := &Repo{Name: "owner/project", src: sources{issues: []github.Issue{is}, comments: map[int]cachedComments{648: {comments: []github.Comment{{ID: 648, User: github.User{Login: "factory[bot]"}, CreatedAt: at, Body: marker(t, m)}}}}}}
+	repo := &Repo{Name: "owner/project", FactoryLogin: "factory[bot]", src: sources{issues: []github.Issue{is}, comments: map[int]cachedComments{648: {comments: []github.Comment{{ID: 648, User: github.User{Login: "factory[bot]"}, CreatedAt: at, Body: marker(t, m)}}}}}}
 	s := &Server{Repos: []*Repo{repo}, Cache: t.TempDir()}
 	p, presentation := comparison648Waiting(t, preview639Snapshot(t, s))
 	if !reflect.DeepEqual(p, r.Proposal) {

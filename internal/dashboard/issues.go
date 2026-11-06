@@ -194,6 +194,20 @@ type Span struct {
 	Open bool      `json:"open,omitempty"` // still going
 }
 
+// factoryLane is an issue's lane as the page shows it: only markers login
+// posted count, as the factory counts only its own, so a marker another
+// commenter posts drives no card, preview or comparison (#666). With no
+// known login it counts none, and people's comments still count as theirs.
+func factoryLane(issue github.Issue, comments []github.Comment, login string, now time.Time) Issue {
+	if login == "" {
+		comments = slices.DeleteFunc(slices.Clone(comments), func(c github.Comment) bool {
+			_, ok := factory.DecodeMarker(c.Body)
+			return ok
+		})
+	}
+	return Lane(issue, comments, login, now)
+}
+
 // Lane reads an issue's comments the way the factory does. self is the
 // factory's bot login; empty means its posts are told apart by their
 // markers alone, as they were before it had an App (D-0041).

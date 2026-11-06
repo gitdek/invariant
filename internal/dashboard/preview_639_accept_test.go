@@ -391,7 +391,7 @@ func preview639Server(t *testing.T, p *formalize.Proposal, repo string, issue in
 	const at = "2026-11-05T12:00:00Z"
 	is := github.Issue{Number: issue, Title: "Choose modeled behavior", State: "open", CreatedAt: at, Labels: []github.Label{{Name: factory.LabelAsking}}}
 	m := factory.Marker{Kind: factory.KindForks, Forks: p.Forks, Proposal: p}
-	r := &Repo{Name: repo, src: sources{issues: []github.Issue{is}, comments: map[int]cachedComments{issue: {comments: []github.Comment{{ID: 639, User: github.User{Login: "factory[bot]"}, CreatedAt: at, Body: marker(t, m)}}}}}}
+	r := &Repo{Name: repo, FactoryLogin: "factory[bot]", src: sources{issues: []github.Issue{is}, comments: map[int]cachedComments{issue: {comments: []github.Comment{{ID: 639, User: github.User{Login: "factory[bot]"}, CreatedAt: at, Body: marker(t, m)}}}}}}
 	return &Server{Repos: []*Repo{r}, Cache: t.TempDir()}
 }
 func preview639Snapshot(t *testing.T, s *Server) []byte {
