@@ -345,8 +345,15 @@ func mcpCmd(ctx context.Context, args []string) int {
 	checkBuild := fs.String("check-build", "", "with -plan or -plumbing: the registration on the check queue")
 	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
 	parentPlan := fs.Int("parent-plan", 0, "with draft checks: the caller-authenticated parent plan's issue, or zero for an ordinary issue")
-	draftContext := fs.String("draft-context", "", "with -formalize: caller-owned choice and parent context")
+	draftEndpoint := fs.String("draft-context-endpoint", "", "with -formalize: caller draft context's loopback endpoint")
+	draftToken := fs.String("draft-context-token", "", "with -formalize: caller draft context's bearer credential")
+	draftSHA256 := fs.String("draft-context-sha256", "", "with -formalize: digest of the captured caller draft context")
 	fs.Parse(args)
+	reference := formalize.CheckContextReference{Endpoint: *draftEndpoint, Token: *draftToken, SHA256: *draftSHA256}
+	if reference != (formalize.CheckContextReference{}) && (!*formal || *graph || *issues || *plan || *pipes || *ratified != "") {
+		fmt.Fprintln(os.Stderr, "invariant: caller draft context requires -formalize alone")
+		return 2
+	}
 	if (*checkQueue != "" || *checkBuild != "") && ((!*pipes && !*plan) || *checkQueue == "" || *checkBuild == "") {
 		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plan or -plumbing, -check-queue and -check-build")
 		return 2
@@ -394,19 +401,21 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	ws := fs.Arg(0)
+	var authority formalize.CheckContext
+	if *formal {
+		var err error
+		authority, err = formalize.LoadCheckContext(ctx, reference, *parentPlan)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invariant:", err)
+			return 2
+		}
+	}
 	tc, err := toolchain.Ensure(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
 	if *formal {
-		authority := formalize.CheckContext{ParentPlan: *parentPlan}
-		if *draftContext != "" {
-			if err := json.Unmarshal([]byte(*draftContext), &authority); err != nil || authority.ParentPlan != *parentPlan {
-				fmt.Fprintln(os.Stderr, "invariant: invalid caller draft context")
-				return 2
-			}
-		}
 		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath, *parentPlan, authority)}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)

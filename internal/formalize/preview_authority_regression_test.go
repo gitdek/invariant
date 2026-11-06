@@ -2,7 +2,6 @@ package formalize_test
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,14 +29,7 @@ func TestPreviewAuthoritySurvivesAgentEdits(t *testing.T) {
 				if (err == nil) != authorized {
 					t.Fatalf("direct check authorization: %v", err)
 				}
-				var staged formalize.CheckContext
-				for i, arg := range job.GateServer {
-					if arg == "-draft-context" {
-						if err := json.Unmarshal([]byte(job.GateServer[i+1]), &staged); err != nil {
-							t.Fatal(err)
-						}
-					}
-				}
+				staged := loadDraftContext(t, ctx, job, 0)
 				if staged.Choices["F0"] != "A" || staged.ParentPlan != 0 {
 					t.Fatal("MCP launch lost caller authority")
 				}

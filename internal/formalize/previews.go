@@ -61,9 +61,7 @@ func (r Request) CheckContext() CheckContext {
 	}
 	c.Baseline = r.comparisonBaseline()
 	if c.Baseline != nil {
-		// Only sources are authority. Both checks recompute the graph, and
-		// sending a saved dump in the check process's arguments can exceed
-		// the operating system's argument limit even below chart capacity.
+		// Only sources are authority. Both checks recompute the graph.
 		c.Baseline.Chart, c.Baseline.Limitation = nil, nil
 	}
 	return c
@@ -71,6 +69,8 @@ func (r Request) CheckContext() CheckContext {
 
 func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
 	c.Baseline = detachedSnapshot(c.Baseline)
+	c.Choices = maps.Clone(c.Choices)
+	c.Revisions = slices.Clone(c.Revisions)
 	b, err := json.Marshal(c)
 	if err != nil {
 		return "", nil, err
@@ -78,9 +78,9 @@ func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
 	if err := writeFile(filepath.Join(ws, "check-context.json"), string(b)+"\n"); err != nil {
 		return "", nil, err
 	}
-	// Direct Check calls and the independent final check retain this copy.
-	// The separate MCP process receives the same bytes in its launch arguments,
-	// not by rereading an agent-writable context file.
+	// Direct Check calls retain a detached copy. Modeled MCP checks fetch
+	// these captured bytes from the caller, never from this guidance file.
+	// The independent final check retains its original caller-memory context.
 	checkContexts.Store(ws, c)
 	if err := stageBaseline(ws, c.Baseline); err != nil {
 		checkContexts.Delete(ws)
