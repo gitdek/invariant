@@ -2609,55 +2609,17 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 			f.logf("#%d: GitHub didn't show draft #%d's events, so I won't mark it ready: %v", n, pr.Number, unread)
 		}
 		if watched = w == watchDraft; !watched {
+			// A configured trusted draft is already held for a person. Read
+			// its actual paths before explaining what a retry could do.
+			if _, proceed, err := f.checkMergeScope(ctx, t, state, pr, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, false, next); err != nil || !proceed {
+				return err
+			}
 			return f.unwatched(ctx, t, state, pr, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, w, unread, next)
 		}
 	}
-	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
-	if err != nil {
+	at, proceed, err := f.checkMergeScope(ctx, t, state, pr, pullRequest{head: pr.Head.SHA, gate: gateOf(run, done)}, watched, next)
+	if err != nil || !proceed {
 		return err
-	}
-	if len(sc.Files) == 0 {
-		// Main may have acquired this head since the first pull request
-		// read. An empty diff alone can't say whether that was a merge.
-		fresh, err := f.GitHub.PullRequest(ctx, pr.Number)
-		if err != nil {
-			return err
-		}
-		if fresh.Merged {
-			return f.watchMerged(ctx, t, state, fresh)
-		}
-	}
-	problems := sc.Problems
-	if sc.Project != m.Project {
-		problems = append(problems, fmt.Sprintf("it changes %q, not the ratified project %q", sc.Project, m.Project))
-	}
-	b, lockErr := f.Repo.Show(ctx, head, lockFileOf(m.Project))
-	if lockErr != nil {
-		problems = append(problems, "its lock can't be read: "+lockErr.Error())
-	} else if lockAt(m.Project, b, nil) != m.Hash {
-		problems = append(problems, "its lock isn't the proposal that was ratified")
-	}
-	// A change to the trusted base is outside what the factory may merge,
-	// so the protocol sees it as out of scope (D-0105).
-	at := pullRequest{head: pr.Head.SHA, gate: gateOf(run, done), lock: lockAt(m.Project, b, lockErr),
-		scopeMany: len(sc.Problems) > 0 || sc.Project != m.Project || len(sc.Trusted) > 0}
-	if len(problems) > 0 {
-		from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
-		to.failure = FailUnmergeable
-		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
-			return err
-		}
-		if err := f.recovers(ctx, n, "say it can't merge", f.canPost(mergingPR(watched, pr, false, false), recovery.Merge)); err != nil {
-			return err
-		}
-		next.Failure = FailUnmergeable
-		return f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
-	}
-	// Only a person merges a change to the trusted base, a plan's or a
-	// project's, such as one of the factory's own proved cores (D-0105,
-	// D-0109).
-	if len(sc.Trusted) > 0 {
-		return f.waitForPerson(ctx, t, state, pr, at, watched, sc.Trusted, next)
 	}
 	// The protocol has the last word on merging.
 	from, to := prStep(t, state, at, protocol.KindMerged, protocol.ByFactory)
@@ -2703,6 +2665,9 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		if now.State != "open" || now.Head.SHA != pr.Head.SHA {
 			return nil
 		}
+		if proceed, err := f.refreshMergeScope(ctx, t, state, pr, at, watched, next); err != nil || !proceed {
+			return err
+		}
 		if err := f.GitHub.MarkReady(ctx, pr.Number); err != nil {
 			return f.refusedMerge(ctx, t, state, pr, at, watched, true, err, next)
 		}
@@ -2712,6 +2677,9 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 	}
 	// The merge is pinned to the head whose gate, scope, lock and trusted
 	// files the factory checked, so GitHub merges nothing pushed since.
+	if proceed, err := f.refreshMergeScope(ctx, t, state, pr, at, watched, next); err != nil || !proceed {
+		return err
+	}
 	sha, err := f.GitHub.Merge(ctx, pr.Number, at.head, "merge")
 	if err != nil {
 		return f.refusedMerge(ctx, t, state, pr, at, watched, false, err, next)
@@ -2721,6 +2689,72 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 		return err
 	}
 	return f.saidMerged(ctx, t, pr, run, sha, next)
+}
+
+// checkMergeScope keeps trust and lock authority in the actual diff, including
+// for recovered drafts. Display metadata never grants or denies a merge.
+func (f *Factory) checkMergeScope(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, watched bool, next Marker) (pullRequest, bool, error) {
+	n, m := t.Issue.Number, state.Marker
+	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, at.head, n)
+	if err != nil {
+		return at, false, err
+	}
+	if len(sc.Files) == 0 {
+		// An empty diff alone cannot tell whether a person merged it.
+		fresh, err := f.GitHub.PullRequest(ctx, pr.Number)
+		if err != nil {
+			return at, false, err
+		}
+		if fresh.Merged {
+			return at, false, f.watchMerged(ctx, t, state, fresh)
+		}
+	}
+	problems := sc.Problems
+	if sc.Project != m.Project {
+		problems = append(problems, fmt.Sprintf("it changes %q, not the ratified project %q", sc.Project, m.Project))
+	}
+	b, lockErr := f.Repo.Show(ctx, at.head, lockFileOf(m.Project))
+	at.lock = lockAt(m.Project, b, lockErr)
+	if lockErr != nil {
+		problems = append(problems, "its lock can't be read: "+lockErr.Error())
+	} else if at.lock != m.Hash {
+		problems = append(problems, "its lock isn't the proposal that was ratified")
+	}
+	// The existing protocol hold covers changes only a person may merge.
+	at.scopeMany = len(problems) > 0 || len(sc.Trusted) > 0
+	if len(problems) > 0 {
+		from, to := prStep(t, state, at, protocol.KindFailed, protocol.Nobody)
+		to.failure = FailUnmergeable
+		if err := f.allowed(ctx, n, fmt.Sprintf("say #%d can't merge", pr.Number), from, to); err != nil {
+			return at, false, err
+		}
+		if !pr.Draft || watched {
+			if err := f.recovers(ctx, n, "say it can't merge", f.canPost(mergingPR(watched, pr, false, false), recovery.Merge)); err != nil {
+				return at, false, err
+			}
+		}
+		next.Kind, next.Failure = KindFailed, FailUnmergeable
+		return at, false, f.say(ctx, n, scopeFailedComment(pr, problems, next), LabelHumanReview)
+	}
+	if len(sc.Trusted) > 0 {
+		return at, false, f.waitForPerson(ctx, t, state, pr, at, watched, sc.Trusted, next)
+	}
+	return at, true, nil
+}
+
+// refreshMergeScope fetches immediately before readiness or merge. A base
+// advance must still honor the ratified execution contract; a new head needs
+// its own CI result. Compatible base movement keeps the original novelty rule.
+func (f *Factory) refreshMergeScope(ctx context.Context, t Thread, state Post, pr github.PullRequest, at pullRequest, watched bool, next Marker) (bool, error) {
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return false, err
+	}
+	head, err := f.Repo.RevParse(ctx, "origin/"+state.Marker.Branch)
+	if err != nil || head != at.head {
+		return false, err
+	}
+	_, proceed, err := f.checkMergeScope(ctx, t, state, pr, at, watched, next)
+	return proceed, err
 }
 
 // watchMerged records a merge already observed on GitHub, using the same

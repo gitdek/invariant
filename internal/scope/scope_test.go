@@ -250,6 +250,7 @@ func TestAPlanKeepsAPlumbingPullRequestInScope(t *testing.T) {
 	}
 	for name, change := range map[string]func(map[string]string){
 		"outside the plan": func(f map[string]string) { f["README.md"] = "changed\n" },
+		"legacy CI":        func(f map[string]string) { f[".github/workflows/gate.yml"] = "name: changed\n" },
 		"a weakened test":  func(f map[string]string) { f["page/page_accept_test.go"] = accept + "\n// skipped\n" },
 		"another's plan":   func(f map[string]string) { delete(f, plumbing.LockPath(7)); f[plumbing.LockPath(8)] = record(8) },
 		"an edited plan": func(f map[string]string) {
@@ -267,6 +268,24 @@ func TestAPlanKeepsAPlumbingPullRequestInScope(t *testing.T) {
 		if r := check(files); r.OK() {
 			t.Errorf("%s: the pull request was in scope: %+v", name, r)
 		}
+	}
+	// Display metadata cannot remove Invariant's actual trusted paths.
+	forged := map[string]string{}
+	for k, v := range ok {
+		forged[k] = v
+	}
+	var lock plumbing.Lock
+	if err := json.Unmarshal([]byte(forged[plumbing.LockPath(7)]), &lock); err != nil {
+		t.Fatal(err)
+	}
+	lock.Plan.Trusted = nil
+	data, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged[plumbing.LockPath(7)] = string(data)
+	if r := check(forged); !r.OK() || !reflect.DeepEqual(r.Trusted, []string{"internal/factory/hook.go"}) {
+		t.Fatalf("forged metadata changed Invariant scope: %+v", r)
 	}
 }
 

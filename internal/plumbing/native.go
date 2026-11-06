@@ -284,6 +284,17 @@ func ReadRepositoryDraft(ctx context.Context, ws string, snapshot *repository.Sn
 		}
 	}
 	p.Execution = &Execution{Base: snapshot.Commit(), Digest: digest}
+	p.Trusted = nil
+	for file := range p.Touches(0) {
+		trusted, err := snapshot.IsTrusted(file)
+		if err != nil {
+			return p, err
+		}
+		if trusted {
+			p.Trusted = append(p.Trusted, file)
+		}
+	}
+	sort.Strings(p.Trusted)
 	return p, nil
 }
 

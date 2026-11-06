@@ -16,10 +16,14 @@ import (
 // show it works.
 func planComment(p *formalize.Proposal, m Marker) string {
 	plan := p.Plan
+	readiness := "Only final passing checks and approval make the pull request ready; otherwise it stays a draft with unresolved findings for a person."
+	if plan.Native() {
+		readiness = "Final passing checks and approval are required for readiness; configured trusted builds still stay drafts for a person. Unresolved findings leave a draft for a person."
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's my plan for **%s**. It's plumbing, so it's tested, not proved. Once you ratify it, the plan and its acceptance tests are pinned by hash: "+
 		"the build writes the files it names and may add new regular Go `*_test.go` regression files in the packages it touches, including a planned embedded asset's nearest owning Go package and new packages the plan names. It has to make every acceptance test pass without changing them.\n\n"+
-		"Existing unnamed tests, the ratified plan and acceptance tests, other production files and unrelated packages stay protected. The original checkout stays the baseline, so a repair may correct or remove a regression test the build added. Review findings return to the same builder and workspace for at most two repairs, each checked and reviewed afresh. Only final passing checks and approval make the pull request ready; otherwise it stays a draft with unresolved findings for a person.\n\n", plan.Name)
+		"Existing unnamed tests, the ratified plan and acceptance tests, other production files and unrelated packages stay protected. The original checkout stays the baseline, so a repair may correct or remove a regression test the build added. Review findings return to the same builder and workspace for at most two repairs, each checked and reviewed afresh. %s\n\n", plan.Name, readiness)
 	fmt.Fprintf(&b, "**What changes.** %s\n\n", strings.TrimSpace(plan.Summary))
 	b.WriteString("**The files the build may write:** " + codeList(plan.Files) + "\n\n")
 	b.WriteString("**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n")
@@ -96,7 +100,7 @@ func plumbingElsewhereComment(m Marker) string {
 		"For now, I plan it only on Invariant's own repository, `%s`, because it isn't ready for any other:\n\n"+
 		"- The gate workflow `invariant init` writes doesn't run the repository's tests or check a plan's ratification.\n"+
 		"- The build and review prompts describe Invariant.\n"+
-		"- The trusted base, which only a person merges, is Invariant's own layout.\n"+
+		"- Configured native checks derive a repository's trusted base, which only a person merges, but external issue intake is still disabled.\n"+
 		"- The sandbox the build is tested in has no network, so it has no way to fetch the repository's dependencies.\n\n"+
 		"So I haven't drafted anything, and I've left this issue for a person.", invariantRepository), m)
 }
@@ -110,9 +114,16 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 	merge := "I'll merge it once CI's `invariant/gate` passes on it."
 	if len(trusted) > 0 {
 		merge = fmt.Sprintf("It changes the trusted base (%s), so once CI's `invariant/gate` passes on it, a person merges it.", codeList(trusted))
+		if pr.Draft {
+			merge += " It stays a draft; I won't mark it ready or merge it."
+		}
 	}
-	body := fmt.Sprintf("The change is built: gofmt, go vet, the tests of every package it touches and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
-		res.Tests, pr.Number, merge)
+	checks := "gofmt, go vet, the tests of every package it touches"
+	if m.Proposal != nil && m.Proposal.Plan != nil && m.Proposal.Plan.Native() {
+		checks = "the captured repository checks"
+	}
+	body := fmt.Sprintf("The change is built: %s and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
+		checks, res.Tests, pr.Number, merge)
 	body += replacedSentence(m)
 	if res.Fallback != nil {
 		body += "\n\n" + fellBack(res.Fallback)

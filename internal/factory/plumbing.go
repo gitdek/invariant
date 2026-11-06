@@ -374,6 +374,8 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	at := pullRequest{head: code, gate: protocol.GatePending}
 	b, lockErr := f.Repo.Show(ctx, code, m.Project)
 	at.lock = lockAt(m.Project, b, lockErr)
+	lock, _ := plumbing.ReadLock(b)
+	configured := lock != nil && lock.Plan.Native()
 	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
 	if err != nil {
 		return err
@@ -394,18 +396,45 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if err != nil {
 		return err
 	}
+	// Publication may have been recovered after the base moved. Refresh before
+	// opening a ready PR or changing an existing draft's state, using its real
+	// diff rather than the proposal's display-only Trusted list.
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return err
+	}
+	if sha, err := f.Repo.RevParse(ctx, head); err != nil {
+		return err
+	} else if sha != code {
+		return fmt.Errorf("the published branch moved since the build; its current head needs checking")
+	}
+	sc, err = f.Repo.Scope(ctx, "origin/"+f.Base, code, n)
+	if err != nil {
+		return err
+	}
+	at.scopeMany = !sc.OK() || sc.Project != m.Project
+	from, to = buildStep(ratified, stops, at)
+	if !ok {
+		to.kind, to.failure = protocol.KindFailed, FailGate
+	}
+	if err := f.allowed(ctx, n, "publish the checked pull request", from, to); err != nil {
+		return err
+	}
+	held := configured && len(sc.Trusted) > 0
+	if configured {
+		next = withTrusted(next, sc.Trusted)
+	}
 	if !found {
-		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false), ok)); err != nil {
+		if err := f.recovers(ctx, n, "open a pull request", f.canOpenPullRequest(building(RunDone, true, false), ok && !held)); err != nil {
 			return err
 		}
 		if pr, err = f.GitHub.CreatePullRequest(ctx, github.NewPullRequest{
-			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !ok, Body: planPullRequestBody(t, next, res, sc.Trusted),
+			Title: t.Issue.Title, Head: m.Branch, Base: f.Base, Draft: !ok || held, Body: planPullRequestBody(t, next, res, sc.Trusted),
 		}); err != nil {
 			return err
 		}
 	}
 	var refusal error
-	if found && ok && pr.State == "open" {
+	if found && ok && !held && pr.State == "open" {
 		if pr, refusal, err = f.markReady(ctx, n, ratified, pr); err != nil {
 			return err
 		}
@@ -428,7 +457,24 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		return f.say(ctx, n, planFailedComment(&pr, res, runErr, next), LabelHumanReview)
 	}
 	next.Kind = KindPR
+	if held {
+		if err := f.GitHub.AddLabels(ctx, pr.Number, LabelHumanReview); err != nil {
+			return err
+		}
+		return f.say(ctx, n, planPRComment(pr, res, sc.Trusted, next), LabelHumanReview)
+	}
 	return f.say(ctx, n, planPRComment(pr, res, sc.Trusted, next), LabelPR)
+}
+
+// withTrusted updates a post's presentation without changing a shared proposal
+// or the ratified identity. Scope remains the only merge authority.
+func withTrusted(m Marker, files []string) Marker {
+	if m.Proposal != nil && m.Proposal.Plan != nil {
+		proposal, plan := *m.Proposal, *m.Proposal.Plan
+		plan.Trusted = append([]string(nil), files...)
+		proposal.Plan, m.Proposal = &plan, &proposal
+	}
+	return m
 }
 
 // waitForPerson says a pull request passed everything, but changes the
@@ -442,10 +488,14 @@ func (f *Factory) waitForPerson(ctx context.Context, t Thread, state Post, pr gi
 	if err := f.allowed(ctx, n, fmt.Sprintf("say #%d waits for a person to merge it", pr.Number), from, to); err != nil {
 		return err
 	}
-	if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(watched, pr, false, false), recovery.Merge)); err != nil {
-		return err
+	// An unwatched draft is outside recovery's merge model, as in unwatched.
+	// The protocol still records its existing trusted-base hold.
+	if !pr.Draft || watched {
+		if err := f.recovers(ctx, n, "say a person merges it", f.canPost(mergingPR(watched, pr, false, false), recovery.Merge)); err != nil {
+			return err
+		}
 	}
-	next.Failure = FailTrusted
+	next.Kind, next.Failure = KindFailed, FailTrusted
 	return f.say(ctx, n, trustedComment(pr, trusted, next), LabelHumanReview)
 }
 
