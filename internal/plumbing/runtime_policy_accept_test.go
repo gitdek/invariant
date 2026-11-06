@@ -32,11 +32,18 @@ func runtimeHasTestStart567(f *runtimeFixture567) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, argv := range f.starts {
-		if len(argv) > 0 && strings.HasSuffix(argv[0], "acceptance.test") {
+		if runtimeTestStart567(argv) {
 			return true
 		}
 	}
 	return false
+}
+
+func runtimeTestStart567(argv []string) bool {
+	if len(argv) > 4 && slices.Equal(argv[:4], []string{"/bin/sh", "-c", goTestingLauncher, "invariant-go-testing"}) {
+		argv = argv[4:]
+	}
+	return len(argv) > 0 && strings.HasSuffix(argv[0], "/acceptance.test")
 }
 
 func runtimeFlag567(argv []string, name string) string {
@@ -62,6 +69,9 @@ func TestLocalGoRuntimeAdmissionAndPolicy(t *testing.T) {
 	control := runtimeFixtureFor567(t, cache, plain)
 	in, e, _, err := control.execute(ctx)
 	runtimeCompleted567(t, in, e, err, "passed", "admitted real runtime")
+	if !runtimeHasTestStart567(control) {
+		t.Fatal("runtime observer missed the passing control")
+	}
 	for _, argv := range [][]string{
 		{"sh", "-c", "go test -run {test}"}, {"/usr/bin/go", "test", "-run={test}"},
 		{"go", "test", "./...", "-run={test}", "-run=TestOther"},

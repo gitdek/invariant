@@ -175,18 +175,21 @@ func validateGoTesting(source string) error {
 
 // Four length-prefixed strings per record keep arbitrary log bytes intact.
 // Only this testing hook writes the protocol; diagnostic framing is irrelevant.
-// The endpoint is captured during testing initialization, before candidate init.
-// Consume the handoff so re-executed test helpers run without producing events.
+// Testing initialization checks the launcher's ownership before opening the
+// endpoint. Dependencies may already have initialized and re-executed helpers;
+// consume the handoff in either process, but only the owner writes events.
 const goTestingHook = `
 var invariantEventMu sync.Mutex
 var invariantEventFile = func() *os.File {
  name := os.Getenv("INVARIANT_GO_TESTING_EVENTS")
- if name == "" { return nil }
+ owner := os.Getenv("INVARIANT_GO_TESTING_OWNER") == strconv.Itoa(os.Getpid())
  if err := os.Unsetenv("INVARIANT_GO_TESTING_EVENTS"); err != nil { panic(err) }
+ if err := os.Unsetenv("INVARIANT_GO_TESTING_OWNER"); err != nil { panic(err) }
+ if name == "" || !owner { return nil }
  f, err := os.OpenFile(name, os.O_WRONLY, 0)
  if err != nil { panic(err) }
  // OpenFile gives us a close-on-exec descriptor. Release the transport's
- // inherited descriptor too, before any test initialization can start helpers.
+ // inherited descriptor too, so later helpers cannot inherit either writer.
  if value, ok := strings.CutPrefix(name, "/dev/fd/"); ok {
   fd, err := strconv.Atoi(value)
   if err != nil || fd < 3 { panic("invalid host Go testing event descriptor") }

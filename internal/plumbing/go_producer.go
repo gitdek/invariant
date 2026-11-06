@@ -102,7 +102,7 @@ func (run *GoAcceptanceRun) start(ctx context.Context, part repository.Part) err
 	if err != nil {
 		return err
 	}
-	spec := RepositoryProcessSpec{Argv: goTestingArguments(binary, in.Argv), EventEnv: goTestingEventEnv, Directory: path.Dir(file)}
+	spec := RepositoryProcessSpec{Argv: goTestingLaunchArguments(binary, in.Argv), EventEnv: goTestingEventEnv, Directory: path.Dir(file)}
 	run.prepared, err = run.environment.Prepare(ctx, spec)
 	if err != nil {
 		return err
@@ -120,6 +120,16 @@ func (run *GoAcceptanceRun) start(ctx context.Context, part repository.Part) err
 func cloneGoInvocation(in RepositoryAcceptanceInvocation) RepositoryAcceptanceInvocation {
 	in.Argv = slices.Clone(in.Argv)
 	return in
+}
+
+// Bind the endpoint before any package initialization. Exec keeps the owned
+// process's PID, directory, descriptors and exit behavior; arguments are never
+// interpolated into the host's fixed script.
+const goTestingLauncher = `export INVARIANT_GO_TESTING_OWNER=$$
+exec "$@"`
+
+func goTestingLaunchArguments(binary string, captured []string) []string {
+	return append([]string{"/bin/sh", "-c", goTestingLauncher, "invariant-go-testing"}, goTestingArguments(binary, captured)...)
 }
 
 // Build policy has already reached both compilers verbatim. Go's driver adds
