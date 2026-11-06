@@ -159,7 +159,9 @@ func TestPrompt(t *testing.T) {
 // The agent's sandbox: the file tools and Invariant's tool, and nothing in
 // the home directory.
 func TestClaudeCodeSandbox(t *testing.T) {
-	args, err := ClaudeCode{Model: "opus", BudgetUSD: 5, MaxTurns: 80}.args(Job{Prompt: "p", GateServer: []string{"invariant", "mcp"}, Tools: []string{"check"}})
+	server := []string{"invariant", "mcp", "-formalize", "-parent-plan", "667", "-draft-context-endpoint", "http://127.0.0.1:12345/check-context",
+		"-draft-context-token", strings.Repeat("a", 64), "-draft-context-sha256", "sha256:" + strings.Repeat("b", 64), "/workspace"}
+	args, err := ClaudeCode{Model: "opus", BudgetUSD: 5, MaxTurns: 80}.args(Job{Prompt: "p", GateServer: server, Tools: []string{"check"}, allowance: "127.0.0.1:12346"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,13 +177,30 @@ func TestClaudeCodeSandbox(t *testing.T) {
 	if flags["--allowedTools"] != "Read,Write,Edit,Glob,Grep,mcp__invariant__check" {
 		t.Errorf("--allowedTools = %q", flags["--allowedTools"])
 	}
-	for _, deny := range []string{"Bash", "WebFetch", "Read(~/**)", "Grep(~/**)", "Glob(~/**)", "Write(~/**)", "Edit(~/**)"} {
+	for _, deny := range []string{"Bash", "WebFetch", "WebSearch", "Task", "NotebookEdit", "Read(~/**)", "Grep(~/**)", "Glob(~/**)", "Write(~/**)", "Edit(~/**)"} {
 		if !strings.Contains(","+flags["--disallowedTools"]+",", ","+deny+",") {
 			t.Errorf("--disallowedTools lacks %s", deny)
 		}
 	}
 	if flags["--mcp-config"] == "" || !contains(args, "--strict-mcp-config") {
 		t.Error("the agent must get Invariant's MCP server and no other")
+	}
+	var config struct {
+		Servers map[string]struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(flags["--mcp-config"]), &config); err != nil {
+		t.Fatal(err)
+	}
+	got := config.Servers["invariant"]
+	if len(config.Servers) != 1 || got.Command != server[0] || !reflect.DeepEqual(got.Args, server[1:]) || got.Env[ToolAllowanceEnv] != "127.0.0.1:12346" {
+		t.Fatalf("caller context reference or tool allowance changed: %+v", config)
+	}
+	if len(flags["--mcp-config"]) > 8192 || slices.Contains(got.Args, "-draft-context") {
+		t.Fatal("caller authority must use a short reference")
 	}
 }
 

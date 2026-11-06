@@ -199,6 +199,33 @@ func TestCodexRunsABuildsJobHeadless(t *testing.T) {
 			t.Errorf("line %d is %s; want the event %s", i, line, events[i-1])
 		}
 	}
+	t.Run("caller context reference", func(t *testing.T) {
+		server := []string{"/bin/invariant", "mcp", "-formalize", "-parent-plan", "667", "-draft-context-endpoint", "http://127.0.0.1:12345/check-context",
+			"-draft-context-token", strings.Repeat("a", 64), "-draft-context-sha256", "sha256:" + strings.Repeat("b", 64), ws}
+		draftArgs, err := c.args(Job{Workspace: ws, Prompt: "draft", GateServer: server, Tools: []string{"check"}, Effort: "max", allowance: "127.0.0.1:12346"}, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(server[1:])
+		want := `mcp_servers.invariant={command="/bin/invariant", args=` + string(encoded) + `, required=true, default_tools_approval_mode="approve", enabled_tools=["check"], startup_timeout_sec=60, tool_timeout_sec=900}`
+		if !containsRun(draftArgs, []string{"-c", want}) || len(want) > 8192 {
+			t.Fatal("modeled checker lost its short caller context reference")
+		}
+		// Changing the checker arguments must preserve every other setting
+		// already checked above, except its temporary directory and allowance.
+		for i, a := range args {
+			if i == 0 || args[i-1] != "-c" || strings.HasPrefix(a, "mcp_servers.") || strings.HasPrefix(a, "shell_environment_policy.set=") {
+				continue
+			}
+			if !containsRun(draftArgs, []string{"-c", a}) {
+				t.Errorf("modeled checker lost setting %s", a)
+			}
+		}
+		joined := strings.Join(draftArgs, "\n")
+		if !strings.Contains(joined, ToolAllowanceEnv+`="127.0.0.1:12346"`) || strings.Contains(joined, "network_access=true") || strings.Contains(joined, "network.enabled=true") {
+			t.Fatal("modeled checker changed the allowance or agent network restrictions")
+		}
+	})
 }
 
 // Stamping adds a time to an event, and leaves anything else as it is.

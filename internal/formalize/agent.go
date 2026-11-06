@@ -167,6 +167,11 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		return nil, err
 	}
 	defer release()
+	reference, closeContext, err := serveCheckContext(ctx, contextJSON)
+	if err != nil {
+		return nil, err
+	}
+	defer closeContext()
 	if err := writeFile(filepath.Join(ws, "request.md"), req.Markdown()); err != nil {
 		return nil, err
 	}
@@ -215,9 +220,10 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	checkLog := filepath.Join(out, "check-runs.jsonl")
 
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
-		Workspace:  ws,
-		Prompt:     Prompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan), "-draft-context", contextJSON, ws},
+		Workspace: ws,
+		Prompt:    Prompt(req, f.CheckRuns),
+		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan),
+			"-draft-context-endpoint", reference.Endpoint, "-draft-context-token", reference.Token, "-draft-context-sha256", reference.SHA256, ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
