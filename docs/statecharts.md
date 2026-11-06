@@ -272,7 +272,7 @@ A legacy source without a view needs a drafting-supplied `baseline/view.json`. I
 
 Structured receipts, Markdown, reader JSON/SVG companions and dashboard proposal and receipt pages retain both sources. When final model/include/view identities differ, they explicitly distinguish the retained proposal comparison from the independent final-model chart. Reusing output directories clears stale comparison exports. Dashboard immutable identities bind source snapshots and rendered contents, and restart revalidates saved comparisons; damage gets a visible diagnostic and no misleading comparison image.
 
-The merger records the new comparison and baseline policy decision for #648 because plumbing cannot write `decisions/`. If Docker is unavailable to the builder, the merger runs the added pinned-TLC coverage before merging:
+[D-0362](../decisions/journal/D-0362.jsonl) records the comparison and baseline policy for #648. The pinned-TLC coverage runs with:
 
 ```sh
 go test -tags integration ./internal/formalize -run '^TestComparison648PinnedTLC$' -count=1 -timeout 10m
