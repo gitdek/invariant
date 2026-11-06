@@ -477,7 +477,8 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 			Usage: synth.Usage{CostUSD: 0.10}}, nil
 	}
 	if len(req.Answers) < len(s.forks) {
-		return &formalize.Result{Proposal: &formalize.Proposal{Draft: formalize.Draft{Forks: s.forks}}, Usage: synth.Usage{CostUSD: 0.10}}, nil
+		p := &formalize.Proposal{Draft: formalize.Draft{Forks: checkedForks(s.t, s.forks, req.CheckContext().Choices)}}
+		return &formalize.Result{Proposal: p, Usage: synth.Usage{CostUSD: 0.10}}, nil
 	}
 	report := &verify.Report{ModelOnly: true, Passed: true, Design: verify.Design{Passed: true, Outcome: "passed", DistinctStates: 7, Depth: 3},
 		Witnesses: []verify.Witness{{Name: "CanFill", Reached: true, Steps: 2}}, Bugs: []verify.Bug{{Name: "PutWhenFull", Caught: true}}}
@@ -498,7 +499,7 @@ func (s *scriptedFormalizer) Formalize(_ context.Context, req formalize.Request,
 // The factory double supplies checked evidence as the formalizer does. The
 // reader evaluator still computes the chart from the buffer's complete graph;
 // TLC and invariant replay themselves are exercised at the formalize boundary.
-func checkedBufferReader(t *testing.T, p *formalize.Proposal) {
+func checkedBufferReader(t *testing.T, p *formalize.Proposal, scope ...statechart.Preview) {
 	t.Helper()
 	p.View = `{"version":1,"state":[{"id":"all","when":true,"label":"Buffer"}],"step":[{"id":"all","when":true,"label":"Update buffer"}]}`
 	g := tlc.GraphResult{Module: p.Module, Config: tlc.Config{Specification: "Spec", Constants: p.Bounds},
@@ -526,6 +527,9 @@ func checkedBufferReader(t *testing.T, p *formalize.Proposal) {
 	chart, err := statechart.Compute(t.Context(), statechart.Input{Graph: g, Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}, Invariants: matrix}, []byte(p.View))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(scope) > 0 {
+		chart.Preview = scope[0]
 	}
 	p.Reader = &formalize.Reader{Version: 1, Chart: chart}
 	// Encode the persisted fingerprint contract, just as a saved formalizer

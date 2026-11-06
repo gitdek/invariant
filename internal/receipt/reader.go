@@ -41,6 +41,9 @@ func readerMarkdown(r *verify.Reader) string {
 		return noReader
 	}
 	var b strings.Builder
+	if !r.Preview.IsZero() {
+		b.WriteString("\n" + statechart.TableLiteral(r.Preview.Description()) + "\n")
+	}
 	b.WriteString("\n**Reader chart**\n\n")
 	if d := r.Unavailable; d != nil {
 		fmt.Fprintf(&b, "No reader chart is available (%s): %s\n", tlcCheckLiteral(d.Code), statechart.TableLiteral(d.Message))

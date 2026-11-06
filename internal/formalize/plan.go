@@ -27,6 +27,9 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.RemoveAll(filepath.Join(out, "previews")); err != nil {
+		return nil, err
+	}
 	// The check tool's build cache serves only this draft's agent, whose
 	// run has ended when Plan returns; the factory's own check of the plan
 	// runs without it. The run's records stay (#366).
@@ -37,6 +40,16 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 		return nil, err
 	}
 	defer os.RemoveAll(ws)
+	authority := req.CheckContext()
+	authority.Planning = "plumbing"
+	_, release, err := stageCheckContext(ws, authority)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := stagePreviousPreviews(ws, req.Previous); err != nil {
+		return nil, err
+	}
 	if err := writeFile(filepath.Join(ws, "request.md"), req.Markdown()); err != nil {
 		return nil, err
 	}
@@ -141,6 +154,11 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 			return fail("a plumbing draft is plan.json, issues.json, or proposal.json with forks to ask")
 		}
 		r.Proposal = p
+		if len(p.Forks) > 0 {
+			if err := p.checkPreviews(ctx, f.Toolchain, authority); err != nil {
+				return fail(err.Error())
+			}
+		}
 		return r, nil
 	}
 	// The factory checks the plan itself, against the base branch as it is,

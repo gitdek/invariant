@@ -30,11 +30,29 @@ type Input struct {
 }
 
 type Result struct {
+	Preview Preview  `json:"preview,omitzero"`
 	Version int      `json:"version"`
 	States  []State  `json:"states"`
 	Initial []string `json:"initial"`
 	Arrows  []Arrow  `json:"arrows"`
 	Report  Report   `json:"report"`
+}
+
+// Preview identifies an unratified alternative, separately from prior choices.
+// The value field leaves ordinary charts and their metadata unchanged.
+type Preview struct {
+	Fork    string            `json:"fork"`
+	Option  string            `json:"option"`
+	Choices map[string]string `json:"choices,omitempty"`
+}
+
+func (p Preview) IsZero() bool { return p.Fork == "" && p.Option == "" && len(p.Choices) == 0 }
+
+func (p Preview) Description() string {
+	if p.IsZero() {
+		return ""
+	}
+	return "Unratified alternative " + p.Fork + "/" + p.Option + "; model-only evidence with candidate rules."
 }
 
 type State struct {

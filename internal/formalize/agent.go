@@ -22,17 +22,18 @@ import (
 // Request is everything people have said about an issue: the issue, their
 // comments, the forks they've decided, and the draft they asked to revise.
 type Request struct {
-	Repo     string // owner/name
-	Language string // the language the code will be written in
-	Issue    int
-	Title    string
-	Body     string
-	Author   string
-	Thread   []Message // people's comments, oldest first
-	Answers  []Answer  // the forks people decided
-	Previous *Proposal // the draft people asked to revise, if any
-	Current  *Current  // the project an amendment changes, if any (D-0045)
-	Existing *Existing // the existing code the issue asks the factory to check, if any (D-0054)
+	Repo            string // owner/name
+	Language        string // the language the code will be written in
+	Issue           int
+	Title           string
+	Body            string
+	Author          string
+	Thread          []Message  // people's comments, oldest first
+	Answers         []Answer   // the forks people decided
+	RevisionChoices []Revision // caller-authorized revisions to those answers
+	Previous        *Proposal  // the draft people asked to revise, if any
+	Current         *Current   // the project an amendment changes, if any (D-0045)
+	Existing        *Existing  // the existing code the issue asks the factory to check, if any (D-0054)
 	// Plumbing is the base branch, exported, for a plumbing issue: the
 	// agent plans a change to it instead of drafting statements (D-0105).
 	Plumbing string
@@ -157,6 +158,12 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		return nil, err
 	}
 	defer os.RemoveAll(ws)
+	authority := req.CheckContext()
+	contextJSON, release, err := stageCheckContext(ws, authority)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := writeFile(filepath.Join(ws, "request.md"), req.Markdown()); err != nil {
 		return nil, err
 	}
@@ -175,7 +182,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		}
 	}
 	if p := req.Previous; p != nil {
-		b, err := json.MarshalIndent(p.Draft, "", "  ")
+		b, err := json.MarshalIndent(p, "", "  ")
 		if err != nil {
 			return nil, err
 		}
@@ -207,7 +214,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
 		Prompt:     Prompt(req, f.CheckRuns),
-		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan), ws},
+		GateServer: []string{f.Binary, "mcp", "-formalize", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan), "-draft-context", contextJSON, ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
 		Timeout:    f.Timeout,
@@ -221,7 +228,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	if synth.ProviderUnavailable(runErr) {
 		err = unfinished(runErr)
 	} else if err = CheckStepDraft(ws, req.ParentPlan); err == nil {
-		p, report, err = Check(ctx, ws, f.Toolchain)
+		p, report, err = CheckWithContext(ctx, ws, f.Toolchain, authority)
 	}
 	if p != nil {
 		p.Language = req.Language
@@ -234,6 +241,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			r.Changes = Diff(c, p)
 		}
 	}
+	r.Proposal, r.Report = p, report
 	switch {
 	case synth.ProviderUnavailable(runErr):
 		r.Problem = err.Error()
@@ -242,9 +250,18 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 	case err != nil:
 		r.Problem = err.Error()
 	default:
-		r.Proposal, r.Report = p, report
 		if report != nil && !report.Passed {
 			r.Problem = verify.Feedback(report)
+		}
+	}
+	// Remove previous exports even after a failed repair. Only a complete
+	// checked request may appear under previews/.
+	if err := os.RemoveAll(filepath.Join(out, "previews")); err != nil {
+		return nil, err
+	}
+	if r.Problem == "" && p != nil && p.HasPreviews() {
+		if err := p.WritePreviews(out); err != nil {
+			r.Problem = err.Error()
 		}
 	}
 	for _, name := range []string{"proposal.json"} {

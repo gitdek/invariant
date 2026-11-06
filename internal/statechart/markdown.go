@@ -49,6 +49,9 @@ func BoundsMarkdown(bounds map[string]string) string {
 // Markdown renders only the supplied chart and report, without changing them.
 func (c *Result) Markdown() string {
 	var b strings.Builder
+	if !c.Preview.IsZero() {
+		b.WriteString(TableLiteral(c.Preview.Description()) + "\n\n")
+	}
 	aliases, labels := map[string]string{}, map[string]string{}
 	b.WriteString("```mermaid\nstateDiagram-v2\n")
 	for i, state := range c.States {
@@ -94,5 +97,11 @@ func (c *Result) Markdown() string {
 		}
 	}
 	fmt.Fprintf(&b, "\nComputed from %s by %s. This explains the bounded model; it adds no proof claim.\n", tableLiteral(c.Report.Source.Module), tableLiteral(c.Report.Source.TLC))
+	if !c.Preview.IsZero() {
+		for _, fork := range slices.Sorted(maps.Keys(c.Preview.Choices)) {
+			fmt.Fprintf(&b, "\nPreviously authorized choice: %s = %s.\n", tableLiteral(fork), tableLiteral(c.Preview.Choices[fork]))
+		}
+		fmt.Fprintf(&b, "\nJava image: %s. TLC jar SHA-256: %s.\n", tableLiteral(c.Report.Source.Tool.Image), tableLiteral(c.Report.Source.Tool.JarSHA256))
+	}
 	return b.String()
 }

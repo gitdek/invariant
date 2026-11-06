@@ -1102,7 +1102,21 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 	if err := f.recovers(ctx, t.Issue.Number, "answer partial choices", f.canPost(noting(), recovery.Note)); err != nil {
 		return err
 	}
-	return f.say(ctx, t.Issue.Number, forksComment(remaining, m), LabelAsking)
+	body := forksComment(remaining, m)
+	if m.Proposal.HasPreviews() {
+		problem := ""
+		if err := m.Proposal.ValidatePreviews(); err != nil {
+			problem = err.Error()
+		}
+		if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
+			problem = "The complete remaining alternatives exceed the comment or expanded marker size limit. Revise and check the options again."
+		}
+		if problem != "" {
+			m.Kind, m.Forks, m.Proposal = KindStuck, nil, nil
+			return f.say(ctx, t.Issue.Number, stuckComment(problem, m), LabelHumanReview)
+		}
+	}
+	return f.say(ctx, t.Issue.Number, body, LabelAsking)
 }
 
 func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formalize.Option, string, string) {
@@ -1288,8 +1302,21 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		m.Kind = KindUnsupported
 		return f.drafted(ctx, t, cause, base, m, unsupportedComment(p.Unsupported, m), "")
 	case len(p.Forks) > 0:
+		if req.Plumbing == "" && req.PRD == "" || p.HasPreviews() {
+			if err := p.ValidatePreviewContext(req.CheckContext()); err != nil {
+				m.Kind = KindStuck
+				return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
+			}
+		}
 		m.Kind, m.Forks, m.Proposal = KindForks, p.Forks, p
-		return f.drafted(ctx, t, cause, base, m, forksComment(p.Forks, m), LabelAsking)
+		body := forksComment(p.Forks, m)
+		if p.HasPreviews() {
+			if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
+				m.Kind, m.Forks, m.Proposal = KindStuck, nil, nil
+				return f.drafted(ctx, t, cause, base, m, stuckComment("The complete alternative previews exceed the comment or expanded marker size limit. Revise the presentation and check every option again before publication.", m), LabelHumanReview)
+			}
+		}
+		return f.drafted(ctx, t, cause, base, m, body, LabelAsking)
 	case p.IssuePlan != nil:
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, issuePlanComment(p, m), LabelProposal)
@@ -1525,6 +1552,13 @@ func (f *Factory) request(t Thread, answers []formalize.Answer, previous *formal
 	for _, c := range t.People {
 		if body := withoutCommands(c.Body); body != "" {
 			req.Thread = append(req.Thread, formalize.Message{By: c.User.Login, Body: body})
+			for _, a := range answers {
+				if fork, ok := askedFork(t, a.Fork); ok {
+					for _, o := range fork.Options {
+						req.RevisionChoices = append(req.RevisionChoices, formalize.Revision{Fork: fork.ID, Option: o.ID, By: c.User.Login})
+					}
+				}
+			}
 		}
 	}
 	return req

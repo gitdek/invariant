@@ -8,7 +8,7 @@ import (
 
 // StepPlanProblem explains why a step cannot propose another plan of issues.
 func StepPlanProblem(parent int) string {
-	return fmt.Sprintf("issues.json cannot be proposed for a step of parent #%d: each step must be one complete plumbing or modeled change. If the whole step cannot fit one reviewable pull request, ask a fork in proposal.json explaining what does not fit and suggesting replacement steps in the parent. Offer either building the complete step as one change, or a writer stopping parent #%d with /invariant stop and requesting a replacement plan on a new top-level issue with /invariant plan.", parent, parent)
+	return fmt.Sprintf("issues.json cannot be proposed for a step of parent #%d: each step must be one complete plumbing or modeled change. If the whole step cannot fit one reviewable pull request, ask a chart-free fork with kind \"step_fit\" in proposal.json explaining what does not fit and suggesting replacement steps in the parent. Use these two option texts: \"Build the complete step as one change.\" and \"A writer stops parent #%d with /invariant stop and requests a replacement plan on a new top-level issue with /invariant plan.\" The second may append replacement-step details after a comma or period. Only that build-or-replan question uses step_fit; modeled behavior choices still require checked previews.", parent, parent)
 }
 
 // CheckStepDraft refuses issues.json for a caller-authenticated plan step,

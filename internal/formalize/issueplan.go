@@ -220,11 +220,24 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.RemoveAll(filepath.Join(out, "previews")); err != nil {
+		return nil, err
+	}
 	ws, err := os.MkdirTemp("", "invariant-issues-")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(ws)
+	authority := req.CheckContext()
+	authority.Planning = "prd"
+	_, release, err := stageCheckContext(ws, authority)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := stagePreviousPreviews(ws, req.Previous); err != nil {
+		return nil, err
+	}
 	if err := writeFile(filepath.Join(ws, "request.md"), req.Markdown()); err != nil {
 		return nil, err
 	}
@@ -290,6 +303,11 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 			return fail("a PRD's draft is issues.json, or proposal.json with forks to ask")
 		}
 		r.Proposal = p
+		if len(p.Forks) > 0 {
+			if err := p.checkPreviews(ctx, f.Toolchain, authority); err != nil {
+				return fail(err.Error())
+			}
+		}
 		return r, nil
 	}
 	// The factory checks the plan itself, whatever the agent says.

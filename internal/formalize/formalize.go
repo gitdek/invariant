@@ -2,7 +2,8 @@
 // reads an issue and drafts the formal statements people would ratify, with
 // a draft model to check them against. When the issue leaves a real decision
 // open, the agent asks instead of guessing: it lists the fork, and people
-// answer it before anything is drafted (D-0002).
+// answer it before a selected proposal is drafted (D-0002). Modeled options
+// carry checked, unratified previews of their candidate behavior.
 package formalize
 
 import (
@@ -27,13 +28,15 @@ import (
 // would do.
 type Fork struct {
 	ID       string   `json:"id"` // F1, F2, ...
+	Kind     string   `json:"kind,omitempty"`
 	Question string   `json:"question"`
 	Options  []Option `json:"options"`
 }
 
 type Option struct {
-	ID   string `json:"id"` // A, B, ...
-	Says string `json:"says"`
+	ID      string   `json:"id"` // A, B, ...
+	Says    string   `json:"says"`
+	Preview *Preview `json:"preview,omitempty"`
 }
 
 // Option finds one of the fork's options by its id.
@@ -254,6 +257,9 @@ var Languages = map[string]string{
 // Write lays the proposal out as a project in dir: the manifest, the lock,
 // the module and the request. ratified is nil for a draft.
 func (p *Proposal) Write(dir, request string, ratified *project.Ratification) error {
+	if len(p.Forks) != 0 {
+		return fmt.Errorf("alternatives are not a selected project")
+	}
 	if p.Reader != nil {
 		if err := p.ValidateReader(); err != nil {
 			return err
@@ -294,9 +300,24 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 // Check stages the draft in ws as a project and runs the gate's model
 // checks on it: TLC, the witnesses and the known bugs.
 func Check(ctx context.Context, ws string, tc toolchain.Toolchain) (*Proposal, *verify.Report, error) {
+	authority := CheckContext{}
+	if saved, ok := checkContexts.Load(ws); ok {
+		authority = saved.(CheckContext)
+	}
+	return CheckWithContext(ctx, ws, tc, authority)
+}
+
+// CheckWithContext uses caller-owned authority, never fields in proposal.json.
+func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, authority CheckContext) (*Proposal, *verify.Report, error) {
+	if err := CheckStepDraft(ws, authority.ParentPlan); err != nil {
+		return nil, nil, err
+	}
 	p, err := Read(ws)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(p.Forks) > 0 {
+		return p, nil, p.checkPreviews(ctx, tc, authority)
 	}
 	if !p.Ratifiable() {
 		return p, nil, nil

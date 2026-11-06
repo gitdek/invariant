@@ -173,10 +173,9 @@ func TestANewProjectsDraftIsNoAmendment(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "src"), 0o755)
 	os.WriteFile(filepath.Join(root, "src", "store.ts"), []byte("export class Store {}"), 0o644)
-	f := Formalizer{Backend: scripted{`{"name": "leases", "slug": "leases", "module": "Leases", "package": "leases",
-		"forks": [{"id": "F1", "question": "When a lease expires, what happens?", "options": [{"id": "A", "says": "Review."}, {"id": "B", "says": "Retry."}]}]}`},
+	f := Formalizer{Backend: scripted{stepFork560},
 		CheckRuns: 1, Timeout: time.Minute}
-	req := Request{Repo: "gitdek/copythis-ad", Issue: 33, Title: "Check leases", Existing: &Existing{Paths: []string{"src"}, Root: root}}
+	req := Request{Repo: "gitdek/copythis-ad", Issue: 33, Title: "Check leases", ParentPlan: 10, Existing: &Existing{Paths: []string{"src"}, Root: root}}
 	r, err := f.Formalize(context.Background(), req, t.TempDir())
 	if err != nil {
 		t.Fatal(err)

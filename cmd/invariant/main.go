@@ -345,6 +345,7 @@ func mcpCmd(ctx context.Context, args []string) int {
 	checkBuild := fs.String("check-build", "", "with -plan or -plumbing: the registration on the check queue")
 	issues := fs.Bool("issues", false, "serve the check tool to an agent drafting a PRD's plan of issues in WORKSPACE")
 	parentPlan := fs.Int("parent-plan", 0, "with draft checks: the caller-authenticated parent plan's issue, or zero for an ordinary issue")
+	draftContext := fs.String("draft-context", "", "with -formalize: caller-owned choice and parent context")
 	fs.Parse(args)
 	if (*checkQueue != "" || *checkBuild != "") && ((!*pipes && !*plan) || *checkQueue == "" || *checkBuild == "") {
 		fmt.Fprintln(os.Stderr, "invariant: a check queue needs -plan or -plumbing, -check-queue and -check-build")
@@ -399,7 +400,14 @@ func mcpCmd(ctx context.Context, args []string) int {
 		return 2
 	}
 	if *formal {
-		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath, *parentPlan)}}
+		authority := formalize.CheckContext{ParentPlan: *parentPlan}
+		if *draftContext != "" {
+			if err := json.Unmarshal([]byte(*draftContext), &authority); err != nil || authority.ParentPlan != *parentPlan {
+				fmt.Fprintln(os.Stderr, "invariant: invalid caller draft context")
+				return 2
+			}
+		}
+		server := mcp.Server{Name: "invariant", Version: "0.4", Tools: []mcp.Tool{checkTool(ws, tc, *maxRuns, *logPath, *parentPlan, authority)}}
 		if err := server.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "invariant:", err)
 			return 1
@@ -649,8 +657,12 @@ func testTool(root string, n int, ws string, sb plumbing.Sandbox, maxRuns int, l
 }
 
 // checkTool runs the gate's model checks on a formalizing agent's draft.
-func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, parentPlan int) mcp.Tool {
+func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, parentPlan int, staged ...formalize.CheckContext) mcp.Tool {
 	calls := toolCalls("check", maxRuns)
+	authority := formalize.CheckContext{ParentPlan: parentPlan}
+	if len(staged) > 0 {
+		authority = staged[0]
+	}
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
@@ -672,11 +684,14 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, p
 					synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: passed, Failed: failed, At: time.Now().UTC().Format(time.RFC3339)})
 				}
 			}
-			p, r, err := formalize.Check(ctx, ws, tc)
+			p, r, err := formalize.CheckWithContext(ctx, ws, tc, authority)
 			switch {
 			case err != nil:
 				record(false, "draft: "+err.Error())
 				return fmt.Sprintf("The draft can't be checked: %v\n\n(Check %d of %d.)", err, runs, maxRuns), true
+			case p.HasPreviews():
+				record(true)
+				return p.PreviewFeedback() + fmt.Sprintf("\n\n(Check %d of %d.)", runs, maxRuns), false
 			case r == nil:
 				record(true)
 				return fmt.Sprintf("proposal.json asks questions or says the issue is unsupported (%d forks), so there's nothing "+
