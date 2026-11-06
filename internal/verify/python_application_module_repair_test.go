@@ -128,7 +128,7 @@ def busy():
 				// The watchdog's own startup comes out of the budget, about
 				// 0.1s in emulated Docker. Half a second still has the busy
 				// loop holding the GIL far past the deadline.
-				_, p := pa321Fixture(t, source, strings.Replace(pa321Driver, "timeout=2", "timeout=0.5", 1))
+				_, p := pa321Fixture(t, source, strings.Replace(pa321Deadline, "timeout=2", "timeout=0.5", 1))
 				opts := pa318Options(t, real, new(int))
 				execute := opts.Execute
 				if execute == nil {

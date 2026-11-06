@@ -115,28 +115,38 @@ func TestConfiguredPlanningCarriesCapturedAuthorityThroughChecksAndRevisions(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := &drafter503{t: t, previous: previous}
-	f := Formalizer{Backend: agent, Binary: "unused-fixture-binary", CheckRuns: 2, Timeout: 10 * time.Second, Sandbox: plumbing.Sandbox{Original: root, Repository: &plumbing.RepositoryChecks{Snapshot: snapshot}}}
-	out := t.TempDir()
-	result, err := f.Plan(context.Background(), Request{Issue: 503, Previous: &Proposal{Draft: Draft{Name: previous.Name}, Plan: previous, Hash: previous.Hash()}}, root, out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if agent.checked == nil {
-		t.Fatal("configured check process was never reached")
-	}
-	if result == nil || result.Proposal != nil || result.Problem == "" {
-		t.Fatalf("final proposal ignored missing native evidence: %+v", result)
-	}
-	data, err = os.ReadFile(filepath.Join(out, "formalization.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saved Result
-	if err := json.Unmarshal(data, &saved); err != nil {
-		t.Fatal(err)
-	}
-	if saved.Proposal != nil || saved.Problem == "" {
-		t.Fatal("saved final result requalified an unsupported pytest wrapper")
+	for _, original := range []string{"empty", "matching", "conflicting"} {
+		t.Run(original, func(t *testing.T) {
+			agent := &drafter503{t: t, previous: previous}
+			f := Formalizer{Backend: agent, Binary: "unused-fixture-binary", CheckRuns: 2, Timeout: 10 * time.Second, Sandbox: plumbing.Sandbox{Repository: &plumbing.RepositoryChecks{Snapshot: snapshot}}}
+			switch original {
+			case "matching":
+				f.Sandbox.Original = root
+			case "conflicting":
+				f.Sandbox.Original = t.TempDir()
+			}
+			out := t.TempDir()
+			result, err := f.Plan(context.Background(), Request{Issue: 503, Previous: &Proposal{Draft: Draft{Name: previous.Name}, Plan: previous, Hash: previous.Hash()}}, root, out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if agent.checked == nil {
+				t.Fatal("configured check process was never reached")
+			}
+			if result == nil || result.Proposal != nil || result.Problem == "" {
+				t.Fatalf("final proposal ignored missing native evidence: %+v", result)
+			}
+			data, err = os.ReadFile(filepath.Join(out, "formalization.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved Result
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Proposal != nil || saved.Problem == "" {
+				t.Fatal("saved final result requalified an unsupported pytest wrapper")
+			}
+		})
 	}
 }

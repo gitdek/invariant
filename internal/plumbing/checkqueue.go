@@ -92,8 +92,7 @@ type checkBuild struct {
 	cancel  context.CancelFunc
 	stop    func() bool
 	sandbox Sandbox
-	plan    *Plan
-	repo    string // nonempty only for a registered planning check
+	plan    *Plan // nil for planning; both modes may retain sandbox.Original
 	wg      sync.WaitGroup
 	mu      sync.Mutex
 	waiting int
@@ -144,7 +143,6 @@ func (q *CheckQueue) RegisterPlan(ctx context.Context, sandbox Sandbox, repo str
 	if err != nil {
 		return nil, nil, err
 	}
-	b.repo = repo
 	return &CheckClient{Address: q.listener.Addr().String(), Build: b.id}, func() { b.finish() }, nil
 }
 
@@ -187,7 +185,7 @@ func (b *checkBuild) wait(start bool) {
 }
 
 func (b *checkBuild) run(ctx context.Context, root string) (Result, error) {
-	if b.repo != "" {
+	if b.plan == nil {
 		return Result{}, errors.New("a planning registration cannot run a build")
 	}
 	if err := b.admit(ctx); err != nil {
@@ -198,14 +196,14 @@ func (b *checkBuild) run(ctx context.Context, root string) (Result, error) {
 }
 
 func (b *checkBuild) check(ctx context.Context, ws string) (*Checked, error) {
-	if b.repo == "" {
+	if b.plan != nil {
 		return nil, errors.New("a build registration cannot replace its plan")
 	}
 	if err := b.admit(ctx); err != nil {
 		return nil, err
 	}
 	defer func() { <-b.queue.slots }()
-	return Check(ctx, ws, b.repo, b.sandbox)
+	return Check(ctx, ws, b.sandbox.Original, b.sandbox)
 }
 
 func (b *checkBuild) admit(ctx context.Context) error {

@@ -94,17 +94,8 @@ func (s Sandbox) repositoryAdapter(framework string) RepositoryAcceptanceAdapter
 	if adapter := s.Repository.Adapters[framework]; adapter != nil {
 		return adapter
 	}
-	if framework == "go" {
-		return GoRepositoryAcceptanceAdapter{}
-	}
-	if framework == "pytest" {
-		return PytestRepositoryAcceptanceAdapter{}
-	}
-	if framework == "vitest" {
-		return VitestRepositoryAcceptanceAdapter{}
-	}
-	if framework == "jest" {
-		return JestRepositoryAcceptanceAdapter{}
+	if definition, ok := lookupAcceptanceFramework(framework); ok {
+		return definition.defaultAdapter()
 	}
 	return nil
 }

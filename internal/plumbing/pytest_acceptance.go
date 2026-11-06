@@ -29,7 +29,8 @@ func (PytestRepositoryAcceptanceAdapter) Select(ctx context.Context, part reposi
 	if err := ctx.Err(); err != nil {
 		return RepositoryAcceptanceSelection{}, err
 	}
-	if part.Language != "python" || test.Framework != "pytest" || part.Name != test.Part {
+	definition, _ := lookupAcceptanceFramework("pytest")
+	if part.Language != definition.language || test.Framework != "pytest" || part.Name != test.Part {
 		return fail("pytest acceptance needs its captured Python owner and framework")
 	}
 	if err := test.validateNative(); err != nil {

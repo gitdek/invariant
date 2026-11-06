@@ -74,19 +74,7 @@ func comparison648Draft(t *testing.T, tc toolchain.Toolchain, req formalize.Requ
 		reader603Write(t, filepath.Join(j.Workspace, "view.json"), strings.ReplaceAll(reader603View, "Working", label))
 		// This is the context passed to the actual MCP check process, not the
 		// agent-editable convenience copy. Exercise it as well as direct Check.
-		var authority formalize.CheckContext
-		found := false
-		for i, arg := range j.GateServer {
-			if arg == "-draft-context" && i+1 < len(j.GateServer) {
-				if err := json.Unmarshal([]byte(j.GateServer[i+1]), &authority); err != nil {
-					t.Fatal(err)
-				}
-				found = true
-			}
-		}
-		if !found {
-			t.Fatal("check process lost its caller context")
-		}
+		authority := loadDraftContext(t, ctx, j, req.ParentPlan)
 		reader603Write(t, filepath.Join(j.Workspace, "check-context.json"), `{}`)
 		p, r, err := formalize.CheckWithContext(ctx, j.Workspace, tc, authority)
 		if err != nil || r == nil || !r.Passed {

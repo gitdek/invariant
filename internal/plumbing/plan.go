@@ -13,9 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path"
 	"path/filepath"
@@ -353,33 +350,6 @@ func (p *Plan) Validate() error {
 			}
 		}
 		sort.Strings(p.Trusted)
-	}
-	return nil
-}
-
-// declares checks that a test file parses as Go and declares every
-// acceptance test the plan puts in it, each as func TestX(t *testing.T).
-func declares(file, src string, tests []Test) error {
-	f, err := parser.ParseFile(token.NewFileSet(), file, src, parser.SkipObjectResolution)
-	if err != nil {
-		return fmt.Errorf("acceptance test file %s doesn't parse: %v", file, err)
-	}
-	have := map[string]bool{}
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Recv != nil || fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
-			continue
-		}
-		if star, ok := fn.Type.Params.List[0].Type.(*ast.StarExpr); ok {
-			if sel, ok := star.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "T" {
-				have[fn.Name.Name] = true
-			}
-		}
-	}
-	for _, t := range tests {
-		if t.File == file && !have[t.Name] {
-			return fmt.Errorf("acceptance test file %s doesn't declare func %s(t *testing.T)", file, t.Name)
-		}
 	}
 	return nil
 }

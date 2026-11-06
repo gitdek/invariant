@@ -118,12 +118,18 @@ async def submit(request, *, status):
 const pa321Driver = `from invariant_observe import module
 from tasks import lifecycle as app
 def drive():
-    with module(app.advance, fields={'status':'tasks[*].status', 'details':'meta', 'first':'rows[0].value'}, timeout=2) as life:
+    with module(app.advance, fields={'status':'tasks[*].status', 'details':'meta', 'first':'rows[0].value'}, timeout=10) as life:
         life.step(app.submit, {'upload': object()}, status='done')
         life.step(app.submit, {'upload': object()}, status='other')
 if __name__ == '__main__':
     drive()
 `
+
+// pa321Deadline is the driver with a two-second step, for the tests of the
+// step's watchdog and deadline, which shorten or lengthen it from there.
+// Every other test gives a step ten seconds, so a loaded CI runner can't
+// starve one past its watchdog (#698).
+var pa321Deadline = strings.Replace(pa321Driver, "timeout=10", "timeout=2", 1)
 
 func pa321Fixture(t *testing.T, source, driver string) (string, *project.Project) {
 	t.Helper()
@@ -351,9 +357,9 @@ func TestPythonApplicationExecutionModuleRefusals(t *testing.T) {
 				{"no target", strings.Replace(base, "target=advance", "target=finish", 1), pa321Driver},
 				{"preexisting worker", base + "\nready = threading.Event()\ndef waiting():\n    ready.wait()\n    advance(reserve({'upload':1}), 'done')\nthreading.Thread(target=waiting, daemon=True).start()\nasync def release(request, *, status):\n    ready.set()\n    await asyncio.sleep(0.03)\n", strings.ReplaceAll(pa321Driver, "app.submit", "app.release")},
 				{"driver started worker", base, strings.Replace(pa321Driver, "def drive():", "def drive():\n    import threading\n    threading.Thread(target=lambda: None).start()", 1)},
-				{"worker still running", strings.Replace(base, "time.sleep(0.03)", "time.sleep(30)", 1), strings.Replace(pa321Driver, "timeout=2", "timeout=0.1", 1)},
-				{"non target worker still running", strings.Replace(base, "    worker.start()", "    worker.start()\n    threading.Thread(target=time.sleep, args=(30,)).start()", 1), strings.Replace(pa321Driver, "timeout=2", "timeout=0.1", 1)},
-				{"awaitable never completes", base + "\nasync def forever(request, *, status):\n    await asyncio.Event().wait()\n", strings.ReplaceAll(strings.Replace(pa321Driver, "timeout=2", "timeout=0.1", 1), "app.submit", "app.forever")},
+				{"worker still running", strings.Replace(base, "time.sleep(0.03)", "time.sleep(30)", 1), strings.Replace(pa321Deadline, "timeout=2", "timeout=0.1", 1)},
+				{"non target worker still running", strings.Replace(base, "    worker.start()", "    worker.start()\n    threading.Thread(target=time.sleep, args=(30,)).start()", 1), strings.Replace(pa321Deadline, "timeout=2", "timeout=0.1", 1)},
+				{"awaitable never completes", base + "\nasync def forever(request, *, status):\n    await asyncio.Event().wait()\n", strings.ReplaceAll(strings.Replace(pa321Deadline, "timeout=2", "timeout=0.1", 1), "app.submit", "app.forever")},
 				{"state changed between steps", base, strings.Replace(pa321Driver, "        life.step(app.submit, {'upload': object()}, status='other')", "        app.meta['values'].append('forged')\n        life.step(app.submit, {'upload': object()}, status='other')", 1)},
 				{"caught handle write", base, strings.Replace(pa321Driver, "        life.step(app.submit", "        try:\n            life.state = {}\n        except AttributeError:\n            pass\n        life.step(app.submit", 1)},
 				{"caught expectation mismatch", base, strings.Replace(pa321Driver, "        life.step(app.submit, {'upload': object()}, status='done')", "        try:\n            life.step(app.submit, {'upload': object()}, status='done', expected_after={'status':['forged']})\n        except Exception:\n            pass", 1)},
