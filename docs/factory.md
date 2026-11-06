@@ -48,6 +48,28 @@ The opt-in real-image gate checks cold-run capacity on a cgroup-v2 Docker host, 
 
 The orphan-reaping acceptance test checks `--init` alongside the existing launch settings without Docker. Run `INVARIANT_PLUMBING_INIT_REAL=1 go test ./internal/plumbing -run '^TestSandboxReapsOrphanedProcesses$' -count=1 -timeout 20m` to also run a Go test in the pinned sandbox image: it waits for a child's parent to exit, kills the orphan, and requires `kill(pid, 0)` to report that the process is gone (`ESRCH`). The real-image check returns normally when it is not enabled.
 
+## Recording heap coverage
+
+Under [#684's ratified plan](../.invariant/plans/issue-684.json), the large-recording tests `TestGateRecordingPeakHeap`, `TestGateRefusedRecordingPeakHeap` and `TestPythonApplicationConversionPeakHeap` use the existing `integration` build tag. Ordinary plumbing checks exclude them from discovery. Each appears exactly once among the tests the tag adds, so the existing CI integration lane runs all three without a new environment opt-in.
+
+Ordinary checks keep `TestPythonApplicationConversionValidation`'s errors and validation and interleaved sampled lifecycles, including writer failures, cancellation and invalid observations. They also retain gate ownership, byte compatibility, cleanup and refusal coverage, sampled and explored Python application transport with strict refusal failure, and recording-storage regressions. Acceptance tests compare real ordinary and tagged inventories and execute the retained functional cases, requiring each to run and pass without skips or duplicates.
+
+The integration workloads still use 32,768 and 65,536 entries, Go and TypeScript routes, successful and late-bad recordings, refused attempts, and sampled and explored Python conversion. The gate retains its 192 MiB peak heap ceiling and descriptor bound; conversion retains its 96 MiB additional heap ceiling above live observations. Both keep their sampling, baseline accounting, cleanup and complete recording, tail and coverage checks. Measured children retain `GOMAXPROCS=1`, `GOGC=100`, `GOMEMLIMIT=off`, one TLC slot, and their existing selectors and timeouts. Run the stress cases explicitly with:
+
+```sh
+go test -tags=integration ./internal/verify -run '^(TestGateRecordingPeakHeap|TestGateRefusedRecordingPeakHeap|TestPythonApplicationConversionPeakHeap)$' -count=1 -timeout 20m
+```
+
+These cases use command-boundary stand-ins and synthetic observations; they need no real Docker verifiers. Other tests in the integration suite retain their existing prerequisites. Check ordinary coverage and scheduling with:
+
+```sh
+go test ./internal/verify -count=1 -timeout 20m
+go test ./internal/verify -run '^(TestPythonApplicationConversionValidation|TestGateRecordingOwnershipAndCompatibility|TestPythonApplicationRecordingTransport|TestPythonRecording.*|TestRecordingCompatibilityCleanup|TestRecordingLinkedOutput)$' -shuffle=on -count=3 -timeout 20m
+go test -race ./internal/verify -run '^(TestPythonApplicationConversionValidation|TestGateRecordingOwnershipAndCompatibility|TestPythonApplicationRecordingTransport|TestPythonRecording.*|TestRecordingCompatibilityCleanup|TestRecordingLinkedOutput)$' -shuffle=on -count=3 -timeout 20m
+```
+
+This changes test scheduling only. The four-CPU default, eight sandbox workers, 4 GiB and 1,024-process limits, check queue and ordinary and verify deadlines remain as recorded by [D-0281](../decisions/journal/D-0281.jsonl), [D-0313](../decisions/journal/D-0313.jsonl) and [D-0350](../decisions/journal/D-0350.jsonl). The merger must record the scheduling decision refining [D-0333](../decisions/journal/D-0333.jsonl); this plumbing build cannot write `decisions/`.
+
 ## Container CPU limits
 
 Under [#622's ratified plan](../.invariant/plans/issue-622.json), workload containers launched with Docker `run` or `create` default to **4 CPUs each**. Set `INVARIANT_CONTAINER_CPUS` in the host environment to change that default. Unset or empty means `4`; finite decimal counts of at least `0.01`, such as `0.5`, `2.5` or `8`, are accepted. Signs, exponents, nondecimal notation, whitespace, nonfinite values and smaller counts are refused with an error naming the setting before workload launch or its image acquisition. Cleanup remains available with an invalid setting.
