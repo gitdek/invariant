@@ -62,9 +62,12 @@ type svgArrow struct {
 }
 
 type svgLayout struct {
-	nodes         []svgNode
-	arrows        []svgArrow
-	index         map[string]int
+	nodes  []svgNode
+	arrows []svgArrow
+	index  map[string]int
+	// number is each state's reading number, by its position in Result.States:
+	// column by column as the layout draws them, then top to bottom (#626).
+	number        []int
 	report        []svgReportText
 	width, height float64
 }
@@ -90,19 +93,32 @@ type svgColumn struct {
 // State sizes depend only on their text. Columns and the space between rows
 // reserve separate corridors for forward labels, local detours and returns.
 // Vertical legs stay outside every label area, including the return labels
-// below the drawing. Routing therefore never needs to enlarge a state.
-func layoutSVG(c *Result, report []string) svgLayout {
-	l := svgLayout{index: map[string]int{}}
+// below the drawing. Routing therefore never needs to enlarge a state. The
+// report is laid out separately, below the drawing, once states are numbered.
+func layoutSVG(c *Result) svgLayout {
+	l := svgLayout{index: map[string]int{}, number: make([]int, len(c.States))}
 	for i, s := range c.States {
 		l.index[s.ID] = i
-		label := fmt.Sprintf("State %d · %s\n", i+1, svgCount(len(s.Members), "concrete state")) + s.Label
+	}
+	// Layers come from the arrows alone, so states get their reading numbers
+	// before their text, which sets their sizes, is built. Initial states form
+	// the first column.
+	layers, rank := svgLayers(c, l.index)
+	n := 0
+	for _, layer := range layers {
+		for _, i := range layer {
+			n++
+			l.number[i] = n
+		}
+	}
+	for i, s := range c.States {
+		label := fmt.Sprintf("State %d · %s\n", l.number[i], svgCount(len(s.Members), "concrete state")) + s.Label
 		if len(s.ViolatedRules) > 0 {
 			label += "\nViolated invariants: " + strings.Join(s.ViolatedRules, ", ")
 		}
 		t := measureSVGText(label)
 		l.nodes = append(l.nodes, svgNode{svgBox: svgBox{width: max(180, t.width+2*svgPadding), height: t.height + 2*svgPadding}, text: t})
 	}
-	layers, rank := svgLayers(c, l.index)
 	columns := make([]svgColumn, len(layers))
 	row := make([]int, len(c.States))
 	rowCount := 0
@@ -261,7 +277,6 @@ func layoutSVG(c *Result, report []string) svgLayout {
 		l.width = max(l.width, a.fromLane+svgMargin, a.toLane+svgMargin, a.label.x+a.label.width+svgMargin)
 	}
 	l.height = y + svgMargin
-	l.layoutReport(report)
 	return l
 }
 

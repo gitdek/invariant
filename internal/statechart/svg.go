@@ -1,6 +1,7 @@
 package statechart
 
 import (
+	"cmp"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -28,7 +29,8 @@ func (c *Result) SVG() (string, error) {
 	if err := validateSVGText(reflect.ValueOf(*c)); err != nil {
 		return "", err
 	}
-	l := layoutSVG(c, svgReport(c))
+	l := layoutSVG(c)
+	l.layoutReport(svgReport(c, l.index, l.number))
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="chart-title" aria-describedby="chart-description" viewBox="0 0 %g %g" width="%g" height="%g" font-family="monospace" font-size="14" fill="#17212b">`, l.width, l.height, l.width, l.height)
 	b.WriteString(`<title id="chart-title">Bounded reader statechart</title><desc id="chart-description">Every checked chart state, initial and visible directed arrow, followed by bounds, rule wording, state qualifications, hidden occurrences, independent counts, provenance and temporal trace facts. This bounded model view adds no proof claim.</desc>`)
@@ -40,7 +42,7 @@ func (c *Result) SVG() (string, error) {
 	for i, a := range c.Arrows {
 		route := l.arrows[i]
 		fmt.Fprintf(&b, `<g id="arrow-%d" data-from="%s" data-to="%s" data-label="%s"><title>%s</title>`, i+1, svgEscape(a.From), svgEscape(a.To), svgEscape(a.Label), svgEscape(a.Label))
-		fmt.Fprintf(&b, `<desc>State %d to state %d; %s.</desc>`, l.index[a.From]+1, l.index[a.To]+1, svgCount(a.Count, "concrete step occurrence"))
+		fmt.Fprintf(&b, `<desc>State %d to state %d; %s.</desc>`, l.number[l.index[a.From]], l.number[l.index[a.To]], svgCount(a.Count, "concrete step occurrence"))
 		writeSVGPath(&b, route.path)
 		fmt.Fprintf(&b, `<circle cx="%g" cy="%g" r="3" fill="#34495e"/>`, route.fromX, route.fromY)
 		writeSVGRect(&b, route.label, "#ffffff", "none")
@@ -61,7 +63,7 @@ func (c *Result) SVG() (string, error) {
 	for i, id := range c.Initial {
 		n := l.nodes[l.index[id]]
 		y := n.y + n.height/2
-		fmt.Fprintf(&b, `<g id="initial-%d" data-initial="%s"><title>Initial state %d</title>`, i+1, svgEscape(id), l.index[id]+1)
+		fmt.Fprintf(&b, `<g id="initial-%d" data-initial="%s"><title>Initial state %d</title>`, i+1, svgEscape(id), l.number[l.index[id]])
 		fmt.Fprintf(&b, `<circle cx="40" cy="%g" r="5" fill="#34495e"/>`, y)
 		writeSVGPath(&b, fmt.Sprintf("M 40 %g L %g %g", y, n.x, y))
 		writeSVGText(&b, measureSVGText("Initial"), 8, y-svgLineHeight-svgPadding/2)
@@ -240,7 +242,10 @@ func validateSVGText(v reflect.Value) error {
 	return nil
 }
 
-func svgReport(c *Result) []string {
+// svgReport lists states and arrows in the drawing's reading order, with the
+// numbers the drawing shows. index and number are the layout's: each state's
+// position in c.States and its reading number by that position.
+func svgReport(c *Result, index map[string]int, number []int) []string {
 	r := c.Report
 	out := []string{
 		"Bounded model report",
@@ -263,10 +268,14 @@ func svgReport(c *Result) []string {
 			out = append(out, "Expected violation: "+rule.Expect)
 		}
 	}
-	index := map[string]int{}
-	out = append(out, "State qualifications")
+	states := make([]State, len(c.States))
 	for i, s := range c.States {
-		index[s.ID] = i + 1
+		states[number[i]-1] = s
+	}
+	// Validation has already checked that every arrow joins two chart states.
+	reading := func(id string) int { return number[index[id]] }
+	out = append(out, "State qualifications")
+	for i, s := range states {
 		out = append(out, fmt.Sprintf("State %d: ", i+1)+s.Label,
 			"Concrete members: "+svgList(s.Members), "Initial members: "+svgList(s.InitialMembers),
 			"Violated invariant rules: "+svgList(s.ViolatedRules), "Unavailable model actions: "+svgList(s.UnavailableActions))
@@ -280,8 +289,13 @@ func svgReport(c *Result) []string {
 		if len(arrows) == 0 {
 			out = append(out, "None.")
 		}
+		// Stable: arrows between the same two states keep their result order.
+		arrows = slices.Clone(arrows)
+		slices.SortStableFunc(arrows, func(a, b Arrow) int {
+			return cmp.Or(cmp.Compare(reading(a.From), reading(b.From)), cmp.Compare(reading(a.To), reading(b.To)))
+		})
 		for i, a := range arrows {
-			out = append(out, fmt.Sprintf("%s arrow %d: state %d -> state %d; %s", name, i+1, index[a.From], index[a.To], svgCount(a.Count, "concrete occurrence")), a.Label)
+			out = append(out, fmt.Sprintf("%s arrow %d: state %d -> state %d; %s", name, i+1, reading(a.From), reading(a.To), svgCount(a.Count, "concrete occurrence")), a.Label)
 			if group == 1 {
 				out = append(out, "Hiding view rules: "+svgList(a.HidingRules))
 			}
