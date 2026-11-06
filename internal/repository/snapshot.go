@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -21,6 +22,8 @@ type Snapshot struct {
 	checkout string
 	config   Config
 	entries  map[string]treeEntry
+	blobsMu  sync.RWMutex
+	blobs    map[string][]byte
 }
 
 type treeEntry struct {
@@ -70,11 +73,11 @@ func Load(ctx context.Context, checkout, baseRef string) (*Snapshot, error) {
 	if err := s.checkPath(Path, false, false); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, Path, err)
 	}
-	entry, exists := entries[Path]
+	_, exists := entries[Path]
 	if !exists {
 		return nil, fmt.Errorf("%w: %s at %s", ErrMissing, Path, commit)
 	}
-	data, err := readGit(ctx, abs, "cat-file", "blob", entry.oid)
+	data, err := s.ReadFileContext(ctx, Path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s at %s: %w", Path, commit, err)
 	}
@@ -101,7 +104,7 @@ func (s *Snapshot) ReadFile(name string) ([]byte, error) {
 }
 
 // ReadFileContext reads the same captured blob as ReadFile, with the caller's
-// cancellation and deadline applying to the object read.
+// cancellation and deadline applying to both cached bytes and object reads.
 func (s *Snapshot) ReadFileContext(ctx context.Context, name string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -109,9 +112,30 @@ func (s *Snapshot) ReadFileContext(ctx context.Context, name string) ([]byte, er
 	if err := s.requireFile(name); err != nil {
 		return nil, err
 	}
-	data, err := readGit(ctx, s.checkout, "cat-file", "blob", s.entries[name].oid)
-	if err != nil {
-		return nil, fmt.Errorf("read %s at %s: %w", name, s.commit, err)
+	oid := s.entries[name].oid
+	s.blobsMu.RLock()
+	data, cached := s.blobs[oid]
+	s.blobsMu.RUnlock()
+	if !cached {
+		// Keep reads outside the lock so each caller owns its cancellation.
+		var err error
+		data, err = readGit(ctx, s.checkout, "cat-file", "blob", oid)
+		if err != nil {
+			return nil, fmt.Errorf("read %s at %s: %w", name, s.commit, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.blobsMu.Lock()
+		if s.blobs == nil {
+			s.blobs = make(map[string][]byte)
+		}
+		s.blobs[oid] = data
+		s.blobsMu.Unlock()
+	}
+	data = bytes.Clone(data)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return data, nil
 }
@@ -192,7 +216,10 @@ func (s *Snapshot) requireFile(name string) error {
 		return err
 	}
 	entry, exists := s.entries[name]
-	if !exists || !entry.regular() {
+	if !exists {
+		return fmt.Errorf("%w: %q at %s", ErrFileMissing, name, s.commit)
+	}
+	if !entry.regular() {
 		return fmt.Errorf("repository path %q is not a committed regular file", name)
 	}
 	return nil

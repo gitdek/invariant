@@ -21,6 +21,8 @@ const Path = ".invariant/repository.json"
 var (
 	ErrMissing = errors.New("repository contract is absent")
 	ErrInvalid = errors.New("invalid repository contract")
+	// ErrFileMissing identifies a safe file path absent from the captured tree.
+	ErrFileMissing = errors.New("repository file is absent")
 )
 
 // Config is version 1 of the repository contract. Paths are relative to the
