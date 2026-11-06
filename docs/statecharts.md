@@ -149,6 +149,8 @@ The inspectable XML contract is:
 | `metadata#statechart-data` | Full checked result as JSON, XML-escaped as text |
 | Root `title` and `desc` | Meaningful accessible text, linked by `aria-labelledby` and `aria-describedby`; the root has `role="img"` |
 
+This contract describes one chart's image. A proposal comparison's image, and a receipt's `reader.svg` that retains one, stack native panels: each panel keeps its own elements and metadata with its IDs prefixed `panelN-`, so `metadata#statechart-data` and the root `title` and `desc` belong to ordinary chart images only.
+
 Element IDs are generated independently of reader labels and chart IDs. Text and attributes are XML-escaped, including markup-like text, quotes and URLs. Styling uses presentation attributes; arrowheads refer only to a local marker. There are no scripts, event handlers, stylesheets, links, foreign objects, embedded resources, DTDs or resource-loading attributes. Whitespace in rule wording and labels is preserved. Coordinates, ordering, colors, fonts and routing are implementation choices, not a pinned serialization format.
 
 Nil or empty results, unsupported versions, missing or repeated initials, unknown endpoints, repeated state or arrow identities, inconsistent concrete membership, visibility or counts, and invalid reachability return an error and an empty string. Invalid UTF-8 and characters XML 1.0 cannot express also fail, including in metadata-only fields; nothing is silently replaced or dropped. Non-JSON temporal values fail too. Verification receipts save this SVG beside their JSON and Markdown. Modeled proposals retain Mermaid publication; the dashboard serves the same native SVG on modeled evidence cards.

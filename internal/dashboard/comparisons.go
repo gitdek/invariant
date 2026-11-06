@@ -132,7 +132,9 @@ func (s *Server) keepComparison(e comparisonEvidence) *ReaderPresentation {
 }
 
 func (s *Server) presentComparison(is *Issue) {
-	if is.Waiting == nil || is.Waiting.Proposal == nil {
+	// A proposal without reader evidence predates charts and stays
+	// ratifiable, so its card shows no chart rather than an error.
+	if is.Waiting == nil || is.Waiting.Proposal == nil || is.Waiting.Proposal.Reader == nil {
 		return
 	}
 	is.Waiting.Reader = s.keepComparison(comparisonEvidence{Format: comparisonFormat, Repo: is.Repo, Issue: is.Number, Proposal: is.Waiting.Proposal})
@@ -152,7 +154,7 @@ func (s *Server) restoreComparisons(snap *Snapshot) {
 		// A saved link without the proposal it shows could never be served
 		// again, so a damaged snapshot loses the link rather than serving a
 		// page that doesn't exist.
-		if w.Proposal == nil {
+		if w.Proposal == nil || w.Proposal.Reader == nil {
 			if w.Reader != nil && w.Reader.Format == comparisonFormat {
 				w.Reader = nil
 			}

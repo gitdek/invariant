@@ -3,6 +3,7 @@ package formalize
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -85,7 +86,10 @@ func currentSnapshot(c *Current) *statechart.ComparisonSnapshot {
 }
 
 func (p *Proposal) comparisonSnapshot() statechart.ComparisonSnapshot {
-	s := statechart.ComparisonSnapshot{Kind: "proposal", Name: "Proposal " + p.Hash, Module: p.Module, Model: p.ModuleText, Includes: p.Includes, View: p.View, Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}}
+	// A view-only revision keeps its statement hash, so the view's hash tells
+	// its two sides apart.
+	view := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(p.View)))
+	s := statechart.ComparisonSnapshot{Kind: "proposal", Name: "Proposal " + p.Hash + " with view " + view[:19], Module: p.Module, Model: p.ModuleText, Includes: p.Includes, View: p.View, Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}}
 	if p.Reader != nil {
 		s.Chart, s.Limitation = p.Reader.Chart, p.Reader.Limitation
 	}

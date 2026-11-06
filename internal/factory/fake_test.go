@@ -579,7 +579,8 @@ func checkedBufferComparison(t *testing.T, p *formalize.Proposal, req formalize.
 		}
 		s.Chart, s.Limitation = old.Reader.Chart, old.Reader.Limitation
 	}
-	b := statechart.ComparisonSnapshot{Kind: "proposal", Name: "Proposal " + p.Hash, Module: p.Module, Model: p.ModuleText, Includes: p.Includes, View: p.View,
+	view := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(p.View)))
+	b := statechart.ComparisonSnapshot{Kind: "proposal", Name: "Proposal " + p.Hash + " with view " + view[:19], Module: p.Module, Model: p.ModuleText, Includes: p.Includes, View: p.View,
 		Lock: project.Lock{Bounds: p.Bounds, Statements: p.Statements}, Chart: p.Reader.Chart, Limitation: p.Reader.Limitation}
 	c, err := statechart.Compare(*s, b)
 	if err != nil {
