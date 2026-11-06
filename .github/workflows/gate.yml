@@ -16,6 +16,17 @@ permissions:
   contents: read
   issues: read
 
+# Tests run git with blank global and system config, so a commit would start
+# git's maintenance detached, writing into a test's repository while its
+# temporary directory is being removed. Git reads this config from the
+# environment even then. The plumbing sandbox sets the same (#687).
+env:
+  GIT_CONFIG_COUNT: "2"
+  GIT_CONFIG_KEY_0: maintenance.auto
+  GIT_CONFIG_VALUE_0: "false"
+  GIT_CONFIG_KEY_1: gc.auto
+  GIT_CONFIG_VALUE_1: "0"
+
 jobs:
   # Whether the change touches anything the gate checks. Docs and decisions
   # don't, so the gate is skipped for them (D-0079). GitHub counts a job its

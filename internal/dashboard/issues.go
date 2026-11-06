@@ -79,13 +79,15 @@ type Issue struct {
 
 // Waiting is what an open issue needs from a person.
 type Waiting struct {
-	Kind       string     `json:"kind"`                 // forks, proposal or failed
-	Failure    string     `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
-	Forks      []Question `json:"forks,omitempty"`      // the questions to answer
-	Name       string     `json:"name,omitempty"`       // the proposal's project
-	Hash       string     `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
-	Statements []Said     `json:"statements,omitempty"` // what the proposal says
-	Amends     string     `json:"amends,omitempty"`     // what an amendment replaces
+	Proposal   *formalize.Proposal `json:"proposal,omitempty"`
+	Reader     *ReaderPresentation `json:"reader,omitempty"`
+	Kind       string              `json:"kind"`                 // forks, proposal or failed
+	Failure    string              `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
+	Forks      []Question          `json:"forks,omitempty"`      // the questions to answer
+	Name       string              `json:"name,omitempty"`       // the proposal's project
+	Hash       string              `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
+	Statements []Said              `json:"statements,omitempty"` // what the proposal says
+	Amends     string              `json:"amends,omitempty"`     // what an amendment replaces
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
 	Unchanged bool `json:"unchanged,omitempty"`
@@ -190,6 +192,20 @@ type Span struct {
 	To   time.Time `json:"to"`
 	Who  string    `json:"who"`
 	Open bool      `json:"open,omitempty"` // still going
+}
+
+// factoryLane is an issue's lane as the page shows it: only markers login
+// posted count, as the factory counts only its own, so a marker another
+// commenter posts drives no card, preview or comparison (#666). With no
+// known login it counts none, and people's comments still count as theirs.
+func factoryLane(issue github.Issue, comments []github.Comment, login string, now time.Time) Issue {
+	if login == "" {
+		comments = slices.DeleteFunc(slices.Clone(comments), func(c github.Comment) bool {
+			_, ok := factory.DecodeMarker(c.Body)
+			return ok
+		})
+	}
+	return Lane(issue, comments, login, now)
 }
 
 // Lane reads an issue's comments the way the factory does. self is the
@@ -428,6 +444,9 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 			return nil
 		}
 		w.Name, w.Hash = p.Name, strings.TrimPrefix(p.Hash, "sha256:")
+		if p.Plan == nil && p.IssuePlan == nil && p.ModuleText != "" {
+			w.Proposal = p
+		}
 		if len(w.Hash) > 12 {
 			w.Hash = w.Hash[:12]
 		}

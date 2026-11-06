@@ -141,6 +141,20 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 		fmt.Fprintf(&b, "\n**Already checked** against a draft model, within %s: %s\n", bounds(p.Bounds), checked(r))
 	}
 	b.WriteString(readerComment(p))
+	if p.Reader != nil && p.Reader.Comparison != nil {
+		old := p.Reader.Comparison.Baseline
+		changes := formalize.Diff(&formalize.Current{ModuleText: old.Model, Lock: old.Lock}, p)
+		fmt.Fprintf(&b, "\nChanges from %s:\n\n| Statement | Change |\n| :-- | :-- |\n", tableLiteral(old.Name))
+		for _, change := range changes.Statements {
+			fmt.Fprintf(&b, "| %s | %s |\n", tableLiteral(change.Name), change.How)
+		}
+		if len(changes.Bounds) > 0 {
+			b.WriteString("\n| Bound | Before | After |\n| :-- | :-- | :-- |\n")
+			for _, bound := range changes.Bounds {
+				fmt.Fprintf(&b, "| %s | %s | %s |\n", tableLiteral(bound.Name), tableLiteral(bound.From), tableLiteral(bound.To))
+			}
+		}
+	}
 	if len(m.Answers) > 0 {
 		b.WriteString("\n**Decided on this issue:**\n\n")
 		for _, a := range m.Answers {
@@ -212,7 +226,11 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	}
 	changed := len(ch.Of(formalize.Added)) + len(ch.Of(formalize.Changed)) + len(ch.Of(formalize.Removed))
 	if changed == 0 {
-		b.WriteString("No statement changes. Every ratified statement stays exactly as it is, and only the code changes.\n")
+		if p.Reader != nil && p.Reader.Comparison != nil && (p.Reader.Comparison.ModelChanged || p.Reader.Comparison.ViewChanged || p.Reader.Comparison.BoundsChanged) {
+			b.WriteString("No statement changes. Every ratified statement stays exactly as it is; the reader comparison qualifies the model, view and checking-scope changes.\n")
+		} else {
+			b.WriteString("No statement changes. Every ratified statement stays exactly as it is, and only the code changes.\n")
+		}
 	} else {
 		b.WriteString("| Statement | Change | Says |\n| :-- | :-- | :-- |\n")
 	}

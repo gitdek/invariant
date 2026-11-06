@@ -666,7 +666,7 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, p
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
-			"the witnesses and the known bugs, then check view.json and compute its reader chart or size limitation. It reports what failed, with counterexamples and view repair details. You have %d checks in total.", maxRuns),
+			"the witnesses and the known bugs, then check view.json and compute its reader chart or size limitation and any required comparison against the captured baseline. Legacy baselines require baseline/view.json at their original bounds. It reports what failed, with counterexamples and view repair details. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			runs, err := calls(ctx)
@@ -1002,14 +1002,15 @@ func watchCmd(ctx context.Context, args []string) int {
 	}
 	// What the factory is doing goes in a status file for the dashboard
 	// (D-0049). It holds no secrets: the process, the repository, the
-	// watcher's name on its lease, which the page follows, and the steps in
+	// watcher's name on its lease, which the page follows, the account it
+	// posts as, whose markers alone the page reads (#666), and the steps in
 	// hand, each of which the page shows (D-0113), with the coding agent it
 	// runs (#179) and the run's directory (#236). Issue, doing and since name
 	// the longest-running step that's doing something. It also holds the
 	// agent steps that ended last, with when they really ended, which outlive
 	// the watcher: the next one starts from them (#269).
 	statusPath := dashboard.StatusPath(*work, *repo)
-	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
+	status := dashboard.Status{PID: os.Getpid(), Repo: *repo, Holder: f.Holder, Login: actor, Started: time.Now().UTC(), Every: every.Seconds(), Limit: timeout.Seconds()}
 	if previous, err := dashboard.ReadStatus(statusPath); err != nil {
 		logger.Printf("status: %v", err)
 	} else if previous.Repo == *repo {

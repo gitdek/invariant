@@ -100,7 +100,7 @@ const hold393Driver = `from invariant_observe import Refusal, Step, explore, mod
 from counter import core as app
 def start():
     app.reset()
-    return module(app.increment, fields={'count':'counts.value', 'active':'counts.active', 'prepared':'counts.prepared'}, timeout=2)
+    return module(app.increment, fields={'count':'counts.value', 'active':'counts.active', 'prepared':'counts.prepared'}, timeout=10)
 def submit(life, state, value):
     expected = state if state['active'] else {'count':1, 'active':1, 'prepared':True}
     life.hold(app.submit, value, hold='forwarded', expected_before=state, expected_after=expected)
@@ -114,6 +114,11 @@ def drive():
                     Step('Finish', finish), Step('Read', read, refusal=Refusal(app.Refused, status_code=404))])
 if __name__ == '__main__': drive()
 `
+
+// hold393Deadline is the driver with a two-second step, for the cases that
+// test the step's watchdog firing. Every other case gives a step ten
+// seconds, so a loaded CI runner can't starve one past its watchdog (#678).
+var hold393Deadline = strings.Replace(hold393Driver, "timeout=10", "timeout=2", 1)
 
 const hold393Model = `---- MODULE Counter ----
 EXTENDS Naturals, Local
@@ -323,8 +328,8 @@ func TestPythonApplicationExecutionHeldCallFailures(t *testing.T) {
 			{name: "call completed without gate pause", source: strings.Replace(hold393Source, "target=increment, args=(value,)", "target=untraced, args=(value,)", 1) + "\ndef untraced(value):\n    import sys\n    sys.settrace(None)\n    increment(value)\n"},
 			{name: "second Submit starts a call", source: strings.Replace(hold393Source, "if counts['active'] != 0:", "if False:", 1), diagnostic: "second call"},
 			{name: "ordinary step starts second call", source: hold393Source + "\ndef second():\n    threading.Thread(target=increment, args=(1,)).start()\n", driver: strings.Replace(hold393Driver, "life.step(app.read, expected_before=state, expected_after=state)", "life.step(app.second if state['active'] else app.read)", 1), diagnostic: "second call"},
-			{name: "release deadline", source: strings.Replace(hold393Source, "    assert counts['value'] == 1", "    if audit['hang']:\n        threading.Event().wait()\n    assert counts['value'] == 1", 1), driver: strings.Replace(hold393Driver, "    life.release(", "    app.audit['hang'] = bool(state['active'])\n    life.release(", 1), diagnostic: "timed out"},
-			{name: "cleanup deadline", source: strings.Replace(hold393Source, "    assert counts['value'] == 1", "    threading.Event().wait()\n    assert counts['value'] == 1", 1), diagnostic: "timed out"},
+			{name: "release deadline", source: strings.Replace(hold393Source, "    assert counts['value'] == 1", "    if audit['hang']:\n        threading.Event().wait()\n    assert counts['value'] == 1", 1), driver: strings.Replace(hold393Deadline, "    life.release(", "    app.audit['hang'] = bool(state['active'])\n    life.release(", 1), diagnostic: "timed out"},
+			{name: "cleanup deadline", source: strings.Replace(hold393Source, "    assert counts['value'] == 1", "    threading.Event().wait()\n    assert counts['value'] == 1", 1), driver: hold393Deadline, diagnostic: "timed out"},
 			{name: "sampled hold", sampled: true, driver: "from invariant_observe import module\nfrom counter import core as app\ndef drive():\n    with module(app.increment, fields={'count':'counts.value'}, timeout=2) as life:\n        life.hold(app.submit, 1)\nif __name__ == '__main__': drive()\n"},
 			{name: "caught hold failure stays poisoned", source: strings.Replace(hold393Source, "threading.Thread(target=increment, args=(value,)).start()", "pass", 1), driver: strings.Replace(hold393Driver, "    life.hold(app.submit, value, hold='forwarded', expected_before=state, expected_after=expected)", "    try:\n        life.hold(app.submit, value)\n    except Exception:\n        pass", 1)},
 			{name: "hold expectation cannot supply state", driver: strings.Replace(hold393Driver, "expected_after=expected", "expected_after={'count':2, 'active':0, 'prepared':True}", 1)},

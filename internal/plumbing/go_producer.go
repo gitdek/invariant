@@ -102,7 +102,12 @@ func (run *GoAcceptanceRun) start(ctx context.Context, part repository.Part) err
 	if err != nil {
 		return err
 	}
-	spec := RepositoryProcessSpec{Argv: goTestingArguments(binary, in.Argv), EventEnv: goTestingEventEnv, Directory: path.Dir(file)}
+	launcher, err := prepareGoTestingLauncher(ctx, run.environment, in)
+	if err != nil {
+		return err
+	}
+	argv := append([]string{launcher}, goTestingArguments(binary, in.Argv)...)
+	spec := RepositoryProcessSpec{Argv: argv, EventEnv: goTestingEventEnv, Directory: path.Dir(file)}
 	run.prepared, err = run.environment.Prepare(ctx, spec)
 	if err != nil {
 		return err

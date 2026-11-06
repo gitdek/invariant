@@ -153,7 +153,7 @@ func TestGoCompilerProductionCorrection604(t *testing.T) {
 			repositoryResult582(t, candidate, f.plan.Tests[0], "passed", "new API executed 604")
 			started := false
 			for _, observation := range f.runner.observed[before:] {
-				if observation.stage == "start" && len(observation.argv) > 0 && strings.HasSuffix(observation.argv[0], "acceptance.test") {
+				if observation.stage == "start" && len(observation.argv) > 1 && strings.HasSuffix(observation.argv[0], "/launch") && strings.HasSuffix(observation.argv[1], "/acceptance.test") {
 					started = true
 				}
 			}

@@ -11,9 +11,12 @@ import (
 // the gate enforces, and a worked example.
 func Prompt(req Request, checks int) string {
 	previous := stepPrompt(req.ParentPlan)
-	if req.Previous != nil {
+	if req.Previous != nil && req.Previous.drafted() {
 		previous += "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
+	}
+	if baseline := req.CheckContext().Baseline; baseline != nil {
+		previous += "\n# Captured comparison baseline\n\nThe checker compares the complete candidate with " + baseline.Name + ". Read its captured model, includes and ratified.lock in `baseline/`. Those files are read-only context: editing them cannot change the checker's caller-owned baseline. If this legacy source has no view, supply a pure `baseline/view.json`; the checker validates it against the captured model and original bounds through model checks, complete TLC exploration, invariant replay and hiding checks. Repair baseline diagnostics as well as candidate failures. Do not write comparison.json or reader.json. Equal charts do not establish behavioral equivalence; view changes and different checking scopes are qualified explicitly. Preserve faithful bounds even above the 500-state chart capacity.\n"
 	}
 	language := req.Language
 	if language == "" {
@@ -27,7 +30,7 @@ func Prompt(req Request, checks int) string {
 		previous += fmt.Sprintf(`
 # The project this changes
 
-This issue changes an existing project, `+"`%s`"+`. What's ratified today is already in the current directory. `+"`%s.tla`"+` holds its statements and its model, and `+"`proposal.json`"+` lists its statements as ratified (%s). Edit both files, and change only what the issue asks for:
+This issue changes an existing project, `+"`%s`"+`. Its captured ratification is already in the current directory and stays the baseline throughout this amendment. `+"`%s.tla`"+` holds its statements and its model, and `+"`proposal.json`"+` lists its statements as ratified (%s). Edit both files, and change only what the issue asks for:
 
 - Add, change or remove statements as the issue requires. Keep every other statement's text and meaning word for word. The factory compares your draft with the ratified lock and shows people exactly what changed, and it calls out every statement you remove or change.
 - Keep the module's name. Change the bounds, the model (`+"`Init`"+`, the actions and `+"`Next`"+`) and helper definitions as the change needs.

@@ -464,15 +464,21 @@ func TestPytestOfflineRefusals617(t *testing.T) {
 			}
 		})
 	}
-	t.Run("missing pytest is setup and is never fetched", func(t *testing.T) {
+	t.Run("command deletion cannot remove acceptance pytest", func(t *testing.T) {
 		f := fixture617(t, image, platform, control617(), nil, func(c *repository.Config) {
-			// Remove only the disposable container's copy of pytest, after the
-			// pinned image was checked. This is a real missing-framework failure.
+			// Delete the command container's installed framework. Acceptance
+			// must obtain its own copy from the same verified image.
 			c.Parts[0].Commands["build"] = repository.Command{Argv: []string{"python3", "-c", "import pathlib, pytest, shutil; shutil.rmtree(pathlib.Path(pytest.__file__).parent); import _pytest; shutil.rmtree(pathlib.Path(_pytest.__file__).parent)"}}
 		})
-		c := check617(t, f, false)
-		if v := result617(t, c.Run, f.plan.Tests[0]); v.Kind != "setup" {
-			t.Fatalf("missing pytest became a failure about the test: %+v", v)
+		c := check617(t, f, true)
+		if v := result617(t, c.Run, f.plan.Tests[0]); v.Kind != "test" || v.Status != "failed" {
+			t.Fatalf("command deletion affected independent acceptance: %+v", v)
+		}
+		for _, file := range f.plan.Files {
+			write468(t, f.candidate, file, "VALUE = 7\n")
+		}
+		if r, err := f.sandbox.Run(t.Context(), f.candidate, f.plan); err != nil || !r.Passed() {
+			t.Fatalf("candidate did not restore prepared pytest: %v\n%s", err, r.Summary())
 		}
 	})
 }

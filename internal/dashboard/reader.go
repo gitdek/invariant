@@ -39,6 +39,14 @@ type ReaderPresentation struct {
 	SVG         string `json:"svg,omitempty"`
 }
 
+// PosterLinks draw a checked chart for people to read: an animated poster,
+// and the same poster without motion for readers who prefer reduced motion.
+// The presentation's SVG stays the complete evidence image.
+type PosterLinks struct {
+	Animated string `json:"animated"`
+	Still    string `json:"still"`
+}
+
 type readerArtifacts struct {
 	JSON []byte
 	SVG  []byte
@@ -53,16 +61,20 @@ type readerEvidence struct {
 	ManifestBytes, LockBytes  []byte
 	Files                     map[string][]byte
 	View                      []byte
-	Report                    *verify.Report
-	Artifacts                 readerArtifacts
-	Traces                    map[string]tlc.TraceFile
-	Problem                   string
+	// Omitted when absent, so evidence without a comparison keeps the
+	// identities and immutable URLs it had before comparisons existed.
+	Comparison []byte `json:",omitempty"`
+	Report     *verify.Report
+	Artifacts  readerArtifacts
+	Traces     map[string]tlc.TraceFile
+	Problem    string
 }
 
 type readerPage struct {
-	repo         string
-	presentation ReaderPresentation
-	html, svg    []byte
+	repo                     string
+	presentation             ReaderPresentation
+	posters                  *PosterLinks
+	html, svg, poster, still []byte
 }
 
 func readerHash(b []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(b)) }
@@ -103,6 +115,15 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("legacy_receipt", "This legacy receipt has no checked reader artifacts. Save .invariant/view.json and verify again.")
 	}
 	rr := r.Reader
+	if rr.Comparison != nil {
+		var captured statechart.Comparison
+		if err := rr.Comparison.Validate(); err != nil {
+			return bad("comparison_evidence", err.Error())
+		}
+		if decodeReaderJSON(e.Comparison, &captured) != nil || !sameReaderJSON(&captured, rr.Comparison) || rr.Comparison.CandidateIdentity.ProposalHash != project.ProposalHash(e.Lock.Bounds, e.Lock.Statements) {
+			return bad("comparison_evidence", "The proposal comparison differs from the captured comparison at this receipt commit. Verify again using the original project evidence.")
+		}
+	}
 	if len(e.Artifacts.JSON) == 0 || (rr.Chart != nil && len(e.Artifacts.SVG) == 0) {
 		return bad("missing_artifacts", "The receipt archive is missing reader.json or reader.svg. Verify again to publish the complete evidence.")
 	}
@@ -170,8 +191,23 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	if rr.Fingerprint != want && (rr.Unavailable == nil || rr.Unavailable.Code != "reader_render") {
 		return bad("snapshot_mismatch", "The checked reader fingerprint does not match its inputs, lock and complete contents.")
 	}
+	limitedComparison := func(code, message string) (string, string, string) {
+		if rr.Comparison == nil {
+			// A damaged comparison's diagnostic stays visible beside the
+			// final model's own outcome.
+			return bad(code, strings.TrimSpace(message+" "+strings.Join(rr.ComparisonNotes(), " ")))
+		}
+		svg, err := rr.SVG()
+		if err != nil {
+			return bad("reader_render", err.Error())
+		}
+		if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
+			return bad("artifact_mismatch", "The archived comparison SVG differs from the native renderer.")
+		}
+		return "chart", message + " " + strings.Join(rr.ComparisonNotes(), " ") + " " + strings.Join(comparisonPageNotes(rr.Comparison), " "), svg
+	}
 	if d := rr.Unavailable; d != nil {
-		if len(e.Artifacts.SVG) != 0 {
+		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil {
 			return bad("artifact_mismatch", "The archive has an SVG beside an unavailable reader outcome.")
 		}
 		if d.Code == "" || d.Message == "" {
@@ -184,9 +220,9 @@ func (e readerEvidence) checked() (status, message, svg string) {
 			if e.View != nil {
 				return bad("snapshot_mismatch", "The receipt reports a missing view, but this commit has a saved view.")
 			}
-			return bad("missing_view", "No saved reader view exists at this receipt commit. Supply .invariant/view.json and verify again.")
+			return limitedComparison("missing_view", "No saved reader view exists at this receipt commit. Supply .invariant/view.json and verify again.")
 		}
-		return bad(d.Code, d.Message)
+		return limitedComparison(d.Code, d.Message)
 	}
 	if e.View == nil {
 		return bad("snapshot_mismatch", "The chart's saved reader view is absent from the receipt commit.")
@@ -206,35 +242,43 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("snapshot_mismatch", "The reader has no matching completed model check in the receipt.")
 	}
 	if l := rr.Limitation; l != nil {
-		if len(e.Artifacts.SVG) != 0 || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
+		if (len(e.Artifacts.SVG) != 0 && rr.Comparison == nil) || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
 			int64(l.Actual) != r.Design.DistinctStates || !sameReaderJSON(l.Source, source) {
 			return bad("snapshot_mismatch", "The reader limitation disagrees with the receipt's completed exploration or provenance.")
 		}
-		return bad("too_large", fmt.Sprintf("TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. The view's mappings and hiding were not evaluated; no partial chart is shown.", l.Actual, l.Limit))
+		return limitedComparison("too_large", fmt.Sprintf("TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. The view's mappings and hiding were not evaluated; no partial chart is shown.", l.Actual, l.Limit))
 	}
 	c := rr.Chart
 	if !sameReaderJSON(c.Report.Rules, e.Lock.Statements) || !sameReaderJSON(c.Report.Source, source) ||
 		c.Report.Counts["tlc_states"] != r.Design.DistinctStates || c.Report.Counts["tlc_generated_states"] != r.Design.StatesGenerated {
 		return bad("snapshot_mismatch", "The chart's rules, counts or tool provenance disagree with the receipt and lock.")
 	}
-	svg, err := c.SVG()
+	svg, err := rr.SVG()
 	if err != nil {
 		return bad("reader_render", "Reader generation failed: "+err.Error())
 	}
 	if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
 		return bad("artifact_mismatch", "The archived SVG does not match the shared native renderer's complete checked result. Verify again with the current renderer.")
 	}
-	return "chart", "Checked bounded model; the full report is included in the image. This adds no proof claim.", svg
+	message = "Checked bounded model; the full report is included in the image. This adds no proof claim."
+	if len(rr.ComparisonNotes()) > 0 {
+		message += " " + strings.Join(rr.ComparisonNotes(), " ")
+	}
+	if rr.Comparison != nil {
+		message += " " + strings.Join(comparisonPageNotes(rr.Comparison), " ")
+	}
+	return "chart", message, svg
 }
 
 const readerHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Evidence.Manifest.Name}} — reader evidence</title>
-<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:100rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}code{overflow-wrap:anywhere}dt{font-weight:bold}dd{margin-bottom:1rem}</style></head>
+<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:100rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}img.poster{width:auto;max-width:100%;margin:1rem auto;border-radius:28px;box-shadow:0 24px 60px rgba(9,13,28,.35)}code{overflow-wrap:anywhere}dt{font-weight:bold}dd{margin-bottom:1rem}</style></head>
 <body><main><h1>{{.Evidence.Manifest.Name}}</h1><p>{{.Evidence.Repo}} · {{.Evidence.Dir}}</p>
 <p>Receipt commit: <code>{{.Presentation.Commit}}</code></p>
 <p>{{.Presentation.Message}}</p>
-{{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}
+{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked reader chart for {{.Evidence.Manifest.Name}}"></picture>
+<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}
 <h2>Checked bounds</h2><dl>{{range $name, $value := .Evidence.Lock.Bounds}}<dt>{{$name}}</dt><dd><pre>{{$value}}</pre></dd>{{end}}</dl>
 <h2>Locked rules</h2>{{range .Evidence.Lock.Statements}}<h3>{{.Name}} ({{.Kind}})</h3><pre>{{.Says}}</pre><p>Pin: <code>{{.SHA256}}</code></p>{{end}}
 {{if .Record}}<details><summary>Complete receipt reader record</summary><pre>{{.Record}}</pre></details>{{end}}
@@ -243,20 +287,46 @@ const readerHTML = `<!doctype html>
 </main></body></html>`
 
 var readerTemplate = template.Must(template.New("reader").Parse(readerHTML))
-var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg)$`)
+var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg|poster\.svg|still\.svg)$`)
+
+// posters draws a checked chart's animated and still posters, or neither.
+func (e readerEvidence) posters(status string) (string, string) {
+	if status != "chart" || e.Report == nil || e.Report.Reader == nil || e.Report.Reader.Chart == nil {
+		return "", ""
+	}
+	c := e.Report.Reader.Chart
+	poster, err := c.Poster(statechart.PosterOptions{Title: e.Manifest.Name, Animated: true})
+	if err != nil {
+		return "", ""
+	}
+	still, err := c.Poster(statechart.PosterOptions{Title: e.Manifest.Name})
+	if err != nil {
+		return "", ""
+	}
+	return poster, still
+}
 
 func makeReader(e readerEvidence) readerPage {
 	status, message, svg := e.checked()
+	poster, still := e.posters(status)
+	if poster != "" {
+		message = strings.Replace(message, "the full report is included in the image", "the poster's light replays one real behavior from TLC's graph, and the evidence page holds the full report", 1)
+	}
 	p := ReaderPresentation{Status: status, Message: message, Commit: e.Commit, Format: readerFormat}
 	key := readerHash(readerJSON(struct {
 		Evidence                       readerEvidence
 		Status, Message, SVG, Template string
-	}{e, status, message, svg, readerHTML}))
+		Poster, Still                  string `json:",omitempty"`
+	}{e, status, message, svg, readerHTML, poster, still}))
 	p.Fingerprint = key
 	base := "/reader/" + strings.TrimPrefix(key, "sha256:")
 	p.Page = base + ".html"
 	if svg != "" {
 		p.SVG = base + ".svg"
+	}
+	var posters *PosterLinks
+	if poster != "" {
+		posters = &PosterLinks{Animated: base + ".poster.svg", Still: base + ".still.svg"}
 	}
 	record := ""
 	if e.Report != nil && e.Report.Reader != nil {
@@ -267,9 +337,10 @@ func makeReader(e readerEvidence) readerPage {
 	_ = readerTemplate.Execute(&b, struct {
 		Evidence     readerEvidence
 		Presentation ReaderPresentation
+		Posters      *PosterLinks
 		Record       string
-	}{e, p, record})
-	return readerPage{repo: e.Repo, presentation: p, html: b.Bytes(), svg: []byte(svg)}
+	}{e, p, posters, record})
+	return readerPage{repo: e.Repo, presentation: p, posters: posters, html: b.Bytes(), svg: []byte(svg), poster: []byte(poster), still: []byte(still)}
 }
 
 func (s *Server) keepReader(e readerEvidence) *ReaderPresentation {
@@ -297,6 +368,16 @@ func (s *Server) keepReader(e readerEvidence) *ReaderPresentation {
 	return &page.presentation
 }
 
+// postersFor returns the poster links of a kept reader page, if it has any.
+func (s *Server) postersFor(r *ReaderPresentation) *PosterLinks {
+	if r == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.readers[strings.TrimPrefix(r.Fingerprint, "sha256:")].posters
+}
+
 func (s *Server) readerFile(key string) string { return filepath.Join(s.Cache, "readers", key+".json") }
 
 func (s *Server) readerRepo(name string) bool {
@@ -318,8 +399,13 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, ct := p.html, "text/html; charset=utf-8"
-	if parts[2] == "svg" {
+	switch parts[2] {
+	case "svg":
 		body, ct = p.svg, "image/svg+xml; charset=utf-8"
+	case "poster.svg":
+		body, ct = p.poster, "image/svg+xml; charset=utf-8"
+	case "still.svg":
+		body, ct = p.still, "image/svg+xml; charset=utf-8"
 	}
 	if len(body) == 0 {
 		http.NotFound(w, r)
@@ -385,10 +471,12 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 					}
 					s.readers[parts[1]] = page
 					s.mu.Unlock()
+					p.Poster = page.posters
 				}
 			}
 			if !ok {
 				rejected = true
+				p.Poster = nil
 				e = readerEvidence{Format: readerFormat, Repo: p.Repo, Dir: p.Dir, Commit: old.Commit,
 					Manifest: project.Manifest{Name: p.Name, Language: p.Language}, Lock: project.Lock{Bounds: p.Bounds}, Problem: "cached_evidence"}
 				if run != nil {
@@ -425,7 +513,7 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 			for _, p := range snap.Projects {
 				if p.Repo == r.Name && p.Dir == e.Dir {
 					sources = append(sources, projectSource{dir: e.Dir, manifest: e.Manifest, lock: e.Lock, key: p.Model,
-						files: e.Files, module: strings.TrimSuffix(path.Base(e.Manifest.Module), ".tla"), view: e.View,
+						files: e.Files, module: strings.TrimSuffix(path.Base(e.Manifest.Module), ".tla"), view: e.View, comparison: e.Comparison,
 						manifestBytes: e.ManifestBytes, lockBytes: e.LockBytes, reader: p.Reader})
 				}
 			}

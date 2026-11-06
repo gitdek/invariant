@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
 )
@@ -97,6 +99,61 @@ func TestPreview639PinnedTLC(t *testing.T) {
 		}
 	}
 	if err := p.WritePreviews(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Comparison baselines use real complete dumps and replay at their own bounds,
+// including the legacy repair path. No saved chart substitutes for those runs.
+func TestComparison648PinnedTLC(t *testing.T) {
+	tc, err := toolchain.Ensure(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, r, err := Check(t.Context(), workspace(t, nil), tc)
+	if err != nil || r == nil || !r.Passed {
+		t.Fatalf("baseline: %+v %v", r, err)
+	}
+	ws := workspace(t, map[string]func(string) string{
+		"view.json":     replace("Buffer", "Queued buffer"),
+		"proposal.json": replace(`"Cap": "2"`, `"Cap": "1"`),
+	})
+	cur := &Current{Dir: "examples/buffer", Manifest: old.Manifest(), ModuleText: old.ModuleText, Includes: old.Includes,
+		Lock: project.Lock{Ratified: &project.Ratification{Issue: 571, By: "owner"}, Bounds: old.Bounds, Statements: old.Statements}}
+	authority := (Request{Current: cur}).CheckContext()
+	if _, _, err := CheckWithContext(t.Context(), ws, tc, authority); err == nil || !strings.Contains(err.Error(), "baseline/view.json") {
+		t.Fatalf("missing legacy view: %v", err)
+	}
+	if err := writeFile(filepath.Join(ws, "baseline/view.json"), old.View); err != nil {
+		t.Fatal(err)
+	}
+	p, r, err := CheckWithContext(t.Context(), ws, tc, authority)
+	if err != nil || r == nil || !r.Passed {
+		t.Fatalf("comparison: %+v %v", r, err)
+	}
+	c := p.Reader.Comparison
+	if c == nil || !c.BoundsChanged || !c.ViewChanged || c.Scope == "" || c.Baseline.Chart.Report.Counts["tlc_states"] != 7 || c.Candidate.Chart.Report.Counts["tlc_states"] != 3 || c.Baseline.Chart.Report.Source.Tool.JarSHA256 != toolchain.TLCJarSHA256 {
+		t.Fatalf("wrong bounded comparison: %+v", c)
+	}
+	cur.View = old.View
+	if err := p.Amend(cur); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := p.Write(dir, "comparison", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(dir, p.Manifest().Module), p.ModuleText+"\\* independently synthesized source\n"); err != nil {
+		t.Fatal(err)
+	}
+	r, err = verify.RunModel(t.Context(), dir, tc)
+	if err != nil || !r.Passed || r.Reader.Comparison == nil || r.Reader.Comparison.Fingerprint != c.Fingerprint {
+		t.Fatalf("retained receipt: %+v %v", r, err)
+	}
+	if err := receipt.Write(t.TempDir(), r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SVG(); err != nil {
 		t.Fatal(err)
 	}
 }

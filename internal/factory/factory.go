@@ -1088,7 +1088,9 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 		return f.formalize(ctx, t, *revision, answers, state.Marker.Proposal, replyTo)
 	}
 	if len(remaining) == 0 {
-		return f.formalize(ctx, t, last, answers, nil, replyTo)
+		// Answers aren't a revision: the next draft starts from them, and
+		// carries on only the baseline and target the question held.
+		return f.formalize(ctx, t, last, answers, state.Marker.Proposal.Carrier(), replyTo)
 	}
 	// The post is the saved state, so idle polls and another watcher keep
 	// the answers and never ask for the same choices again.
@@ -1195,6 +1197,20 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		if err != nil {
 			return err
 		}
+		// A revision amends the ratification its amendment captured, until
+		// another ratification of the project lands on the base branch or
+		// the issue names another project. The captured one could then never
+		// be ratified against, so the revision amends the project as it is
+		// now.
+		if p := req.Previous; p != nil && p.Target != nil && p.Target.Baseline != nil {
+			if cur != nil && p.Target.Dir == dir && p.Target.Amends == project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements) {
+				cur = formalize.Request{Previous: p, Current: cur}.CapturedCurrent()
+			} else {
+				moved := *p
+				moved.Target = nil
+				req.Previous = &moved
+			}
+		}
 		if cur != nil {
 			req.Current, req.Language = cur, cur.Manifest.Language
 			base = project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements)
@@ -1299,22 +1315,22 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		m.Kind, m.Proposal = KindStuck, p
 		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
 	case p.Unsupported != "":
-		m.Kind = KindUnsupported
+		m.Kind, m.Proposal = KindUnsupported, previous
 		return f.drafted(ctx, t, cause, base, m, unsupportedComment(p.Unsupported, m), "")
 	case len(p.Forks) > 0:
 		if req.Plumbing == "" && req.PRD == "" || p.HasPreviews() {
 			if err := p.ValidatePreviewContext(req.CheckContext()); err != nil {
-				m.Kind = KindStuck
+				m.Kind, m.Proposal = KindStuck, previous
 				return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 			}
 		}
 		m.Kind, m.Forks, m.Proposal = KindForks, p.Forks, p
 		body := forksComment(p.Forks, m)
-		if p.HasPreviews() {
-			if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
-				m.Kind, m.Forks, m.Proposal = KindStuck, nil, nil
-				return f.drafted(ctx, t, cause, base, m, stuckComment("The complete alternative previews exceed the comment or expanded marker size limit. Revise the presentation and check every option again before publication.", m), LabelHumanReview)
-			}
+		// A question carries its previews, and the baseline and target the
+		// draft after it compares with, so any of them can outgrow a post.
+		if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
+			m.Kind, m.Forks, m.Proposal = KindStuck, nil, previous
+			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete question, with its alternative previews and the baseline it carries, exceeds the comment or expanded marker size limit. Revise the presentation and check every option again before publication.", m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelAsking)
 	case p.IssuePlan != nil:
@@ -1324,15 +1340,25 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		m.Kind, m.Proposal = KindProposal, p
 		return f.drafted(ctx, t, cause, base, m, planComment(p, m), LabelProposal)
 	default:
+		// A refused draft isn't a selected model, so its post keeps the
+		// previous one, and with it the baseline a revision compares with.
 		if err := p.ValidateReader(); err != nil {
-			m.Kind = KindStuck
+			m.Kind, m.Proposal = KindStuck, previous
+			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
+		}
+		authority := req.CheckContext()
+		if res.CheckContext != nil {
+			authority = *res.CheckContext
+		}
+		if err := p.ValidateComparisonContext(authority); err != nil {
+			m.Kind, m.Proposal = KindStuck, previous
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
 		m.Kind, m.Proposal = KindProposal, p
 		// A compressed marker can fit the comment but exceed the reader's
 		// expanded size limit, leaving nothing recoverable or ratifiable.
 		if _, ok := DecodeMarker(m.encode()); !ok {
-			m.Kind, m.Proposal = KindStuck, nil
+			m.Kind, m.Proposal = KindStuck, previous
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification.", m), LabelHumanReview)
 		}
 		body := proposalComment(p, res.Report, m)
@@ -1340,7 +1366,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 			body = amendmentComment(p, res.Report, res.Changes, m)
 		}
 		if len(body) > maxComment {
-			m.Kind, m.Proposal = KindStuck, nil
+			m.Kind, m.Proposal = KindStuck, previous
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal and its reader evidence exceed the comment size limit; it cannot be published for ratification. Revise the presentation before publishing again.", m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelProposal)
@@ -1361,6 +1387,7 @@ func draftStepName(cause Command) string {
 // It returns nil for a run recorded and never finished. The run's record
 // and its result name the agent (#179).
 func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request) (*formalize.Result, error) {
+	authority := req.CheckContext()
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -1409,6 +1436,7 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	// paths on this machine as localPaths does, whether it's the formalizer's
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
+	res.CheckContext = &authority
 	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
 		return nil, err
@@ -1497,12 +1525,15 @@ func (f *Factory) current(ctx context.Context, dir string) (*formalize.Current, 
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return nil, err
 	}
-	ref := "origin/" + f.Base
+	ref, err := f.Repo.RevParse(ctx, "origin/"+f.Base)
+	if err != nil {
+		return nil, err
+	}
 	b, err := f.Repo.Show(ctx, ref, dir+"/.invariant/invariant.json")
 	if err != nil {
 		return nil, nil
 	}
-	c := &formalize.Current{Dir: dir}
+	c := &formalize.Current{Dir: dir, Commit: ref}
 	if err := json.Unmarshal(b, &c.Manifest); err != nil {
 		return nil, fmt.Errorf("%s's manifest: %w", dir, err)
 	}

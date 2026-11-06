@@ -313,17 +313,18 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			testStarted = true
 		}
 	}
-	for i, part := range parts {
+	// Only private copies reach workloads. The staged base/candidate and the
+	// verified prepared image remain pristine for every later invocation.
+	openWork := func(part repository.Part) error {
 		if err := execution.Err(); err != nil {
-			result.TimedOut = ctx.Err() == nil
-			return result, err
+			return err
 		}
 		prepared := session.parts[part.Name]
 		q := cloneDependencyRequest(prepared.request)
 		activePart = part.Name
 		partWork, err = stageDependencySource(execution, DependencyRequest{SourceDir: src, Directory: "."}, false)
 		if err != nil {
-			return result, err
+			return err
 		}
 		q.Image, q.SourceDir = prepared.artifact.Image, filepath.Join(partWork, "invariant", "work")
 		q.Network, q.Pull, q.Argv = false, false, nil
@@ -332,36 +333,34 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		// candidate's node_modules must not overlay that captured preparation.
 		if part.Language == "typescript" {
 			if err := os.RemoveAll(filepath.Join(q.SourceDir, filepath.FromSlash(part.Directory), "node_modules")); err != nil {
-				return result, err
+				return err
 			}
 		}
 		q.Token, err = dependencyToken()
 		if err != nil {
-			return result, err
+			return err
 		}
 		environment, err = runner.OpenChecks(execution, q)
 		if err != nil {
-			return result, fmt.Errorf("part %q startup: %w", part.Name, err)
+			return fmt.Errorf("part %q startup: %w", part.Name, err)
 		}
 		if environment == nil {
-			return result, fmt.Errorf("part %q startup returned no environment", part.Name)
+			return fmt.Errorf("part %q startup returned no environment", part.Name)
 		}
-		nodeSeal := ""
-		for _, test := range plan.Tests {
-			if test.Part == part.Name && defaultNodeAdapter(s.repositoryAdapter(test.Framework)) {
-				if _, ok := environment.(RepositoryProcessTransport); ok {
-					nodeSeal, err = sealNodeDependencies(execution, environment)
-					if err != nil {
-						return result, err
-					}
-				}
-				break
-			}
-		}
+		return execution.Err()
+	}
+	for i, part := range parts {
 		for j, phase := range repositoryPhases {
 			command := &result.CommandResults[i*len(repositoryPhases)+j]
 			if command.Status == "skipped" {
 				continue
+			}
+			// A part's commands share build outputs, but an entirely
+			// inapplicable command list needs no container.
+			if environment == nil {
+				if err := openWork(part); err != nil {
+					return result, err
+				}
 			}
 			if phase == "test" {
 				startTests()
@@ -392,12 +391,28 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			if !plan.Native() || test.Part != part.Name {
 				continue
 			}
+			// Cleanup owns the queue slot and must finish before another
+			// invocation starts, including after ordinary base failures.
+			if err := cleanupWork(false); err != nil {
+				return result, err
+			}
+			startTests()
+			if err := openWork(part); err != nil {
+				return result, err
+			}
 			invocation := repositoryInvocation(plan, test, selections[j])
 			transport, processCapable := environment.(RepositoryProcessTransport)
 			goRuntime := test.Framework == "go" && processCapable
 			_, defaultPytest := s.repositoryAdapter(test.Framework).(PytestRepositoryAcceptanceAdapter)
 			pytestRuntime := defaultPytest && processCapable
 			nodeRuntime := defaultNodeAdapter(s.repositoryAdapter(test.Framework)) && processCapable
+			nodeSeal := ""
+			if nodeRuntime {
+				nodeSeal, err = sealNodeDependencies(execution, environment)
+				if err != nil {
+					return result, err
+				}
+			}
 			discovered := false
 			if adapter, ok := s.repositoryAdapter(test.Framework).(RepositoryAcceptanceDiscoverer); ok {
 				startTests()
@@ -485,15 +500,12 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				return result, fmt.Errorf("accept %s: %w", test.Identity(), err)
 			}
 		}
-		// Close and remove this part's staging before opening another. A failed
-		// close and the final source copy share the same cleanup reserve.
-		if i+1 < len(parts) {
-			if err := cleanupWork(false); err != nil {
-				return result, err
-			}
-			if err := execution.Err(); err != nil {
-				return result, err
-			}
+		// The last close and final source copy share one cleanup reserve.
+		if err := cleanupWork(i+1 == len(parts)); err != nil {
+			return result, err
+		}
+		if err := execution.Err(); err != nil {
+			return result, err
 		}
 	}
 	return result, nil

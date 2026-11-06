@@ -78,7 +78,10 @@ type Repo struct {
 	Name   string // owner/name
 	GitHub github.Client
 	Status string // its watcher's status file
-	src    sources
+	// FactoryLogin is the account its factory posts as, when the caller
+	// knows it; otherwise its watchers' status files say (#666).
+	FactoryLogin string
+	src          sources
 }
 
 // Short is the repository's name without its owner.
@@ -100,6 +103,7 @@ type sources struct {
 	readme   string
 	prd      string
 	merges   map[int]mergeCheck
+	changed  bool // comments or merges read since they were last kept (#674)
 	lease    *Lease
 	// gates says, for each finished gate run looked at, whether the gate
 	// ran in it: gateRan, gateSkipped or gateRefused. A finished run never
@@ -154,6 +158,7 @@ type projectSource struct {
 	files         map[string][]byte // the model's .tla files, for drawing its graph
 	module        string
 	view          []byte
+	comparison    []byte
 	lockBytes     []byte
 	manifestBytes []byte
 	reader        *ReaderPresentation
@@ -333,6 +338,7 @@ type Project struct {
 	Graph          bool                `json:"graph,omitempty"` // its state graph is ready
 	Factory        bool                `json:"factory"`         // built by the factory from an issue
 	Reader         *ReaderPresentation `json:"reader,omitempty"`
+	Poster         *PosterLinks        `json:"poster,omitempty"`
 }
 
 type Statement struct {
@@ -408,13 +414,7 @@ type Who struct {
 
 // Start reads everything once, then keeps it fresh until ctx ends.
 func (s *Server) Start(ctx context.Context) {
-	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
-	for _, r := range s.Repos {
-		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
-		r.src.gates, r.src.journal = map[int64]string{}, map[string]journalFile{}
-	}
-	s.pending = make(chan graphJob, 64)
-	s.loadSnapshot()
+	s.prepare()
 	go s.drawGraphs(ctx)
 	go func() {
 		for {
@@ -430,6 +430,19 @@ func (s *Server) Start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// prepare makes the server's caches, filled with what the last run kept,
+// and serves the last run's snapshot until the first refresh.
+func (s *Server) prepare() {
+	s.graphs, s.drawing, s.failed = map[string][]byte{}, map[string]bool{}, map[string]time.Time{}
+	for _, r := range s.Repos {
+		r.src.comments, r.src.files, r.src.merges = map[int]cachedComments{}, map[string][]byte{}, map[int]mergeCheck{}
+		r.src.gates, r.src.journal = map[int64]string{}, map[string]journalFile{}
+	}
+	s.pending = make(chan graphJob, 64)
+	s.loadSources()
+	s.loadSnapshot()
 }
 
 func (s *Server) refresh(ctx context.Context) error {
@@ -461,6 +474,7 @@ func (s *Server) refresh(ctx context.Context) error {
 					continue
 				}
 				r.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
+				r.src.changed = true
 			}
 			for _, is := range others {
 				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt && !commanded(c.comments) {
@@ -536,6 +550,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		return err
 	}
 	s.saveSnapshot(gz)
+	s.saveSources()
 	return nil
 }
 
@@ -588,6 +603,7 @@ func (s *Server) loadSnapshot() {
 		return
 	}
 	s.restorePreviews(&snap)
+	s.restoreComparisons(&snap)
 	js, err = json.Marshal(snap)
 	if err != nil {
 		return
@@ -678,7 +694,7 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 		name := path.Base(p.dir)
 		e := readerEvidence{Format: readerFormat, Repo: r.Name, Dir: p.dir, Commit: run.HeadSHA,
 			Manifest: p.manifest, Lock: p.lock, ManifestBytes: p.manifestBytes, LockBytes: p.lockBytes,
-			Files: p.files, View: p.view, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name]}
+			Files: p.files, View: p.view, Comparison: p.comparison, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name]}
 		if missing != nil {
 			e.Problem = "missing_archive"
 		} else if names[name] > 1 {
@@ -792,6 +808,12 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 		}
 		p.lockBytes = raw
 		for _, f := range tree {
+			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/comparison.json") {
+				p.comparison, err = s.file(ctx, r, sha, f.Path)
+				if err != nil {
+					return nil, err
+				}
+			}
 			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/view.json") {
 				p.view, err = s.file(ctx, r, sha, f.Path)
 				if err != nil {
@@ -922,8 +944,9 @@ func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, erro
 // CI's gate passed on the head it merged. A merged pull request never
 // changes, so each is checked once.
 func (s *Server) checkMerges(ctx context.Context, r *Repo) {
+	login := s.factoryOf(r)
 	for _, is := range r.src.issues {
-		l := Lane(is, r.src.comments[is.Number].comments, "", time.Now())
+		l := factoryLane(is, r.src.comments[is.Number].comments, login, time.Now())
 		if l.Stage != StageMerged || l.PR == 0 {
 			continue
 		}
@@ -945,6 +968,7 @@ func (s *Server) checkMerges(ctx context.Context, r *Repo) {
 			}
 		}
 		r.src.merges[l.PR] = mergeCheck{sha: pr.Head.SHA, green: green}
+		r.src.changed = true
 	}
 }
 
@@ -981,10 +1005,12 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		}
 		watchers = append(watchers, namedWatcher{repo: r.Name, w: rs.Factory})
 
+		login := s.factoryOf(r)
 		for _, is := range r.src.issues {
-			l := Lane(is, r.src.comments[is.Number].comments, "", now)
+			l := factoryLane(is, r.src.comments[is.Number].comments, login, now)
 			l.Repo = r.Name
 			s.presentPreviews(&l)
+			s.presentComparison(&l)
 			for k := range l.Events {
 				l.Events[k].Repo = r.Name
 			}
@@ -1023,6 +1049,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 				p := projectOf(ps, rep)
 				p.Repo = r.Name
 				p.Reader = ps.reader
+				p.Poster = s.postersFor(ps.reader)
 				p.Graph = rep != nil && (ready[ps.key] || s.cached(ps.key))
 				snap.Projects = append(snap.Projects, p)
 				rs.Projects++

@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "state": [
+    {
+      "id": "none",
+      "when": {
+        "eq": [
+          {
+            "var": "written"
+          },
+          "(c1 :> 0 @@ c2 :> 0)"
+        ]
+      },
+      "label": "No lines journaled yet"
+    },
+    {
+      "id": "one",
+      "when": {
+        "any": [
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 1 @@ c2 :> 0)"
+            ]
+          },
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 0 @@ c2 :> 1)"
+            ]
+          }
+        ]
+      },
+      "label": "1 line journaled"
+    },
+    {
+      "id": "two",
+      "when": {
+        "any": [
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 1 @@ c2 :> 1)"
+            ]
+          },
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 2 @@ c2 :> 0)"
+            ]
+          },
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 0 @@ c2 :> 2)"
+            ]
+          }
+        ]
+      },
+      "label": "2 lines journaled"
+    },
+    {
+      "id": "three",
+      "when": {
+        "any": [
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 2 @@ c2 :> 1)"
+            ]
+          },
+          {
+            "eq": [
+              {
+                "var": "written"
+              },
+              "(c1 :> 1 @@ c2 :> 2)"
+            ]
+          }
+        ]
+      },
+      "label": "3 lines journaled"
+    },
+    {
+      "id": "all",
+      "when": {
+        "eq": [
+          {
+            "var": "written"
+          },
+          "(c1 :> 2 @@ c2 :> 2)"
+        ]
+      },
+      "label": "All 4 lines journaled"
+    }
+  ],
+  "step": [
+    {
+      "id": "done",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Done"
+        ]
+      },
+      "label": "Every line written or abandoned",
+      "hide": true
+    },
+    {
+      "id": "write",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Write"
+        ]
+      },
+      "label": "Write a line; the store journals it"
+    },
+    {
+      "id": "takein",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "TakeIn"
+        ]
+      },
+      "label": "Take in the other branch's lines"
+    },
+    {
+      "id": "abandon",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Abandon"
+        ]
+      },
+      "label": "Abandon a branch; its lines stay"
+    },
+    {
+      "id": "rebuild",
+      "when": {
+        "eq": [
+          {
+            "action": true
+          },
+          "Rebuild"
+        ]
+      },
+      "label": "Rebuild the store from a checkout"
+    }
+  ]
+}

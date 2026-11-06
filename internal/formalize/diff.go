@@ -4,14 +4,16 @@ import (
 	"sort"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/statechart"
 	"github.com/gitdek/invariant/internal/tla"
 )
 
 // Changes is what an amendment does to a project's ratified statements
 // and bounds.
 type Changes struct {
-	Statements []Change      `json:"statements"`
-	Bounds     []BoundChange `json:"bounds,omitempty"`
+	Reader     *statechart.Comparison `json:"reader,omitempty"`
+	Statements []Change               `json:"statements"`
+	Bounds     []BoundChange          `json:"bounds,omitempty"`
 	// Definitions are the helper definitions that changed under some
 	// statement, such as vars gaining a variable.
 	Definitions []Definition `json:"definitions,omitempty"`
@@ -69,6 +71,9 @@ func Diff(c *Current, p *Proposal) *Changes {
 		old[s.Name] = s
 	}
 	out := &Changes{}
+	if p.Reader != nil {
+		out.Reader = p.Reader.Comparison
+	}
 	seen := map[string]bool{}
 	for _, s := range p.Statements {
 		s := s
