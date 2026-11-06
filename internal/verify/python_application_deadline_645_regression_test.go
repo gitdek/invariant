@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,12 +20,15 @@ func TestPythonApplicationModuleDeadlineStartsWithItsWatchdog(t *testing.T) {
 	}
 	dir := t.TempDir()
 	started := filepath.Join(dir, "started")
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'" }
-	// exec -a keeps this script as sys.executable, which starts the
-	// watchdog. Only the watchdog's program is late; the gate's own Python
-	// checks find this script on PATH too.
-	script := "#!/bin/bash\ncase \"$1 $2 $3 $4\" in\n'-I -S -c import os, select, signal, sys, time'*)\n  echo \"watchdog $6\" >> " + quote(started) +
-		"\n  sleep 2.5;;\nesac\nexec -a \"$0\" " + quote(python) + " \"$@\"\n"
+	// The stand-in re-executes the interpreter under its own name, so it stays
+	// sys.executable, which starts the watchdog. Only the watchdog's program
+	// is late; the gate's own Python checks find it on PATH too. It's Python,
+	// not a shell script, because hosts such as Alpine have no bash.
+	script := "#!" + python + " -IS\nimport os, sys, time\n" +
+		"if sys.argv[1:4] == ['-I', '-S', '-c'] and sys.argv[4].startswith('import os, select, signal, sys, time'):\n" +
+		"    with open(" + strconv.Quote(started) + ", 'a') as f:\n        f.write('watchdog ' + sys.argv[6] + '\\n')\n" +
+		"    time.sleep(2.5)\n" +
+		"os.execv(" + strconv.Quote(python) + ", [sys.argv[0]] + sys.argv[1:])\n"
 	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
