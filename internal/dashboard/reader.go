@@ -53,11 +53,13 @@ type readerEvidence struct {
 	ManifestBytes, LockBytes  []byte
 	Files                     map[string][]byte
 	View                      []byte
-	Comparison                []byte
-	Report                    *verify.Report
-	Artifacts                 readerArtifacts
-	Traces                    map[string]tlc.TraceFile
-	Problem                   string
+	// Omitted when absent, so evidence without a comparison keeps the
+	// identities and immutable URLs it had before comparisons existed.
+	Comparison []byte `json:",omitempty"`
+	Report     *verify.Report
+	Artifacts  readerArtifacts
+	Traces     map[string]tlc.TraceFile
+	Problem    string
 }
 
 type readerPage struct {
@@ -182,7 +184,9 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	}
 	limitedComparison := func(code, message string) (string, string, string) {
 		if rr.Comparison == nil {
-			return bad(code, message)
+			// A damaged comparison's diagnostic stays visible beside the
+			// final model's own outcome.
+			return bad(code, strings.TrimSpace(message+" "+strings.Join(rr.ComparisonNotes(), " ")))
 		}
 		svg, err := rr.SVG()
 		if err != nil {

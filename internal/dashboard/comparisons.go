@@ -146,7 +146,16 @@ func (s *Server) restoreComparisons(snap *Snapshot) {
 			repo = snap.Repo
 		}
 		w := is.Waiting
-		if w == nil || w.Proposal == nil || !s.readerRepo(repo) {
+		if w == nil || !s.readerRepo(repo) {
+			continue
+		}
+		// A saved link without the proposal it shows could never be served
+		// again, so a damaged snapshot loses the link rather than serving a
+		// page that doesn't exist.
+		if w.Proposal == nil {
+			if w.Reader != nil && w.Reader.Format == comparisonFormat {
+				w.Reader = nil
+			}
 			continue
 		}
 		expected := comparisonEvidence{Format: comparisonFormat, Repo: repo, Issue: is.Number, Proposal: w.Proposal}

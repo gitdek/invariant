@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 
@@ -38,15 +39,37 @@ func detachedSnapshot(s *statechart.ComparisonSnapshot) *statechart.ComparisonSn
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.UseNumber()
 	_ = d.Decode(&out)
+	// As in a checked comparison, no includes and an empty set are one source.
+	if out.Includes == nil {
+		out.Includes = map[string]string{}
+	}
 	return &out
 }
 
-// CapturedCurrent always prefers the originally captured amendment target.
+// CapturedCurrent is the project an amendment changes: the ratification an
+// earlier draft of it captured, when that draft amended the same project,
+// or else the project as the caller found it. A request without a current
+// project changes none, whatever an earlier draft amended. The caller's
+// saved reader stays as workspace context when it describes these exact
+// sources, and never becomes part of a captured baseline.
 func (r Request) CapturedCurrent() *Current {
-	if r.Previous != nil && r.Previous.Target != nil && r.Previous.Target.Baseline != nil && (r.Current == nil || r.Current.Dir == r.Previous.Target.Dir) {
-		return detachCurrent(r.Previous.Target.Baseline)
+	if r.Current == nil {
+		return nil
 	}
-	return detachCurrent(r.Current)
+	c := detachCurrent(r.Current)
+	if p := r.Previous; p != nil && p.Target != nil && p.Target.Baseline != nil && p.Target.Dir == r.Current.Dir {
+		c = detachCurrent(p.Target.Baseline)
+	}
+	if sameSources(c, r.Current) {
+		c.Reader = r.Current.Reader
+	}
+	return c
+}
+
+func sameSources(a, b *Current) bool {
+	x, _ := json.Marshal(a.Lock)
+	y, _ := json.Marshal(b.Lock)
+	return a.ModuleText == b.ModuleText && maps.Equal(a.Includes, b.Includes) && a.View == b.View && bytes.Equal(x, y)
 }
 
 func currentSnapshot(c *Current) *statechart.ComparisonSnapshot {
@@ -77,7 +100,9 @@ func (r Request) comparisonBaseline() *statechart.ComparisonSnapshot {
 		if p.Baseline != nil {
 			return detachedSnapshot(p.Baseline)
 		}
-		if p.ModuleText != "" && p.Plan == nil && p.IssuePlan == nil && len(p.Forks) == 0 && p.Unsupported == "" {
+		// Only a draft that passed its checks is a selected model. A failed
+		// first draft carries no baseline, so its revision starts afresh.
+		if p.ModuleText != "" && p.Plan == nil && p.IssuePlan == nil && len(p.Forks) == 0 && p.Unsupported == "" && p.Reader != nil && p.ValidateReader() == nil {
 			s := p.comparisonSnapshot()
 			return detachedSnapshot(&s)
 		}

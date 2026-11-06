@@ -11,7 +11,7 @@ import (
 // the gate enforces, and a worked example.
 func Prompt(req Request, checks int) string {
 	previous := stepPrompt(req.ParentPlan)
-	if req.Previous != nil {
+	if req.Previous != nil && req.Previous.drafted() {
 		previous += "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
 	}

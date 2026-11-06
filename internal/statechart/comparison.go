@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tla"
@@ -157,8 +159,16 @@ func canonicalSnapshot(s ComparisonSnapshot) (ComparisonSnapshot, error) {
 		return s, err
 	}
 	s = out
+	// Saved proposals omit empty includes, so no includes and an empty set
+	// are one source.
+	if s.Includes == nil {
+		s.Includes = map[string]string{}
+	}
 	if (s.Kind != "proposal" && s.Kind != "ratification") || s.Name == "" || s.Model == "" || s.View == "" || (s.Chart == nil) == (s.Limitation == nil) {
 		return s, fmt.Errorf("requires named source, model, view and exactly one checked chart or limitation")
+	}
+	if strings.IndexFunc(s.Name, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
+		return s, fmt.Errorf("source name is not printable")
 	}
 	if name, err := tla.ModuleName(s.Model); err != nil || name != s.Module {
 		return s, fmt.Errorf("model module differs from captured source")
@@ -222,6 +232,28 @@ type arrowIdentity struct{ From, Label, To string }
 
 func arrowID(a Arrow) arrowIdentity { return arrowIdentity{a.From, a.Label, a.To} }
 
+// Concrete members are TLC fingerprints, and TLC picks its fingerprint
+// polynomial afresh on every run, so two explorations of one model name the
+// same concrete states differently. A state changes when how many concrete
+// states it holds, or their status, changes; an arrow changes when the
+// multiset of its occurrences' actions does.
+func stateSignature(s State) any {
+	return []any{s.Label, len(s.Members), len(s.InitialMembers), s.ViolatedRules, s.UnavailableActions}
+}
+
+func arrowSignature(a Arrow) any {
+	return []any{a.Label, a.Count, arrowActions(a), a.HidingRules}
+}
+
+func arrowActions(a Arrow) []string {
+	actions := make([]string, 0, len(a.Members))
+	for _, step := range a.Members {
+		actions = append(actions, step.Action)
+	}
+	slices.Sort(actions)
+	return actions
+}
+
 func compareCharts(a, b *Result, beforeHiding bool) Delta {
 	d := Delta{}
 	oldStates, newStates := map[string]State{}, map[string]State{}
@@ -232,7 +264,7 @@ func compareCharts(a, b *Result, beforeHiding bool) Delta {
 		newStates[s.ID] = s
 		if old, ok := oldStates[s.ID]; !ok {
 			d.AddedStates = append(d.AddedStates, s)
-		} else if !comparisonEqual(old, s) {
+		} else if !comparisonEqual(stateSignature(old), stateSignature(s)) {
 			d.ChangedStates = append(d.ChangedStates, StateChange{old, s})
 		}
 	}
@@ -261,7 +293,7 @@ func compareCharts(a, b *Result, beforeHiding bool) Delta {
 		newArrows[id] = x
 		if old, ok := oldArrows[id]; !ok {
 			d.AddedArrows = append(d.AddedArrows, x)
-		} else if !comparisonEqual(old, x) {
+		} else if !comparisonEqual(arrowSignature(old), arrowSignature(x)) {
 			d.ChangedArrows = append(d.ChangedArrows, ArrowChange{old, x})
 		}
 	}
@@ -314,14 +346,95 @@ func (c *Comparison) reportLines() []string {
 			name = "Before hiding (visibility and hiding rule IDs ignored)"
 		}
 		out = append(out, fmt.Sprintf("%s: states added %d, removed %d, changed %d; arrows added %d, removed %d, changed %d.", name, len(d.AddedStates), len(d.RemovedStates), len(d.ChangedStates), len(d.AddedArrows), len(d.RemovedArrows), len(d.ChangedArrows)))
-		for _, entry := range []struct {
-			name  string
-			value any
-		}{{"Added states", d.AddedStates}, {"Removed states", d.RemovedStates}, {"Changed states", d.ChangedStates}, {"Added arrows", d.AddedArrows}, {"Removed arrows", d.RemovedArrows}, {"Changed arrows", d.ChangedArrows}} {
-			out = append(out, entry.name+": "+string(comparisonJSON(entry.value)))
+		if i == 0 {
+			out = append(out, c.deltaLines(d, nil)...)
+		} else {
+			// States are never hidden, and the visible lines above already
+			// name every arrow change that hiding doesn't affect.
+			shown := map[string]bool{}
+			for _, line := range c.deltaLines(Delta{AddedArrows: c.Visible.AddedArrows, RemovedArrows: c.Visible.RemovedArrows, ChangedArrows: c.Visible.ChangedArrows}, nil) {
+				shown[line] = true
+			}
+			out = append(out, c.deltaLines(Delta{AddedArrows: d.AddedArrows, RemovedArrows: d.RemovedArrows, ChangedArrows: d.ChangedArrows}, shown)...)
 		}
 	}
 	return out
+}
+
+// deltaLines names each change once, by reader label, with the counts and
+// actions that make it a change. The structured delta keeps every concrete
+// occurrence; a line never repeats one, so a report grows with the chart,
+// not with the TLC graph beneath it.
+func (c *Comparison) deltaLines(d Delta, skip map[string]bool) []string {
+	var out []string
+	add := func(line string) {
+		if !skip[line] {
+			out = append(out, line)
+		}
+	}
+	for _, s := range d.AddedStates {
+		add("Added state " + strconv.Quote(s.Label) + ": " + stateCounts(s) + ".")
+	}
+	for _, s := range d.RemovedStates {
+		add("Removed state " + strconv.Quote(s.Label) + ": " + stateCounts(s) + ".")
+	}
+	for _, x := range d.ChangedStates {
+		add("Changed state " + strconv.Quote(x.After.Label) + ": " + stateCounts(x.Before) + " before, " + stateCounts(x.After) + " after.")
+	}
+	for _, a := range d.AddedArrows {
+		add("Added arrow " + c.arrowName(a) + ": " + arrowCounts(a) + ".")
+	}
+	for _, a := range d.RemovedArrows {
+		add("Removed arrow " + c.arrowName(a) + ": " + arrowCounts(a) + ".")
+	}
+	for _, x := range d.ChangedArrows {
+		add("Changed arrow " + c.arrowName(x.After) + ": " + arrowCounts(x.Before) + " before, " + arrowCounts(x.After) + " after.")
+	}
+	return out
+}
+
+func stateCounts(s State) string {
+	out := fmt.Sprintf("%d concrete states, %d initial", len(s.Members), len(s.InitialMembers))
+	if len(s.ViolatedRules) > 0 {
+		out += ", violates " + strings.Join(s.ViolatedRules, ", ")
+	}
+	if len(s.UnavailableActions) > 0 {
+		out += ", unavailable " + strings.Join(s.UnavailableActions, ", ")
+	}
+	return out
+}
+
+func arrowCounts(a Arrow) string {
+	counts := map[string]int{}
+	for _, action := range arrowActions(a) {
+		counts[action]++
+	}
+	var actions []string
+	for _, action := range slices.Sorted(maps.Keys(counts)) {
+		actions = append(actions, fmt.Sprintf("%s x%d", action, counts[action]))
+	}
+	out := fmt.Sprintf("%d steps (%s)", len(a.Members), strings.Join(actions, ", "))
+	if len(a.HidingRules) > 0 {
+		out += ", hidden by " + strings.Join(a.HidingRules, ", ")
+	}
+	return out
+}
+
+func (c *Comparison) arrowName(a Arrow) string {
+	label := func(id string) string {
+		for _, chart := range []*Result{c.Candidate.Chart, c.Baseline.Chart} {
+			if chart == nil {
+				continue
+			}
+			for _, s := range chart.States {
+				if s.ID == id {
+					return strconv.Quote(s.Label)
+				}
+			}
+		}
+		return id
+	}
+	return label(a.From) + " to " + label(a.To) + " on " + strconv.Quote(a.Label)
 }
 
 func (c *Comparison) Markdown() string {

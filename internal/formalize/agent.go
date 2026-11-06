@@ -184,7 +184,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			}
 		}
 	}
-	if p := req.Previous; p != nil {
+	if p := req.Previous; p != nil && p.drafted() {
 		b, err := json.MarshalIndent(p, "", "  ")
 		if err != nil {
 			return nil, err

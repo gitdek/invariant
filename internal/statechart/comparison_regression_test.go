@@ -60,11 +60,22 @@ func TestComparisonRetainsMembershipAndOccurrenceChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Visible.AddedStates)+len(c.Visible.RemovedStates) != 0 || len(c.Visible.ChangedStates) != 1 || len(c.BeforeHiding.ChangedArrows) != 3 {
-		t.Fatalf("lost membership change: %+v", c)
+	// TLC picks its fingerprint polynomial afresh on every run, so another
+	// exploration of the same model names the same concrete states anew.
+	if n := len(c.Visible.AddedStates) + len(c.Visible.RemovedStates) + len(c.Visible.ChangedStates) + len(c.Visible.ChangedArrows) + len(c.BeforeHiding.ChangedArrows); n != 0 {
+		t.Fatalf("renamed fingerprints reported as %d changes: %+v", n, c)
 	}
-	if c.Visible.ChangedStates[0].Before.Members[0] != "1" || c.Visible.ChangedStates[0].After.Members[0] != "9" {
-		t.Fatal("membership before/after was replaced")
+
+	b = comparison648Snapshot(t, 1, "Poll", comparison648View)
+	s0 := &b.Chart.States[0]
+	s0.Members = append(s0.Members, "9")
+	b.Chart.Report.Counts["tlc_states"]++
+	c, err = statechart.Compare(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Visible.ChangedStates) != 1 || len(c.Visible.ChangedStates[0].Before.Members)+1 != len(c.Visible.ChangedStates[0].After.Members) {
+		t.Fatalf("lost membership change: %+v", c)
 	}
 
 	b = comparison648Snapshot(t, 1, "Poll", comparison648View)
@@ -176,5 +187,42 @@ func TestComparisonNestedSVGHasUniqueIDsAndAttributes(t *testing.T) {
 		if !ids[ref] {
 			t.Fatalf("missing local marker %s", ref)
 		}
+	}
+}
+
+// A saved proposal omits empty includes, so a comparison recomputed from it
+// must match the one its check made (#648).
+func TestComparisonTreatsAbsentIncludesAsEmpty(t *testing.T) {
+	a := comparison648Snapshot(t, 1, "Poll", comparison648View)
+	b := comparison648Snapshot(t, 2, "Poll", comparison648View)
+	checked, err := statechart.Compare(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Includes, b.Includes = nil, nil
+	saved, err := statechart.Compare(a, b)
+	if err != nil || saved.Fingerprint != checked.Fingerprint {
+		t.Fatalf("absent includes changed the comparison: %v", err)
+	}
+}
+
+// A report names each change by its reader label and counts, never by the
+// concrete fingerprints beneath it, so it grows with the chart. Unprintable
+// source names are refused before they reach a renderer.
+func TestComparisonReportStaysReadable(t *testing.T) {
+	a := comparison648Snapshot(t, 1, "Poll", comparison648View)
+	b := comparison648Snapshot(t, 2, "Poll", comparison648View)
+	c, err := statechart.Compare(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := c.Markdown()
+	report := md[:strings.Index(md, "Complete candidate chart:")]
+	if strings.Contains(report, `"members"`) || !strings.Contains(report, "Added state") || !strings.Contains(report, "concrete states") {
+		t.Fatalf("report doesn't summarize changes by label:\n%s", report)
+	}
+	b.Name = "Proposal \x01"
+	if _, err := statechart.Compare(a, b); err == nil {
+		t.Fatal("an unprintable source name was accepted")
 	}
 }

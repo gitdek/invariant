@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"unicode"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/statechart"
@@ -33,11 +35,28 @@ func (r *Reader) captureComparison(data []byte, err error, lock project.Lock) {
 	if err == nil && c.CandidateIdentity.ProposalHash != project.ProposalHash(lock.Bounds, lock.Statements) {
 		err = fmt.Errorf("comparison candidate rules or bounds differ from the captured project lock")
 	}
+	// Evidence that can't be drawn is damaged too, and never reaches the
+	// renderers that draw the final chart beside it.
+	if err == nil {
+		if _, renderErr := c.SVG(); renderErr != nil {
+			err = fmt.Errorf("comparison cannot be drawn: %w", renderErr)
+		}
+	}
 	if err != nil {
-		r.ComparisonDiagnostic = &ReaderDiagnostic{Code: "comparison_evidence", Message: "Proposal comparison unavailable: " + err.Error()}
+		r.ComparisonDiagnostic = &ReaderDiagnostic{Code: "comparison_evidence", Message: "Proposal comparison unavailable: " + printable(err.Error())}
 		return
 	}
 	r.Comparison = &c
+}
+
+// printable keeps a diagnostic drawable whatever damaged evidence it quotes.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsGraphic(r) {
+			return r
+		}
+		return '\uFFFD'
+	}, s)
 }
 
 // ComparisonNotes explicitly distinguish the retained proposal's sources from

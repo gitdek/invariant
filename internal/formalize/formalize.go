@@ -122,6 +122,22 @@ type Target struct {
 	Previous string           `json:"previous"` // where that lock was ratified: "#3", or "D-0027"
 }
 
+// Carrier is what an answered question passes on to the draft that follows
+// it: the selected baseline and the captured target, with no draft to
+// revise.
+func (p *Proposal) Carrier() *Proposal {
+	if p == nil || p.Baseline == nil && p.Target == nil {
+		return nil
+	}
+	return &Proposal{Baseline: p.Baseline, Target: p.Target}
+}
+
+// drafted says whether the proposal holds a draft to revise, rather than
+// only what an answered question carries on.
+func (p *Proposal) drafted() bool {
+	return p.ModuleText != "" || len(p.Forks) > 0 || p.Plan != nil || p.IssuePlan != nil || p.Unsupported != ""
+}
+
 // Ratifiable says whether the proposal is one a person can ratify: nothing
 // is left to ask.
 func (p *Proposal) Ratifiable() bool {
