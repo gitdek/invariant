@@ -51,12 +51,12 @@ const (
 // request answers; only its ratification may amend an existing project.
 func Check(ctx context.Context, dir, base, head string, issue int) (Result, error) {
 	g := git{ctx: ctx, dir: dir}
-	out, err := g.run("diff", "--name-only", "--no-renames", base+"..."+head)
+	out, err := g.run("diff", "--name-only", "-z", "--no-renames", base+"..."+head)
 	if err != nil {
 		return Result{}, err
 	}
 	var r Result
-	for _, f := range strings.Split(strings.TrimSpace(out), "\n") {
+	for _, f := range strings.Split(out, "\x00") {
 		if f != "" {
 			r.Files = append(r.Files, f)
 		}
@@ -367,13 +367,22 @@ func plan(g git, base, head string, issue int, r Result) Result {
 		r.Problems = append(r.Problems, "the original file inventory can't be read: "+err.Error())
 		return r
 	}
+	var snapshot *repository.Snapshot
 	if lock.Plan.Native() {
-		snapshot, err := repository.Load(g.ctx, g.dir, from)
+		snapshot, err = repository.Load(g.ctx, g.dir, from)
 		if err == nil {
 			err = lock.Plan.ValidateRepository(g.ctx, snapshot)
 		}
 		if err != nil {
 			r.Problems = append(r.Problems, "its native execution authority differs from the original baseline: "+err.Error())
+			return r
+		}
+		current, err := repository.Load(g.ctx, g.dir, base)
+		if err == nil {
+			err = lock.Plan.ValidateRepository(g.ctx, current)
+		}
+		if err != nil {
+			r.Problems = append(r.Problems, "its native execution authority differs from the current base: "+err.Error())
 		}
 		for _, file := range lock.Plan.TestFiles() {
 			if _, exists := before[file]; exists {
@@ -425,12 +434,22 @@ func plan(g git, base, head string, issue int, r Result) Result {
 	}
 	for _, f := range r.Files {
 		switch {
-		case f == ".github" || strings.HasPrefix(f, ".github/"):
+		case snapshot == nil && (f == ".github" || strings.HasPrefix(f, ".github/")):
 			r.Problems = append(r.Problems, "it edits CI configuration: "+f)
+		case snapshot != nil && repository.CI(f) && !changed(lock.Plan.Files, f):
+			r.Problems = append(r.Problems, "it edits unplanned CI configuration: "+f)
 		case !touches[f]:
 			r.Problems = append(r.Problems, "it changes "+f+", which its plan doesn't name")
 		}
-		if plumbing.Trusted(f) {
+		trusted := plumbing.Trusted(f)
+		if snapshot != nil {
+			var err error
+			trusted, err = snapshot.IsTrusted(f)
+			if err != nil {
+				r.Problems = append(r.Problems, "its trusted paths can't be checked: "+err.Error())
+			}
+		}
+		if trusted {
 			r.Trusted = append(r.Trusted, f)
 		}
 	}

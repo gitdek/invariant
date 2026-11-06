@@ -1,10 +1,14 @@
 package plumbing
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gitdek/invariant/internal/repository"
 )
 
 const graphTest = `package dashboard
@@ -144,5 +148,50 @@ func TestADraftIsReadAndARecordRoundTrips(t *testing.T) {
 	tampered := strings.Replace(string(b), "Draw the graph.", "Draw a different graph.", 1)
 	if _, err := ReadLock([]byte(tampered)); err == nil {
 		t.Error("a record whose plan isn't the one ratified was read")
+	}
+}
+
+func TestConfiguredPlanTrustAndNamedCI(t *testing.T) {
+	_, _, snapshot := fixture484(t, []repository.Part{n503Part("go", "api")}, func(c *repository.Config) {
+		c.SharedPaths = []repository.SharedPath{
+			{Path: ".github/", Parts: []string{"api"}},
+			{Path: ".circleci/", Parts: []string{"api"}},
+			{Path: ".gitlab-ci.yml", Parts: []string{"api"}},
+		}
+		c.TrustedPaths = []string{"api/policy/"}
+	})
+	p := n503Plan(t, "go", "api", "api/graph_accept_test.go", "TestGraphShowsEveryDecision", graphTest)
+	p.Files = []string{".github/workflows/gate.yml", ".circleci/config.yml", ".gitlab-ci.yml", "api/AGENTS.md", "api/policy/check.go", "api/main.go"}
+	// Native structure alone supplies no execution authority.
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	unbound := Lock{Plan: *p, Ratified: Ratification{Issue: 1, Proposal: p.Hash()}}
+	if err := unbound.Verify(); err == nil {
+		t.Fatal("unbound native plan became ratifiable")
+	}
+	p = n503Read(t, p, snapshot)
+	want := []string{".circleci/config.yml", ".github/workflows/gate.yml", ".gitlab-ci.yml", "api/AGENTS.md", "api/policy/check.go"}
+	if !slices.Equal(p.Trusted, want) {
+		t.Fatalf("trusted paths = %v; want %v", p.Trusted, want)
+	}
+	hash := p.Hash()
+	lock := Lock{Plan: *p, Ratified: Ratification{Issue: 1, Proposal: hash}}
+	data, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadLock(data)
+	if err != nil || !slices.Equal(read.Plan.Trusted, want) {
+		t.Fatalf("native lock lost display trust: %+v, %v", read, err)
+	}
+	p.Trusted = []string{"api/main.go"}
+	if p.Hash() != hash || p.ValidateRepository(t.Context(), snapshot) != nil {
+		t.Fatal("display metadata changed execution authority or ratification")
+	}
+	legacy := plan()
+	legacy.Files = []string{".github/workflows/gate.yml"}
+	if err := legacy.Validate(); err == nil {
+		t.Fatal("legacy Invariant plan admitted CI")
 	}
 }

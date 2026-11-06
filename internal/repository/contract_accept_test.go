@@ -652,7 +652,9 @@ func TestRepositoryContractKeepsBaseAuthority(t *testing.T) {
 		}
 		parts461(t, captured, []string{"shared/new.json"}, "api", "web")
 		parts461(t, captured, []string{"api/src/old.go"}, "api")
-		trusted461(t, captured, "tools/new-check.sh", true)
+		for _, file := range []string{"tools/new-check.sh", ".github/workflows/new.yml", ".gitlab-ci.yml", ".circleci/config.yml", "new/AGENTS.md", "new/CLAUDE.md", "new/.codex/config.toml", "new/.claude/settings.json", "new/.mcp.json"} {
+			trusted461(t, captured, file, true)
+		}
 		trusted461(t, captured, "rogue/new-check.sh", false)
 	}
 	if _, err := os.Stat(filepath.Join(root, "loader-ran-command")); !errors.Is(err, os.ErrNotExist) {
@@ -707,10 +709,12 @@ func TestRepositoryContractOwnsEveryTouchedPath(t *testing.T) {
 		}
 	}
 	parts461(t, s, []string{"api/src/old.go", "web/tools/package.json", "pnpm-lock.yaml"}, "api", "web", "web-tools")
-	for _, name := range []string{contractPath461, "AGENTS.md", "api/go.mod", "api/go.sum", "pnpm-lock.yaml", "workspace.env", "tools/new.sh"} {
+	for _, name := range []string{contractPath461, "AGENTS.md", "api/go.mod", "api/go.sum", "pnpm-lock.yaml", "workspace.env", "tools/new.sh",
+		"CLAUDE.md", ".codex/config.toml", ".claude/settings.json", ".mcp.json", "web/AGENTS.md", "web/CLAUDE.md",
+		"web/tools/.codex/config.toml", "web/tools/.claude/settings.json", "web/tools/.mcp.json", ".github/CODEOWNERS", ".github/workflows/invariant.yml", ".gitlab-ci.yml", ".circleci/config.yml"} {
 		trusted461(t, s, name, true)
 	}
-	for _, name := range []string{"SPEC.md", "README.md", "web/src/new.ts", "toolsmith/new.sh"} {
+	for _, name := range []string{"SPEC.md", "README.md", "web/src/new.ts", "toolsmith/new.sh", "web/AGENTS.md.bak", "web/.mcp.json.example", "web/.codexish/config.toml", "internal/factory/ordinary.go", ".githubish/workflows/gate.yml"} {
 		trusted461(t, s, name, false)
 	}
 	// Reordering declarations does not affect which checks are selected.
