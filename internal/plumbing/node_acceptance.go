@@ -32,7 +32,8 @@ func selectNodeAcceptance(ctx context.Context, part repository.Part, test Test, 
 	if err := ctx.Err(); err != nil {
 		return RepositoryAcceptanceSelection{}, err
 	}
-	if part.Language != "typescript" || test.Framework != framework || part.Name != test.Part {
+	definition, ok := lookupAcceptanceFramework(framework)
+	if !ok || part.Language != definition.language || test.Framework != framework || part.Name != test.Part {
 		return fail("Node acceptance needs its captured TypeScript owner and framework")
 	}
 	if err := test.validateNative(); err != nil {
