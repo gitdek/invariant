@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -144,7 +145,7 @@ func stageBaseline(ws string, s *statechart.ComparisonSnapshot) error {
 	return nil
 }
 
-func (p *Proposal) computeComparison(ctx context.Context, ws string, tc toolchain.Toolchain, authority CheckContext) error {
+func (p *Proposal) computeComparison(ctx context.Context, ws string, tc toolchain.Toolchain, authority CheckContext, memo *baselineMemo) error {
 	if authority.Baseline == nil {
 		return nil
 	}
@@ -156,7 +157,11 @@ func (p *Proposal) computeComparison(ctx context.Context, ws string, tc toolchai
 		}
 		s.View = string(b)
 	}
-	if err := checkBaseline(ctx, s, tc); err != nil {
+	if err := memo.check(ctx, s, tc); err != nil {
+		var refusal *baselineReaderRefusal
+		if errors.As(err, &refusal) {
+			err = fmt.Errorf("%w; %s", err, authority.baselineViewRepair())
+		}
 		return fmt.Errorf("comparison baseline %s: %w", s.Name, err)
 	}
 	c, err := statechart.Compare(*s, p.comparisonSnapshot())
@@ -168,9 +173,29 @@ func (p *Proposal) computeComparison(ctx context.Context, ws string, tc toolchai
 	return err
 }
 
+func (c CheckContext) baselineViewRepair() string {
+	if c.Baseline != nil && c.Baseline.View == "" {
+		return "supply or repair baseline/view.json for the captured model and original bounds, then check again"
+	}
+	if c.BaselineViewPath != "" {
+		return "repair the project's saved " + c.BaselineViewPath + " in a separate change, then open a new amendment issue; revising the existing issue retains its captured view and cannot capture a view-only fix"
+	}
+	return "the captured proposal view is fixed; staged baseline/view.json cannot replace it"
+}
+
+type baselineReaderRefusal struct{ diagnostic verify.ReaderDiagnostic }
+
+func (e *baselineReaderRefusal) Error() string {
+	return e.diagnostic.Code + ": " + e.diagnostic.Message
+}
+
 // Recompute from caller-owned sources, including the original lock. Staged
 // old files are conveniences for the drafter, never comparison authority.
 func checkBaseline(ctx context.Context, s *statechart.ComparisonSnapshot, tc toolchain.Toolchain) error {
+	s.Chart, s.Limitation = nil, nil
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp("", "invariant-baseline-")
 	if err != nil {
 		return err
@@ -219,10 +244,15 @@ func checkBaseline(ctx context.Context, s *statechart.ComparisonSnapshot, tc too
 		return fmt.Errorf("model check returned no baseline reader")
 	}
 	if d := r.Reader.Unavailable; d != nil {
-		return fmt.Errorf("%s: %s; repair baseline/view.json", d.Code, d.Message)
+		return &baselineReaderRefusal{diagnostic: *d}
 	}
 	s.Chart, s.Limitation = r.Reader.Chart, r.Reader.Limitation
-	return nil
+	// A successful gate without complete reader evidence is not reusable.
+	// The comparison validator also checks pins, bounds and source identity.
+	if _, err := statechart.Compare(*s, *s); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // ValidateComparisonContext is the publication boundary for fresh and recovered

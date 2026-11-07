@@ -96,7 +96,7 @@ func TestStagedCheckContextDetachesAllAuthority(t *testing.T) {
 	if !ok {
 		t.Fatal("direct check lost its caller context")
 	}
-	b, err := json.Marshal(saved)
+	b, err := json.Marshal(saved.(*CheckSession).authority)
 	if err != nil || string(b) != capture {
 		t.Fatalf("staged authority shares caller-owned memory: %v", err)
 	}

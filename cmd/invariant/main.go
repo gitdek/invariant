@@ -672,10 +672,11 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, p
 	if len(staged) > 0 {
 		authority = staged[0]
 	}
+	session := formalize.NewCheckSession(authority)
 	return mcp.Tool{
 		Name: "check",
 		Description: fmt.Sprintf("Pin the statements in proposal.json and run the gate's model checks on your draft: TLC, "+
-			"the witnesses and the known bugs, then check view.json and compute its reader chart or size limitation and any required comparison against the captured baseline. Legacy baselines require baseline/view.json at their original bounds. It reports what failed, with counterexamples and view repair details. You have %d checks in total.", maxRuns),
+			"the witnesses and the known bugs, then check view.json and compute its reader chart or size limitation and any required comparison against the captured baseline. Legacy baselines missing a view require baseline/view.json at their original bounds. A fixed captured amendment view that refuses must be repaired in the project's saved .invariant/view.json in a separate change, followed by a new amendment issue; revising this issue cannot capture a view-only fix. Successful complete baseline checks are reused only in this checker session; candidate checks and comparisons run each time. It reports what failed, with counterexamples and view repair details. You have %d checks in total.", maxRuns),
 		Schema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		Call: func(ctx context.Context, _ json.RawMessage) (string, bool) {
 			runs, err := calls(ctx)
@@ -693,7 +694,7 @@ func checkTool(ws string, tc toolchain.Toolchain, maxRuns int, logPath string, p
 					synth.LogGateRun(logPath, synth.GateRun{Run: runs, Passed: passed, Failed: failed, At: time.Now().UTC().Format(time.RFC3339)})
 				}
 			}
-			p, r, err := formalize.CheckWithContext(ctx, ws, tc, authority)
+			p, r, err := session.Check(ctx, ws, tc)
 			switch {
 			case err != nil:
 				record(false, "draft: "+err.Error())

@@ -15,8 +15,14 @@ func Prompt(req Request, checks int) string {
 		previous += "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
 	}
-	if baseline := req.CheckContext().Baseline; baseline != nil {
-		previous += "\n# Captured comparison baseline\n\nThe checker compares the complete candidate with " + baseline.Name + ". Read its captured model, includes and ratified.lock in `baseline/`. Those files are read-only context: editing them cannot change the checker's caller-owned baseline. If this legacy source has no view, supply a pure `baseline/view.json`; the checker validates it against the captured model and original bounds through model checks, complete TLC exploration, invariant replay and hiding checks. Repair baseline diagnostics as well as candidate failures. Do not write comparison.json or reader.json. Equal charts do not establish behavioral equivalence; view changes and different checking scopes are qualified explicitly. Preserve faithful bounds even above the 500-state chart capacity.\n"
+	if authority := req.CheckContext(); authority.Baseline != nil {
+		previous += "\n# Captured comparison baseline\n\nThe checker compares the complete candidate with " + authority.Baseline.Name + ". Read its captured model, includes and ratified.lock in `baseline/`. Those files are read-only context: editing them cannot change the checker's caller-owned baseline. "
+		if authority.Baseline.View == "" {
+			previous += "This legacy source has no view: supply a pure `baseline/view.json`; the checker validates it against the captured model and original bounds through model checks, complete TLC exploration, invariant replay and hiding checks. Repair that supplied view if its reader checks refuse. "
+		} else {
+			previous += "The captured view is fixed. If its reader checks refuse, " + authority.baselineViewRepair() + ". "
+		}
+		previous += "Each checker session reuses only successful complete baseline checks for identical sources and tools. Every candidate is checked again and each comparison is rebuilt; independent final validation freshly checks the baseline from caller-owned sources. Do not write comparison.json or reader.json. Equal charts do not establish behavioral equivalence; view changes and different checking scopes are qualified explicitly. Preserve faithful bounds even above the 500-state chart capacity.\n"
 	}
 	language := req.Language
 	if language == "" {

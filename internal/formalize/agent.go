@@ -229,6 +229,9 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		Timeout:    f.Timeout,
 	})
 	usage.Backend = f.Backend.Name()
+	// Drafting has ended. Final validation uses the original source authority
+	// through CheckWithContext, with no session memo or drafting artifacts.
+	release()
 	r := &Result{Usage: usage, CheckContext: &authority}
 	r.CheckRuns, _ = readRuns(checkLog)
 

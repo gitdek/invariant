@@ -39,8 +39,15 @@ func TestComparisonRepairKeepsCapturedSources(t *testing.T) {
 			if err != nil || r.Problem == "" || r.Proposal == nil || r.Proposal.Baseline == nil {
 				t.Fatalf("repair lost caller source: %+v %v", r, err)
 			}
-			if err := r.Proposal.ValidateReader(); err == nil {
-				t.Fatal("failed comparison remained publishable")
+			// Supply valid ordinary evidence so this reaches the required
+			// comparison boundary, not an earlier missing-reader refusal.
+			ordinary, _ := reader603Checked(t, ws, tc)
+			if err := ordinary.ValidateReader(); err != nil {
+				t.Fatal(err)
+			}
+			ordinary.Baseline, ordinary.Target = r.Proposal.Baseline, r.Proposal.Target
+			if err := ordinary.ValidateReader(); err == nil || !strings.Contains(err.Error(), "comparison with baseline") || !strings.Contains(err.Error(), "is missing") {
+				t.Fatalf("missing comparison refusal: %v", err)
 			}
 			var saved formalize.Proposal
 			if err := json.Unmarshal(reader603JSON(t, r.Proposal), &saved); err != nil {
@@ -60,6 +67,15 @@ func TestComparisonRepairKeepsCapturedSources(t *testing.T) {
 			c, _ := comparison648Of(t, r.Proposal)
 			if c.Baseline.Model != old.ModuleText || c.Baseline.View != old.View {
 				t.Fatal("repair replaced captured source with failed draft or moved branch")
+			}
+			if err := r.Proposal.ValidateReader(); err != nil {
+				t.Fatal(err)
+			}
+			stale := req.CheckContext().Baseline
+			stale.View += "\n"
+			r.Proposal.Baseline = stale
+			if err := r.Proposal.ValidateReader(); err == nil || !strings.Contains(err.Error(), "comparison baseline is stale") {
+				t.Fatalf("stale comparison refusal: %v", err)
 			}
 		})
 	}
