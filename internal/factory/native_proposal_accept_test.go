@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"reflect"
 	"strings"
 	"testing"
@@ -34,7 +35,15 @@ func TestNativeProposalShowsIdentityLanguageAndSafeNames(t *testing.T) {
 	m := Marker{Kind: KindProposal, Proposal: p}
 	text := planComment(p, m)
 	visible := strings.Split(text, "<!-- invariant:")[0]
-	for _, want := range []string{"worker", "pytest", "worker/test_accept.py", "test_accept.py::test_ready[one case]", "web", "vitest", "web/ready.test.ts", "checkout handles a case", "```python", "```typescript"} {
+	rendered := html.UnescapeString(visible)
+	for _, test := range p.Plan.Tests {
+		for _, want := range []string{test.Name, test.Part, test.Framework, test.File, test.Selector, test.Says} {
+			if !strings.Contains(rendered, "<code>"+want+"</code>") {
+				t.Fatalf("proposal hides literal %q: %s", want, visible)
+			}
+		}
+	}
+	for _, want := range []string{"```python", "```typescript"} {
 		if !strings.Contains(visible, want) {
 			t.Fatalf("proposal hides %q: %s", want, visible)
 		}

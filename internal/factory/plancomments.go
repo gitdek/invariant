@@ -3,12 +3,12 @@ package factory
 import (
 	"fmt"
 	"html"
-	"regexp"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/receipt"
 )
 
 // planComment proposes a plumbing plan for ratification (D-0105): what
@@ -29,13 +29,13 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	b.WriteString("**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n")
 	for _, t := range plan.Tests {
 		if t.Native() {
-			fmt.Fprintf(&b, "| %s — part %s; framework %s; file %s; selector %s | %s |\n", planText(t.Name), planCode(t.Part), planCode(t.Framework), planCode(t.File), planCode(t.Selector), planText(t.Says))
+			fmt.Fprintf(&b, "| %s — part %s; framework %s; file %s; selector %s | %s |\n", planCode(t.Name), planCode(t.Part), planCode(t.Framework), planCode(t.File), planCode(t.Selector), planCode(t.Says))
 		} else {
 			fmt.Fprintf(&b, "| `%s` in `%s` | %s |\n", t.Name, t.File, t.Says)
 		}
 	}
 	if plan.Execution != nil {
-		fmt.Fprintf(&b, "\nCaptured execution: %s. Base provenance: %s.\n", planText(plan.Execution.Digest), planText(plan.Execution.Base))
+		fmt.Fprintf(&b, "\nCaptured execution: %s. Base provenance: %s.\n", receipt.EscapeText(plan.Execution.Digest), receipt.EscapeText(plan.Execution.Base))
 	}
 	if len(plan.Trusted) > 0 {
 		fmt.Fprintf(&b, "\nIt changes the trusted base (%s), so once CI's gate and a second agent's review pass, a person merges it.\n", codeList(plan.Trusted))
@@ -65,32 +65,10 @@ func planComment(p *formalize.Proposal, m Marker) string {
 	return post("plan for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
 }
 
-// planText keeps native labels and assertions as text inside Markdown
-// tables, as the receipt's componentText does for source-derived text: one
-// pass encodes markup, cell and line delimiters, and GFM's automatic links
-// are defused, since inline HTML does not suppress them.
-func planText(text string) string {
-	text = planEscapes.Replace(text)
-	return planAutolink.ReplaceAllStringFunc(text, func(link string) string {
-		return strings.NewReplacer(":", "&#58;", ".", "&#46;", "@", "&#64;").Replace(link)
-	})
-}
-
-var (
-	planEscapes = strings.NewReplacer(
-		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;",
-		"\\", "&#92;", "`", "&#96;", "|", "&#124;", "*", "&#42;", "_", "&#95;",
-		"[", "&#91;", "]", "&#93;", "~", "&#126;", "\r", "&#13;", "\n", "&#10;",
-	)
-	planAutolink = regexp.MustCompile(`(?i)(https?|ftp)://|www\.|@[a-z0-9._-]+\.[a-z0-9_-]+`)
-)
-
+// Code context suppresses GitHub mentions and issue references. Its contents
+// still need escaping for Markdown, table boundaries and GFM automatic links.
 func planCode(text string) string {
-	fence := "`"
-	for strings.Contains(text, fence) {
-		fence += "`"
-	}
-	return fence + " " + strings.ReplaceAll(text, "|", "\\|") + " " + fence
+	return "<code>" + receipt.EscapeText(text) + "</code>"
 }
 
 // plumbingElsewhereComment answers a plumbing issue on a repository that
