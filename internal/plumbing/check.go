@@ -100,18 +100,24 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 	for _, t := range plan.Tests {
 		passed := c.Run.Accepted[t.File+":"+t.Name]
 		// Legacy results have only Accepted. Structured runs distinguish a
-		// completed failure (including a compiler failure for a proposed API)
+		// completed failure (including an attributed production API error)
 		// from a check that never ran, skipped, or exited before finishing.
 		if c.Run.TestResults != nil || c.Run.CommandResults != nil || s.Repository != nil {
 			status := "not_run"
+			reason := ""
 			for _, result := range c.Run.TestResults {
 				if result.Phase == "accept" && result.identity() == t.Identity() {
 					status = result.Status
+					reason = result.Reason
 					break
 				}
 			}
 			if status != "failed" && status != "passed" {
-				unfinished = append(unfinished, fmt.Sprintf("%s (%s)", t.Identity(), status))
+				detail := status
+				if reason != "" {
+					detail += ": " + reason
+				}
+				unfinished = append(unfinished, fmt.Sprintf("%s (%s)", t.Identity(), detail))
 			}
 			passed = status == "passed"
 		}
