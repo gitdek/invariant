@@ -125,6 +125,66 @@ func TestGitNamesACommitterQuickly(t *testing.T) {
 	}
 }
 
+// A test in the sandbox can run a step with bash, as GitHub Actions runs a
+// workflow's steps, so a change to a generated workflow is checked where it's
+// built (#741). The image's Bash is the recipe's pinned 5.3.9.
+func TestTheSandboxRunsBash(t *testing.T) {
+	root := t.TempDir()
+	write := func(p, text string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, p), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module example.com/step\n\ngo 1.27.1\n")
+	write("step.go", "package step\n")
+	accept := `package step
+
+import (
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+func TestAStepRunsWithBash(t *testing.T) {
+	script := "set -u; args=(-issue 741); [[ ${#args[@]} -eq 2 ]] && echo \"$BASH_VERSION ${args[1]}\""
+	out, err := exec.Command("bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); !strings.HasPrefix(got, "5.3.9") || !strings.HasSuffix(got, " 741") {
+		t.Fatalf("the step printed %q, want the pinned Bash 5.3.9 and 741", got)
+	}
+}
+`
+	write("step_accept_test.go", accept)
+	if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	p := &Plan{Name: "step", Summary: "A step runs with bash.", Files: []string{"step.go"},
+		Tests:   []Test{{Name: "TestAStepRunsWithBash", File: "step_accept_test.go", Says: "A workflow step runs with bash."}},
+		Sources: map[string]string{"step_accept_test.go": accept}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	mod, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := toolchain.PlumbingImage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Sandbox{Image: image, ModCache: strings.TrimSpace(string(mod)), Cache: filepath.Join(t.TempDir(), "cache")}
+	r, err := s.Run(context.Background(), root, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Accepted["step_accept_test.go:TestAStepRunsWithBash"] {
+		t.Fatalf("the sandbox couldn't run a step with bash:\n%s", r.Output)
+	}
+}
+
 // The sandbox's python3 is the pinned image's own: toolchain.PythonVersion
 // names what both really run (#332).
 func TestTheSandboxRunsThePinnedPython(t *testing.T) {
