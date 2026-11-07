@@ -65,6 +65,8 @@ const (
 // NoOne holds the lease when nobody does, and NoRun is a watcher in no
 // agent run. MaxAttempt is the most retries an issue may have, so the
 // attempt number never overflows; no issue comes near it.
+// The same machine limit protects follow-up operation and journal positions
+// and lease fences. It is independent of the explorer's checking bounds.
 const (
 	NoOne      = -1
 	NoRun      = -1
@@ -73,6 +75,8 @@ const (
 
 // Repo is the shared, visible state of one issue in one repository.
 type Repo struct {
+	Followup   bool          // this obligation is managed by the follow-up journal
+	Fence      int           // monotonically increasing follow-up lease generation
 	Given      [NumKeys]bool // commands a writer has given; Given[Retry] once any retry is, Given[Watch] once one watches the latest build's draft
 	Posted     [NumKeys]bool // a factory post answers the step
 	Runs       [NumKeys]int  // the agent run recorded for the step
@@ -99,6 +103,7 @@ type Watcher struct {
 
 // NewRepo is an issue with no commands, posts, runs, branch or pull request,
 // and a lease nobody holds.
+// @ ensures !r.Followup && r.Fence == 0
 // @ ensures r.Lease == NoOne
 // @ ensures !r.RatPushed && !r.CodePushed && !r.Opened && r.PR == PRNone
 // @ ensures !r.GatePassed && !r.Mergeable && !r.Merged && !r.Marked && r.Pred == PredNone && !r.Intent && r.Attempt == 0
@@ -226,83 +231,83 @@ func (r Repo) Stale(w Watcher) bool {
 // @ decreases
 // @ pure
 func (r Repo) CanGive(c int) bool {
-	return (IsCmd(c) && c != Retry && c != Watch && !r.Given[c] && (c != Ratify || r.Posted[Solve])) ||
+	return !r.Followup && ((IsCmd(c) && c != Retry && c != Watch && !r.Given[c] && (c != Ratify || r.Posted[Solve])) ||
 		(c == Retry && r.Posted[Build] && (r.PR == PRNone || r.PR == PRDraft) && !r.Given[Watch] && !r.Merged && r.Settled() && 0 <= r.Attempt && r.Attempt < MaxAttempt) ||
-		(c == Watch && r.Posted[Build] && r.PR == PRDraft && !r.Given[Watch] && !r.Merged && r.Settled())
+		(c == Watch && r.Posted[Build] && r.PR == PRDraft && !r.Given[Watch] && !r.Merged && r.Settled()))
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanStartRun(w Watcher, k int) bool {
-	return r.Holds(w) && IsRunKey(k) && r.Active(k) && r.Runs[k] == RunNone
+	return !r.Followup && (r.Holds(w) && IsRunKey(k) && r.Active(k) && r.Runs[k] == RunNone)
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanReportStopped(w Watcher, k int) bool {
-	return r.Holds(w) && IsRunKey(k) && r.Active(k) && r.Runs[k] == RunRecorded
+	return !r.Followup && (r.Holds(w) && IsRunKey(k) && r.Active(k) && r.Runs[k] == RunRecorded)
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanPushRatification(w Watcher, k int) bool {
-	return r.Holds(w) && k == Ratify && r.Active(k) && !r.RatPushed
+	return !r.Followup && (r.Holds(w) && k == Ratify && r.Active(k) && !r.RatPushed)
 }
 
 // @ decreases
 // @ pure
 func (r Repo) CanRecordIntent(w Watcher) bool {
-	return r.Holds(w) && r.Active(Retry) && r.Pred == PredDraft && !r.Intent
+	return !r.Followup && (r.Holds(w) && r.Active(Retry) && r.Pred == PredDraft && !r.Intent)
 }
 
 // @ decreases
 // @ pure
 func (r Repo) CanRetire(w Watcher) bool {
-	return r.Holds(w) && r.Active(Retry) && r.Pred == PredDraft && r.Intent
+	return !r.Followup && (r.Holds(w) && r.Active(Retry) && r.Pred == PredDraft && r.Intent)
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanPushCode(w Watcher, k int) bool {
-	return r.Holds(w) && k == Build && r.Active(k) && r.Runs[k] == RunDone && !r.CodePushed
+	return !r.Followup && (r.Holds(w) && k == Build && r.Active(k) && r.Runs[k] == RunDone && !r.CodePushed)
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanOpenPullRequest(w Watcher, k int) bool {
-	return r.Holds(w) && k == Build && r.Active(k) && r.Runs[k] == RunDone && r.CodePushed && !r.Opened
+	return !r.Followup && (r.Holds(w) && k == Build && r.Active(k) && r.Runs[k] == RunDone && r.CodePushed && !r.Opened)
 }
 
 // @ decreases
 // @ pure
 func (r Repo) CanMarkReady(w Watcher) bool {
-	return r.Holds(w) && r.Active(Merge) && r.PR == PRDraft && r.Mergeable
+	return !r.Followup && (r.Holds(w) && r.Active(Merge) && r.PR == PRDraft && r.Mergeable)
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanMerge(w Watcher, k int) bool {
-	return r.Holds(w) && k == Merge && r.Active(k) && r.Mergeable && r.PR == PRReady && !r.Merged
+	return !r.Followup && (r.Holds(w) && k == Merge && r.Active(k) && r.Mergeable && r.PR == PRReady && !r.Merged)
 }
 
 // @ requires 0 <= k && k < NumKeys
 // @ decreases
 // @ pure
 func (r Repo) CanPost(w Watcher, k int) bool {
-	return r.Holds(w) && r.Active(k) && r.EffectsDone(k)
+	return !r.Followup && (r.Holds(w) && r.Active(k) && r.EffectsDone(k))
 }
 
 // @ requires w.Ok()
 // @ decreases
 // @ pure
 func (r Repo) CanFinishRun(w Watcher) bool {
-	return r.Lease == w.ID && w.InRun != NoRun
+	return !r.Followup && (r.Lease == w.ID && w.InRun != NoRun)
 }
 
 // Give records a writer's command c, when the issue protocol allows it. A
@@ -326,6 +331,7 @@ func (r Repo) CanFinishRun(w Watcher) bool {
 // @ ensures ok && c == Retry ==> s.Attempt == r.Attempt + 1
 // @ ensures ok && c == Retry && r.PR == PRDraft ==> s.Pred == PredDraft && !s.Intent
 // @ ensures ok && c == Retry && r.PR != PRDraft ==> s.Pred == r.Pred && s.Intent == r.Intent
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) Give(c int) (s Repo, ok bool) {
 	if !r.CanGive(c) {
 		return r, false
@@ -358,14 +364,15 @@ func (r Repo) Give(c int) (s Repo, ok bool) {
 
 // PassGate records CI's gate passing on the latest build's pull request's
 // head, and whether GitHub can merge it.
-// @ ensures ok == ((r.PR == PRDraft || r.PR == PRReady) && !r.GatePassed)
+// @ ensures ok == (!r.Followup && (r.PR == PRDraft || r.PR == PRReady) && !r.GatePassed)
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.GatePassed && s.Mergeable == m
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened && s.PR == r.PR && s.Merged == r.Merged && s.Marked == r.Marked
 // @ ensures ok ==> r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) PassGate(m bool) (s Repo, ok bool) {
-	if !((r.PR == PRDraft || r.PR == PRReady) && !r.GatePassed) {
+	if r.Followup || !((r.PR == PRDraft || r.PR == PRReady) && !r.GatePassed) {
 		return r, false
 	}
 	s = r
@@ -376,14 +383,15 @@ func (r Repo) PassGate(m bool) (s Repo, ok bool) {
 
 // OthersClosePR records someone else closing the latest build's open pull
 // request.
-// @ ensures ok == (r.PR == PRDraft || r.PR == PRReady)
+// @ ensures ok == (!r.Followup && (r.PR == PRDraft || r.PR == PRReady))
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.PR == PRClosed
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
 // @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) OthersClosePR() (s Repo, ok bool) {
-	if !(r.PR == PRDraft || r.PR == PRReady) {
+	if r.Followup || !(r.PR == PRDraft || r.PR == PRReady) {
 		return r, false
 	}
 	s = r
@@ -393,14 +401,15 @@ func (r Repo) OthersClosePR() (s Repo, ok bool) {
 
 // OthersMergePR records someone else merging the latest build's open pull
 // request.
-// @ ensures ok == (r.PR == PRDraft || r.PR == PRReady)
+// @ ensures ok == (!r.Followup && (r.PR == PRDraft || r.PR == PRReady))
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.PR == PRMerged
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
 // @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) OthersMergePR() (s Repo, ok bool) {
-	if !(r.PR == PRDraft || r.PR == PRReady) {
+	if r.Followup || !(r.PR == PRDraft || r.PR == PRReady) {
 		return r, false
 	}
 	s = r
@@ -410,13 +419,14 @@ func (r Repo) OthersMergePR() (s Repo, ok bool) {
 
 // OthersCloseDraft records someone else closing the draft the latest retry
 // replaces, while it's open.
-// @ ensures ok == (r.Pred == PredDraft)
+// @ ensures ok == (!r.Followup && r.Pred == PredDraft)
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.Pred == PredClosed && s.Intent == r.Intent && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) OthersCloseDraft() (s Repo, ok bool) {
-	if r.Pred != PredDraft {
+	if r.Followup || r.Pred != PredDraft {
 		return r, false
 	}
 	s = r
@@ -426,13 +436,14 @@ func (r Repo) OthersCloseDraft() (s Repo, ok bool) {
 
 // OthersMergeDraft records someone else merging the draft the latest retry
 // replaces, while it's open.
-// @ ensures ok == (r.Pred == PredDraft)
+// @ ensures ok == (!r.Followup && r.Pred == PredDraft)
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.Pred == PredMerged && s.Intent == r.Intent && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) OthersMergeDraft() (s Repo, ok bool) {
-	if r.Pred != PredDraft {
+	if r.Followup || r.Pred != PredDraft {
 		return r, false
 	}
 	s = r
@@ -441,18 +452,24 @@ func (r Repo) OthersMergeDraft() (s Repo, ok bool) {
 }
 
 // Acquire takes the lease for w, atomically, when nobody holds it.
-// @ requires w.Ok()
-// @ ensures ok == (r.Lease == NoOne)
+// @ requires w.Ok() && 0 <= r.Fence && r.Fence <= MaxAttempt
+// @ ensures ok == (r.Lease == NoOne && (!r.Followup || r.Fence < MaxAttempt))
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.Lease == w.ID
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup
+// @ ensures ok && r.Followup ==> s.Fence == r.Fence + 1
+// @ ensures !ok || !r.Followup ==> s.Fence == r.Fence
 func (r Repo) Acquire(w Watcher) (s Repo, ok bool) {
-	if r.Lease != NoOne {
+	if r.Lease != NoOne || (r.Followup && r.Fence >= MaxAttempt) {
 		return r, false
 	}
 	s = r
 	s.Lease = w.ID
+	if r.Followup {
+		s.Fence++
+	}
 	return s, true
 }
 
@@ -463,6 +480,7 @@ func (r Repo) Acquire(w Watcher) (s Repo, ok bool) {
 // @ ensures ok ==> s.Lease == NoOne
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) Lapse(w Watcher) (s Repo, ok bool) {
 	if r.Lease != w.ID {
 		return r, false
@@ -479,6 +497,7 @@ func (r Repo) Lapse(w Watcher) (s Repo, ok bool) {
 // @ ensures ok ==> s.Lease == NoOne
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) Expire() (s Repo, ok bool) {
 	if r.Lease == NoOne {
 		return r, false
@@ -511,6 +530,7 @@ func (r Repo) Restart(w Watcher) (v Watcher, ok bool) {
 // @ ensures ok ==> forall j int :: { s.Runs[j] } 0 <= j && j < NumKeys && j != k ==> s.Runs[j] == r.Runs[j]
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) StartRun(w Watcher, k int) (s Repo, v Watcher, ok bool) {
 	if !r.CanStartRun(w, k) {
 		return r, w, false
@@ -537,6 +557,7 @@ func (r Repo) StartRun(w Watcher, k int) (s Repo, v Watcher, ok bool) {
 // @ ensures ok ==> v.ID == w.ID && v.InRun == NoRun && v.Ok()
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) FinishRun(w Watcher) (s Repo, v Watcher, ok bool) {
 	if !r.CanFinishRun(w) {
 		return r, w, false
@@ -575,6 +596,7 @@ func (r Repo) DropRun(w Watcher) (v Watcher, ok bool) {
 // @ ensures ok ==> s.Posted[k] && s.Given == r.Given && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> forall j int :: { s.Posted[j] } 0 <= j && j < NumKeys && j != k ==> s.Posted[j] == r.Posted[j]
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) ReportStopped(w Watcher, k int) (s Repo, ok bool) {
 	if !r.CanReportStopped(w, k) {
 		return r, false
@@ -593,6 +615,7 @@ func (r Repo) ReportStopped(w Watcher, k int) (s Repo, ok bool) {
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.RatPushed && s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) PushRatification(w Watcher, k int) (s Repo, ok bool) {
 	if !r.CanPushRatification(w, k) {
 		return r, false
@@ -611,6 +634,7 @@ func (r Repo) PushRatification(w Watcher, k int) (s Repo, ok bool) {
 // @ ensures ok ==> s.Intent && s.Pred == r.Pred && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) RecordIntent(w Watcher) (s Repo, ok bool) {
 	if !r.CanRecordIntent(w) {
 		return r, false
@@ -627,6 +651,7 @@ func (r Repo) RecordIntent(w Watcher) (s Repo, ok bool) {
 // @ ensures ok ==> s.Pred == PredRetired && s.Intent == r.Intent && s.Attempt == r.Attempt
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) Retire(w Watcher) (s Repo, ok bool) {
 	if !r.CanRetire(w) {
 		return r, false
@@ -642,6 +667,7 @@ func (r Repo) Retire(w Watcher) (s Repo, ok bool) {
 // @ ensures !ok ==> s == r
 // @ ensures ok ==> s.CodePushed && s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) PushCode(w Watcher, k int) (s Repo, ok bool) {
 	if !r.CanPushCode(w, k) {
 		return r, false
@@ -661,6 +687,7 @@ func (r Repo) PushCode(w Watcher, k int) (s Repo, ok bool) {
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed
 // @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && s.Marked == r.Marked && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) OpenPullRequest(w Watcher, k int, ready bool) (s Repo, ok bool) {
 	if !r.CanOpenPullRequest(w, k) {
 		return r, false
@@ -685,6 +712,7 @@ func (r Repo) OpenPullRequest(w Watcher, k int, ready bool) (s Repo, ok bool) {
 // @ ensures ok ==> s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
 // @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Merged == r.Merged && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) MarkReady(w Watcher) (s Repo, ok bool) {
 	if !r.CanMarkReady(w) {
 		return r, false
@@ -703,6 +731,7 @@ func (r Repo) MarkReady(w Watcher) (s Repo, ok bool) {
 // @ ensures ok ==> s.Merged && s.PR == PRMerged && s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && s.Opened == r.Opened
 // @ ensures ok ==> s.GatePassed == r.GatePassed && s.Mergeable == r.Mergeable && s.Marked == r.Marked && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) MergePullRequest(w Watcher, k int) (s Repo, ok bool) {
 	if !r.CanMerge(w, k) {
 		return r, false
@@ -722,6 +751,7 @@ func (r Repo) MergePullRequest(w Watcher, k int) (s Repo, ok bool) {
 // @ ensures ok ==> s.Posted[k] && s.Given == r.Given && s.Runs == r.Runs && s.Lease == r.Lease
 // @ ensures ok ==> forall j int :: { s.Posted[j] } 0 <= j && j < NumKeys && j != k ==> s.Posted[j] == r.Posted[j]
 // @ ensures ok ==> s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+// @ ensures s.Followup == r.Followup && s.Fence == r.Fence
 func (r Repo) Post(w Watcher, k int) (s Repo, ok bool) {
 	if !r.CanPost(w, k) {
 		return r, false
@@ -730,5 +760,30 @@ func (r Repo) Post(w Watcher, k int) (s Repo, ok bool) {
 	p[k] = true
 	s = r
 	s.Posted = p
+	return s, true
+}
+
+// SelectFollowup chooses journal recovery only for an untouched issue. Watcher
+// availability and crash history are environment conditions checked separately.
+// @ decreases
+// @ pure
+func (r Repo) CanSelectFollowup() bool {
+	return !r.Followup && r.Fence == 0 && r.Lease == NoOne &&
+		r.Given == ([NumKeys]bool{}) && r.Posted == ([NumKeys]bool{}) && r.Runs == ([NumKeys]int{}) &&
+		!r.RatPushed && !r.CodePushed && !r.Opened && r.PR == PRNone && !r.GatePassed && !r.Mergeable && !r.Merged &&
+		!r.Marked && r.Pred == PredNone && !r.Intent
+}
+
+// @ ensures ok == r.CanSelectFollowup()
+// @ ensures !ok ==> s == r
+// @ ensures ok ==> s.Followup && s.Fence == r.Fence && s.Lease == r.Lease
+// @ ensures s.Given == r.Given && s.Posted == r.Posted && s.Runs == r.Runs
+// @ ensures s.RatPushed == r.RatPushed && s.CodePushed == r.CodePushed && r.samePR(s) && r.sameDraft(s)
+func (r Repo) SelectFollowup() (s Repo, ok bool) {
+	if !r.CanSelectFollowup() {
+		return r, false
+	}
+	s = r
+	s.Followup = true
 	return s, true
 }
