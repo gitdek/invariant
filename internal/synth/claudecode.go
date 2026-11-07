@@ -131,6 +131,11 @@ func (c ClaudeCode) Run(ctx context.Context, job Job) (Usage, error) {
 	if _, err := c.args(job); err != nil {
 		return Usage{}, err
 	}
+	// Claude Code waits for no turn, but its agent starts only while the
+	// work is still wanted, as Codex's does (#677).
+	if err := starting(ctx); err != nil {
+		return Usage{}, err
+	}
 	ctx, cancel := within(ctx, job)
 	defer cancel()
 	tools, err := newAllowance(job)

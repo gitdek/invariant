@@ -83,15 +83,25 @@ var codexTurn = make(chan struct{}, 1)
 // turn waits for a run's turn (D-0138, D-0154): this process's first, then
 // a lock on a file in Codex's home, which every process whose runs share
 // that sign-in takes, a second watcher's or a synthesize run by hand. The
-// lock goes with the file, so a process that dies gives it up. release
-// gives the turn back.
+// lock goes with the file, so a process that dies gives it up. While it
+// waits, it checks that the run's work is still wanted, and stops waiting
+// when it isn't (#677). release gives the turn back.
 func (c Codex) turn(ctx context.Context) (release func(), err error) {
-	select {
-	case codexTurn <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	ticks, stop := wantedTicks(ctx)
+	defer stop()
+	for taken := false; !taken; {
+		select {
+		case codexTurn <- struct{}{}:
+			taken = true
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticks:
+			if err := StillWanted(ctx); err != nil {
+				return nil, err
+			}
+		}
 	}
-	f, err := c.lockHome(ctx)
+	f, err := c.lockHome(ctx, ticks)
 	if err != nil {
 		<-codexTurn
 		return nil, err
@@ -100,8 +110,9 @@ func (c Codex) turn(ctx context.Context) (release func(), err error) {
 }
 
 // lockHome takes the lock on Codex's home. It tries once a second, since a
-// lock that blocks can't be called off.
-func (c Codex) lockHome(ctx context.Context) (*os.File, error) {
+// lock that blocks can't be called off, and checks that the run's work is
+// still wanted at each of ticks.
+func (c Codex) lockHome(ctx context.Context, ticks <-chan time.Time) (*os.File, error) {
 	if err := os.MkdirAll(c.Home, 0o700); err != nil {
 		return nil, err
 	}
@@ -122,6 +133,11 @@ func (c Codex) lockHome(ctx context.Context) (*os.File, error) {
 		case <-ctx.Done():
 			f.Close()
 			return nil, ctx.Err()
+		case <-ticks:
+			if err := StillWanted(ctx); err != nil {
+				f.Close()
+				return nil, err
+			}
 		case <-time.After(time.Second):
 		}
 	}
@@ -324,6 +340,11 @@ func (c Codex) Run(ctx context.Context, job Job) (Usage, error) {
 			release()
 		}
 	}()
+	// The work may have stopped being wanted while the run waited, and then
+	// its agent never starts (#677).
+	if err := starting(ctx); err != nil {
+		return Usage{}, err
+	}
 	// The run's time starts now that its first turn has come (D-0154). The
 	// waits before its retries and its later turns all count against it.
 	ctx, cancel := within(ctx, job)
