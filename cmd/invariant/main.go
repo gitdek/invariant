@@ -1287,6 +1287,14 @@ func initCmd(args []string) int {
 			"Build invariant from a clean checkout of a commit that's on GitHub, or pass -invariant with a full commit hash.")
 		return 2
 	}
+	if _, err := setup.Workflow(*ref); err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	if err := setup.CheckInitPaths(dir); err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
 	path, err := setup.Write(dir, *ref, *force)
 	if err != nil {
 		if path != "" {
@@ -1294,6 +1302,22 @@ func initCmd(args []string) int {
 		}
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
+	}
+	kept, unresolved, err := setup.WriteRepository(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant: .invariant/repository.json:", err)
+		return 2
+	}
+	if kept {
+		fmt.Println("Kept existing .invariant/repository.json unchanged, including with -force.")
+	} else {
+		fmt.Println("Drafted .invariant/repository.json from checkout evidence without running repository commands.")
+		if len(unresolved) > 0 {
+			fmt.Printf("Unresolved requirements (%d):\n", len(unresolved))
+			for _, issue := range unresolved {
+				fmt.Printf("- %s\n", issue)
+			}
+		}
 	}
 	if *repo == "" {
 		*repo = originRepo(dir)
@@ -1329,6 +1353,7 @@ invariant watch -repo %[3]s -projects invariant%[4]s
 
 4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
 `, setup.WorkflowPath, (*ref)[:12], *repo, language)
+	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; configured checks read committed base evidence. External plumbing remains disabled. Before plumbing can be enabled, a gate must run the configured repository checks and verify plan ratification and scope. The generated workflow still runs the modeled-project gate.")
 	return 0
 }
 
