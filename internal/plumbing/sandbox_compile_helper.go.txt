@@ -19,18 +19,18 @@ import (
 )
 
 type packageInfo struct {
-	Dir, ImportPath, Name, Export                                       string
+	Dir, ImportPath, Name, Export                                           string
 	GoFiles, CgoFiles, TestGoFiles, XTestGoFiles, TestImports, XTestImports []string
-	Incomplete                                                         bool
-	Error                                                              *struct{ Err string }
-	Module                                                             *struct {
+	Incomplete                                                              bool
+	Error                                                                   *struct{ Err string }
+	Module                                                                  *struct {
 		Main      bool
 		GoVersion string
 	}
 }
 
 type report struct {
-	Eligible bool `json:"eligible"`
+	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason"`
 }
 
@@ -265,6 +265,177 @@ func (a *analysis) productionType(typ types.Type) bool {
 	return ok && a.production(named.Obj())
 }
 
+// declared reports whether a type a test declares, such as a result,
+// parameter, field or element type, names a production type anywhere in its
+// structure, so changing that production type can change what it accepts.
+// A test's own named types stay fixed, whatever their fields.
+func (a *analysis) declared(typ types.Type) bool {
+	return a.declaredSeen(typ, map[types.Type]bool{})
+}
+
+func (a *analysis) declaredSeen(typ types.Type, seen map[types.Type]bool) bool {
+	if typ == nil || seen[typ] {
+		return false
+	}
+	seen[typ] = true
+	switch typ := types.Unalias(typ).(type) {
+	case *types.Named:
+		if a.production(typ.Obj()) {
+			return true
+		}
+		for i := 0; i < typ.TypeArgs().Len(); i++ {
+			if a.declaredSeen(typ.TypeArgs().At(i), seen) {
+				return true
+			}
+		}
+	case *types.Pointer:
+		return a.declaredSeen(typ.Elem(), seen)
+	case *types.Slice:
+		return a.declaredSeen(typ.Elem(), seen)
+	case *types.Array:
+		return a.declaredSeen(typ.Elem(), seen)
+	case *types.Chan:
+		return a.declaredSeen(typ.Elem(), seen)
+	case *types.Map:
+		return a.declaredSeen(typ.Key(), seen) || a.declaredSeen(typ.Elem(), seen)
+	case *types.Signature:
+		return a.declaredSeen(typ.Params(), seen) || a.declaredSeen(typ.Results(), seen)
+	case *types.Tuple:
+		for i := 0; i < typ.Len(); i++ {
+			if a.declaredSeen(typ.At(i).Type(), seen) {
+				return true
+			}
+		}
+	case *types.Struct:
+		for i := 0; i < typ.NumFields(); i++ {
+			if a.declaredSeen(typ.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parameter is the declared type a call's i'th argument must suit, or nil
+// for a builtin, a conversion or a call the checker couldn't type.
+func (a *analysis) parameter(call *ast.CallExpr, i int) types.Type {
+	if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+		if _, ok := a.info.Uses[id].(*types.Builtin); ok {
+			return nil
+		}
+	}
+	typ := a.info.TypeOf(call.Fun)
+	if typ == nil {
+		return nil
+	}
+	signature, ok := typ.Underlying().(*types.Signature)
+	if !ok {
+		return nil
+	}
+	params := signature.Params()
+	if signature.Variadic() && i >= params.Len()-1 {
+		last := params.At(params.Len() - 1).Type()
+		if slice, ok := last.(*types.Slice); ok && !call.Ellipsis.IsValid() {
+			return slice.Elem()
+		}
+		return last
+	}
+	if i < params.Len() {
+		return params.At(i).Type()
+	}
+	return nil
+}
+
+// element is the declared type a composite literal's i'th element must suit:
+// a struct field's, or a slice's, array's or map's element or key type.
+func (a *analysis) element(literal *ast.CompositeLit, i int, pos token.Pos) types.Type {
+	typ := a.info.TypeOf(literal)
+	if typ == nil {
+		return nil
+	}
+	pair, keyed := literal.Elts[i].(*ast.KeyValueExpr)
+	switch under := typ.Underlying().(type) {
+	case *types.Struct:
+		if keyed {
+			if id, ok := pair.Key.(*ast.Ident); ok {
+				for j := 0; j < under.NumFields(); j++ {
+					if under.Field(j).Name() == id.Name {
+						return under.Field(j).Type()
+					}
+				}
+			}
+			return nil
+		}
+		if i < under.NumFields() {
+			return under.Field(i).Type()
+		}
+	case *types.Slice:
+		return under.Elem()
+	case *types.Array:
+		return under.Elem()
+	case *types.Map:
+		if keyed && contains(pair.Key, pos) {
+			return under.Key()
+		}
+		return under.Elem()
+	}
+	return nil
+}
+
+// result is the declared type of the innermost enclosing function's j'th
+// result, when a return statement gives all n of them.
+func (a *analysis) result(enclosing []ast.Node, j, n int) types.Type {
+	for k := len(enclosing) - 1; k >= 0; k-- {
+		var typ types.Type
+		switch fn := enclosing[k].(type) {
+		case *ast.FuncLit:
+			typ = a.info.TypeOf(fn)
+		case *ast.FuncDecl:
+			if object := a.info.Defs[fn.Name]; object != nil {
+				typ = object.Type()
+			}
+		default:
+			continue
+		}
+		signature, ok := typ.(*types.Signature)
+		if !ok || signature.Results().Len() != n {
+			return nil
+		}
+		return signature.Results().At(j).Type()
+	}
+	return nil
+}
+
+// admits reports whether an operand the test fixes can take part in op
+// beside an operand of some type. If it can't, as a boolean can't be added,
+// no production change to the other operand repairs the expression.
+func (a *analysis) admits(op token.Token, fixed ast.Expr) bool {
+	typ := a.info.TypeOf(fixed)
+	if typ == nil {
+		return true
+	}
+	if _, ok := types.Unalias(typ).(*types.TypeParam); ok {
+		return true
+	}
+	basic, _ := typ.Underlying().(*types.Basic)
+	has := func(info types.BasicInfo) bool { return basic != nil && basic.Info()&info != 0 }
+	switch op {
+	case token.LAND, token.LOR:
+		return has(types.IsBoolean)
+	case token.EQL, token.NEQ:
+		return types.Comparable(typ) || basic != nil && basic.Kind() == types.UntypedNil
+	case token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return has(types.IsOrdered)
+	case token.ADD:
+		return has(types.IsNumeric | types.IsString)
+	case token.SUB, token.MUL, token.QUO:
+		return has(types.IsNumeric)
+	case token.REM, token.AND, token.OR, token.XOR, token.AND_NOT:
+		return has(types.IsInteger)
+	}
+	return true
+}
+
 // An inferred local retains the origin of its type. An explicit test-local
 // type stays fixed even when its initializer happens to call production.
 func (a *analysis) inferred(file *ast.File) {
@@ -474,7 +645,9 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 			}
 		}
 	}
-	if !strings.HasPrefix(message, "cannot use ") && !strings.HasPrefix(message, "cannot convert ") &&
+	// Each of these renders the operand at its position, as "cannot use x (".
+	operands := []string{"cannot use ", "cannot convert ", "invalid argument: ", "cannot range over "}
+	if !slices.ContainsFunc(operands, func(prefix string) bool { return strings.HasPrefix(message, prefix) }) &&
 		!strings.HasPrefix(message, "invalid operation:") {
 		return false
 	}
@@ -487,7 +660,7 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 			continue
 		}
 		operand := types.ExprString(expr) + " ("
-		if strings.HasPrefix(message, "cannot use "+operand) || strings.HasPrefix(message, "cannot convert "+operand) {
+		if slices.ContainsFunc(operands, func(prefix string) bool { return strings.HasPrefix(message, prefix+operand) }) {
 			if a.origin(expr) {
 				return true
 			}
@@ -506,16 +679,28 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 				}
 				return contains(node.Y, pos) && a.origin(node.Y)
 			}
-			return a.origin(node.X) || a.origin(node.Y)
+			x, y := a.origin(node.X), a.origin(node.Y)
+			switch {
+			case x && y:
+				return true
+			case x:
+				return a.admits(node.Op, node.Y)
+			case y:
+				return a.admits(node.Op, node.X)
+			}
+			return false
 		case *ast.UnaryExpr:
+			return a.origin(node.X)
+		case *ast.TypeAssertExpr:
+			// Only a production value could become an interface.
 			return a.origin(node.X)
 		case *ast.CallExpr:
 			if a.origin(node.Fun) {
 				return true
 			}
-			for _, arg := range node.Args {
+			for j, arg := range node.Args {
 				if contains(arg, pos) {
-					return a.origin(arg)
+					return a.origin(arg) || a.declared(a.parameter(node, j))
 				}
 			}
 			return false
@@ -523,17 +708,20 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 			if a.origin(node.Type) {
 				return true
 			}
-			for _, element := range node.Elts {
-				if pair, ok := element.(*ast.KeyValueExpr); ok {
-					element = pair.Value
-				}
+			for j, element := range node.Elts {
 				if contains(element, pos) {
-					return a.origin(element)
+					if pair, ok := element.(*ast.KeyValueExpr); ok {
+						element = pair.Value
+						if contains(pair.Key, pos) {
+							element = pair.Key
+						}
+					}
+					return a.origin(element) || a.declared(a.element(node, j, pos))
 				}
 			}
 			return false
 		case *ast.ValueSpec:
-			if a.origin(node.Type) {
+			if a.origin(node.Type) || node.Type != nil && a.declared(a.info.TypeOf(node.Type)) {
 				return true
 			}
 			for _, value := range node.Values {
@@ -545,14 +733,15 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 		case *ast.AssignStmt:
 			for j, value := range node.Rhs {
 				if contains(value, pos) {
-					return a.origin(value) || len(node.Lhs) == len(node.Rhs) && a.origin(node.Lhs[j])
+					return a.origin(value) || len(node.Lhs) == len(node.Rhs) &&
+						(a.origin(node.Lhs[j]) || a.declared(a.info.TypeOf(node.Lhs[j])))
 				}
 			}
 			return false
 		case *ast.ReturnStmt:
-			for _, value := range node.Results {
+			for j, value := range node.Results {
 				if contains(value, pos) {
-					return a.origin(value)
+					return a.origin(value) || a.declared(a.result(nodes[:i], j, len(node.Results)))
 				}
 			}
 			return false

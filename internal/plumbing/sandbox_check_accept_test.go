@@ -361,6 +361,27 @@ func TestSandboxCheckAttributesCompilerErrors(t *testing.T) {
 		{"external private field", "type Options397 struct{}", "", `_ = product.Options397{hidden397: 1}`, "unknown field"},
 		{"external nested local call", "func Value397(n int) {}", "func helper397(n int) int { return n }", `product.Value397(helper397("bad"))`, "cannot use"},
 		{"production init stays unexecuted", `func init() { panic("must not run") }`, "", `RequireNewAPI397()`, ""},
+		// An operand the test fixes must admit the operator with some type.
+		{"local boolean sum", "func Value397() int { return 1 }", "", `var local bool; _ = local + Value397()`, "mismatched types"},
+		{"external local boolean sum", "func Value397() int { return 1 }", "", `var local bool; _ = local + product.Value397()`, "mismatched types"},
+		{"local slice comparison", "func Value397() []int { return nil }", "", `var local []int; _ = local == Value397()`, "slice can only be compared to nil"},
+		{"changed result beside local sum", `func Value397() string { return "" }`, "", `var local int; _ = local + Value397()`, ""},
+		// Builtins, ranges and assertions name the operand they refuse.
+		{"local length", "", "", `RequireNewAPI397(); var local int; _ = len(local)`, "invalid argument"},
+		{"local range", "", "", `RequireNewAPI397(); var local bool; for range local {}`, "cannot range over"},
+		{"local assertion", "", "", `RequireNewAPI397(); var local int; _, _ = local.(string)`, "is not an interface"},
+		{"changed result length", "func Value397() int { return 0 }", "", `_ = len(Value397())`, ""},
+		{"external changed result length", "func Value397() int { return 0 }", "", `_ = len(product.Value397())`, ""},
+		{"changed result range", "func Value397() bool { return false }", "", `for range Value397() {}`, ""},
+		{"changed result assertion", "func Value397() int { return 0 }", "", `got := Value397(); _, _ = got.(string)`, ""},
+		// A declared type naming a production type changes with it.
+		{"local declared result", "", "func helper397() int { return \"bad\" }", `RequireNewAPI397(); _ = helper397()`, "cannot use"},
+		{"changed declared result", "type Type397 int", "func helper397() Type397 { return \"changed\" }", `_ = helper397()`, ""},
+		{"external changed declared result", "type Type397 int", "func helper397() product.Type397 { return \"changed\" }", `_ = helper397()`, ""},
+		{"changed helper parameter", "type Type397 int", "func helper397(v Type397) {}", `helper397("changed")`, ""},
+		{"changed local field type", "type Type397 int", "type local397 struct{ V Type397 }", `_ = local397{V: "changed"}`, ""},
+		{"changed element type", "type Type397 int", "", `_ = []Type397{"changed"}`, ""},
+		{"local field beside production field", "type Type397 int", "type local397 struct{ V Type397; W int }", `_ = local397{W: "bad"}`, "cannot use"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := s397New(t)
@@ -404,6 +425,13 @@ func TestSandboxCheckProductionSignatureCorrections(t *testing.T) {
 		{"package result count", "func Value397() int { return 7 }", "func Value397() (int, int) { return 7, 8 }", "var a, b = Value397()", `if a != 7 || b != 8 { t.Fatal(a, b) }`},
 		{"explicit result count", "func Value397() int { return 7 }", "func Value397() (int, int) { return 7, 8 }", "", `var a, b int = Value397(); if a != 7 || b != 8 { t.Fatal(a, b) }`},
 		{"production method", "type Box397 struct{}\nfunc (Box397) Value397(n int) int { return n }", "type Box397 struct{}\nfunc (Box397) Value397(s string) int { return len(s) }", "", `if (Box397{}).Value397("changed") != 7 { t.Fatal("wrong result") }`},
+		{"result length", "func Value397() int { return 0 }", "func Value397() []int { return []int{1, 2, 3} }", "", `if len(Value397()) != 3 { t.Fatal("wrong length") }`},
+		{"result range", "func Value397() bool { return false }", "func Value397() []int { return []int{7} }", "", `for _, v := range Value397() { if v != 7 { t.Fatal(v) } }`},
+		{"result assertion", "func Value397() int { return 0 }", `func Value397() any { return "x" }`, "", `got := Value397(); if s, ok := got.(string); !ok || s != "x" { t.Fatal(got) }`},
+		{"result beside local sum", `func Value397() string { return "" }`, "func Value397() int { return 7 }", "", `local := 1; if local+Value397() != 8 { t.Fatal("wrong sum") }`},
+		{"declared result type", "type Type397 int", "type Type397 string", `func helper397() Type397 { return "changed" }`, `if helper397() != "changed" { t.Fatal("wrong result") }`},
+		{"helper parameter type", "type Type397 int", "type Type397 string", "func helper397(v Type397) Type397 { return v }", `if helper397("changed") != "changed" { t.Fatal("wrong result") }`},
+		{"literal field type", "type Type397 int", "type Type397 string", "type local397 struct{ V Type397 }", `if (local397{V: "changed"}).V != "changed" { t.Fatal("wrong field") }`},
 	} {
 		for _, external := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/external_%t", tc.name, external), func(t *testing.T) {
@@ -415,7 +443,7 @@ func TestSandboxCheckProductionSignatureCorrections(t *testing.T) {
 				declarations, body := tc.declarations, tc.body
 				if external {
 					header = "package pending_test\nimport (\"testing\"; product \"example.com/shards397/pending\")\n"
-					qualify := strings.NewReplacer("Value397()", "product.Value397()", "Box397{}", "product.Box397{}")
+					qualify := strings.NewReplacer("Value397()", "product.Value397()", "Box397{}", "product.Box397{}", "Type397", "product.Type397")
 					declarations, body = qualify.Replace(declarations), qualify.Replace(body)
 				}
 				f.accept(t, "pending", "TestNeedsChange", header+declarations+"\nfunc TestNeedsChange(t *testing.T) { "+body+" }\n")
