@@ -98,11 +98,14 @@ func TestRepositoryGateRefusesInheritedDefaultsAndEnvironment(t *testing.T) {
 	}
 	top := func(keys string) string { return strings.Replace(w, "permissions:\n", keys+"permissions:\n", 1) }
 	for name, workflow := range map[string]string{
-		"workflow working directory": top("defaults:\n  run:\n    working-directory: docs\n"),
-		"job working directory":      job("    defaults:\n      run:\n        working-directory: docs\n"),
-		"quoted job defaults":        job("    'defaults' : {run: {working-directory: docs}}\n"),
-		"workflow BASH_ENV":          top("env:\n  BASH_ENV: /tmp/hook\n"),
-		"job BASH_ENV":               job("    env:\n      BASH_ENV: /tmp/hook\n"),
+		"workflow working directory":   top("defaults:\n  run:\n    working-directory: docs\n"),
+		"job working directory":        job("    defaults:\n      run:\n        working-directory: docs\n"),
+		"quoted job defaults":          job("    'defaults' : {run: {working-directory: docs}}\n"),
+		"workflow BASH_ENV":            top("env:\n  BASH_ENV: /tmp/hook\n"),
+		"job BASH_ENV":                 job("    env:\n      BASH_ENV: /tmp/hook\n"),
+		"workflow defaults after jobs": w + "defaults:\n  run:\n    working-directory: docs\n",
+		"workflow env after jobs":      w + "'env': {BASH_ENV: /tmp/hook}\n",
+		"job container":                job("    container:\n      image: alpine\n      env:\n        BASH_ENV: /tmp/hook\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !strings.Contains(workflow, "working-directory") && !strings.Contains(workflow, "BASH_ENV") {

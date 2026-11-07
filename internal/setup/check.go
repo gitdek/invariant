@@ -47,7 +47,8 @@ func CheckRepository(ctx context.Context, gh GitHub, repo, base string, configur
 			"Run invariant init in a checkout of %s, and commit the workflow it writes to %s.", base, repo, base))
 	}
 	if configured && !capable {
-		fixes = append(fixes, fmt.Sprintf("Manually upgrade invariant/gate on %s: use invariant init -invariant FULL_COMMIT in a separate directory to generate a pinned template, review and merge its check-repository, factory scope and guarded project/plan ratification steps with your custom workflow, then commit the upgraded workflow to %s. Init does not replace a different workflow without -force.", base, base))
+		fixes = append(fixes, fmt.Sprintf("Manually upgrade invariant/gate on %s: use invariant init -invariant FULL_COMMIT in a separate directory to generate a pinned template, review and merge its check-repository, factory scope and guarded project/plan ratification steps with your custom workflow, then commit the upgraded workflow to %s. Init does not replace a different workflow without -force. "+
+			"The gate's job must run on push and on every pull request, with no condition, needs, continue-on-error, container, or workflow or job defaults or env, which reach its steps; set environment on your own steps instead.", base, base))
 	}
 	if !merges {
 		fixes = append(fixes, fmt.Sprintf("%s doesn't allow merge commits, and the factory merges with one. Allow them:\n  gh api -X PATCH repos/%s -F allow_merge_commit=true", repo, repo))
@@ -89,12 +90,6 @@ func hasRepositoryGate(workflow string) bool {
 				return true
 			}
 			key, value, ok := gateKey(text)
-			// Workflow defaults and environment reach the gate's steps: a
-			// default working directory empties their project and plan
-			// discovery, and BASH_ENV runs code before each script.
-			if ok && (key == "defaults" || key == "env") {
-				return false
-			}
 			inJobs, start, jobIndent = ok && key == "jobs" && value == "", -1, -1
 		} else if inJobs && (jobIndent < 0 || indent == jobIndent) {
 			if check(i) {
@@ -185,10 +180,10 @@ func repositoryGateSteps(lines []string, jobIndent int) ([]gateStep, bool) {
 				named = true
 			}
 			needs, literalNeeds := gateFlow(value, '[', ']')
-			// A job's defaults and environment reach its steps as the
-			// workflow's do; the gate's own steps set what they need.
+			// A job's defaults, environment and container reach its steps as
+			// the workflow's do; the gate's own steps set what they need.
 			if key == "if" && !gateTrue(value) || key == "continue-on-error" && !gateFalse(value) || key == "needs" && (!literalNeeds || len(needs) != 0) ||
-				key == "defaults" || key == "env" {
+				key == "defaults" || key == "env" || key == "container" {
 				enabled = false
 			}
 			continue
@@ -397,6 +392,12 @@ func repositoryGateTriggers(workflow string) bool {
 		}
 		key, v, ok := gateKey(text)
 		if !ok || keys[key] || key == "<<" {
+			return false
+		}
+		// Workflow defaults and environment reach the gate's steps wherever
+		// they appear: a default working directory empties their project and
+		// plan discovery, and BASH_ENV runs code before each script.
+		if key == "defaults" || key == "env" {
 			return false
 		}
 		keys[key] = true
