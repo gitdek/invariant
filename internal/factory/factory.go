@@ -2822,7 +2822,7 @@ func (f *Factory) watchMerged(ctx context.Context, t Thread, state Post, pr gith
 	// (#145).
 	if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
 		return err
-	} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR {
+	} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR && !mergedByOther(f.Self, pr) {
 		runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
 		if err != nil {
 			return err
