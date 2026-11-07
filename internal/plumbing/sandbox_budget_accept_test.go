@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,9 +36,9 @@ import (
 // Image acquisition is outside the timed runs, as it is when the watcher starts.
 // Only this subtest's plan touches internal/verify: this acceptance file belongs
 // to plumbing so #397 can itself be built by the old, unsharded sandbox.
-// The real-image check records kernel cgroup high-water marks on normal exit
-// or just before forced removal, including compilation's peaks. Host report
-// files survive cancellation of the run's Docker CLI and output pipe.
+// The real-image check samples working memory every 100 ms, retaining kernel
+// peaks as diagnostics. Host reports survive cancellation of the Docker CLI
+// and output pipe; cleanup takes a bounded final observation when possible.
 // The sandbox does not forward INVARIANT_PLUMBING_REAL into its container, so
 // this same acceptance test runs its default assertions there without nesting
 // more Docker runs. The default assertions always run, even without Docker.
@@ -112,9 +113,22 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 		}
 		setupCtx, finishSetup := context.WithTimeout(context.Background(), 8*time.Minute)
 		defer finishSetup()
+		acquisition := time.Now()
 		image, err := toolchain.PlumbingImage(setupCtx)
 		if err != nil {
 			t.Fatalf("acquire the real pinned sandbox image: %v", err)
+		}
+		t.Logf("image %s acquired in %s outside timed runs; host %s/%s", image, time.Since(acquisition), runtime.GOOS, runtime.GOARCH)
+		for _, args := range [][]string{
+			{"git", "rev-parse", "HEAD"}, {"git", "status", "--porcelain"},
+			{"docker", "context", "show"}, {"docker", "version", "--format", "{{json .}}"},
+			{"docker", "info", "--format", "id={{.ID}} name={{.Name}} os={{.OperatingSystem}} arch={{.Architecture}} kernel={{.KernelVersion}} cpus={{.NCPU}} memory={{.MemTotal}} cgroup={{.CgroupVersion}}"},
+			{"docker", "image", "inspect", "--format", "{{.Id}}", image},
+		} {
+			cmd := exec.CommandContext(setupCtx, args[0], args[1:]...)
+			cmd.Dir = root
+			data, err := cmd.CombinedOutput()
+			t.Logf("measurement identity %v: %s (error: %v)", args, strings.TrimSpace(string(data)), err)
 		}
 		modCmd := exec.CommandContext(setupCtx, "go", "env", "GOMODCACHE")
 		modCmd.Dir = root
@@ -175,6 +189,14 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 					t.Fatalf("%d concurrent real sandbox runs did not all return within %s", wave.runs, budget)
 				}
 				t.Logf("%d-run wave: real sandbox %d finished in %s", wave.runs, out.i+1, out.elapsed)
+				for _, line := range strings.Split(out.result.Output, "\n") {
+					if strings.HasPrefix(line, "@@s397-container ") {
+						t.Logf("%d-run wave: real sandbox %d: %s", wave.runs, out.i+1, line)
+					}
+				}
+				for _, test := range sandboxBudgetSlowTests(out.result) {
+					t.Logf("%d-run wave: real sandbox %d slow test: package=%s test=%s phase=%s elapsed_seconds=%.6f", wave.runs, out.i+1, test.Package, test.Name, test.Phase, *test.ElapsedSeconds)
+				}
 				if out.err != nil {
 					t.Errorf("%d-run wave: real sandbox %d did not return a usable result after %s: %v\n%s\n%s", wave.runs, out.i+1, out.elapsed, out.err, out.result.Summary(), out.result.Tail(16000))
 				}
@@ -244,20 +266,18 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 					continue
 				}
 				t.Logf("%d-run wave: resource report %d is for container %s", wave.runs, i+1, strings.TrimSuffix(name, ".json"))
+				t.Logf("%d-run wave: resource report %s", wave.runs, data)
 				sandboxBudgetCheckResources(t, i+1, "@@s397-resources "+string(data))
 			}
 		}
 	})
 }
 
-// Wrap the real Docker CLI to read kernel-maintained peaks on normal exit and
-// immediately before forced removal. A cidfile identifies each container; host
-// report files survive loss of the run's output pipe on cancellation. No test
-// commands, limits or mounts are replaced. The extra inspection/exec calls are
-// bounded and never prevent delegation of the original removal command.
-// A polling docker-stats sample can miss compilation peaks; memory.peak and
-// pids.peak include every process since container creation. Missing counters or
-// observer failures fail only the opt-in check. It needs a cgroup-v2 Docker host.
+// Wrap the real Docker CLI with an in-container sampler, from preparation to
+// exit. A cidfile identifies the one host report, updated during work and at
+// removal. Inspection and final observations are bounded and never prevent
+// cleanup. Missing counters or observer failures fail only the opt-in check.
+// Sampled working memory is not a kernel high-water mark.
 func sandboxBudgetObserveResources(t *testing.T) string {
 	t.Helper()
 	docker, err := exec.LookPath("docker")
@@ -310,45 +330,132 @@ func sandboxBudgetCheckResources(t *testing.T, run int, output string) {
 		CPUMax      string            `json:"cpu_max"`
 		CPUStat     map[string]uint64 `json:"cpu_stat"`
 		Elapsed     float64           `json:"elapsed_seconds"`
+		WorkingPeak int64             `json:"working_memory_peak"`
+		Samples     int64             `json:"memory_samples"`
+		Interval    float64           `json:"sample_interval_seconds"`
+		MaxEvents   int64             `json:"memory_max_events"`
+		Complete    bool              `json:"complete"`
+
+		Phases map[string]json.RawMessage `json:"phases"`
 	}
 	if err := json.Unmarshal([]byte(reports[0]), &usage); err != nil || usage.Error != "" {
 		t.Errorf("real sandbox %d could not measure resource peaks: %v; %s", run, err, reports[0])
 		return
 	}
-	t.Logf("real sandbox %d: peak memory %d / %d bytes, peak processes %d / %d, OOM events %d, OOM kills %d, denied processes %d", run, usage.MemoryPeak, usage.MemoryLimit, usage.PIDsPeak, usage.PIDsLimit, usage.OOMs, usage.OOMKills, usage.PIDsDenied)
+	fields := sandboxBudgetRequired(t, run, []byte(reports[0]), "memory_peak", "memory_limit", "working_memory_peak", "memory_samples", "sample_interval_seconds", "memory_max_events", "oom", "oom_kill", "pids_peak", "pids_limit", "pids_denied", "cpu_max", "cpu_stat", "elapsed_seconds", "complete", "phases")
+	t.Logf("real sandbox %d: sampled working memory peak %d / %d bytes (%d samples at %.3fs), kernel peak %d bytes, max events %d, peak processes %d / %d, OOM events %d, OOM kills %d, denied processes %d", run, usage.WorkingPeak, usage.MemoryLimit, usage.Samples, usage.Interval, usage.MemoryPeak, usage.MaxEvents, usage.PIDsPeak, usage.PIDsLimit, usage.OOMs, usage.OOMKills, usage.PIDsDenied)
 	t.Logf("real sandbox %d: elapsed %.3fs, cpu.max %q, cpu.stat %v (usage and throttling times in microseconds)", run, usage.Elapsed, usage.CPUMax, usage.CPUStat)
 	cpus, err := toolchain.ContainerCPUs()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want, _ := strconv.ParseFloat(cpus, 64)
-	fields := strings.Fields(usage.CPUMax)
-	if len(fields) != 2 {
+	cpuMax := strings.Fields(usage.CPUMax)
+	if len(cpuMax) != 2 {
 		t.Errorf("real sandbox %d has malformed cpu.max: %q", run, usage.CPUMax)
 	} else {
-		quota, quotaErr := strconv.ParseInt(fields[0], 10, 64)
-		period, periodErr := strconv.ParseInt(fields[1], 10, 64)
+		quota, quotaErr := strconv.ParseInt(cpuMax[0], 10, 64)
+		period, periodErr := strconv.ParseInt(cpuMax[1], 10, 64)
 		if quotaErr != nil || periodErr != nil || quota <= 0 || period <= 0 || math.Abs(float64(quota)-want*float64(period)) > 1 {
 			t.Errorf("real sandbox %d cpu.max = %q, want %s CPUs", run, usage.CPUMax, cpus)
 		}
 	}
-	for _, key := range []string{"usage_usec", "user_usec", "system_usec", "nr_periods", "nr_throttled", "throttled_usec"} {
-		if _, ok := usage.CPUStat[key]; !ok {
-			t.Errorf("real sandbox %d cpu.stat lacks %s", run, key)
-		}
-	}
+	sandboxBudgetCPU(t, run, fields["cpu_stat"])
 	if usage.Elapsed <= 0 || usage.CPUStat["usage_usec"] == 0 {
 		t.Errorf("real sandbox %d has no measured elapsed time or CPU usage: %+v", run, usage)
 	}
 	if usage.MemoryLimit != 4*1024*1024*1024 || usage.PIDsLimit != 1024 {
 		t.Errorf("real sandbox %d did not enforce 4 GiB and 1024 PIDs: %+v", run, usage)
 	}
-	if usage.MemoryPeak <= 0 || usage.MemoryPeak >= usage.MemoryLimit || usage.PIDsPeak <= 0 || usage.PIDsPeak >= usage.PIDsLimit {
+	if usage.MemoryPeak < 0 || usage.WorkingPeak < 0 || usage.WorkingPeak >= usage.MemoryLimit || usage.PIDsPeak <= 0 || usage.PIDsPeak >= usage.PIDsLimit {
 		t.Errorf("real sandbox %d did not stay below its memory/process caps: %+v", run, usage)
 	}
 	if usage.OOMs != 0 || usage.OOMKills != 0 || usage.PIDsDenied != 0 {
 		t.Errorf("real sandbox %d hit a memory/process limit: %+v", run, usage)
 	}
+	if !usage.Complete || usage.Samples <= 0 || usage.Interval != 0.1 || usage.MaxEvents < 0 {
+		t.Errorf("real sandbox %d lacks complete 100 ms sampling evidence: %+v", run, usage)
+	}
+	if _, ok := usage.Phases["prepare"]; !ok {
+		t.Errorf("real sandbox %d lacks preparation measurements", run)
+	}
+	var samples int64
+	var elapsed float64
+	for name, data := range usage.Phases {
+		if name != "prepare" && name != "build" && name != "test" && name != "accept" {
+			t.Errorf("real sandbox %d has unknown phase %q", run, name)
+		}
+		var phase struct {
+			Peak    int64             `json:"working_memory_peak"`
+			Samples int64             `json:"memory_samples"`
+			Elapsed float64           `json:"elapsed_seconds"`
+			CPU     map[string]uint64 `json:"cpu_stat"`
+		}
+		if err := json.Unmarshal(data, &phase); err != nil {
+			t.Errorf("real sandbox %d phase %s: %v", run, name, err)
+			continue
+		}
+		fields := sandboxBudgetRequired(t, run, data, "working_memory_peak", "memory_samples", "elapsed_seconds", "cpu_stat")
+		sandboxBudgetCPU(t, run, fields["cpu_stat"])
+		t.Logf("real sandbox %d phase %s: sampled working peak %d bytes, %d samples, elapsed %.6fs, cpu.stat delta %v", run, name, phase.Peak, phase.Samples, phase.Elapsed, phase.CPU)
+		if phase.Peak < 0 || phase.Peak > usage.WorkingPeak || phase.Samples <= 0 || phase.Elapsed < 0 {
+			t.Errorf("real sandbox %d has invalid %s measurements: %s", run, name, data)
+		}
+		for key, value := range phase.CPU {
+			if value > usage.CPUStat[key] {
+				t.Errorf("real sandbox %d phase %s CPU delta %s exceeds total", run, name, key)
+			}
+		}
+		samples += phase.Samples
+		elapsed += phase.Elapsed
+	}
+	if samples > usage.Samples || elapsed > usage.Elapsed+0.001 {
+		t.Errorf("real sandbox %d phase measurements exceed container totals", run)
+	}
+}
+
+func sandboxBudgetRequired(t *testing.T, run int, data []byte, required ...string) map[string]json.RawMessage {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Errorf("real sandbox %d malformed measurements: %v", run, err)
+	}
+	for _, key := range required {
+		if value, ok := fields[key]; !ok || string(value) == "null" {
+			t.Errorf("real sandbox %d missing measurement %s", run, key)
+		}
+	}
+	return fields
+}
+
+func sandboxBudgetCPU(t *testing.T, run int, data []byte) {
+	t.Helper()
+	fields := sandboxBudgetRequired(t, run, data, "usage_usec", "user_usec", "system_usec", "nr_periods", "nr_throttled", "throttled_usec")
+	for key, raw := range fields {
+		var value uint64
+		if err := json.Unmarshal(raw, &value); err != nil || string(raw) == "null" {
+			t.Errorf("real sandbox %d malformed CPU counter %s: %s", run, key, raw)
+		}
+	}
+}
+
+func sandboxBudgetSlowTests(result plumbing.Result) []plumbing.TestResult {
+	var tests []plumbing.TestResult
+	for _, test := range result.TestResults {
+		if strings.Contains(test.Name, "/") || test.ElapsedSeconds == nil || math.IsNaN(*test.ElapsedSeconds) || math.IsInf(*test.ElapsedSeconds, 0) || *test.ElapsedSeconds < 0 {
+			continue
+		}
+		if test.Status == "passed" || test.Status == "failed" || test.Status == "skipped" {
+			tests = append(tests, test)
+		}
+	}
+	sort.Slice(tests, func(i, j int) bool {
+		if *tests[i].ElapsedSeconds != *tests[j].ElapsedSeconds {
+			return *tests[i].ElapsedSeconds > *tests[j].ElapsedSeconds
+		}
+		return tests[i].Package+"\x00"+tests[i].Name+"\x00"+tests[i].Phase < tests[j].Package+"\x00"+tests[j].Name+"\x00"+tests[j].Phase
+	})
+	return tests[:min(20, len(tests))]
 }
 
 const sandboxBudgetDocker = `#!/usr/bin/env python3
@@ -358,56 +465,248 @@ real = os.environ["S397_REAL_DOCKER"]
 root = pathlib.Path(os.environ["S397_RESOURCE_DIR"])
 reports = root / "reports"
 marker = b"@@s397-resources "
-probe = '''import json, pathlib
-root = pathlib.Path("/sys/fs/cgroup")
-def counter(name):
-    return int((root / name).read_text().strip())
-def events(name):
-    return {key: int(value) for key, value in (line.split() for line in (root / name).read_text().splitlines())}
-try:
-    memory = events("memory.events")
-    pids = events("pids.events")
-    report = dict(memory_peak=counter("memory.peak"), memory_limit=counter("memory.max"),
-                  pids_peak=counter("pids.peak"), pids_limit=counter("pids.max"),
-                  cpu_max=(root / "cpu.max").read_text().strip(), cpu_stat=events("cpu.stat"),
-                  oom=memory["oom"], oom_kill=memory["oom_kill"], pids_denied=pids["max"])
-except Exception as error:
-    report = dict(error=str(error))
-print("\\n@@s397-resources " + json.dumps(report), flush=True)
-'''
+# Shared by the in-container sampler, final exec and host report merger.
+common = r'''
+import contextlib, fcntl, json, os, pathlib, re, time, uuid
+interval = 0.1
+cpu_keys = ("usage_usec", "user_usec", "system_usec", "nr_periods", "nr_throttled", "throttled_usec")
+peaks = ("memory_peak", "working_memory_peak", "memory_samples", "memory_max_events",
+         "pids_peak", "oom", "oom_kill", "pids_denied", "elapsed_seconds")
 def atomic(path, value):
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    tmp.write_text(json.dumps(value))
-    os.replace(tmp, path)
-def save(cid, report):
-    if not re.fullmatch("[0-9a-f]{64}", cid):
-        unknown = cid
-        cid = "observer-error-" + uuid.uuid4().hex
-        report = dict(error="cannot identify observed container: " + repr(unknown), detail=report)
-    for registration in root.glob("run-*.json"):
-        run = json.loads(registration.read_text())
-        if cid == (run.get("cid") or read_cid(run["cidfile"])):
-            report["elapsed_seconds"] = time.monotonic() - run["started"]
-            break
-    path = reports / (cid + ".json")
-    with (reports / (cid + ".lock")).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        tmp.write_text(json.dumps(value, allow_nan=False))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+@contextlib.contextmanager
+def locked(path):
+    with path.open("a") as lock:
+        end = time.monotonic() + 0.5
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= end: raise TimeoutError("resource report lock unavailable")
+                time.sleep(0.01)
+        try: yield
+        finally: fcntl.flock(lock, fcntl.LOCK_UN)
+def merge(prior, report):
+    result = dict(prior, **report)
+    for key in peaks:
+        if key in prior:
+            result[key] = max(prior[key], report.get(key, prior[key]))
+    for key in ("memory_limit", "pids_limit", "cpu_max", "sample_interval_seconds"):
+        if key in prior and key in report and prior[key] != report[key]:
+            result["error"] = "container limits changed between observations"
+    result["cpu_stat"] = dict(prior.get("cpu_stat", {}))
+    for key, value in report.get("cpu_stat", {}).items():
+        result["cpu_stat"][key] = max(value, result["cpu_stat"].get(key, 0))
+    result["phases"] = dict(prior.get("phases", {}))
+    for name, phase in report.get("phases", {}).items():
+        result["phases"][name] = merge(prior.get("phases", {}).get(name, {}), phase)
+        # Phase rows contain deltas, not independent container reports.
+        result["phases"][name].pop("phases", None)
+        result["phases"][name].pop("complete", None)
+    result["complete"] = prior.get("complete", False) or report.get("complete", False)
+    if prior.get("error"): result["error"] = prior["error"]
+    return result
+def public(report):
+    return {key: value for key, value in report.items() if not key.startswith("_")}
+def completed(report):
+    required = (*peaks, "memory_limit", "pids_limit", "cpu_max", "cpu_stat",
+                "sample_interval_seconds", "phases")
+    return (report.get("complete") is True and not report.get("error")
+            and all(key in report for key in required)
+            and report["memory_samples"] > 0 and report["sample_interval_seconds"] == interval
+            and "prepare" in report["phases"]
+            and all(key in report["cpu_stat"] for key in cpu_keys))
+def read_sample():
+    cg = pathlib.Path("/sys/fs/cgroup")
+    sample, errors = {}, []
+    def number(value):
+        if not re.fullmatch(r"[0-9]+", value): raise ValueError("invalid counter " + repr(value))
+        return int(value)
+    def counter(name):
+        return number((cg / name).read_text().strip())
+    def table(name, required):
+        result = {}
+        for line in (cg / name).read_text().splitlines():
+            key, value = line.split()
+            if key in result: raise ValueError("duplicate counter " + key)
+            result[key] = number(value)
+        for key in required:
+            if key not in result: raise ValueError(name + " lacks " + key)
+        return result
+    def read(name, get):
+        try: sample.update(get())
+        except Exception as error: errors.append(name + ": " + str(error))
+    def memory():
+        stat = table("memory.stat", ("anon", "shmem"))
+        return dict(working_memory_peak=stat["anon"] + stat["shmem"])
+    def memory_events():
+        events = table("memory.events", ("max", "oom", "oom_kill"))
+        return dict(memory_max_events=events["max"], oom=events["oom"], oom_kill=events["oom_kill"])
+    def cpu_max():
+        value = (cg / "cpu.max").read_text().strip()
+        quota, period = value.split()
+        if number(quota) <= 0 or number(period) <= 0: raise ValueError("nonpositive CPU limit")
+        return dict(cpu_max=value)
+    read("memory.stat", memory)
+    read("memory.events", memory_events)
+    for key, name in (("memory_peak", "memory.peak"), ("memory_limit", "memory.max"),
+                      ("pids_peak", "pids.peak"), ("pids_limit", "pids.max")):
+        read(name, lambda: {key: counter(name)})
+    read("pids.events", lambda: dict(pids_denied=table("pids.events", ("max",))["max"]))
+    read("cpu.max", cpu_max)
+    read("cpu.stat", lambda: dict(cpu_stat=table("cpu.stat", cpu_keys)))
+    return sample, errors
+def observe(state, phase=None, final=False):
+    if state.get("complete"): return state
+    now = time.monotonic()
+    sample, errors = read_sample()
+    if not state:
+        state = dict(_started=now, _phase="prepare", _phase_started=now,
+                     _phase_cpu=sample.get("cpu_stat", {}), memory_samples=0,
+                     sample_interval_seconds=interval, phases={}, complete=False)
+    current = state["_phase"]
+    phases = state["phases"]
+    def update_phase():
+        row = phases.setdefault(current, dict(working_memory_peak=0, memory_samples=0, cpu_stat={}))
+        row["elapsed_seconds"] = max(row.get("elapsed_seconds", 0), now-state["_phase_started"])
+        for key, value in sample.get("cpu_stat", {}).items():
+            baseline = state["_phase_cpu"].get(key, value)
+            if value < baseline: errors.append("CPU counter decreased: " + key)
+            row["cpu_stat"][key] = max(row["cpu_stat"].get(key, 0), value-baseline)
+        return row
+    update_phase()
+    if phase is not None and phase != current:
+        if phase not in ("build", "test", "accept") or phase in phases:
+            errors.append("invalid phase transition: " + phase)
+        else:
+            state.update(_phase=phase, _phase_started=now, _phase_cpu=sample.get("cpu_stat", {}))
+            current = phase
+    row = update_phase()
+    if "working_memory_peak" in sample:
+        state["memory_samples"] += 1
+        row["memory_samples"] += 1
+        row["working_memory_peak"] = max(row["working_memory_peak"], sample["working_memory_peak"])
+    sample.update(elapsed_seconds=now-state["_started"], complete=final and not errors)
+    state = merge(state, sample)
+    if errors and not state.get("error"): state["error"] = "; ".join(errors)
+    return state
+def observation(path, phase=None, final=False, initial=False):
+    with locked(path.with_suffix(".lock")):
         if path.exists():
-            prior = json.loads(path.read_text())
-            if not prior.get("error"):
-                if report.get("error"):
-                    return # An already recorded natural exit can race rm.
-                for key in ("memory_peak", "pids_peak", "oom", "oom_kill", "pids_denied"):
-                    report[key] = max(prior[key], report[key])
-                for key, value in prior["cpu_stat"].items():
-                    report["cpu_stat"][key] = max(value, report["cpu_stat"].get(key, 0))
-                report["elapsed_seconds"] = max(prior["elapsed_seconds"], report["elapsed_seconds"])
-                if any(prior[key] != report[key] for key in ("memory_limit", "pids_limit", "cpu_max")):
-                    report["error"] = "container limits changed between observations"
-        atomic(path, report)
+            state = json.loads(path.read_text())
+        elif initial:
+            state = {}
+        else:
+            raise RuntimeError("sampler state unavailable")
+        state = observe(state, phase, final)
+        atomic(path, state)
+        return public(state)
+'''
+exec(common)
+probe = common + r'''
+import sys
+try:
+    report = observation(pathlib.Path(sys.argv[1]), final=True)
+except Exception as error:
+    report = dict(error="final observation: " + str(error), complete=False)
+print("@@s397-resources " + json.dumps(report), flush=True)
+'''
+sampler = common + r'''
+import selectors, subprocess, sys
+path, command = pathlib.Path(sys.argv[1]), sys.argv[2]
+output_open = True
+def output(data):
+    global output_open
+    if output_open:
+        try:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            output_open = False
+            # Cancellation loses the host pipe, but local sampling continues.
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+def snapshot(**options):
+    report = observation(path, **options)
+    output(b"@@s397-resources " + json.dumps(report).encode() + b"\n")
+def line(data):
+    if data.startswith(b"@@result "):
+        event = json.loads(data[len(b"@@result "):])
+        if event.get("kind") == "phase_start": snapshot(phase=event["phase"])
+    output(data)
+process = None
+selector = selectors.DefaultSelector()
+pending = b""
+try:
+    snapshot(initial=True)
+    process = subprocess.Popen(["sh", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    selector.register(process.stdout, selectors.EVENT_READ)
+    end, next_sample = time.monotonic()+1590, time.monotonic()+interval
+    while selector.get_map() or process.poll() is None:
+        now = time.monotonic()
+        if now >= end: raise TimeoutError("in-container observer exceeded 1590 seconds")
+        if now >= next_sample:
+            snapshot()
+            next_sample = time.monotonic()+interval
+        for key, _ in selector.select(max(0, min(next_sample, end)-time.monotonic())):
+            chunk = os.read(key.fd, 65536)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            pending += chunk
+            while b"\n" in pending:
+                complete, pending = pending.split(b"\n", 1)
+                line(complete+b"\n")
+            if len(pending) > 1024*1024:
+                output(pending)
+                pending = b""
+    if pending: line(pending+b"\n")
+    code = process.wait(timeout=1)
+    snapshot(final=True)
+except Exception as error:
+    try:
+        with locked(path.with_suffix(".lock")):
+            state = json.loads(path.read_text()) if path.exists() else {}
+            state = merge(state, dict(error=str(error)))
+            atomic(path, state)
+        output(b"@@s397-resources " + json.dumps(public(state)).encode() + b"\n")
+    finally:
+        if process is not None:
+            process.kill()
+            try: process.wait(timeout=1)
+            except subprocess.TimeoutExpired: pass
+    code = 1
+finally:
+    selector.close()
+sys.exit(code if code >= 0 else 128-code)
+'''
 def read_cid(path):
     try: return pathlib.Path(path).read_text().strip()
     except FileNotFoundError: return ""
+def registration_for(cid):
+    for registration in root.glob("run-*.json"):
+        run = json.loads(registration.read_text())
+        if cid == (run.get("cid") or read_cid(run["cidfile"])): return run
+    return {}
+def save(cid, report, removal_error=False):
+    if not re.fullmatch("[0-9a-f]{64}", cid):
+        raise RuntimeError("cannot identify observed container: " + repr(cid))
+    run = registration_for(cid)
+    report = dict(report, container_id=cid, container_name=run.get("name", ""))
+    path = reports / (cid + ".json")
+    with locked(reports / (cid + ".lock")):
+        if path.exists():
+            prior = json.loads(path.read_text())
+            # The workload can finish while cleanup's final probe is failing.
+            if removal_error and completed(prior): return prior
+            report = merge(prior, report)
+        atomic(path, report)
+    return report
 def value(flag):
     for i, arg in enumerate(args):
         if arg == flag and i+1 < len(args): return args[i+1]
@@ -434,13 +733,16 @@ if args and args[0] == "rm":
             try:
                 cid = resolve(ref)
                 prior = reports / (cid + ".json")
-                if prior.exists() and not json.loads(prior.read_text()).get("error"): continue
-                result = subprocess.run([real, "exec", cid, "python3", "-c", probe],
+                # Only completed, healthy evidence tolerates a late removal.
+                if prior.exists() and completed(json.loads(prior.read_text())): continue
+                run = registration_for(cid)
+                result = subprocess.run([real, "exec", cid, "python3", "-c", probe, run["state"]],
                                         capture_output=True, timeout=3)
                 if result.returncode: raise RuntimeError(result.stderr.decode(errors="replace").strip())
                 save(cid, extract(result.stdout))
             except Exception as error:
-                save(cid, dict(error="before removal of " + ref + ": " + str(error)))
+                try: save(cid, dict(error="before removal of " + ref + ": " + str(error)), removal_error=True)
+                except Exception as save_error: print(str(save_error), file=sys.stderr)
     finally:
         os.execv(real, [real, *args])
 if args and args[0] == "run":
@@ -451,14 +753,30 @@ if args and args[0] == "run":
         cidfile = str(root / ("cid-" + uuid.uuid4().hex))
         args[1:1] = ["--cidfile", cidfile]
     registration = root / ("run-" + uuid.uuid4().hex + ".json")
-    identity = dict(cidfile=cidfile, name=value("--name"), started=time.monotonic())
+    identity = dict(cidfile=cidfile, name=value("--name"),
+                    state="/tmp/invariant-resource-" + uuid.uuid4().hex + ".json")
     atomic(registration, identity)
-    args[-1] = "sh -c " + shlex.quote(args[-1]) + "\ns397_status=$?\npython3 -c " + shlex.quote(probe) + '\nexit "$s397_status"\n'
+    args[-1] = "exec python3 -c " + shlex.quote(sampler) + " " + shlex.quote(identity["state"]) + " " + shlex.quote(args[-1])
     process = subprocess.Popen([real, *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     pending = b""
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     end = time.monotonic() + 1590
+    identified = False
+    def receive(line):
+        global identified
+        if line.startswith(marker):
+            report = save(read_cid(cidfile), json.loads(line[len(marker):]))
+            if not identified:
+                identity = {key: report[key] for key in ("container_id", "container_name")}
+                sys.stdout.buffer.write(b"@@s397-container " + json.dumps(identity).encode() + b"\n")
+                identified = True
+            # Periodic reports live on the host; only the final one expands the log.
+            if report.get("complete"):
+                sys.stdout.buffer.write(marker + json.dumps(report).encode() + b"\n")
+        else:
+            sys.stdout.buffer.write(line+b"\n")
+        sys.stdout.buffer.flush()
     try:
         while selector.get_map():
             if time.monotonic() >= end: raise TimeoutError("resource observer's Docker run exceeded 1590 seconds")
@@ -473,15 +791,23 @@ if args and args[0] == "run":
                 pending += chunk
                 while b"\n" in pending:
                     line, pending = pending.split(b"\n", 1)
-                    if line.startswith(marker): save(read_cid(cidfile), json.loads(line[len(marker):]))
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
+                    receive(line)
+                if len(pending) > 1024*1024:
+                    sys.stdout.buffer.write(pending)
+                    sys.stdout.buffer.flush()
+                    pending = b""
+        if pending: receive(pending)
         code = process.wait(timeout=2)
+        cid = read_cid(cidfile)
+        path = reports / (cid + ".json")
+        if not path.exists() or not json.loads(path.read_text()).get("complete"):
+            save(cid, dict(error="container exited without a successful final observation"))
     except Exception as error:
-        save(read_cid(cidfile), dict(error=str(error)))
-        process.kill()
-        try: process.wait(timeout=2)
-        except subprocess.TimeoutExpired: pass
+        try: save(read_cid(cidfile), dict(error=str(error)))
+        finally:
+            process.kill()
+            try: process.wait(timeout=2)
+            except subprocess.TimeoutExpired: pass
         code = 1
     finally:
         selector.close()
