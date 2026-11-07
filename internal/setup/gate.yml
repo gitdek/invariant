@@ -21,6 +21,7 @@ jobs:
         with:
           fetch-depth: 0
           lfs: false
+          persist-credentials: false
 
       # Invariant is public, so CI checks it out without a key.
       - uses: actions/checkout@v7
@@ -42,33 +43,66 @@ jobs:
 
       # The branch names the issue: invariant/issue-<n>-<slug>.
       - name: Keep a factory pull request in scope
+        shell: bash
         if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/')
         env:
-          BASE: ${{ github.base_ref }}
+          BASE: ${{ github.event.pull_request.base.sha }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
           issue=$(printf '%s' "$HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
-          "$RUNNER_TEMP/invariant" scope -base "origin/$BASE" -issue "${issue:-0}" HEAD
+          "$RUNNER_TEMP/invariant" scope -base "$BASE" -issue "${issue:-0}" HEAD
+
+      - name: Check repository parts and native acceptance
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(-repo "$GITHUB_REPOSITORY")
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            args+=(-base "$BASE")
+            if [[ "$GITHUB_HEAD_REF" == invariant/* ]]; then
+              issue=$(printf '%s' "$GITHUB_HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
+              if [ -n "$issue" ]; then args+=(-issue "$issue"); fi
+            fi
+          fi
+          "$RUNNER_TEMP/invariant" check-repository "${args[@]}" HEAD
 
       # Every project in the repository, found rather than listed.
       - name: Verify every project
+        shell: bash
         run: |
           status=0
-          for manifest in $(git ls-files '*/.invariant/invariant.json'); do
+          git ls-files -z '.invariant/invariant.json' '*/.invariant/invariant.json' > "$RUNNER_TEMP/invariant-projects"
+          while IFS= read -r -d '' manifest; do
             project="${manifest%/.invariant/invariant.json}"
+            if [ "$manifest" = .invariant/invariant.json ]; then project=.; fi
+            case "$project" in -*) echo "::error::invariant: project path $project starts with -"; exit 1;; esac
             echo "::group::$project"
             "$RUNNER_TEMP/invariant" verify -out "out/$(basename "$project")" "$project" || status=1
             echo "::endgroup::"
-          done
+          done < "$RUNNER_TEMP/invariant-projects"
           exit $status
 
-      - name: Check who ratified each project
+      - name: Check who ratified each project and plan
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          projects=$(git ls-files '*/.invariant/invariant.json' | sed 's#/.invariant/invariant.json$##')
-          if [ -n "$projects" ]; then
-            "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" $projects
+          targets=()
+          git ls-files -z '.invariant/invariant.json' '*/.invariant/invariant.json' > "$RUNNER_TEMP/invariant-projects"
+          while IFS= read -r -d '' manifest; do
+            project="${manifest%/.invariant/invariant.json}"
+            if [ "$manifest" = .invariant/invariant.json ]; then project=.; fi
+            case "$project" in -*) echo "::error::invariant: project path $project starts with -"; exit 1;; esac
+            targets+=("$project")
+          done < "$RUNNER_TEMP/invariant-projects"
+          git ls-files -z '.invariant/plans/issue-*.json' > "$RUNNER_TEMP/invariant-plans"
+          while IFS= read -r -d '' plan; do
+            targets+=("$plan")
+          done < "$RUNNER_TEMP/invariant-plans"
+          if [ "${#targets[@]}" -gt 0 ]; then
+            "$RUNNER_TEMP/invariant" ratification -repo "$GITHUB_REPOSITORY" "${targets[@]}"
           fi
 
       - name: Upload the receipts and traces
