@@ -244,6 +244,15 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 	if err := plumbing.CopyCheckout(ctx, repo, filepath.Join(ws, "repo")); err != nil {
 		return nil, err
 	}
+	repoContext, err := f.Sandbox.RepositoryContext(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	guidance, releaseContext, err := repoContext.Stage(ws)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseContext()
 	if p := req.Previous; p != nil && p.IssuePlan != nil {
 		b, err := json.MarshalIndent(p.IssuePlan, "", "  ")
 		if err != nil {
@@ -261,7 +270,7 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 	checkLog := filepath.Join(out, "check-runs.jsonl")
 	usage, runErr := f.Backend.Run(ctx, synth.Job{
 		Workspace:  ws,
-		Prompt:     IssuesPrompt(req, f.CheckRuns),
+		Prompt:     issuesPrompt(req, f.CheckRuns, repoContext != nil) + guidance,
 		GateServer: []string{f.Binary, "mcp", "-issues", "-max-runs", fmt.Sprint(f.CheckRuns), "-log", checkLog, "-parent-plan", fmt.Sprint(req.ParentPlan), ws},
 		Tools:      []string{"check"},
 		Transcript: transcript,
@@ -321,13 +330,21 @@ func (f Formalizer) PlanIssues(ctx context.Context, req Request, repo, out strin
 
 // IssuesPrompt is the task for the agent that plans a PRD's issues.
 func IssuesPrompt(req Request, checks int) string {
+	return issuesPrompt(req, checks, false)
+}
+
+func issuesPrompt(req Request, checks int, configured bool) string {
 	if req.ParentPlan != 0 {
 		return stepPrompt(req.ParentPlan) + "\nWrite proposal.json with the fork to resolve before this step can be planned as one complete change.\n"
 	}
 	var b strings.Builder
+	rules := "AGENTS.md for the repository's rules"
+	if configured {
+		rules = "the captured repository context and its readable rule copies for the repository's rules"
+	}
 	fmt.Fprintf(&b, `You're planning the issues that carry out a PRD in this repository, for issue #%d. A writer asked for a plan of issues: the changes that together do what the PRD asks, each one an issue of its own, taken one at a time, in order. A person ratifies your plan by its hash, and each issue is then opened exactly as you write it, so the plan is the contract.
 
-request.md holds the issue, what's been decided, and the discussion. The issue holds the PRD, or says where it is. repo/ is the repository as it is on the base branch. Read the PRD, the code it touches, and AGENTS.md for the repository's rules. Don't change anything in repo/: it's there to read.
+request.md holds the issue, what's been decided, and the discussion. The issue holds the PRD, or says where it is. repo/ is the repository as it is on the base branch. Read the PRD, the code it touches, and %s. Don't change anything in repo/: it's there to read.
 
 # Write the plan
 
@@ -365,7 +382,7 @@ Ask only what changes the plan: which issues there are, what each one does, or t
 # Check your plan
 
 The `+"`check`"+` tool reads issues.json and checks that the plan holds together: its name and summary, how many issues it has, and each issue's title and body. You have %d checks, so reread your file before each. When the check passes, you're done. Then reply with a two-sentence summary.
-`, req.Issue, MaxIssues, MaxIssues, MaxIssues, checks)
+`, req.Issue, rules, MaxIssues, MaxIssues, MaxIssues, checks)
 	if req.Previous != nil && req.Previous.IssuePlan != nil {
 		b.WriteString("\n# The plan people asked to revise\n\nprevious/issues.json is the plan before. Keep what the discussion didn't ask to change.\n")
 	}

@@ -23,7 +23,7 @@ func TestPlumbingElsewhereGetsOneAnswerAndNoDraft(t *testing.T) {
 		t.Errorf("the answer should reply to the issue's /invariant solve: %v", answer.Marker.ReplyTo)
 	}
 	body := strings.ToLower(answer.Comment.Body)
-	for _, want := range []string{"plumbing", "yet", "invariant init", "prompt", "trusted base", "dependencies", "person"} {
+	for _, want := range []string{"plumbing", "yet", "invariant init", "configuration drafting", "generated ci", "trusted base", "external issue intake is still disabled", "person"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the answer doesn't say %q:\n%s", want, answer.Comment.Body)
 		}
