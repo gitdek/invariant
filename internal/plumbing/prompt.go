@@ -74,7 +74,7 @@ func ReviewPrompt(plan *Plan, n int) string {
 	repository := "Invariant, a Go project"
 	checks := "gofmt, go vet, the tests of every package it touches, and the acceptance tests"
 	rules := "AGENTS.md there holds its rules."
-	merger := "List decision recording and checks that require unavailable Docker or network access under **Merger work**. The plumbing build cannot write decisions/, and those unavailable checks are the merger's responsibility. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, and the gate requires them, so don't list those; the plumbing sandbox's real-image budget check is still the merger's."
+	merger := "List decision recording and checks that require unavailable Docker or network access under **Merger work**. The plumbing build cannot write decisions/, and those unavailable checks are the merger's responsibility. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, and the gate requires them, so don't list those. List the plumbing sandbox's real-image budget check only when the change can affect what it measures: the sandbox's container, image, resource limits, deadlines or check runner, or the cost of building and testing internal/verify, which it selects. Don't list it for any other change."
 	if plan.Native() {
 		repository = "the configured repository"
 		checks = "the captured parts' applicable commands and pinned native acceptance selectors, including declared reasons for inapplicable phases"
