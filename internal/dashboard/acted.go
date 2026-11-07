@@ -98,14 +98,32 @@ func actedText(w *Waiting, verb string) string {
 func (s *Server) publish(snap Snapshot) ([]byte, error) {
 	s.acted.mu.Lock()
 	defer s.acted.mu.Unlock()
-	left := s.acted.kept[:0]
+	var left []kept
 	for _, k := range s.acted.kept {
 		if !s.readComment(k) {
 			left = append(left, k)
 		}
 	}
+	next := acted{read: &snap, kept: left}
+	shown, gz, err := next.encoded(nil)
+	if err != nil {
+		return nil, err
+	}
+	s.proposals.mu.Lock()
+	defer s.proposals.mu.Unlock()
+	if err := s.ensureProposals(snap); err != nil {
+		return nil, err
+	}
+	// Keep the previous snapshot and its evidence until replacement is durable.
+	if err := s.writeSnapshot(gz); err != nil {
+		return nil, err
+	}
 	s.acted.read, s.acted.kept = &snap, left
-	return s.serve(nil)
+	s.mu.Lock()
+	s.state, s.issues = gz, shown.Issues
+	s.mu.Unlock()
+	s.pruneProposals(snap)
+	return gz, nil
 }
 
 // resume serves the last run's snapshot, gzipped as gz, until the first
@@ -114,8 +132,16 @@ func (s *Server) resume(snap Snapshot, gz []byte) {
 	s.acted.mu.Lock()
 	defer s.acted.mu.Unlock()
 	if s.acted.read == nil {
+		s.proposals.mu.Lock()
+		defer s.proposals.mu.Unlock()
+		// Save any isolated diagnostics before retiring their damaged records.
+		if err := s.writeSnapshot(gz); err != nil {
+			s.logf("restoring the snapshot: %v", err)
+			return
+		}
 		s.acted.read = &snap
 		s.serve(gz) // nothing is kept yet, so it serves gz as it is
+		s.pruneProposals(snap)
 	}
 }
 
@@ -140,20 +166,28 @@ func (s *Server) readComment(k kept) bool {
 // caller has it, is the snapshot last read, gzipped, which it serves as it
 // is while no command applies. The caller holds s.acted.mu.
 func (s *Server) serve(gz []byte) ([]byte, error) {
-	snap, applied := s.acted.apply(*s.acted.read)
-	if applied || gz == nil {
-		js, err := json.Marshal(snap)
-		if err != nil {
-			return nil, err
-		}
-		if gz, err = gzipped(js); err != nil {
-			return nil, err
-		}
+	snap, gz, err := s.acted.encoded(gz)
+	if err != nil {
+		return nil, err
 	}
 	s.mu.Lock()
 	s.state, s.issues = gz, snap.Issues
 	s.mu.Unlock()
 	return gz, nil
+}
+
+func (a *acted) encoded(gz []byte) (Snapshot, []byte, error) {
+	snap, applied := a.apply(*a.read)
+	if applied || gz == nil {
+		js, err := json.Marshal(snap)
+		if err != nil {
+			return Snapshot{}, nil, err
+		}
+		if gz, err = gzipped(js); err != nil {
+			return Snapshot{}, nil, err
+		}
+	}
+	return snap, gz, nil
 }
 
 // apply is snap with every kept command applied whose issue still waits on

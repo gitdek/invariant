@@ -293,12 +293,10 @@ func reader631Load(t *testing.T, s *Server, r *Repo) []reader631Project {
 	}
 	snap := s.assemble(time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC))
 	b := reader631JSON(t, snap)
-	gz, err := gzipped(b)
+	_, err := s.publish(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.state = gz
-	s.saveSnapshot(gz)
 	var out struct{ Projects []reader631Project }
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
