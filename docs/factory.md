@@ -224,7 +224,7 @@ Every part has all six command fields. Missing commands are empty declarations, 
 
 Init keeps an existing regular repository configuration byte for byte, including customized or unfinished JSON, even with `-force`; that flag still replaces only the workflow. Linked configuration or workflow destinations are refused. An absent or invalid full Invariant commit pin writes neither file. Existing modeled manifests, locks, setup guidance and workflow contents remain unchanged. **External plumbing stays disabled:** the generated gate still verifies modeled projects. A gate running configured checks and verifying plan ratification and scope remains necessary before external intake can be enabled.
 
-This completed drafting step rests on D-0105, D-0121, D-0122, D-0294 and D-0301, the preparation policy D-0305, execution/native checks D-0311 and D-0314, and selector decisions D-0321, D-0352 and D-0359. Whoever merges it must record the new discovery and drafting decision before the next step, because the factory cannot write `decisions/`.
+This completed drafting step rests on D-0105, D-0121, D-0122, D-0294 and D-0301, the preparation policy D-0305, execution/native checks D-0311 and D-0314, and selector decisions D-0321, D-0352 and D-0359. [D-0393](../decisions/journal/D-0393.jsonl) records its discovery and drafting decision.
 
 ## Repository context for agents
 
