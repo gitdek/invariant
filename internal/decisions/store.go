@@ -310,8 +310,15 @@ func addEdge(tx *sql.Tx, src, typ, dst, project string) error {
 // checkout holds: every decision in its journal, then what cites each one in
 // its text, which is the decisions' own words, the docs and the code. Every
 // other project stays as it was, and the journal table keeps every line it
-// ever had, since it only grows.
+// ever had, since it only grows. It holds the store's write lock from
+// reading the checkouts to committing, so a decision another process
+// writes meanwhile is neither read too early nor overwritten (#758).
 func (s *Store) Rebuild(repos []Repo) error {
+	unlock, err := s.lockWrites()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	type loaded struct {
 		repo      Repo
 		journals  map[string][]Event
