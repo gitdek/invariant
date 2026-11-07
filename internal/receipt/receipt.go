@@ -381,13 +381,19 @@ func componentLiteral(s string) string {
 	return "<code>" + componentText(s) + "</code>"
 }
 
+func componentText(s string) string {
+	return EscapeText(s)
+}
+
 var componentAutolink = regexp.MustCompile(`(?i)(https?|ftp)://|www\.|@[a-z0-9._-]+\.[a-z0-9_-]+`)
 
-// componentText keeps source-derived text literal in both prose and GFM
+// EscapeText keeps raw text literal in both prose and GFM
 // tables. Entities cannot delimit table cells, Markdown spans or HTML tags.
 // Encode line endings too: even a filename or diagnostic containing a newline
-// must stay within its own row. JSON retains the original, unescaped values.
-func componentText(s string) string {
+// must stay within its own row. Pass original values, not already escaped text.
+// It returns text without a wrapper; callers must supply a code element to
+// suppress GitHub mentions and issue references. It is not an attribute encoder.
+func EscapeText(s string) string {
 	s = strings.NewReplacer(
 		"&", "&amp;", "<", "&lt;", ">", "&gt;", "\\", "&#92;",
 		"`", "&#96;", "*", "&#42;", "_", "&#95;", "[", "&#91;", "]", "&#93;",
