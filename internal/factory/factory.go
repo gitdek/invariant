@@ -1234,12 +1234,13 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		var snapshot *repository.Snapshot
 		var err error
-		if previous != nil && previous.Plan != nil && previous.Plan.Native() {
-			snapshot, err = f.planRepository(ctx, previous.Plan)
+		authority := nativeAuthority(t, previous)
+		if authority != nil {
+			snapshot, err = f.planRepository(ctx, authority.Plan)
 		} else {
 			snapshot, err = f.repositoryAt(ctx, "origin/"+f.Base)
 		}
-		if errors.Is(err, repository.ErrMissing) && (previous == nil || previous.Plan == nil || !previous.Plan.Native()) {
+		if errors.Is(err, repository.ErrMissing) && authority == nil {
 			if !f.plansPlumbing() {
 				m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers}
 				return f.drafted(ctx, t, cause, base, m, plumbingElsewhereComment(m), LabelHumanReview)
@@ -1394,8 +1395,8 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// A failed native revision keeps the original execution base, so the
 	// next revision cannot recapture changed guidance or gate authority.
 	failed := res.Proposal
-	if previous != nil && previous.Plan != nil && previous.Plan.Native() {
-		failed = previous
+	if authority := nativeAuthority(t, previous); authority != nil {
+		failed = authority
 	}
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}

@@ -8,6 +8,7 @@ import (
 	"maps"
 	"strings"
 
+	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/setup"
@@ -51,6 +52,25 @@ func (f *Factory) repositoryAt(ctx context.Context, base string) (*repository.Sn
 // planRepository reconstructs the proposal's original authority from its
 // execution base, including on revision or restart. Compatible base movement
 // never replaces captured guidance, commands, dependencies or native identity.
+// nativeAuthority is the proposal whose native plan holds the repository
+// authority a draft keeps: the previous proposal, when it has a native plan,
+// or else the latest native plan the factory posted on the issue. A
+// question, or a failed draft, carries no plan, and nor does an answered
+// question's carrier, so without this the next draft would capture the
+// current base and adopt a gate or guidance change made meanwhile. The
+// issue's posts outlast a restart, so the original authority does too.
+func nativeAuthority(t Thread, previous *formalize.Proposal) *formalize.Proposal {
+	if previous != nil && previous.Plan != nil && previous.Plan.Native() {
+		return previous
+	}
+	for i := len(t.Posts) - 1; i >= 0; i-- {
+		if p := t.Posts[i].Marker.Proposal; p != nil && p.Plan != nil && p.Plan.Native() {
+			return p
+		}
+	}
+	return nil
+}
+
 func (f *Factory) planRepository(ctx context.Context, plan *plumbing.Plan) (*repository.Snapshot, error) {
 	if plan == nil || !plan.Native() {
 		return nil, nil
