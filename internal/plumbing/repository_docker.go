@@ -202,6 +202,7 @@ func (e *dockerRepositoryChecks) Close(ctx context.Context) error {
 			// only failure to join the owned client is a cleanup error.
 			err = errors.Join(err, client.join(cleanup))
 		}
+		err = errors.Join(err, cleanup.Err())
 		e.err = errors.Join(err, removeRepositoryStage(cleanup, e.stage))
 		if e.err != nil {
 			e.err = fmt.Errorf("remove repository check environment: %w", e.err)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/synth"
 )
@@ -28,7 +30,9 @@ type RepositoryChecks struct {
 
 // RepositoryCheckEnvironment retains a part's build outputs between commands.
 // The caller closes it, including after a failed or canceled command, using
-// a fresh bounded context. Diagnostics never supply result records.
+// a fresh bounded context. Close reports shutdown deadline errors before
+// removing host staging under its separate reserve. Diagnostics never supply
+// result records.
 type RepositoryCheckEnvironment interface {
 	Run(context.Context, []string) ([]byte, error)
 	Close(context.Context) error
@@ -238,7 +242,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		defer done()
 		var err error
 		if environment != nil {
-			err = errors.Join(environment.Close(cleanup), cleanup.Err())
+			err = environment.Close(cleanup)
 			environment = nil
 		}
 		if partWork != "" {
@@ -300,7 +304,12 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	if plan.Native() {
 		session, err = s.prepareRepositoryGo(execution, dependencies, parts)
 	} else {
-		session, err = dependencies.Prepare(execution, s.Repository.Snapshot, names)
+		session, err = dependencies.prepareInputs(execution, s.Repository.Snapshot, names, func(ctx context.Context, name string) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return regular.ReadFile(src, name)
+		})
 	}
 	if err != nil {
 		return result, err
@@ -327,6 +336,9 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 			return err
 		}
 		q.Image, q.SourceDir = prepared.artifact.Image, filepath.Join(partWork, "invariant", "work")
+		if err := verifyDependencyInputs(execution, q.SourceDir, q.Inputs); err != nil {
+			return err
+		}
 		q.Network, q.Pull, q.Argv = false, false, nil
 		q.Env = dependencyEnv(part.Language, false)
 		// Installed Node dependencies come only from the prepared image. A
@@ -500,7 +512,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				return result, fmt.Errorf("accept %s: %w", test.Identity(), err)
 			}
 		}
-		// The last close and final source copy share one cleanup reserve.
+		// Container shutdown and host tree removal have separate reserves.
 		if err := cleanupWork(i+1 == len(parts)); err != nil {
 			return result, err
 		}
@@ -683,15 +695,58 @@ func (s Sandbox) repositoryParts(ctx context.Context, root string, plan *Plan) (
 	return s.Repository.Snapshot.PartsFor(paths)
 }
 
-func removeRepositoryStage(ctx context.Context, dir string) error {
-	done := make(chan error, 1)
-	go func() { done <- os.RemoveAll(dir) }()
-	select {
-	case err := <-done:
-		return errors.Join(err, ctx.Err())
-	case <-ctx.Done():
-		return ctx.Err()
+func removeRepositoryStage(_ context.Context, dir string) error {
+	return CleanupRepositoryStage(dir)
+}
+
+// CleanupRepositoryStage owns a fresh two-minute host filesystem reserve,
+// independent of container shutdown and execution. Removal is synchronous:
+// callers retain their queue slot until it finishes or stops at its deadline.
+func CleanupRepositoryStage(dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	return errors.Join(removeRepositoryTree(ctx, dir), ctx.Err())
+}
+
+func removeRepositoryTree(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	info, err := os.Lstat(name)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return os.Remove(name)
+	}
+	dir, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	var removalErr error
+	for ctx.Err() == nil {
+		entries, readErr := dir.ReadDir(128)
+		for _, entry := range entries {
+			removalErr = errors.Join(removalErr, removeRepositoryTree(ctx, filepath.Join(name, entry.Name())))
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				removalErr = errors.Join(removalErr, readErr)
+			}
+			break
+		}
+	}
+	removalErr = errors.Join(removalErr, dir.Close(), ctx.Err())
+	if ctx.Err() == nil {
+		removalErr = errors.Join(removalErr, os.Remove(name))
+	}
+	return removalErr
 }
 
 func (r Result) repositorySummary() string {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -99,49 +100,53 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 		if _, err := repositoryGit(ctx, checkout, "-c", "protocol.file.allow=always", "clone", "--bare", "--shared", "--template=", "--quiet", "--", checkout, objects); err != nil {
 			return fail(err)
 		}
-		data, err := repositoryBlob(ctx, objects, head, plumbing.LockPath(*issue))
-		if err != nil {
-			return fail(err)
-		}
-		lock, err := plumbing.ReadLock(data)
-		if err != nil {
-			return fail(err)
-		}
-		if lock.Ratified.Issue != *issue || !lock.Plan.Native() {
-			return fail(fmt.Errorf("configured factory checks require issue #%d's ratified native plan", *issue))
-		}
-		plan = &lock.Plan
-		from, err := repositoryMergeBase(ctx, objects, baseCommit, head)
-		if err != nil {
-			return fail(err)
-		}
-		original = from
-		captured, err := repository.Load(ctx, objects, original)
-		if err == nil {
-			err = plan.ValidateRepository(ctx, captured)
-		}
-		if err == nil {
-			err = plan.ValidateRepository(ctx, snapshot)
-		}
-		if err != nil {
-			return fail(err)
-		}
 		r, err := scope.Check(ctx, objects, baseCommit, head, *issue)
 		if err != nil {
-			return fail(err)
+			return fail(fmt.Errorf("factory scope: %w", err))
 		}
-		if !r.OK() || !r.Plumbing || r.Project != plumbing.LockPath(*issue) {
+		if !r.OK() {
 			return fail(fmt.Errorf("factory scope: %s", strings.Join(r.Problems, "; ")))
 		}
-		if comments == nil {
-			comments = github.Client{Repo: *repo}
+		if !r.Plumbing {
+			plan.Files = r.Files
+		} else {
+			data, err := repositoryBlob(ctx, objects, head, plumbing.LockPath(*issue))
+			if err != nil {
+				return fail(err)
+			}
+			lock, err := plumbing.ReadLock(data)
+			if err != nil {
+				return fail(err)
+			}
+			if r.Project != plumbing.LockPath(*issue) || lock.Ratified.Issue != *issue || !lock.Plan.Native() {
+				return fail(fmt.Errorf("configured factory checks require issue #%d's ratified native plan", *issue))
+			}
+			plan = &lock.Plan
+			from, err := repositoryMergeBase(ctx, objects, baseCommit, head)
+			if err != nil {
+				return fail(err)
+			}
+			original = from
+			captured, err := repository.Load(ctx, objects, original)
+			if err == nil {
+				err = plan.ValidateRepository(ctx, captured)
+			}
+			if err == nil {
+				err = plan.ValidateRepository(ctx, snapshot)
+			}
+			if err != nil {
+				return fail(err)
+			}
+			if comments == nil {
+				comments = github.Client{Repo: *repo}
+			}
+			if err := factory.VerifyPlan(ctx, comments, *repo, *lock); err != nil {
+				return fail(err)
+			}
+			// Use the original inventory and inputs even after compatible movement
+			// of the current base. Scope has checked pinned sources and regressions.
+			snapshot = captured
 		}
-		if err := factory.VerifyPlan(ctx, comments, *repo, *lock); err != nil {
-			return fail(err)
-		}
-		// Use the original inventory and inputs even after compatible movement
-		// of the current base. Scope has checked pinned sources and regressions.
-		snapshot = captured
 	} else if explicitBase {
 		from, err := repositoryMergeBase(ctx, checkout, baseCommit, head)
 		if err == nil {
@@ -165,7 +170,7 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 	if err := stageRepositoryCommit(ctx, checkout, head, candidate); err != nil {
 		return fail(err)
 	}
-	if *issue == 0 {
+	if !plan.Native() {
 		// Ordinary CI has no ratified file allowance. Name the captured
 		// runner's additional suite files explicitly so its factory-only
 		// implicit-regression policy cannot reject an ordinary policy edit.
@@ -211,16 +216,7 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 }
 
 func cleanupRepositoryCI(dir string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), plumbing.SandboxCleanupAllowance)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- os.RemoveAll(dir) }()
-	select {
-	case err := <-done:
-		return errors.Join(err, ctx.Err())
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return plumbing.CleanupRepositoryStage(dir)
 }
 
 // scope.Check owns its Git subprocesses. Allow inert identity and maintenance
@@ -321,6 +317,17 @@ func repositoryMergeBase(ctx context.Context, dir, base, head string) (string, e
 }
 
 func repositoryGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := repositoryGitCommand(ctx, dir, args...)
+	var diagnostics bytes.Buffer
+	cmd.Stderr = &diagnostics
+	data, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", args[0], errors.Join(err, ctx.Err()), strings.TrimSpace(diagnostics.String()))
+	}
+	return data, ctx.Err()
+}
+
+func repositoryGitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	options := []string{"--no-replace-objects", "-c", "core.hooksPath=" + os.DevNull,
 		"-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-c", "credential.helper="}
 	cmd := exec.CommandContext(ctx, "git", append(options, args...)...)
@@ -332,13 +339,7 @@ func repositoryGit(ctx context.Context, dir string, args ...string) ([]byte, err
 	}
 	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
 		"GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
-	var diagnostics bytes.Buffer
-	cmd.Stderr = &diagnostics
-	data, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", args[0], errors.Join(err, ctx.Err()), strings.TrimSpace(diagnostics.String()))
-	}
-	return data, ctx.Err()
+	return cmd
 }
 
 func repositoryBlob(ctx context.Context, dir, commit, name string) ([]byte, error) {
@@ -398,7 +399,7 @@ func refuseGitLayout(listing []byte) error {
 
 // Read objects directly: archive attributes, checkout filters and mutable
 // working-tree files cannot omit, rewrite or replace committed test inputs.
-func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) error {
+func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) (stageErr error) {
 	listing, err := repositoryGit(ctx, dir, "ls-tree", "-r", "-z", "--full-tree", commit)
 	if err != nil {
 		return err
@@ -409,6 +410,33 @@ func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) error {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
+	objects, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := repositoryGitCommand(objects, dir, "cat-file", "--batch")
+	var diagnostics bytes.Buffer
+	cmd.Stderr = &diagnostics
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer stdin.Close()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	defer func() {
+		if stageErr != nil {
+			cancel()
+		}
+		if err := cmd.Wait(); err != nil {
+			stageErr = errors.Join(stageErr, fmt.Errorf("git cat-file --batch: %w: %s", err, strings.TrimSpace(diagnostics.String())))
+		}
+		stageErr = errors.Join(stageErr, ctx.Err())
+	}()
+	reader := bufio.NewReader(stdout)
 	for _, entry := range strings.Split(strings.TrimSuffix(string(listing), "\x00"), "\x00") {
 		if entry == "" {
 			continue
@@ -417,6 +445,10 @@ func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) error {
 		fields := strings.Fields(meta)
 		if !ok || len(fields) != 3 || fields[1] != "blob" || fields[0] != "100644" && fields[0] != "100755" {
 			return fmt.Errorf("committed entry %q is not a regular file", entry)
+		}
+		oid := fields[2]
+		if len(oid) != 40 && len(oid) != 64 || strings.Trim(oid, "0123456789abcdef") != "" {
+			return fmt.Errorf("invalid committed object %q", oid)
 		}
 		local, err := filepath.Localize(name)
 		if err != nil || local == "." {
@@ -427,9 +459,25 @@ func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) error {
 				return fmt.Errorf("committed path %q contains Git metadata", name)
 			}
 		}
-		data, err := repositoryGit(ctx, dir, "cat-file", "blob", fields[2])
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if _, err := io.WriteString(stdin, oid+"\n"); err != nil {
+			return err
+		}
+		// Bound the header and stream the exact advertised body, so binary
+		// contents and large blobs never become protocol or allocation sizes.
+		header, err := reader.ReadSlice('\n')
+		if err != nil {
+			return fmt.Errorf("read object %s header: %w", oid, err)
+		}
+		response := strings.Split(strings.TrimSuffix(string(header), "\n"), " ")
+		if len(response) != 3 || response[0] != oid || response[1] != "blob" || response[2] == "" || strings.Trim(response[2], "0123456789") != "" {
+			return fmt.Errorf("invalid batch response for %s: %q", oid, header)
+		}
+		size, err := strconv.ParseInt(response[2], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid object length: %w", err)
 		}
 		to := filepath.Join(dst, local)
 		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
@@ -439,9 +487,24 @@ func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) error {
 		if fields[0] == "100755" {
 			mode = 0o755
 		}
-		if err := os.WriteFile(to, data, mode); err != nil {
+		file, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err != nil {
 			return err
 		}
+		_, copyErr := io.CopyN(file, reader, size)
+		if err := errors.Join(copyErr, file.Close()); err != nil {
+			return fmt.Errorf("stage object %s: %w", oid, err)
+		}
+		terminator, err := reader.ReadByte()
+		if err != nil || terminator != '\n' {
+			return fmt.Errorf("missing batch terminator for %s: %v", oid, err)
+		}
+	}
+	if err := stdin.Close(); err != nil {
+		return err
+	}
+	if _, err := reader.ReadByte(); err != io.EOF {
+		return fmt.Errorf("unexpected batch output after tree: %v", err)
 	}
 	return ctx.Err()
 }

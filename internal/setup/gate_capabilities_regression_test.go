@@ -49,3 +49,40 @@ func TestRepositoryGateQuotesProjectPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryGateLiteralKeysCannotHidePolicy(t *testing.T) {
+	w := workflow736(t)
+	for name, workflow := range map[string]string{
+		"merge key":                       strings.Replace(w, "    name: invariant/gate", "    <<: *disabled\n    name: invariant/gate", 1),
+		"continued condition":             strings.Replace(w, "    name: invariant/gate", "    if: true\n      && false\n    name: invariant/gate", 1),
+		"duplicate steps":                 strings.Replace(w, "    steps:\n", "    'steps': []\n    steps:\n", 1),
+		"quoted step condition":           strings.Replace(w, "        run: |", "        'if' : false\n        run: |", -1),
+		"duplicate event":                 strings.Replace(w, "  pull_request:\n", "  pull_request:\n  'pull_request':\n", 1),
+		"PR alias":                        strings.Replace(w, "  pull_request:\n", "  pull_request: *unfiltered\n", 1),
+		"PR empty map followed by filter": strings.Replace(w, "  pull_request:\n", "  pull_request: {}\n    paths: ['api/**']\n", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if hasRepositoryGate(workflow) {
+				t.Fatal("uncertain workflow policy was accepted")
+			}
+		})
+	}
+	trigger := "on:\n  push:\n    branches: [main]\n  pull_request:\n"
+	for _, value := range []string{
+		"on: {push: {}, pull_request: {}}\n",
+		"on: {push: {branches: [main]}, pull_request: {}}\n",
+		"on:\n  - push\n  - pull_request\n",
+		"'on' : ['push', \"pull_request\"] # literal events\n",
+		"on:\n  'push' :\n    'branches' : [main]\n  'pull_request' : {}\n",
+	} {
+		if !hasRepositoryGate(strings.Replace(w, trigger, value, 1)) {
+			t.Fatalf("literal triggers refused: %s", value)
+		}
+	}
+	quoted := strings.Replace(w, "jobs:", "'jobs' :", 1)
+	quoted = strings.Replace(quoted, "    name: invariant/gate", "    'name' : invariant/gate\n    'needs' : [ ]", 1)
+	gh := &capabilityGitHub736{workflows: map[string]string{WorkflowPath: quoted}}
+	if err := CheckRepository(t.Context(), gh, "fixture/repository", "main", true); err != nil {
+		t.Fatalf("quoted job keys refused: %v", err)
+	}
+}

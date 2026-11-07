@@ -120,3 +120,24 @@ func TestRepositoryCIRefusesStagedGitRepositoryLayout(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryBatchRefusesAmbiguousFraming(t *testing.T) {
+	for name, response := range map[string]string{
+		"signed length":      "printf '%s blob +4\\nabc\\n\\n' \"$oid\"\n",
+		"overflow length":    "printf '%s blob 9223372036854775808\\n' \"$oid\"\n",
+		"extra header field": "printf '%s blob 4 extra\\nabc\\n\\n' \"$oid\"\n",
+		"wrong terminator":   "printf '%s blob 4\\nabc\\nx' \"$oid\"\n",
+		"trailing output":    "printf '%s blob 4\\nabc\\n\\nextra' \"$oid\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			gateGit736(t, root, "init", "-q", "-b", "main")
+			gateWrite736(t, root, "file", "abc\n")
+			commit := gateCommit736(t, root)
+			wrapObjectReader740(t, "if [ \"$batch\" = yes ]; then\nIFS= read -r oid\n"+response+"exit 0\nfi")
+			if err := stageRepositoryCommit(t.Context(), root, commit, filepath.Join(t.TempDir(), "stage")); err == nil {
+				t.Fatal("ambiguous object framing was staged")
+			}
+		})
+	}
+}
