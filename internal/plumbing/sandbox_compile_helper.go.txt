@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/token"
@@ -215,7 +216,9 @@ func analyze(path string, pinned []string) (string, error) {
 		}
 	}
 	if len(refusals) != 0 {
-		return "", fmt.Errorf("compiler errors outside production API changes: %s", strings.Join(refusals, "; "))
+		return "", fmt.Errorf("compiler errors outside production API changes: %s. If a production change would fix one, "+
+			"give the expected type where the test receives the production value, as in var got []int = product.Items(), "+
+			"which the check attributes to production", strings.Join(refusals, "; "))
 	}
 	if len(reasons) == 0 {
 		return "", fmt.Errorf("compilation failed without an attributable production API error in the acceptance files")
@@ -270,10 +273,17 @@ func (a *analysis) productionType(typ types.Type) bool {
 // structure, so changing that production type can change what it accepts.
 // A test's own named types stay fixed, whatever their fields.
 func (a *analysis) declared(typ types.Type) bool {
-	return a.declaredSeen(typ, map[types.Type]bool{})
+	return a.declaredSeen(typ, map[types.Type]bool{}, false)
 }
 
-func (a *analysis) declaredSeen(typ types.Type, seen map[types.Type]bool) bool {
+// contained reports whether a production type appears anywhere in a type,
+// including in the fields of a test's own named types, which decide what
+// the type's values can take part in.
+func (a *analysis) contained(typ types.Type) bool {
+	return a.declaredSeen(typ, map[types.Type]bool{}, true)
+}
+
+func (a *analysis) declaredSeen(typ types.Type, seen map[types.Type]bool, deep bool) bool {
 	if typ == nil || seen[typ] {
 		return false
 	}
@@ -284,31 +294,34 @@ func (a *analysis) declaredSeen(typ types.Type, seen map[types.Type]bool) bool {
 			return true
 		}
 		for i := 0; i < typ.TypeArgs().Len(); i++ {
-			if a.declaredSeen(typ.TypeArgs().At(i), seen) {
+			if a.declaredSeen(typ.TypeArgs().At(i), seen, deep) {
 				return true
 			}
 		}
+		if deep {
+			return a.declaredSeen(typ.Underlying(), seen, deep)
+		}
 	case *types.Pointer:
-		return a.declaredSeen(typ.Elem(), seen)
+		return a.declaredSeen(typ.Elem(), seen, deep)
 	case *types.Slice:
-		return a.declaredSeen(typ.Elem(), seen)
+		return a.declaredSeen(typ.Elem(), seen, deep)
 	case *types.Array:
-		return a.declaredSeen(typ.Elem(), seen)
+		return a.declaredSeen(typ.Elem(), seen, deep)
 	case *types.Chan:
-		return a.declaredSeen(typ.Elem(), seen)
+		return a.declaredSeen(typ.Elem(), seen, deep)
 	case *types.Map:
-		return a.declaredSeen(typ.Key(), seen) || a.declaredSeen(typ.Elem(), seen)
+		return a.declaredSeen(typ.Key(), seen, deep) || a.declaredSeen(typ.Elem(), seen, deep)
 	case *types.Signature:
-		return a.declaredSeen(typ.Params(), seen) || a.declaredSeen(typ.Results(), seen)
+		return a.declaredSeen(typ.Params(), seen, deep) || a.declaredSeen(typ.Results(), seen, deep)
 	case *types.Tuple:
 		for i := 0; i < typ.Len(); i++ {
-			if a.declaredSeen(typ.At(i).Type(), seen) {
+			if a.declaredSeen(typ.At(i).Type(), seen, deep) {
 				return true
 			}
 		}
 	case *types.Struct:
 		for i := 0; i < typ.NumFields(); i++ {
-			if a.declaredSeen(typ.Field(i).Type(), seen) {
+			if a.declaredSeen(typ.Field(i).Type(), seen, deep) {
 				return true
 			}
 		}
@@ -417,8 +430,18 @@ func (a *analysis) admits(op token.Token, fixed ast.Expr) bool {
 	if _, ok := types.Unalias(typ).(*types.TypeParam); ok {
 		return true
 	}
+	if a.contained(typ) {
+		return true
+	}
 	basic, _ := typ.Underlying().(*types.Basic)
 	has := func(info types.BasicInfo) bool { return basic != nil && basic.Info()&info != 0 }
+	// A constant takes the type it was converted to, so judge its value.
+	if value := a.info.Types[fixed].Value; value != nil && has(types.IsNumeric) {
+		switch op {
+		case token.REM, token.AND, token.OR, token.XOR, token.AND_NOT:
+			return constant.ToInt(value).Kind() == constant.Int
+		}
+	}
 	switch op {
 	case token.LAND, token.LOR:
 		return has(types.IsBoolean)
@@ -587,6 +610,21 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 	if undefined {
 		return a.missing(nodes, pos)
 	}
+	if strings.HasPrefix(message, "non-boolean condition in ") {
+		for i := len(nodes) - 1; i >= 0; i-- {
+			var cond ast.Expr
+			switch node := nodes[i].(type) {
+			case *ast.IfStmt:
+				cond = node.Cond
+			case *ast.ForStmt:
+				cond = node.Cond
+			default:
+				continue
+			}
+			return contains(cond, pos) && a.origin(cond)
+		}
+		return false
+	}
 	if strings.HasPrefix(message, "unknown field ") {
 		var field string
 		for i := len(nodes) - 1; i >= 0; i-- {
@@ -594,7 +632,9 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 				field = id.Name
 			}
 			if literal, ok := nodes[i].(*ast.CompositeLit); ok {
-				return field != "" && a.visibleMember(field, a.info.TypeOf(literal.Type), pos) && a.origin(literal.Type)
+				typ := a.info.TypeOf(literal)
+				return field != "" && a.visibleMember(field, typ, pos) &&
+					(a.origin(literal.Type) || literal.Type == nil && a.productionType(typ))
 			}
 		}
 		return false
@@ -646,7 +686,8 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 		}
 	}
 	// Each of these renders the operand at its position, as "cannot use x (".
-	operands := []string{"cannot use ", "cannot convert ", "invalid argument: ", "cannot range over "}
+	operands := []string{"cannot use ", "cannot convert ", "invalid argument: ", "cannot range over ",
+		"cannot index ", "cannot slice "}
 	if !slices.ContainsFunc(operands, func(prefix string) bool { return strings.HasPrefix(message, prefix) }) &&
 		!strings.HasPrefix(message, "invalid operation:") {
 		return false
@@ -654,6 +695,7 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 	// A diagnostic about helper() as an argument belongs to the outer call,
 	// whereas one about "bad" inside helper("bad") belongs to helper itself.
 	// Match the checker-rendered operand before walking its enclosing relation.
+	var matched ast.Expr
 	for i := len(nodes) - 1; i >= 0; i-- {
 		expr, ok := nodes[i].(ast.Expr)
 		if !ok || expr.Pos() != pos {
@@ -664,10 +706,23 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 			if a.origin(expr) {
 				return true
 			}
-			nodes = nodes[:i]
+			matched, nodes = expr, nodes[:i]
 			break
 		}
 	}
+	// go/types reports a binary operation at its left operand, or at the
+	// offending operand of a comparison, so start from the relation it renders.
+	if matched == nil && strings.HasPrefix(message, "invalid operation: ") {
+		for i := 0; i < len(nodes); i++ {
+			if binary, ok := nodes[i].(*ast.BinaryExpr); ok &&
+				strings.HasPrefix(message, "invalid operation: "+types.ExprString(binary)+" (") {
+				nodes = nodes[:i+1]
+				break
+			}
+		}
+	}
+	// A declared target type only matters to the operand the message renders.
+	target := func(value ast.Expr, typ types.Type) bool { return value == matched && a.declared(typ) }
 	for i := len(nodes) - 1; i >= 0; i-- {
 		switch node := nodes[i].(type) {
 		case *ast.BinaryExpr:
@@ -693,19 +748,31 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 			return a.origin(node.X)
 		case *ast.TypeAssertExpr:
 			// Only a production value could become an interface.
+			if strings.HasPrefix(message, "invalid operation: "+types.ExprString(node.X)+" (") {
+				return a.origin(node.X)
+			}
+		case *ast.StarExpr:
 			return a.origin(node.X)
+		case *ast.IndexExpr:
+			return a.origin(node.X) || contains(node.Index, pos) && a.origin(node.Index)
+		case *ast.FuncLit:
+			// An error inside a function literal's body never belongs to
+			// the call or assignment around the literal.
+			if contains(node.Body, pos) {
+				return false
+			}
 		case *ast.CallExpr:
 			if a.origin(node.Fun) {
 				return true
 			}
 			for j, arg := range node.Args {
 				if contains(arg, pos) {
-					return a.origin(arg) || a.declared(a.parameter(node, j))
+					return a.origin(arg) || target(arg, a.parameter(node, j))
 				}
 			}
 			return false
 		case *ast.CompositeLit:
-			if a.origin(node.Type) {
+			if a.origin(node.Type) || node.Type == nil && a.productionType(a.info.TypeOf(node)) {
 				return true
 			}
 			for j, element := range node.Elts {
@@ -716,17 +783,17 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 							element = pair.Key
 						}
 					}
-					return a.origin(element) || a.declared(a.element(node, j, pos))
+					return a.origin(element) || target(element, a.element(node, j, pos))
 				}
 			}
 			return false
 		case *ast.ValueSpec:
-			if a.origin(node.Type) || node.Type != nil && a.declared(a.info.TypeOf(node.Type)) {
+			if a.origin(node.Type) {
 				return true
 			}
 			for _, value := range node.Values {
 				if contains(value, pos) {
-					return a.origin(value)
+					return a.origin(value) || node.Type != nil && target(value, a.info.TypeOf(node.Type))
 				}
 			}
 			return false
@@ -734,14 +801,14 @@ func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
 			for j, value := range node.Rhs {
 				if contains(value, pos) {
 					return a.origin(value) || len(node.Lhs) == len(node.Rhs) &&
-						(a.origin(node.Lhs[j]) || a.declared(a.info.TypeOf(node.Lhs[j])))
+						(a.origin(node.Lhs[j]) || target(value, a.info.TypeOf(node.Lhs[j])))
 				}
 			}
 			return false
 		case *ast.ReturnStmt:
 			for j, value := range node.Results {
 				if contains(value, pos) {
-					return a.origin(value) || a.declared(a.result(nodes[:i], j, len(node.Results)))
+					return a.origin(value) || target(value, a.result(nodes[:i], j, len(node.Results)))
 				}
 			}
 			return false

@@ -382,6 +382,25 @@ func TestSandboxCheckAttributesCompilerErrors(t *testing.T) {
 		{"changed local field type", "type Type397 int", "type local397 struct{ V Type397 }", `_ = local397{V: "changed"}`, ""},
 		{"changed element type", "type Type397 int", "", `_ = []Type397{"changed"}`, ""},
 		{"local field beside production field", "type Type397 int", "type local397 struct{ V Type397; W int }", `_ = local397{W: "bad"}`, "cannot use"},
+		// A declared type matters only to the operand the message names, and
+		// a function literal's body keeps its own errors.
+		{"index beside production call", "func Value397(n int) {}", "", `local := [3]int{}; Value397(local[5])`, "out of bounds"},
+		{"external index beside production call", "func Value397(n int) {}", "", `local := [3]int{}; product.Value397(local[5])`, "out of bounds"},
+		{"indirect into declared parameter", "type Type397 int", "func helper397(v Type397) {}", `local := 1; helper397(*local)`, "cannot indirect"},
+		{"indirect into declared result", "type Type397 int", "func helper397() Type397 { local := 1; return *local }", `_ = helper397()`, "cannot indirect"},
+		{"closure increment", "type Type397 int", "", `check := func(v Type397) { s := "x"; s++; _ = v }; check(1)`, "non-numeric"},
+		{"closure send", "type Type397 int", "", `ch := make(chan string, 1); check := func(v Type397) { ch <- 7; _ = v }; check(1)`, "cannot use"},
+		{"assertion beside local", "func Value397() any { return 1 }", "", `got := Value397(); want := 7; _ = got.(string) + want`, "mismatched types"},
+		{"assertion negated", "func Value397() any { return 1 }", "", `got := Value397(); _ = -got.(string)`, "operator - not defined"},
+		{"production boolean sum", "func Value397() int { return 1 }", "", `var local bool; _ = Value397() + local`, "mismatched types"},
+		{"production slice comparison", "func Value397() []int { return nil }", "", `var local []int; _ = Value397() == local`, "slice can only be compared to nil"},
+		// Indexes and conditions name what they refuse.
+		{"local index", "", "", `RequireNewAPI397(); var local int; _ = local[0]`, "cannot index"},
+		{"changed result index", "func Value397() int { return 0 }", "", `_ = Value397()[0]`, ""},
+		{"local condition", "", "", `RequireNewAPI397(); var local int; if local { t.Fatal("ready") }`, "non-boolean condition"},
+		{"changed result condition", "func Value397() int { return 0 }", "", `if Value397() { t.Fatal("ready") }`, ""},
+		// A refusal says how to state an expectation the check attributes.
+		{"refusal suggests a typed expectation", "", "", `RequireNewAPI397(); unused := 1`, "var got []int = product.Items()"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := s397New(t)
@@ -432,6 +451,14 @@ func TestSandboxCheckProductionSignatureCorrections(t *testing.T) {
 		{"declared result type", "type Type397 int", "type Type397 string", `func helper397() Type397 { return "changed" }`, `if helper397() != "changed" { t.Fatal("wrong result") }`},
 		{"helper parameter type", "type Type397 int", "type Type397 string", "func helper397(v Type397) Type397 { return v }", `if helper397("changed") != "changed" { t.Fatal("wrong result") }`},
 		{"literal field type", "type Type397 int", "type Type397 string", "type local397 struct{ V Type397 }", `if (local397{V: "changed"}).V != "changed" { t.Fatal("wrong field") }`},
+		{"float constant remainder", "func Value397() float64 { return 0 }", "func Value397() int64 { return 7 }", "", `got := Value397(); if got % 1e9 != 7 { t.Fatal(got) }`},
+		{"asserted operand sum", "func Value397() int64 { return 0 }", "func Value397() int { return 7 }", "", `var local any = 1; if local.(int) + Value397() != 8 { t.Fatal("wrong sum") }`},
+		{"comparability through production field", "type Type397 []int\nfunc Value397() any { return nil }", "type Type397 int\nfunc Value397() any { return nil }", "type pair397 struct{ A Type397 }", `var want pair397; if want == Value397() { t.Fatal("equal") }`},
+		{"elided literal field", "type Type397 struct{ Value int }", "type Type397 struct{ Value string }", "", `cases := []Type397{{Value: "changed"}}; if cases[0].Value != "changed" { t.Fatal(cases) }`},
+		{"elided new field", "type Type397 struct{ Value int }", "type Type397 struct{ Value, NewField397 int }", "", `cases := []Type397{{Value: 1, NewField397: 2}}; if cases[0].NewField397 != 2 { t.Fatal(cases) }`},
+		{"left-nested sum", "func Value397() int64 { return 0 }", "func Value397() int { return 7 }", "", `a, b := 1, 2; if a + b + Value397() != 10 { t.Fatal("wrong sum") }`},
+		{"index result", "func Value397() int { return 0 }", "func Value397() []int { return []int{7} }", "", `if Value397()[0] != 7 { t.Fatal("wrong item") }`},
+		{"boolean result", "func Value397() int { return 0 }", "func Value397() bool { return true }", "", `if Value397() { return }; t.Fatal("not ready")`},
 	} {
 		for _, external := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/external_%t", tc.name, external), func(t *testing.T) {
