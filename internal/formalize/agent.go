@@ -208,8 +208,10 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		if err := writeIncludes(filepath.Join(ws, "previous"), p.Includes); err != nil {
 			return nil, err
 		}
-		if err := writeReader(filepath.Join(ws, "previous"), p.View, p.Reader); err != nil {
-			return nil, err
+		if p.View != "" {
+			if err := writeFile(filepath.Join(ws, "previous", "view.json"), p.View); err != nil {
+				return nil, err
+			}
 		}
 	}
 	transcript, err := os.Create(filepath.Join(out, "transcript.jsonl"))
@@ -313,7 +315,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		if err := writeIncludes(out, p.Includes); err != nil {
 			return nil, err
 		}
-		if err := writeReader(out, p.View, p.Reader); err != nil {
+		if err := writeReader(out, p.View, p.Reader, false); err != nil {
 			return nil, err
 		}
 	}
@@ -414,7 +416,7 @@ func seedAmendment(ws string, c *Current) error {
 	if err := writeIncludes(ws, c.Includes); err != nil {
 		return err
 	}
-	if err := writeReader(ws, c.View, c.Reader); err != nil {
+	if err := writeReader(ws, c.View, c.Reader, false); err != nil {
 		return err
 	}
 	return writeFile(filepath.Join(ws, d.Module+".tla"), c.ModuleText)

@@ -134,17 +134,24 @@ func (s ComparisonSnapshot) Identity() ComparisonIdentity {
 // Validate checks retained sources, identities, all deltas and their binding.
 // It does not turn explanatory provenance into a new verifier result.
 func (c *Comparison) Validate() error {
+	_, err := c.Validated()
+	return err
+}
+
+// Validated returns detached canonical evidence after checking every retained
+// field. It is a snapshot, not a cache: later validation checks mutations anew.
+func (c *Comparison) Validated() (*Comparison, error) {
 	if c == nil {
-		return fmt.Errorf("comparison is missing; check against the captured baseline again")
+		return nil, fmt.Errorf("comparison is missing; check against the captured baseline again")
 	}
 	want, err := Compare(c.Baseline, c.Candidate)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !comparisonEqual(c, want) {
-		return fmt.Errorf("comparison evidence is stale or damaged; check the captured baseline and candidate again")
+		return nil, fmt.Errorf("comparison evidence is stale or damaged; check the captured baseline and candidate again")
 	}
-	return nil
+	return want, nil
 }
 
 func canonicalSnapshot(s ComparisonSnapshot) (ComparisonSnapshot, error) {
@@ -177,7 +184,7 @@ func canonicalSnapshot(s ComparisonSnapshot) (ComparisonSnapshot, error) {
 		return s, err
 	}
 	for name := range s.Includes {
-		if !strings.HasSuffix(name, ".tla") || !identifier.MatchString(strings.TrimSuffix(name, ".tla")) || name == s.Module+".tla" {
+		if !tla.ValidIncludeName(name, s.Module) {
 			return s, fmt.Errorf("invalid sibling include %q", name)
 		}
 	}
@@ -305,9 +312,9 @@ func compareCharts(a, b *Result, beforeHiding bool) Delta {
 	return d
 }
 
-func (c *Comparison) reportLines() []string {
-	out := []string{"Proposal comparison", "Legend: added (green, solid); removed (red, dashed); changed retains before and after evidence.",
-		"Equal charts do not establish behavioral equivalence. This bounded, view-qualified comparison adds no proof claim."}
+// Qualifications supplies the same literal caveats to every publisher.
+func (c *Comparison) Qualifications() []string {
+	out := []string{"Equal charts do not establish behavioral equivalence. This bounded, view-qualified comparison adds no proof claim."}
 	if c.ViewChanged {
 		out = append(out, "View change: labels or hiding definitions differ; chart differences may reflect the view.")
 	}
@@ -320,6 +327,12 @@ func (c *Comparison) reportLines() []string {
 	if c.Unavailable != nil {
 		out = append(out, c.Unavailable.Message)
 	}
+	return out
+}
+
+func (c *Comparison) reportLines() []string {
+	out := []string{"Proposal comparison", "Legend: added (green, solid); removed (red, dashed); changed retains before and after evidence."}
+	out = append(out, c.Qualifications()...)
 	for i, s := range []ComparisonSnapshot{c.Baseline, c.Candidate} {
 		id, side := c.BaselineIdentity, "Baseline"
 		if i == 1 {

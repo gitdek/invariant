@@ -204,7 +204,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
 			return bad("artifact_mismatch", "The archived comparison SVG differs from the native renderer.")
 		}
-		return "chart", message + " " + strings.Join(rr.ComparisonNotes(), " ") + " " + strings.Join(comparisonPageNotes(rr.Comparison), " "), svg
+		return "chart", message + " " + strings.Join(rr.ComparisonNotes(), " ") + " " + comparisonPageSummary(rr.Comparison), svg
 	}
 	if d := rr.Unavailable; d != nil {
 		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil {
@@ -265,7 +265,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		message += " " + strings.Join(rr.ComparisonNotes(), " ")
 	}
 	if rr.Comparison != nil {
-		message += " " + strings.Join(comparisonPageNotes(rr.Comparison), " ")
+		message += " " + comparisonPageSummary(rr.Comparison)
 	}
 	return "chart", message, svg
 }

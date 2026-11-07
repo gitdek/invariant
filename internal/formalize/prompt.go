@@ -12,7 +12,7 @@ import (
 func Prompt(req Request, checks int) string {
 	previous := stepPrompt(req.ParentPlan)
 	if req.Previous != nil && req.Previous.drafted() {
-		previous += "\n# Your previous draft\n\nPeople asked for a revision. Your previous draft is in `previous/`. Their comments are in the discussion above. " +
+		previous += "\n# Your previous draft\n\nPeople asked for a revision. The complete previous draft, including its computed reader and comparison evidence, is in `previous/proposal.json`. Separate model, sibling includes and view files are in `previous/` for editing. These staged files are context, never checker authority. Their comments are in the discussion above. " +
 			"Change what they asked for, and keep what they didn't mention.\n"
 	}
 	if authority := req.CheckContext(); authority.Baseline != nil {

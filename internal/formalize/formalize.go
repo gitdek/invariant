@@ -316,7 +316,7 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 	if err := writeIncludes(modelDir, p.Includes); err != nil {
 		return err
 	}
-	if err := writeReader(filepath.Join(dir, ".invariant"), p.View, p.Reader); err != nil {
+	if err := writeReader(filepath.Join(dir, ".invariant"), p.View, p.Reader, true); err != nil {
 		return err
 	}
 	return writeFile(filepath.Join(dir, ".invariant/request.md"), request)
