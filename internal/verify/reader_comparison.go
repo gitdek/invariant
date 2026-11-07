@@ -14,8 +14,14 @@ import (
 )
 
 func (r *Reader) captureComparison(data []byte, err error, lock project.Lock) {
+	r.Comparison, r.ComparisonDiagnostic = CapturedComparison(data, err, lock)
+}
+
+// CapturedComparison validates the optional captured file for both verification
+// and receipt readers. Only a missing file means absence; empty bytes are damage.
+func CapturedComparison(data []byte, err error, lock project.Lock) (*statechart.Comparison, *ReaderDiagnostic) {
 	if os.IsNotExist(err) {
-		return
+		return nil, nil
 	}
 	var c statechart.Comparison
 	if err == nil {
@@ -43,10 +49,9 @@ func (r *Reader) captureComparison(data []byte, err error, lock project.Lock) {
 		}
 	}
 	if err != nil {
-		r.ComparisonDiagnostic = &ReaderDiagnostic{Code: "comparison_evidence", Message: "Proposal comparison unavailable: " + printable(err.Error())}
-		return
+		return nil, &ReaderDiagnostic{Code: "comparison_evidence", Message: "Proposal comparison unavailable: " + printable(err.Error())}
 	}
-	r.Comparison = &c
+	return &c, nil
 }
 
 // printable keeps a diagnostic drawable whatever damaged evidence it quotes.
@@ -66,7 +71,7 @@ func (r *Reader) ComparisonNotes() []string {
 		return nil
 	}
 	if r.ComparisonDiagnostic != nil {
-		return []string{r.ComparisonDiagnostic.Message}
+		return []string{r.ComparisonDiagnostic.Code + ": " + r.ComparisonDiagnostic.Message}
 	}
 	if r.Comparison == nil {
 		return nil
