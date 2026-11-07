@@ -70,7 +70,7 @@ For diagnosis, first inspect the wave's verdicts and named unfinished tests, the
 
 ### Working-memory merger evidence
 
-The build cannot write `decisions/`. Before moving on, the merger records the new accounting and measurement decision refining [D-0281](../decisions/journal/D-0281.jsonl) and [D-0313](../decisions/journal/D-0313.jsonl), preserving [D-0350](../decisions/journal/D-0350.jsonl), under [D-0105](../decisions/D-0105-factory-takes-every-change.md), [D-0122](../decisions/journal/D-0122.jsonl) and [D-0294](../decisions/journal/D-0294.jsonl), and updates SPEC's citation. Check decision dependents before recording that refinement.
+[D-0386](../decisions/journal/D-0386.jsonl) records this accounting and measurement rule, refining [D-0281](../decisions/journal/D-0281.jsonl) and [D-0313](../decisions/journal/D-0313.jsonl) and keeping [D-0350](../decisions/journal/D-0350.jsonl), under [D-0105](../decisions/D-0105-factory-takes-every-change.md), [D-0122](../decisions/journal/D-0122.jsonl) and [D-0294](../decisions/journal/D-0294.jsonl).
 
 The offline #700 build has no real Docker budget measurement or same-host pre-change comparison. Both real wave outcomes, checkout/image/host identities, per-container elapsed time, slow tests, phase memory/CPU/wall evidence, sampled and kernel peaks and max/OOM/process counters remain **unmeasured** here. Daemon-free observer and runner fixtures establish correctness, not speedup or host capacity. On a quiet cgroup-v2 Docker host with no competing factory checks, unset `INVARIANT_CONTAINER_CPUS` (the four-CPU default), acquire the pinned image first, and retain the verbose output of:
 
