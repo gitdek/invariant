@@ -44,6 +44,7 @@ class Runner:
         self.acceptance = config.get("acceptance") or []
         self.packages = {}
         self.tests_ok = True
+        self.compile_helper = None
 
     def emit(self, kind, **fields):
         with self.output_lock:
@@ -315,6 +316,39 @@ class Runner:
                 break
         self.phase("gofmt", passed)
 
+    def compile_failure(self, package, directory):
+        acceptance = [item for item in self.acceptance
+                      if self.package_path(os.path.dirname(item["file"])) == package["path"]]
+        if not acceptance:
+            return
+        if self.compile_helper is None:
+            helper = os.path.join(directory, "compile-helper")
+            outcome = self.command(
+                ["go", "build", "-o", helper, os.path.join(os.path.dirname(__file__), "compile.go")], "build"
+            )
+            if outcome["code"] != 0 or outcome["timed_out"] or self.stop_signal:
+                self.problem("build", "Go compiler analysis helper did not build")
+                return
+            self.compile_helper = helper
+        outcome = self.command(
+            [self.compile_helper, package["path"], *sorted({item["file"] for item in acceptance})],
+            "build", capture=True, display=False,
+        )
+        if outcome["code"] != 0 or outcome["timed_out"] or self.stop_signal:
+            self.problem("build", "Go compiler analysis did not complete")
+            return
+        try:
+            report = json.loads(outcome["output"])
+            eligible, reason = report["eligible"], report["reason"]
+            if type(eligible) is not bool or not isinstance(reason, str) or not reason:
+                raise ValueError("invalid compiler analysis")
+        except (ValueError, KeyError, TypeError):
+            self.problem("build", "Go compiler analysis produced no valid report")
+            return
+        self.diagnostic(reason)
+        for item in acceptance:
+            self.record(package, item["name"], "accept", "failed" if eligible else "refused", reason=reason)
+
     def compile(self, directory):
         for index, package in enumerate(self.packages.values()):
             if self.expired("build") or self.stop_signal:
@@ -327,12 +361,10 @@ class Runner:
             if outcome["code"] != 0:
                 self.tests_ok = False
                 self.problem("build", "Package build failed: " + package["ImportPath"], package=package["ImportPath"])
-                # A completed compiler failure is evidence that a proposed
-                # API is missing; cancellation and timeouts are not evidence.
-                if outcome["code"] is not None and outcome["code"] > 0 and not outcome["timed_out"]:
-                    for item in self.acceptance:
-                        if self.package_path(os.path.dirname(item["file"])) == package["path"]:
-                            self.record(package, item["name"], "accept", "failed", reason="build")
+                # Only source-attributed production API errors qualify. The
+                # analyzer never executes test initialization or renews time.
+                if outcome["code"] is not None and outcome["code"] > 0 and not outcome["timed_out"] and not self.stop_signal:
+                    self.compile_failure(package, directory)
                 continue
             if os.path.isfile(binary):
                 package["binary"] = binary

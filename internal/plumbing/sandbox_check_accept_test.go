@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/format"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,8 +301,8 @@ func TestNeedsChange(t *testing.T) { t.Fatal("the proposed behavior is missing")
 	}
 	t.Run("new_api_does_not_build_yet", func(t *testing.T) {
 		// Plans may introduce an API the original checkout cannot compile.
-		// An observed compiler failure is conclusive evidence, distinct from
-		// a deadline that prevented the compiler or acceptance test running.
+		// A completed compiler failure qualifies only when every source error
+		// is attributable to production APIs, without running initialization.
 		f := s397New(t)
 		f.pkg(t, "pending", "")
 		f.accept(t, "pending", "TestNeedsChange", `package pending
@@ -316,4 +317,131 @@ func TestNeedsChange(t *testing.T) { RequireNewAPI397() }
 			t.Errorf("a completed compiler failure must remain eligible evidence for a new API: problem=%q result=%+v", c.Problem, c.Run)
 		}
 	})
+}
+
+func TestSandboxCheckAttributesCompilerErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, production, declarations, body, diagnostic string
+	}{
+		{"unused beside API", "", "", `RequireNewAPI397(); unused := 1`, "declared and not used"},
+		{"bad operand beside API", "", "", `RequireNewAPI397(1 + "bad")`, "mismatched types"},
+		{"nested local call", "func Value397(n int) {}", "func helper397(n int) int { return n }", `Value397(helper397("bad"))`, "cannot use"},
+		{"nested local literal", "func Value397(n interface{}) {}", "type local397 struct { Value int }", `Value397(local397{Value: "bad"})`, "cannot use"},
+		{"local result type", "func Value397() int { return 0 }", "", `var local int = Value397(); var other string = local; _ = other`, "cannot use"},
+		{"local missing member", "", "type local397 struct{}", `RequireNewAPI397(); local397{}.Missing397()`, "undefined"},
+		{"division by zero", "func Value397() int { return 0 }", "", `_ = Value397() / 0`, "division by zero"},
+		{"local shift count", "func Value397() int { return 1 }", "", `shift := "bad"; _ = Value397() << shift`, "shift count"},
+		{"external local shift count", "func Value397() int { return 1 }", "", `shift := "bad"; _ = product.Value397() << shift`, "shift count"},
+		{"local shifted operand", "func Value397() int { return 1 }", "", `value := "bad"; _ = value >> Value397()`, "shifted operand"},
+		{"external local shifted operand", "func Value397() int { return 1 }", "", `value := "bad"; _ = value >> product.Value397()`, "shifted operand"},
+		{"external negative shift count", "func Value397() int { return 1 }", "", `_ = product.Value397() << -1`, "negative shift count"},
+		{"address of call result", "func Value397() int { return 0 }", "", `_ = &Value397()`, "cannot take address"},
+		{"address of parenthesized call result", "func Value397() int { return 0 }", "", `_ = &(Value397())`, "cannot take address"},
+		{"external address of call result", "func Value397() int { return 0 }", "", `_ = &product.Value397()`, "cannot take address"},
+		{"test method on production receiver", "type Box397 struct{}", "func (Box397) helper397(n int) {}", `Box397{}.helper397("wrong")`, "cannot use"},
+		{"test method arity", "type Box397 struct{}", "func (Box397) helper397(n int) {}", `Box397{}.helper397()`, "not enough arguments"},
+		{"test method value", "type Box397 struct{}", "func (Box397) helper397(n int) {}", `helper := Box397{}.helper397; helper("wrong")`, "cannot use"},
+		{"test method expression", "type Box397 struct{}", "func (Box397) helper397(n int) {}", `Box397.helper397(Box397{}, "wrong")`, "cannot use"},
+		{"test method result count", "type Box397 struct{}", "func (Box397) helper397() int { return 0 }", `var a, b = Box397{}.helper397(); _, _ = a, b`, "assignment mismatch"},
+		{"test method missing result", "type Box397 struct{}", "func (Box397) helper397() {}", `if (Box397{}).helper397() == 7 { t.Fatal("wrong result") }`, "(no value) used as value"},
+		{"test helper missing result", "func Value397(n int) {}", "func helper397() {}", `Value397(helper397())`, "(no value) used as value"},
+		{"external test helper missing result", "func Value397(n int) {}", "func helper397() {}", `product.Value397(helper397())`, "(no value) used as value"},
+		{"standard library call", "", `import "fmt"`, `RequireNewAPI397(); _ = fmt.Sprintf(7)`, "cannot use"},
+		{"changed inferred result", "func Value397() int { return 0 }", "", `got := Value397(); var want string = got; _ = want`, ""},
+		{"changed outer call arity", "func Value397() {}", "func helper397() int { return 1 }", `Value397(helper397())`, ""},
+		{"changed outer argument type", "func Value397(s string) {}", "func helper397() int { return 1 }", `Value397(helper397())`, ""},
+		{"changed field with local value", "type Options397 struct{ Value string }", "func helper397() int { return 1 }", `_ = Options397{Value: helper397()}`, ""},
+		{"changed inferred receiver", "func Value397() int { return 0 }", "", `got := Value397(); got.Future397()`, ""},
+		{"changed production member", "type Options397 struct{}", "", `_ = Options397{NewField397: "value"}`, ""},
+		{"external changed argument", "func Value397(n int) {}", "", `product.Value397("changed")`, ""},
+		{"diagnostic words in value", "func Value397(n int) {}", "", `Value397("not used; arguments in call; division by zero; undefined (")`, ""},
+		{"external changed field", "type Options397 struct{ Value int }", "", `_ = product.Options397{Value: "changed"}`, ""},
+		{"external private function", "", "", `product.hidden397()`, "undefined"},
+		{"external private member", "type Options397 struct{}", "", `product.Options397{}.hidden397()`, "undefined"},
+		{"external private field", "type Options397 struct{}", "", `_ = product.Options397{hidden397: 1}`, "unknown field"},
+		{"external nested local call", "func Value397(n int) {}", "func helper397(n int) int { return n }", `product.Value397(helper397("bad"))`, "cannot use"},
+		{"production init stays unexecuted", `func init() { panic("must not run") }`, "", `RequireNewAPI397()`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := s397New(t)
+			f.pkg(t, "pending", "")
+			s397Write(t, filepath.Join(f.root, "pending", "code.go"), "package pending\n"+tc.production+"\n", 0o644)
+			header := "package pending\nimport \"testing\"\n"
+			if strings.HasPrefix(tc.name, "external ") {
+				header = "package pending_test\nimport (\"testing\"; product \"example.com/shards397/pending\")\n"
+			}
+			f.accept(t, "pending", "TestNeedsChange", header+tc.declarations+"\nfunc TestNeedsChange(t *testing.T) { "+tc.body+" }\n")
+			c, err := Check(context.Background(), s397Draft(t, f), f.root, s397Checker(f, 90*time.Second))
+			if err != nil || c == nil || c.Run.DeadlineExceeded || c.Run.Interrupted {
+				t.Fatalf("compiler check did not complete: result=%+v error=%v", c, err)
+			}
+			if tc.diagnostic == "" {
+				if c.Problem != "" {
+					t.Fatal(c.Feedback())
+				}
+				s397Status(t, c.Run, "pending", "TestNeedsChange", "accept", "failed")
+				return
+			}
+			s397Status(t, c.Run, "pending", "TestNeedsChange", "accept", "refused")
+			// Feedback must retain the reason even when the raw transcript's
+			// tail no longer contains the compiler output.
+			c.Run.Output = strings.Repeat("later output\n", 1000)
+			if c.Problem == "" || !strings.Contains(c.Feedback(), "pinned_accept_test.go:") || !strings.Contains(c.Feedback(), tc.diagnostic) {
+				t.Fatalf("lost compiler refusal: %s", c.Feedback())
+			}
+		})
+	}
+}
+
+func TestSandboxCheckProductionSignatureCorrections(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, fixed, declarations, body string
+	}{
+		{"missing result", "func Value397() {}", "func Value397() int { return 7 }", "", `if Value397() != 7 { t.Fatal("wrong result") }`},
+		{"changed shift count", `func Value397() string { return "bad" }`, "func Value397() int { return 7 }", "", `shift := Value397(); if 128 >> shift != 1 { t.Fatal("wrong shift") }`},
+		{"changed shifted operand", `func Value397() string { return "bad" }`, "func Value397() int { return 7 }", "", `value := Value397(); if value << 1 != 14 { t.Fatal("wrong shift") }`},
+		{"local result count", "func Value397() int { return 7 }", "func Value397() (int, int) { return 7, 8 }", "", `var a, b = Value397(); if a != 7 || b != 8 { t.Fatal(a, b) }`},
+		{"package result count", "func Value397() int { return 7 }", "func Value397() (int, int) { return 7, 8 }", "var a, b = Value397()", `if a != 7 || b != 8 { t.Fatal(a, b) }`},
+		{"explicit result count", "func Value397() int { return 7 }", "func Value397() (int, int) { return 7, 8 }", "", `var a, b int = Value397(); if a != 7 || b != 8 { t.Fatal(a, b) }`},
+		{"production method", "type Box397 struct{}\nfunc (Box397) Value397(n int) int { return n }", "type Box397 struct{}\nfunc (Box397) Value397(s string) int { return len(s) }", "", `if (Box397{}).Value397("changed") != 7 { t.Fatal("wrong result") }`},
+	} {
+		for _, external := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/external_%t", tc.name, external), func(t *testing.T) {
+				f := s397New(t)
+				f.pkg(t, "pending", "")
+				production := filepath.Join(f.root, "pending", "code.go")
+				s397Write(t, production, "package pending\n"+tc.base+"\n", 0o644)
+				header := "package pending\nimport \"testing\"\n"
+				declarations, body := tc.declarations, tc.body
+				if external {
+					header = "package pending_test\nimport (\"testing\"; product \"example.com/shards397/pending\")\n"
+					qualify := strings.NewReplacer("Value397()", "product.Value397()", "Box397{}", "product.Box397{}")
+					declarations, body = qualify.Replace(declarations), qualify.Replace(body)
+				}
+				f.accept(t, "pending", "TestNeedsChange", header+declarations+"\nfunc TestNeedsChange(t *testing.T) { "+body+" }\n")
+				c, err := Check(context.Background(), s397Draft(t, f), f.root, s397Checker(f, 90*time.Second))
+				if err != nil || c == nil {
+					t.Fatalf("Check: result=%+v error=%v", c, err)
+				}
+				if c.Problem != "" {
+					t.Fatal(c.Feedback())
+				}
+				s397Status(t, c.Run, "pending", "TestNeedsChange", "accept", "failed")
+
+				// Only production changes; the pinned test must now pass at runtime.
+				fixed, err := format.Source([]byte("package pending\n" + tc.fixed + "\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				s397Write(t, production, string(fixed), 0o644)
+				file := "pending/pinned_accept_test.go"
+				s397Write(t, filepath.Join(f.root, file), f.plan.Sources[file], 0o644)
+				r := f.run(t, 90*time.Second, 30*time.Second)
+				if !r.Passed() {
+					t.Fatalf("production correction did not pass: %s\n%s", r.Summary(), r.Output)
+				}
+				s397Status(t, r, "pending", "TestNeedsChange", "accept", "passed")
+			})
+		}
+	}
 }
