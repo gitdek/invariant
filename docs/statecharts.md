@@ -302,7 +302,7 @@ Under [#723's ratified plan](../.invariant/plans/issue-723.json), verification a
 
 Comparison-only failure leaves the complete independently checked final chart, report and posters beside literal `comparison_evidence` text. The shared native renderer draws that fallback without mutating or resealing the retained receipt. All final model/include/view/lock, report and reader fingerprint, pin, bounds, tool, count, chart-consistency and companion checks remain required. The final drawing and report in the native SVG companion are checked separately from comparison presentation; intact metadata alone cannot excuse a forged drawing, and arbitrary archived SVG supplies no fallback. A final `too_large` or unavailable outcome keeps its specific cause and counts, with no invented chart. Public and `/act` rows, grouped implementation entries, table entries and evidence pages identify the affected project and show the diagnostic as literal text.
 
-Presentation URLs and ETags bind captured bytes, diagnostics and rendered contents, retaining unchanged no-comparison identities. Legitimate diagnostics survive restart; damaged cached fallback evidence still rejects the whole saved snapshot and its old images under D-0353, retries the archive and recovers from authoritative evidence. Verdicts, assurance, verification fingerprints, proposal hashes and locks remain unchanged. The merger records this refinement on D-0351, D-0353, D-0362 and D-0364 and runs unavailable local Docker/network checks without replacing applicable real Python or TLAPS CI.
+Presentation URLs and ETags bind captured bytes, diagnostics and rendered contents, retaining unchanged no-comparison identities. Legitimate diagnostics survive restart; damaged cached fallback evidence still rejects the whole saved snapshot and its old images under D-0353, retries the archive and recovers from authoritative evidence. Verdicts, assurance, verification fingerprints, proposal hashes and locks remain unchanged. [D-0391](../decisions/journal/D-0391.jsonl) records this refinement of D-0351, D-0353, D-0362 and D-0364.
 
 [D-0362](../decisions/journal/D-0362.jsonl) records the comparison and baseline policy for #648. The pinned-TLC coverage runs with:
 
@@ -310,7 +310,7 @@ Presentation URLs and ETags bind captured bytes, diagnostics and rendered conten
 go test -tags integration ./internal/formalize -run '^TestComparison648PinnedTLC$' -count=1 -timeout 10m
 ```
 
-The full gate and applicable real Python and TLAPS suites remain required.
+CI's integration shards run it, with the rest of the integration-tagged tests, on hand pull requests and the factory's plumbing pull requests, and invariant/gate needs them, so it isn't merger work ([D-0392](../decisions/journal/D-0392.jsonl)). The full gate and applicable real Python and TLAPS suites remain required.
 
 The focused validation benchmark compares the pre-#717 validation algorithm,
 retained in the test as `base`, with the candidate on identical detached
