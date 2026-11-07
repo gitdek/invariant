@@ -34,6 +34,9 @@ const (
 //go:embed sandbox_runner.py
 var sandboxRunner string
 
+//go:embed sandbox_compile_helper.go.txt
+var sandboxCompileHelper string
+
 // sandboxGit is git configuration every process in the sandbox gets from
 // its environment, which git reads even when a test blanks its global and
 // system config: no background maintenance or garbage collection. A commit
@@ -304,6 +307,9 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 	if err := os.WriteFile(filepath.Join(runnerDir, "runner.py"), []byte(sandboxRunner), 0o600); err != nil {
 		return Result{}, err
 	}
+	if err := os.WriteFile(filepath.Join(runnerDir, "compile.go"), []byte(sandboxCompileHelper), 0o600); err != nil {
+		return Result{}, err
+	}
 	deadline, _ := ctx.Deadline()
 	config := struct {
 		Packages     []string `json:"packages"`
@@ -549,7 +555,7 @@ func parse(out string, plan *Plan) Result {
 				continue
 			}
 			switch event.Status {
-			case "passed", "failed", "skipped", "running", "not_run":
+			case "passed", "failed", "skipped", "refused", "running", "not_run":
 				key := event.Phase + "\x00" + event.Package + "\x00" + event.Name
 				results[key] = event.TestResult
 			}
