@@ -138,10 +138,10 @@ type PlanView struct {
 	Files   []string `json:"files"`
 	Trusted []string `json:"trusted,omitempty"`
 
-	Tests     []plumbing.Test     `json:"tests,omitempty"`
-	Sources   map[string]string   `json:"sources,omitempty"`
-	Languages map[string]string   `json:"languages,omitempty"`
-	Execution *plumbing.Execution `json:"execution,omitempty"`
+	Tests      []plumbing.Test     `json:"tests,omitempty"`
+	Execution  *plumbing.Execution `json:"execution,omitempty"`
+	SourceHash string              `json:"sourceHash,omitempty"`
+	SourceURL  string              `json:"sourceURL,omitempty"`
 }
 
 // IssuePlanView is what a plan of issues says: what the issues do together,
@@ -454,10 +454,7 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 			w.Statements = append(w.Statements, Said{Name: s.Name, Kind: s.Kind, Says: s.Says})
 		}
 		if pl := p.Plan; pl != nil {
-			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted, Tests: pl.Tests, Sources: pl.Sources, Execution: pl.Execution, Languages: map[string]string{}}
-			for _, file := range pl.TestFiles() {
-				w.Plan.Languages[file] = pl.SourceLanguage(file)
-			}
+			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted, Tests: pl.Tests, Execution: pl.Execution, SourceHash: p.Hash}
 			for _, t := range pl.Tests {
 				w.Statements = append(w.Statements, Said{Name: t.Name, Kind: "test", Says: t.Says})
 			}

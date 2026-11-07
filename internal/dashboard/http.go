@@ -90,6 +90,8 @@ func (s *Server) Handler() http.Handler {
 			h.Set("Cache-Control", "no-store")
 			h.Set("Content-Type", "application/json")
 			w.Write(body)
+		case strings.HasPrefix(p, "/api/plan-sources/"):
+			s.servePlanSources(w, r)
 		case graphPath.MatchString(p):
 			body := s.graph(graphPath.FindStringSubmatch(p)[1])
 			if body == nil {
