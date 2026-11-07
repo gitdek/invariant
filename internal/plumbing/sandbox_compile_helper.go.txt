@@ -1,0 +1,818 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/constant"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+)
+
+type packageInfo struct {
+	Dir, ImportPath, Name, Export                                           string
+	GoFiles, CgoFiles, TestGoFiles, XTestGoFiles, TestImports, XTestImports []string
+	Incomplete                                                              bool
+	Error                                                                   *struct{ Err string }
+	Module                                                                  *struct {
+		Main      bool
+		GoVersion string
+	}
+}
+
+type report struct {
+	Eligible bool   `json:"eligible"`
+	Reason   string `json:"reason"`
+}
+
+func main() {
+	var out report
+	reason, err := analyze(os.Args[1], os.Args[2:])
+	if err != nil {
+		out.Reason = err.Error()
+	} else {
+		out.Eligible, out.Reason = true, reason
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+		panic(err)
+	}
+}
+
+func list(export bool, packages ...string) ([]packageInfo, error) {
+	args := []string{"list", "-json"}
+	if export {
+		args = append(args, "-deps", "-export")
+	}
+	args = append(args, packages...)
+	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), args...)
+	var diagnostic bytes.Buffer
+	cmd.Stderr = &diagnostic
+	data, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("Go compiler analysis could not load packages: %v\n%s", err, diagnostic.String())
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var result []packageInfo
+	for {
+		var pkg packageInfo
+		if err := decoder.Decode(&pkg); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		if pkg.Incomplete || pkg.Error != nil || pkg.ImportPath == "" {
+			return nil, fmt.Errorf("incomplete Go package metadata for %s", pkg.ImportPath)
+		}
+		result = append(result, pkg)
+	}
+	return result, nil
+}
+
+func analyze(path string, pinned []string) (string, error) {
+	loaded, err := list(false, path)
+	if err != nil {
+		return "", err
+	}
+	if len(loaded) != 1 || len(loaded[0].CgoFiles) != 0 {
+		return "", fmt.Errorf("compiler attribution needs one ordinary Go package")
+	}
+	pkg := loaded[0]
+	positions := token.NewFileSet()
+	var groups [3][]*ast.File
+	included := map[string]bool{}
+	for group, names := range [][]string{pkg.GoFiles, pkg.TestGoFiles, pkg.XTestGoFiles} {
+		for _, base := range names {
+			name := filepath.Join(pkg.Dir, base)
+			file, err := parser.ParseFile(positions, name, nil, parser.AllErrors|parser.ParseComments)
+			if err != nil {
+				return "", fmt.Errorf("invalid Go source: %w", err)
+			}
+			if group != 0 {
+				// Compiler-only directives and bodyless declarations need the
+				// compiler's validation; a neighboring API error cannot hide them.
+				for _, comments := range file.Comments {
+					for _, comment := range comments.List {
+						if strings.HasPrefix(comment.Text, "//go:") && !strings.HasPrefix(comment.Text, "//go:build ") {
+							return "", fmt.Errorf("%s: test compiler directive is outside API attribution: %s", positions.Position(comment.Pos()), comment.Text)
+						}
+					}
+				}
+				for _, decl := range file.Decls {
+					if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body == nil {
+						return "", fmt.Errorf("%s: test function has no body", positions.Position(fn.Pos()))
+					}
+				}
+				included[name] = true
+			}
+			groups[group] = append(groups[group], file)
+		}
+	}
+	acceptance := map[string]bool{}
+	for _, file := range pinned {
+		name, err := filepath.Abs(file)
+		if err != nil || !included[name] {
+			return "", fmt.Errorf("acceptance file is not included in compiler analysis: %s", file)
+		}
+		acceptance[name] = true
+	}
+	// Validate package setup and compile actual production and dependency
+	// exports. No test binary or package initializer runs during analysis.
+	if _, err := list(false, "-test", path); err != nil {
+		return "", err
+	}
+	imports := append([]string{path}, pkg.TestImports...)
+	imports = append(imports, pkg.XTestImports...)
+	dependencies, err := list(true, imports...)
+	if err != nil {
+		return "", err
+	}
+	exports, productionFiles := map[string]string{}, map[string]bool{}
+	productionPackages := map[string]bool{}
+	for _, dep := range dependencies {
+		if dep.Export != "" {
+			exports[dep.ImportPath] = dep.Export
+		}
+		if dep.Module != nil && dep.Module.Main {
+			productionPackages[dep.ImportPath] = true
+			for _, base := range dep.GoFiles {
+				productionFiles[filepath.Join(dep.Dir, base)] = true
+			}
+		}
+	}
+	lookup := func(name string) (io.ReadCloser, error) {
+		file := exports[name]
+		if file == "" {
+			return nil, fmt.Errorf("no compiled export for %s", name)
+		}
+		return os.Open(file)
+	}
+	imported := importer.ForCompiler(positions, "gc", lookup).(types.ImporterFrom)
+	var tested *types.Package
+	var reasons, refusals []string
+	for group, tests := range groups[1:] {
+		if len(tests) == 0 {
+			continue
+		}
+		files, name := tests, pkg.ImportPath+"_test"
+		var imports types.Importer = imported
+		if group == 0 {
+			files, name = append(slices.Clone(groups[0]), tests...), pkg.ImportPath
+		} else if tested != nil {
+			imports = testedImporter{imported, tested}
+		}
+		info := &types.Info{
+			Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{},
+			Uses: map[*ast.Ident]types.Object{}, Scopes: map[ast.Node]*types.Scope{},
+		}
+		var failures []types.Error
+		config := types.Config{Importer: imports, Sizes: types.SizesFor("gc", runtime.GOARCH), Error: func(err error) {
+			if typed, ok := err.(types.Error); ok {
+				failures = append(failures, typed)
+			} else {
+				refusals = append(refusals, err.Error())
+			}
+		}}
+		if pkg.Module != nil && pkg.Module.GoVersion != "" {
+			config.GoVersion = "go" + pkg.Module.GoVersion
+		}
+		checked, checkErr := config.Check(name, positions, files, info)
+		if checkErr != nil && len(failures) == 0 {
+			return "", fmt.Errorf("Go type analysis failed: %w", checkErr)
+		}
+		if group == 0 {
+			tested = checked
+		}
+		a := analysis{positions, info, productionFiles, productionPackages, group == 0, map[types.Object]ast.Expr{}}
+		for _, file := range tests {
+			a.inferred(file)
+		}
+		for _, failure := range failures {
+			var nodes []ast.Node
+			for _, file := range tests {
+				ast.Inspect(file, func(node ast.Node) bool {
+					if node == nil || failure.Pos < node.Pos() || failure.Pos >= node.End() {
+						return false
+					}
+					nodes = append(nodes, node)
+					return true
+				})
+			}
+			if !a.attributable(failure, nodes) {
+				refusals = append(refusals, failure.Error())
+			} else if acceptance[positions.PositionFor(failure.Pos, false).Filename] {
+				reasons = append(reasons, failure.Error())
+			}
+		}
+	}
+	if len(refusals) != 0 {
+		return "", fmt.Errorf("compiler errors outside production API changes: %s. If a production change would fix one, "+
+			"give the expected type where the test receives the production value, as in var got []int = product.Items(), "+
+			"which the check attributes to production", strings.Join(refusals, "; "))
+	}
+	if len(reasons) == 0 {
+		return "", fmt.Errorf("compilation failed without an attributable production API error in the acceptance files")
+	}
+	return "production API compilation failure: " + strings.Join(reasons, "; "), nil
+}
+
+// External tests see internal test declarations too, just as go test does.
+type testedImporter struct {
+	types.ImporterFrom
+	tested *types.Package
+}
+
+func (t testedImporter) Import(path string) (*types.Package, error) {
+	return t.ImportFrom(path, "", 0)
+}
+
+func (t testedImporter) ImportFrom(path, dir string, mode types.ImportMode) (*types.Package, error) {
+	if path == t.tested.Path() {
+		return t.tested, nil
+	}
+	return t.ImporterFrom.ImportFrom(path, dir, mode)
+}
+
+type analysis struct {
+	positions                           *token.FileSet
+	info                                *types.Info
+	productionFiles, productionPackages map[string]bool
+	internal                            bool
+	initializers                        map[types.Object]ast.Expr
+}
+
+func (a *analysis) production(object types.Object) bool {
+	return object != nil && object.Pkg() != nil && a.productionPackages[object.Pkg().Path()] &&
+		a.productionFiles[a.positions.PositionFor(object.Pos(), false).Filename]
+}
+
+func (a *analysis) productionType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	typ = types.Unalias(typ)
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = types.Unalias(ptr.Elem())
+	}
+	named, ok := typ.(*types.Named)
+	return ok && a.production(named.Obj())
+}
+
+// declared reports whether a type a test declares, such as a result,
+// parameter, field or element type, names a production type anywhere in its
+// structure, so changing that production type can change what it accepts.
+// A test's own named types stay fixed, whatever their fields.
+func (a *analysis) declared(typ types.Type) bool {
+	return a.declaredSeen(typ, map[types.Type]bool{}, false)
+}
+
+// contained reports whether a production type appears anywhere in a type,
+// including in the fields of a test's own named types, which decide what
+// the type's values can take part in.
+func (a *analysis) contained(typ types.Type) bool {
+	return a.declaredSeen(typ, map[types.Type]bool{}, true)
+}
+
+func (a *analysis) declaredSeen(typ types.Type, seen map[types.Type]bool, deep bool) bool {
+	if typ == nil || seen[typ] {
+		return false
+	}
+	seen[typ] = true
+	switch typ := types.Unalias(typ).(type) {
+	case *types.Named:
+		if a.production(typ.Obj()) {
+			return true
+		}
+		for i := 0; i < typ.TypeArgs().Len(); i++ {
+			if a.declaredSeen(typ.TypeArgs().At(i), seen, deep) {
+				return true
+			}
+		}
+		if deep {
+			return a.declaredSeen(typ.Underlying(), seen, deep)
+		}
+	case *types.Pointer:
+		return a.declaredSeen(typ.Elem(), seen, deep)
+	case *types.Slice:
+		return a.declaredSeen(typ.Elem(), seen, deep)
+	case *types.Array:
+		return a.declaredSeen(typ.Elem(), seen, deep)
+	case *types.Chan:
+		return a.declaredSeen(typ.Elem(), seen, deep)
+	case *types.Map:
+		return a.declaredSeen(typ.Key(), seen, deep) || a.declaredSeen(typ.Elem(), seen, deep)
+	case *types.Signature:
+		return a.declaredSeen(typ.Params(), seen, deep) || a.declaredSeen(typ.Results(), seen, deep)
+	case *types.Tuple:
+		for i := 0; i < typ.Len(); i++ {
+			if a.declaredSeen(typ.At(i).Type(), seen, deep) {
+				return true
+			}
+		}
+	case *types.Struct:
+		for i := 0; i < typ.NumFields(); i++ {
+			if a.declaredSeen(typ.Field(i).Type(), seen, deep) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parameter is the declared type a call's i'th argument must suit, or nil
+// for a builtin, a conversion or a call the checker couldn't type.
+func (a *analysis) parameter(call *ast.CallExpr, i int) types.Type {
+	if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+		if _, ok := a.info.Uses[id].(*types.Builtin); ok {
+			return nil
+		}
+	}
+	typ := a.info.TypeOf(call.Fun)
+	if typ == nil {
+		return nil
+	}
+	signature, ok := typ.Underlying().(*types.Signature)
+	if !ok {
+		return nil
+	}
+	params := signature.Params()
+	if signature.Variadic() && i >= params.Len()-1 {
+		last := params.At(params.Len() - 1).Type()
+		if slice, ok := last.(*types.Slice); ok && !call.Ellipsis.IsValid() {
+			return slice.Elem()
+		}
+		return last
+	}
+	if i < params.Len() {
+		return params.At(i).Type()
+	}
+	return nil
+}
+
+// element is the declared type a composite literal's i'th element must suit:
+// a struct field's, or a slice's, array's or map's element or key type.
+func (a *analysis) element(literal *ast.CompositeLit, i int, pos token.Pos) types.Type {
+	typ := a.info.TypeOf(literal)
+	if typ == nil {
+		return nil
+	}
+	pair, keyed := literal.Elts[i].(*ast.KeyValueExpr)
+	switch under := typ.Underlying().(type) {
+	case *types.Struct:
+		if keyed {
+			if id, ok := pair.Key.(*ast.Ident); ok {
+				for j := 0; j < under.NumFields(); j++ {
+					if under.Field(j).Name() == id.Name {
+						return under.Field(j).Type()
+					}
+				}
+			}
+			return nil
+		}
+		if i < under.NumFields() {
+			return under.Field(i).Type()
+		}
+	case *types.Slice:
+		return under.Elem()
+	case *types.Array:
+		return under.Elem()
+	case *types.Map:
+		if keyed && contains(pair.Key, pos) {
+			return under.Key()
+		}
+		return under.Elem()
+	}
+	return nil
+}
+
+// result is the declared type of the innermost enclosing function's j'th
+// result, when a return statement gives all n of them.
+func (a *analysis) result(enclosing []ast.Node, j, n int) types.Type {
+	for k := len(enclosing) - 1; k >= 0; k-- {
+		var typ types.Type
+		switch fn := enclosing[k].(type) {
+		case *ast.FuncLit:
+			typ = a.info.TypeOf(fn)
+		case *ast.FuncDecl:
+			if object := a.info.Defs[fn.Name]; object != nil {
+				typ = object.Type()
+			}
+		default:
+			continue
+		}
+		signature, ok := typ.(*types.Signature)
+		if !ok || signature.Results().Len() != n {
+			return nil
+		}
+		return signature.Results().At(j).Type()
+	}
+	return nil
+}
+
+// admits reports whether an operand the test fixes can take part in op
+// beside an operand of some type. If it can't, as a boolean can't be added,
+// no production change to the other operand repairs the expression.
+func (a *analysis) admits(op token.Token, fixed ast.Expr) bool {
+	typ := a.info.TypeOf(fixed)
+	if typ == nil {
+		return true
+	}
+	if _, ok := types.Unalias(typ).(*types.TypeParam); ok {
+		return true
+	}
+	if a.contained(typ) {
+		return true
+	}
+	basic, _ := typ.Underlying().(*types.Basic)
+	has := func(info types.BasicInfo) bool { return basic != nil && basic.Info()&info != 0 }
+	// A constant takes the type it was converted to, so judge its value.
+	if value := a.info.Types[fixed].Value; value != nil && has(types.IsNumeric) {
+		switch op {
+		case token.REM, token.AND, token.OR, token.XOR, token.AND_NOT:
+			return constant.ToInt(value).Kind() == constant.Int
+		}
+	}
+	switch op {
+	case token.LAND, token.LOR:
+		return has(types.IsBoolean)
+	case token.EQL, token.NEQ:
+		return types.Comparable(typ) || basic != nil && basic.Kind() == types.UntypedNil
+	case token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return has(types.IsOrdered)
+	case token.ADD:
+		return has(types.IsNumeric | types.IsString)
+	case token.SUB, token.MUL, token.QUO:
+		return has(types.IsNumeric)
+	case token.REM, token.AND, token.OR, token.XOR, token.AND_NOT:
+		return has(types.IsInteger)
+	}
+	return true
+}
+
+// An inferred local retains the origin of its type. An explicit test-local
+// type stays fixed even when its initializer happens to call production.
+func (a *analysis) inferred(file *ast.File) {
+	ast.Inspect(file, func(node ast.Node) bool {
+		var names []*ast.Ident
+		var values []ast.Expr
+		switch node := node.(type) {
+		case *ast.ValueSpec:
+			if node.Type == nil {
+				names, values = node.Names, node.Values
+			}
+		case *ast.AssignStmt:
+			if node.Tok == token.DEFINE {
+				for _, lhs := range node.Lhs {
+					id, _ := lhs.(*ast.Ident)
+					names = append(names, id)
+				}
+				values = node.Rhs
+			}
+		}
+		for i, id := range names {
+			if id == nil || a.info.Defs[id] == nil {
+				continue
+			}
+			if len(values) == len(names) {
+				a.initializers[a.info.Defs[id]] = values[i]
+			} else if len(values) == 1 {
+				a.initializers[a.info.Defs[id]] = values[0]
+			}
+		}
+		return true
+	})
+}
+
+func (a *analysis) origin(expr ast.Expr) bool {
+	return a.originSeen(expr, map[types.Object]bool{})
+}
+
+func (a *analysis) originSeen(expr ast.Expr, seen map[types.Object]bool) bool {
+	if expr == nil {
+		return false
+	}
+	if a.productionType(a.info.TypeOf(expr)) {
+		return true
+	}
+	switch expr := expr.(type) {
+	case *ast.ParenExpr:
+		return a.originSeen(expr.X, seen)
+	case *ast.Ident:
+		object := a.info.Uses[expr]
+		if a.production(object) {
+			return true
+		}
+		if object != nil && !seen[object] {
+			seen[object] = true
+			return a.originSeen(a.initializers[object], seen)
+		}
+	case *ast.SelectorExpr:
+		// A test can declare a method on a production type. Its signature
+		// belongs to that declaration, not to the receiver's source file.
+		if method, ok := a.info.Uses[expr.Sel].(*types.Func); ok {
+			return a.production(method)
+		}
+		return a.production(a.info.Uses[expr.Sel]) || a.productionType(a.info.TypeOf(expr.X))
+	case *ast.CallExpr:
+		return a.originSeen(expr.Fun, seen)
+	case *ast.StarExpr:
+		return a.originSeen(expr.X, seen)
+	case *ast.IndexExpr:
+		return a.originSeen(expr.X, seen)
+	case *ast.IndexListExpr:
+		return a.originSeen(expr.X, seen)
+	}
+	return false
+}
+
+func contains(node ast.Node, pos token.Pos) bool {
+	return node != nil && node.Pos() <= pos && pos < node.End()
+}
+
+func (a *analysis) visibleMember(name string, typ types.Type, pos token.Pos) bool {
+	if ast.IsExported(name) {
+		return true
+	}
+	// Production in another package cannot add an accessible unexported
+	// member, even when its receiver comes from that package.
+	if !a.internal || typ == nil {
+		return false
+	}
+	typ = types.Unalias(typ)
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = types.Unalias(ptr.Elem())
+	}
+	named, ok := typ.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return false
+	}
+	file := a.positions.PositionFor(pos, false).Filename
+	declaration := a.positions.PositionFor(named.Obj().Pos(), false).Filename
+	return filepath.Dir(file) == filepath.Dir(declaration)
+}
+
+func (a *analysis) missing(nodes []ast.Node, pos token.Pos) bool {
+	for i := len(nodes) - 1; i >= 0; i-- {
+		switch node := nodes[i].(type) {
+		case *ast.SelectorExpr:
+			if !contains(node.Sel, pos) {
+				continue
+			}
+			if id, ok := node.X.(*ast.Ident); ok {
+				if object, ok := a.info.Uses[id].(*types.PkgName); ok {
+					return ast.IsExported(node.Sel.Name) && a.productionPackages[object.Imported().Path()]
+				}
+			}
+			return a.visibleMember(node.Sel.Name, a.info.TypeOf(node.X), pos) && a.origin(node.X)
+		}
+	}
+	if !a.internal || len(nodes) == 0 {
+		return false
+	}
+	id, ok := nodes[len(nodes)-1].(*ast.Ident)
+	if !ok || a.info.Uses[id] != nil || a.info.Defs[id] != nil {
+		return false
+	}
+	for _, scope := range a.info.Scopes {
+		if scope.Contains(id.Pos()) {
+			if _, object := scope.LookupParent(id.Name, id.Pos()); object != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Attribute the failing relation, never an arbitrary enclosing statement.
+// In Future(1 + "bad"), for example, the invalid operands remain test-local
+// even though a production function could supply Future itself.
+func (a *analysis) attributable(failure types.Error, nodes []ast.Node) bool {
+	message, pos := failure.Msg, failure.Pos
+	if strings.HasPrefix(message, "invalid operation: division by zero") || strings.HasPrefix(message, "\t") {
+		return false
+	}
+	undefined := strings.HasPrefix(message, "undefined:")
+	for _, node := range nodes {
+		if selector, ok := node.(*ast.SelectorExpr); ok && strings.HasPrefix(message, types.ExprString(selector)+" undefined (") {
+			undefined = true
+		}
+	}
+	if undefined {
+		return a.missing(nodes, pos)
+	}
+	if strings.HasPrefix(message, "non-boolean condition in ") {
+		for i := len(nodes) - 1; i >= 0; i-- {
+			var cond ast.Expr
+			switch node := nodes[i].(type) {
+			case *ast.IfStmt:
+				cond = node.Cond
+			case *ast.ForStmt:
+				cond = node.Cond
+			default:
+				continue
+			}
+			return contains(cond, pos) && a.origin(cond)
+		}
+		return false
+	}
+	if strings.HasPrefix(message, "unknown field ") {
+		var field string
+		for i := len(nodes) - 1; i >= 0; i-- {
+			if id, ok := nodes[i].(*ast.Ident); ok {
+				field = id.Name
+			}
+			if literal, ok := nodes[i].(*ast.CompositeLit); ok {
+				typ := a.info.TypeOf(literal)
+				return field != "" && a.visibleMember(field, typ, pos) &&
+					(a.origin(literal.Type) || literal.Type == nil && a.productionType(typ))
+			}
+		}
+		return false
+	}
+	if strings.HasPrefix(message, "too many arguments in call to ") || strings.HasPrefix(message, "not enough arguments in call to ") {
+		for i := len(nodes) - 1; i >= 0; i-- {
+			call, ok := nodes[i].(*ast.CallExpr)
+			first, _, _ := strings.Cut(message, "\n")
+			if ok && strings.HasSuffix(first, "arguments in call to "+types.ExprString(call.Fun)) {
+				return a.origin(call.Fun)
+			}
+		}
+		return false
+	}
+	if strings.HasPrefix(message, "assignment mismatch:") {
+		for i := len(nodes) - 1; i >= 0; i-- {
+			var values []ast.Expr
+			switch node := nodes[i].(type) {
+			case *ast.AssignStmt:
+				values = node.Rhs
+			case *ast.ValueSpec:
+				values = node.Values
+			}
+			if len(values) == 1 {
+				call, ok := ast.Unparen(values[0]).(*ast.CallExpr)
+				return ok && a.origin(call.Fun)
+			}
+		}
+		return false
+	}
+	if strings.HasSuffix(message, " (no value) used as value") {
+		for i := len(nodes) - 1; i >= 0; i-- {
+			expr, ok := nodes[i].(ast.Expr)
+			if ok && message == types.ExprString(expr)+" (no value) used as value" {
+				call, ok := ast.Unparen(expr).(*ast.CallExpr)
+				return ok && a.origin(call.Fun)
+			}
+		}
+		return false
+	}
+	if strings.HasPrefix(message, "invalid operation: cannot take address of ") {
+		for _, node := range nodes {
+			if unary, ok := node.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+				// No production signature can make a call result addressable.
+				if _, ok := ast.Unparen(unary.X).(*ast.CallExpr); ok {
+					return false
+				}
+			}
+		}
+	}
+	// Each of these renders the operand at its position, as "cannot use x (".
+	operands := []string{"cannot use ", "cannot convert ", "invalid argument: ", "cannot range over ",
+		"cannot index ", "cannot slice "}
+	if !slices.ContainsFunc(operands, func(prefix string) bool { return strings.HasPrefix(message, prefix) }) &&
+		!strings.HasPrefix(message, "invalid operation:") {
+		return false
+	}
+	// A diagnostic about helper() as an argument belongs to the outer call,
+	// whereas one about "bad" inside helper("bad") belongs to helper itself.
+	// Match the checker-rendered operand before walking its enclosing relation.
+	var matched ast.Expr
+	for i := len(nodes) - 1; i >= 0; i-- {
+		expr, ok := nodes[i].(ast.Expr)
+		if !ok || expr.Pos() != pos {
+			continue
+		}
+		operand := types.ExprString(expr) + " ("
+		if slices.ContainsFunc(operands, func(prefix string) bool { return strings.HasPrefix(message, prefix+operand) }) {
+			if a.origin(expr) {
+				return true
+			}
+			matched, nodes = expr, nodes[:i]
+			break
+		}
+	}
+	// go/types reports a binary operation at its left operand, or at the
+	// offending operand of a comparison, so start from the relation it renders.
+	if matched == nil && strings.HasPrefix(message, "invalid operation: ") {
+		for i := 0; i < len(nodes); i++ {
+			if binary, ok := nodes[i].(*ast.BinaryExpr); ok &&
+				strings.HasPrefix(message, "invalid operation: "+types.ExprString(binary)+" (") {
+				nodes = nodes[:i+1]
+				break
+			}
+		}
+	}
+	// A declared target type only matters to the operand the message renders.
+	target := func(value ast.Expr, typ types.Type) bool { return value == matched && a.declared(typ) }
+	for i := len(nodes) - 1; i >= 0; i-- {
+		switch node := nodes[i].(type) {
+		case *ast.BinaryExpr:
+			if node.Op == token.SHL || node.Op == token.SHR {
+				// Each shift operand must be valid on its own; changing the
+				// other operand's production type cannot repair this error.
+				if contains(node.X, pos) {
+					return a.origin(node.X)
+				}
+				return contains(node.Y, pos) && a.origin(node.Y)
+			}
+			x, y := a.origin(node.X), a.origin(node.Y)
+			switch {
+			case x && y:
+				return true
+			case x:
+				return a.admits(node.Op, node.Y)
+			case y:
+				return a.admits(node.Op, node.X)
+			}
+			return false
+		case *ast.UnaryExpr:
+			return a.origin(node.X)
+		case *ast.TypeAssertExpr:
+			// Only a production value could become an interface.
+			if strings.HasPrefix(message, "invalid operation: "+types.ExprString(node.X)+" (") {
+				return a.origin(node.X)
+			}
+		case *ast.StarExpr:
+			return a.origin(node.X)
+		case *ast.IndexExpr:
+			return a.origin(node.X) || contains(node.Index, pos) && a.origin(node.Index)
+		case *ast.FuncLit:
+			// An error inside a function literal's body never belongs to
+			// the call or assignment around the literal.
+			if contains(node.Body, pos) {
+				return false
+			}
+		case *ast.CallExpr:
+			if a.origin(node.Fun) {
+				return true
+			}
+			for j, arg := range node.Args {
+				if contains(arg, pos) {
+					return a.origin(arg) || target(arg, a.parameter(node, j))
+				}
+			}
+			return false
+		case *ast.CompositeLit:
+			if a.origin(node.Type) || node.Type == nil && a.productionType(a.info.TypeOf(node)) {
+				return true
+			}
+			for j, element := range node.Elts {
+				if contains(element, pos) {
+					if pair, ok := element.(*ast.KeyValueExpr); ok {
+						element = pair.Value
+						if contains(pair.Key, pos) {
+							element = pair.Key
+						}
+					}
+					return a.origin(element) || target(element, a.element(node, j, pos))
+				}
+			}
+			return false
+		case *ast.ValueSpec:
+			if a.origin(node.Type) {
+				return true
+			}
+			for _, value := range node.Values {
+				if contains(value, pos) {
+					return a.origin(value) || node.Type != nil && target(value, a.info.TypeOf(node.Type))
+				}
+			}
+			return false
+		case *ast.AssignStmt:
+			for j, value := range node.Rhs {
+				if contains(value, pos) {
+					return a.origin(value) || len(node.Lhs) == len(node.Rhs) &&
+						(a.origin(node.Lhs[j]) || target(value, a.info.TypeOf(node.Lhs[j])))
+				}
+			}
+			return false
+		case *ast.ReturnStmt:
+			for j, value := range node.Results {
+				if contains(value, pos) {
+					return a.origin(value) || target(value, a.result(nodes[:i], j, len(node.Results)))
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
