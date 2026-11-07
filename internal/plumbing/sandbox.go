@@ -82,6 +82,9 @@ type TestResult struct {
 	Shard   int    `json:"shard,omitempty"`
 	File    string `json:"file,omitempty"`
 
+	// ElapsedSeconds is measured by the test runner; nil means unmeasured.
+	ElapsedSeconds *float64 `json:"elapsed_seconds,omitempty"`
+
 	Part      string                        `json:"part,omitempty"`
 	Framework string                        `json:"framework,omitempty"`
 	Selector  string                        `json:"selector,omitempty"`

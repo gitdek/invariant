@@ -537,6 +537,7 @@ class Runner:
 
     def run(self):
         self.emit("start")
+        self.emit("phase_start", phase="prepare")
         self.inventory()
         self.formatting()
         if not self.expired("vet") and not self.stop_signal:
@@ -545,11 +546,14 @@ class Runner:
             if outcome["code"] != 0:
                 self.problem("vet", "go vet failed or did not finish")
         with tempfile.TemporaryDirectory(prefix="invariant-test-binaries-") as directory:
+            self.emit("phase_start", phase="build")
             self.compile(directory)
             tests = self.discover()
             hints = self.timings(tests)
+            self.emit("phase_start", phase="test")
             self.workers(tests, hints)
             self.save_timings(hints)
+            self.emit("phase_start", phase="accept")
             self.accept()
         self.expired("runner")
         if self.stop_signal:
