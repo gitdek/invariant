@@ -250,7 +250,7 @@ To **manually upgrade** an existing gate, build a CLI from a published full Inva
 
 Before external intake is enabled, [#740](https://github.com/gitdek/invariant/issues/740) closes gaps an independent review found. A modeled factory pull request in a configured repository fails, because #736's acceptance tests require `-issue` for every factory branch and a plan for every factory change. A dependency update fails ordinary checks against the base's prepared dependencies. Staging starts one object process per file, and preflight misses some owner-written job conditions.
 
-This CI step rests on the existing configuration, execution, native identity and trust decisions D-0301, D-0311, D-0314, D-0321, D-0352, D-0359 and D-0379. **Merger work:** before the next step, record #736's new CI and gate-upgrade decision with `invariant decisions decide`, under D-0122/D-0294; this plumbing change cannot write `decisions/`.
+This CI step rests on the existing configuration, execution, native identity and trust decisions D-0301, D-0311, D-0314, D-0321, D-0352, D-0359 and D-0379. [D-0395](../decisions/journal/D-0395.jsonl) records #736's CI and gate-upgrade decision.
 
 ## Repository context for agents
 
