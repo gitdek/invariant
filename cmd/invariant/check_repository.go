@@ -253,6 +253,8 @@ func repositoryScopeEnvironment() error {
 		case (name == "GIT_CONFIG_GLOBAL" || name == "GIT_CONFIG_SYSTEM") && value == os.DevNull:
 		case (name == "GIT_CONFIG_NOSYSTEM" || name == "GIT_NO_LAZY_FETCH" || name == "GIT_NO_REPLACE_OBJECTS" || name == "GIT_LFS_SKIP_SMUDGE") && value == "1":
 		case (name == "GIT_TERMINAL_PROMPT" || name == "GIT_OPTIONAL_LOCKS") && value == "0":
+		case name == "GIT_EDITOR" || name == "GIT_SEQUENCE_EDITOR" || name == "GIT_PAGER":
+			// Scope's reads are non-interactive, so no editor or pager runs.
 		default:
 			return fmt.Errorf("factory scope requires an unredirected Git environment; unset %s", name)
 		}
@@ -353,11 +355,55 @@ func repositoryBlob(ctx context.Context, dir, commit, name string) ([]byte, erro
 	return repositoryGit(ctx, dir, "cat-file", "blob", fields[2])
 }
 
+// refuseGitLayout refuses a tree with a directory Git would open as a
+// repository: a HEAD file beside objects/, refs/ or commondir. The sandbox
+// runs plain git in the staged copy, outside Docker, and Git would read that
+// directory's own config, which can name commands to run.
+func refuseGitLayout(listing []byte) error {
+	type markers struct{ head, other bool }
+	dirs := map[string]*markers{}
+	mark := func(dir string) *markers {
+		if dirs[dir] == nil {
+			dirs[dir] = &markers{}
+		}
+		return dirs[dir]
+	}
+	for _, entry := range strings.Split(strings.TrimSuffix(string(listing), "\x00"), "\x00") {
+		_, name, ok := strings.Cut(entry, "\t")
+		if !ok {
+			continue
+		}
+		components := strings.Split(name, "/")
+		for i, component := range components {
+			dir := strings.Join(components[:i], "/")
+			last := i == len(components)-1
+			switch {
+			case last && strings.EqualFold(component, "HEAD"):
+				mark(dir).head = true
+			case last && strings.EqualFold(component, "commondir"), !last && (strings.EqualFold(component, "objects") || strings.EqualFold(component, "refs")):
+				mark(dir).other = true
+			}
+		}
+	}
+	for dir, m := range dirs {
+		if m.head && m.other {
+			if dir == "" {
+				dir = "."
+			}
+			return fmt.Errorf("committed tree lays out a Git repository at %q, whose configuration Git would read; remove it from the repository", dir)
+		}
+	}
+	return nil
+}
+
 // Read objects directly: archive attributes, checkout filters and mutable
 // working-tree files cannot omit, rewrite or replace committed test inputs.
 func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) error {
 	listing, err := repositoryGit(ctx, dir, "ls-tree", "-r", "-z", "--full-tree", commit)
 	if err != nil {
+		return err
+	}
+	if err := refuseGitLayout(listing); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(dst, 0o700); err != nil {

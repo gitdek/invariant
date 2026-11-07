@@ -85,3 +85,38 @@ func TestRepositoryPreflightPinsWorkflowAuthority(t *testing.T) {
 		t.Fatalf("preflight must read the resolved commit and name the upgrade branch: ref=%s err=%v", gh.ref, err)
 	}
 }
+
+// A developer's shell often names an editor or pager. Neither runs for
+// scope's reads, so neither stops factory checks; redirection still does.
+func TestRepositoryCIScopeAllowsEditorsAndPagers(t *testing.T) {
+	for _, name := range []string{"GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER"} {
+		t.Setenv(name, "vi")
+	}
+	if err := repositoryScopeEnvironment(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_OBJECT_DIRECTORY", t.TempDir())
+	if err := repositoryScopeEnvironment(); err == nil || !strings.Contains(err.Error(), "GIT_OBJECT_DIRECTORY") {
+		t.Fatalf("redirected objects were allowed beside an editor: %v", err)
+	}
+}
+
+// A committed tree laid out as a Git repository would hand its own config to
+// the plain git the sandbox runs in the staged copy, outside Docker, so
+// staging refuses it, at any depth, before any check runs.
+func TestRepositoryCIRefusesStagedGitRepositoryLayout(t *testing.T) {
+	for _, dir := range []string{".", "api/vendor/tool"} {
+		t.Run(dir, func(t *testing.T) {
+			f := gateFixtureFor736(t, "go", "pytest")
+			for name, body := range map[string]string{"HEAD": "ref: refs/heads/main\n", "config": "[core]\n\tbare = true\n", "objects/info/packs": "\n", "refs/heads/README": "\n"} {
+				gateWrite736(t, f.root, filepath.Join(dir, name), body)
+			}
+			gateCommit736(t, f.root)
+			r := f.runner()
+			code, out := f.run(t.Context(), r, "-base", f.base)
+			if code == 0 || len(r.events) != 0 || !strings.Contains(out, "lays out a Git repository") {
+				t.Fatalf("a staged Git repository layout reached the checks: %d %v\n%s", code, r.events, out)
+			}
+		})
+	}
+}

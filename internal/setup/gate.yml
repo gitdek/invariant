@@ -63,19 +63,21 @@ jobs:
             args+=(-base "$BASE")
             if [[ "$GITHUB_HEAD_REF" == invariant/* ]]; then
               issue=$(printf '%s' "$GITHUB_HEAD_REF" | sed -n 's#^invariant/issue-\([0-9][0-9]*\)-.*#\1#p')
-              args+=(-issue "${issue:-0}")
+              if [ -n "$issue" ]; then args+=(-issue "$issue"); fi
             fi
           fi
           "$RUNNER_TEMP/invariant" check-repository "${args[@]}" HEAD
 
       # Every project in the repository, found rather than listed.
       - name: Verify every project
+        shell: bash
         run: |
           status=0
           git ls-files -z '.invariant/invariant.json' '*/.invariant/invariant.json' > "$RUNNER_TEMP/invariant-projects"
           while IFS= read -r -d '' manifest; do
             project="${manifest%/.invariant/invariant.json}"
             if [ "$manifest" = .invariant/invariant.json ]; then project=.; fi
+            case "$project" in -*) echo "::error::invariant: project path $project starts with -"; exit 1;; esac
             echo "::group::$project"
             "$RUNNER_TEMP/invariant" verify -out "out/$(basename "$project")" "$project" || status=1
             echo "::endgroup::"
@@ -92,6 +94,7 @@ jobs:
           while IFS= read -r -d '' manifest; do
             project="${manifest%/.invariant/invariant.json}"
             if [ "$manifest" = .invariant/invariant.json ]; then project=.; fi
+            case "$project" in -*) echo "::error::invariant: project path $project starts with -"; exit 1;; esac
             targets+=("$project")
           done < "$RUNNER_TEMP/invariant-projects"
           git ls-files -z '.invariant/plans/issue-*.json' > "$RUNNER_TEMP/invariant-plans"
