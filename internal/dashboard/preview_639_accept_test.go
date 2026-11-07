@@ -398,12 +398,10 @@ func preview639Snapshot(t *testing.T, s *Server) []byte {
 	t.Helper()
 	snap := s.assemble(time.Date(2026, 11, 5, 12, 1, 0, 0, time.UTC))
 	b := reader603JSON(t, snap)
-	gz, err := gzipped(b)
+	_, err := s.publish(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.state = gz
-	s.saveSnapshot(gz)
 	return b
 }
 func preview639Choices(t *testing.T, b []byte) []preview639Choice {

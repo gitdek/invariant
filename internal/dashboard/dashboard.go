@@ -56,18 +56,19 @@ type Server struct {
 	Post   func(ctx context.Context, repo string, issue int, body string) (url string, err error)
 	Open   func(ctx context.Context, repo string, is github.NewIssue) (number int, url string, err error)
 
-	mu      sync.RWMutex
-	state   []byte            // the latest snapshot, as every page reads it, gzipped JSON
-	issues  []Issue           // the latest snapshot's issues, which say what each is waiting for
-	holders map[string]string // each repository's lease holder, as last read, whose watcher the page follows
-	graphs  map[string][]byte
-	readers map[string]readerPage
-	drawing map[string]bool
-	failed  map[string]time.Time // graphs TLC couldn't draw, and when
-	pending chan graphJob
-	live    live
-	acted   acted     // the snapshot as last read, and the commands posted since, which it's served with
-	untaken []Untaken // what /act offers to plan, as the latest refresh read it
+	mu        sync.RWMutex
+	state     []byte            // the latest snapshot, as every page reads it, gzipped JSON
+	issues    []Issue           // the latest snapshot's issues, which say what each is waiting for
+	holders   map[string]string // each repository's lease holder, as last read, whose watcher the page follows
+	graphs    map[string][]byte
+	readers   map[string]readerPage
+	proposals proposalCache
+	drawing   map[string]bool
+	failed    map[string]time.Time // graphs TLC couldn't draw, and when
+	pending   chan graphJob
+	live      live
+	acted     acted     // the snapshot as last read, and the commands posted since, which it's served with
+	untaken   []Untaken // what /act offers to plan, as the latest refresh read it
 	// planned is each issue /act planned, by repo#n, and when: a refresh
 	// that read GitHub before the post leaves it out for a while (#201).
 	planned map[string]time.Time
@@ -548,11 +549,10 @@ func (s *Server) refresh(ctx context.Context) error {
 	s.mu.Unlock()
 	snap := s.assemble(time.Now().UTC())
 	snap.Stale = stale
-	gz, err := s.publish(snap)
+	_, err := s.publish(snap)
 	if err != nil {
 		return err
 	}
-	s.saveSnapshot(gz)
 	s.saveSources()
 	return nil
 }
@@ -563,21 +563,24 @@ func (s *Server) refresh(ctx context.Context) error {
 func (s *Server) snapshotFile() string { return filepath.Join(s.Cache, "state.json.gz") }
 
 func (s *Server) saveSnapshot(gz []byte) {
+	if err := s.writeSnapshot(gz); err != nil {
+		s.logf("keeping the snapshot: %v", err)
+	}
+}
+
+func (s *Server) writeSnapshot(gz []byte) error {
 	if s.Cache == "" {
-		return
+		return nil
 	}
 	tmp := s.snapshotFile() + ".tmp"
 	if err := os.MkdirAll(s.Cache, 0o755); err != nil {
-		s.logf("keeping the snapshot: %v", err)
-		return
+		return err
 	}
+	defer os.Remove(tmp)
 	if err := os.WriteFile(tmp, gz, 0o644); err != nil {
-		s.logf("keeping the snapshot: %v", err)
-		return
+		return err
 	}
-	if err := os.Rename(tmp, s.snapshotFile()); err != nil {
-		s.logf("keeping the snapshot: %v", err)
-	}
+	return os.Rename(tmp, s.snapshotFile())
 }
 
 // loadSnapshot serves the last run's snapshot until the first read of

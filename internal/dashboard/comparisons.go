@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -21,6 +20,15 @@ type comparisonEvidence struct {
 	Issue    int
 	Proposal *formalize.Proposal
 	Problem  string
+}
+
+var comparisonCache = proposalKind[comparisonEvidence]{
+	directory: "comparisons", format: comparisonFormat, template: comparisonHTML,
+	render: makeComparison,
+	withProblem: func(e comparisonEvidence, problem string) comparisonEvidence {
+		e.Problem = problem
+		return e
+	},
 }
 
 func comparisonPageSummary(c *statechart.Comparison) string {
@@ -94,28 +102,7 @@ func (s *Server) comparisonFile(key string) string {
 }
 
 func (s *Server) keepComparison(e comparisonEvidence) *ReaderPresentation {
-	page := makeComparison(e)
-	key := strings.TrimPrefix(page.presentation.Fingerprint, "sha256:")
-	s.mu.Lock()
-	if s.readers == nil {
-		s.readers = map[string]readerPage{}
-	}
-	s.readers[key] = page
-	s.mu.Unlock()
-	if s.Cache != "" {
-		file := s.comparisonFile(key)
-		err := os.MkdirAll(filepath.Dir(file), 0755)
-		if err == nil {
-			err = os.WriteFile(file+".tmp", readerJSON(e), 0600)
-		}
-		if err == nil {
-			err = os.Rename(file+".tmp", file)
-		}
-		if err != nil {
-			s.logf("keeping proposal comparison: %v", err)
-		}
-	}
-	return &page.presentation
+	return comparisonCache.keep(s, e)
 }
 
 func (s *Server) presentComparison(is *Issue) {
@@ -142,31 +129,10 @@ func (s *Server) restoreComparisons(snap *Snapshot) {
 		// again, so a damaged snapshot loses the link rather than serving a
 		// page that doesn't exist.
 		if w.Proposal == nil || w.Proposal.Reader == nil {
-			if w.Reader != nil && w.Reader.Format == comparisonFormat {
-				w.Reader = nil
-			}
+			w.Reader = nil
 			continue
 		}
 		expected := comparisonEvidence{Format: comparisonFormat, Repo: repo, Issue: is.Number, Proposal: w.Proposal}
-		var saved comparisonEvidence
-		ok := w.Reader != nil && w.Reader.Format == comparisonFormat
-		if ok {
-			parts := readerPath.FindStringSubmatch(w.Reader.Page)
-			ok = len(parts) == 3
-			if ok {
-				b, err := os.ReadFile(s.comparisonFile(parts[1]))
-				ok = err == nil && decodeReaderJSON(b, &saved) == nil
-			}
-		}
-		if ok {
-			comparable := saved
-			comparable.Problem = ""
-			ok = sameReaderJSON(comparable, expected) && makeComparison(saved).presentation == *w.Reader
-		}
-		if !ok {
-			saved = expected
-			saved.Problem = "Cached proposal comparison is damaged or obsolete; check the captured baseline and candidate again."
-		}
-		w.Reader = s.keepComparison(saved)
+		w.Reader = comparisonCache.restore(s, expected, w.Reader, "Cached proposal comparison is damaged or obsolete; check the captured baseline and candidate again.")
 	}
 }
