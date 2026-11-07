@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -118,5 +119,62 @@ func TestRepositoryCIRefusesStagedGitRepositoryLayout(t *testing.T) {
 				t.Fatalf("a staged Git repository layout reached the checks: %d %v\n%s", code, r.events, out)
 			}
 		})
+	}
+}
+
+func TestRepositoryBatchRefusesAmbiguousFraming(t *testing.T) {
+	for name, response := range map[string]string{
+		"signed length":      "printf '%s blob +4\\nabc\\n\\n' \"$oid\"\n",
+		"overflow length":    "printf '%s blob 9223372036854775808\\n' \"$oid\"\n",
+		"extra header field": "printf '%s blob 4 extra\\nabc\\n\\n' \"$oid\"\n",
+		"wrong terminator":   "printf '%s blob 4\\nabc\\nx' \"$oid\"\n",
+		"trailing output":    "printf '%s blob 4\\nabc\\n\\nextra' \"$oid\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			gateGit736(t, root, "init", "-q", "-b", "main")
+			gateWrite736(t, root, "file", "abc\n")
+			commit := gateCommit736(t, root)
+			wrapObjectReader740(t, "if [ \"$batch\" = yes ]; then\nIFS= read -r oid\n"+response+"exit 0\nfi")
+			if err := stageRepositoryCommit(t.Context(), root, commit, filepath.Join(t.TempDir(), "stage")); err == nil {
+				t.Fatal("ambiguous object framing was staged")
+			}
+		})
+	}
+}
+
+// A modeled factory change adds no dependencies (D-0014), and scope reads
+// only its own languages' manifests. A part's declared lockfile changed
+// beside modeled code fails before anything installs (#746's review).
+func TestRepositoryGateModeledChangeKeepsDependencies(t *testing.T) {
+	f := gateFixtureFor736(t, "pytest")
+	gateWrite736(t, f.root, "worker/.invariant/invariant.json", "{}\n")
+	f.base = gateCommit736(t, f.root)
+	gateWrite736(t, f.root, "worker/requirements.lock", "packaging==24.2 --hash=sha256:"+strings.Repeat("c", 64)+"\nbrand-new==1.0 --hash=sha256:"+strings.Repeat("d", 64)+"\n")
+	gateWrite736(t, f.root, "worker/main.py", "VALUE = 7\n")
+	gateCommit736(t, f.root)
+	r := f.runner()
+	code, out := f.run(t.Context(), r, f.factoryArgs()...)
+	if code == 0 || len(r.events) != 0 || !strings.Contains(out, "worker/requirements.lock") {
+		t.Fatalf("a modeled change's new locked dependency must fail before installation: %d %v\n%s", code, r.events, out)
+	}
+}
+
+// A modeled project no part owns selects every part, as the same ordinary
+// pull request does, instead of failing on the unowned path (#746's review).
+func TestRepositoryGateModeledChangeOutsideParts(t *testing.T) {
+	f := gateFixtureFor736(t, "go")
+	gateWrite736(t, f.root, "models/pool/.invariant/invariant.json", "{}\n")
+	gateWrite736(t, f.root, "models/pool/pool.go", "package pool\nconst Size = 1\n")
+	f.base = gateCommit736(t, f.root)
+	gateWrite736(t, f.root, "models/pool/pool.go", "package pool\nconst Size = 2\n")
+	gateCommit736(t, f.root)
+	ordinary := f.runner()
+	if code, out := f.run(t.Context(), ordinary, "-base", f.base, "HEAD"); code != 0 || len(ordinary.commands) == 0 {
+		t.Fatalf("ordinary pull request: %d %v\n%s", code, ordinary.commands, out)
+	}
+	modeled := f.runner()
+	if code, out := f.run(t.Context(), modeled, f.factoryArgs()...); code != 0 || !slices.Equal(modeled.commands, ordinary.commands) {
+		t.Fatalf("a modeled change outside every part must check as the ordinary pull request does: %d %v, want %v\n%s", code, modeled.commands, ordinary.commands, out)
 	}
 }

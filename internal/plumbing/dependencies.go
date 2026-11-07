@@ -92,6 +92,12 @@ var dependencyPlatform = regexp.MustCompile(`^linux/(amd64|arm64)(/v[0-9]+)?$`)
 // selection finish before any installation starts. Concurrent callers install
 // privately and atomically publish only complete, independently checked records.
 func (p DependencyPreparer) Prepare(parent context.Context, snapshot *repository.Snapshot, names []string) (*DependencySession, error) {
+	return p.prepareInputs(parent, snapshot, names, snapshot.ReadFileContext)
+}
+
+// Ordinary CI supplies committed candidate bytes from its private staging
+// tree. The captured snapshot still owns every declaration and command.
+func (p DependencyPreparer) prepareInputs(parent context.Context, snapshot *repository.Snapshot, names []string, read func(context.Context, string) ([]byte, error)) (*DependencySession, error) {
 	ctx, cancel := context.WithTimeout(parent, sandboxLimit(p.Timeout, SandboxTimeout))
 	defer cancel()
 	deadline, _ := ctx.Deadline()
@@ -130,7 +136,7 @@ func (p DependencyPreparer) Prepare(parent context.Context, snapshot *repository
 	for i, part := range selected {
 		files := map[string][]byte{}
 		for _, name := range append(slices.Clone(part.Inputs), part.Lockfiles...) {
-			data, err := snapshot.ReadFileContext(ctx, name)
+			data, err := read(ctx, name)
 			if err != nil {
 				return nil, fmt.Errorf("dependency input %s: %w", name, err)
 			}
@@ -210,7 +216,7 @@ func (p DependencyPreparer) prepare(ctx context.Context, runner DependencyRunner
 	if err != nil {
 		return artifact, err
 	}
-	defer os.RemoveAll(stage)
+	defer func() { resultErr = errors.Join(resultErr, removeRepositoryStage(context.Background(), stage)) }()
 	q.SourceDir = stage
 	q.Token, err = dependencyToken()
 	if err != nil {

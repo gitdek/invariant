@@ -141,3 +141,32 @@ func TestRepositoryCandidateLinksAreRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryTreeRemovalStopsAndDoesNotFollowDirectories(t *testing.T) {
+	outside := t.TempDir()
+	file := filepath.Join(outside, "keep")
+	if err := os.WriteFile(file, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(stage, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := removeRepositoryTree(ctx, stage); !errors.Is(err, context.Canceled) {
+		t.Fatalf("removal ignored its own deadline: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(stage, "linked")); err != nil {
+		t.Fatalf("canceled removal continued: %v", err)
+	}
+	if err := removeRepositoryStage(ctx, stage); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stage); !os.IsNotExist(err) {
+		t.Fatalf("removal returned with staging still present: %v", err)
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "outside" {
+		t.Fatalf("cleanup followed a directory link: %q, %v", data, err)
+	}
+}
