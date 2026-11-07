@@ -148,6 +148,35 @@ func goDependencyLock(p repository.Part, files map[string][]byte) error {
 	return nil
 }
 
+// pythonLockText refuses requirements text that pip could split or decode
+// differently from the grammar below, so no line admission reads as a
+// comment reaches pip as an option (#748): anything but tabs, line feeds and
+// printable ASCII once CRLF is normalized, a coding declaration, a comment
+// continued onto the next line, or a "#" that pip wouldn't read as a comment.
+func pythonLockText(name string, data []byte) (string, error) {
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	for i := 0; i < len(text); i++ {
+		if c := text[i]; c != '\t' && c != '\n' && (c < 0x20 || c > 0x7e) {
+			return "", fmt.Errorf("%s: requirements must be lines of printable ASCII, not byte %#02x at offset %d", name, c, i)
+		}
+	}
+	for i, line := range strings.Split(text, "\n") {
+		comment := strings.IndexByte(line, '#')
+		switch {
+		case comment < 0:
+		case i < 2 && pythonCoding.MatchString(line):
+			return "", fmt.Errorf("%s:%d: requirements can't declare an encoding", name, i+1)
+		case comment > 0 && line[comment-1] != ' ' && line[comment-1] != '\t':
+			return "", fmt.Errorf("%s:%d: a comment's \"#\" must start the line or follow whitespace", name, i+1)
+		case strings.TrimSpace(line[:comment]) == "" && strings.HasSuffix(line, "\\"):
+			return "", fmt.Errorf("%s:%d: a comment can't continue onto the next line", name, i+1)
+		}
+	}
+	return text, nil
+}
+
+var pythonCoding = regexp.MustCompile(`(?i)coding[:=]`)
+
 var pythonRequirement = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9_,.-]+\])?)==([0-9][A-Za-z0-9.!+_-]*)$`)
 var pythonHash = regexp.MustCompile(`^--hash=sha256:[0-9a-fA-F]{64}$`)
 
@@ -179,9 +208,12 @@ func pythonDependencyLock(p repository.Part, files map[string][]byte) ([]string,
 	}
 	versions := map[string]string{}
 	for name := range used {
+		body, err := pythonLockText(name, files[name])
+		if err != nil {
+			return nil, err
+		}
 		// Continuations join hash lines only; all other pip directives,
 		// markers, direct references and includes fail the grammar below.
-		body := strings.ReplaceAll(string(files[name]), "\r\n", "\n")
 		body = strings.ReplaceAll(body, "\\\n", " ")
 		for _, line := range strings.Split(body, "\n") {
 			line, _, _ = strings.Cut(line, "#")
