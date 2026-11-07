@@ -80,25 +80,31 @@ func (s *Snapshot) PartsFor(paths []string) ([]Part, error) {
 
 // IsTrusted reports whether the captured policy protects a file as part of the
 // trusted base. Current-state documents are not trusted unless also declared
-// through a trusted category.
+// through a trusted category. What a trusted symbolic link in the base names
+// is trusted too.
 func (s *Snapshot) IsTrusted(name string) (bool, error) {
 	if err := s.checkPath(name, false, false); err != nil {
 		return false, err
 	}
+	return s.trustedByRule(name) || linkedFrom(s.linked, name), nil
+}
+
+// trustedByRule applies the policy to a path by its name alone.
+func (s *Snapshot) trustedByRule(name string) bool {
 	if name == Path || CI(name) || agentPath(name) || slices.Contains(s.config.AgentRules, name) {
-		return true, nil
+		return true
 	}
 	for _, part := range s.config.Parts {
 		if slices.Contains(part.Lockfiles, name) || slices.Contains(part.Inputs, name) {
-			return true, nil
+			return true
 		}
 	}
 	for _, selector := range s.config.TrustedPaths {
 		if selectorMatches(name, selector) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // CI protects the gate workflow and the repository's other CI configuration.
