@@ -25,3 +25,30 @@ func TestPlumbingRecipeUsesThePinnedImages(t *testing.T) {
 		t.Errorf("PythonVersion = %q, want a full Python 3 version", PythonVersion)
 	}
 }
+
+// The sandbox adds git and Bash, each at a pinned version, so a rebuild
+// can't quietly pick up another release: tests run generated workflow steps
+// with bash, as GitHub Actions does (#741).
+func TestPlumbingRecipePinsItsPackages(t *testing.T) {
+	pinned := map[string]string{}
+	for _, line := range strings.Split(string(PlumbingDockerfile), "\n") {
+		_, rest, ok := strings.Cut(line, "apk add --no-cache ")
+		if !ok {
+			continue
+		}
+		rest, _, _ = strings.Cut(rest, "&&")
+		for _, pkg := range strings.Fields(rest) {
+			name, version, ok := strings.Cut(pkg, "=")
+			if !ok || version == "" {
+				t.Errorf("the recipe adds %s at no pinned version", pkg)
+				continue
+			}
+			pinned[name] = version
+		}
+	}
+	for _, name := range []string{"git", "bash"} {
+		if pinned[name] == "" {
+			t.Errorf("the recipe doesn't add %s at a pinned version; it pins %v", name, pinned)
+		}
+	}
+}
