@@ -2659,6 +2659,8 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 				return retry
 			}
 			f.logf("#%d: GitHub didn't show draft #%d's events, so I won't mark it ready: %v", n, pr.Number, unread)
+		} else if err := f.failingEnded(ctx, n, failingEventsStep(state, pr.Number, pr.Head.SHA)); err != nil {
+			return err // the read is asked again on the next poll, which ends the run then
 		}
 		if watched = w == watchDraft; !watched {
 			// A configured trusted draft is already held for a person. Read
