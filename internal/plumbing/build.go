@@ -86,6 +86,14 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 	}
 	ctx, cancel := synth.WithExecutionBudget(ctx, b.Timeout)
 	defer cancel()
+	repoContext, err := b.Sandbox.RepositoryContext(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
+	backend := b.Backend
+	if repoContext != nil {
+		backend = contextBackend{Backend: backend, captured: repoContext}
+	}
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return nil, err
 	}
@@ -200,7 +208,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		} else {
 			job.Prompt = BuildPrompt(plan, n, b.TestRuns) + fmt.Sprintf("\nRepair attempt %d of 2. Continue in this workspace under the unchanged ratified plan. Address the latest review findings below, adding or correcting regression tests within the captured regression allowance. If a finding requires a different plan, explain what remains for a person.\n\n%s\n", round, r.Review)
 		}
-		usage, fb, runErr := synth.RunAgent(ctx, b.Backend, job, b.Timeout, fallback)
+		usage, fb, runErr := synth.RunAgent(ctx, backend, job, b.Timeout, fallback)
 		r.Usage = synth.AddUsage(r.Usage, usage)
 		if fb != nil {
 			r.Fallback = fb
@@ -256,7 +264,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		if !r.Passed {
 			return r, nil
 		}
-		review, approved, reviewErr := b.review(ctx, root, staged, n, plan, r, out, round)
+		review, approved, reviewErr := b.review(ctx, root, staged, n, plan, r, out, round, repoContext)
 		if reviewErr != nil {
 			// A failed review must not erase the last unresolved findings.
 			if review != "" {
@@ -332,12 +340,17 @@ var verdictLine = regexp.MustCompile(`(?im)^\s*\**VERDICT:\**\s*(approve|changes
 // review has a second agent, which can only read, check the change against
 // the plan: that it does what the plan says, that its tests show it, and
 // that it does nothing else.
-func (b Builder) review(ctx context.Context, root, candidate string, n int, plan *Plan, r *BuildResult, out string, round int) (string, bool, error) {
+func (b Builder) review(ctx context.Context, root, candidate string, n int, plan *Plan, r *BuildResult, out string, round int, repoContext *RepositoryContext) (string, bool, error) {
 	ws, err := os.MkdirTemp("", "invariant-plumbing-review-")
 	if err != nil {
 		return "", false, err
 	}
 	defer os.RemoveAll(ws)
+	guidance, releaseContext, err := repoContext.Stage(ws)
+	if err != nil {
+		return "", false, err
+	}
+	defer releaseContext()
 	if err := CopyCheckout(ctx, candidate, filepath.Join(ws, "repo")); err != nil {
 		return "", false, err
 	}
@@ -368,7 +381,7 @@ func (b Builder) review(ctx context.Context, root, candidate string, n int, plan
 		return "", false, err
 	}
 	defer transcript.Close()
-	usage, _, err := synth.RunAgent(ctx, b.Reviewer, synth.Job{Workspace: ws, Prompt: ReviewPrompt(plan, n), ReadOnly: true, Transcript: transcript}, b.Timeout, "")
+	usage, _, err := synth.RunAgent(ctx, b.Reviewer, synth.Job{Workspace: ws, Prompt: ReviewPrompt(plan, n) + guidance, ReadOnly: true, Transcript: transcript}, b.Timeout, "")
 	r.Usage = synth.AddUsage(r.Usage, usage)
 	text := strings.TrimSpace(usage.Summary)
 	os.WriteFile(filepath.Join(out, fmt.Sprintf("review-%d.txt", round)), []byte(text), 0o644)
