@@ -73,15 +73,13 @@ func planCode(text string) string {
 	return "<code>" + receipt.EscapeText(text) + "</code>"
 }
 
-// plumbingElsewhereComment answers a plumbing issue on a repository that
-// isn't Invariant's own: plumbing isn't supported there yet, and why (#103).
+// plumbingElsewhereComment explains the committed setup missing from an
+// external repository. Neither an agent run nor a branch is needed to answer.
 func plumbingElsewhereComment(m Marker) string {
-	return post("not one I can take", fmt.Sprintf("This issue is marked `Kind: plumbing`, and plumbing isn't supported on this repository yet. "+
-		"For now, I plan it only on Invariant's own repository, `%s`; external issue intake is still disabled. The remaining prerequisites are:\n\n"+
-		"- Configuration drafting for the repository's parts, commands, documentation, agent rules and trusted base.\n"+
-		"- Generated CI: the gate workflow `invariant init` writes must run the configured repository checks and verify the plan's ratification and scope.\n\n"+
-		"Captured context, dependency preparation and native checks are available to configured callers, with trusted-base changes held for a person; they do not enable intake.\n\n"+
-		"So I haven't drafted anything, and I've left this issue for a person.", invariantRepository), m)
+	return post("repository setup needed", "This `Kind: plumbing` issue cannot start yet: the authoritative base has no committed `.invariant/repository.json`. "+
+		"Run `invariant init` in a checkout to draft the configuration and CI gate. Complete its unresolved requirements for parts, commands, dependencies, documents, agent rules and trusted base, then have a person review and commit the contract and capable `invariant/gate` workflow to the base branch. "+
+		"The gate must run `check-repository`, factory `scope` and project/plan `ratification`. Configuration or a gate only in a worktree or candidate branch cannot enable intake.\n\n"+
+		"I haven't run an agent or created a branch. This issue waits for a person; after committing the reviewed setup on the base, comment `/invariant revise`.", m)
 }
 
 func planRatifiedComment(by, branch string, n int, p *formalize.Proposal, m Marker) string {

@@ -72,6 +72,7 @@ func (r *BuildResult) Built() bool {
 // under captured test conventions come back into root after the last round. Its
 // transcripts and checks land in out.
 func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *BuildResult, buildErr error) {
+	b.Sandbox = b.Sandbox.ForRequest(ctx)
 	lock, err := ReadLockFile(root, n)
 	if err != nil {
 		return nil, err

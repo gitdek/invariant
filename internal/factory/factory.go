@@ -24,6 +24,7 @@ import (
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/scope"
 	"github.com/gitdek/invariant/internal/synth"
 )
@@ -98,6 +99,8 @@ type Repo interface {
 	Push(ctx context.Context, worktree, branch string) error
 	RevParse(ctx context.Context, ref string) (string, error)
 	Show(ctx context.Context, ref, file string) ([]byte, error)
+	Repository(ctx context.Context, ref string) (*repository.Snapshot, error)
+	Workflows(ctx context.Context, ref string) (map[string]string, error)
 	Export(ctx context.Context, ref string, paths []string, dst string) error
 	Scope(ctx context.Context, base, head string, issue int) (scope.Result, error)
 	Lease(ctx context.Context) (sha string, rec LeaseRecord, err error)
@@ -129,6 +132,11 @@ type Factory struct {
 	Work       string      // where transcripts and logs go
 	Check      string      // the CI check that gates a merge: invariant/gate
 	Language   string      // the code's language when an issue has no language label (D-0040)
+
+	// RepositoryDependencies is the host's default for configured requests.
+	// Unconfigured and modeled runners do not opt into repository execution.
+	RepositoryDependencies plumbing.DependencyPreparer
+
 	// Agent names the coding agent that Formalizer, Builder and Plumbing
 	// run, which an issue gets unless it or its project picks another
 	// (#173). Empty is claude-code. Agents are the other agents the watcher
@@ -877,6 +885,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 	if err != nil {
 		return err
 	}
+	if held, err := f.workflowPublicationHeld(ctx, t); err != nil || held {
+		return err
+	}
 	var stopped bool
 	ctx, stopped, err = f.effects(ctx, t)
 	if err != nil || stopped {
@@ -891,6 +902,9 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 		if err != nil {
 			return err
 		}
+	}
+	if held, err := f.repositoryHolds(ctx, t); err != nil || held {
+		return err
 	}
 	state, started := t.State()
 	if next, ok := ctx.Value(pollStepKey{}).(*pollContinuation); ok {
@@ -1212,23 +1226,61 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		req.PRD = root
 	}
 	// A plumbing issue gets a plan instead of statements, checked against
-	// the base branch as it is (D-0105). Only on Invariant's own repository,
-	// for now: anywhere else, it gets an answer and is left for a person,
-	// with nothing drafted (#103).
+	// the committed base (D-0105). External repositories need a reviewed
+	// contract and capable gate before any agent run or branch is recorded.
 	if !prd && kindLine(t.Issue.Body) == "plumbing" {
-		if !f.plansPlumbing() {
-			m := Marker{Kind: KindUnsupported, ReplyTo: replyTo}
-			return f.drafted(ctx, t, cause, base, m, plumbingElsewhereComment(m), LabelHumanReview)
+		if err := f.Repo.Fetch(ctx); err != nil {
+			return err
+		}
+		var snapshot *repository.Snapshot
+		var err error
+		if previous != nil && previous.Plan != nil && previous.Plan.Native() {
+			snapshot, err = f.planRepository(ctx, previous.Plan)
+		} else {
+			snapshot, err = f.repositoryAt(ctx, "origin/"+f.Base)
+		}
+		if errors.Is(err, repository.ErrMissing) && (previous == nil || previous.Plan == nil || !previous.Plan.Native()) {
+			if !f.plansPlumbing() {
+				m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers}
+				return f.drafted(ctx, t, cause, base, m, plumbingElsewhereComment(m), LabelHumanReview)
+			}
+			err = nil // Invariant's unconfigured built-in runner.
+		}
+		if err == nil && snapshot != nil {
+			_, err = f.repositoryGates(ctx, snapshot.Commit())
+		}
+		if err != nil {
+			var authority repositoryAuthority
+			if errors.As(err, &authority) {
+				return stuck(err.Error())
+			}
+			return err
 		}
 		if projectLine(t.Issue.Body) != "" || len(codeLines(t.Issue.Body)) > 0 {
 			return stuck("A plumbing issue's plan names the files it changes, so it names no project or code to check. Take out the Project: and Code: lines, or the Kind: plumbing line.")
 		}
-		root, err := f.planBase(ctx)
+		var root string
+		if snapshot != nil {
+			// The native checker reads captured objects independently of the
+			// agent's copy, so keep a detached checkout for this request.
+			root, err = f.Repo.Worktree(ctx, "", snapshot.Commit())
+			if err == nil {
+				defer f.Repo.RemoveWorktree(context.WithoutCancel(ctx), root)
+			}
+		} else {
+			root, err = f.planBaseAt(ctx, "origin/"+f.Base)
+			if err == nil {
+				defer os.RemoveAll(root)
+			}
+		}
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(root)
-		req.Plumbing, req.Language = root, "go"
+		req.Plumbing = root
+		if snapshot == nil {
+			req.Language = "go"
+		}
+		ctx = plumbing.WithRepositoryRuntime(ctx, snapshot, f.RepositoryDependencies)
 	}
 	// A Project: line names the project the issue changes, or where a new
 	// one goes (D-0045).
@@ -1287,8 +1339,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		req.Existing, req.Language = &formalize.Existing{Paths: paths, Root: root}, "typescript"
 	}
 	// The issue's agent drafts it (#173). One the watcher can't run, or
-	// doesn't know, gets an answer instead, with nothing drafted, as a
-	// plumbing issue on another repository does (D-0121).
+	// doesn't know, gets an answer instead, with nothing drafted.
 	line, named := agentLine(t.Issue.Body), ""
 	if req.Current != nil {
 		named = req.Current.Manifest.Agent
@@ -1296,7 +1347,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	agent := f.agentOf(line, named)
 	run, ok := f.runners(agent)
 	if !ok || run.Formalizer == nil {
-		m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers}
+		m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers, Proposal: previous}
 		return f.drafted(ctx, t, cause, base, m, unrunnableComment(agent, f.runnable(), m), LabelHumanReview)
 	}
 	// The draft's agent run is recorded before it starts, where every
@@ -1340,6 +1391,12 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	if res.Proposal != nil {
 		answers = revise(t, answers, res.Proposal.Revised)
 	}
+	// A failed native revision keeps the original execution base, so the
+	// next revision cannot recapture changed guidance or gate authority.
+	failed := res.Proposal
+	if previous != nil && previous.Plan != nil && previous.Plan.Native() {
+		failed = previous
+	}
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
 	switch p := res.Proposal; {
@@ -1353,10 +1410,10 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		case req.Plumbing != "":
 			what = "plan"
 		}
-		m.Kind, m.Proposal = KindStuck, p
+		m.Kind, m.Proposal = KindStuck, failed
 		return f.drafted(ctx, t, cause, base, m, providerStuckComment(res.Problem, what, m), LabelHumanReview)
 	case res.Problem != "":
-		m.Kind, m.Proposal = KindStuck, p
+		m.Kind, m.Proposal = KindStuck, failed
 		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
 	case p.Unsupported != "":
 		m.Kind, m.Proposal = KindUnsupported, previous
@@ -1712,6 +1769,10 @@ func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) e
 		return f.ratifyIssuePlan(ctx, t, state, c)
 	}
 	posted, err := f.commitRatification(ctx, t, state, c)
+	var authority repositoryAuthority
+	if errors.As(err, &authority) {
+		return f.holdRepository(ctx, t, err, LabelProposal)
+	}
 	if errors.Is(err, errStale) {
 		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything.",
 			" Comment `/invariant revise` and I'll draft it again from the project as it is now.")
@@ -1966,7 +2027,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 				return nil
 			}
 			if err != nil {
-				return err
+				return f.holdRepository(ctx, t, err, LabelBuilding)
 			}
 			if built == "" {
 				if err := f.recovers(ctx, n, "say the build stopped", f.canReportStopped(building(RunRecorded, false, false), recovery.Build)); err != nil {
@@ -2354,7 +2415,12 @@ func (f *Factory) publish(ctx context.Context, t Thread, ratified Post, result s
 		return err
 	}
 	if built.Plumbing != nil {
-		return f.effectResult(ctx, n, "publish the plumbing pull request", f.publishPlan(ctx, t, ratified, result, built, next, stops))
+		err := f.publishPlan(ctx, t, ratified, result, built, next, stops)
+		var authority repositoryAuthority
+		if errors.As(err, &authority) {
+			return f.holdRepository(ctx, t, err, LabelBuilding)
+		}
+		return f.effectResult(ctx, n, "publish the plumbing pull request", err)
 	}
 	res := built.Result
 	if res == nil || res.Final == nil {
@@ -2771,6 +2837,17 @@ func (f *Factory) checkMergeScope(ctx context.Context, t Thread, state Post, pr 
 		problems = append(problems, "its lock can't be read: "+lockErr.Error())
 	} else if at.lock != m.Hash {
 		problems = append(problems, "its lock isn't the proposal that was ratified")
+	}
+	if isPlan(m.Project) && lockErr == nil {
+		if lock, err := plumbing.ReadLock(b); err == nil {
+			if _, err := f.lockedRepository(ctx, m, &lock.Plan); err != nil {
+				var authority repositoryAuthority
+				if !errors.As(err, &authority) {
+					return at, false, err
+				}
+				problems = append(problems, err.Error()+". Review and commit the original contract and capable gate on the base branch. Restoring authority alone does not resume the merge: a person with write access must then comment `/invariant retry`.")
+			}
+		}
 	}
 	// The existing protocol hold covers changes only a person may merge.
 	at.scopeMany = len(problems) > 0 || len(sc.Trusted) > 0

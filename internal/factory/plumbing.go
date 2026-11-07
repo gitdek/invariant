@@ -30,14 +30,11 @@ type PlanBuilder interface {
 	Build(ctx context.Context, root string, n int, out string) (*plumbing.BuildResult, error)
 }
 
-// invariantRepository is Invariant's own repository, the only one the
-// factory plans plumbing on for now (#103). What a plan's build and checks
-// rest on is Invariant's own: the gate, the prompts, the trusted base and
-// the sandbox's dependencies.
+// invariantRepository is the repository with the built-in Go profile. Other
+// repositories supply committed execution and gate authority.
 const invariantRepository = "gitdek/invariant"
 
-// plansPlumbing says whether the factory plans plumbing issues on the
-// repository it watches.
+// plansPlumbing says whether the unconfigured built-in profile is available.
 func (f *Factory) plansPlumbing() bool {
 	return strings.EqualFold(f.Repository, invariantRepository)
 }
@@ -99,15 +96,18 @@ func lockAt(project string, b []byte, err error) string {
 // planBase exports the base branch for a plumbing issue's planner to read
 // and check its plan against.
 func (f *Factory) planBase(ctx context.Context) (string, error) {
+	if err := f.Repo.Fetch(ctx); err != nil {
+		return "", err
+	}
+	return f.planBaseAt(ctx, "origin/"+f.Base)
+}
+
+func (f *Factory) planBaseAt(ctx context.Context, ref string) (string, error) {
 	root, err := os.MkdirTemp("", "invariant-plan-base-")
 	if err != nil {
 		return "", err
 	}
-	if err := f.Repo.Fetch(ctx); err != nil {
-		os.RemoveAll(root)
-		return "", err
-	}
-	if err := f.Repo.Export(ctx, "origin/"+f.Base, []string{"."}, root); err != nil {
+	if err := f.Repo.Export(ctx, ref, []string{"."}, root); err != nil {
 		os.RemoveAll(root)
 		return "", err
 	}
@@ -152,6 +152,9 @@ func (f *Factory) planBranch(ctx context.Context, n int, p *formalize.Proposal) 
 // tests, on the issue's branch. Then it says so on the issue.
 func (f *Factory) commitPlan(ctx context.Context, t Thread, state Post, c Command) (Post, error) {
 	n, p := t.Issue.Number, state.Marker.Proposal
+	if _, err := f.planRepository(ctx, p.Plan); err != nil {
+		return Post{}, err
+	}
 	branch, from, err := f.planBranch(ctx, n, p)
 	if err != nil {
 		return Post{}, err
@@ -235,6 +238,19 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		}
 		from = m.From
 	}
+	data, err := f.Repo.Show(ctx, from, m.Project)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	lock, err := plumbing.ReadLock(data)
+	if err != nil {
+		return "", agent, nil, err, nil
+	}
+	snapshot, err := f.lockedRepository(ctx, m, &lock.Plan)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	ctx = plumbing.WithRepositoryRuntime(ctx, snapshot, f.RepositoryDependencies)
 	wt, err := f.Repo.Worktree(ctx, m.Branch, from)
 	if err != nil {
 		return "", "", nil, nil, err
@@ -356,6 +372,14 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	if err != nil {
 		return err
 	}
+	b, lockErr := f.Repo.Show(ctx, code, m.Project)
+	lock, _ := plumbing.ReadLock(b)
+	configured := lock != nil && lock.Plan.Native()
+	if lock != nil {
+		if _, err := f.lockedRepository(ctx, m, &lock.Plan); err != nil {
+			return err
+		}
+	}
 	head := "origin/" + m.Branch
 	has := false
 	// A retry's branch is there only once its code is pushed (#271).
@@ -363,6 +387,26 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		if has, err = f.Repo.Holds(ctx, head, code); err != nil {
 			return err
 		}
+	}
+	at := pullRequest{head: code, gate: protocol.GatePending}
+	at.lock = lockAt(m.Project, b, lockErr)
+	// Scope checks the recorded commit before any publication write, including
+	// a push. The branch may still hold only its ratification at this point.
+	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, code, n)
+	if err != nil {
+		return err
+	}
+	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
+	ok := res.Built()
+	from, to := buildStep(ratified, stops, at)
+	if !ok {
+		to.kind, to.failure = protocol.KindFailed, FailGate
+	}
+	if err := f.publicationRepository(ctx, m, lock); err != nil {
+		return err
+	}
+	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
+		return err
 	}
 	if !has {
 		if err := f.recovers(ctx, n, "push the code", f.canPushCode(building(RunDone, false, false))); err != nil {
@@ -374,24 +418,6 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 		if err := f.Repo.Fetch(ctx); err != nil {
 			return err
 		}
-	}
-	at := pullRequest{head: code, gate: protocol.GatePending}
-	b, lockErr := f.Repo.Show(ctx, code, m.Project)
-	at.lock = lockAt(m.Project, b, lockErr)
-	lock, _ := plumbing.ReadLock(b)
-	configured := lock != nil && lock.Plan.Native()
-	sc, err := f.Repo.Scope(ctx, "origin/"+f.Base, head, n)
-	if err != nil {
-		return err
-	}
-	at.scopeMany = len(sc.Problems) > 0 || sc.Project != m.Project
-	ok := res.Built()
-	from, to := buildStep(ratified, stops, at)
-	if !ok {
-		to.kind, to.failure = protocol.KindFailed, FailGate
-	}
-	if err := f.allowed(ctx, n, "open a pull request", from, to); err != nil {
-		return err
 	}
 	if ok, err := f.stillBuilding(ctx, n, ratified); err != nil || !ok {
 		return err
@@ -419,6 +445,9 @@ func (f *Factory) publishPlan(ctx context.Context, t Thread, ratified Post, resu
 	from, to = buildStep(ratified, stops, at)
 	if !ok {
 		to.kind, to.failure = protocol.KindFailed, FailGate
+	}
+	if err := f.publicationRepository(ctx, m, lock); err != nil {
+		return err
 	}
 	if err := f.allowed(ctx, n, "publish the checked pull request", from, to); err != nil {
 		return err

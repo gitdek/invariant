@@ -43,11 +43,11 @@ func CheckRepository(ctx context.Context, gh GitHub, repo, base string, configur
 	}
 	var fixes []string
 	if !gate {
-		fixes = append(fixes, fmt.Sprintf("No workflow on %s has a job named invariant/gate, the check the factory merges on. "+
-			"Run invariant init in a checkout of %s, and commit the workflow it writes to %s.", base, repo, base))
+		fixes = append(fixes, fmt.Sprintf("No committed workflow on base %s has a job named invariant/gate, the check the factory merges on. "+
+			"Run invariant init in a checkout of %s, review and commit the workflow it writes to the base branch %s.", base, repo, base))
 	}
 	if configured && !capable {
-		fixes = append(fixes, fmt.Sprintf("Manually upgrade invariant/gate on %s: use invariant init -invariant FULL_COMMIT in a separate directory to generate a pinned template, review and merge its check-repository, factory scope and guarded project/plan ratification steps with your custom workflow, then commit the upgraded workflow to %s. Init does not replace a different workflow without -force. "+
+		fixes = append(fixes, fmt.Sprintf("Manually upgrade invariant/gate on base %s: use invariant init -invariant FULL_COMMIT in a separate directory to generate a pinned template, review and merge its check-repository, factory scope and guarded project/plan ratification steps with your custom workflow, then commit the upgraded workflow to the base branch %s. Init does not replace a different workflow without -force. "+
 			"The gate's job must run on push and on every pull request, with no condition, needs, continue-on-error, container, or workflow or job defaults or env, which reach its steps; set environment on your own steps instead.", base, base))
 	}
 	if !merges {
@@ -57,6 +57,20 @@ func CheckRepository(ctx context.Context, gh GitHub, repo, base string, configur
 		return nil
 	}
 	return fmt.Errorf("the factory can't work on %s yet:\n- %s", repo, strings.Join(fixes, "\n- "))
+}
+
+// RepositoryGates returns every workflow with an invariant/gate job, including
+// ones without configured capabilities that could supply a competing check.
+// Callers retain their complete committed bytes, including the Invariant
+// commit pin, and compare them before publication and merge.
+func RepositoryGates(workflows map[string]string) map[string]string {
+	gates := map[string]string{}
+	for name, workflow := range workflows {
+		if hasGateJob(workflow) {
+			gates[name] = workflow
+		}
+	}
+	return gates
 }
 
 type gateStep struct {

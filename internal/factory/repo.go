@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/scope"
 )
 
@@ -89,14 +90,20 @@ func (c Clone) Dirs(ctx context.Context, ref, dir string) ([]string, error) {
 }
 
 // Worktree checks out a new branch, starting at from, in a directory of its
-// own.
+// own. An empty branch makes a detached planning checkout without a new ref.
 func (c Clone) Worktree(ctx context.Context, branch, from string) (string, error) {
 	defer c.lock()()
 	dir, err := os.MkdirTemp("", "invariant-worktree-")
 	if err != nil {
 		return "", err
 	}
-	if _, err := c.git(ctx, "worktree", "add", "--quiet", "-B", branch, dir, from); err != nil {
+	args := []string{"worktree", "add", "--quiet"}
+	if branch == "" {
+		args = append(args, "--detach")
+	} else {
+		args = append(args, "-B", branch)
+	}
+	if _, err := c.git(ctx, append(args, dir, from)...); err != nil {
 		os.RemoveAll(dir)
 		return "", err
 	}
@@ -195,6 +202,44 @@ func (c Clone) Show(ctx context.Context, ref, file string) ([]byte, error) {
 	defer c.lock()()
 	out, err := c.git(ctx, "show", ref+":"+file)
 	return []byte(out), err
+}
+
+// Repository reads only the resolved committed tree, never the clone's index
+// or worktree. The snapshot keeps that commit for later context and checks.
+func (c Clone) Repository(ctx context.Context, ref string) (*repository.Snapshot, error) {
+	defer c.lock()()
+	return repository.Load(ctx, c.Dir, ref)
+}
+
+// Workflows reads gate authority through Repo, which remains available behind
+// the watcher's leased GitHub client. Linked files cannot supply a gate.
+func (c Clone) Workflows(ctx context.Context, ref string) (map[string]string, error) {
+	defer c.lock()()
+	commit, err := c.git(ctx, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return nil, err
+	}
+	listing, err := c.git(ctx, "ls-tree", "-r", "-z", strings.TrimSpace(commit), "--", ".github/workflows/")
+	if err != nil {
+		return nil, err
+	}
+	workflows := map[string]string{}
+	for _, entry := range strings.Split(listing, "\x00") {
+		meta, name, ok := strings.Cut(entry, "\t")
+		if !ok || path.Dir(name) != ".github/workflows" || (path.Ext(name) != ".yml" && path.Ext(name) != ".yaml") {
+			continue
+		}
+		fields := strings.Fields(meta)
+		if len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755") {
+			continue
+		}
+		body, err := c.git(ctx, "cat-file", "blob", fields[2])
+		if err != nil {
+			return nil, err
+		}
+		workflows[name] = body
+	}
+	return workflows, nil
 }
 
 // Export writes the files under paths, as they are at ref, into dst: the

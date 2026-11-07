@@ -16,6 +16,7 @@ import (
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/scope"
+	"github.com/gitdek/invariant/internal/setup"
 )
 
 // These fixtures start below external issue intake. They use real committed
@@ -69,12 +70,16 @@ func newTrust695(t *testing.T) *trust695 {
 		AgentRules: []string{"guidance.md"}, CurrentState: []string{"README.md"},
 		TrustedPaths: []string{"policy/"}, SharedPaths: []repository.SharedPath{},
 	}
+	workflow, err := setup.Workflow(strings.Repeat("a", 40))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for file, body := range map[string]string{
 		repository.Path: jsonTrust695(t, config), "go.mod": "module example.invalid/app\n\ngo 1.27.1\n", "go.sum": "",
 		"app/main.go": "package app\nconst Value = 1\n", "guidance.md": "Repository guidance.\n",
 		"AGENTS.md": "Root rules.\n", "app/AGENTS.md": "Nested rules.\n", "app/CLAUDE.md": "Nested instructions.\n",
 		"app/.codex/config.toml": "model = 'fixture'\n", "app/.claude/settings.json": "{}\n", "app/.mcp.json": "{}\n",
-		"policy/guard.txt": "Trusted policy.\n", ".github/workflows/invariant.yml": "name: invariant\n",
+		"policy/guard.txt": "Trusted policy.\n", ".github/workflows/invariant.yml": workflow,
 		".github/CODEOWNERS": "* @owner\n", ".gitlab-ci.yml": "stages: [test]\n", ".circleci/config.yml": "version: 2.1\n",
 	} {
 		writeTrust695(t, c.Dir, file, body)

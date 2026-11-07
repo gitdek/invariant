@@ -105,25 +105,25 @@ func TestConfiguredPullRequestPostsDescribeActualChecks708(t *testing.T) {
 	}
 }
 
-func TestExternalPlumbingRefusalNamesRemainingIntakeWork708(t *testing.T) {
+func TestExternalPlumbingRefusalExplainsCommittedSetup708(t *testing.T) {
 	r, builder := plumbingRig(t, "page/page.go")
 	r.f.Repository = otherRepo
 	r.gh.open(708, "gitdek", "Add a widget", "Kind: plumbing\n\n/invariant solve")
 	r.poll()
 	post := r.expect(708, KindUnsupported, LabelHumanReview)
 	body := strings.ToLower(post.Comment.Body)
-	for _, want := range []string{"configuration", "ci", "external issue intake is still disabled", "person"} {
+	for _, want := range []string{"configuration", "ci", "base", "commit", "review", "invariant init", ".invariant/repository.json", "person"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("intake explanation omits %q", want)
 		}
 	}
-	for _, obsolete := range []string{"build and review prompts describe invariant", "no way to fetch the repository's dependencies"} {
+	for _, obsolete := range []string{"build and review prompts describe invariant", "no way to fetch the repository's dependencies", "external issue intake is still disabled"} {
 		if strings.Contains(body, obsolete) {
 			t.Errorf("intake explanation still claims %q", obsolete)
 		}
 	}
 	if len(r.form.requests) != 0 || len(builder.built) != 0 {
-		t.Fatal("context support enabled external intake")
+		t.Fatal("missing committed contract enabled external intake")
 	}
 	before := len(r.gh.comments[708])
 	r.poll()

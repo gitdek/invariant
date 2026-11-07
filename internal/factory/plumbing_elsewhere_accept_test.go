@@ -9,8 +9,7 @@ import (
 // otherRepo is a repository that isn't Invariant's own.
 const otherRepo = "gitdek/copythis-ad"
 
-// A plumbing issue on a repository that isn't Invariant's own gets one
-// answer, saying plumbing isn't supported there yet and why, and nothing is
+// An unconfigured external plumbing issue gets one setup answer, and nothing is
 // drafted for it: the planner never runs, no agent run is recorded, and no
 // branch is pushed. The issue is left for a person (#103).
 func TestPlumbingElsewhereGetsOneAnswerAndNoDraft(t *testing.T) {
@@ -23,7 +22,7 @@ func TestPlumbingElsewhereGetsOneAnswerAndNoDraft(t *testing.T) {
 		t.Errorf("the answer should reply to the issue's /invariant solve: %v", answer.Marker.ReplyTo)
 	}
 	body := strings.ToLower(answer.Comment.Body)
-	for _, want := range []string{"plumbing", "yet", "invariant init", "configuration drafting", "generated ci", "trusted base", "external issue intake is still disabled", "person"} {
+	for _, want := range []string{"plumbing", "yet", "invariant init", ".invariant/repository.json", "ci gate", "trusted base", "review", "base", "commit", "person"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the answer doesn't say %q:\n%s", want, answer.Comment.Body)
 		}
@@ -49,9 +48,8 @@ func TestPlumbingElsewhereGetsOneAnswerAndNoDraft(t *testing.T) {
 	}
 }
 
-// The same plumbing issue gets a plan on Invariant's own repository, as it
-// does now, and the answer instead on any other.
-func TestOnlyInvariantsOwnRepositoryPlansPlumbing(t *testing.T) {
+// Invariant retains its built-in runner without a repository contract.
+func TestOnlyInvariantsOwnRepositoryPlansUnconfiguredPlumbing(t *testing.T) {
 	for _, c := range []struct {
 		repo    string
 		planned bool
@@ -99,17 +97,16 @@ func TestARevisedPlumbingIssueElsewhereIsStillNotDrafted(t *testing.T) {
 	}
 }
 
-func TestConfiguredRepositoryStillRefusesExternalIssueIntake(t *testing.T) {
+func TestConfiguredRepositoryEnablesExternalIssueIntake(t *testing.T) {
 	x := newTrust695(t)
 	x.r.f.Repository = otherRepo
+	x.r.form.forks = nil
+	x.r.form.plan = x.draft(t, "app/main.go")
 	x.r.gh.open(2, "gitdek", "Change the workflow", "Kind: plumbing\n\n/invariant solve")
 	x.r.poll()
-	answer := x.r.expect(2, KindUnsupported, LabelHumanReview)
-	if !strings.Contains(answer.Comment.Body, "trusted base") || !strings.Contains(answer.Comment.Body, "external issue intake is still disabled") {
-		t.Fatalf("configured intake answer: %s", answer.Comment.Body)
-	}
-	if len(x.r.form.requests) != 0 {
-		t.Fatal("a repository contract enabled external issue intake")
+	answer := x.r.expect(2, KindProposal, LabelProposal)
+	if answer.Marker.Proposal.Plan == nil || len(x.r.form.requests) != 1 || x.r.form.requests[0].Plumbing == "" {
+		t.Fatal("committed contract and capable gate did not enable planning")
 	}
 	x.r.poll()
 	if posts := len(x.r.gh.posts(2)); posts != 1 {

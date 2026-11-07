@@ -55,7 +55,9 @@ invariant watch -repo OWNER/NAME -app-id APP_ID
 
 ## Publishing workflow edits
 
-The [configured native profile](factory.md#configured-trust-and-publication) can admit explicitly planned CI files. CI and the gate workflow are always trusted: a successful build opens as a draft for a person and stays held through recovery, retries and rebuilds. This support does not enable external issue intake or change Invariant's built-in CI refusal.
+The [configured native profile](factory.md#configured-trust-and-publication) can admit explicitly planned CI files. CI and the gate workflow are always trusted: a successful build opens as a draft for a person and stays held through recovery, retries and rebuilds. [External issue intake](factory.md#configured-issue-intake) requires a reviewed repository contract and capable gate committed on the authoritative base. Missing configuration receives setup guidance with no agent run or branch. Invariant's built-in CI refusal remains.
+
+Configured issues use their captured Go, pytest, Vitest or Jest checks and repository guidance. A changed or removed base contract or gate, including its Invariant commit pin, stops ratification, building, readiness or merge for a person. Publication holds preserve the finished build across restart without reloading it for publication or repeating writes. Restore the original committed authority, then have a writer comment `/invariant retry` to resume recorded publication without rebuilding. Candidate edits cannot weaken captured trust, and trusted successes still stay drafts.
 
 GitHub separately requires publishing credentials authorized to create or update `.github/workflows/`: a GitHub App installation or fine-grained token with **Workflows: write**, or a classic token with the **workflow** scope, along with repository write access. Configure the credentials actually used for the push; changing a local `gh` login does not change a watcher that publishes as an App. The repository owner chooses and provisions those credentials. Invariant does not widen its App's permissions.
 
