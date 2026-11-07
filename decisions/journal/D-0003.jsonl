@@ -1,1 +1,0 @@
-{"at":"2026-09-25T00:00:00Z","by":"agent","op":"import","id":"D-0003","date":"2026-09-25","door":"one-way","status":"ratified","who":"@gitdek","text":"Generated code is Go, verified with Gobra. TLA+ and TLC still check the design.","record":"D-0003-go-with-gobra.md","prev":"","hash":"sha256:f2a12bb9db6f9d8cca973de67983f1f7d06be27052945676d24b36ee14a33cf6"}
