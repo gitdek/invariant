@@ -28,7 +28,9 @@ import (
 // it, and the count holds across polls, restarts and watchers. The record
 // is named after the issue's latest post, the request, the pull request and
 // its head, so a writer's retry, which the factory answers with a post, or
-// a push, which moves the head, starts the count afresh.
+// a push, which moves the head, starts the count afresh. So does a success:
+// each run of failures has a record of its own, which the request
+// succeeding ends (#760).
 
 // failingFor is how long GitHub may keep failing a request before the
 // factory stops asking and says so: half an hour, about 60 polls at 30
@@ -148,9 +150,18 @@ func (f *Factory) gitHubsAnswer(ctx context.Context, n int, step string, pr gith
 }
 
 // failingSince is when GitHub first failed the request the record named
-// step counts. When nothing has recorded that yet, it records now.
-func (f *Factory) failingSince(ctx context.Context, n int, step string) (time.Time, error) {
-	if since, ok, err := f.failingRecord(ctx, n, step); err != nil || ok {
+// base counts, in its current run of failures. When no run is going, it
+// records one that starts now.
+func (f *Factory) failingSince(ctx context.Context, n int, base string) (time.Time, error) {
+	step, state, err := f.failingRun(ctx, n, base)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if state == RunRecorded {
+		since, ok, err := f.failingRecord(ctx, n, step)
+		if err == nil && !ok {
+			err = fmt.Errorf("the record of GitHub failing #%d's request, %s, isn't there", n, step)
+		}
 		return since, err
 	}
 	now := f.now()
@@ -170,6 +181,42 @@ func (f *Factory) failingSince(ctx context.Context, n int, step string) (time.Ti
 		err = fmt.Errorf("the record of GitHub failing #%d's request, %s, isn't there", n, step)
 	}
 	return since, err
+}
+
+// failingRun is the record of the request base names that counts GitHub's
+// current run of failures, and whether that run is going: the first of its
+// records that hasn't ended. A run ends once the request succeeds, so a
+// failure after a success starts the count afresh (#760). The first run
+// keeps base's own name, as records made before runs ended do.
+func (f *Factory) failingRun(ctx context.Context, n int, base string) (string, RunState, error) {
+	for k := 1; k <= 100; k++ {
+		step := base
+		if k > 1 {
+			step = fmt.Sprintf("%s-%d", base, k)
+		}
+		state, _, err := f.Repo.Run(ctx, n, step)
+		if err != nil || state != RunDone {
+			return step, state, err
+		}
+	}
+	return "", RunNone, fmt.Errorf("GitHub's runs of failures at #%d's request, %s, are past counting", n, base)
+}
+
+// failingEnded ends GitHub's current run of failures at the request base
+// names, once the request has succeeded. With no run going, it does nothing.
+func (f *Factory) failingEnded(ctx context.Context, n int, base string) error {
+	step, state, err := f.failingRun(ctx, n, base)
+	if err != nil || state != RunRecorded {
+		return err
+	}
+	if err := f.mayAct(ctx); err != nil {
+		return err
+	}
+	result, err := f.saveResult(ctx, struct{}{}, "GitHub answered the request it had failed", "")
+	if err != nil {
+		return err
+	}
+	return f.Repo.Finish(ctx, n, step, result)
 }
 
 // failingRecord reads when the record named step says GitHub first failed,
