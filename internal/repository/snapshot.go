@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"unicode"
@@ -24,6 +25,9 @@ type Snapshot struct {
 	entries  map[string]treeEntry
 	blobsMu  sync.RWMutex
 	blobs    map[string][]byte
+	// linked holds what the base tree's trusted symbolic links name, in
+	// lower case: a file, or a directory whose contents it serves (#705).
+	linked map[string]bool
 }
 
 type treeEntry struct {
@@ -88,7 +92,91 @@ func Load(ctx context.Context, checkout, baseRef string) (*Snapshot, error) {
 	if err := s.validate(); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, Path, err)
 	}
+	if s.linked, err = s.linkTargets(ctx); err != nil {
+		return nil, fmt.Errorf("read repository links at %s: %w", commit, err)
+	}
 	return s, nil
+}
+
+// linkTargets resolves, within the base tree, each symbolic link whose own
+// path is trusted. An edit to what the link names changes what the trusted
+// path serves, so that target is trusted too, and so is the target of a
+// trusted link inside it. A link that leaves the repository or loops adds
+// nothing: scope already refuses any change through it.
+func (s *Snapshot) linkTargets(ctx context.Context) (map[string]bool, error) {
+	var links []string
+	for name, entry := range s.entries {
+		if entry.mode == "120000" {
+			links = append(links, name)
+		}
+	}
+	sort.Strings(links)
+	targets, done := map[string]bool{}, map[string]bool{}
+	for grown := true; grown; {
+		grown = false
+		for _, link := range links {
+			if done[link] || !s.trustedByRule(link) && !linkedFrom(targets, link) {
+				continue
+			}
+			done[link], grown = true, true
+			target, ok, err := s.resolve(ctx, link)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				targets[strings.ToLower(target)] = true
+			}
+		}
+	}
+	return targets, nil
+}
+
+// resolve follows a link, and any link on the way to its target, through the
+// base tree. A target that doesn't exist resolves to its path all the same,
+// since adding that file would change what the link serves.
+func (s *Snapshot) resolve(ctx context.Context, name string) (string, bool, error) {
+	current := name
+	for range 40 {
+		components := strings.Split(current, "/")
+		at := -1
+		for i := range components {
+			if s.entries[strings.Join(components[:i+1], "/")].mode == "120000" {
+				at = i
+				break
+			}
+		}
+		if at < 0 {
+			return current, true, nil
+		}
+		link := strings.Join(components[:at+1], "/")
+		target, err := readGit(ctx, s.checkout, "cat-file", "blob", s.entries[link].oid)
+		if err != nil {
+			return "", false, fmt.Errorf("read link %s: %w", link, err)
+		}
+		if path.IsAbs(string(target)) {
+			return "", false, nil
+		}
+		current = path.Join(append([]string{path.Dir(link), string(target)}, components[at+1:]...)...)
+		if current == ".." || strings.HasPrefix(current, "../") {
+			return "", false, nil
+		}
+	}
+	return "", false, nil
+}
+
+// linkedFrom says whether a trusted link names the path, or a directory that
+// holds it. Names compare whatever their case, as agentPath's do.
+func linkedFrom(targets map[string]bool, name string) bool {
+	if targets["."] {
+		return true
+	}
+	name = strings.ToLower(name)
+	for dir := name; dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if targets[dir] {
+			return true
+		}
+	}
+	return false
 }
 
 // Commit returns the full commit ID captured by Load.
