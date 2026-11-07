@@ -96,27 +96,47 @@ func actedText(w *Waiting, verb string) string {
 // the rest applied. It returns what it serves, gzipped. Only a refresh reads
 // the comments, so only a refresh publishes.
 func (s *Server) publish(snap Snapshot) ([]byte, error) {
+	js, err := json.Marshal(snap)
+	if err != nil {
+		return nil, err
+	}
+	var detached Snapshot
+	if err := decodeReaderJSON(js, &detached); err != nil {
+		return nil, err
+	}
+	snap = detached
 	s.acted.mu.Lock()
 	defer s.acted.mu.Unlock()
-	left := s.acted.kept[:0]
+	left := make([]kept, 0, len(s.acted.kept))
 	for _, k := range s.acted.kept {
 		if !s.readComment(k) {
 			left = append(left, k)
 		}
 	}
+	read, kept := s.acted.read, s.acted.kept
 	s.acted.read, s.acted.kept = &snap, left
-	return s.serve(nil)
+	gz, err := s.serve(nil)
+	if err != nil {
+		s.acted.read, s.acted.kept = read, kept
+	}
+	return gz, err
 }
 
 // resume serves the last run's snapshot, gzipped as gz, until the first
 // refresh replaces it, unless one already has.
-func (s *Server) resume(snap Snapshot, gz []byte) {
+func (s *Server) resume(snap Snapshot, gz []byte) bool {
 	s.acted.mu.Lock()
 	defer s.acted.mu.Unlock()
 	if s.acted.read == nil {
 		s.acted.read = &snap
-		s.serve(gz) // nothing is kept yet, so it serves gz as it is
+		if _, err := s.serve(gz); err != nil {
+			s.acted.read = nil
+			s.logf("resuming the snapshot: %v", err)
+			return false
+		}
+		return true
 	}
+	return false
 }
 
 // readComment says whether a refresh has read k's comment, among its issue's
@@ -150,9 +170,22 @@ func (s *Server) serve(gz []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
+	s.proposals.mu.Lock()
+	defer s.proposals.mu.Unlock()
+	if err := s.ensureProposals(*s.acted.read); err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
+	proposalReferences(snap, live)
+	// /act can hide a waiting card without replacing the refresh that read it.
+	// Keep those references too until a successful refresh replaces that read.
+	proposalReferences(*s.acted.read, live)
+	s.proposals.live = live
 	s.mu.Lock()
 	s.state, s.issues = gz, snap.Issues
+	s.retireProposals(live)
 	s.mu.Unlock()
+	s.pruneProposals(live)
 	return gz, nil
 }
 

@@ -73,6 +73,7 @@ type Server struct {
 	planned map[string]time.Time
 
 	planSources map[string][]byte // verified, detached responses by full proposal hash
+	proposals   proposalCache
 }
 
 // Repo is one repository the page shows.
@@ -566,6 +567,8 @@ func (s *Server) saveSnapshot(gz []byte) {
 	if s.Cache == "" {
 		return
 	}
+	s.proposals.mu.Lock()
+	defer s.proposals.mu.Unlock()
 	tmp := s.snapshotFile() + ".tmp"
 	if err := os.MkdirAll(s.Cache, 0o755); err != nil {
 		s.logf("keeping the snapshot: %v", err)
@@ -577,6 +580,13 @@ func (s *Server) saveSnapshot(gz []byte) {
 	}
 	if err := os.Rename(tmp, s.snapshotFile()); err != nil {
 		s.logf("keeping the snapshot: %v", err)
+		return
+	}
+	if s.proposals.live != nil {
+		s.mu.Lock()
+		s.retireProposals(s.proposals.live)
+		s.mu.Unlock()
+		s.pruneProposals(s.proposals.live)
 	}
 }
 
@@ -619,7 +629,9 @@ func (s *Server) loadSnapshot() {
 	if err != nil {
 		return
 	}
-	s.resume(snap, gz)
+	if s.resume(snap, gz) {
+		s.saveSnapshot(gz)
+	}
 }
 
 // readReceipts takes the receipts from the newest gate run on the branch

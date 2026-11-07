@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -13,6 +12,15 @@ import (
 )
 
 const previewFormat = "1: unratified option, isolated model-only receipt"
+
+var previewCodec = proposalCodec[previewEvidence]{
+	kind: 1, directory: "previews", format: previewFormat, template: previewHTML,
+	build: makePreview,
+	problem: func(e previewEvidence, problem string) previewEvidence {
+		e.Problem = problem
+		return e
+	},
+}
 
 // Option evidence is independent of project receipts and their commit cache.
 // The enclosing words belong in the identity as much as the source snapshot.
@@ -94,28 +102,7 @@ func (s *Server) previewFile(key string) string {
 }
 
 func (s *Server) keepPreview(e previewEvidence) *ReaderPresentation {
-	page := makePreview(e)
-	key := strings.TrimPrefix(page.presentation.Fingerprint, "sha256:")
-	s.mu.Lock()
-	if s.readers == nil {
-		s.readers = map[string]readerPage{}
-	}
-	s.readers[key] = page
-	s.mu.Unlock()
-	if s.Cache != "" {
-		file := s.previewFile(key)
-		err := os.MkdirAll(filepath.Dir(file), 0o755)
-		if err == nil {
-			err = os.WriteFile(file+".tmp", readerJSON(e), 0o600)
-		}
-		if err == nil {
-			err = os.Rename(file+".tmp", file)
-		}
-		if err != nil {
-			s.logf("keeping option evidence: %v", err)
-		}
-	}
-	return &page.presentation
+	return keepProposal(s, previewCodec, e)
 }
 
 func optionEvidence(is *Issue, q Question, o Choice) previewEvidence {
@@ -164,26 +151,8 @@ func (s *Server) restorePreviews(snap *Snapshot) {
 					continue
 				}
 				expected := optionEvidence(&identity, *q, *o)
-				var saved previewEvidence
-				ok := o.Reader != nil && o.Reader.Format == previewFormat
-				if ok {
-					parts := readerPath.FindStringSubmatch(o.Reader.Page)
-					ok = len(parts) == 3
-					if ok {
-						b, err := os.ReadFile(s.previewFile(parts[1]))
-						ok = err == nil && decodeReaderJSON(b, &saved) == nil
-					}
-				}
-				if ok {
-					comparable := saved
-					comparable.Problem = ""
-					ok = sameReaderJSON(comparable, expected) && makePreview(saved).presentation == *o.Reader
-				}
-				if !ok {
-					saved = expected
-					saved.Problem = fmt.Sprintf("%s/%s: cached option evidence is damaged or obsolete; check this option again.", q.ID, o.ID)
-				}
-				o.Reader = s.keepPreview(saved)
+				o.Reader = restoreProposal(s, previewCodec, expected, o.Reader,
+					fmt.Sprintf("%s/%s: cached option evidence is damaged or obsolete; check this option again.", q.ID, o.ID))
 			}
 		}
 	}
