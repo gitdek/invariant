@@ -71,6 +71,8 @@ type Server struct {
 	// planned is each issue /act planned, by repo#n, and when: a refresh
 	// that read GitHub before the post leaves it out for a while (#201).
 	planned map[string]time.Time
+
+	planSources map[string][]byte // verified, detached responses by full proposal hash
 }
 
 // Repo is one repository the page shows.
@@ -442,6 +444,7 @@ func (s *Server) prepare() {
 	}
 	s.pending = make(chan graphJob, 64)
 	s.loadSources()
+	s.loadPlanSources()
 	s.loadSnapshot()
 }
 
@@ -589,6 +592,10 @@ func (s *Server) loadSnapshot() {
 	}
 	js, err := gunzip(gz)
 	if err != nil {
+		return
+	}
+	if inlinePlanSources(js) {
+		s.logf("not serving the last snapshot: it contains inline acceptance sources")
 		return
 	}
 	var snap Snapshot
@@ -1009,6 +1016,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		for _, is := range r.src.issues {
 			l := factoryLane(is, r.src.comments[is.Number].comments, login, now)
 			l.Repo = r.Name
+			s.presentPlanSources(&l, r.src.comments[is.Number].comments, login)
 			s.presentPreviews(&l)
 			s.presentComparison(&l)
 			for k := range l.Events {

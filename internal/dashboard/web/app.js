@@ -1449,7 +1449,9 @@
     const first = (i) => (i.repo === s.repo ? 0 : 1);
     items.sort((a, b) => first(a) - first(b) || new Date(a.waiting.since) - new Date(b.waiting.since));
     done.sort((a, b) => first(a) - first(b) || new Date(a.acted.at) - new Date(b.acted.at));
+    const disclosures = new Map([...box.querySelectorAll("[data-plan-sources]")].map((el) => [planDisclosureKey(el), el]));
     box.innerHTML = (items.length ? batchBanner(items) + items.map(needCard).join("") : calm) + done.map(actedCard).join("");
+    wirePlanSources(box, disclosures, items);
     if (toOpen) openAt(box);
   }
   // actedCard is an issue acted on from /act, its Ratify all or the agent's
@@ -1473,10 +1475,7 @@
       // said() lists every test's name and what it says. Native tests also
       // name the complete identity being ratified.
       const tests = (w.plan.tests || []).filter((t) => t.framework).map((t) => `<li><strong>${esc(t.name)}</strong> · part <code>${esc(t.part)}</code> · ${esc(t.framework)} · <code>${esc(t.file)}</code> · selector <code>${esc(t.selector)}</code></li>`).join("");
-      const sources = Object.entries(w.plan.sources || {}).sort(([a], [b]) => a.localeCompare(b)).map(([file, source]) => {
-        const language = w.plan.languages?.[file] || "go";
-        return `<details><summary><code>${esc(file)}</code> · ${esc(language)}</summary><pre><code class="language-${esc(language)}">${planSource(source, language)}</code></pre></details>`;
-      }).join("");
+      const sources = `<details data-plan-sources="${esc(w.plan.sourceHash)}" data-source-url="${esc(w.plan.sourceURL)}"><summary>Read acceptance sources</summary><div data-source-content aria-live="polite">Open to load the exact acceptance files.</div></details>`;
       const execution = w.plan.execution ? `<p>Captured execution: <code>${esc(w.plan.execution.digest)}</code><br>Base provenance: <code>${esc(w.plan.execution.base)}</code></p>` : "";
       return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.plan.summary)}</p>${tests ? `<ul>${tests}</ul>` : ""}${execution}${sources}`;
     }
@@ -1488,6 +1487,76 @@
     if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
     return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
   }
+  // The same disclosure serves both pages. Keep the node on ordinary inbox
+  // refreshes, including its open files, loading state and explicit retry.
+  const planSources = new Map();
+  const planDisclosureKey = (el) => JSON.stringify([el.closest("[data-issue]")?.dataset.issue, el.dataset.planSources, el.dataset.sourceUrl]);
+
+  function wirePlanSources(box, previous, items) {
+    box.querySelectorAll("[data-plan-sources]").forEach((el) => {
+      const kept = previous.get(planDisclosureKey(el));
+      if (kept) { el.replaceWith(kept); return; }
+      const key = el.closest("[data-issue]")?.dataset.issue;
+      const plan = items.find((is) => issueKey(is) === key)?.waiting?.plan;
+      let started = false;
+      el.addEventListener("toggle", () => {
+        if (el.open && !started) { started = true; showPlanSources(el, plan); }
+      });
+      el.addEventListener("click", (event) => {
+        if (event.target.closest("[data-source-retry]") && el.open) showPlanSources(el, plan);
+      });
+    });
+  }
+
+  function checkedPlanResponse(plan, response) {
+    const files = [...new Set((plan.tests || []).map((t) => t.file))].sort();
+    const map = (v) => v && typeof v === "object" && !Array.isArray(v);
+    if (!response || response.hash !== plan.sourceHash || !files.length ||
+        !map(response.sources) || !map(response.languages) ||
+        JSON.stringify(Object.keys(response.sources).sort()) !== JSON.stringify(files) ||
+        JSON.stringify(Object.keys(response.languages).sort()) !== JSON.stringify(files) ||
+        files.some((f) => typeof response.sources[f] !== "string" || !response.sources[f] ||
+          !["go", "python", "typescript", "javascript"].includes(response.languages[f]))) {
+      throw new Error("The response does not contain the exact proposal's acceptance files.");
+    }
+    return response;
+  }
+
+  function fetchPlanSources(plan) {
+    if (!plan || !/^sha256:[0-9a-f]{64}$/.test(plan.sourceHash) ||
+        plan.sourceURL !== `/api/plan-sources/${plan.sourceHash.slice(7)}.json`) {
+      return Promise.reject(new Error("Verified acceptance sources are unavailable."));
+    }
+    const hash = plan.sourceHash;
+    if (!planSources.has(hash)) {
+      const pending = fetch(plan.sourceURL).then((r) => {
+        if (!r.ok) throw new Error(`Acceptance sources unavailable (HTTP ${r.status}).`);
+        return r.json();
+      }).then((response) => checkedPlanResponse(plan, response)).catch((error) => {
+        planSources.delete(hash);
+        throw error;
+      });
+      planSources.set(hash, pending);
+    }
+    return planSources.get(hash).then((response) => checkedPlanResponse(plan, response));
+  }
+
+  async function showPlanSources(el, plan) {
+    const content = $("[data-source-content]", el), hash = el.dataset.planSources, url = el.dataset.sourceUrl;
+    const current = () => el.isConnected && el.dataset.planSources === hash && el.dataset.sourceUrl === url;
+    content.textContent = "Loading acceptance sources…";
+    try {
+      const response = await fetchPlanSources(plan);
+      if (!current()) return;
+      content.innerHTML = Object.keys(response.sources).sort().map((file) => {
+        const language = response.languages[file], source = response.sources[file];
+        return `<details><summary><code>${esc(file)}</code> · ${esc(language)}</summary><pre><code class="language-${esc(language)}">${planSource(source, language).replace(/\r/g, "&#13;")}</code></pre></details>`;
+      }).join("");
+    } catch (error) {
+      if (current()) content.innerHTML = `<p>${esc(error.message)}</p><button type="button" data-source-retry>Retry acceptance sources</button>`;
+    }
+  }
+
   // Highlight escaped tokens only. Source and labels never become page markup.
   function planSource(source, language) {
     const keywords = {
@@ -1575,7 +1644,7 @@
       body = `<p class="ask">${why(w, repo)}</p>${retryText(w)}
         <div class="cmds">${fixes(w).map(([label, c], i) => cmd(c, i === 0, c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
     }
-    return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)}><div>${needGlyph(w.kind)}</div><div>
+    return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)} data-issue="${esc(issueKey(is))}"><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
   }
   document.addEventListener("click", async (e) => {
