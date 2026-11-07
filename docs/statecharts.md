@@ -294,7 +294,7 @@ Keep faithful bounds: above 500 states, a well-formed view and successful comple
 
 Only the project's `.invariant/reader.json` uses a reference: it remains an ordinary version-1 reader with `comparison_ref: {"version":1,"file":"comparison.json","fingerprint":"<comparison fingerprint>"}` and no inline `comparison`. `Current.ReadReader` resolves only that fixed sibling, requires regular unlinked evidence, validates its complete contents and fingerprint, and reconstructs the unchanged in-memory Reader. Missing, malformed, unsupported, unsafe or mismatched references refuse explicitly. Historical inline readers still load without a sibling, but any sibling must validate and agree with the inline evidence. A failed read never substitutes a different comparison or retains a previous reader. Ordinary and legacy rewrites remove stale comparisons, and legacy projects still need no reader. Proposals, formalization records and exports, factory markers, receipts and receipt reader companions remain self-contained.
 
-These storage, staging and validation refinements implement [#717's ratified plan](../.invariant/plans/issue-717.json), preserving [D-0345](../decisions/journal/D-0345.jsonl)'s artifact bindings, [D-0351](../decisions/journal/D-0351.jsonl)'s independent receipt evidence, [D-0355](../decisions/journal/D-0355.jsonl)'s recovery and publication boundaries and [D-0362](../decisions/journal/D-0362.jsonl)'s comparison sources. The merger records the new policy.
+These storage, staging and validation refinements implement [#717's ratified plan](../.invariant/plans/issue-717.json), preserving [D-0345](../decisions/journal/D-0345.jsonl)'s artifact bindings, [D-0351](../decisions/journal/D-0351.jsonl)'s independent receipt evidence, [D-0355](../decisions/journal/D-0355.jsonl)'s recovery and publication boundaries and [D-0362](../decisions/journal/D-0362.jsonl)'s comparison sources. [D-0387](../decisions/journal/D-0387.jsonl) records the new policy.
 
 Structured receipts, Markdown, reader JSON/SVG companions and dashboard proposal and receipt pages retain both sources. When final model/include/view identities differ, they explicitly distinguish the retained proposal comparison from the independent final-model chart. Reusing output directories clears stale comparison exports. Dashboard immutable identities bind source snapshots and rendered contents, and restart revalidates saved comparisons; damage gets a visible diagnostic and no misleading comparison image.
 
@@ -324,10 +324,10 @@ runs; timing is evidence, not a test threshold):
 | 100 | 13.266 | 5.132 | 17,044,440 | 6,425,196 | 102,981 | 28,721 |
 | 500 | 62.517 | 23.434 | 102,470,644 | 38,996,506 | 490,789 | 136,782 |
 
-The #717 build cannot access the Docker daemon. Merger work includes the documented
-`TestComparison648PinnedTLC` integration command above and recording the policy
-refinement; the offline acceptance, mutation, persistence, recovery and receipt
-suites remain build checks.
+The merger ran the pinned-TLC `TestComparison648PinnedTLC` command above, with
+`TestCheckRunsTheModelChecks` and `TestPreview639PinnedTLC`, on #720's head, and
+all three passed. The offline acceptance, mutation, persistence, recovery and
+receipt suites are build checks.
 
 ## Tests
 
