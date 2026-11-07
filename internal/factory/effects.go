@@ -199,7 +199,16 @@ var refusedStatus = regexp.MustCompile(`(?i)\bHTTP 4\d\d\b`)
 
 func permanentEffect(err error) bool {
 	return err != nil && !github.Transient(err) &&
-		(refusedStatus.MatchString(err.Error()) || errors.Is(err, github.ErrNotFound) || errors.Is(err, github.ErrNoPermission))
+		(refusedStatus.MatchString(err.Error()) || errors.Is(err, github.ErrNotFound) || errors.Is(err, github.ErrNoPermission) || workflowPermission(err.Error()))
+}
+
+// Git's remote rejects workflow writes without an HTTP status. Both App and
+// token refusals are definitive; another poll cannot supply the permission.
+func workflowPermission(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "refusing to allow") &&
+		strings.Contains(message, "workflow") && strings.Contains(message, "without") &&
+		(strings.Contains(message, "permission") || strings.Contains(message, "scope"))
 }
 
 // The publication and replacement helpers also read GitHub. A failed read
@@ -261,8 +270,12 @@ func (f *Factory) reportEffect(ctx context.Context, issue int, key string, refus
 		}
 		body := refused.Body
 		if body == "" {
+			guidance := "\n\nThe recorded work is preserved. A person with write access can comment `/invariant retry` after fixing the refusal."
+			if workflowPermission(refused.Message) {
+				guidance = "\n\nThe recorded build and commits are preserved. Publishing workflow edits needs credentials with workflow write permission: an authorized GitHub App or fine-grained token with Workflows write, or a classic token with the workflow scope and repository access. Configure those publishing credentials, then have a person with write access comment `/invariant retry` to resume publication. I won't retry the refused push until that command, or mark this work ready or merged. Invariant's App permissions are unchanged."
+			}
 			body = post("GitHub refused an operation", fmt.Sprintf("GitHub refused to %s:\n\n%s", refused.Operation, quote(refused.Message, 100)), Marker{Kind: KindNote, Refusal: key},
-				"\n\nThe recorded work is preserved. A person with write access can comment `/invariant retry` after fixing the refusal.")
+				guidance)
 		}
 		report, err = f.GitHub.PostComment(ctx, issue, body)
 	}

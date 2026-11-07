@@ -24,7 +24,7 @@ For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, b
    | Metadata | Read-only | Set automatically |
    | Pull requests | Read and write | Open and merge pull requests |
 
-   Leave everything else at **No access**, especially **Workflows**. Without it, the App's token can't change a workflow in `.github/workflows/`, and the gate's scope check fails a factory pull request that changes anything else in `.github/`.
+   Leave everything else at **No access**, especially **Workflows**. These are Invariant's unchanged App permissions. Its built-in profile refuses `.github/` edits. The configured native profile's explicit workflow-edit prerequisite is described below; ordinary in-scope work needs no workflow permission.
 7. **Where can this GitHub App be installed?** Only on this account.
 8. Click **Create GitHub App**.
 
@@ -52,3 +52,11 @@ invariant watch -repo OWNER/NAME -app-id APP_ID
 ```
 
 `-app-key` defaults to `~/.config/invariant/factory.pem`. The watcher reads the repository with your own git credentials, so for a private repository, run `gh auth setup-git` first. Everything it writes, it writes as the App.
+
+## Publishing workflow edits
+
+The [configured native profile](factory.md#configured-trust-and-publication) can admit explicitly planned CI files. CI and the gate workflow are always trusted: a successful build opens as a draft for a person and stays held through recovery, retries and rebuilds. This support does not enable external issue intake or change Invariant's built-in CI refusal.
+
+GitHub separately requires publishing credentials authorized to create or update `.github/workflows/`: a GitHub App installation or fine-grained token with **Workflows: write**, or a classic token with the **workflow** scope, along with repository write access. Configure the credentials actually used for the push; changing a local `gh` login does not change a watcher that publishes as an App. The repository owner chooses and provisions those credentials. Invariant does not widen its App's permissions.
+
+If GitHub refuses a workflow push for missing permission, the factory durably records the refusal, preserves the build and commits, and reports the required credentials on the issue. It reports no ready or merged success and does not repeat the refused push on later polls or restarts. After fixing the publishing credentials, a person with write access comments `/invariant retry` to resume the recorded publication. A successful retry still leaves trusted work for a person to review, mark ready and merge. Ordinary in-scope changes remain eligible for automatic merge without workflow permission.

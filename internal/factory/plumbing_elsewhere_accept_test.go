@@ -98,3 +98,21 @@ func TestARevisedPlumbingIssueElsewhereIsStillNotDrafted(t *testing.T) {
 		t.Errorf("an agent run was recorded:\n%s", runs)
 	}
 }
+
+func TestConfiguredRepositoryStillRefusesExternalIssueIntake(t *testing.T) {
+	x := newTrust695(t)
+	x.r.f.Repository = otherRepo
+	x.r.gh.open(2, "gitdek", "Change the workflow", "Kind: plumbing\n\n/invariant solve")
+	x.r.poll()
+	answer := x.r.expect(2, KindUnsupported, LabelHumanReview)
+	if !strings.Contains(answer.Comment.Body, "trusted base") || !strings.Contains(answer.Comment.Body, "external issue intake is still disabled") {
+		t.Fatalf("configured intake answer: %s", answer.Comment.Body)
+	}
+	if len(x.r.form.requests) != 0 {
+		t.Fatal("a repository contract enabled external issue intake")
+	}
+	x.r.poll()
+	if posts := len(x.r.gh.posts(2)); posts != 1 {
+		t.Fatalf("external issue answered %d times", posts)
+	}
+}

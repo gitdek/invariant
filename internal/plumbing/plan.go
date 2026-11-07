@@ -32,8 +32,9 @@ type Plan struct {
 	// Sources is each acceptance test file's text, by path. The tests are
 	// new files the ratification adds, which the build can't change.
 	Sources map[string]string `json:"sources"`
-	// Trusted is the files the change touches in the trusted base, which
-	// only a person merges. The factory sets it; the hash leaves it out.
+	// Trusted displays planned paths in the trusted base. The factory derives
+	// it from policy; the hash leaves it out. Only scope of the actual diff
+	// against base policy can decide whether a person must merge the build.
 	Trusted []string `json:"trusted,omitempty"`
 	// Execution is supplied by the trusted caller, never by a draft.
 	Execution *Execution `json:"execution,omitempty"`
@@ -216,13 +217,19 @@ func (p *Plan) RegressionFiles(baseFiles, candidates []string) []string {
 // clean checks a path from the repository's root: relative, inside it, and
 // not somewhere a plan can't reach.
 func clean(p string) (string, error) {
+	return cleanPlanPath(p, false)
+}
+
+// Native plans may name CI files explicitly. A saved native plan also needs
+// captured execution authority; legacy Invariant plans keep their CI refusal.
+func cleanPlanPath(p string, native bool) (string, error) {
 	c := path.Clean(filepath.ToSlash(strings.TrimSpace(p)))
 	switch {
 	case c == "." || c == "" || path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../"):
 		return "", fmt.Errorf("%q isn't a path inside the repository", p)
 	case c == ".git" || strings.HasPrefix(c, ".git/"):
 		return "", fmt.Errorf("%q is git's own", p)
-	case strings.HasPrefix(c, ".github/"):
+	case !native && strings.HasPrefix(c, ".github/"):
 		return "", fmt.Errorf("%q is CI's: the factory's App can't change it, so a person does", p)
 	case strings.HasPrefix(c, LockDir+"/"):
 		return "", fmt.Errorf("%q is where ratified plans are recorded", p)
@@ -241,7 +248,7 @@ func (p *Plan) Validate() error {
 	}
 	files := map[string]bool{}
 	for i, f := range p.Files {
-		c, err := clean(f)
+		c, err := cleanPlanPath(f, p.Native())
 		if err != nil {
 			return err
 		}
@@ -333,13 +340,17 @@ func (p *Plan) Validate() error {
 	if err := p.validateExecution(false); err != nil {
 		return err
 	}
-	p.Trusted = nil
-	for f := range p.Touches(0) {
-		if Trusted(f) {
-			p.Trusted = append(p.Trusted, f)
+	// Native display metadata comes from the captured repository. Structural
+	// validation and lock reads cannot replace it with Invariant's layout.
+	if !p.Native() {
+		p.Trusted = nil
+		for f := range p.Touches(0) {
+			if Trusted(f) {
+				p.Trusted = append(p.Trusted, f)
+			}
 		}
+		sort.Strings(p.Trusted)
 	}
-	sort.Strings(p.Trusted)
 	return nil
 }
 

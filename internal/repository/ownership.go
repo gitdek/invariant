@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -84,7 +85,7 @@ func (s *Snapshot) IsTrusted(name string) (bool, error) {
 	if err := s.checkPath(name, false, false); err != nil {
 		return false, err
 	}
-	if name == Path || slices.Contains(s.config.AgentRules, name) {
+	if name == Path || CI(name) || agentPath(name) || slices.Contains(s.config.AgentRules, name) {
 		return true, nil
 	}
 	for _, part := range s.config.Parts {
@@ -98,6 +99,31 @@ func (s *Snapshot) IsTrusted(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// CI protects the gate workflow and the repository's other CI configuration.
+func CI(name string) bool {
+	return name == ".github" || strings.HasPrefix(name, ".github/") ||
+		name == ".gitlab-ci.yml" || name == ".circleci" || strings.HasPrefix(name, ".circleci/")
+}
+
+// agentPath says whether a file supplies a coding agent's instructions or
+// tools, in any directory: AGENTS.md and the AGENTS.override.md Codex reads
+// in its place, CLAUDE.md and CLAUDE.local.md, .mcp.json, and anything under
+// .codex/ or .claude/. Names match whatever their case, since a
+// case-insensitive file system, as macOS's, serves app/agents.md to an agent
+// that asks for app/AGENTS.md.
+func agentPath(name string) bool {
+	switch strings.ToLower(path.Base(name)) {
+	case "agents.md", "agents.override.md", "claude.md", "claude.local.md", ".mcp.json":
+		return true
+	}
+	for _, part := range strings.Split(name, "/") {
+		if p := strings.ToLower(part); p == ".codex" || p == ".claude" {
+			return true
+		}
+	}
+	return false
 }
 
 func selectorMatches(name, selector string) bool {

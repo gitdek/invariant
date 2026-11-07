@@ -395,6 +395,12 @@ func (c Client) ClosePullRequest(ctx context.Context, n int) (PullRequest, error
 	return pr, err
 }
 
+// DescribePullRequest replaces pull request n's description.
+func (c Client) DescribePullRequest(ctx context.Context, n int, body string) (PullRequest, error) {
+	var out PullRequest
+	return out, c.call(ctx, "PATCH", c.path(fmt.Sprintf("pulls/%d", n)), map[string]string{"body": body}, &out)
+}
+
 // CheckRuns lists the check runs with the given name on a commit.
 func (c Client) CheckRuns(ctx context.Context, sha, name string) ([]CheckRun, error) {
 	var out struct {
