@@ -2729,6 +2729,8 @@ func (f *Factory) watch(ctx context.Context, t Thread, state Post) error {
 				return retry
 			}
 			f.logf("#%d: GitHub didn't show draft #%d's events, so I won't mark it ready: %v", n, pr.Number, unread)
+		} else if err := f.failingEnded(ctx, n, failingEventsStep(state, pr.Number, pr.Head.SHA)); err != nil {
+			return err // the read is asked again on the next poll, which ends the run then
 		}
 		if watched = w == watchDraft; !watched {
 			// A configured trusted draft is already held for a person. Read
@@ -2903,7 +2905,7 @@ func (f *Factory) watchMerged(ctx context.Context, t Thread, state Post, pr gith
 	// (#145).
 	if at, ok, err := f.mergeRecord(ctx, n, pr.Number, pr.Head.SHA); err != nil {
 		return err
-	} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR {
+	} else if ok && at.head == pr.Head.SHA && m.Kind == KindPR && !mergedByOther(f.Self, pr) {
 		runs, err := f.GitHub.CheckRuns(ctx, pr.Head.SHA, f.Check)
 		if err != nil {
 			return err

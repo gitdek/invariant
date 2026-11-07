@@ -194,6 +194,20 @@ type Span struct {
 	Open bool      `json:"open,omitempty"` // still going
 }
 
+// takes is factory.Takes as the factory itself decides it (#752). Labels
+// need write access to set, but anyone can open an issue that says
+// /invariant solve, and the factory takes that only from a writer, or from
+// itself when it opens a plan's step.
+func takes(is github.Issue) bool {
+	for _, l := range is.Labels {
+		if l.Name == factory.LabelTrigger || strings.HasPrefix(l.Name, factory.LabelTrigger+":") {
+			return true
+		}
+	}
+	bot := is.User.Type == "Bot" || strings.HasSuffix(is.User.Login, "[bot]")
+	return factory.Takes(is) && (bot || !outsider(is.AuthorAssociation))
+}
+
 // factoryLane is an issue's lane as the page shows it: only markers login
 // posted count, as the factory counts only its own, so a marker another
 // commenter posts drives no card, preview or comparison (#666). With no
@@ -272,6 +286,11 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 			continue
 		}
 		if c.User.Type == "Bot" || strings.HasSuffix(c.User.Login, "[bot]") {
+			continue
+		}
+		// The factory obeys only people who can write to the repository,
+		// so a stranger's command neither answers a card nor moves its lane.
+		if outsider(c.AuthorAssociation) {
 			continue
 		}
 		cmds := factory.ParseCommands(c.Body)

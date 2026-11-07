@@ -232,6 +232,14 @@ func writer(association string) bool {
 	return association == "OWNER" || association == "MEMBER" || association == "COLLABORATOR"
 }
 
+// outsider says whether GitHub's author association is one that can't
+// write to the repository, so the factory ignores what its author asks
+// (#752). An empty one is unknown, as in comments cached before the page
+// kept associations, and keeps counting.
+func outsider(association string) bool {
+	return association != "" && !writer(association)
+}
+
 // commanded says whether a writer's comment holds /invariant solve or
 // /invariant plan, which makes the issue the factory's.
 func commanded(comments []github.Comment) bool {
