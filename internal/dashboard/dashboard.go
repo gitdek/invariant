@@ -461,7 +461,7 @@ func (s *Server) refresh(ctx context.Context) error {
 		} else {
 			var issues, others []github.Issue
 			for _, is := range all {
-				if factory.Takes(is) {
+				if takes(is) {
 					issues = append(issues, is)
 				} else if is.State == "open" && writer(is.AuthorAssociation) {
 					others = append(others, is)
