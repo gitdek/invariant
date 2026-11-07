@@ -409,13 +409,13 @@ This delivery contract builds on native identity ([D-0314](../decisions/journal/
 
 ```sh
 go test -timeout 20m ./internal/dashboard
-go test -race -timeout 20m ./internal/dashboard
+go test -race -timeout 40m ./internal/dashboard
 INVARIANT_DASHBOARD_BROWSER=/absolute/path/to/chromium go test -timeout 3m ./internal/dashboard -run '^TestPlanSourcesBrowserControlledResponses$' -count=1 -v
 ```
 
 For each page, the harness checks distinct issue identities for two cards sharing one hash; three closed polls with zero source requests; simultaneous opens sharing one pending request; repeated opens before and after success; independent outer and per-file open states through card refreshes, including one open card beside a closed card with the same hash; exact DOM text for Go, Python, TypeScript and JavaScript sources including CRLF and entity-looking markup; loading and 503 feedback; explicit retry after null, missing-hash, wrong-hash, missing-file and missing-language responses; successful retry; a pending response arriving after replacement; and reuse of a previously successful full hash. It fails unless the browser reports every scenario complete. The existing Go acceptance tests independently check HTTP security, source authority, state size, byte fidelity, persistence, damage and restart.
 
-The merger ran all three on #721's head with Go 1.27.3 on darwin/arm64 and Google Chrome 156.0.8078.81 as the browser. The package passed in 100 s, and in 722 s with the race detector, and the browser check passed on both pages. Removing the response-hash check, the stale-response guard or the kept disclosure from `app.js` each makes the browser check fail. The factory's own build couldn't run these: its sandbox has no Chromium and forbids the local HTTP listeners the authenticated-page tests need, so a skipped harness there is not browser evidence.
+The merger ran all three on #721's head with Go 1.27.3 on darwin/arm64 and Google Chrome 156.0.8078.81 as the browser. The package passed in 100 s, and in 722 s with the race detector, which has since grown to about 26 minutes, mostly from #728's receipt comparison tests, hence the 40-minute limit ([D-0394](../decisions/journal/D-0394.jsonl)); and the browser check passed on both pages. Removing the response-hash check, the stale-response guard or the kept disclosure from `app.js` each makes the browser check fail. The factory's own build couldn't run these: its sandbox has no Chromium and forbids the local HTTP listeners the authenticated-page tests need, so a skipped harness there is not browser evidence.
 
 ## Configured acceptance foundation
 
