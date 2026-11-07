@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/formalize"
@@ -49,28 +50,44 @@ func (f *Factory) repositoryAt(ctx context.Context, base string) (*repository.Sn
 	return snapshot, err
 }
 
-// planRepository reconstructs the proposal's original authority from its
-// execution base, including on revision or restart. Compatible base movement
-// never replaces captured guidance, commands, dependencies or native identity.
 // nativeAuthority is the proposal whose native plan holds the repository
-// authority a draft keeps: the previous proposal, when it has a native plan,
-// or else the latest native plan the factory posted on the issue. A
-// question, or a failed draft, carries no plan, and nor does an answered
-// question's carrier, so without this the next draft would capture the
-// current base and adopt a gate or guidance change made meanwhile. The
-// issue's posts outlast a restart, so the original authority does too.
-func nativeAuthority(t Thread, previous *formalize.Proposal) *formalize.Proposal {
+// authority a draft keeps. A draft with a native previous proposal keeps
+// that one's. A revision or an answered question whose previous proposal
+// carries no plan, as a question's, a failed draft's or an answered
+// question's carrier don't, keeps the latest native plan the factory posted
+// since the issue was last drafted afresh, so it doesn't capture the
+// current base and adopt a gate or guidance change made meanwhile; the
+// issue's posts outlast a restart. A writer's /invariant solve or plan
+// drafts afresh and captures the base again, so neither searches, and a
+// revision's search stops at the post that answered one (#762's review).
+func nativeAuthority(t Thread, cause Command, previous *formalize.Proposal) *formalize.Proposal {
 	if previous != nil && previous.Plan != nil && previous.Plan.Native() {
 		return previous
 	}
+	if cause.Verb != Revise && cause.Verb != Choose {
+		return nil
+	}
+	fresh := map[int64]bool{}
+	for _, c := range t.Commands {
+		if (c.Verb == Solve || c.Verb == Plan) && c.Comment != 0 {
+			fresh[c.Comment] = true
+		}
+	}
 	for i := len(t.Posts) - 1; i >= 0; i-- {
-		if p := t.Posts[i].Marker.Proposal; p != nil && p.Plan != nil && p.Plan.Native() {
+		m := t.Posts[i].Marker
+		if p := m.Proposal; p != nil && p.Plan != nil && p.Plan.Native() {
 			return p
+		}
+		if slices.ContainsFunc(m.ReplyTo, func(id int64) bool { return fresh[id] }) {
+			return nil // drafted afresh here, with no native plan since
 		}
 	}
 	return nil
 }
 
+// planRepository reconstructs the proposal's original authority from its
+// execution base, including on revision or restart. Compatible base movement
+// never replaces captured guidance, commands, dependencies or native identity.
 func (f *Factory) planRepository(ctx context.Context, plan *plumbing.Plan) (*repository.Snapshot, error) {
 	if plan == nil || !plan.Native() {
 		return nil, nil

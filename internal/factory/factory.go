@@ -1225,6 +1225,9 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		defer os.RemoveAll(root)
 		req.PRD = root
 	}
+	// authority is the native plan a plumbing draft keeps the captured
+	// repository authority of, if any.
+	var authority *formalize.Proposal
 	// A plumbing issue gets a plan instead of statements, checked against
 	// the committed base (D-0105). External repositories need a reviewed
 	// contract and capable gate before any agent run or branch is recorded.
@@ -1234,7 +1237,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		var snapshot *repository.Snapshot
 		var err error
-		authority := nativeAuthority(t, previous)
+		authority = nativeAuthority(t, cause, previous)
 		if authority != nil {
 			snapshot, err = f.planRepository(ctx, authority.Plan)
 		} else {
@@ -1395,7 +1398,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// A failed native revision keeps the original execution base, so the
 	// next revision cannot recapture changed guidance or gate authority.
 	failed := res.Proposal
-	if authority := nativeAuthority(t, previous); authority != nil {
+	if authority != nil {
 		failed = authority
 	}
 	// The post names the agent that drafted it, beside what it spent (#179).
