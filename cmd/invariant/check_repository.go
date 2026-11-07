@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -108,7 +109,21 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 			return fail(fmt.Errorf("factory scope: %s", strings.Join(r.Problems, "; ")))
 		}
 		if !r.Plumbing {
-			plan.Files = r.Files
+			// A modeled change adds no dependencies (D-0014). Scope reads only
+			// its own languages' manifests, so check each part's declared
+			// inputs and lockfiles as the base contract names them.
+			for _, part := range snapshot.Config().Parts {
+				for _, name := range append(slices.Clone(part.Inputs), part.Lockfiles...) {
+					if slices.Contains(r.Files, name) {
+						return fail(fmt.Errorf("factory scope: a modeled change can't change part %s's dependency input %s", part.Name, name))
+					}
+				}
+			}
+			// It selects parts as an ordinary pull request does: files no part
+			// owns select every part.
+			if parts, err := snapshot.PartsFor(r.Files); err == nil && len(parts) > 0 {
+				plan.Files = r.Files
+			}
 		} else {
 			data, err := repositoryBlob(ctx, objects, head, plumbing.LockPath(*issue))
 			if err != nil {

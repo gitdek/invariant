@@ -86,3 +86,31 @@ func TestRepositoryGateLiteralKeysCannotHidePolicy(t *testing.T) {
 		t.Fatalf("quoted job keys refused: %v", err)
 	}
 }
+
+// Workflow and job defaults and environment reach the gate's own steps. A
+// default working directory makes project and plan discovery find nothing,
+// so the checks pass without checking, and BASH_ENV runs code before each
+// script (#746's review).
+func TestRepositoryGateRefusesInheritedDefaultsAndEnvironment(t *testing.T) {
+	w := workflow736(t)
+	job := func(keys string) string {
+		return strings.Replace(w, "    name: invariant/gate", keys+"    name: invariant/gate", 1)
+	}
+	top := func(keys string) string { return strings.Replace(w, "permissions:\n", keys+"permissions:\n", 1) }
+	for name, workflow := range map[string]string{
+		"workflow working directory": top("defaults:\n  run:\n    working-directory: docs\n"),
+		"job working directory":      job("    defaults:\n      run:\n        working-directory: docs\n"),
+		"quoted job defaults":        job("    'defaults' : {run: {working-directory: docs}}\n"),
+		"workflow BASH_ENV":          top("env:\n  BASH_ENV: /tmp/hook\n"),
+		"job BASH_ENV":               job("    env:\n      BASH_ENV: /tmp/hook\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(workflow, "working-directory") && !strings.Contains(workflow, "BASH_ENV") {
+				t.Fatal("fixture no longer places the setting")
+			}
+			if hasRepositoryGate(workflow) {
+				t.Fatal("a gate whose steps inherit defaults or environment counted as configured capability")
+			}
+		})
+	}
+}

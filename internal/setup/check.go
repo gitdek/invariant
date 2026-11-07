@@ -89,6 +89,12 @@ func hasRepositoryGate(workflow string) bool {
 				return true
 			}
 			key, value, ok := gateKey(text)
+			// Workflow defaults and environment reach the gate's steps: a
+			// default working directory empties their project and plan
+			// discovery, and BASH_ENV runs code before each script.
+			if ok && (key == "defaults" || key == "env") {
+				return false
+			}
 			inJobs, start, jobIndent = ok && key == "jobs" && value == "", -1, -1
 		} else if inJobs && (jobIndent < 0 || indent == jobIndent) {
 			if check(i) {
@@ -179,7 +185,10 @@ func repositoryGateSteps(lines []string, jobIndent int) ([]gateStep, bool) {
 				named = true
 			}
 			needs, literalNeeds := gateFlow(value, '[', ']')
-			if key == "if" && !gateTrue(value) || key == "continue-on-error" && !gateFalse(value) || key == "needs" && (!literalNeeds || len(needs) != 0) {
+			// A job's defaults and environment reach its steps as the
+			// workflow's do; the gate's own steps set what they need.
+			if key == "if" && !gateTrue(value) || key == "continue-on-error" && !gateFalse(value) || key == "needs" && (!literalNeeds || len(needs) != 0) ||
+				key == "defaults" || key == "env" {
 				enabled = false
 			}
 			continue
