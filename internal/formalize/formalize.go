@@ -325,15 +325,22 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 // Check stages the draft in ws as a project and runs the gate's model
 // checks on it: TLC, the witnesses and the known bugs.
 func Check(ctx context.Context, ws string, tc toolchain.Toolchain) (*Proposal, *verify.Report, error) {
-	authority := CheckContext{}
 	if saved, ok := checkContexts.Load(ws); ok {
-		authority = saved.(CheckContext)
+		return saved.(*CheckSession).Check(ctx, ws, tc)
 	}
-	return CheckWithContext(ctx, ws, tc, authority)
+	return CheckWithContext(ctx, ws, tc, CheckContext{})
 }
 
-// CheckWithContext uses caller-owned authority, never fields in proposal.json.
+// CheckWithContext freshly validates caller-owned authority, never fields in
+// proposal.json or a drafting session's memo.
 func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, authority CheckContext) (*Proposal, *verify.Report, error) {
+	return checkWithContext(ctx, ws, tc, authority, nil)
+}
+
+func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, authority CheckContext, memo *baselineMemo) (*Proposal, *verify.Report, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	if err := CheckStepDraft(ws, authority.ParentPlan); err != nil {
 		return nil, nil, err
 	}
@@ -362,7 +369,10 @@ func CheckWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 	}
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
 	if err == nil {
-		err = p.computeComparison(ctx, ws, tc, authority)
+		err = p.computeComparison(ctx, ws, tc, authority, memo)
+	}
+	if err == nil {
+		err = ctx.Err()
 	}
 	return p, r, err
 }

@@ -150,6 +150,37 @@ func TestComparison648LegacyBaselineRepairAndAuthority(t *testing.T) {
 	cur := &formalize.Current{Dir: "examples/reader", Manifest: p.Manifest(), ModuleText: oldModel, Includes: p.Includes, Lock: project.Lock{Ratified: &project.Ratification{Issue: 571, By: "owner"}, Bounds: p.Bounds, Statements: p.Statements}}
 	for _, mode := range []string{"missing", "invalid", "valid", "tampered old files"} {
 		t.Run(mode, func(t *testing.T) {
+			checked := func(q *formalize.Proposal) {
+				t.Helper()
+				if q == nil {
+					t.Fatal("check returned no candidate")
+				}
+				if err := q.ValidateReader(); err != nil {
+					t.Fatal(err)
+				}
+				c, _ := comparison648Of(t, q)
+				if c.Baseline.Model != oldModel || !reflect.DeepEqual(c.Baseline.Includes, cur.Includes) || !reflect.DeepEqual(c.Baseline.Lock, cur.Lock) || c.Baseline.View != reader603View || c.Candidate.Lock.Bounds["Limit"] != "3" {
+					t.Fatalf("check replaced original sources or bounds: %+v", c)
+				}
+			}
+			refused := func(problem string) {
+				t.Helper()
+				for _, want := range []string{"baseline/view.json", "original bounds"} {
+					if !strings.Contains(problem, want) {
+						t.Fatalf("legacy refusal omits %q: %s", want, problem)
+					}
+				}
+				if mode == "invalid" {
+					for _, want := range []string{"unreachable_chart", "advance", "Advance"} {
+						if !strings.Contains(problem, want) {
+							t.Fatalf("hiding refusal omits %q: %s", want, problem)
+						}
+					}
+				}
+				if strings.Contains(problem, "new amendment issue") {
+					t.Fatal("legacy repair was treated as a fixed view")
+				}
+			}
 			a := reader603Agent{run: func(ctx context.Context, j synth.Job) (synth.Usage, error) {
 				reader603Workspace(t, j.Workspace)
 				reader603Write(t, filepath.Join(j.Workspace, "proposal.json"), strings.Replace(reader603Draft, `"Limit":"2"`, `"Limit":"3"`, 1))
@@ -162,21 +193,21 @@ func TestComparison648LegacyBaselineRepairAndAuthority(t *testing.T) {
 				}
 				if mode == "tampered old files" {
 					reader603Write(t, filepath.Join(j.Workspace, "baseline/Reader603.tla"), reader603Model)
+					reader603Write(t, filepath.Join(j.Workspace, "baseline/Helper603.tla"), "invented include")
 					reader603Write(t, filepath.Join(j.Workspace, "baseline/ratified.lock"), `{"bounds":{"Limit":"3"},"statements":[]}`)
+					reader603Write(t, filepath.Join(j.Workspace, "check-context.json"), `{}`)
 				}
 				q, r, err := formalize.Check(ctx, j.Workspace, tc)
 				if mode == "missing" || mode == "invalid" {
 					if err == nil || !strings.Contains(strings.ToLower(err.Error()), "baseline") {
 						t.Fatalf("baseline failure not actionable in check: %+v %+v %v", q, r, err)
 					}
-					if mode == "missing" && !strings.Contains(err.Error(), "view.json") {
-						t.Fatal("missing-view repair path absent")
+					refused(err.Error())
+				} else {
+					if err != nil || r == nil || !r.Passed {
+						t.Fatalf("tool check: %+v %v", r, err)
 					}
-					if mode == "invalid" && !strings.Contains(err.Error(), "unreachable_chart") {
-						t.Fatal("baseline hiding refusal lost its cause")
-					}
-				} else if err != nil && mode != "tampered old files" {
-					t.Fatal(err)
+					checked(q)
 				}
 				return synth.Usage{}, nil
 			}}
@@ -185,20 +216,16 @@ func TestComparison648LegacyBaselineRepairAndAuthority(t *testing.T) {
 				t.Fatalf("formalizer: %+v %v", r, err)
 			}
 			if mode == "missing" || mode == "invalid" {
-				if !strings.Contains(strings.ToLower(r.Problem), "baseline") {
-					t.Fatalf("final check accepted bad baseline: %+v", r)
-				}
-				return
-			}
-			if mode == "tampered old files" && r.Problem != "" {
-				if !strings.Contains(strings.ToLower(r.Problem), "baseline") {
-					t.Fatal(r.Problem)
-				}
+				refused(r.Problem)
 				return
 			}
 			if r.Problem != "" {
 				t.Fatal(r.Problem)
 			}
+			if r.Report == nil || !r.Report.Passed {
+				t.Fatalf("final gate failed: %+v", r.Report)
+			}
+			checked(r.Proposal)
 			c, _ := comparison648Of(t, r.Proposal)
 			if c.Baseline.Kind != "ratification" || !strings.Contains(c.Baseline.Name, "#571") || c.Baseline.Model != oldModel || !reflect.DeepEqual(c.Baseline.Lock, cur.Lock) || c.Baseline.View != reader603View || !c.BoundsChanged || !strings.Contains(strings.ToLower(c.Scope), "scope") {
 				t.Fatalf("legacy baseline edited or not checked: %+v", c)

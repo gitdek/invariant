@@ -39,11 +39,12 @@ type Preview struct {
 // only changes that pass the factory's existing writer/comment/option checks.
 // The agent can select one of these through revised, but cannot authorize one.
 type CheckContext struct {
-	Baseline   *statechart.ComparisonSnapshot `json:"baseline,omitempty"`
-	ParentPlan int                            `json:"parent_plan,omitempty"`
-	Planning   string                         `json:"planning,omitempty"`
-	Choices    map[string]string              `json:"choices,omitempty"`
-	Revisions  []Revision                     `json:"revisions,omitempty"`
+	Baseline         *statechart.ComparisonSnapshot `json:"baseline,omitempty"`
+	BaselineViewPath string                         `json:"baseline_view_path,omitempty"`
+	ParentPlan       int                            `json:"parent_plan,omitempty"`
+	Planning         string                         `json:"planning,omitempty"`
+	Choices          map[string]string              `json:"choices,omitempty"`
+	Revisions        []Revision                     `json:"revisions,omitempty"`
 }
 
 var checkContexts sync.Map
@@ -60,17 +61,19 @@ func (r Request) CheckContext() CheckContext {
 		c.Choices[a.Fork] = a.Option
 	}
 	c.Baseline = r.comparisonBaseline()
+	if current := r.CapturedCurrent(); current != nil && current.View != "" {
+		c.BaselineViewPath = filepath.ToSlash(filepath.Join(current.Dir, ".invariant/view.json"))
+	}
 	if c.Baseline != nil {
-		// Only sources are authority. Both checks recompute the graph.
+		// Only sources are authority. Derived evidence stays session-local.
 		c.Baseline.Chart, c.Baseline.Limitation = nil, nil
 	}
 	return c
 }
 
 func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
-	c.Baseline = detachedSnapshot(c.Baseline)
-	c.Choices = maps.Clone(c.Choices)
-	c.Revisions = slices.Clone(c.Revisions)
+	session := NewCheckSession(c)
+	c = session.authority
 	b, err := json.Marshal(c)
 	if err != nil {
 		return "", nil, err
@@ -81,7 +84,7 @@ func stageCheckContext(ws string, c CheckContext) (string, func(), error) {
 	// Direct Check calls retain a detached copy. Modeled MCP checks fetch
 	// these captured bytes from the caller, never from this guidance file.
 	// The independent final check retains its original caller-memory context.
-	checkContexts.Store(ws, c)
+	checkContexts.Store(ws, session)
 	if err := stageBaseline(ws, c.Baseline); err != nil {
 		checkContexts.Delete(ws)
 		return "", nil, err
