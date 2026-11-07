@@ -291,3 +291,12 @@ func (c Clone) pushRef(ctx context.Context, ref, old, commit string) error {
 	_, err = runEnv(ctx, c.Dir, env, "git", "push", "--quiet", receivePack, "--force-with-lease="+ref+":"+old, "origin", commit+":"+ref)
 	return err
 }
+
+// mergedByOther says whether GitHub names someone other than the factory as
+// who merged a pull request. A record of a merge the factory meant to make
+// doesn't make a person's merge the factory's, as when a watcher stopped
+// between recording a merge and making it (#756). With no login of its own,
+// or no name from GitHub, it can't tell, and the record stands as before.
+func mergedByOther(self string, pr github.PullRequest) bool {
+	return self != "" && pr.MergedBy != nil && pr.MergedBy.Login != "" && pr.MergedBy.Login != self
+}
