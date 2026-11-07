@@ -179,6 +179,11 @@ func (d *repositoryDraft) nodeCommands(p *repository.Part, files map[string][]by
 	return nil
 }
 
+// Only the part's own directory can supply test configuration. The part
+// always has its own package.json, and Jest's search stops at the first
+// directory holding one, with or without a "jest" key (jest-config's
+// resolveConfigPathByTraversing, 29 and 30); Vite loads config files only
+// from its root.
 func (d *repositoryDraft) nodeTestConfig(p *repository.Part, argv []string, framework string, packageConfig json.RawMessage) (bool, error) {
 	unresolved := func(name, reason string) (bool, error) {
 		d.issue(p, "test", name+": "+reason+"; complete the test configuration for the native check and review test/test_one")
@@ -455,6 +460,25 @@ func (d *repositoryDraft) pythonCommands(p *repository.Part, files map[string][]
 				ok = false // an alternative configuration needs its own review
 			}
 		}
+		// Collection naming decides whether a native selector's test_ function
+		// is collected at all, and settings outside ini_options aren't read
+		// here, so neither is guessed.
+		for key := range metadata {
+			name, found := strings.CutPrefix(key, "tool.pytest.")
+			if !found {
+				continue
+			}
+			if setting, ini := strings.CutPrefix(name, "ini_options."); !ini || slices.Contains([]string{"python_files", "python_classes", "python_functions"}, setting) {
+				ok = false
+				d.issue(p, "test", path.Join(p.Directory, "pyproject.toml")+" tool.pytest."+name+": this pytest collection setting is unsupported by the draft; review test/test_one")
+			}
+		}
+		// Pytest searches for its configuration from the common ancestor of the
+		// paths it's given, upward, so one below the part can replace the
+		// part's own: beside a test_one node ID, or above the suite's targets.
+		if err := d.nestedPytestConfig(p, targets, &ok); err != nil {
+			return err
+		}
 		argv := append([]string{"python3", "-m", "pytest"}, options...)
 		one := append(slices.Clone(argv), "{test}")
 		candidate := *p
@@ -468,6 +492,65 @@ func (d *repositoryDraft) pythonCommands(p *repository.Part, files map[string][]
 		}
 	}
 	return nil
+}
+
+// nestedPytestConfig retains each pytest configuration below p that its test
+// commands can reach and leaves them for review. A test_one node ID can start
+// the search anywhere in p's own tree; the suite starts at its targets' common
+// ancestor, which may lie inside a nested part.
+func (d *repositoryDraft) nestedPytestConfig(p *repository.Part, targets []string, ok *bool) error {
+	suite := p.Directory
+	for i, target := range targets {
+		target = path.Join(p.Directory, target)
+		if d.files[target] {
+			target = path.Dir(target)
+		}
+		if i == 0 {
+			suite = target
+		}
+		for !encloses(suite, target) {
+			suite = path.Dir(suite)
+		}
+	}
+	for _, name := range d.names {
+		dir := path.Dir(name)
+		if dir == p.Directory || !encloses(p.Directory, dir) || d.nested(p.Directory, dir, "python") && !encloses(dir, suite) {
+			continue
+		}
+		section := ""
+		switch path.Base(name) {
+		case "pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml":
+		case "pyproject.toml":
+			section = "tool.pytest"
+		case "tox.ini":
+			section = "[pytest]"
+		case "setup.cfg":
+			section = "[tool:pytest]"
+		default:
+			continue
+		}
+		b, err := d.read(name)
+		if err != nil {
+			return err
+		}
+		if section != "" && !strings.Contains(string(b), section) {
+			continue
+		}
+		p.Inputs = append(p.Inputs, name)
+		*ok = false
+		d.issue(p, "test", name+": pytest selects this configuration for the tests it reaches, instead of the part's own; review test/test_one and select a supported configuration")
+	}
+	return nil
+}
+
+// nested reports whether dir, below outer, lies in a deeper part's directory.
+func (d *repositoryDraft) nested(outer, dir, language string) bool {
+	for ; dir != outer && dir != "."; dir = path.Dir(dir) {
+		if d.project(dir, language) {
+			return true
+		}
+	}
+	return false
 }
 
 var tableName = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
