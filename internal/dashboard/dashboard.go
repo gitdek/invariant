@@ -820,6 +820,9 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 				if err != nil {
 					return nil, err
 				}
+				if p.comparison == nil {
+					p.comparison = []byte{}
+				}
 			}
 			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/view.json") {
 				p.view, err = s.file(ctx, r, sha, f.Path)
