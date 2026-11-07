@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gitdek/invariant/factory/protocol/protocol"
@@ -167,6 +168,9 @@ type Factory struct {
 	// with one step per issue across polls (D-0113, #455). Positive values
 	// dispatch steps without waiting; zero keeps Poll synchronous.
 	Parallel int
+	// recheck is how often a step that waits for capacity or its agent's
+	// turn reads its issue again; zero means once a minute (#677).
+	recheck time.Duration
 
 	// mu guards the cache of who can write, which steps share: writers is
 	// what GitHub last said of each login, and asked is whom the latest poll
@@ -646,12 +650,23 @@ func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
 		return nil, errDraining
 	default:
 	}
-	select {
-	case slots <- struct{}{}:
-	case <-drain:
-		return nil, errDraining
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	// A step queued for capacity ends when its issue closes, without
+	// waiting for a slot first (#677).
+	recheck := time.NewTicker(f.recheckEvery())
+	defer recheck.Stop()
+	for queued := true; queued; {
+		select {
+		case slots <- struct{}{}:
+			queued = false
+		case <-drain:
+			return nil, errDraining
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-recheck.C:
+			if issue, err := f.GitHub.Issue(ctx, n); err == nil && issue.State == "closed" {
+				return nil, errIssueClosed
+			}
+		}
 	}
 	keep := false
 	defer func() {
@@ -690,6 +705,32 @@ func (f *Factory) agentSlot(ctx context.Context, n int) (func(), error) {
 	a.steps[n] = true
 	keep = true
 	return func() { <-slots }, nil
+}
+
+func (f *Factory) recheckEvery() time.Duration {
+	if f.recheck > 0 {
+		return f.recheck
+	}
+	return time.Minute
+}
+
+// whileOpen returns ctx carrying a check that issue n is still open, which
+// the step's agent makes while it waits for its turn and once more before it
+// starts (#677). closed says whether the check found the issue closed: the
+// agent never started, so the step ends as it does when the issue closes
+// before admission, posting nothing, and the run stays recorded, as one that
+// stopped does. A read that fails leaves the run waiting, since only a closed
+// issue stops it.
+func (f *Factory) whileOpen(ctx context.Context, n int) (context.Context, func() bool) {
+	var closed atomic.Bool
+	ctx = synth.WhileWanted(ctx, f.recheckEvery(), func(ctx context.Context) error {
+		if issue, err := f.GitHub.Issue(ctx, n); err == nil && issue.State == "closed" {
+			closed.Store(true)
+			return errIssueClosed
+		}
+		return nil
+	})
+	return ctx, closed.Load
 }
 
 // end ends the step on issue n, which ended at ended.
@@ -1417,7 +1458,11 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 		return nil, err
 	}
 	f.runsAgent(n, agent, out)
-	res, runErr := form.Formalize(ctx, req, out)
+	agentCtx, closed := f.whileOpen(ctx, n)
+	res, runErr := form.Formalize(agentCtx, req, out)
+	if closed() {
+		return nil, errIssueClosed
+	}
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped. One that took it back since, in
 	// a new tenure, records the run's result, and its next step posts it.
@@ -2124,7 +2169,11 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	}
 	f.runsAgent(n, agent, out)
 	amend := m.Proposal != nil && m.Proposal.Target != nil
-	res, runErr := run.Builder.Build(ctx, root, out, amend)
+	agentCtx, closed := f.whileOpen(ctx, n)
+	res, runErr := run.Builder.Build(agentCtx, root, out, amend)
+	if closed() {
+		return "", "", nil, nil, errIssueClosed
+	}
 	// A watcher that lost the lease during the run drops it. The holder will
 	// find it recorded, and say it stopped. One that took it back since, in
 	// a new tenure, records the run's result, and its next step publishes

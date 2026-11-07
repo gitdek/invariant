@@ -254,7 +254,11 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	checks := plumbing.WithCheckStatus(ctx, func(waiting bool) {
 		f.checkStatus(n, filepath.Base(out), waiting)
 	})
+	checks, closed := f.whileOpen(checks, n)
 	res, runErr := run.Plumbing.Build(checks, wt, n, out)
+	if closed() {
+		return "", "", nil, nil, errIssueClosed
+	}
 	// As for a project: a watcher that lost the lease drops the run, and one
 	// that took it back in a new tenure records its result, and its next
 	// step publishes it, if the build still stands.
