@@ -261,14 +261,24 @@ func (p *Proposal) ValidateComparisonContext(c CheckContext) error {
 	if c.Baseline == nil {
 		return nil
 	}
-	if p.Reader == nil || p.Reader.Comparison == nil {
-		return fmt.Errorf("comparison with baseline %s is missing; check the draft against that captured baseline before publishing", c.Baseline.Name)
+	var comparison *statechart.Comparison
+	if p.Reader != nil && p.Reader.Comparison != nil {
+		var err error
+		comparison, err = p.Reader.Comparison.Validated()
+		if err != nil {
+			return err
+		}
 	}
-	d := p.Reader.Comparison
-	if err := d.Validate(); err != nil {
-		return err
+	return validateComparisonBaseline(comparison, c.Baseline)
+}
+
+// The comparison belongs to this validation call and has already been
+// recomputed. Neither mutable proposals nor earlier calls grant authority.
+func validateComparisonBaseline(d *statechart.Comparison, baseline *statechart.ComparisonSnapshot) error {
+	if d == nil {
+		return fmt.Errorf("comparison with baseline %s is missing; check the draft against that captured baseline before publishing", baseline.Name)
 	}
-	expected, got := detachedSnapshot(c.Baseline), detachedSnapshot(&d.Baseline)
+	expected, got := detachedSnapshot(baseline), detachedSnapshot(&d.Baseline)
 	// The legacy view is the only repairable input. The check, not the agent,
 	// supplies both chart outputs, so compare captured sources here.
 	if expected.View == "" {

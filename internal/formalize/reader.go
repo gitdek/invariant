@@ -1,6 +1,7 @@
 package formalize
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -8,13 +9,13 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/statechart"
+	"github.com/gitdek/invariant/internal/tla"
 	"github.com/gitdek/invariant/internal/tlc"
 	"github.com/gitdek/invariant/internal/toolchain"
 )
@@ -30,6 +31,14 @@ type Reader struct {
 }
 
 type ReaderLimitation = statechart.Limitation
+
+// Only a project's reader uses this wire reference. In-memory readers and
+// saved proposals, formalizations and receipts keep the complete comparison.
+type comparisonReference struct {
+	Version     int    `json:"version"`
+	File        string `json:"file"`
+	Fingerprint string `json:"fingerprint"`
+}
 
 func (p *Proposal) computeReader(ctx context.Context, dir string, tc toolchain.Toolchain, states int64) error {
 	p.Reader = nil
@@ -92,25 +101,33 @@ func (p *Proposal) ValidateReader() error {
 	if r.Fingerprint != want {
 		return fmt.Errorf("reader evidence is stale: model, includes, view, bounds, statements, tools or artifact changed; check the draft again")
 	}
+	var comparison *statechart.Comparison
 	if c := r.Comparison; c != nil {
-		if err := c.Validate(); err != nil {
-			return err
-		}
-		want, err := statechart.Compare(c.Baseline, p.comparisonSnapshot())
+		// Recompute against the current candidate once. Comparing the whole
+		// record checks every retained field as well as the candidate binding.
+		comparison, err = statechart.Compare(c.Baseline, p.comparisonSnapshot())
 		if err != nil {
 			return err
 		}
-		if want.Fingerprint != c.Fingerprint {
-			return fmt.Errorf("comparison candidate is stale; check against the captured baseline again")
+		got, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		want, err := json.Marshal(comparison)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("comparison candidate or retained evidence is stale; check against the captured baseline again")
 		}
 	}
 	if p.Target != nil && p.Target.Baseline != nil {
-		if err := p.ValidateComparisonContext(CheckContext{Baseline: currentSnapshot(p.Target.Baseline)}); err != nil {
+		if err := validateComparisonBaseline(comparison, currentSnapshot(p.Target.Baseline)); err != nil {
 			return err
 		}
 	}
 	if p.Baseline != nil {
-		if err := p.ValidateComparisonContext(CheckContext{Baseline: p.Baseline}); err != nil {
+		if err := validateComparisonBaseline(comparison, p.Baseline); err != nil {
 			return err
 		}
 	}
@@ -135,19 +152,14 @@ func (p *Proposal) ReaderFeedback() string {
 		fmt.Fprintf(&b, " %s = %s;", name, p.Bounds[name])
 	}
 	if c := p.Reader.Comparison; c != nil {
-		fmt.Fprintf(&b, " Comparison checked against %s; view change=%t; model source change=%t. %s", c.Baseline.Name, c.ViewChanged, c.ModelChanged, c.Scope)
-		if c.Unavailable != nil {
-			b.WriteString(" " + c.Unavailable.Message)
-		}
+		fmt.Fprintf(&b, " Comparison checked against %s. %s", c.Baseline.Name, strings.Join(c.Qualifications(), " "))
 	}
 	return b.String()
 }
 
-var includeName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\.tla$`)
-
 func validateIncludes(includes map[string]string, module string) error {
 	for name := range includes {
-		if !includeName.MatchString(name) || name == module+".tla" {
+		if !tla.ValidIncludeName(name, module) {
 			return fmt.Errorf("reader include %q must be a sibling TLA+ file distinct from the model", name)
 		}
 	}
@@ -204,7 +216,7 @@ func removeOldIncludes(dir, module string, includes map[string]string) error {
 	return nil
 }
 
-func writeReader(dir, view string, reader *Reader) error {
+func writeReader(dir, view string, reader *Reader, reference bool) error {
 	for _, name := range []string{"reader.json", "comparison.json"} {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
 			return err
@@ -225,7 +237,16 @@ func writeReader(dir, view string, reader *Reader) error {
 				return err
 			}
 		}
-		b, err := json.MarshalIndent(reader, "", "  ")
+		var record any = reader
+		if reference && reader.Comparison != nil {
+			copyReader := *reader
+			copyReader.Comparison = nil
+			record = struct {
+				Reader
+				ComparisonRef comparisonReference `json:"comparison_ref"`
+			}{copyReader, comparisonReference{Version: 1, File: "comparison.json", Fingerprint: reader.Comparison.Fingerprint}}
+		}
+		b, err := json.MarshalIndent(record, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -237,6 +258,7 @@ func writeReader(dir, view string, reader *Reader) error {
 // ReadReader loads a current project's optional saved explanation and its
 // sibling includes. Legacy projects need no invented view or evidence.
 func (c *Current) ReadReader(dir string) error {
+	c.Reader = nil
 	var err error
 	c.Includes, err = readIncludes(filepath.Join(dir, filepath.Dir(c.Manifest.Module)), c.ModuleName())
 	if err != nil {
@@ -254,5 +276,65 @@ func (c *Current) ReadReader(dir string) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, &c.Reader)
+	var saved struct {
+		*Reader
+		ComparisonRef json.RawMessage `json:"comparison_ref"`
+	}
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return fmt.Errorf("reader comparison record: %w", err)
+	}
+	var ref comparisonReference
+	if len(saved.ComparisonRef) != 0 {
+		if err := json.Unmarshal(saved.ComparisonRef, &ref); err != nil {
+			return fmt.Errorf("comparison reference: %w", err)
+		}
+		if ref.Version != 1 || ref.File != "comparison.json" || ref.Fingerprint == "" || saved.Reader == nil || saved.Version != 1 {
+			return fmt.Errorf("comparison reference requires a version 1 reader and {version:1, file:comparison.json, fingerprint}")
+		}
+	}
+	// A sibling alone cannot add a comparison to an ordinary or absent reader.
+	if saved.Reader == nil || saved.Comparison == nil && len(saved.ComparisonRef) == 0 {
+		c.Reader = saved.Reader
+		return nil
+	}
+	if saved.Comparison != nil {
+		if err := saved.Comparison.Validate(); err != nil {
+			return err
+		}
+	}
+	data, err := regular.ReadFile(dir, ".invariant/comparison.json")
+	if os.IsNotExist(err) && len(saved.ComparisonRef) == 0 {
+		c.Reader = saved.Reader
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("comparison evidence: %w", err)
+	}
+	var sibling statechart.Comparison
+	if err := json.Unmarshal(data, &sibling); err != nil {
+		return fmt.Errorf("comparison evidence: %w", err)
+	}
+	comparison, err := sibling.Validated()
+	if err != nil {
+		return err
+	}
+	if len(saved.ComparisonRef) != 0 && ref.Fingerprint != comparison.Fingerprint {
+		return fmt.Errorf("comparison reference fingerprint differs from comparison.json")
+	}
+	if saved.Comparison != nil {
+		inline, err := json.Marshal(saved.Comparison)
+		if err != nil {
+			return err
+		}
+		want, err := json.Marshal(comparison)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(inline, want) {
+			return fmt.Errorf("inline comparison differs from comparison.json")
+		}
+	}
+	saved.Comparison = comparison
+	c.Reader = saved.Reader
+	return nil
 }

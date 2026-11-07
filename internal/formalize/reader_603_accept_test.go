@@ -672,12 +672,12 @@ func reader603PersistenceAndStaging(t *testing.T, tc toolchain.Toolchain, p *for
 				}
 			}
 			if !amend {
-				b, err := os.ReadFile(filepath.Join(root, "reader.json"))
+				b, err := os.ReadFile(filepath.Join(root, "proposal.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				var s reader603Snapshot
-				if err := json.Unmarshal(b, &s); err != nil || !reflect.DeepEqual(s, saved) {
+				var previous formalize.Proposal
+				if err := json.Unmarshal(b, &previous); err != nil || !reflect.DeepEqual(reader603Evidence(t, &previous), saved) {
 					t.Fatalf("previous computed snapshot lost: %v", err)
 				}
 			}

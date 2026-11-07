@@ -76,7 +76,7 @@ func (r *Reader) ComparisonNotes() []string {
 	if r.Inputs.Model != r.Comparison.CandidateIdentity.ModelSHA256 || r.Inputs.View != r.Comparison.CandidateIdentity.ViewSHA256 || !sameComparisonIncludes(r.Inputs.Includes, r.Comparison.CandidateIdentity.Includes) {
 		out = append(out, "Final source identities differ from the retained proposal comparison. Its candidate chart describes the proposed source, not the synthesized final model.")
 	}
-	return out
+	return append(out, r.Comparison.Qualifications()...)
 }
 
 func sameComparisonIncludes(a, b map[string]string) bool {

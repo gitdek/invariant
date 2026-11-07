@@ -23,21 +23,8 @@ type comparisonEvidence struct {
 	Problem  string
 }
 
-func comparisonPageNotes(c *statechart.Comparison) []string {
-	out := []string{"Proposal comparison: " + c.Baseline.Name + " to " + c.Candidate.Name + ". Added and removed annotations retain the complete candidate. Equal charts do not establish behavioral equivalence."}
-	if c.ViewChanged {
-		out = append(out, "View change: labels or hiding differ.")
-	}
-	if c.ModelChanged {
-		out = append(out, "Model source change: exact model or include bytes differ.")
-	}
-	if c.Scope != "" {
-		out = append(out, c.Scope)
-	}
-	if c.Unavailable != nil {
-		out = append(out, c.Unavailable.Message)
-	}
-	return out
+func comparisonPageSummary(c *statechart.Comparison) string {
+	return "Proposal comparison: " + c.Baseline.Name + " to " + c.Candidate.Name + ". Added and removed annotations retain the complete candidate."
 }
 
 func (e comparisonEvidence) checked() (string, string, string) {
@@ -55,7 +42,7 @@ func (e comparisonEvidence) checked() (string, string, string) {
 	var svg string
 	var err error
 	if p.Reader.Comparison != nil {
-		message += " " + strings.Join(comparisonPageNotes(p.Reader.Comparison), " ")
+		message += " " + comparisonPageSummary(p.Reader.Comparison) + " " + strings.Join(p.Reader.Comparison.Qualifications(), " ")
 		svg, err = p.Reader.Comparison.SVG()
 	} else if l := p.Reader.Limitation; l != nil {
 		return "too_large", fmt.Sprintf("TLC reached %d states at these bounds; chart capacity is %d. Mappings and hiding were not evaluated.", l.Actual, l.Limit), ""
