@@ -913,6 +913,12 @@
       <p class="fp">Receipt commit <code>${esc(r.commit)}</code></p></div>`;
   }
 
+  function comparisonDiagnostic(p) {
+    const r = p.reader;
+    return r && r.message.includes("comparison_evidence")
+      ? `<p class="reader-note">${esc(p.name)} (${esc(p.dir)}): ${esc(r.message)}</p>` : "";
+  }
+
   // Projects whose models are identical share a row, in the order they
   // come: the examples, then Invariant's own parts, then other repositories.
   function modelRows(ps, primary) {
@@ -1007,7 +1013,7 @@
         const tip = [q.dir, q.fingerprint ? q.fingerprint.slice(0, 19) : "", provOf(q)].filter(Boolean).join(" · ");
         const href = q.reader ? q.reader.page : "";
         const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? "passed" : "failed"}</span>`}`;
-        return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}</li>`;
+        return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}${comparisonDiagnostic(q)}</li>`;
       }).join("");
       return `${head}<article class="model${quiet(p.repo)}" ${tag(p.repo)}>
         ${tile(p, title)}
@@ -2051,7 +2057,7 @@
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
-        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
+        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
         <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));

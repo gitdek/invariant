@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -63,7 +65,7 @@ type readerEvidence struct {
 	View                      []byte
 	// Omitted when absent, so evidence without a comparison keeps the
 	// identities and immutable URLs it had before comparisons existed.
-	Comparison []byte `json:",omitempty"`
+	Comparison []byte `json:",omitzero"`
 	Report     *verify.Report
 	Artifacts  readerArtifacts
 	Traces     map[string]tlc.TraceFile
@@ -115,16 +117,25 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("legacy_receipt", "This legacy receipt has no checked reader artifacts. Save .invariant/view.json and verify again.")
 	}
 	rr := r.Reader
-	if rr.Comparison != nil {
-		var captured statechart.Comparison
-		if err := rr.Comparison.Validate(); err != nil {
-			return bad("comparison_evidence", err.Error())
-		}
-		if decodeReaderJSON(e.Comparison, &captured) != nil || !sameReaderJSON(&captured, rr.Comparison) || rr.Comparison.CandidateIdentity.ProposalHash != project.ProposalHash(e.Lock.Bounds, e.Lock.Statements) {
-			return bad("comparison_evidence", "The proposal comparison differs from the captured comparison at this receipt commit. Verify again using the original project evidence.")
-		}
+	// Recompute even when the receipt omits the comparison or its diagnostic.
+	// The original reader remains intact for every fingerprint and final check.
+	display := *rr
+	var comparisonErr error
+	if e.Comparison == nil {
+		comparisonErr = os.ErrNotExist
 	}
-	if len(e.Artifacts.JSON) == 0 || (rr.Chart != nil && len(e.Artifacts.SVG) == 0) {
+	captured, diagnostic := verify.CapturedComparison(e.Comparison, comparisonErr, e.Lock)
+	if !sameReaderJSON(captured, rr.Comparison) || !sameReaderJSON(diagnostic, rr.ComparisonDiagnostic) {
+		message := "The receipt's proposal comparison or diagnostic differs from the captured comparison at this receipt commit. Verify again using the original project evidence."
+		if diagnostic != nil {
+			message = diagnostic.Message + " " + message
+		}
+		diagnostic = &verify.ReaderDiagnostic{Code: "comparison_evidence", Message: message}
+	}
+	if diagnostic != nil {
+		display.Comparison, display.ComparisonDiagnostic = nil, diagnostic
+	}
+	if len(e.Artifacts.JSON) == 0 || ((rr.Chart != nil || rr.Comparison != nil) && len(e.Artifacts.SVG) == 0) {
 		return bad("missing_artifacts", "The receipt archive is missing reader.json or reader.svg. Verify again to publish the complete evidence.")
 	}
 	var companion verify.Reader
@@ -192,10 +203,13 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("snapshot_mismatch", "The checked reader fingerprint does not match its inputs, lock and complete contents.")
 	}
 	limitedComparison := func(code, message string) (string, string, string) {
-		if rr.Comparison == nil {
+		if display.Comparison == nil {
 			// A damaged comparison's diagnostic stays visible beside the
 			// final model's own outcome.
-			return bad(code, strings.TrimSpace(message+" "+strings.Join(rr.ComparisonNotes(), " ")))
+			if len(e.Artifacts.SVG) != 0 && !readerCompanionMatches(rr, e.Artifacts.SVG, diagnostic != nil) {
+				return bad("artifact_mismatch", "The archived SVG differs from the native renderer's final outcome.")
+			}
+			return bad(code, strings.TrimSpace(message+" "+strings.Join(display.ComparisonNotes(), " ")))
 		}
 		svg, err := rr.SVG()
 		if err != nil {
@@ -207,7 +221,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return "chart", message + " " + strings.Join(rr.ComparisonNotes(), " ") + " " + comparisonPageSummary(rr.Comparison), svg
 	}
 	if d := rr.Unavailable; d != nil {
-		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil {
+		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil && diagnostic == nil {
 			return bad("artifact_mismatch", "The archive has an SVG beside an unavailable reader outcome.")
 		}
 		if d.Code == "" || d.Message == "" {
@@ -242,7 +256,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("snapshot_mismatch", "The reader has no matching completed model check in the receipt.")
 	}
 	if l := rr.Limitation; l != nil {
-		if (len(e.Artifacts.SVG) != 0 && rr.Comparison == nil) || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
+		if (len(e.Artifacts.SVG) != 0 && rr.Comparison == nil && diagnostic == nil) || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
 			int64(l.Actual) != r.Design.DistinctStates || !sameReaderJSON(l.Source, source) {
 			return bad("snapshot_mismatch", "The reader limitation disagrees with the receipt's completed exploration or provenance.")
 		}
@@ -253,21 +267,183 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		c.Report.Counts["tlc_states"] != r.Design.DistinctStates || c.Report.Counts["tlc_generated_states"] != r.Design.StatesGenerated {
 		return bad("snapshot_mismatch", "The chart's rules, counts or tool provenance disagree with the receipt and lock.")
 	}
-	svg, err := rr.SVG()
+	svg, err := display.SVG()
 	if err != nil {
 		return bad("reader_render", "Reader generation failed: "+err.Error())
 	}
-	if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
+	if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) && (diagnostic == nil || !readerCompanionMatches(rr, e.Artifacts.SVG, true)) {
 		return bad("artifact_mismatch", "The archived SVG does not match the shared native renderer's complete checked result. Verify again with the current renderer.")
 	}
 	message = "Checked bounded model; the full report is included in the image. This adds no proof claim."
-	if len(rr.ComparisonNotes()) > 0 {
-		message += " " + strings.Join(rr.ComparisonNotes(), " ")
+	if len(display.ComparisonNotes()) > 0 {
+		message += " " + strings.Join(display.ComparisonNotes(), " ")
 	}
-	if rr.Comparison != nil {
-		message += " " + comparisonPageSummary(rr.Comparison)
+	if display.Comparison != nil {
+		message += " " + comparisonPageSummary(display.Comparison)
 	}
 	return "chart", message, svg
+}
+
+// A comparison-only discrepancy may change the leading native panels. Check
+// the final drawing and report independently, never just their embedded JSON.
+// Archived bytes are only evidence to compare; all displayed SVG is regenerated.
+func readerCompanionMatches(r *verify.Reader, archived []byte, fallback bool) bool {
+	if svg, err := r.SVG(); err == nil && bytes.Equal(archived, []byte(svg)) {
+		return true
+	}
+	if !fallback {
+		return false
+	}
+	final := *r
+	final.Comparison, final.ComparisonDiagnostic = nil, nil
+	if svg, err := final.SVG(); err == nil && svg != "" && bytes.Equal(archived, []byte(svg)) {
+		return true
+	}
+	// Use the shared renderer to obtain the title and complete final panel,
+	// including specific unavailable and too_large outcomes. The first panel
+	// is a placeholder, ignored along with the archived comparison panels.
+	final.ComparisonDiagnostic = &verify.ReaderDiagnostic{Code: "comparison_evidence", Message: "Unavailable"}
+	svg, err := final.SVG()
+	if err != nil {
+		return false
+	}
+	want, ok := readerStack([]byte(svg))
+	if !ok {
+		return false
+	}
+	got, ok := readerStack(archived)
+	if !ok || !sameReaderJSON(got.root, want.root) || got.width < want.width ||
+		(len(got.panels) != len(want.panels) && len(got.panels) != len(want.panels)+1) {
+		return false
+	}
+	for i := 1; i < len(want.panels); i++ {
+		j := len(got.panels) - len(want.panels) + i
+		if !sameReaderJSON(got.panels[j], want.panels[i]) || got.height-got.y[j] != want.height-want.y[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type readerSVGStack struct {
+	root          xml.StartElement
+	width, height float64
+	y             []float64
+	panels        [][]xml.Token
+}
+
+// Accept only the native stack envelope. Normalize its generated panel IDs,
+// but preserve every drawing attribute, text node and report in each panel.
+func readerStack(data []byte) (readerSVGStack, bool) {
+	var s readerSVGStack
+	d := xml.NewDecoder(bytes.NewReader(data))
+	t, err := d.Token()
+	root, ok := t.(xml.StartElement)
+	if err != nil || !ok || root.Name != (xml.Name{Space: "http://www.w3.org/2000/svg", Local: "svg"}) {
+		return s, false
+	}
+	s.root = root.Copy()
+	for _, a := range root.Attr {
+		if a.Name.Local == "viewBox" {
+			if _, err := fmt.Sscanf(a.Value, "0 0 %f %f", &s.width, &s.height); err != nil || s.width <= 0 || s.height <= 0 ||
+				a.Value != fmt.Sprintf("0 0 %g %g", s.width, s.height) {
+				return s, false
+			}
+		}
+	}
+	if s.width <= 0 || s.height <= 0 || math.IsNaN(s.width) || math.IsNaN(s.height) || math.IsInf(s.width, 0) || math.IsInf(s.height, 0) {
+		return s, false
+	}
+	for i, a := range s.root.Attr {
+		switch a.Name.Local {
+		case "width", "height":
+			v := s.width
+			if a.Name.Local == "height" {
+				v = s.height
+			}
+			if a.Value != fmt.Sprint(v) {
+				return s, false
+			}
+			s.root.Attr[i].Value = "dimension"
+		case "viewBox":
+			s.root.Attr[i].Value = "dimensions"
+		}
+	}
+	depth := 0
+	closed := false
+	for {
+		t, err := d.Token()
+		if err == io.EOF {
+			return s, closed && len(s.panels) >= 2
+		}
+		if err != nil || closed {
+			return s, false
+		}
+		switch el := t.(type) {
+		case xml.StartElement:
+			if el.Name.Space != root.Name.Space {
+				return s, false
+			}
+			if depth == 0 {
+				var y float64
+				if el.Name.Local != "g" || len(el.Attr) != 1 || el.Attr[0].Name != (xml.Name{Local: "transform"}) {
+					return s, false
+				}
+				v := el.Attr[0].Value
+				if _, err := fmt.Sscanf(v, "translate(0 %f)", &y); err != nil || v != fmt.Sprintf("translate(0 %g)", y) ||
+					y < 0 || y >= s.height || (len(s.y) == 0 && y != 0) || (len(s.y) > 0 && y <= s.y[len(s.y)-1]) {
+					return s, false
+				}
+				s.y = append(s.y, y)
+				s.panels = append(s.panels, nil)
+				depth++
+				continue
+			}
+			switch el.Name.Local {
+			case "g", "title", "desc", "metadata", "defs", "marker", "path", "rect", "text", "tspan", "circle":
+			default:
+				return s, false
+			}
+			el = el.Copy()
+			prefix := fmt.Sprintf("panel%d-", len(s.panels)-1)
+			for i, a := range el.Attr {
+				if strings.HasPrefix(strings.ToLower(a.Name.Local), "on") || a.Name.Local == "href" || a.Name.Local == "style" {
+					return s, false
+				}
+				switch a.Name.Local {
+				case "id", "aria-labelledby", "aria-describedby":
+					if !strings.HasPrefix(a.Value, prefix) {
+						return s, false
+					}
+					el.Attr[i].Value = strings.TrimPrefix(a.Value, prefix)
+				case "marker-end":
+					if !strings.HasPrefix(a.Value, "url(#"+prefix) {
+						return s, false
+					}
+					el.Attr[i].Value = strings.ReplaceAll(a.Value, "url(#"+prefix, "url(#")
+				}
+			}
+			t = el
+			depth++
+		case xml.EndElement:
+			if depth == 0 {
+				closed = true
+				continue
+			}
+			depth--
+			if depth == 0 {
+				continue
+			}
+		case xml.CharData:
+			if depth == 0 {
+				return s, false
+			}
+		default:
+			return s, false
+		}
+		i := len(s.panels) - 1
+		s.panels[i] = append(s.panels[i], xml.CopyToken(t))
+	}
 }
 
 const readerHTML = `<!doctype html>
