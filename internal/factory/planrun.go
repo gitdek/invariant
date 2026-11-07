@@ -233,11 +233,14 @@ func (f *Factory) planRun(ctx context.Context, plan PlanOfIssues, t Thread) (pla
 }
 
 // openedFor finds an issue opened for the plan's step k, counting from 0,
-// that the plan's issue doesn't record: an open issue whose marker names the
+// that the plan's issue doesn't record: an issue whose marker names the
 // plan's issue, hash and step, opened by the factory's bot, or by a writer
-// when there's no bot. It's 0 when there's none.
+// when there's no bot. It's 0 when there's none. It reads issues in every
+// state, as the plan's core counts every issue ever opened: one closed
+// before it was recorded is still the step's, and opening another would
+// leave two (#754).
 func (f *Factory) openedFor(ctx context.Context, plan PlanOfIssues, run planRun, k int) (int, error) {
-	issues, err := f.GitHub.OpenIssues(ctx)
+	issues, err := f.GitHub.Issues(ctx, "")
 	if err != nil {
 		return 0, err
 	}
