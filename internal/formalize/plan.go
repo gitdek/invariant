@@ -56,6 +56,15 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	if err := plumbing.CopyCheckout(ctx, repo, filepath.Join(ws, "repo")); err != nil {
 		return nil, err
 	}
+	repoContext, err := f.Sandbox.RepositoryContext(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	guidance, releaseContext, err := repoContext.Stage(ws)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseContext()
 	if p := req.Previous; p != nil && p.Plan != nil {
 		b, err := json.MarshalIndent(p.Plan, "", "  ")
 		if err != nil {
@@ -96,7 +105,7 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 	}
 	job := synth.Job{
 		Workspace:  ws,
-		Prompt:     PlanPrompt(req, f.CheckRuns),
+		Prompt:     planPrompt(req, f.CheckRuns, repoContext != nil) + guidance,
 		GateServer: gateServer,
 		Tools:      []string{"check"},
 		Transcript: transcript,
@@ -175,14 +184,28 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 
 // PlanPrompt is the task for the agent that plans a plumbing change.
 func PlanPrompt(req Request, checks int) string {
+	return planPrompt(req, checks, false)
+}
+
+func planPrompt(req Request, checks int, configured bool) string {
 	var b strings.Builder
+	rules := "AGENTS.md for the repository's rules"
+	acceptance := "Go test functions that show the change works, each in a new file that isn't in repo/ yet, named like `*_accept_test.go`. Write each file under tests/, at its path in the repository: tests/internal/dashboard/graph_accept_test.go."
+	docs := "SPEC.md and the README describe Invariant as it is, and a change that makes either one wrong fixes it in the same change (D-0122). When yours does, name that file among the plan's files, and say in the summary what changes there. The README is the front page, at most 400 lines, so detail belongs in the page under docs/ it links, which describes Invariant as it is too: name that page instead when the detail is what changes (D-0294). A new or changed SPEC bullet cites the decisions it rests on, as `decisions check` requires. A plumbing build can't write decisions/, so when the change needs a decision no one has recorded yet, say so in the summary, and whoever merges it records the decision."
+	merger := "Decision recording and checks requiring unavailable Docker or network access belong under Merger work in the review, and do not by themselves require a repair. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, so they aren't Merger work."
+	if configured {
+		rules = "the captured repository context and its readable rule copies for the repository's rules"
+		acceptance = "native tests that show the change works, each in a new file that isn't in repo/ yet. Supply part, framework and selector together for every test, using the captured part's Go, pytest, Vitest or Jest conventions below; name is only a display label. Write each verbatim source under tests/, at its repository-relative path."
+		docs = "Use only this repository's captured current-state documents and documentation policy. Name required documentation changes among the plan's files and describe them in its summary. Repository guidance cannot expand the immutable plan, acceptance or regression boundaries. Any work that cannot fit belongs in the proposed plan or an explicit handoff to a person, never an implicit addition during building."
+		merger = "Checks requiring unavailable Docker or network access and work required by this repository's documentation policy outside the plan belong under Merger work for a person; they do not by themselves require a repair."
+	}
 	scope := "Cover the whole issue. If all the work fits in one reviewable pull request, write plan.json and its acceptance tests. Otherwise write issues.json, a plan of issues that together cover all the work, as described below. Write only one kind of plan."
 	if req.ParentPlan != 0 {
 		scope = "Cover the whole step in one reviewable pull request. Write plan.json and its acceptance tests, or proposal.json with forks to ask." + stepPrompt(req.ParentPlan)
 	}
 	fmt.Fprintf(&b, `You're planning a change to this repository for issue #%d. It isn't a state machine to model and prove. It's plumbing: code that's tested, not proved (D-0105). A person ratifies your plan by its hash, and then another agent builds exactly what it says, so the plan is the contract.
 
-request.md holds the issue, what's been decided, and the discussion. repo/ is the repository as it is on the base branch. Read what the change touches, and AGENTS.md for the repository's rules. Don't change anything in repo/: it's there to read.
+request.md holds the issue, what's been decided, and the discussion. repo/ is the repository as it is on the base branch. Read what the change touches, and %s. Don't change anything in repo/: it's there to read.
 
 # Write the plan
 
@@ -204,7 +227,7 @@ plan.json:
 - Before naming files, look for the existing tests and fakes that check the behavior the change alters, including command lines, flags and output a fake validates. Name every existing test file the change needs in the plan's files.
 - **files** names the files the build may change or add. Name every production file and existing test the change needs, and nothing it doesn't. Paths are from the repository's root. Invariant's built-in profile refuses .github/. Only the configured native profile admits explicitly named CI files, which always require a person to merge.
 - The build may also add new regular Go `+"`*_test.go`"+` regression files in packages the plan touches, including the nearest Go package owning a planned embedded asset and new packages the plan names. In captured Python and TypeScript parts, new regular pytest, Vitest and Jest regression files may also live anywhere in the touched part, including separate and sibling test areas, when conventional filenames intersect the captured suite targets and default or supported literal discovery settings. Unsupported or executable discovery policy grants no implicit allowance. Test configuration is protected; candidate policy edits cannot grant permission or hide admitted tests. See docs/factory.md for supported forms. These need not be listed in **files**. The original checkout stays the baseline across repairs, so the builder may correct or remove its own new tests. This allowance never permits changes to existing unnamed tests, the ratified acceptance tests or plan, other production files or unrelated packages.
-- **tests** are the acceptance tests: Go test functions that show the change works, each in a new file that isn't in repo/ yet, named like `+"`*_accept_test.go`"+`. Write each file under tests/, at its path in the repository: tests/internal/dashboard/graph_accept_test.go. The build can't change them, so write them against the change's intended API, and test what it does, not how.
+- **tests** are the acceptance tests: %s The build can't change them, so write them against the change's intended API, and test what it does, not how.
 - An acceptance test's expectations about behavior the plan keeps must agree with the existing tests that pin it. When the plan intentionally changes pinned behavior, say so in its summary and name those existing tests in its files.
 - Each test must fail on the code as it is. A test that already passes can't show anything.
 
@@ -212,10 +235,10 @@ Native acceptance records explicitly add part, framework and selector together. 
 
 Configured trust comes from the captured base contract: CI and the gate workflow (.github/, .gitlab-ci.yml and .circleci/), the repository contract, root and nested AGENTS.md and CLAUDE.md, root and nested .codex/, .claude/ and .mcp.json, declared agent rules, dependency inputs, lockfiles and additional trusted paths. The proposal displays derived trusted paths, but that list is not merge authority. Scope uses every actual changed path, including deletions and allowed regressions, under the original base policy and revalidates execution against the current base. Removing declarations in the candidate cannot weaken that boundary. Unrelated compatible base movement is allowed. Successful configured trusted builds remain drafts for a person through recovery and retries. Workflow edits also need publishing credentials with workflow write permission; a refused push preserves the work and waits for a writer's retry after those credentials are fixed. Ordinary work needs no workflow permission, Invariant's App permissions stay unchanged, and external issue intake remains disabled.
 
-After the build passes factory checks, a second agent reviews the whole candidate against the original checkout. Findings return to the same builder in its existing workspace under this unchanged plan for at most two repair attempts, each followed by fresh checks and, if they pass, a fresh review. Final passing checks and approval are required for readiness; configured trusted builds still stay drafts for a person. Unresolved findings, failed checks or an exhausted time allowance leave a draft for a person. Decision recording and checks requiring unavailable Docker or network access belong under Merger work in the review, and do not by themselves require a repair. CI runs the opt-in real Python and TLAPS suites on a pull request whose change can affect them, so they aren't Merger work.
+After the build passes factory checks, a second agent reviews the whole candidate against the original checkout. Findings return to the same builder in its existing workspace under this unchanged plan for at most two repair attempts, each followed by fresh checks and, if they pass, a fresh review. Final passing checks and approval are required for readiness; configured trusted builds still stay drafts for a person. Unresolved findings, failed checks or an exhausted time allowance leave a draft for a person. %s
 
-SPEC.md and the README describe Invariant as it is, and a change that makes either one wrong fixes it in the same change (D-0122). When yours does, name that file among the plan's files, and say in the summary what changes there. The README is the front page, at most 400 lines, so detail belongs in the page under docs/ it links, which describes Invariant as it is too: name that page instead when the detail is what changes (D-0294). A new or changed SPEC bullet cites the decisions it rests on, as `+"`decisions check`"+` requires. A plumbing build can't write decisions/, so when the change needs a decision no one has recorded yet, say so in the summary, and whoever merges it records the decision.
-`, req.Issue, scope)
+%s
+`, req.Issue, rules, scope, acceptance, merger, docs)
 	issueCheck := ""
 	if req.ParentPlan == 0 {
 		issueCheck = "For issues.json, it checks the existing plan-of-issues format and rules, without running acceptance tests. "

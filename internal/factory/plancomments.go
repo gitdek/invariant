@@ -17,13 +17,15 @@ import (
 func planComment(p *formalize.Proposal, m Marker) string {
 	plan := p.Plan
 	readiness := "Only final passing checks and approval make the pull request ready; otherwise it stays a draft with unresolved findings for a person."
+	regressions := "new regular Go `*_test.go` regression files in the packages it touches, including a planned embedded asset's nearest owning Go package and new packages the plan names"
 	if plan.Native() {
 		readiness = "Final passing checks and approval are required for readiness; configured trusted builds still stay drafts for a person. Unresolved findings leave a draft for a person."
+		regressions += ". In captured Python and TypeScript parts it may also add new regular pytest, Vitest and Jest regression files throughout a touched part, including separate and sibling test areas, where conventional filenames intersect captured suite targets and default or supported literal discovery settings. Unsupported or executable discovery policy grants no implicit allowance. Test configuration stays protected; candidate policy edits cannot grant permission or hide admitted tests"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's my plan for **%s**. It's plumbing, so it's tested, not proved. Once you ratify it, the plan and its acceptance tests are pinned by hash: "+
-		"the build writes the files it names and may add new regular Go `*_test.go` regression files in the packages it touches, including a planned embedded asset's nearest owning Go package and new packages the plan names. It has to make every acceptance test pass without changing them.\n\n"+
-		"Existing unnamed tests, the ratified plan and acceptance tests, other production files and unrelated packages stay protected. The original checkout stays the baseline, so a repair may correct or remove a regression test the build added. Review findings return to the same builder and workspace for at most two repairs, each checked and reviewed afresh. %s\n\n", plan.Name, readiness)
+		"the build writes the files it names and may add %s. It has to make every acceptance test pass without changing them.\n\n"+
+		"Existing unnamed tests, the ratified plan and acceptance tests, other production files and unrelated packages stay protected. The original checkout stays the baseline, so a repair may correct or remove a regression test the build added. Review findings return to the same builder and workspace for at most two repairs, each checked and reviewed afresh. %s\n\n", plan.Name, regressions, readiness)
 	fmt.Fprintf(&b, "**What changes.** %s\n\n", strings.TrimSpace(plan.Summary))
 	b.WriteString("**The files the build may write:** " + codeList(plan.Files) + "\n\n")
 	b.WriteString("**The acceptance tests,** which fail on the code as it is:\n\n| Test | Shows |\n| :-- | :-- |\n")
@@ -75,11 +77,10 @@ func planCode(text string) string {
 // isn't Invariant's own: plumbing isn't supported there yet, and why (#103).
 func plumbingElsewhereComment(m Marker) string {
 	return post("not one I can take", fmt.Sprintf("This issue is marked `Kind: plumbing`, and plumbing isn't supported on this repository yet. "+
-		"For now, I plan it only on Invariant's own repository, `%s`, because it isn't ready for any other:\n\n"+
-		"- The gate workflow `invariant init` writes doesn't run the repository's tests or check a plan's ratification.\n"+
-		"- The build and review prompts describe Invariant.\n"+
-		"- Configured native checks derive a repository's trusted base, which only a person merges, but external issue intake is still disabled.\n"+
-		"- The sandbox the build is tested in has no network, so it has no way to fetch the repository's dependencies.\n\n"+
+		"For now, I plan it only on Invariant's own repository, `%s`; external issue intake is still disabled. The remaining prerequisites are:\n\n"+
+		"- Configuration drafting for the repository's parts, commands, documentation, agent rules and trusted base.\n"+
+		"- Generated CI: the gate workflow `invariant init` writes must run the configured repository checks and verify the plan's ratification and scope.\n\n"+
+		"Captured context, dependency preparation and native checks are available to configured callers, with trusted-base changes held for a person; they do not enable intake.\n\n"+
 		"So I haven't drafted anything, and I've left this issue for a person.", invariantRepository), m)
 }
 
@@ -102,6 +103,9 @@ func planPRComment(pr github.PullRequest, res *plumbing.BuildResult, trusted []s
 	}
 	body := fmt.Sprintf("The change is built: %s and all %d acceptance tests pass, and a second agent's review approves it. I opened #%d. %s",
 		checks, res.Tests, pr.Number, merge)
+	if m.Proposal != nil && m.Proposal.Plan != nil && m.Proposal.Plan.Native() {
+		body += configuredBuildChecks(res, m.Proposal.Plan)
+	}
 	body += replacedSentence(m)
 	if res.Fallback != nil {
 		body += "\n\n" + fellBack(res.Fallback)
@@ -243,6 +247,27 @@ func trustedComment(pr github.PullRequest, trusted []string, m Marker) string {
 // across a large package names every test that didn't pass (#408).
 const summaryLimit = 6000
 
+// The summary is retained in build.json, unlike Final. Use it for both fresh
+// and recovered posts so inapplicable phases and native results survive.
+func configuredBuildChecks(res *plumbing.BuildResult, plan *plumbing.Plan) string {
+	var b strings.Builder
+	b.WriteString("\n\nNew regression tests are limited to touched Go packages and captured Python/TypeScript part conventions, intersected with suite targets and supported literal discovery. Existing unnamed tests, acceptance sources and discovery policy stay protected; candidate policy cannot expand the allowance.\n")
+	b.WriteString("\n**Configured check results** (including inapplicable phases):\n\n")
+	summary := res.Summary
+	if summary == "" {
+		summary = res.Final.Summary()
+	}
+	b.WriteString("<pre>" + receipt.EscapeText(clip(summary, summaryLimit)) + "</pre>")
+	b.WriteString("\n\n| Test | Part | Framework | File | Selector | Shows |\n| :-- | :-- | :-- | :-- | :-- | :-- |\n")
+	for _, test := range plan.Tests {
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", planCode(test.Name), planCode(test.Part), planCode(test.Framework), planCode(test.File), planCode(test.Selector), planCode(test.Says))
+	}
+	if plan.Execution != nil {
+		fmt.Fprintf(&b, "\nCaptured execution: %s. Base provenance: %s.\n", receipt.EscapeText(plan.Execution.Digest), receipt.EscapeText(plan.Execution.Base))
+	}
+	return b.String()
+}
+
 // planPullRequestBody is a plan's pull request: the plan, how the build
 // went, and the second agent's review. m is the marker of the build's post,
 // as for a project's.
@@ -268,7 +293,11 @@ func planPullRequestBody(t Thread, m Marker, res *plumbing.BuildResult, trusted 
 	if res.Fallback != nil {
 		b.WriteString("\n" + fellBack(res.Fallback) + "\n")
 	}
-	fmt.Fprintf(&b, "\n**The factory's own run:** %s", clip(res.Summary, summaryLimit))
+	if m.Proposal != nil && m.Proposal.Plan != nil && m.Proposal.Plan.Native() {
+		b.WriteString(configuredBuildChecks(res, m.Proposal.Plan))
+	} else {
+		fmt.Fprintf(&b, "\n**The factory's own run:** %s", clip(res.Summary, summaryLimit))
+	}
 	if res.Review != "" {
 		b.WriteString("\n**The review,** by a second agent that can only read. It's an opinion, not evidence:\n\n" + quote(clip(res.Review, accountLimit), 200) + "\n")
 	}
