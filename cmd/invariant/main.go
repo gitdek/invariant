@@ -61,6 +61,8 @@ Usage:
   invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-agent A] [-language L] [-lease D] [-parallel N] [-check-parallel N]
                                                turn the repository's issues into merged pull requests
   invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
+  invariant check-repository [-C DIR] [-base REF] [-issue N -repo OWNER/NAME] [HEAD]
+                                               run committed repository checks and native acceptance
   invariant ratification -repo OWNER/NAME PROJECT|PLAN...
                                                check factory projects' and plans' ratifications on GitHub
   invariant decisions COMMAND ...              record decisions and ask what rests on them
@@ -97,6 +99,8 @@ func main() {
 		code = watchCmd(ctx, args)
 	case "scope":
 		code = scopeCmd(ctx, args)
+	case "check-repository":
+		code = checkRepositoryCmd(ctx, args)
 	case "ratification":
 		code = ratificationCmd(ctx, args)
 	case "mcp":
@@ -924,10 +928,13 @@ func watchCmd(ctx context.Context, args []string) int {
 	// The factory merges only once invariant/gate passes, and with a merge
 	// commit, so it doesn't start on a repository where its pull requests
 	// never could merge.
-	if err := setup.Check(ctx, gh, *repo, *base); err != nil {
+	if err := clone.Ensure(ctx); err != nil {
 		return fail(err)
 	}
-	if err := clone.Ensure(ctx); err != nil {
+	if err := clone.Fetch(ctx); err != nil {
+		return fail(err)
+	}
+	if err := checkRepositorySetup(ctx, gh, *repo, clone.Dir, "origin/"+*base); err != nil {
 		return fail(err)
 	}
 	// It runs whichever coding agent an issue or its project picks, among
@@ -1297,6 +1304,9 @@ func initCmd(args []string) int {
 	}
 	path, err := setup.Write(dir, *ref, *force)
 	if err != nil {
+		if errors.Is(err, setup.ErrExists) {
+			err = fmt.Errorf("%w; manually upgrade using invariant init -invariant %s in a separate directory, review and merge its check-repository, scope and project/plan ratification steps with your custom workflow, then commit it to the base branch", err, *ref)
+		}
 		if path != "" {
 			err = fmt.Errorf("%s: %w", path, err)
 		}
@@ -1353,7 +1363,7 @@ invariant watch -repo %[3]s -projects invariant%[4]s
 
 4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
 `, setup.WorkflowPath, (*ref)[:12], *repo, language)
-	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; configured checks read committed base evidence. External plumbing remains disabled. Before plumbing can be enabled, a gate must run the configured repository checks and verify plan ratification and scope. The generated workflow still runs the modeled-project gate.")
+	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; check-repository reads committed base evidence. The generated gate runs configured repository checks, scope, project and plan ratification, and modeled verification. External plumbing remains disabled. To upgrade an existing gate, generate this pinned template with invariant init in a separate directory, review and merge these steps with your custom workflow, and commit the result to the base branch; init never replaces a different workflow without -force.")
 	return 0
 }
 
