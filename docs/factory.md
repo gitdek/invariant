@@ -170,7 +170,7 @@ Before ratification, building, publication readiness and the final checked-head 
 
 The real-orchestration fixtures in `configured_flow_742_accept_test.go` cover Go, pytest, Vitest, Jest and a Go/TypeScript repository through the production lease wrapper, planning checks, hash ratification, the real builder, native evidence, review, scope and publication. They share only compiled Go artifacts between subtests; repository and dependency state stay isolated. Intake fixtures cover committed setup, inherited gate restrictions and ambiguous requirements text before installation. Existing modeled scope ordering, dependency refusals, ordinary-CI candidate lockfiles, batch staging, Bash support and compiler attribution remain in force.
 
-This change builds on the recorded contract, native execution, context, trust and gate decisions D-0301, D-0305, D-0311, D-0314, D-0361, D-0379, D-0389, D-0393, D-0395, D-0397 and D-0399. Before further work, the merger must record the decision removing D-0121's temporary intake restriction with `invariant decisions decide`; the factory build cannot write `decisions/`.
+This change builds on the recorded contract, native execution, context, trust and gate decisions D-0301, D-0305, D-0311, D-0314, D-0361, D-0379, D-0389, D-0393, D-0395, D-0397 and D-0399. [D-0403](../decisions/journal/D-0403.jsonl) records it, lifting D-0121's temporary intake restriction, with the merger's real-image checks.
 
 ## Repository check contract
 
