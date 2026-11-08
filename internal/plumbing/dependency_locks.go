@@ -296,11 +296,11 @@ func npmDependencyLock(p repository.Part, files map[string][]byte) error {
 	if pkg.Name != root.Name || pkg.Version != root.Version || pkg.Name != locked.Name || pkg.Version != locked.Version || !maps.Equal(pkg.Dependencies, root.Dependencies) || !maps.Equal(pkg.DevDependencies, root.DevDependencies) || !maps.Equal(pkg.OptionalDependencies, root.OptionalDependencies) || !maps.Equal(pkg.PeerDependencies, root.PeerDependencies) {
 		return errors.New("npm manifest and lock root disagree")
 	}
-	if err := npmSupportedPackage(pkg); err != nil {
+	if err := npmSupportedPackage(pkg, true); err != nil {
 		return err
 	}
 	for location, node := range locked.Packages {
-		if err := npmSupportedPackage(node); err != nil {
+		if err := npmSupportedPackage(node, location == ""); err != nil {
 			return fmt.Errorf("npm package %q: %w", location, err)
 		}
 		if location != "" {
@@ -323,10 +323,19 @@ func npmDependencyLock(p repository.Part, files map[string][]byte) error {
 		if location == "" {
 			groups = append(groups, node.DevDependencies)
 		}
+		bundled, all, err := npmBundled(node)
+		if err != nil {
+			return fmt.Errorf("npm package %q: %w", location, err)
+		}
 		for group, deps := range groups {
 			for name, spec := range deps {
 				if !npmPackageName.MatchString(name) {
 					return fmt.Errorf("unsupported npm dependency name %q", name)
+				}
+				// A bundled dependency comes from the package's own tarball,
+				// not from the lock's tree.
+				if all || bundled[name] {
+					continue
 				}
 				// optionalDependencies override dependencies of the same name.
 				if group == 0 && node.OptionalDependencies[name] != "" {
@@ -352,11 +361,37 @@ func npmDependencyLock(p repository.Part, files map[string][]byte) error {
 	return nil
 }
 
-func npmSupportedPackage(p npmDependencyPackage) error {
-	if len(p.Workspaces) != 0 || len(p.Overrides) != 0 || len(p.BundledDependencies) != 0 || len(p.BundleDependencies) != 0 || p.Link || p.InBundle {
+// A dependency may bundle packages: they ship inside its own tarball, which
+// its integrity covers. Packages recorded as bundled inside another are still
+// refused, as is bundling at the root.
+func npmSupportedPackage(p npmDependencyPackage, root bool) error {
+	bundles := len(p.BundledDependencies) != 0 || len(p.BundleDependencies) != 0
+	if len(p.Workspaces) != 0 || len(p.Overrides) != 0 || bundles && root || p.Link || p.InBundle {
 		return errors.New("npm workspaces, overrides, bundled packages and links are not supported")
 	}
 	return nil
+}
+
+// npmBundled names the dependencies a package ships inside its own tarball:
+// a list of names, or true for all of them.
+func npmBundled(p npmDependencyPackage) (map[string]bool, bool, error) {
+	names, all := map[string]bool{}, false
+	for _, raw := range []json.RawMessage{p.BundleDependencies, p.BundledDependencies} {
+		if len(raw) == 0 {
+			continue
+		}
+		var list []string
+		if err := json.Unmarshal(raw, &list); err == nil {
+			for _, name := range list {
+				names[name] = true
+			}
+			continue
+		}
+		if err := json.Unmarshal(raw, &all); err != nil {
+			return nil, false, errors.New("bundled dependencies must be a list of names or a boolean")
+		}
+	}
+	return names, all, nil
 }
 
 func npmIntegrity(value string) bool {
