@@ -120,8 +120,8 @@ func cantRun(agent string) error {
 
 // unrunnableComment answers an issue whose agent the watcher can't run, or
 // doesn't know, before anything is drafted, as plumbingElsewhereComment
-// answers plumbing on another repository (D-0121). can names every agent
-// the watcher can run, its own first.
+// answers plumbing on a repository without committed setup (D-0403). can
+// names every agent the watcher can run, its own first.
 func unrunnableComment(agent string, can []string, m Marker) string {
 	return post("not one I can take", fmt.Sprintf("This issue's coding agent is `%s`, and this watcher can't run it. It can run %s. "+
 		"An issue's `Agent:` line picks its agent, else the manifest of the project it changes does, else it gets the watcher's own.\n\n"+

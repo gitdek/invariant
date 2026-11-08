@@ -186,11 +186,11 @@ func TestAProjectsManifestPicksTheAgentUnlessItsIssueDoes(t *testing.T) {
 
 // An issue that picks an agent the watcher can't run, or one it doesn't
 // know, gets one answer before anything's drafted, as a plumbing issue on
-// another repository does (D-0121). The answer names the agent the issue
-// picked and every agent the watcher can run, and the issue is left for a
-// person: nothing is drafted, no agent run is recorded, and no branch is
-// pushed. An issue whose project's manifest picks such an agent, and that
-// picks none itself, gets the same.
+// a repository without committed setup does (D-0403). The answer names
+// the agent the issue picked and every agent the watcher can run, and the
+// issue is left for a person: nothing is drafted, no agent run is
+// recorded, and no branch is pushed. An issue whose project's manifest
+// picks such an agent, and that picks none itself, gets the same.
 func TestAnAgentTheWatcherCantRunGetsOneAnswer(t *testing.T) {
 	const dir = "examples/03-bounded-buffer"
 	for _, c := range []struct {
