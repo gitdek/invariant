@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -338,6 +339,9 @@ func (s *DependencySession) Run(caller context.Context, partName, candidateRoot 
 	q.Image, q.SourceDir = p.artifact.Image, candidateRoot
 	q.Network, q.Pull = false, false
 	q.Argv, q.Env = slices.Clone(argv), dependencyEnv(p.part.Language, false)
+	if p.part.Language == "typescript" {
+		q.Env["PATH"] = nodeToolsPath(q.Directory, q.Env["PATH"])
+	}
 	var err error
 	q.Token, err = dependencyToken()
 	if err != nil {
@@ -375,6 +379,12 @@ func cloneDependencyArtifact(a DependencyArtifact) DependencyArtifact {
 func cloneDependencyRequest(q DependencyRequest) DependencyRequest {
 	q.Argv, q.Env, q.Inputs = slices.Clone(q.Argv), maps.Clone(q.Env), maps.Clone(q.Inputs)
 	return q
+}
+
+// nodeToolsPath puts a TypeScript part's prepared node_modules/.bin first, as
+// npm run does, for the part's declared commands only (#765).
+func nodeToolsPath(directory, base string) string {
+	return path.Join(dependencyWork, directory, "node_modules", ".bin") + ":" + base
 }
 
 func dependencyEnv(language string, network bool) map[string]string {

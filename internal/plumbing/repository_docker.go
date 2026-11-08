@@ -83,6 +83,22 @@ type dockerRepositoryChecks struct {
 }
 
 func (e *dockerRepositoryChecks) Run(ctx context.Context, argv []string) ([]byte, error) {
+	return e.run(ctx, argv, nil)
+}
+
+// RunCommand runs one of the part's declared commands. A TypeScript part's
+// find its prepared, locked tools first, as npm run does (#765). Run keeps the
+// image's PATH for Invariant's own helpers, so a locked package can't stand in
+// for node.
+func (e *dockerRepositoryChecks) RunCommand(ctx context.Context, argv []string) ([]byte, error) {
+	var extra map[string]string
+	if e.request.Env["NPM_CONFIG_OFFLINE"] == "true" {
+		extra = map[string]string{"PATH": nodeToolsPath(e.request.Directory, dependencyContainerEnv(e.request)["PATH"])}
+	}
+	return e.run(ctx, argv, extra)
+}
+
+func (e *dockerRepositoryChecks) run(ctx context.Context, argv []string, extra map[string]string) ([]byte, error) {
 	if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" || strings.HasPrefix(argv[0], "-") {
 		return nil, errors.New("repository check needs an executable")
 	}
@@ -91,7 +107,7 @@ func (e *dockerRepositoryChecks) Run(ctx context.Context, argv []string) ([]byte
 			return nil, errors.New("repository check argument contains NUL")
 		}
 	}
-	args := e.execArgs("", nil)
+	args := e.execArgs("", extra)
 	// The fixed wrapper also keeps an executable containing '=' from being
 	// interpreted as an env assignment. Only positional arguments reach exec.
 	args = append(args, "/bin/sh", "-c", "exec \"$@\"", "invariant-check")
