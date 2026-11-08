@@ -323,10 +323,19 @@ func npmDependencyLock(p repository.Part, files map[string][]byte) error {
 		if location == "" {
 			groups = append(groups, node.DevDependencies)
 		}
+		bundled, all, err := npmBundled(node)
+		if err != nil {
+			return fmt.Errorf("npm package %q: %w", location, err)
+		}
 		for group, deps := range groups {
 			for name, spec := range deps {
 				if !npmPackageName.MatchString(name) {
 					return fmt.Errorf("unsupported npm dependency name %q", name)
+				}
+				// A bundled dependency comes from the package's own tarball,
+				// not from the lock's tree.
+				if all || bundled[name] {
+					continue
 				}
 				// optionalDependencies override dependencies of the same name.
 				if group == 0 && node.OptionalDependencies[name] != "" {
@@ -361,6 +370,28 @@ func npmSupportedPackage(p npmDependencyPackage, root bool) error {
 		return errors.New("npm workspaces, overrides, bundled packages and links are not supported")
 	}
 	return nil
+}
+
+// npmBundled names the dependencies a package ships inside its own tarball:
+// a list of names, or true for all of them.
+func npmBundled(p npmDependencyPackage) (map[string]bool, bool, error) {
+	names, all := map[string]bool{}, false
+	for _, raw := range []json.RawMessage{p.BundleDependencies, p.BundledDependencies} {
+		if len(raw) == 0 {
+			continue
+		}
+		var list []string
+		if err := json.Unmarshal(raw, &list); err == nil {
+			for _, name := range list {
+				names[name] = true
+			}
+			continue
+		}
+		if err := json.Unmarshal(raw, &all); err != nil {
+			return nil, false, errors.New("bundled dependencies must be a list of names or a boolean")
+		}
+	}
+	return names, all, nil
 }
 
 func npmIntegrity(value string) bool {
