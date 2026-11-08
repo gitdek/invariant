@@ -979,6 +979,11 @@ func watchCmd(ctx context.Context, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	// Each request supplies its committed snapshot. The template retains only
+	// host-owned dependency state, shared by planning, builds and repairs.
+	f.RepositoryDependencies = plumbing.DependencyPreparer{
+		CacheDir: filepath.Join(dir, "dependencies"), Platform: "linux/amd64",
+	}
 	// Each coding agent runs every role for the issues it takes: drafting,
 	// building, and a plumbing plan's build and its review (#173). A
 	// plumbing issue's plan is built with tests, not proofs, and a second
@@ -1363,7 +1368,7 @@ invariant watch -repo %[3]s -projects invariant%[4]s
 
 4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
 `, setup.WorkflowPath, (*ref)[:12], *repo, language)
-	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; check-repository reads committed base evidence. The generated gate runs configured repository checks, scope, project and plan ratification, and modeled verification. External plumbing remains disabled. To upgrade an existing gate, generate this pinned template with invariant init in a separate directory, review and merge these steps with your custom workflow, and commit the result to the base branch; init never replaces a different workflow without -force.")
+	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; check-repository reads committed base evidence. The generated gate runs configured repository checks, scope, project and plan ratification, and modeled verification. External plumbing remains disabled until the reviewed contract and capable gate are committed on the authoritative base. Configured issues then use native Go, pytest, Vitest and Jest tests under captured repository rules; trusted changes stay drafts for a person. Without a committed contract, intake runs no agent and creates no branch. To upgrade an existing gate, generate this pinned template with invariant init in a separate directory, review and merge these steps with your custom workflow, and commit the result to the base branch; init never replaces a different workflow without -force.")
 	return 0
 }
 
