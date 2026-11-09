@@ -4,7 +4,7 @@ The factory acts as its own bot once it has a GitHub App ([D-0041](../decisions/
 
 The App is optional. Without one, the factory posts and merges as you, through `gh`, pushes with your git credentials, and tells its own posts from people's by the markers in them. With one, its work shows as the bot's, and the App's narrow permissions bound what it can do.
 
-For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, bot `invariant-code-factory[bot]`, installed on gitdek/invariant ([D-0044](../decisions/log.md)) and, since 2026-11-09, on gitdek/ask3d ([D-0407](../decisions/journal/D-0407.jsonl)). It also worked on copythis-ad ([D-0054](../decisions/D-0054-slice-6-part-b-plan.md)) until that repository left Invariant ([D-0149](../decisions/log.md)). `Invariant Factory` was taken, because it's reserved for an existing account. Creating the App and holding its private key is the repository owner's job. The factory only ever reads the key from the path you give it.
+For gitdek/invariant, the App is **Invariant Code Factory**: App ID `5079269`, bot `invariant-code-factory[bot]`, installed on gitdek/invariant ([D-0044](../decisions/log.md)) and, since 2026-11-09, on gitdek/ask3d ([D-0408](../decisions/journal/D-0408.jsonl)). It also worked on copythis-ad ([D-0054](../decisions/D-0054-slice-6-part-b-plan.md)) until that repository left Invariant ([D-0149](../decisions/log.md)). `Invariant Factory` was taken, because it's reserved for an existing account. Creating the App and holding its private key is the repository owner's job. The factory only ever reads the key from the path you give it.
 
 ## Create the App
 
