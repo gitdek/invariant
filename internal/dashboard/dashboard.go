@@ -133,7 +133,7 @@ type sources struct {
 	// tests, by blob (#775).
 	plans   map[string]int
 	plansAt string
-	graph     *DecisionGraph
+	graph   *DecisionGraph
 }
 
 // Whether the gate job ran in a finished run (D-0081, D-0083).
