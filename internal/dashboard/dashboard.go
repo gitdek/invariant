@@ -90,6 +90,15 @@ type Repo struct {
 // Short is the repository's name without its owner.
 func (r *Repo) Short() string { return path.Base(r.Name) }
 
+// head is the branch's newest commit: the first commit read, or the
+// branch's ref for a repository whose commits aren't read.
+func (r *Repo) head() string {
+	if len(r.src.commits) > 0 {
+		return r.src.commits[0].SHA
+	}
+	return r.src.head
+}
+
 // sources is the last good read of everything the snapshot is built from,
 // so one source failing leaves the rest fresh.
 type sources struct {
@@ -101,6 +110,7 @@ type sources struct {
 	receipts *receiptSet
 	projects []projectSource
 	files    map[string][]byte // by commit and path; a commit's files never change
+	head     string            // the branch's newest commit, for a repository whose commits aren't read
 	docsAt   string            // the commit docs were read at
 	log      string
 	readme   string
@@ -207,6 +217,10 @@ type RepoState struct {
 	Lease    *Lease  `json:"lease,omitempty"` // which watcher may act (D-0069)
 	Totals   Totals  `json:"totals"`          // the big numbers for this repository alone
 	Tiles    []Tile  `json:"tiles"`           // its numbers row, from its own totals
+	// Decisions are another repository's own, from its journal, for its view
+	// (#773). The primary repository's are the snapshot's.
+	Decisions *Decisions `json:"decisions,omitempty"`
+	who       Who        // who made its decisions' calls, for its decisions tile
 }
 
 // Lease is a repository's lease as its ref says: the one watcher that may
@@ -494,6 +508,12 @@ func (s *Server) refresh(ctx context.Context) error {
 			} else {
 				r.src.commits = commits
 			}
+		} else if sha, err := r.GitHub.Ref(ctx, "heads/"+s.Branch); err != nil {
+			fail("branch", err)
+		} else {
+			// Its decision journal is read at its branch's head, so its
+			// view shows its own decisions (#773).
+			r.src.head = sha
 		}
 		if runs, err := r.GitHub.Runs(ctx, s.Branch, 30); err != nil {
 			fail("CI runs", err)
@@ -516,9 +536,9 @@ func (s *Server) refresh(ctx context.Context) error {
 			if err := s.readDocs(ctx, r); err != nil {
 				fail("docs", err)
 			}
-			if err := s.readJournal(ctx, r); err != nil {
-				fail("decision journal", err)
-			}
+		}
+		if err := s.readJournal(ctx, r); err != nil {
+			fail("decision journal", err)
 		}
 		s.checkMerges(ctx, r)
 		if lease, err := readLease(ctx, r); err != nil {
@@ -894,10 +914,11 @@ func (s *Server) readDocs(ctx context.Context, r *Repo) error {
 // ones. When any changed, it builds the decision graph again, and until a
 // build succeeds the page keeps the last good one.
 func (s *Server) readJournal(ctx context.Context, r *Repo) error {
-	if len(r.src.commits) == 0 {
+	sha := r.head()
+	if sha == "" {
 		return errors.New("no commits read")
 	}
-	if sha := r.src.commits[0].SHA; sha != r.src.journalAt {
+	if sha != r.src.journalAt {
 		// A commit without the directory has no journal files.
 		entries, err := r.GitHub.Files(ctx, "decisions/journal", sha)
 		if err != nil && !errors.Is(err, github.ErrNotFound) {
@@ -1122,6 +1143,10 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			}
 			snap.Activity = append(snap.Activity, e)
 		}
+		if i > 0 {
+			rs.Decisions, rs.who = journalDecisions(r.src.graph)
+			rs.Totals.Decisions = rs.Decisions.Total
+		}
 		snap.Repos = append(snap.Repos, rs)
 	}
 	snap.Totals.Statements, snap.Who.Built = len(pins), len(built)
@@ -1220,9 +1245,41 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	// totals, which the page shows when that repository is chosen (#152).
 	snap.Tiles = Tiles(snap.Totals, snap.Who)
 	for i := range snap.Repos {
-		snap.Repos[i].Tiles = Tiles(snap.Repos[i].Totals, snap.Who)
+		who := snap.Who
+		if snap.Repos[i].Decisions != nil {
+			who = snap.Repos[i].who
+		}
+		snap.Repos[i].Tiles = Tiles(snap.Repos[i].Totals, who)
 	}
 	return snap
+}
+
+// journalDecisions are a repository's decisions as its journal's graph
+// holds them, for a repository whose log isn't read: the newest twelve, the
+// counts by status and by who, and who made the calls, for its decisions
+// tile. A repository without a journal has none.
+func journalDecisions(g *DecisionGraph) (*Decisions, Who) {
+	d := &Decisions{Status: map[string]int{}, Who: map[string]int{}, Latest: []Decision{}, Graph: g}
+	var who Who
+	if g == nil {
+		return d, who
+	}
+	d.Total = len(g.Nodes)
+	for i := len(g.Nodes) - 1; i >= 0; i-- {
+		n := g.Nodes[i]
+		d.Status[n.Status]++
+		d.Who[n.Who]++
+		if len(d.Latest) < 12 {
+			d.Latest = append(d.Latest, Decision{ID: n.ID, Date: n.Date, Door: n.Door, Status: n.Status, Text: n.Text, Who: n.Who})
+		}
+		if n.Who == "@gitdek" && n.Status == "ratified" {
+			who.Ratified++
+		}
+		if n.Status == "decided" {
+			who.Logged++
+		}
+	}
+	return d, who
 }
 
 // runsOf reads checks only from the run named by the headline issue's step

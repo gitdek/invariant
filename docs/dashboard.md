@@ -2,6 +2,12 @@
 
 The [live dashboard](https://invariant.puglisij.com/) shows the factory at work. `invariant dashboard -repo OWNER/NAME` serves it on http://127.0.0.1:8484, beside the factory [the README](../README.md#use-it-on-your-repository) sets up. This page says what its cards show and keep, and what the private `/act` page adds.
 
+## Repository views
+
+The page shows every repository `-repo` names, Invariant's own first. **Show** chooses one of them or everything, and each choice is a link to its view's address: `/?repo=ask3d`, with the repository's short name, or owner/name when two repositories share it ([#773](https://github.com/gitdek/invariant/issues/773), [D-0409](../decisions/journal/D-0409.jsonl)). The page opens on the repository its address names, or on the last choice when the address names none, and keeps the address on the view it shows, so a view can be bookmarked and shared, and back and forward move between views. A repository the page doesn't show opens Everything.
+
+In a repository's view, every part shows only that repository: its headline and the page's title, what needs a person, its running or last finished steps, its numbers, its projects and their state charts, its issues, its activity and its decisions. Another repository's decisions come from its own journal, `decisions/journal`, read at its branch's head, and its decisions tile counts its own calls; a repository without a journal says it has none. The road and who builds what describe Invariant itself, so they show only in Invariant's view and in Everything. Another repository's commits aren't read, only its branch's ref.
+
 ## Reader evidence
 
 Each modeled project's checked reader chart, from CI's receipt archive, links to a script-free evidence page, which links the standalone `image/svg+xml` image. The shared native Go renderer draws the complete chart and report: literal labels, verbatim locked rules, unavailable model actions, all hidden occurrences and view-rule IDs, separately defined counts, checked bounds and source/tool provenance. The image works without scripts or a browser renderer. Its page identifies the repository, full project path and receipt commit, keeps the locked wording readable as text, and includes the complete reader record. Neither adds a proof claim or changes the receipt's verdict or code assurance.
