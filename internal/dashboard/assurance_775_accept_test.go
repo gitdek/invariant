@@ -58,6 +58,16 @@ func TestARepositoryCountsItsTestedChanges775(t *testing.T) {
 	} {
 		entries = append(entries, map[string]any{"name": name, "type": "blob", "oid": queryBlob([]byte(text)), "object": map[string]any{"text": text, "isTruncated": false}})
 	}
+	// GitHub's query can return a plan's text with escapes missing, as it
+	// does issue-227.json's, and not truncated. That plan is read whole.
+	whole := plan(true, 4)
+	entries = append(entries, map[string]any{"name": "issue-4.json", "type": "blob", "oid": queryBlob([]byte(whole)), "object": map[string]any{"text": `{"ratified":{"by":"gitdek"},"plan":{"summary":"a \q"}}`, "isTruncated": false}})
+	if err := os.MkdirAll(filepath.Join(fake, ours, ".invariant", "plans"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fake, ours, ".invariant", "plans", "issue-4.json"), []byte(whole), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	queryWrite(t, filepath.Join(fake, ours, "plans.json"), map[string]any{"data": map[string]any{"repository": map[string]any{"object": map[string]any{"entries": entries}}}})
 	queryHead(t, fake, ours)
 
@@ -93,14 +103,14 @@ func TestARepositoryCountsItsTestedChanges775(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := snap.Repos[0].Totals; got.Tested != 2 || got.Tests != 5 {
-		t.Errorf("o/r tested %d changes by %d tests, want its 2 ratified plans' 5", got.Tested, got.Tests)
+	if got := snap.Repos[0].Totals; got.Tested != 3 || got.Tests != 9 {
+		t.Errorf("o/r tested %d changes by %d tests, want its 3 ratified plans' 9", got.Tested, got.Tests)
 	}
 	if got := snap.Repos[1].Totals; got.Tested != 0 || got.Tests != 0 {
 		t.Errorf("o/quiet, which has no plans, tested %d changes by %d tests", got.Tested, got.Tests)
 	}
-	if snap.Totals.Tested != 2 || snap.Totals.Tests != 5 {
-		t.Errorf("everything tested %d changes by %d tests, want 2 by 5", snap.Totals.Tested, snap.Totals.Tests)
+	if snap.Totals.Tested != 3 || snap.Totals.Tests != 9 {
+		t.Errorf("everything tested %d changes by %d tests, want 3 by 9", snap.Totals.Tested, snap.Totals.Tests)
 	}
 }
 

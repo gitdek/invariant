@@ -994,19 +994,38 @@ func (s *Server) readPlans(ctx context.Context, r *Repo) error {
 			plans[e.OID] = n
 			continue
 		}
-		var p struct {
-			Ratified *struct{} `json:"ratified"`
-			Plan     struct {
-				Tests []json.RawMessage `json:"tests"`
-			} `json:"plan"`
+		n, ratified, ok := planTests([]byte(e.Text))
+		if !ok {
+			// The query's text of a blob isn't always its bytes: GitHub returns
+			// issue-227.json, a 358 KB plan, with escapes missing and not
+			// truncated. The contents API gives the file itself.
+			b, err := s.file(ctx, r, sha, ".invariant/plans/"+e.Name)
+			if err != nil {
+				return err
+			}
+			n, ratified, _ = planTests(b)
 		}
-		if json.Unmarshal([]byte(e.Text), &p) != nil || p.Ratified == nil {
-			continue
+		if ratified {
+			plans[e.OID] = n
 		}
-		plans[e.OID] = len(p.Plan.Tests)
 	}
 	r.src.plans, r.src.plansAt = plans, sha
 	return nil
+}
+
+// planTests is how many acceptance tests a plan pinned, and whether a person
+// ratified it. It's not ok for text that isn't a plan.
+func planTests(b []byte) (tests int, ratified, ok bool) {
+	var p struct {
+		Ratified *struct{} `json:"ratified"`
+		Plan     struct {
+			Tests []json.RawMessage `json:"tests"`
+		} `json:"plan"`
+	}
+	if json.Unmarshal(b, &p) != nil {
+		return 0, false, false
+	}
+	return len(p.Plan.Tests), p.Ratified != nil, true
 }
 
 func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, error) {
