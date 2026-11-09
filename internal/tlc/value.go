@@ -46,7 +46,11 @@ func (p *valueParser) value() (any, error) {
 	case p.i < len(p.s) && p.s[p.i] == '"':
 		return p.str()
 	case p.i < len(p.s) && (p.s[p.i] == '-' || p.s[p.i] >= '0' && p.s[p.i] <= '9'):
-		return p.integer()
+		n, err := p.integer()
+		if err != nil || !p.eat("..") {
+			return n, err
+		}
+		return p.interval(n.(int64))
 	}
 	switch id := p.ident(); id {
 	case "":
@@ -161,6 +165,36 @@ func (p *valueParser) integer() (any, error) {
 		return nil, p.errorf("bad integer %q", p.s[start:p.i])
 	}
 	return n, nil
+}
+
+// maxInterval is the most integers an interval may list.
+const maxInterval = 1 << 16
+
+// interval reads the rest of a set TLC prints as its bounds, low..high: the
+// integers from low to high, as the set TLC would print in braces. 1..3 is
+// {1, 2, 3}, and 1..0 is empty (#777).
+func (p *valueParser) interval(low int64) (any, error) {
+	if p.i >= len(p.s) || !(p.s[p.i] == '-' || p.s[p.i] >= '0' && p.s[p.i] <= '9') {
+		return nil, p.errorf("expected an integer after ..")
+	}
+	h, err := p.integer()
+	if err != nil {
+		return nil, err
+	}
+	high := h.(int64)
+	out := []any{}
+	if high < low {
+		return out, nil
+	}
+	if d := high - low; d < 0 || d >= maxInterval {
+		return nil, p.errorf("the interval %d..%d holds more than %d integers", low, high, maxInterval)
+	}
+	for n := low; ; n++ {
+		out = append(out, n)
+		if n == high {
+			return out, nil
+		}
+	}
 }
 
 func (p *valueParser) ident() string {
