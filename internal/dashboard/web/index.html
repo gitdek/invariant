@@ -96,13 +96,15 @@
     <div class="inbox" id="inbox"></div>
   </section>
 
+  <section class="assurance" id="assurance" aria-label="What's proved, model-checked and tested"></section>
+
   <section class="numbers" id="numbers" aria-label="The numbers"></section>
 
   <section class="block">
     <header>
       <div>
         <h2>The fleet</h2>
-        <p class="lede">Every repository Invariant works in is a star. Its projects orbit it as planets, sized by how many states TLC checked and colored by language, with a ring in the accent when every check holds. Open issues ride the outer orbit as comets, from issue to merge, and each merged issue becomes a moon of its project.</p>
+        <p class="lede">Every repository Invariant works in is a star. The models it checks there orbit it as planets, sized by how many states TLC checked and colored by language, with a ring in the accent when every check holds. Open issues ride the outer orbit as comets, from issue to merge, and each merged issue becomes a moon of its model.</p>
       </div>
     </header>
     <div class="fleet" id="fleet"></div>
@@ -146,9 +148,9 @@
     <header>
       <div>
         <h2>What's proved</h2>
-        <p class="lede">Every modeled project, from CI's last passing gate receipt: one row per model, with a chip for each implementation. Rest on a chart to see it whole, and click it for its evidence page. A model with no reader chart says why. Charts are checked bounded models and add no proof claim.</p>
+        <p class="lede">Every checked model, from CI's last passing gate receipt: one row per model, with a chip for each implementation. Rest on a chart to see it whole, and click it for its evidence page. A model with no reader chart says why. Charts are checked bounded models and add no proof claim.</p>
       </div>
-      <div class="viewtoggle" role="group" aria-label="Show projects as"><button type="button" data-view="cards">Models</button><button type="button" data-view="table">Table</button></div>
+      <div class="viewtoggle" role="group" aria-label="Show models as"><button type="button" data-view="cards">Models</button><button type="button" data-view="table">Table</button></div>
     </header>
     <p class="muted" id="receipts"></p>
     <div class="models" id="projects"></div>

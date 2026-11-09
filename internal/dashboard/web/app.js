@@ -113,7 +113,7 @@
   function render(s) {
     settleScope(s);
     renderTop(s);
-    if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
+    if (changed("scope", [scope, s.totals, (s.repos || []).map((r) => [r.name, r.totals, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
     if (ACT && changed("untaken", [scope, state?.repo])) untaken.paint();
     if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
@@ -121,6 +121,7 @@
     // changes at once without changing anything else it draws (#175).
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
     if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
+    if (changed("assurance", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals])])) renderAssurance(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states, p.receiptMissing])])) renderTabs(s);
     if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
@@ -243,7 +244,7 @@
       }
       const f = r.factory?.running ? "factory on" : "factory off";
       const held = r.lease && T(r.lease.until) > Date.now() ? " · lease held" : "";
-      rows.push(`<div class="${quiet(r.name)}" ${tag(r.name)}><span class="k">${esc(r.short)}</span><span>${gate} · ${f}${held} · ${r.projects} project${r.projects === 1 ? "" : "s"}</span></div>`);
+      rows.push(`<div class="${quiet(r.name)}" ${tag(r.name)}><span class="k">${esc(r.short)}</span><span>${gate} · ${f}${held} · ${esc(established(r.totals))}</span></div>`);
     }
     $("#mainline").innerHTML = rows.join("");
   }
@@ -1382,6 +1383,19 @@
   // (#773).
   let asked = new URLSearchParams(location.search).get("repo");
   const inScope = (repo) => scope === "all" || !repo || repo === scope;
+  // What a repository has established, in plain words: functions proved,
+  // models checked and changes tested, never "projects" (#775).
+  const many = (n, one, more) => `${Number(n).toLocaleString("en-US")} ${n === 1 ? one : more}`;
+  function established(t, words = { proved: ["function", "functions"], models: ["model", "models"], tested: ["change", "changes"] }) {
+    const parts = [];
+    if (t.proved) parts.push(`${many(t.proved, ...words.proved)} proved`);
+    if (t.models) parts.push(`${many(t.models, ...words.models)} checked`);
+    if (t.tested) parts.push(`${many(t.tested, ...words.tested)} tested`);
+    if (!t.proved && !t.models) parts.unshift(t.tested ? "nothing proved yet" : "nothing checked yet");
+    return parts.join(" · ");
+  }
+  // The same, short enough for Show's choices.
+  const briefly = (t) => established(t, { proved: ["", ""], models: ["", ""], tested: ["", ""] }).replace(/ {2}/g, " ");
   const shortOf = (s, name) => (s.repos || []).find((r) => r.name === name)?.short || name;
   // The decisions the page shows: Invariant's own, or the chosen
   // repository's, from its journal (#773).
@@ -1454,17 +1468,30 @@
     const nav = $("#scope");
     if (repos.length < 2) { nav.innerHTML = ""; return; }
     const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
-    const all = repos.reduce((a, r) => a + r.projects, 0);
     // Each choice is a link to its view, so it can open in a new tab.
-    const link = (value, label, projects, open, live) =>
-      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${projects} project${projects === 1 ? "" : "s"}${open ? ` · ${open} open` : ""}</span></a>`;
-    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", all, openIn(""), repos.some((r) => r.factory?.running)) +
-      repos.map((r) => link(r.name, r.short, r.projects, openIn(r.name), r.factory?.running)).join("");
+    const link = (value, label, t, open, live) =>
+      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${esc(briefly(t))}${open ? ` · ${open} open` : ""}</span></a>`;
+    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), repos.some((r) => r.factory?.running)) +
+      repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), r.factory?.running)).join("");
     nav.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
       if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
       setScope(a.dataset.scope);
     }));
+  }
+
+  // ---------- what's established ----------
+  // Before the numbers, each repository in view says what's proved,
+  // model-checked and tested, in those words (#775).
+  function renderAssurance(s) {
+    const level = (key, label, n, says) => `<div class="lvl ${key}${n ? " on" : ""}"><b>${label}</b><span>${n ? says : "Nothing yet"}</span></div>`;
+    $("#assurance").innerHTML = (s.repos || []).filter((r) => inScope(r.name)).map((r) => {
+      const t = r.totals;
+      return `<div class="arow${quiet(r.name)}" ${tag(r.name)}><span class="repo">${esc(r.short)}</span>
+        ${level("proved", "Proved", t.proved, `${many(t.proved, "function", "functions")}, by Gobra and Nagini`)}
+        ${level("checked", "Model-checked", t.models, `${many(t.models, "model", "models")}, ${many(t.states, "state", "states")} explored`)}
+        ${level("tested", "Tested", t.tested, `${many(t.tested, "change", "changes")}, by ${many(t.tests, "acceptance test", "acceptance tests")}`)}</div>`;
+    }).join("");
   }
 
   // ---------- needs you ----------
@@ -2106,11 +2133,11 @@
         <animateTransform attributeName="transform" type="translate" values="-60 40; 280 -20" dur="2.8s" repeatCount="indefinite"/></line>`;
     const legend = projects.length
       ? projects.slice().reverse().map((p) => `<span data-model="${esc(p.model)}" title="${esc(p.dir)}"><i class="${langClass(p.language)}"></i>${esc(cap(p.name))}</span>`).join("")
-      : `<span>No projects yet. The first issue's project will orbit here.</span>`;
+      : `<span>No models yet. The first model it checks will orbit here.</span>`;
     const state = r.factory?.running ? `<span class="chip factory pulse state"><i></i>${working ? "working" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
     return `<article class="system${quiet(r.name)}" ${tag(r.name)}>
-      <header><h3>${esc(r.short)}</h3><span class="meta">${n} project${n === 1 ? "" : "s"} · ${open.length} open · ${merged.length} merged</span>${state}</header>
-      <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${n} projects, ${open.length} open issues">${g}</svg>
+      <header><h3>${esc(r.short)}</h3><span class="meta">${esc(established(r.totals))} · ${open.length} open · ${merged.length} merged</span>${state}</header>
+      <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${esc(established(r.totals))}, ${open.length} open issues">${g}</svg>
       <div class="legend2">${legend}</div></article>`;
   }
 

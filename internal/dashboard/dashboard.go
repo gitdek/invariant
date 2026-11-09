@@ -128,7 +128,12 @@ type sources struct {
 	journal   map[string]journalFile
 	journalAt string
 	rebuild   bool
-	graph     *DecisionGraph
+	// plans are the ratified plans on the branch, .invariant/plans, as
+	// plansAt, the commit they were last read at: each one's acceptance
+	// tests, by blob (#775).
+	plans   map[string]int
+	plansAt string
+	graph   *DecisionGraph
 }
 
 // Whether the gate job ran in a finished run (D-0081, D-0083).
@@ -412,6 +417,8 @@ type Totals struct {
 	LocksChecked  int   `json:"locksChecked"`
 	BadLocks      int   `json:"badLocks"` // a lock that isn't the proposal its ratification names
 	Decisions     int   `json:"decisions"`
+	Tested        int   `json:"tested"` // changes merged under a ratified plan (#775)
+	Tests         int   `json:"tests"`  // the acceptance tests those plans pinned
 }
 
 // Who is who builds what (D-0048): people decide, Invariant proves, and
@@ -539,6 +546,9 @@ func (s *Server) refresh(ctx context.Context) error {
 		}
 		if err := s.readJournal(ctx, r); err != nil {
 			fail("decision journal", err)
+		}
+		if err := s.readPlans(ctx, r); err != nil {
+			fail("plans", err)
 		}
 		s.checkMerges(ctx, r)
 		if lease, err := readLease(ctx, r); err != nil {
@@ -958,6 +968,66 @@ func (s *Server) readJournal(ctx context.Context, r *Repo) error {
 	return nil
 }
 
+// readPlans reads .invariant/plans at the branch's newest commit, once for
+// each commit, in one query, and keeps each ratified plan's count of
+// acceptance tests, so a repository's view can say what's tested (#775). A
+// plan on the branch was merged with the change it planned. A blob already
+// read isn't parsed again.
+func (s *Server) readPlans(ctx context.Context, r *Repo) error {
+	sha := r.head()
+	if sha == "" {
+		return errors.New("no commits read")
+	}
+	if sha == r.src.plansAt {
+		return nil
+	}
+	entries, err := r.GitHub.Files(ctx, ".invariant/plans", sha)
+	if err != nil && !errors.Is(err, github.ErrNotFound) {
+		return err
+	}
+	plans := map[string]int{}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name, "issue-") || !strings.HasSuffix(e.Name, ".json") {
+			continue
+		}
+		if n, ok := r.src.plans[e.OID]; ok {
+			plans[e.OID] = n
+			continue
+		}
+		n, ratified, ok := planTests([]byte(e.Text))
+		if !ok {
+			// The query's text of a blob isn't always its bytes: GitHub returns
+			// issue-227.json, a 358 KB plan, with escapes missing and not
+			// truncated. The contents API gives the file itself.
+			b, err := s.file(ctx, r, sha, ".invariant/plans/"+e.Name)
+			if err != nil {
+				return err
+			}
+			n, ratified, _ = planTests(b)
+		}
+		if ratified {
+			plans[e.OID] = n
+		}
+	}
+	r.src.plans, r.src.plansAt = plans, sha
+	return nil
+}
+
+// planTests is how many acceptance tests a plan pinned, and whether a person
+// ratified it. It's not ok for text that isn't a plan.
+func planTests(b []byte) (tests int, ratified, ok bool) {
+	var p struct {
+		Ratified *struct{} `json:"ratified"`
+		Plan     struct {
+			Tests []json.RawMessage `json:"tests"`
+		} `json:"plan"`
+	}
+	if json.Unmarshal(b, &p) != nil {
+		return 0, false, false
+	}
+	return len(p.Plan.Tests), p.Ratified != nil, true
+}
+
 func (s *Server) file(ctx context.Context, r *Repo, sha, p string) ([]byte, error) {
 	key := r.Name + "@" + sha + ":" + p
 	if b, ok := r.src.files[key]; ok {
@@ -1146,6 +1216,12 @@ func (s *Server) assemble(now time.Time) Snapshot {
 		if i > 0 {
 			rs.Decisions, rs.who = journalDecisions(r.src.graph)
 			rs.Totals.Decisions = rs.Decisions.Total
+		}
+		for _, n := range r.src.plans {
+			for _, t := range []*Totals{&snap.Totals, &rs.Totals} {
+				t.Tested++
+				t.Tests += n
+			}
 		}
 		snap.Repos = append(snap.Repos, rs)
 	}
