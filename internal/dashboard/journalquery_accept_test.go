@@ -347,11 +347,15 @@ func queryRefreshes(t *testing.T, fake string, from, n int) {
 
 // queryReads checks that the only reads of the journal among calls are one
 // GraphQL query of decisions/journal at sha: no tree listed, and no file read
-// one at a time.
+// one at a time. The plans' own query, .invariant/plans at the same commit,
+// reads no journal (#775).
 func queryReads(t *testing.T, calls []string, sha, when string) {
 	t.Helper()
 	var reads []string
 	for _, c := range calls {
+		if c == "graphql "+sha+":.invariant/plans" {
+			continue
+		}
 		if strings.HasPrefix(c, "graphql") || strings.Contains(c, "/git/trees/") || strings.Contains(c, "/git/blobs/") || strings.Contains(c, "decisions/journal") {
 			reads = append(reads, c)
 		}
