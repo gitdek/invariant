@@ -75,7 +75,11 @@
 }
 
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+/* The scrollbar's room is kept whether or not it shows, so the page's width
+   never depends on its height. Otherwise a short view, whose orbit's height
+   follows its width, can bring the scrollbar back and forth without end, and
+   switching views jumps the page sideways (#781). */
+html { -webkit-text-size-adjust: 100%; scrollbar-gutter: stable; }
 body {
   margin: 0;
   background: var(--bg);
@@ -133,6 +137,9 @@ header.top {
 .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--bug); box-shadow: 0 0 0 0 rgba(var(--bug-rgb), 0.6); animation: beat 2s infinite; }
 @keyframes beat { 0% { box-shadow: 0 0 0 0 rgba(var(--bug-rgb), 0.55); } 70% { box-shadow: 0 0 0 9px rgba(var(--bug-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--bug-rgb), 0); } }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 12px; justify-content: flex-end; min-width: 0; }
+/* The updated label ticks every second in a proportional face, so it gets a
+   width of its own and digits of one width: nothing beside it moves (#781). */
+#updated { display: inline-block; width: 9em; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .pill { white-space: nowrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px;
@@ -709,7 +716,9 @@ footer p { margin: 0; max-width: 60em; }
   border-radius: 999px; padding: 8px 12px; cursor: pointer; display: inline-flex; text-decoration: none; gap: 8px; align-items: center;
   transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s;
 }
-.scope a:hover { color: var(--ink); transform: translateY(-1px); }
+/* A choice brightens rather than lifts when pointed at: a lift moves it out
+   from under a cursor resting on its edge, back and forth (#781). */
+.scope a:hover { color: var(--ink); border-color: rgba(var(--ink-rgb), 0.35); }
 .scope a[aria-current="page"] { color: var(--bg); background: var(--ink); border-color: var(--ink); }
 .scope a .ct { font: 600 11px var(--mono); opacity: 0.7; }
 .scope a i.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
@@ -724,9 +733,11 @@ footer p { margin: 0; max-width: 60em; }
 .orbit .aside .issue-dot { filter: none; }
 .orbit .aside .issue-label { font-size: 10px; fill: var(--ink3); }
 .leaving { animation: leave 0.36s ease forwards !important; pointer-events: none; }
-@keyframes leave { to { opacity: 0; filter: blur(3px); } }
+@keyframes leave { to { opacity: 0; } }
 .arriving { animation: arrive 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both !important; }
-@keyframes arrive { from { opacity: 0; filter: blur(3px); } }
+/* Views fade by opacity alone: a blur on every leaving and arriving element
+   at once is the heaviest thing the page asks of the browser (#781). */
+@keyframes arrive { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .leaving, .arriving { animation: none !important; } }
 @keyframes livepulse { 70% { box-shadow: 0 0 0 8px rgba(var(--accent-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); } }
 
@@ -1021,3 +1032,6 @@ footer p { margin: 0; max-width: 60em; }
 .alternative { min-width: 0; }
 .alternative > .opt { width: 100%; }
 .alternative .reader-evidence { margin: .75rem 0 1.5rem; }
+
+/* A proposal's chart in its card, drawn for people to read (#784). */
+.reader-poster { display: block; width: 100%; height: auto; border-radius: 18px; box-shadow: 0 16px 40px rgba(9, 13, 28, 0.35); }

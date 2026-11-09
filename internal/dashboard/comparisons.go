@@ -65,36 +65,65 @@ func (e comparisonEvidence) checked() (string, string, string) {
 
 const comparisonHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Proposal reader evidence</title>
-<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}code{overflow-wrap:anywhere}</style></head>
+<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:72rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}img.poster{width:auto;max-width:100%;margin:1rem auto;border-radius:28px;box-shadow:0 24px 60px rgba(9,13,28,.35)}code{overflow-wrap:anywhere}dt{font-weight:600}dd{margin:0 0 1rem}.kind{font:600 12px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;color:#5b6b7a;margin-left:.5rem}</style></head>
 <body><main><h1>{{.Evidence.Proposal.Name}}</h1><p>{{.Evidence.Repo}} · issue #{{.Evidence.Issue}}</p><p>{{.Presentation.Message}}</p>
-{{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked proposal comparison and complete bounded evidence">{{end}}
+{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked state chart for {{.Evidence.Proposal.Name}}"></picture>
+{{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{end}}{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked proposal comparison and complete bounded evidence">{{end}}
+{{if .Evidence.Proposal}}<h2>The rules you would ratify</h2><dl>{{range .Evidence.Proposal.Statements}}<dt>{{.Name}}<span class="kind">{{.Kind}}</span></dt><dd>{{.Says}}</dd>{{end}}</dl>
+<h2>Checked bounds</h2><dl>{{range $name, $value := .Evidence.Proposal.Bounds}}<dt>{{$name}}</dt><dd><code>{{$value}}</code></dd>{{end}}</dl>{{end}}
 <details><summary>Complete proposal sources and checked reader record</summary><pre>{{.Record}}</pre></details>
 <p>Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
 <p>These proposed rules await ratification. The comparison describes bounded, view-qualified charts and does not establish behavioral equivalence.</p></main></body></html>`
 
 var comparisonTemplate = template.Must(template.New("comparison").Parse(comparisonHTML))
 
+// posters draws a checked proposal's chart for people to read, as a merged
+// project's page does: an animated poster and its still twin, or neither
+// (#784). The complete evidence image stays the presentation's SVG.
+func (e comparisonEvidence) posters(status string) (string, string) {
+	p := e.Proposal
+	if status != "chart" || p == nil || p.Reader == nil || p.Reader.Chart == nil {
+		return "", ""
+	}
+	poster, err := p.Reader.Chart.Poster(statechart.PosterOptions{Title: p.Name, Animated: true})
+	if err != nil {
+		return "", ""
+	}
+	still, err := p.Reader.Chart.Poster(statechart.PosterOptions{Title: p.Name})
+	if err != nil {
+		return "", ""
+	}
+	return poster, still
+}
+
 func makeComparison(e comparisonEvidence) readerPage {
 	status, message, svg := e.checked()
+	poster, still := e.posters(status)
 	p := ReaderPresentation{Status: status, Message: message, Format: comparisonFormat}
 	key := readerHash(readerJSON(struct {
 		Evidence                       comparisonEvidence
 		Status, Message, SVG, Template string
-	}{e, status, message, svg, comparisonHTML}))
+		Poster, Still                  string `json:",omitempty"`
+	}{e, status, message, svg, comparisonHTML, poster, still}))
 	p.Fingerprint = key
 	base := "/reader/" + strings.TrimPrefix(key, "sha256:")
 	p.Page = base + ".html"
 	if svg != "" {
 		p.SVG = base + ".svg"
 	}
+	var posters *PosterLinks
+	if poster != "" {
+		posters = &PosterLinks{Animated: base + ".poster.svg", Still: base + ".still.svg"}
+	}
 	record, _ := json.MarshalIndent(e.Proposal, "", "  ")
 	var b bytes.Buffer
 	_ = comparisonTemplate.Execute(&b, struct {
 		Evidence     comparisonEvidence
 		Presentation ReaderPresentation
+		Posters      *PosterLinks
 		Record       string
-	}{e, p, string(record)})
-	return readerPage{repo: e.Repo, presentation: p, html: b.Bytes(), svg: []byte(svg)}
+	}{e, p, posters, string(record)})
+	return readerPage{repo: e.Repo, presentation: p, posters: posters, html: b.Bytes(), svg: []byte(svg), poster: []byte(poster), still: []byte(still)}
 }
 
 func (s *Server) comparisonFile(key string) string {
@@ -112,6 +141,7 @@ func (s *Server) presentComparison(is *Issue) {
 		return
 	}
 	is.Waiting.Reader = s.keepComparison(comparisonEvidence{Format: comparisonFormat, Repo: is.Repo, Issue: is.Number, Proposal: is.Waiting.Proposal})
+	is.Waiting.Posters = s.postersFor(is.Waiting.Reader)
 }
 
 func (s *Server) restoreComparisons(snap *Snapshot) {
@@ -134,5 +164,6 @@ func (s *Server) restoreComparisons(snap *Snapshot) {
 		}
 		expected := comparisonEvidence{Format: comparisonFormat, Repo: repo, Issue: is.Number, Proposal: w.Proposal}
 		w.Reader = comparisonCache.restore(s, expected, w.Reader, "Cached proposal comparison is damaged or obsolete; check the captured baseline and candidate again.")
+		w.Posters = s.postersFor(w.Reader)
 	}
 }

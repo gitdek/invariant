@@ -81,6 +81,7 @@ type Issue struct {
 type Waiting struct {
 	Proposal   *formalize.Proposal `json:"proposal,omitempty"`
 	Reader     *ReaderPresentation `json:"reader,omitempty"`
+	Posters    *PosterLinks        `json:"posters,omitempty"`    // its chart for people to read, in place of the evidence image (#784)
 	Kind       string              `json:"kind"`                 // forks, proposal or failed
 	Failure    string              `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
 	Forks      []Question          `json:"forks,omitempty"`      // the questions to answer
@@ -165,6 +166,7 @@ type Choice struct {
 	Says    string              `json:"says"`
 	Preview *formalize.Preview  `json:"preview,omitempty"`
 	Reader  *ReaderPresentation `json:"reader,omitempty"`
+	Posters *PosterLinks        `json:"posters,omitempty"` // its chart for people to read (#784)
 }
 
 // Said is one statement of a proposal, in plain language.
