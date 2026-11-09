@@ -982,7 +982,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	// Each request supplies its committed snapshot. The template retains only
 	// host-owned dependency state, shared by planning, builds and repairs.
 	f.RepositoryDependencies = plumbing.DependencyPreparer{
-		CacheDir: filepath.Join(dir, "dependencies"), Platform: "linux/amd64",
+		CacheDir: filepath.Join(dir, "dependencies"), Platform: dependencyPlatform(),
 	}
 	// Each coding agent runs every role for the issues it takes: drafting,
 	// building, and a plumbing plan's build and its review (#173). A

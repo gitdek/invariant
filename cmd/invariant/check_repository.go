@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -205,7 +206,7 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 		}
 		plan.Files = append(plan.Files, regressions.Files(after)...)
 	}
-	dependencies := plumbing.DependencyPreparer{CacheDir: filepath.Join(work, "dependencies"), Platform: "linux/amd64"}
+	dependencies := plumbing.DependencyPreparer{CacheDir: filepath.Join(work, "dependencies"), Platform: dependencyPlatform()}
 	if sb.Repository != nil {
 		dependencies.Runner = sb.Repository.Dependencies.Runner
 		dependencies.Timeout = sb.Repository.Dependencies.Timeout
@@ -522,4 +523,12 @@ func stageRepositoryCommit(ctx context.Context, dir, commit, dst string) (stageE
 		return fmt.Errorf("unexpected batch output after tree: %v", err)
 	}
 	return ctx.Err()
+}
+
+// dependencyPlatform is the Docker host's own Linux platform: linux/arm64 on
+// Apple silicon, linux/amd64 on CI's runners. A base pinned by digest can hold
+// both, and inspecting it without a platform reports the host's, so preparing
+// another refuses the image; emulating it would be slower too.
+func dependencyPlatform() string {
+	return "linux/" + runtime.GOARCH
 }

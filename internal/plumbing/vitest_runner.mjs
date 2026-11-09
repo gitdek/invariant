@@ -81,30 +81,45 @@ async function run() {
     if (test.environment && test.environment !== 'node') throw new Error('acceptance requires the prepared Node environment');
     if (config.esbuild && typeof config.esbuild !== 'object') throw new Error('unsupported esbuild configuration');
     if (config.esbuild) common.onlyKeys(config.esbuild, ['jsx', 'jsxFactory', 'jsxFragment', 'target'], 'esbuild');
-    common.resolve('esbuild');
+    // Vite 8 transforms with Rolldown in place of esbuild. Either comes only
+    // from the locked dependencies.
+    try { common.resolve('esbuild'); } catch { common.resolve('rolldown'); }
+    const major = vitestMajor();
     const analysis = common.analyze(selected, {globals: test.globals === true});
     process.env.INVARIANT_NODE_WORKER = JSON.stringify({...selected, Proposed: analysis.proposed, ControllerPID: process.pid});
     process.env.INVARIANT_NODE_ENDPOINT = session.endpoint;
     const {createVitest} = await common.importLocked('vitest/node');
     let completed = false;
+    const reported = new Set();
+    // Vitest 2 reports a run's end with onFinished, Vitest 4 with onTestRunEnd,
+    // and Vitest 3 with both. Each may report once, and both must agree.
+    const finished = (hook, files, errors) => {
+      if (reported.has(hook) || errors?.length || files.length !== 1 || files[0].filepath !== common.regular(selected.File)) throw new Error('Vitest session did not finish uniquely');
+      reported.add(hook);
+      const selectedTasks = [];
+      const walk = suite => { for (const task of suite.tasks || []) task.type === 'test' ? selectedTasks.push(task) : walk(task); };
+      walk(files[0]);
+      const matches = selectedTasks.filter(t => title(t) === selected.Binding.Selector);
+      if (matches.length !== 1 || !['pass', 'fail'].includes(matches[0].result?.state) ||
+          selectedTasks.some(t => title(t) !== selected.Binding.Selector && ['pass', 'fail'].includes(t.result?.state))) throw new Error('Vitest final results differ from exact selection');
+      if (!hooksPassed(files[0])) throw new Error('Vitest hook or suite error');
+      const result = matches[0].result.state === 'pass' ? 0 : 1;
+      if (completed && result !== code) throw new Error('Vitest session did not finish uniquely');
+      code = result;
+      completed = true;
+    };
     const reporter = {
-      onFinished(files, errors) {
-        if (completed || errors?.length || files.length !== 1 || files[0].filepath !== common.regular(selected.File)) throw new Error('Vitest session did not finish uniquely');
-        const selectedTasks = [];
-        const walk = suite => { for (const task of suite.tasks || []) task.type === 'test' ? selectedTasks.push(task) : walk(task); };
-        walk(files[0]);
-        const matches = selectedTasks.filter(t => title(t) === selected.Binding.Selector);
-        if (matches.length !== 1 || !['pass', 'fail'].includes(matches[0].result?.state) ||
-            selectedTasks.some(t => title(t) !== selected.Binding.Selector && ['pass', 'fail'].includes(t.result?.state))) throw new Error('Vitest final results differ from exact selection');
-        if (!hooksPassed(files[0])) throw new Error('Vitest hook or suite error');
-        code = matches[0].result.state === 'pass' ? 0 : 1;
-        completed = true;
+      onFinished(files, errors) { finished('onFinished', files, errors); },
+      // Each test module's task is the file Vitest 2 reported.
+      onTestRunEnd(modules, errors, reason) {
+        if (reason === 'interrupted') throw new Error('Vitest session was interrupted');
+        finished('onTestRunEnd', modules.map(m => m.task), errors);
       },
     };
     ctx = await createVitest('test', {root: common.root, config: false, ...test,
       include: [selected.File], watch: false, passWithNoTests: false, testNamePattern: policy.testNamePattern,
       ...(policy.testTimeout ? {testTimeout: policy.testTimeout} : {}),
-      pool: 'forks', poolOptions: {forks: {singleFork: true}}, fileParallelism: false,
+      pool: 'forks', ...(major >= 4 ? {maxWorkers: 1} : {poolOptions: {forks: {singleFork: true}}}), fileParallelism: false,
       isolate: true, retry: 0, runner: fileURLToPath(import.meta.url), reporters: [reporter]}, {esbuild: config.esbuild});
     await ctx.start([common.regular(selected.File)]);
     await ctx.close();
@@ -122,6 +137,12 @@ async function run() {
     session.close();
     process.exitCode = code;
   }
+}
+
+// Vitest 4 moved poolOptions to top-level options such as maxWorkers.
+function vitestMajor() {
+  try { return Number(common.requireLocked('vitest/package.json').version.split('.')[0]); }
+  catch { return 0; }
 }
 
 if (isMain) run().catch(error => { console.error(error); process.exitCode = 1; });

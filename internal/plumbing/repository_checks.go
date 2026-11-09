@@ -42,6 +42,19 @@ type repositoryCheckRunner interface {
 	OpenChecks(context.Context, DependencyRequest) (RepositoryCheckEnvironment, error)
 }
 
+// An environment that runs a part's declared commands differently from
+// Invariant's own helpers implements RunCommand; Run stays the helpers' (#765).
+type repositoryCommandEnvironment interface {
+	RunCommand(context.Context, []string) ([]byte, error)
+}
+
+func runRepositoryCommand(ctx context.Context, environment RepositoryCheckEnvironment, argv []string) ([]byte, error) {
+	if commands, ok := environment.(repositoryCommandEnvironment); ok {
+		return commands.RunCommand(ctx, argv)
+	}
+	return environment.Run(ctx, argv)
+}
+
 // CommandResult records a declared check, not individual acceptance evidence.
 type CommandResult struct {
 	Part   string `json:"part"`
@@ -382,7 +395,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				return result, err
 			}
 			command.Status = "running"
-			out, err := environment.Run(execution, slices.Clone(part.Commands[phase].Argv))
+			out, err := runRepositoryCommand(execution, environment, slices.Clone(part.Commands[phase].Argv))
 			result.Output += fmt.Sprintf("%s/%s:\n%s\n", part.Name, phase, out)
 			err = errors.Join(err, execution.Err())
 			if err != nil {
