@@ -246,6 +246,26 @@ a.chip:hover { border-color: currentColor; }
    width in em, --ems, which the page gives it (#152), so it always fits.
    The numbers row's tiles are size containers for it. */
 .numbers .num { container-type: inline-size; }
+
+/* ---------- What's established: proved, model-checked, tested ---------- */
+/* One row for each repository in view, before the numbers, in plain words
+   (#775). A level with something in it lights up; one with nothing says so. */
+.assurance { display: grid; gap: 10px; margin: 8px 0 14px; }
+.assurance:empty { display: none; }
+.arow {
+  display: grid; grid-template-columns: minmax(84px, 150px) repeat(3, minmax(0, 1fr)); gap: 1px;
+  border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--line);
+}
+.arow .repo { background: var(--tile); padding: 14px 18px; display: flex; align-items: center; font: 600 15px/1.2 var(--sans); color: var(--ink); }
+.arow .lvl { position: relative; background: var(--tile); padding: 13px 18px 14px 22px; font-size: 13px; line-height: 1.45; color: var(--ink3); }
+.arow .lvl b { display: block; margin-bottom: 3px; font: 600 11px/1.3 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink3); }
+.arow .lvl::before { content: ""; position: absolute; left: 10px; top: 14px; bottom: 14px; width: 3px; border-radius: 2px; background: var(--line2); }
+.arow .lvl.on { color: var(--ink); }
+.arow .lvl.on::before { background: var(--accent); box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.55); }
+.arow .lvl.on b { color: var(--accent); }
+.arow .lvl.checked.on::before { opacity: 0.8; }
+.arow .lvl.tested.on::before { opacity: 0.6; }
+@media (max-width: 720px) { .arow { grid-template-columns: 1fr; } }
 .num .v { font: 600 clamp(30px, 3.4vw, 42px)/1 var(--sans); font-size: min(clamp(30px, 3.4vw, 42px), 100cqi / var(--ems, 1)); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .num .l { font-size: 14px; color: var(--ink); font-weight: 500; line-height: 1.3; }
 .num .s { font-size: 12.5px; color: var(--ink3); line-height: 1.4; margin-top: auto; }
