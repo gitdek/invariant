@@ -111,6 +111,7 @@
   }
 
   function render(s) {
+    settleScope(s);
     renderTop(s);
     if (changed("scope", [scope, (s.repos || []).map((r) => [r.name, r.projects, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
@@ -124,10 +125,16 @@
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states, p.receiptMissing])])) renderTabs(s);
     if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
     if (changed("projects", [scope, pview, s.projects])) renderProjects(s);
+    // The road and who builds what describe Invariant itself, so another
+    // repository's view leaves them out (#773).
+    const own = scope === "all" || scope === s.repo;
+    $("#road").closest("section").hidden = !own;
+    $("#who").closest("section").hidden = !own;
     if (changed("road", s.slices)) renderRoad(s.slices);
     if (changed("who", [s.who, s.decisions.status])) renderWho(s);
-    if (changed("decisions", s.decisions)) renderDecisions(s.decisions);
-    if (changed("dgraph", s.decisions.graph || null)) dgraph.update(s.decisions.graph);
+    const d = decisionsOf(s);
+    if (changed("decisions", [scope, d])) renderDecisions(d, own ? "" : shortOf(s, scope));
+    if (changed("dgraph", [scope, d.graph || null])) dgraph.update(d.graph, own ? "" : scope);
     if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
     if (live) renderLive();
     tick();
@@ -154,7 +161,9 @@
     }
     const working = n.waitingOn === "factory" || n.waitingOn === "ci";
     h.classList.toggle("working", working && !REDUCED);
-    document.title = `${n.headline} · Invariant`;
+    // Another repository's view is named in the title too (#773).
+    const other = scope === "all" || scope === s.repo ? "" : shortOf(s, scope);
+    document.title = other ? `${n.headline} · ${other} · Invariant` : `${n.headline} · Invariant`;
 
     const d = $("#detail");
     const lastMerged = s.issues.find((i) => i.stage === "merged" && inScope(i.repo));
@@ -1191,7 +1200,11 @@
   }
 
   // ---------- decisions ----------
-  function renderDecisions(d) {
+  function renderDecisions(d, name) {
+    if (!d.total) {
+      $("#decisions").innerHTML = `<p class="muted">No decisions are recorded in ${esc(name || "this repository")} yet. They show here once it keeps a journal in <code>decisions/journal</code>.</p>`;
+      return;
+    }
     const st = d.status || {};
     const parts = [["ratified", st.ratified || 0, "ratified by @gitdek"], ["decided", st.decided || 0, "decided by an agent"], ["proposed", st.proposed || 0, "proposed"]];
     const total = Math.max(1, d.total);
@@ -1243,7 +1256,14 @@
         if (b) this.choose(b.dataset.dg);
       });
     },
-    update(g) {
+    update(g, repo = "") {
+      // Another repository's journal numbers its decisions from D-0001 too,
+      // so none of its decisions is new to a graph it replaces (#773).
+      if (repo !== this.repo) {
+        this.repo = repo;
+        this.known = new Set();
+        this.chosen = "";
+      }
       this.box.hidden = !g?.nodes?.length;
       if (this.box.hidden) return;
       // A decision that's new since the last graph arrives on its own.
@@ -1356,7 +1376,33 @@
   // ---------- scope: which repositories the page shows ----------
   let scope = "all", pview = "cards", lanesAll = false;
   try { scope = localStorage.getItem("invariant-scope") || "all"; pview = localStorage.getItem("invariant-pview") || "cards"; } catch (e) {}
+  // An address can name the repository to show, as ?repo=ask3d, by its short
+  // name or as owner/name, so each repository's view can be bookmarked and
+  // shared. It's settled against the repositories once the snapshot comes
+  // (#773).
+  let asked = new URLSearchParams(location.search).get("repo");
   const inScope = (repo) => scope === "all" || !repo || repo === scope;
+  const shortOf = (s, name) => (s.repos || []).find((r) => r.name === name)?.short || name;
+  // The decisions the page shows: Invariant's own, or the chosen
+  // repository's, from its journal (#773).
+  const decisionsOf = (s) => (scope === "all" || scope === s.repo ? s.decisions : (s.repos || []).find((r) => r.name === scope)?.decisions) || { total: 0, status: {}, who: {}, latest: [] };
+  // The address names the repository the page shows, by its short name
+  // unless another repository shares it, or none for everything (#773).
+  function addressOf(v) {
+    const repos = state?.repos || [], r = repos.find((x) => x.name === v), u = new URL(location.href);
+    if (r) u.searchParams.set("repo", repos.filter((x) => x.short === r.short).length > 1 ? r.name : r.short);
+    else u.searchParams.delete("repo");
+    return u;
+  }
+  function address(push) {
+    const u = addressOf(scope);
+    if (u.href !== location.href) history[push ? "pushState" : "replaceState"](null, "", u);
+  }
+  // Back and forward move between the views the address named.
+  addEventListener("popstate", () => {
+    const v = new URLSearchParams(location.search).get("repo");
+    setScope((state?.repos || []).find((r) => r.name === v || r.short === v)?.name || "all", false);
+  });
   // Every item from a repository says which, so choosing one repository can
   // fade the others out. With everything shown, another repository's items
   // stay quieter than Invariant's own.
@@ -1367,12 +1413,27 @@
   // And their tiles, in the server's words.
   const tilesOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.tiles) || s.tiles || [];
   let fading = 0;
-  function setScope(v) {
+  // The scope settles before anything is drawn, so what each part last drew
+  // for is the scope it drew: on the repository the address asked for, or on
+  // everything when the page doesn't show the one chosen. The address follows
+  // it.
+  function settleScope(s) {
+    const repos = s.repos || [];
+    if (asked !== null) {
+      scope = repos.find((r) => r.name === asked || r.short === asked)?.name || "all";
+      asked = null;
+      try { localStorage.setItem("invariant-scope", scope); } catch (e) {}
+    }
+    if (scope !== "all" && !repos.find((r) => r.name === scope)) scope = "all";
+    address(false);
+  }
+  function setScope(v, push = true) {
     if (v === scope) return;
     const was = scope;
     scope = v;
     try { localStorage.setItem("invariant-scope", v); } catch (e) {}
     if (!state) return;
+    address(push);
     // What the choice leaves out fades first. Then the page is drawn for it,
     // and what comes back fades in.
     const draw = () => {
@@ -1392,14 +1453,18 @@
     const repos = s.repos || [];
     const nav = $("#scope");
     if (repos.length < 2) { nav.innerHTML = ""; return; }
-    if (scope !== "all" && !repos.find((r) => r.name === scope)) scope = "all";
     const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
     const all = repos.reduce((a, r) => a + r.projects, 0);
-    const btn = (value, label, projects, open, live) =>
-      `<button type="button" data-scope="${esc(value)}" aria-pressed="${scope === value}"><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${projects} project${projects === 1 ? "" : "s"}${open ? ` · ${open} open` : ""}</span></button>`;
-    nav.innerHTML = `<span class="lbl">Show</span>` + btn("all", "Everything", all, openIn(""), repos.some((r) => r.factory?.running)) +
-      repos.map((r) => btn(r.name, r.short, r.projects, openIn(r.name), r.factory?.running)).join("");
-    nav.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => setScope(b.dataset.scope)));
+    // Each choice is a link to its view, so it can open in a new tab.
+    const link = (value, label, projects, open, live) =>
+      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${projects} project${projects === 1 ? "" : "s"}${open ? ` · ${open} open` : ""}</span></a>`;
+    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", all, openIn(""), repos.some((r) => r.factory?.running)) +
+      repos.map((r) => link(r.name, r.short, r.projects, openIn(r.name), r.factory?.running)).join("");
+    nav.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      setScope(a.dataset.scope);
+    }));
   }
 
   // ---------- needs you ----------
