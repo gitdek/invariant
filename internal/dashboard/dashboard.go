@@ -1330,6 +1330,39 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	return snap
 }
 
+// componentAssurance is what a project's explicit components earned for its
+// code: proved, with how many components a proof qualifies; tested in every
+// state, when every passing conformance check reached every state its model
+// has; tested otherwise, with the most states one reached; or unchecked, when
+// no component earned any of those.
+func componentAssurance(c *verify.ComponentEvidence) (assurance string, proved int, visited int64) {
+	if c == nil {
+		return "unchecked", 0, 0
+	}
+	for _, p := range c.Proofs {
+		if p.Status == "proved" {
+			proved++
+		}
+	}
+	if proved > 0 {
+		return "proved", proved, 0
+	}
+	assurance = "unchecked"
+	for _, e := range c.Conformance {
+		if !e.TransitionsChecked || e.Result.Outcome != "passed" {
+			continue
+		}
+		visited = max(visited, e.Result.States)
+		switch {
+		case assurance == "unchecked" && e.ExhaustiveStates:
+			assurance = "tested in every state"
+		case !e.ExhaustiveStates:
+			assurance = "tested"
+		}
+	}
+	return assurance, 0, visited
+}
+
 // journalDecisions are a repository's decisions as its journal's graph
 // holds them, for a repository whose log isn't read: the newest twelve, the
 // counts by status and by who, and who made the calls, for its decisions
@@ -1501,6 +1534,12 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 		if p.Assurance == "proved" {
 			p.Verified = len(c.Functions)
 		}
+	}
+	// A receipt with explicit components says what each one earned. The page
+	// says what the code earned, in the words it uses for every project, and
+	// never "unchecked" for code that ran against the model (#780).
+	if p.Assurance == "component evidence" {
+		p.Assurance, p.Verified, p.Visited = componentAssurance(r.Components)
 	}
 	if rt := r.Ratified; rt != nil {
 		p.Ratified = &Provenance{By: rt.By, At: rt.At, Issue: rt.Issue, Previous: rt.Previous}

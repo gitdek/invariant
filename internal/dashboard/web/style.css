@@ -75,7 +75,11 @@
 }
 
 * { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+/* The scrollbar's room is kept whether or not it shows, so the page's width
+   never depends on its height. Otherwise a short view, whose orbit's height
+   follows its width, can bring the scrollbar back and forth without end, and
+   switching views jumps the page sideways (#781). */
+html { -webkit-text-size-adjust: 100%; scrollbar-gutter: stable; }
 body {
   margin: 0;
   background: var(--bg);
