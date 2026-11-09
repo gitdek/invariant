@@ -682,18 +682,18 @@ footer p { margin: 0; max-width: 60em; }
   padding: 10px 0; margin: 0 0 6px; background: linear-gradient(var(--bg) 70%, transparent);
 }
 .scope::-webkit-scrollbar { display: none; }
-.scope button { flex: none; }
+.scope a { flex: none; }
 .scope .lbl { font: 600 11px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); margin-right: 4px; }
-.scope button {
+.scope a {
   font: 500 13px/1 var(--sans); color: var(--ink2); background: rgba(var(--glass-rgb), 0.7); border: 1px solid var(--line2);
-  border-radius: 999px; padding: 8px 12px; cursor: pointer; display: inline-flex; gap: 8px; align-items: center;
+  border-radius: 999px; padding: 8px 12px; cursor: pointer; display: inline-flex; text-decoration: none; gap: 8px; align-items: center;
   transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s;
 }
-.scope button:hover { color: var(--ink); transform: translateY(-1px); }
-.scope button[aria-pressed="true"] { color: var(--bg); background: var(--ink); border-color: var(--ink); }
-.scope button .ct { font: 600 11px var(--mono); opacity: 0.7; }
-.scope button i.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
-.scope button i.live.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.6); animation: livepulse 1.8s infinite; }
+.scope a:hover { color: var(--ink); transform: translateY(-1px); }
+.scope a[aria-current="page"] { color: var(--bg); background: var(--ink); border-color: var(--ink); }
+.scope a .ct { font: 600 11px var(--mono); opacity: 0.7; }
+.scope a i.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
+.scope a i.live.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.6); animation: livepulse 1.8s infinite; }
 
 /* ---------- Focus: one repository at a time ---------- */
 /* With everything shown, another repository's items are quieter than
