@@ -179,6 +179,7 @@ type projectSource struct {
 	comparison    []byte
 	lockBytes     []byte
 	manifestBytes []byte
+	code          map[string]string // existing code's paths in the repository (#786)
 	reader        *ReaderPresentation
 }
 
@@ -734,7 +735,8 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 		name := path.Base(p.dir)
 		e := readerEvidence{Format: readerFormat, Repo: r.Name, Dir: p.dir, Commit: run.HeadSHA,
 			Manifest: p.manifest, Lock: p.lock, ManifestBytes: p.manifestBytes, LockBytes: p.lockBytes,
-			Files: p.files, View: p.view, Comparison: p.comparison, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name]}
+			Files: p.files, View: p.view, Comparison: p.comparison, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name],
+			Code: p.code}
 		if missing != nil {
 			e.Problem = "missing_archive"
 		} else if names[name] > 1 {
@@ -847,6 +849,7 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 			return nil, fmt.Errorf("%s's lock: %w", dir, err)
 		}
 		p.lockBytes = raw
+		p.code = existingCode(tree, dir, p.manifest)
 		for _, f := range tree {
 			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/comparison.json") {
 				p.comparison, err = s.file(ctx, r, sha, f.Path)

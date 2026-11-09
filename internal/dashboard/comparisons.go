@@ -64,18 +64,19 @@ func (e comparisonEvidence) checked() (string, string, string) {
 }
 
 const comparisonHTML = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Proposal reader evidence</title>
-<style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:72rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}img.poster{width:auto;max-width:100%;margin:1rem auto;border-radius:28px;box-shadow:0 24px 60px rgba(9,13,28,.35)}code{overflow-wrap:anywhere}dt{font-weight:600}dd{margin:0 0 1rem}.kind{font:600 12px/1 ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;color:#5b6b7a;margin-left:.5rem}</style></head>
-<body><main><h1>{{.Evidence.Proposal.Name}}</h1><p>{{.Evidence.Repo}} · issue #{{.Evidence.Issue}}</p><p>{{.Presentation.Message}}</p>
-{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked state chart for {{.Evidence.Proposal.Name}}"></picture>
-{{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{end}}{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked proposal comparison and complete bounded evidence">{{end}}
-{{if .Evidence.Proposal}}<h2>The rules you would ratify</h2><dl>{{range .Evidence.Proposal.Statements}}<dt>{{.Name}}<span class="kind">{{.Kind}}</span></dt><dd>{{.Says}}</dd>{{end}}</dl>
-<h2>Checked bounds</h2><dl>{{range $name, $value := .Evidence.Proposal.Bounds}}<dt>{{$name}}</dt><dd><code>{{$value}}</code></dd>{{end}}</dl>{{end}}
+<html lang="en"><head>` + evidenceHead + `<title>{{.Evidence.Proposal.Name}} — proposal evidence</title></head>
+<body><main>{{template "top" .View}}
+<div class="hero">{{template "hero" .View}}<p class="lede">{{.Presentation.Message}}</p>{{template "links" .View}}</div>
+<div class="chart">{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked state chart for {{.Evidence.Proposal.Name}}"></picture>
+{{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{end}}{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked proposal comparison and complete bounded evidence">{{end}}</div>
+{{if .Evidence.Proposal}}<section><h2>The rules you would ratify</h2><p class="note">Ratifying pins these by hash. The factory then writes the code or driver, and CI checks every step against them.</p>{{template "rules" .View}}</section>
+<section><h2>Checked bounds</h2><p class="note">TLC explored every state the draft model reaches within these.</p>{{template "bounds" .View}}</section>{{end}}
 <details><summary>Complete proposal sources and checked reader record</summary><pre>{{.Record}}</pre></details>
-<p>Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
-<p>These proposed rules await ratification. The comparison describes bounded, view-qualified charts and does not establish behavioral equivalence.</p></main></body></html>`
+<p class="meta">Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
+<p class="foot">These proposed rules await ratification. The comparison describes bounded, view-qualified charts and does not establish behavioral equivalence.</p>
+</main></body></html>` + evidenceParts
 
-var comparisonTemplate = template.Must(template.New("comparison").Parse(comparisonHTML))
+var comparisonTemplate = template.Must(template.New("comparison").Funcs(evidenceFuncs).Parse(comparisonHTML))
 
 // posters draws a checked proposal's chart for people to read, as a merged
 // project's page does: an animated poster and its still twin, or neither
@@ -100,11 +101,13 @@ func makeComparison(e comparisonEvidence) readerPage {
 	status, message, svg := e.checked()
 	poster, still := e.posters(status)
 	p := ReaderPresentation{Status: status, Message: message, Format: comparisonFormat}
+	view := proposalView(e)
 	key := readerHash(readerJSON(struct {
 		Evidence                       comparisonEvidence
 		Status, Message, SVG, Template string
 		Poster, Still                  string `json:",omitempty"`
-	}{e, status, message, svg, comparisonHTML, poster, still}))
+		View                           evidenceView
+	}{e, status, message, svg, comparisonHTML, poster, still, view}))
 	p.Fingerprint = key
 	base := "/reader/" + strings.TrimPrefix(key, "sha256:")
 	p.Page = base + ".html"
@@ -122,7 +125,8 @@ func makeComparison(e comparisonEvidence) readerPage {
 		Presentation ReaderPresentation
 		Posters      *PosterLinks
 		Record       string
-	}{e, p, posters, string(record)})
+		View         evidenceView
+	}{e, p, posters, string(record), view})
 	return readerPage{repo: e.Repo, presentation: p, posters: posters, html: b.Bytes(), svg: []byte(svg), poster: []byte(poster), still: []byte(still)}
 }
 

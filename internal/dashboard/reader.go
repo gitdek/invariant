@@ -66,10 +66,14 @@ type readerEvidence struct {
 	// Omitted when absent, so evidence without a comparison keeps the
 	// identities and immutable URLs it had before comparisons existed.
 	Comparison []byte `json:",omitzero"`
-	Report     *verify.Report
-	Artifacts  readerArtifacts
-	Traces     map[string]tlc.TraceFile
-	Problem    string
+	// Code places the existing code a project checks in its repository, as
+	// the receipt commit's tree shows it, for the page to link (#786).
+	// Omitted when absent, like Comparison.
+	Code      map[string]string `json:",omitzero"`
+	Report    *verify.Report
+	Artifacts readerArtifacts
+	Traces    map[string]tlc.TraceFile
+	Problem   string
 }
 
 type readerPage struct {
@@ -446,7 +450,11 @@ func readerStack(data []byte) (readerSVGStack, bool) {
 	}
 }
 
-const readerHTML = `<!doctype html>
+// readerIdentityTemplate is the page template #631 and #665 drew. A merged
+// project's evidence keeps naming it in its identity, so a page redesign
+// never moves unchanged evidence or its images (#723). The page itself is
+// versioned by its own hash in its URL's query instead (#786).
+const readerIdentityTemplate = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Evidence.Manifest.Name}} — reader evidence</title>
 <style>body{font:16px system-ui,sans-serif;margin:2rem;line-height:1.5;color:#17202a;background:#fff}main{max-width:100rem;margin:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}img{display:block;width:100%;height:auto}img.poster{width:auto;max-width:100%;margin:1rem auto;border-radius:28px;box-shadow:0 24px 60px rgba(9,13,28,.35)}code{overflow-wrap:anywhere}dt{font-weight:bold}dd{margin-bottom:1rem}</style></head>
@@ -462,8 +470,34 @@ const readerHTML = `<!doctype html>
 <p>This explanation describes the model at the receipt's bounds. It does not change the receipt's verification verdict or code assurance.</p>
 </main></body></html>`
 
-var readerTemplate = template.Must(template.New("reader").Parse(readerHTML))
-var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg|poster\.svg|still\.svg)$`)
+const readerHTML = `<!doctype html>
+<html lang="en"><head>` + evidenceHead + `<title>{{.Evidence.Manifest.Name}} — reader evidence</title></head>
+<body><main>{{template "top" .View}}
+<div class="hero">{{template "hero" .View}}<p class="lede">{{.Presentation.Message}}</p>{{template "links" .View}}</div>
+<div class="chart">{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked reader chart for {{.Evidence.Manifest.Name}}"></picture>
+<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}</div>
+<section><h2>Locked rules</h2><p class="note">Ratified, then pinned by hash: the code is checked against these, and nothing can change them without a new ratification.</p>{{template "rules" .View}}</section>
+<section><h2>Checked bounds</h2><p class="note">TLC explored every state the model reaches within these.</p>{{template "bounds" .View}}</section>
+{{if .Record}}<details><summary>Complete receipt reader record</summary><pre>{{.Record}}</pre></details>{{end}}
+<p class="meta">Receipt commit: <code>{{.Presentation.Commit}}</code><br>Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
+<p class="foot">This explanation describes the model at the receipt's bounds. It does not change the receipt's verification verdict or code assurance.</p>
+</main></body></html>` + evidenceParts
+
+var readerTemplate = template.Must(template.New("reader").Funcs(evidenceFuncs).Parse(readerHTML))
+
+// readerPolicy keeps every evidence response script-free and sandboxed. A
+// page may also use the dashboard's fonts, from Google Fonts (#786).
+func readerPolicy(contentType string) string {
+	fonts := ""
+	if strings.HasPrefix(contentType, "text/html") {
+		fonts = " https://fonts.googleapis.com; font-src https://fonts.gstatic.com"
+	}
+	return "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'" + fonts + "; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; sandbox"
+}
+
+// readerPath reads a reader URL's key and kind. A page's link may carry its
+// own hash as a query, which only versions it for caches (#786).
+var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg|poster\.svg|still\.svg)(?:\?h=[0-9a-f]{16})?$`)
 
 // posters draws a checked chart's animated and still posters, or neither.
 func (e readerEvidence) posters(status string) (string, string) {
@@ -493,7 +527,7 @@ func makeReader(e readerEvidence) readerPage {
 		Evidence                       readerEvidence
 		Status, Message, SVG, Template string
 		Poster, Still                  string `json:",omitempty"`
-	}{e, status, message, svg, readerHTML, poster, still}))
+	}{e, status, message, svg, readerIdentityTemplate, poster, still}))
 	p.Fingerprint = key
 	base := "/reader/" + strings.TrimPrefix(key, "sha256:")
 	p.Page = base + ".html"
@@ -515,7 +549,11 @@ func makeReader(e readerEvidence) readerPage {
 		Presentation ReaderPresentation
 		Posters      *PosterLinks
 		Record       string
-	}{e, p, posters, record})
+		View         evidenceView
+	}{e, p, posters, record, projectView(e)})
+	// The page's own hash versions its URL, so a redesign reaches readers at
+	// once while the evidence keeps its identity (#786).
+	p.Page = base + ".html?h=" + strings.TrimPrefix(readerHash(b.Bytes()), "sha256:")[:16]
 	return readerPage{repo: e.Repo, presentation: p, posters: posters, html: b.Bytes(), svg: []byte(svg), poster: []byte(poster), still: []byte(still)}
 }
 
@@ -589,7 +627,7 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 	}
 	h := w.Header()
 	h.Set("Content-Type", ct)
-	h.Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; sandbox")
+	h.Set("Content-Security-Policy", readerPolicy(ct))
 	h.Set("Cache-Control", "public, max-age=31536000, immutable")
 	etag := `"` + readerHash(append([]byte(p.presentation.Fingerprint), body...)) + `"`
 	h.Set("ETag", etag)
