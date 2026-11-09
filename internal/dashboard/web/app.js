@@ -72,6 +72,7 @@
     if (state) {
       const u = $("#updated");
       u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
+      u.title = u.textContent;
       u.classList.toggle("stale", !!state.stale?.length);
     }
     liveTick();
@@ -916,8 +917,11 @@
   function readerEvidence(p) {
     const r = p.reader;
     if (!r) return '<p class="reader-note">This legacy snapshot has no reader evidence. Waiting for a receipt refresh.</p>';
-    const image = r.status === "chart" && r.svg
-      ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
+    // A chart people read: the poster where there is one, which the
+    // complete evidence image, shrunk to a card, never is (#784).
+    const image = r.status !== "chart" ? ""
+      : p.posters ? `<a href="${esc(r.page)}"><picture><source media="(prefers-reduced-motion: reduce)" srcset="${esc(p.posters.still)}"><img class="reader-poster" src="${esc(p.posters.animated)}" alt="Checked state chart for ${esc(p.name)}" loading="lazy"></picture></a>`
+      : r.svg ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
     return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>
       <a href="${esc(r.page)}">Read model evidence</a>
       <p class="fp">Receipt commit <code>${esc(r.commit)}</code></p></div>`;
@@ -1729,10 +1733,10 @@
     if (w.kind === "forks") {
       body = (w.forks || []).map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const c = `/invariant choose ${q.id} ${o.id}`;
-        return `<div class="alternative"><button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`}) : ""}</div>`;
+        return `<div class="alternative"><button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`, posters: o.posters}) : ""}</div>`;
       }).join("")}</div>`).join("") + `<div class="cmds">${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "proposal") {
-      body = `${proposalText(w, repo, "a person")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name}) : ""}
+      body = `${proposalText(w, repo, "a person")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name, posters: w.posters}) : ""}
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>
@@ -1819,7 +1823,7 @@
       const forks = w.forks || [];
       body = forks.map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const on = a.chosen[q.id] === o.id;
-        return `<div class="alternative"><button class="opt pick${on ? " chosen" : ""}" type="button" aria-pressed="${on}" data-act-key="${esc(key)}" data-act-pick="${esc(q.id)} ${esc(o.id)}"><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">${on ? "chosen" : "choose"}</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`}) : ""}</div>`;
+        return `<div class="alternative"><button class="opt pick${on ? " chosen" : ""}" type="button" aria-pressed="${on}" data-act-key="${esc(key)}" data-act-pick="${esc(q.id)} ${esc(o.id)}"><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">${on ? "chosen" : "choose"}</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`, posters: o.posters}) : ""}</div>`;
       }).join("")}</div>`).join("");
       const picked = forks.filter((q) => a.chosen[q.id]);
       const lines = picked.map((q) => `/invariant choose ${q.id} ${a.chosen[q.id]}`).join("\n");
@@ -1828,7 +1832,7 @@
         : `<button class="cmd act primary" type="button" disabled>Choose ${forks.length === 1 ? "an answer" : `all ${forks.length}`} to post</button>`;
       if (takes(w, "revise")) actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
-      body = `${proposalText(w, repo, "you")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name}) : ""}`;
+      body = `${proposalText(w, repo, "you")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name, posters: w.posters}) : ""}`;
       actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>`;

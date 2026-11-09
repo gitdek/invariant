@@ -137,6 +137,9 @@ header.top {
 .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--bug); box-shadow: 0 0 0 0 rgba(var(--bug-rgb), 0.6); animation: beat 2s infinite; }
 @keyframes beat { 0% { box-shadow: 0 0 0 0 rgba(var(--bug-rgb), 0.55); } 70% { box-shadow: 0 0 0 9px rgba(var(--bug-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--bug-rgb), 0); } }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 12px; justify-content: flex-end; min-width: 0; }
+/* The updated label ticks every second in a proportional face, so it gets a
+   width of its own and digits of one width: nothing beside it moves (#781). */
+#updated { display: inline-block; width: 9em; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .pill { white-space: nowrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px;
@@ -1029,3 +1032,6 @@ footer p { margin: 0; max-width: 60em; }
 .alternative { min-width: 0; }
 .alternative > .opt { width: 100%; }
 .alternative .reader-evidence { margin: .75rem 0 1.5rem; }
+
+/* A proposal's chart in its card, drawn for people to read (#784). */
+.reader-poster { display: block; width: 100%; height: auto; border-radius: 18px; box-shadow: 0 16px 40px rgba(9, 13, 28, 0.35); }
