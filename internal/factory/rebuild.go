@@ -201,16 +201,11 @@ const (
 // started, as when a writer retried while its watcher was away. Such a
 // watcher records the run as its own and publishes nothing of it (D-0212).
 func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (supersession, error) {
-	comments, err := f.GitHub.Comments(ctx, n)
+	posts, err := f.postsOn(ctx, n)
 	if err != nil {
 		return current, err
 	}
-	var t Thread
-	for _, c := range comments {
-		if m, ok := DecodeMarker(c.Body); ok && (f.Self == "" || c.User.Login == f.Self) {
-			t.Posts = append(t.Posts, Post{Comment: c, Marker: m})
-		}
-	}
+	t := Thread{Posts: posts}
 	state, ok := t.State()
 	switch {
 	case !ok || state.Comment.ID == ratified.Comment.ID:

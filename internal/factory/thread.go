@@ -155,11 +155,18 @@ type Marker struct {
 	Forks    []formalize.Fork    `json:"forks,omitempty"`
 	Answers  []formalize.Answer  `json:"answers,omitempty"` // the forks decided so far
 	Proposal *formalize.Proposal `json:"proposal,omitempty"`
-	Project  string              `json:"project,omitempty"` // the project's directory
-	Branch   string              `json:"branch,omitempty"`
-	Hash     string              `json:"hash,omitempty"` // the ratified proposal
-	PR       int                 `json:"pr,omitempty"`
-	Failure  string              `json:"failure,omitempty"` // why a failed post failed: Fail*
+	// ProposalRef stays raw until ResolveDraft validates it. A malformed
+	// reference must remain an error, never reveal an older working state.
+	ProposalRef json.RawMessage `json:"proposal_ref,omitempty"`
+	// ProposalCarrier resolves only the baseline and target after the last
+	// answer, including when the following draft fails before publication.
+	ProposalCarrier  bool `json:"proposal_carrier,omitempty"`
+	referenceProblem string
+	Project          string `json:"project,omitempty"` // the project's directory
+	Branch           string `json:"branch,omitempty"`
+	Hash             string `json:"hash,omitempty"` // the ratified proposal
+	PR               int    `json:"pr,omitempty"`
+	Failure          string `json:"failure,omitempty"` // why a failed post failed: Fail*
 	// A writer's retry of a plan's failed draft builds the plan again on a
 	// branch of its own (#271). Replaces is the draft its build replaces,
 	// which the factory closed, and From the commit its branch starts from:
@@ -267,8 +274,34 @@ func DecodeMarker(body string) (Marker, bool) {
 		b, err = unzip(b)
 	}
 	var m Marker
-	if err != nil || json.Unmarshal(b, &m) != nil || m.Kind == "" {
+	if err != nil {
 		return Marker{}, false
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(b, &fields) != nil {
+			return Marker{}, false
+		}
+		var ref json.RawMessage
+		for name, value := range fields {
+			if strings.EqualFold(name, "proposal_ref") {
+				ref = value
+				break
+			}
+		}
+		if ref == nil {
+			return Marker{}, false
+		}
+		m = Marker{ProposalRef: ref, referenceProblem: err.Error()}
+		_ = json.Unmarshal(fields["kind"], &m.Kind)
+	}
+	if m.Kind == "" && m.ProposalRef == nil {
+		return Marker{}, false
+	}
+	if m.ProposalRef != nil {
+		if _, err := draftObject(b); err != nil {
+			m.referenceProblem = err.Error()
+		}
 	}
 	return m, true
 }

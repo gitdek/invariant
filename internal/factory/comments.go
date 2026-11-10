@@ -40,7 +40,8 @@ func post(title, body string, m Marker, closing ...string) string {
 	// result keeps it whole. Clipping never shortens the marker, so a marker
 	// that can't be read back, or a post still beyond the limit, as a failed
 	// preview's snapshots can make either, leaves the proposal out instead.
-	if m.Kind == KindStuck && m.Proposal != nil {
+	// A reference already keeps the complete previous draft outside the post.
+	if m.Kind == KindStuck && m.Proposal != nil && m.ProposalRef == nil {
 		if _, ok := DecodeMarker(m.encode()); !ok || len(out) > maxComment {
 			m.Proposal = nil
 			return clippedPost(title, body, m, closing...)

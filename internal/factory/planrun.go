@@ -312,8 +312,12 @@ func (f *Factory) postsOn(ctx context.Context, n int) ([]Post, error) {
 	}
 	var posts []Post
 	for _, c := range comments {
-		if m, ok := DecodeMarker(c.Body); ok && (f.Self == "" || c.User.Login == f.Self) {
-			posts = append(posts, Post{Comment: c, Marker: m})
+		p, ok, err := f.draftPost(ctx, n, c)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			posts = append(posts, p)
 		}
 	}
 	return posts, nil

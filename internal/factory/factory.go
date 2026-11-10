@@ -779,8 +779,12 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 		return t, err
 	}
 	for _, c := range comments {
-		if m, ok := DecodeMarker(c.Body); ok && (f.Self == "" || c.User.Login == f.Self) {
-			t.Posts = append(t.Posts, Post{Comment: c, Marker: m})
+		p, ok, err := f.draftPost(ctx, issue.Number, c)
+		if err != nil {
+			return t, err
+		}
+		if ok {
+			t.Posts = append(t.Posts, p)
 		}
 	}
 	// A writer's issue that opens with /invariant plan is a PRD, as one a
@@ -1199,10 +1203,25 @@ func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formaliz
 // command that asked for the draft.
 func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answers []formalize.Answer, previous *formalize.Proposal, replyTo []int64) error {
 	n := t.Issue.Number
+	// New completed records already contain publication authority. Recover
+	// before consulting editable issue text or preparing another agent run.
+	state, commit, err := f.Repo.Run(ctx, n, draftStepName(cause))
+	if err != nil {
+		return err
+	}
+	if state == RunDone {
+		res, err := f.loadDraft(ctx, commit)
+		if err != nil {
+			return err
+		}
+		if res.Publication != nil {
+			return f.publishDraft(ctx, t, cause, replyTo, res)
+		}
+	}
 	// base is the project's lock on the base branch, which a draft amends.
 	var base string
 	stuck := func(problem string) error {
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous}
+		m := retainedDraft(t, Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous})
 		return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 	}
 	f.logf("#%d: formalizing", n)
@@ -1351,13 +1370,15 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	agent := f.agentOf(line, named)
 	run, ok := f.runners(agent)
 	if !ok || run.Formalizer == nil {
-		m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers, Proposal: previous}
+		m := retainedDraft(t, Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers, Proposal: previous})
 		return f.drafted(ctx, t, cause, base, m, unrunnableComment(agent, f.runnable(), m), LabelHumanReview)
 	}
 	// The draft's agent run is recorded before it starts, where every
 	// watcher sees it (D-0069). One recorded and never finished stopped
 	// partway, and only a writer's command starts another.
-	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req)
+	publication := draftPublication{Agent: agent, Dir: newDir, ProposalAgent: line, Base: base,
+		Answers: answers, Previous: previous, Authority: authority}
+	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req, publication)
 	if errors.Is(err, errResumed) {
 		return nil
 	}
@@ -1370,10 +1391,36 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		// The issue's agent ran the draft that stopped, so its post names it
 		// (#179).
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous, Agent: agent}
+		m := retainedDraft(t, Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous, Agent: agent})
 		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the watcher running it stopped or lost the repository's lease.", m,
 			" Comment `/invariant revise` to draft again."), LabelHumanReview)
 	}
+	if res.Publication == nil {
+		// Legacy completed records predate effective publication metadata.
+		res.Publication = &publication
+		applyDraftPublication(res)
+		if res.CheckContext == nil {
+			c := req.CheckContext()
+			res.CheckContext = &c
+		}
+	}
+	return f.publishDraft(ctx, t, cause, replyTo, res)
+}
+
+func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, replyTo []int64, res *savedDraftResult) error {
+	n := t.Issue.Number
+	publication := res.Publication
+	if publication == nil || res.CheckContext == nil {
+		return fmt.Errorf("completed draft is missing its publication context")
+	}
+	if res.Proposal == nil && res.Problem == "" {
+		return fmt.Errorf("completed draft is missing its outcome")
+	}
+	base, agent := publication.Base, publication.Agent
+	previous, authority := publication.Previous, publication.Authority
+	answers := publication.Answers
+	checkContext := *res.CheckContext
+	parent, prd := checkContext.ParentPlan, checkContext.Planning == "prd"
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
 		return err
 	}
@@ -1381,16 +1428,6 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	// its formalizer did not check it or it was saved before the limit.
 	if parent != 0 && res.Proposal != nil && res.Proposal.IssuePlan != nil {
 		res.Problem, res.Proposal = formalize.StepPlanProblem(parent), nil
-	}
-	if res.Proposal != nil && newDir != "" {
-		res.Proposal.Dir = newDir
-	}
-	// The proposal settles the agent its issue's line picked, so its build
-	// runs the agent that drafted it, however the issue reads by then, and a
-	// new project's manifest records it (#173). An amendment keeps its
-	// project's manifest as it is (D-0046).
-	if res.Proposal != nil {
-		res.Proposal.Agent = line
 	}
 	if res.Proposal != nil {
 		answers = revise(t, answers, res.Proposal.Revised)
@@ -1400,6 +1437,8 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	failed := res.Proposal
 	if authority != nil {
 		failed = authority
+	} else if failed == nil || res.Problem != "" && previous != nil {
+		failed = previous
 	}
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
@@ -1411,21 +1450,25 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		switch {
 		case prd:
 			what = "plan of issues"
-		case req.Plumbing != "":
+		case checkContext.Planning == "plumbing":
 			what = "plan"
 		}
 		m.Kind, m.Proposal = KindStuck, failed
+		m = retainedDraft(t, m)
 		return f.drafted(ctx, t, cause, base, m, providerStuckComment(res.Problem, what, m), LabelHumanReview)
 	case res.Problem != "":
 		m.Kind, m.Proposal = KindStuck, failed
+		m = retainedDraft(t, m)
 		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
 	case p.Unsupported != "":
 		m.Kind, m.Proposal = KindUnsupported, previous
+		m = retainedDraft(t, m)
 		return f.drafted(ctx, t, cause, base, m, unsupportedComment(p.Unsupported, m), "")
 	case len(p.Forks) > 0:
-		if req.Plumbing == "" && req.PRD == "" || p.HasPreviews() {
-			if err := p.ValidatePreviewContext(req.CheckContext()); err != nil {
+		if checkContext.Planning == "" || p.HasPreviews() {
+			if err := p.ValidatePreviewContext(checkContext); err != nil {
 				m.Kind, m.Proposal = KindStuck, previous
+				m = retainedDraft(t, m)
 				return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 			}
 		}
@@ -1435,6 +1478,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// draft after it compares with, so any of them can outgrow a post.
 		if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
 			m.Kind, m.Forks, m.Proposal = KindStuck, nil, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete question, with its alternative previews and the baseline it carries, exceeds the comment or expanded marker size limit. Revise the presentation and check every option again before publication.", m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelAsking)
@@ -1449,14 +1493,12 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// previous one, and with it the baseline a revision compares with.
 		if err := p.ValidateReader(); err != nil {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
-		authority := req.CheckContext()
-		if res.CheckContext != nil {
-			authority = *res.CheckContext
-		}
-		if err := p.ValidateComparisonContext(authority); err != nil {
+		if err := p.ValidateComparisonContext(checkContext); err != nil {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
 		m.Kind, m.Proposal = KindProposal, p
@@ -1464,6 +1506,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// expanded size limit, leaving nothing recoverable or ratifiable.
 		if _, ok := DecodeMarker(m.encode()); !ok {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification.", m), LabelHumanReview)
 		}
 		body := proposalComment(p, res.Report, m)
@@ -1472,6 +1515,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		if len(body) > maxComment {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal and its reader evidence exceed the comment size limit; it cannot be published for ratification. Revise the presentation before publishing again.", m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelProposal)
@@ -1491,8 +1535,19 @@ func draftStepName(cause Command) string {
 // recorded, or reading what a finished run left, whichever watcher ran it.
 // It returns nil for a run recorded and never finished. The run's record
 // and its result name the agent (#179).
-func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request) (*formalize.Result, error) {
+func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request, publication draftPublication) (*savedDraftResult, error) {
 	authority := req.CheckContext()
+	// The formalizer receives the request, not ownership of the publication
+	// metadata and previous proposal retained for recovery.
+	b, err := json.Marshal(publication)
+	if err != nil {
+		return nil, err
+	}
+	var captured draftPublication
+	if err := json.Unmarshal(b, &captured); err != nil {
+		return nil, err
+	}
+	publication = captured
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -1500,8 +1555,7 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	case state == RunRecorded:
 		return nil, nil
 	case state == RunDone:
-		var res formalize.Result
-		return &res, f.loadResult(ctx, result, &res)
+		return f.loadDraft(ctx, result)
 	}
 	release, err := f.agentSlot(ctx, n)
 	if err != nil {
@@ -1538,6 +1592,8 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 			spent = res.Usage
 		}
 		res = &formalize.Result{Problem: "the formalizer couldn't run: " + runErr.Error(), Usage: spent}
+	case res == nil:
+		res = &formalize.Result{Problem: "the formalizer left no draft"}
 	case res.Proposal == nil && res.Problem == "":
 		res.Problem = "the formalizer left no draft"
 	}
@@ -1546,7 +1602,9 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
 	res.CheckContext = &authority
-	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
+	complete := &savedDraftResult{Result: *res, Publication: &publication}
+	applyDraftPublication(complete)
+	saved, err := f.saveResult(ctx, complete, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
 		return nil, err
 	}
@@ -1559,7 +1617,7 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	if resumed {
 		return nil, errResumed
 	}
-	return res, nil
+	return complete, nil
 }
 
 // drafted posts what the formalizer made of an issue, once the protocol
@@ -1881,7 +1939,7 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if err := f.recovers(ctx, n, "say it's ratified", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
 		return Post{}, err
 	}
-	m := Marker{Kind: KindRatified, ReplyTo: []int64{c.Comment}, Answers: state.Marker.Answers, Proposal: p, Project: dir, Branch: branch, Hash: p.Hash}
+	m := Marker{Kind: KindRatified, ReplyTo: []int64{c.Comment}, Answers: state.Marker.Answers, Proposal: p, ProposalRef: state.Marker.ProposalRef, Project: dir, Branch: branch, Hash: p.Hash}
 	body := ratifiedComment(c.By, dir, branch, p.Hash, len(p.Statements), m)
 	posted, err := f.GitHub.PostComment(ctx, n, body)
 	if err != nil {
@@ -1982,7 +2040,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
 	f.logf("#%d: building %s", n, m.Project)
 	f.doing(n, "building")
-	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
+	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, ProposalRef: m.ProposalRef, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
 		Replaces: m.Replaces, From: m.From}
 	stops := t.Stops()
 	// failed posts that the build failed before it made a pull request: it
