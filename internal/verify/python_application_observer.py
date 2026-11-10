@@ -18,6 +18,7 @@ import hashlib
 import inspect
 import json
 import math
+import operator
 import os
 import random
 import re
@@ -26,6 +27,7 @@ import sys
 import threading
 import time
 import types
+from itertools import compress, repeat
 
 
 _collector = None
@@ -134,9 +136,16 @@ def ordinary(obj):
 
 
 def coroutine_objects():
-    return {value for value in gc.get_objects()
-            if type(value) is types.CoroutineType
-            or (type(value) is types.GeneratorType and value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE)}
+    # A module step scans the heap twice under the collector's hooks, so a
+    # Python loop here raised a trace and a profile event for every object
+    # (#796). These C callables compare exact types, as type() is does, with
+    # no event per object, and unlike isinstance they never read __class__.
+    objects = gc.get_objects()
+    kinds = list(map(type, objects))
+    found = set(compress(objects, map(operator.is_, kinds, repeat(types.CoroutineType))))
+    found.update([value for value in compress(objects, map(operator.is_, kinds, repeat(types.GeneratorType)))
+                  if value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE])
+    return found
 
 
 def return_kind(frame):
