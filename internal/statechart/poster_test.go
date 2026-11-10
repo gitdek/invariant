@@ -1,10 +1,14 @@
 package statechart
 
 import (
+	"encoding/xml"
 	"fmt"
+	"io"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tla"
@@ -140,5 +144,103 @@ func TestPosterRefusesWhatSVGRefuses(t *testing.T) {
 	}
 	if _, err := c.Poster(PosterOptions{Title: "fixture"}); err == nil {
 		t.Error("a poster was drawn for a result SVG refuses")
+	}
+}
+
+func posterSubtitleText(t *testing.T, svg string) []string {
+	t.Helper()
+	d := xml.NewDecoder(strings.NewReader(svg))
+	var lines []string
+	for {
+		tok, err := d.Token()
+		if err == io.EOF {
+			return lines
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok || start.Name.Local != "text" {
+			continue
+		}
+		for _, a := range start.Attr {
+			if a.Name.Local == "font-size" && a.Value == "14.5" {
+				var line string
+				if err := d.DecodeElement(&line, &start); err != nil {
+					t.Fatal(err)
+				}
+				lines = append(lines, line)
+			}
+		}
+	}
+}
+
+func TestPosterSubtitleFitBoundaries(t *testing.T) {
+	c := posterChart(t)
+	w := newPoster(c, PosterOptions{}).w
+	capacity := int((w - 2*posterPad) / (14.5 * 0.53))
+	header := "Reader statechart · 3 checked states"
+	prefix := "Limit = "
+	remaining := capacity - utf8.RuneCountInString(header+" · "+prefix)
+	whole := capacity - utf8.RuneCountInString(prefix)
+	for _, tc := range []struct {
+		name, value string
+		want        []string
+	}{
+		{"last rune fits", strings.Repeat("λ", remaining), []string{header + " · " + prefix + strings.Repeat("λ", remaining)}},
+		{"next rune wraps", strings.Repeat("λ", remaining+1), []string{header, prefix + strings.Repeat("λ", remaining+1)}},
+		{"whole line fits", strings.Repeat("🧭", whole), []string{header, prefix + strings.Repeat("🧭", whole)}},
+		{"whole line overflows", strings.Repeat("🧭", whole+1), []string{header, prefix + strings.Repeat("🧭", whole-1) + "…"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c.Report.Source.Config.Constants = map[string]string{"Limit": tc.value}
+			for _, animated := range []bool{false, true} {
+				svg, err := c.Poster(PosterOptions{Title: "fixture", Animated: animated})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := posterSubtitleText(t, svg); !reflect.DeepEqual(got, tc.want) {
+					t.Errorf("animated=%t: subtitle %q, want %q", animated, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestPosterSubtitleManyLiteralBounds(t *testing.T) {
+	c := posterChart(t)
+	c.Report.Source.Config.Constants = map[string]string{}
+	value := `{"café <&>", "left · right", "🧭"}`
+	for i := 34; i >= 0; i-- {
+		c.Report.Source.Config.Constants[fmt.Sprintf("Bound%02d", i)] = value
+	}
+	want := []string{"Reader statechart", "3 checked states"}
+	for i := 0; i < 35; i++ {
+		want = append(want, fmt.Sprintf("Bound%02d = %s", i, value))
+	}
+	w := newPoster(c, PosterOptions{}).w
+	var still []string
+	for _, animated := range []bool{false, true} {
+		o := PosterOptions{Title: "fixture", Animated: animated}
+		svg, err := c.Poster(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := posterSubtitleText(t, svg)
+		if len(lines) < 3 || strings.Join(lines, " · ") != strings.Join(want, " · ") {
+			t.Errorf("bounds lost literal text or order: %q", lines)
+		}
+		for _, line := range lines {
+			if float64(utf8.RuneCountInString(line))*14.5*0.53 > w-2*posterPad {
+				t.Errorf("line exceeds the available width: %q", line)
+			}
+		}
+		if animated && !reflect.DeepEqual(lines, still) {
+			t.Error("animated and still subtitle text differs")
+		}
+		still = lines
+		if again, err := c.Poster(o); err != nil || svg != again {
+			t.Errorf("wrapped rendering changed: %v", err)
+		}
 	}
 }

@@ -639,10 +639,44 @@ func plural(n int64, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
+// subtitle uses the final width, including room for returning arrows. Only
+// whole items wrap; an item too wide for a line keeps a literal rune prefix.
+func (p *poster) subtitle() []string {
+	items := []string{"Reader statechart", plural(p.c.Report.Counts["tlc_states"], "checked state")}
+	names := make([]string, 0, len(p.c.Report.Source.Config.Constants))
+	for name := range p.c.Report.Source.Config.Constants {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		items = append(items, name+" = "+p.c.Report.Source.Config.Constants[name])
+	}
+	width := int((p.w - 2*posterPad) / (14.5 * 0.53))
+	var lines []string
+	line := ""
+	for _, item := range items {
+		if utf8.RuneCountInString(item) > width {
+			item = string([]rune(item)[:width-1]) + "…"
+		}
+		if line != "" && utf8.RuneCountInString(line)+3+utf8.RuneCountInString(item) > width {
+			lines = append(lines, line)
+			line = item
+		} else if line == "" {
+			line = item
+		} else {
+			line += " · " + item
+		}
+	}
+	return append(lines, line)
+}
+
 func (p *poster) draw() string {
 	var b strings.Builder
 	add := func(format string, args ...any) { fmt.Fprintf(&b, format, args...); b.WriteByte('\n') }
 	W := p.w
+	subtitle := p.subtitle()
+	const subtitleGap = 22.0
+	extra := subtitleGap * float64(len(subtitle)-1)
 	animated := p.o.Animated
 	explain := "Arrows are checked TLC steps, thicker for more concrete steps; ↻ marks steps that stay in a state."
 	tail := "Bounded model, explored completely; it adds no proof claim."
@@ -652,7 +686,7 @@ func (p *poster) draw() string {
 	explainLines := posterWrap(explain, int((W-2*posterPad)/(13*0.53)))
 	tailLines := posterWrap(tail, int((W-2*posterPad)/(12.5*0.53)))
 	sep := p.bottom + 70
-	H := math.Ceil(sep + 28 + 30 + 20*float64(len(explainLines)) + 4 + 19*float64(len(tailLines)) + 22)
+	H := math.Ceil(sep + 28 + 30 + 20*float64(len(explainLines)) + 4 + 19*float64(len(tailLines)) + 22 + extra)
 	p.h = H
 	counts := p.c.Report.Counts
 	add(`<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="poster-title poster-desc" viewBox="0 0 %.0f %.0f" width="%.0f" height="%.0f" font-family="%s">`, W, H, W, H, svgEscape(posterFont))
@@ -727,16 +761,9 @@ func (p *poster) draw() string {
 		title = strings.ToUpper(string(r)) + title[n:]
 	}
 	add(`<text x="%.0f" y="74" fill="#f8fafc" font-size="32" font-weight="700" letter-spacing="-0.6">%s</text>`, posterPad, svgEscape(title))
-	sub := []string{"Reader statechart", plural(counts["tlc_states"], "checked state")}
-	names := make([]string, 0, len(p.c.Report.Source.Config.Constants))
-	for name := range p.c.Report.Source.Config.Constants {
-		names = append(names, name)
+	for i, line := range subtitle {
+		add(`<text x="%.0f" y="%.0f" fill="#94a3b8" font-size="14.5">%s</text>`, posterPad, 104+subtitleGap*float64(i), svgEscape(line))
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		sub = append(sub, name+" = "+p.c.Report.Source.Config.Constants[name])
-	}
-	add(`<text x="%.0f" y="104" fill="#94a3b8" font-size="14.5">%s</text>`, posterPad, svgEscape(strings.Join(sub, " · ")))
 	bx := W - posterPad - 214
 	pulse := ""
 	if animated {
@@ -745,6 +772,12 @@ func (p *poster) draw() string {
 	add(`<rect x="%.0f" y="50" width="214" height="34" rx="17" fill="#10b981" fill-opacity="0.12" stroke="#34d399" stroke-opacity="0.45"/>`, bx)
 	add(`<circle cx="%.0f" cy="67" r="5" fill="#34d399">%s</circle>`, bx+22, pulse)
 	add(`<text x="%.0f" y="72" fill="#a7f3d0" font-size="13" font-weight="600">Complete TLC exploration</text>`, bx+36)
+
+	// Translate the whole drawing, including its replay and legend, so the
+	// extra header lines cannot change routes or label placement.
+	if extra > 0 {
+		add(`<g transform="translate(0 %.0f)">`, extra)
+	}
 
 	// Arrows between states.
 	for i, e := range p.edges {
@@ -926,6 +959,9 @@ func (p *poster) draw() string {
 	for _, line := range tailLines {
 		add(`<text x="%.0f" y="%.0f" fill="#64748b" font-size="12.5">%s</text>`, posterPad, ly, svgEscape(line))
 		ly += 19
+	}
+	if extra > 0 {
+		add(`</g>`)
 	}
 	add(`</svg>`)
 	return b.String()
