@@ -438,6 +438,121 @@ func TestNodeOfflineProposedAPI633(t *testing.T) {
 	}
 }
 
+func TestNodeOfflineNewModule788(t *testing.T) {
+	tools, enabled := nodeOffline633(t)
+	if !enabled {
+		return
+	}
+	for _, framework := range []string{"vitest", "jest"} {
+		t.Run(framework, func(t *testing.T) {
+			module := "vitest"
+			if framework == "jest" {
+				module = "@jest/globals"
+			}
+			source := "import { test, expect } from '" + module + "';\n" + `
+type API = { future(): number };
+test('loads future module', async () => {
+  const modulePath: string = './future';
+  const api: API | undefined = await import(modulePath).catch(() => undefined);
+  expect(api).toBeDefined();
+  expect(api!.future()).toBe(7);
+});
+`
+			f := fixture633(t, tools, []nativeCase633{{framework, "web", "future.test.ts", "loads future module", source}}, nil, nil)
+			f.plan.Files = []string{"web/future.ts"}
+			f.plan = n503Read(t, f.plan, f.sandbox.Repository.Snapshot)
+			c := check633(t, f, true)
+			if v := result617(t, c.Run, f.plan.Tests[0]); v.Kind != "test" || v.Status != "failed" {
+				t.Fatalf("absent module did not finish an assertion: %+v", v)
+			}
+			write468(t, f.candidate, "web/future.ts", "export function future(): number { return 0; }\n")
+			r, err := f.sandbox.Run(t.Context(), f.candidate, f.plan)
+			if err != nil || r.Passed() {
+				t.Fatalf("incorrect module behavior qualified: %v %+v", err, r)
+			}
+			if v := result617(t, r, f.plan.Tests[0]); v.Kind != "test" || v.Status != "failed" {
+				t.Fatalf("loaded module did not reach the behavior assertion: %+v", v)
+			}
+			fix633(t, f)
+			pass633(t, f)
+		})
+	}
+}
+
+func TestNodeOfflineDiagnostics788(t *testing.T) {
+	tools, enabled := nodeOffline633(t)
+	if !enabled {
+		return
+	}
+	longModule := "./" + strings.Repeat("missing-", 140) + "END_OF_MODULE788"
+	for _, framework := range []string{"vitest", "jest"} {
+		cases := []struct {
+			name, source string
+			want         []string
+		}{
+			{"missing module", "import {future} from './future';\ntest('selected',()=>expect(future()).toBe(7));\n",
+				[]string{"refused.test.ts:2:22 TS2307:", "Cannot find module './future' or its corresponding type declarations."}},
+			{"unrelated type", "const value: number = 'wrong';\ntest('selected',()=>expect(value).toBe(7));\n",
+				[]string{"refused.test.ts:2:7 TS2322:", "Type 'string' is not assignable to type 'number'."}},
+			{"multiple and chained", "import {future} from '" + longModule + "';\nconst wrong = {value: 'wrong'};\nconst value: {value: number} = wrong;\ntest('selected',()=>expect(future()).toBe(7));\n",
+				[]string{"refused.test.ts:2:22 TS2307:", "Cannot find module '" + longModule + "' or its corresponding type declarations.", "refused.test.ts:4:7 TS2322:", "Types of property 'value' are incompatible.", "Type 'string' is not assignable to type 'number'."}},
+			{"unattributed export", "import {future} from './product';\ntest('selected',()=>{expect(1).toBe(2);expect(future()).toBe(7);});\n",
+				[]string{"refused.test.ts:2:9 TS2305:", "Module '\"./product\"' has no exported member 'future'."}},
+		}
+		for _, tc := range cases {
+			t.Run(framework+"/"+tc.name, func(t *testing.T) {
+				f := fixture633(t, tools, []nativeCase633{{framework, "web", "refused.test.ts", "selected", nodeImports633(framework) + tc.source}}, nil, nil)
+				c := check633(t, f, false)
+				v := result617(t, c.Run, f.plan.Tests[0])
+				if v.Status != "refused" || c.Run.Passed() {
+					t.Fatalf("diagnostics became acceptance: %+v", v)
+				}
+				for name, output := range map[string]string{"reason": v.Reason, "feedback": c.Feedback(), "output": c.Run.Output} {
+					for _, want := range tc.want {
+						if !strings.Contains(output, want) {
+							t.Errorf("%s lacks full diagnostic %q: %s", name, want, output)
+						}
+					}
+				}
+				var detail strings.Builder
+				if len(f.runner.streams) != 1 {
+					t.Fatalf("expected one refused invocation, got %d", len(f.runner.streams))
+				}
+				for _, line := range bytes.Split(bytes.TrimSpace(f.runner.streams[0].Events), []byte("\n")) {
+					if len(line)+1 > 4096 {
+						t.Fatal("diagnostic exceeded atomic frame limit")
+					}
+					var event nodeEvent
+					if err := json.Unmarshal(line, &event); err != nil {
+						t.Fatal(err)
+					}
+					if event.Event == "diagnostic" {
+						if event.Actor != "parent" || event.MAC == "" {
+							t.Fatal("diagnostic lost parent authentication")
+						}
+						detail.WriteString(event.Reason)
+					} else if event.Event != "begin" && event.Event != "refused" {
+						t.Fatalf("precheck started a framework lifecycle: %s", event.Event)
+					}
+				}
+				if detail.Len() == 0 || !strings.Contains(v.Reason, detail.String()) {
+					t.Fatal("authenticated diagnostics were not retained verbatim")
+				}
+			})
+		}
+	}
+	// Invalid compiler settings produce diagnostics with no source location.
+	t.Run("jest/compiler settings", func(t *testing.T) {
+		f := fixture633(t, tools, nodeCases633("jest"), map[string]string{
+			"web/jest.config.cjs": "module.exports={transform:{'^.+\\\\.tsx?$':['ts-jest',{tsconfig:{module:'invalid788'}}]}};\n",
+		}, nil)
+		c := check633(t, f, false)
+		if !strings.Contains(c.Feedback(), "TS6046: [no source location]") || !strings.Contains(c.Feedback(), "--module") {
+			t.Fatalf("compiler setting diagnostic lost its code or message: %s", c.Feedback())
+		}
+	})
+}
+
 func TestNodeOfflineRefusals633(t *testing.T) {
 	tools, enabled := nodeOffline633(t)
 	if !enabled {
