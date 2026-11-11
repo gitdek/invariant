@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -73,12 +74,12 @@ func (c *Result) svg(marks *comparisonSVG) (string, error) {
 			fill = "#fff0e8"
 		}
 		writeSVGRect(&b, n.svgBox, fill, color)
-		writeSVGText(&b, n.text, n.x+svgPadding, n.y+(n.height-n.text.height)/2)
+		writeSVGText(&b, n.text, n.x+svgPadding, math.FMA(n.height-n.text.height, 0.5, n.y))
 		b.WriteString(`</g>`)
 	}
 	for i, id := range c.Initial {
 		n := l.nodes[l.index[id]]
-		y := n.y + n.height/2
+		y := math.FMA(n.height, 0.5, n.y)
 		fmt.Fprintf(&b, `<g id="initial-%d" data-initial="%s"><title>Initial state %d</title>`, i+1, svgEscape(id), l.number[l.index[id]])
 		fmt.Fprintf(&b, `<circle cx="40" cy="%g" r="5" fill="#34495e"/>`, y)
 		writeSVGPath(&b, fmt.Sprintf("M 40 %g L %g %g", y, n.x, y))
@@ -106,7 +107,7 @@ func writeSVGText(b *strings.Builder, t svgText, x, y float64) {
 		if i > 0 {
 			b.WriteString("&#xA;")
 		}
-		fmt.Fprintf(b, `<tspan x="%g" y="%g">%s</tspan>`, x, y+svgFontSize+float64(i)*svgLineHeight, svgEscape(line))
+		fmt.Fprintf(b, `<tspan x="%g" y="%g">%s</tspan>`, x, math.FMA(float64(i), svgLineHeight, y+svgFontSize), svgEscape(line))
 	}
 	b.WriteString(`</text>`)
 }
