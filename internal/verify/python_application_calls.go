@@ -14,16 +14,26 @@ import (
 // PythonApplicationCall is a completed call inside an explored application
 // entry, in completion order. Arguments are copied on entry, by parameter
 // name, and the result on return; neither holds application objects.
+// Caller is the staged file whose code made the call: the nearest frame
+// beneath it that runs application code. A call counts toward a proof only
+// when that file is one of the application's own sources, so a call a
+// driver, a helper beside it or a callback of theirs makes shows nothing
+// about the application.
 type PythonApplicationCall struct {
 	Target       string         `json:"target"`
 	SourceSHA256 string         `json:"source_sha256"`
+	Caller       string         `json:"caller,omitempty"`
 	Arguments    map[string]any `json:"arguments"`
 	Result       any            `json:"result"`
 }
 
 func (c *PythonApplicationCall) UnmarshalJSON(b []byte) error {
-	if _, err := pythonApplicationJSONFields(b, true, "target", "source_sha256", "arguments", "result"); err != nil {
-		return fmt.Errorf("observed call: %w", err)
+	// The collector names every call's caller. A record with none, as one
+	// written before callers were recorded has, counts toward no proof.
+	if _, err := pythonApplicationJSONFields(b, true, "target", "source_sha256", "caller", "arguments", "result"); err != nil {
+		if _, err := pythonApplicationJSONFields(b, true, "target", "source_sha256", "arguments", "result"); err != nil {
+			return fmt.Errorf("observed call: %w", err)
+		}
 	}
 	type call PythonApplicationCall
 	d := json.NewDecoder(bytes.NewReader(b))
@@ -72,7 +82,19 @@ func (s *PythonApplicationSession) observedDeclarations(target string) []project
 	return out
 }
 
-func pythonApplicationValidateCalls(row PythonApplicationObservation, declarations []project.Component, explored bool) error {
+// pythonApplicationOwnCall says whether the application's own code made a
+// recorded call: its caller is one of the manifest's existing sources, or
+// lies under one, and isn't the driver.
+func pythonApplicationOwnCall(call PythonApplicationCall, existing []string, driver string) bool {
+	if call.Caller == "" || call.Caller == driver {
+		return false
+	}
+	return slices.ContainsFunc(existing, func(name string) bool {
+		return call.Caller == name || strings.HasPrefix(call.Caller, name+"/")
+	})
+}
+
+func pythonApplicationValidateCalls(row PythonApplicationObservation, declarations []project.Component, files map[string]string, explored bool) error {
 	if row.Calls == nil {
 		return nil
 	}
@@ -88,25 +110,32 @@ func pythonApplicationValidateCalls(row PythonApplicationObservation, declaratio
 		if call.Arguments == nil || !pythonApplicationValue(call.Arguments, true) || !pythonApplicationValue(call.Result, true) {
 			return fmt.Errorf("observed call arguments and result must be portable JSON values")
 		}
+		// A caller is a file the run staged, or nothing when no application
+		// code made the call.
+		if _, staged := files[call.Caller]; call.Caller != "" && (!staged || !strings.HasSuffix(call.Caller, ".py")) {
+			return fmt.Errorf("observed call names a caller the run didn't stage: %s", call.Caller)
+		}
 	}
 	return nil
 }
 
 // pythonApplicationObservedProof derives qualification from the matching
 // execution and both conformance records, never from a saved proof status.
-func pythonApplicationObservedProof(e *ComponentEvidence, a *PythonApplicationReport, target string, proof *ComponentProofResult) bool {
+// When the proof doesn't qualify, missing says what it lacks.
+func pythonApplicationObservedProof(e *ComponentEvidence, a *PythonApplicationReport, target string, proof *ComponentProofResult) (qualified bool, missing string) {
 	if a == nil || proof == nil {
-		return false
+		return false, "the session's application report with its proof"
 	}
 	index, err := indexComponentInventory(e.Inventory)
 	if err != nil {
-		return false
+		return false, "a consistent component inventory"
 	}
 	declaration, ok := index.components[target]
 	if !ok || !slices.Contains(proof.Inputs, declaration) ||
 		!slices.Contains(proof.FileInputs, project.ComponentFile{Path: declaration.Source, SHA256: declaration.SourceSHA256}) {
-		return false
+		return false, "a proof made from the bytes of the declaration the exploration observed"
 	}
+	missing = "a complete exploration, in this session, with passing transition, state and attempted-step conformance against the proof's source bytes"
 	for _, row := range e.Conformance {
 		check := index.checks[row.Target]
 		if row.Origin != "gate" || row.Status != "tested" || !slices.Contains(check.Observe, target) {
@@ -139,16 +168,29 @@ func pythonApplicationObservedProof(e *ComponentEvidence, a *PythonApplicationRe
 					c.Result.Tried.Attempts != x.Exploration.Attempts || c.Result.Tried.States != x.Exploration.States {
 					continue
 				}
-				if pythonApplicationCallCoverage(x, observed, index.declarations, target) {
-					return true
+				accepted, refused, valid := pythonApplicationCallCoverage(x, observed, index.declarations, check.Existing, target)
+				switch {
+				case !valid:
+				case accepted && refused:
+					return true, ""
+				case accepted:
+					missing = "a completed call by the application's own code on a declared-refused attempt: such calls were seen only on accepted attempts"
+				case refused:
+					missing = "a completed call by the application's own code on an accepted attempt: such calls were seen only on declared-refused attempts"
+				default:
+					missing = "any completed call by the application's own code inside an explored entry: a call a driver, a helper outside the application's existing sources, or a callback of theirs makes doesn't count"
 				}
 			}
 		}
 	}
-	return false
+	return false, missing
 }
 
-func pythonApplicationCallCoverage(x PythonApplicationExecutionResult, observed []project.Component, declarations map[string]project.Component, target string) bool {
+// pythonApplicationCallCoverage says whether the application's own code
+// completed a call of target on an accepted attempt, and on a declared-
+// refused one, that weren't replays. valid is false when the execution's
+// rows don't hold up as the observation protocol requires.
+func pythonApplicationCallCoverage(x PythonApplicationExecutionResult, observed []project.Component, declarations map[string]project.Component, existing []string, target string) (accepted, refused, valid bool) {
 	// Reconstruct the full observation protocol, including continuity,
 	// replayed calls and refusal declarations, for decoded receipts too.
 	steps := slices.Clone(x.Exploration.Steps)
@@ -161,7 +203,7 @@ func pythonApplicationCallCoverage(x PythonApplicationExecutionResult, observed 
 	}{"exploration", steps})
 	explorer := &pythonApplicationExplorer{}
 	if err != nil || explorer.declare(raw) != nil {
-		return false
+		return false, false, false
 	}
 	files := map[string]string{}
 	for _, f := range x.Provenance.Files {
@@ -169,7 +211,6 @@ func pythonApplicationCallCoverage(x PythonApplicationExecutionResult, observed 
 	}
 	observations := newPythonApplicationObservations(x.Key, x.Actual.Sampling, files, observed, explorer)
 	worker, driver := declarations[x.Key.Target], declarations[x.Key.Check]
-	accepted, refused := false, false
 	for _, row := range x.Observations {
 		// Observation JSON has always omitted an empty argument list. Its
 		// absence on a decoded attempt means the zero-argument step; the
@@ -178,18 +219,20 @@ func pythonApplicationCallCoverage(x PythonApplicationExecutionResult, observed 
 			row.Args = append([]any{}, row.Args...)
 		}
 		if observations.observe(row, worker, driver) != nil {
-			return false
+			return false, false, false
 		}
 		if row.Replay == nil || *row.Replay {
 			continue
 		}
 		for _, call := range row.Calls {
-			if call.Target == target {
+			// Only a call the application's own code made shows that the
+			// application runs the function.
+			if call.Target == target && pythonApplicationOwnCall(call, existing, driver.Source) {
 				accepted = accepted || row.Outcome == "accepted"
 				refused = refused || row.Outcome == "refused"
 			}
 		}
 	}
 	stats, err := observations.finish()
-	return err == nil && accepted && refused && pythonApplicationKey(stats) == pythonApplicationKey(x.Exploration)
+	return accepted, refused, err == nil && pythonApplicationKey(stats) == pythonApplicationKey(x.Exploration)
 }

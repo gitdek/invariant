@@ -187,7 +187,7 @@ func (v *pythonApplicationObservations) observe(row PythonApplicationObservation
 	if row.Operation != "" && (v.explorer == nil || row.Kind != "transition" || row.Form != "module" || row.Operation != "hold" && row.Operation != "release") {
 		return fmt.Errorf("invalid held-call observation operation")
 	}
-	if err := pythonApplicationValidateCalls(row, v.observed, v.explorer != nil); err != nil {
+	if err := pythonApplicationValidateCalls(row, v.observed, v.files, v.explorer != nil); err != nil {
 		return err
 	}
 	if row.Key != v.key || target.ID == "" || driver.ID == "" || row.Target != target.ID || row.Driver != driver.ID || row.SourceSHA256 != target.SourceSHA256 || row.DriverSHA256 != driver.SourceSHA256 || row.Symbol != target.Symbol {

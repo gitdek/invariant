@@ -230,8 +230,13 @@ func PythonApplicationTargetProblems(e *ComponentEvidence, target string, applic
 	}
 	if !pythonApplicationProofExercised(e, target, row.Result) {
 		if pythonApplicationObservedTarget(&e.Inventory, target) {
-			if len(application) != 1 || !pythonApplicationObservedProof(e, application[0], target, row.Result) {
-				out = append(out, fmt.Sprintf("%s lacks completed observed calls on both accepted and declared-refused non-replay attempts in one complete exploration with passing transition, state and attempted-step conformance against the proof's source bytes", target))
+			missing := "the session's application report"
+			qualified := false
+			if len(application) == 1 {
+				qualified, missing = pythonApplicationObservedProof(e, application[0], target, row.Result)
+			}
+			if !qualified {
+				out = append(out, fmt.Sprintf("%s lacks completed observed calls on both accepted and declared-refused non-replay attempts in one complete exploration with passing transition, state and attempted-step conformance against the proof's source bytes. It needs %s", target, missing))
 			}
 		} else {
 			out = append(out, fmt.Sprintf("%s has no passing conformance on the same declaration or declared observed-call coverage, so nothing shows the application runs the function Nagini proved", target))

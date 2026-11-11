@@ -624,6 +624,8 @@ func copyComponentInventory(inv project.ComponentInventory) project.ComponentInv
 		sort.Strings(check.Conformance)
 		check.Observe = slices.Clone(check.Observe)
 		sort.Strings(check.Observe)
+		check.Existing = slices.Clone(check.Existing)
+		sort.Strings(check.Existing)
 		check.Assumptions = slices.Clone(check.Assumptions)
 		sort.Slice(check.Assumptions, func(i, j int) bool { return check.Assumptions[i].ID < check.Assumptions[j].ID })
 		check.Invocations = slices.Clone(check.Invocations)

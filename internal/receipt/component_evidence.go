@@ -120,16 +120,18 @@ func componentObservedCalls(b *strings.Builder, application *verify.PythonApplic
 	heading := false
 	for _, x := range application.Executions {
 		for _, row := range x.Observations {
-			if len(row.Calls) == 0 {
+			// A replay repeats an attempt's calls, which Go has compared, so
+			// each attempt's calls print once.
+			if len(row.Calls) == 0 || row.Replay != nil && *row.Replay {
 				continue
 			}
 			if !heading {
 				b.WriteString("\n### Observed calls inside application entries\n")
 				heading = true
 			}
-			fmt.Fprintf(b, "\nInvocation %s on %s, run %d, step %d: %s via %s; outcome %s, replay %t. Calls in completion order:\n\n",
+			fmt.Fprintf(b, "\nInvocation %s on %s, run %d, step %d: %s via %s; outcome %s. Calls in completion order, each with the staged file whose code made it:\n\n",
 				componentLiteral(x.Key.ID), componentLiteral(x.Key.Target), row.Run, row.Sequence,
-				componentLiteral(row.Step), componentLiteral(row.Entry), componentLiteral(row.Outcome), row.Replay != nil && *row.Replay)
+				componentLiteral(row.Step), componentLiteral(row.Entry), componentLiteral(row.Outcome))
 			raw, _ := json.MarshalIndent(row.Calls, "", "  ")
 			fmt.Fprintf(b, "```json\n%s\n```\n", raw)
 		}

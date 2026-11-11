@@ -46,7 +46,7 @@ func TestPythonApplicationObservedCallCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, result := range []PythonApplicationExecutionResult{*x, decoded} {
-		if !pythonApplicationCallCoverage(result, s.observedDeclarations(x.Key.Target), s.declarations, pa342ID("counter/decision.py", "decision")) {
+		if accepted, refused, valid := pythonApplicationCallCoverage(result, s.observedDeclarations(x.Key.Target), s.declarations, []string{pa342Source}, pa342ID("counter/decision.py", "decision")); !accepted || !refused || !valid {
 			t.Fatal("complete call coverage did not survive JSON")
 		}
 	}

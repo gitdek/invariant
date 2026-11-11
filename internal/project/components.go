@@ -76,11 +76,15 @@ type Component struct {
 }
 
 type ResolvedComponentCheck struct {
-	Target      string                        `json:"target"`
-	Proof       *ResolvedComponentProof       `json:"proof,omitempty"`
-	Tests       []string                      `json:"tests,omitempty"`
-	Conformance []string                      `json:"conformance,omitempty"`
-	Observe     []string                      `json:"observe,omitempty"`
+	Target      string                  `json:"target"`
+	Proof       *ResolvedComponentProof `json:"proof,omitempty"`
+	Tests       []string                `json:"tests,omitempty"`
+	Conformance []string                `json:"conformance,omitempty"`
+	Observe     []string                `json:"observe,omitempty"`
+	// Existing is the application's own sources, the manifest's existing
+	// list, for a check that observes calls: only a call their code makes
+	// counts (#793).
+	Existing    []string                      `json:"existing,omitempty"`
 	Assumptions []ResolvedComponentAssumption `json:"assumptions,omitempty"`
 	Invocations []ResolvedComponentInvocation `json:"invocations,omitempty"`
 }
@@ -194,6 +198,8 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 			if resolved.Observe, err = r.associations(check.Observe, "observe"); err != nil {
 				return nil, err
 			}
+			resolved.Existing = slices.Clone(p.Manifest.Existing)
+			sort.Strings(resolved.Existing)
 		}
 		if resolved.Assumptions, err = r.assumptions(check.Assumptions); err != nil {
 			return nil, fmt.Errorf("components target %s: %w", target.ID, err)

@@ -453,17 +453,42 @@ class Collector:
             if code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS):
                 raise ValueError("observed functions require named parameters")
             names = code.co_varnames[:code.co_argcount + code.co_kwonlyargcount]
-            arguments = {name: copied(frame.f_locals[name]) for name in names}
-            life.observed_frames[frame] = (binding, arguments)
+            arguments = {}
+            for name in names:
+                try:
+                    arguments[name] = copied(frame.f_locals[name])
+                except ValueError as error:
+                    raise ValueError("observed function %s: argument %s must be a JSON scalar, or a list or a "
+                                     "dictionary with string keys of them: %s" % (binding.symbol, name, error)) from None
+            life.observed_frames[frame] = (binding, arguments, self.caller(frame))
         if event == "return" and frame in life.observed_frames:
             kind = return_kind(frame)
             if kind == "yield":
                 return
-            binding, arguments = life.observed_frames.pop(frame)
+            binding, arguments, caller = life.observed_frames.pop(frame)
             binding.frame(frame)
             if kind == "return":
+                try:
+                    result = copied(arg)
+                except ValueError as error:
+                    raise ValueError("observed function %s: its result must be a JSON scalar, or a list or a "
+                                     "dictionary with string keys of them: %s" % (binding.symbol, error)) from None
                 life.observed_calls.append(dict(target=binding.component, source_sha256=binding.digest,
-                                                arguments=arguments, result=copied(arg)))
+                                                caller=caller, arguments=arguments, result=result))
+
+    def caller(self, frame):
+        # Who made an observed call is the nearest frame beneath it that runs
+        # a staged application file: the application's own code, a driver, a
+        # helper beside it, or a callback one of them passed in. Go counts
+        # the call only when that file is one of the application's own.
+        root = self.request["root"]
+        frame = frame.f_back
+        while frame is not None:
+            filename = os.path.abspath(frame.f_code.co_filename)
+            if filename.startswith(root + os.sep) and filename.endswith(".py"):
+                return os.path.relpath(filename, root).replace(os.sep, "/")
+            frame = frame.f_back
+        return ""
 
     def check_observed(self):
         for binding in self.observed_bindings.values():
