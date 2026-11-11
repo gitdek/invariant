@@ -191,6 +191,7 @@ type pythonApplicationRequest struct {
 	Targets        []project.Component            `json:"targets,omitempty"`
 	Drivers        []project.Component            `json:"drivers,omitempty"`
 	Delegates      []string                       `json:"delegates,omitempty"`
+	Observe        []project.Component            `json:"observe,omitempty"`
 	Key            PythonApplicationInvocationKey `json:"key"`
 	SnapshotSHA256 string                         `json:"snapshot_sha256"`
 	RunnerSHA256   string                         `json:"runner_sha256"`
@@ -334,6 +335,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 		Target: s.declarations[key.Target], Sampling: maps.Clone(c.Sampling), Execution: rand.Text()}
 	if invocation.Explored {
 		c.Mode, req.Mode = "explored", "explored"
+		req.Observe = s.observedDeclarations(key.Target)
 	}
 	var overlays []PythonApplicationOverlayFile
 	if larger != nil {

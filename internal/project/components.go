@@ -39,6 +39,7 @@ type ComponentCheck struct {
 	Proof       *ComponentProof       `json:"proof,omitempty"`
 	Tests       []ComponentRef        `json:"tests,omitempty"`
 	Conformance []ComponentRef        `json:"conformance,omitempty"`
+	Observe     []ComponentRef        `json:"observe,omitempty"`
 	Assumptions []ComponentAssumption `json:"assumptions,omitempty"`
 	Invocations []ComponentInvocation `json:"invocations,omitempty"`
 }
@@ -79,6 +80,7 @@ type ResolvedComponentCheck struct {
 	Proof       *ResolvedComponentProof       `json:"proof,omitempty"`
 	Tests       []string                      `json:"tests,omitempty"`
 	Conformance []string                      `json:"conformance,omitempty"`
+	Observe     []string                      `json:"observe,omitempty"`
 	Assumptions []ResolvedComponentAssumption `json:"assumptions,omitempty"`
 	Invocations []ResolvedComponentInvocation `json:"invocations,omitempty"`
 }
@@ -185,6 +187,14 @@ func ResolveComponents(p *Project) (*ComponentInventory, error) {
 		if resolved.Conformance, err = r.associations(check.Conformance, "conformance"); err != nil {
 			return nil, err
 		}
+		if len(check.Observe) > 0 {
+			if language != "python" || len(p.Manifest.Existing) == 0 || !p.Manifest.Exhaustive || len(check.Conformance) == 0 {
+				return nil, fmt.Errorf("components target %s: observe requires an existing Python application check with exhaustive conformance", target.ID)
+			}
+			if resolved.Observe, err = r.associations(check.Observe, "observe"); err != nil {
+				return nil, err
+			}
+		}
 		if resolved.Assumptions, err = r.assumptions(check.Assumptions); err != nil {
 			return nil, fmt.Errorf("components target %s: %w", target.ID, err)
 		}
@@ -249,7 +259,7 @@ func (r *componentResolver) associations(refs []ComponentRef, kind string) ([]st
 		}
 		seen[c.ID] = true
 		ids = append(ids, c.ID)
-		if kind == "test" || kind == "conformance" {
+		if kind == "test" || kind == "conformance" || kind == "observe" {
 			r.declarations[c.ID] = c
 			r.provenanceFiles[c.Source] = ComponentFile{Path: c.Source, SHA256: c.SourceSHA256}
 		}

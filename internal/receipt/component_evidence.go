@@ -1,6 +1,7 @@
 package receipt
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -20,6 +21,9 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			parts = append(parts, "selected proof contracts: "+componentStrings(check.Proof.Contracts))
 		}
 		parts = append(parts, "selected conformance: "+componentStrings(check.Conformance), "selected tests: "+componentStrings(check.Tests))
+		if len(check.Observe) > 0 {
+			parts = append(parts, "observe calls inside explored entries: "+componentStrings(check.Observe))
+		}
 		for _, a := range check.Assumptions {
 			parts = append(parts, "declared assumptions (assumed / unverified): "+componentAssumption(a))
 		}
@@ -28,6 +32,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 		}
 		fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(check.Target), strings.Join(parts, "; "))
 	}
+	componentObservedCalls(b, r.Application)
 
 	componentCheckHeader(b, "conformance", len(e.Conformance))
 	b.WriteString("\nSampled observations describe the supplied runs. Bounded-exhaustive state coverage and attempt coverage are qualified separately, within the supplied model and bounds.\n\n")
@@ -102,6 +107,31 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 		b.WriteString("\n| Module file | Identity |\n| :-- | :-- |\n")
 		for _, f := range p.Modules {
 			fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(f.Path), componentLiteral(short(f.SHA256)))
+		}
+	}
+}
+
+// Keep the copied argument names and values readable as JSON. JSON escapes
+// newlines inside strings, so no value can close this fenced block.
+func componentObservedCalls(b *strings.Builder, application *verify.PythonApplicationReport) {
+	if application == nil {
+		return
+	}
+	heading := false
+	for _, x := range application.Executions {
+		for _, row := range x.Observations {
+			if len(row.Calls) == 0 {
+				continue
+			}
+			if !heading {
+				b.WriteString("\n### Observed calls inside application entries\n")
+				heading = true
+			}
+			fmt.Fprintf(b, "\nInvocation %s on %s, run %d, step %d: %s via %s; outcome %s, replay %t. Calls in completion order:\n\n",
+				componentLiteral(x.Key.ID), componentLiteral(x.Key.Target), row.Run, row.Sequence,
+				componentLiteral(row.Step), componentLiteral(row.Entry), componentLiteral(row.Outcome), row.Replay != nil && *row.Replay)
+			raw, _ := json.MarshalIndent(row.Calls, "", "  ")
+			fmt.Fprintf(b, "```json\n%s\n```\n", raw)
 		}
 	}
 }

@@ -54,6 +54,7 @@ type PythonApplicationObservation struct {
 	Operation string                    `json:"operation,omitempty"`
 	Outcome   string                    `json:"outcome,omitempty"`
 	Refusal   *PythonApplicationRefusal `json:"refusal,omitempty"`
+	Calls     []PythonApplicationCall   `json:"calls,omitempty"`
 }
 
 // PythonApplicationRefusal records only the exception class and attributes
@@ -151,6 +152,145 @@ func pythonApplicationState(state map[string]any, reader map[string]string, modu
 	return true
 }
 
+// pythonApplicationObservations validates the same bindings and lifecycle
+// continuity for live transport and decoded receipt requalification.
+type pythonApplicationObservations struct {
+	key             PythonApplicationInvocationKey
+	files           map[string]string
+	observed        []project.Component
+	runs            map[int]PythonApplicationObservation
+	instanceModules map[int]string
+	instanceForms   map[int]string
+	maxInstance     int
+	runLimit        int
+	stepLimit       int
+	explorer        *pythonApplicationExplorer
+}
+
+func newPythonApplicationObservations(key PythonApplicationInvocationKey, sampling, files map[string]string, observed []project.Component, explorer *pythonApplicationExplorer) *pythonApplicationObservations {
+	runLimit, _ := strconv.Atoi(sampling["runs"])
+	stepLimit, _ := strconv.Atoi(sampling["steps"])
+	return &pythonApplicationObservations{
+		key: key, files: files, observed: observed, explorer: explorer,
+		runs: map[int]PythonApplicationObservation{}, instanceModules: map[int]string{}, instanceForms: map[int]string{},
+		runLimit: runLimit, stepLimit: stepLimit,
+	}
+}
+
+func (v *pythonApplicationObservations) observe(row PythonApplicationObservation, target, driver project.Component) error {
+	if row.Kind != "initial" && row.Kind != "transition" && (row.Kind != "omitted" || v.explorer == nil) {
+		return fmt.Errorf("unknown observation kind")
+	}
+	if row.Form != "" && row.Form != "module" {
+		return fmt.Errorf("unknown observation form")
+	}
+	if row.Operation != "" && (v.explorer == nil || row.Kind != "transition" || row.Form != "module" || row.Operation != "hold" && row.Operation != "release") {
+		return fmt.Errorf("invalid held-call observation operation")
+	}
+	if err := pythonApplicationValidateCalls(row, v.observed, v.explorer != nil); err != nil {
+		return err
+	}
+	if row.Key != v.key || target.ID == "" || driver.ID == "" || row.Target != target.ID || row.Driver != driver.ID || row.SourceSHA256 != target.SourceSHA256 || row.DriverSHA256 != driver.SourceSHA256 || row.Symbol != target.Symbol {
+		return fmt.Errorf("foreign observation binding")
+	}
+	isModule := row.Form == "module"
+	if row.Operation == "release" && (row.Entry != row.Target || row.EntrySHA256 != row.SourceSHA256) {
+		return fmt.Errorf("release must name the selected target as its entry")
+	}
+	// An omitted step calls no application entry.
+	if row.Kind != "omitted" {
+		// Entries may live outside production scope; the Python collector
+		// validates their lexical declarations against the full staged tree.
+		prefix, source, ok := strings.Cut(row.Entry, "@")
+		module, symbol, named := strings.Cut(prefix, "#")
+		hash, staged := v.files[source]
+		if !ok || !named || !staged || !strings.HasSuffix(source, ".py") || module != "python:"+strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".") || !pythonApplicationName.MatchString(symbol) || row.EntrySHA256 != hash || source == driver.Source {
+			return fmt.Errorf("unknown or substituted application entry")
+		}
+		if isModule && strings.Contains(symbol, ".") {
+			return fmt.Errorf("module observations require module functions")
+		}
+	}
+	functional := false
+	if isModule && strings.Contains(row.Symbol, ".") {
+		return fmt.Errorf("module observations require module functions")
+	}
+	for key, reader := range row.Readback {
+		if key == "" || reader == "" {
+			return fmt.Errorf("empty read-back binding")
+		}
+		if isModule {
+			if !pythonApplicationModulePath.MatchString(reader) {
+				return fmt.Errorf("invalid module read-back path")
+			}
+		} else if reader == "$return" {
+			functional = true
+		} else if !pythonApplicationName.MatchString(reader) || strings.Contains(reader, ".") {
+			return fmt.Errorf("invalid attribute reader")
+		}
+	}
+	if functional && len(row.Readback) != 1 {
+		return fmt.Errorf("invalid functional reader")
+	}
+	previous, exists := v.runs[row.Run]
+	if row.Kind == "initial" {
+		if exists || row.Run != len(v.runs)+1 || row.Run > v.runLimit || row.Instance < 1 || row.Instance > v.maxInstance+1 || row.Sequence != 0 || !pythonApplicationState(row.State, row.Readback, isModule) || (!functional && row.Entry != row.Target) || (functional && row.Entry == row.Target) {
+			return fmt.Errorf("invalid initial observation")
+		}
+		if form, seen := v.instanceForms[row.Instance]; seen && form != row.Form {
+			return fmt.Errorf("instance changed observation form")
+		}
+		v.instanceForms[row.Instance] = row.Form
+		if isModule {
+			if source, seen := v.instanceModules[row.Instance]; seen && source != target.Source {
+				return fmt.Errorf("module instance changed source")
+			}
+			v.instanceModules[row.Instance] = target.Source
+		}
+		if row.Instance > v.maxInstance {
+			v.maxInstance = row.Instance
+		}
+	} else {
+		state := previous.State
+		if previous.Kind == "transition" {
+			state = previous.After
+		}
+		if !exists || previous.Kind == "omitted" || row.Form != previous.Form || row.Target != previous.Target || row.Driver != previous.Driver || row.Instance != previous.Instance || !maps.Equal(row.Readback, previous.Readback) {
+			return fmt.Errorf("invalid transition or state continuity")
+		}
+		if row.Kind == "omitted" {
+			// An omission ends its run in the state it reached.
+			if row.Sequence != previous.Sequence || !pythonApplicationState(row.State, row.Readback, isModule) || !reflect.DeepEqual(row.State, state) {
+				return fmt.Errorf("invalid omitted step or state continuity")
+			}
+		} else if row.Sequence != previous.Sequence+1 || row.Sequence > v.stepLimit || !pythonApplicationState(row.Before, row.Readback, isModule) || !pythonApplicationState(row.After, row.Readback, isModule) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target && row.Operation != "release" {
+			return fmt.Errorf("invalid transition or state continuity")
+		}
+	}
+	if v.explorer != nil {
+		if err := v.explorer.observe(row); err != nil {
+			return err
+		}
+	}
+	v.runs[row.Run] = row
+	return nil
+}
+
+func (v *pythonApplicationObservations) finish() (*PythonApplicationExploration, error) {
+	if len(v.runs) == 0 {
+		return nil, fmt.Errorf("missing or miscounted observations")
+	}
+	for _, row := range v.runs {
+		if row.Sequence == 0 && row.Kind != "omitted" {
+			return nil, fmt.Errorf("empty lifecycle")
+		}
+	}
+	if v.explorer != nil {
+		return v.explorer.finish()
+	}
+	return nil, nil
+}
+
 // pythonApplicationUnsealed is a collector stream with no authentication
 // footer, as a runner stopped partway leaves one (#645).
 type pythonApplicationUnsealed struct{ error }
@@ -195,16 +335,15 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 	}
 	events = events[:end]
 	begun, ended := false, false
-	runs := map[int]PythonApplicationObservation{}
-	instanceModules := map[int]string{}
-	instanceForms := map[int]string{}
-	maxInstance := 0
-	runLimit, _ := strconv.Atoi(c.Sampling["runs"])
-	stepLimit, _ := strconv.Atoi(c.Sampling["steps"])
 	var explorer *pythonApplicationExplorer
 	if explored {
 		explorer = &pythonApplicationExplorer{}
 	}
+	files := map[string]string{}
+	for path, file := range s.snapshot {
+		files[path] = file.hash
+	}
+	observations := newPythonApplicationObservations(c.Key, c.Sampling, files, s.observedDeclarations(c.Key.Target), explorer)
 	for len(events) > 0 {
 		n := bytes.IndexByte(events, '\n')
 		if n < 0 {
@@ -269,16 +408,13 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				required = append(required, "entry", "entry_sha256")
 			}
 			if row.Form != "" {
-				if row.Form != "module" {
-					return fmt.Errorf("unknown observation form")
-				}
 				required = append(required, "form")
 			}
 			if row.Operation != "" {
-				if !explored || row.Kind != "transition" || row.Form != "module" || (row.Operation != "hold" && row.Operation != "release") {
-					return fmt.Errorf("invalid held-call observation operation")
-				}
 				required = append(required, "operation")
+			}
+			if row.Calls != nil {
+				required = append(required, "calls")
 			}
 			switch row.Kind {
 			case "initial":
@@ -337,89 +473,9 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 					}
 				}
 			}
-			if row.Key != c.Key || target.ID == "" || driver.ID == "" || row.Target != target.ID || row.Driver != driver.ID || row.SourceSHA256 != target.SourceSHA256 || row.DriverSHA256 != driver.SourceSHA256 || row.Symbol != target.Symbol {
-				return fmt.Errorf("foreign observation binding")
+			if err := observations.observe(row, target, driver); err != nil {
+				return err
 			}
-			isModule := row.Form == "module"
-			if row.Operation == "release" && (row.Entry != row.Target || row.EntrySHA256 != row.SourceSHA256) {
-				return fmt.Errorf("release must name the selected target as its entry")
-			}
-			// An omitted step calls no application entry.
-			if row.Kind != "omitted" {
-				// Entries may live outside production scope; the Python collector
-				// validates their lexical declarations against the full staged tree.
-				prefix, source, ok := strings.Cut(row.Entry, "@")
-				module, symbol, named := strings.Cut(prefix, "#")
-				file, staged := s.snapshot[source]
-				if !ok || !named || !staged || !strings.HasSuffix(source, ".py") || module != "python:"+strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".") || !pythonApplicationName.MatchString(symbol) || row.EntrySHA256 != file.hash || source == driver.Source {
-					return fmt.Errorf("unknown or substituted application entry")
-				}
-				if isModule && strings.Contains(symbol, ".") {
-					return fmt.Errorf("module observations require module functions")
-				}
-			}
-			functional := false
-			if isModule && strings.Contains(row.Symbol, ".") {
-				return fmt.Errorf("module observations require module functions")
-			}
-			for key, reader := range row.Readback {
-				if key == "" || reader == "" {
-					return fmt.Errorf("empty read-back binding")
-				}
-				if isModule {
-					if !pythonApplicationModulePath.MatchString(reader) {
-						return fmt.Errorf("invalid module read-back path")
-					}
-				} else if reader == "$return" {
-					functional = true
-				} else if !pythonApplicationName.MatchString(reader) || strings.Contains(reader, ".") {
-					return fmt.Errorf("invalid attribute reader")
-				}
-			}
-			if functional && len(row.Readback) != 1 {
-				return fmt.Errorf("invalid functional reader")
-			}
-			previous, exists := runs[row.Run]
-			if row.Kind == "initial" {
-				if exists || row.Run != len(runs)+1 || row.Run > runLimit || row.Instance < 1 || row.Instance > maxInstance+1 || row.Sequence != 0 || !pythonApplicationState(row.State, row.Readback, isModule) || (!functional && row.Entry != row.Target) || (functional && row.Entry == row.Target) {
-					return fmt.Errorf("invalid initial observation")
-				}
-				if form, seen := instanceForms[row.Instance]; seen && form != row.Form {
-					return fmt.Errorf("instance changed observation form")
-				}
-				instanceForms[row.Instance] = row.Form
-				if isModule {
-					if source, seen := instanceModules[row.Instance]; seen && source != target.Source {
-						return fmt.Errorf("module instance changed source")
-					}
-					instanceModules[row.Instance] = target.Source
-				}
-				if row.Instance > maxInstance {
-					maxInstance = row.Instance
-				}
-			} else {
-				state := previous.State
-				if previous.Kind == "transition" {
-					state = previous.After
-				}
-				if !exists || previous.Kind == "omitted" || row.Form != previous.Form || row.Target != previous.Target || row.Driver != previous.Driver || row.Instance != previous.Instance || !maps.Equal(row.Readback, previous.Readback) {
-					return fmt.Errorf("invalid transition or state continuity")
-				}
-				if row.Kind == "omitted" {
-					// An omission ends its run in the state it reached.
-					if row.Sequence != previous.Sequence || !pythonApplicationState(row.State, row.Readback, isModule) || !reflect.DeepEqual(row.State, state) {
-						return fmt.Errorf("invalid omitted step or state continuity")
-					}
-				} else if row.Sequence != previous.Sequence+1 || row.Sequence > stepLimit || !pythonApplicationState(row.Before, row.Readback, isModule) || !pythonApplicationState(row.After, row.Readback, isModule) || !reflect.DeepEqual(row.Before, state) || row.Entry == row.Target && row.Operation != "release" {
-					return fmt.Errorf("invalid transition or state continuity")
-				}
-			}
-			if explorer != nil {
-				if err := explorer.observe(row); err != nil {
-					return err
-				}
-			}
-			runs[row.Run] = row
 			r.Observations = append(r.Observations, row)
 		case "end":
 			if _, err := pythonApplicationJSON(line, "type", "count"); err != nil {
@@ -431,21 +487,14 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			if err := json.Unmarshal(line, &e); err != nil {
 				return err
 			}
-			if !begun || e.Count != len(r.Observations) || len(runs) == 0 {
+			if !begun || e.Count != len(r.Observations) {
 				return fmt.Errorf("missing or miscounted observations")
 			}
-			for _, row := range runs {
-				if row.Sequence == 0 && row.Kind != "omitted" {
-					return fmt.Errorf("empty lifecycle")
-				}
+			x, err := observations.finish()
+			if err != nil {
+				return err
 			}
-			if explorer != nil {
-				x, err := explorer.finish()
-				if err != nil {
-					return err
-				}
-				r.Exploration = x
-			}
+			r.Exploration = x
 			ended = true
 		default:
 			return fmt.Errorf("unknown Python application observation event")

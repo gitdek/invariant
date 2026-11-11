@@ -96,6 +96,7 @@ func ResolvePythonApplication(p *Project) (*PythonApplication, error) {
 			names = append(names, check.Target.Source)
 			refs := append([]ComponentRef(nil), check.Tests...)
 			refs = append(refs, check.Conformance...)
+			refs = append(refs, check.Observe...)
 			if check.Proof != nil {
 				refs = append(refs, check.Proof.Contracts...)
 			}

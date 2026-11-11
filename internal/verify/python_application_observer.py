@@ -311,6 +311,9 @@ class Collector:
         self.handles = {}
         self.original_defaults = {}
         self.original_functions = {}
+        self.observed = {(os.path.join(request["root"], d["source"]), d["symbol"]): d
+                         for d in request.get("observe", [])}
+        self.observed_bindings = {}
         self.definitions = {}
         self.internal_threads = set()
         self.thread_traces = {}
@@ -384,6 +387,8 @@ class Collector:
             kind = "initial" if life.sequence == 0 else "transition"
         if self.exploration is not None:
             state.update(self.exploration.fields(life, kind))
+            if kind == "transition" and life.operation != "release" and life.observed_calls:
+                state["calls"] = life.observed_calls
         row = dict(type="observation", kind=kind,
                    run=life.run, instance=life.identity, sequence=life.sequence,
                    key=self.request["key"], target=life.target.component,
@@ -423,10 +428,46 @@ class Collector:
             active = self.active
             if active is not None:
                 active.observe(frame, event, arg)
+                self.observe_call(active, frame, event, arg)
         except BaseException:
             self.failed = True
             raise
         return self.thread_traces[current]
+
+    def observe_call(self, life, frame, event, arg):
+        if not self.observed or not self.exploring or life.operation == "release" or event not in ("call", "return"):
+            return
+        declaration = self.observed.get((os.path.abspath(frame.f_code.co_filename), frame.f_code.co_qualname))
+        if declaration is None:
+            return
+        if event == "call" and frame not in life.observed_frames:
+            if not life.owns(frame):
+                return
+            function = frame.f_globals.get(frame.f_code.co_name)
+            binding = Binding(self, function, module=True)
+            if binding.component != declaration["id"] or binding.digest != declaration["source_sha256"]:
+                raise ValueError("observed function differs from selected staged declaration")
+            binding.frame(frame)
+            self.observed_bindings[binding.component] = binding
+            code = binding.code
+            if code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS):
+                raise ValueError("observed functions require named parameters")
+            names = code.co_varnames[:code.co_argcount + code.co_kwonlyargcount]
+            arguments = {name: copied(frame.f_locals[name]) for name in names}
+            life.observed_frames[frame] = (binding, arguments)
+        if event == "return" and frame in life.observed_frames:
+            kind = return_kind(frame)
+            if kind == "yield":
+                return
+            binding, arguments = life.observed_frames.pop(frame)
+            binding.frame(frame)
+            if kind == "return":
+                life.observed_calls.append(dict(target=binding.component, source_sha256=binding.digest,
+                                                arguments=arguments, result=copied(arg)))
+
+    def check_observed(self):
+        for binding in self.observed_bindings.values():
+            binding.check()
 
     def capture_definition(self, frame, event):
         # Observe MAKE_FUNCTION before any decorator receives the object, even
@@ -683,6 +724,8 @@ class _Lifecycle:
             raise ValueError("state changed between transitions")
         expect(self.before, expected_before)
         self.calls, self.after = 0, None
+        self.observed_calls, self.observed_frames = [], {}
+        c.check_observed()
         self.delegate_called = not bool(c.request.get('delegates'))
         self.entry_frame = self.target_frame = None
         self.entry_raised = None
@@ -702,6 +745,7 @@ class _Lifecycle:
                 raise ValueError("incomplete selected call")
             self.check_target()
             self.entry.check()
+            c.check_observed()
             expect(self.after, expected_after)
             self.sequence += 1
             self.state = self.after.copy()
@@ -919,6 +963,8 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
             raise ValueError("state changed between transitions")
         expect(self.before, expected_before, module=True)
         self.calls = 0
+        self.observed_calls, self.observed_frames = [], {}
+        c.check_observed()
         self.completed = self.entry_completed = False
         self.entry_frame = self.target_frame = self.await_frame = None
         self.entry_raised = self.await_raised = self.await_task = None
@@ -986,6 +1032,7 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 raise ValueError("incomplete selected call")
             if self.entry is not None:
                 self.entry.check()
+            c.check_observed()
             self.after = self.read()
             if refused and not equal(self.after, self.before):
                 raise ValueError("a refused step changed the state without a selected call")

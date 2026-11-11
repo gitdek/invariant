@@ -773,13 +773,35 @@ async def report(name: str) -> str:
     return f"admitted {name}"
 ```
 
-and select it as a check's proof, its own inline contract the proof's contract, with no proof invocation, since the gate runs only its own pinned Nagini, and beside conformance on the same function, which the gate needs to show the application runs the function it proved. The module must be among the manifest's `existing` sources:
+and select it as a check's proof, its own inline contract the proof's contract, with no proof invocation, since the gate runs only its own pinned Nagini. Conformance on the same function, or the observed-call route below, shows the application runs the function it proved. The module must be among the manifest's `existing` sources:
 
 ```json
 {"target": {"source": "tasks/admission.py", "symbol": "admit"},
  "proof": {"contracts": [{"source": "tasks/admission.py", "symbol": "admit"}]},
  "conformance": [{"source": "verification/tasks/driver.py", "symbol": "drive"}]}
 ```
+
+A decision that refuses a request can instead be observed inside the entries of another check's exhaustive exploration ([D-0416](../decisions/journal/D-0416.jsonl), refining [D-0260](../decisions/journal/D-0260.jsonl)). For example, a service's `admission` function returns 403 for the wrong site, 400 for the wrong engine, 409 while busy and 0 on admission. Its entry raises the driver's declared refusal before starting the selected worker when admission fails. Add `observe` to the worker's existing check, keeping its conformance invocation, and a separate proof selection:
+
+```json
+[
+  {"target": {"source": "tasks/worker.py", "symbol": "run"},
+   "observe": [{"source": "tasks/admission.py", "symbol": "admission"}],
+   "conformance": [{"source": "verification/tasks/driver.py", "symbol": "drive"}],
+   "invocations": [{"id": "explore", "kind": "conformance",
+     "check": {"source": "verification/tasks/driver.py", "symbol": "drive"},
+     "command": "python", "args": ["driver.py"], "working_dir": "verification/tasks",
+     "inputs": ["verification/tasks/.invariant/specs/Tasks.tla", "verification/tasks/.invariant/ratified.lock"]}]},
+  {"target": {"source": "tasks/admission.py", "symbol": "admission"},
+   "proof": {"contracts": [{"source": "tasks/admission.py", "symbol": "admission"}]}}
+]
+```
+
+This is the `components.checks` list; set `exhaustive: true`, include both modules in `existing`, and include their directories in `components.scope`. `observe` accepts module functions in the existing application. It resolves and pins their source/symbol declarations and requires exhaustive conformance on the check that declares it. The separate proof check needs no conformance invocation of its own.
+
+Each completed call inside an entry appears in completion order in that attempt observation's `calls`, with `target`, `source_sha256`, `arguments` by parameter name and `result`. Positional, keyword and default arguments are recorded as Python binds them. The collector copies arguments on entry and results on return: finite JSON scalars, lists and string-keyed dictionaries, with exact integers, including integers larger than a float can represent. Callable substitutions, unsupported values and inconsistent replays invalidate the execution. Calls made outside entries, during initialization or during `release` earn no evidence; observing a decision does not count as calling or starting the selected worker. Held-call reservation, release and read-back keep their existing rules.
+
+The observed function qualifies only when the same complete, successful exploration invocation records it on both accepted and declared-refused non-replay attempts, against the proof's source bytes, beside passing transition, state and attempted-step conformance. A declaration alone, calls on only one outcome, replay-only calls, a sampled run or stale, incomplete or failed evidence leaves the proof not qualified. Receipts retain the calls and declarations, bind them into fingerprints and check qualification again from the matching execution and conformance; missing coverage appears in the proof diagnostics.
 
 Every operation beyond the function needs a [trusted contract](#trusted-dependency-contracts), here one on `packaging.utils.is_normalized_name` whose abstraction says what the proof relies on:
 
@@ -851,7 +873,7 @@ Then it runs the application's tests, its conformance and the trusted contracts'
 
 - Nagini proved the function from its original bytes, with no error and nothing it reached unaccounted for.
 - Every trusted contract it assumed has tested support.
-- Conformance on the same function passed in the same run, against the same source bytes. The gate's collector binds what conformance observes to that very staged declaration, so the function Nagini proved is the one the application runs.
+- Conformance on the same function passed in the same run, against the same source bytes, or its declared calls qualify on both accepted and declared-refused attempts of one complete exploration with passing transition, state and attempted-step conformance. The gate's collector binds both routes to that very staged declaration, so the function Nagini proved is the one the application runs.
 
 A proof that falls short fails the gate, as an untested declared contract does, and the receipt's failures say why. If Nagini verified it, the report marks its row `unqualified`, a mark later attribution keeps, and the receipt calls it not qualified and leaves it out of the proved count. A receipt counts an in-place result only beside the attempt its `in_place_input` pin names, and says so when the report doesn't hold it. The tests, conformance and contract evidence stay as they ran.
 
@@ -895,7 +917,7 @@ The receipt keeps the three apart:
 
 No step proves a dependency, an unselected function or the whole application. In-place proof supports top-level functions that select their own inline contract, within the limits the table above lists. The gate doesn't check callers against a proved function's preconditions; #210 leaves that for later.
 
-`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses)' -count=1 -timeout 60m` runs all 24 of the gate's in-place proof cases on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
+`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793)' -count=1 -timeout 60m` runs the gate's in-place proof cases and the observed admission-decision fixture on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
 
 - The valid proof passes, and so does one whose contract holds only what Python runs as Nagini reads it.
 - A body that breaks its postcondition only where conformance never goes fails at the original line.

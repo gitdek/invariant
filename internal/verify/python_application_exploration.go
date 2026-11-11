@@ -296,14 +296,14 @@ func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) er
 		return fmt.Errorf("a step without the selected call or a held release changed the state")
 	}
 	k := [3]string{from, row.Step, args}
-	outcome := pythonApplicationKey([]any{row.Operation, *row.Called, row.Outcome, row.Refusal})
+	outcome := pythonApplicationKey([]any{row.Operation, *row.Called, row.Outcome, row.Refusal, row.Calls})
 	if *row.Replay {
 		// A replay repeats an attempt the exploration already made.
 		if was, ok := x.attempts[k]; !ok || was != to {
 			return fmt.Errorf("the application is not deterministic: a replay of %s reached another state", row.Step)
 		}
 		if x.outcomes[k] != outcome {
-			return fmt.Errorf("the application is not deterministic: a replay of %s changed its operation, selected start or outcome", row.Step)
+			return fmt.Errorf("the application is not deterministic: a replay of %s changed its operation, selected start, outcome or observed calls", row.Step)
 		}
 		return nil
 	}
