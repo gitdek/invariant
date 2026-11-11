@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,7 +112,10 @@ func (c Codex) turn(ctx context.Context) (release func(), err error) {
 
 // lockHome takes the lock on Codex's home. It tries once a second, since a
 // lock that blocks can't be called off, and checks that the run's work is
-// still wanted at each of ticks.
+// still wanted at each of ticks. Processes take it in the order they asked
+// (#805): a process's next run takes the lock the instant its last run frees
+// it, so without the order another process, trying once a second, would
+// wait for that process's whole queue.
 func (c Codex) lockHome(ctx context.Context, ticks <-chan time.Time) (*os.File, error) {
 	if err := os.MkdirAll(c.Home, 0o700); err != nil {
 		return nil, err
@@ -120,8 +124,14 @@ func (c Codex) lockHome(ctx context.Context, ticks <-chan time.Time) (*os.File, 
 	if err != nil {
 		return nil, err
 	}
+	// Without a ticket, the lock alone still keeps runs apart.
+	place, _ := takeTicket(filepath.Join(c.Home, "invariant-turns"))
+	defer place.done()
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		var err error = syscall.EWOULDBLOCK
+		if place.first() {
+			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		}
 		if err == nil {
 			return f, nil
 		}
@@ -141,6 +151,89 @@ func (c Codex) lockHome(ctx context.Context, ticks <-chan time.Time) (*os.File, 
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// A ticket is a process's place in line for Codex's home (#805). It's named
+// for when the process asked, and the process holds a lock on it while it
+// waits, so a ticket nobody holds is a dead process's.
+type ticket struct {
+	dir, name string
+	f         *os.File
+}
+
+// takeTicket joins the line in dir. The ticket is locked before it's renamed
+// into place, so no one sees a live ticket unlocked.
+func takeTicket(dir string) (*ticket, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	name := fmt.Sprintf("%020d-%d-%x", time.Now().UnixNano(), os.Getpid(), nonce)
+	draft := filepath.Join(dir, name+".new")
+	f, err := os.OpenFile(draft, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		os.Remove(draft)
+		return nil, err
+	}
+	if err := os.Rename(draft, filepath.Join(dir, name)); err != nil {
+		f.Close()
+		os.Remove(draft)
+		return nil, err
+	}
+	return &ticket{dir: dir, name: name, f: f}, nil
+}
+
+// first says whether no live ticket is older than t, and removes the
+// tickets of processes that died waiting. A nil ticket is always first.
+func (t *ticket) first() bool {
+	if t == nil {
+		return true
+	}
+	entries, err := os.ReadDir(t.dir)
+	if err != nil {
+		return true
+	}
+	// ReadDir sorts by name, and names sort by when their process asked.
+	for _, e := range entries {
+		name := e.Name()
+		if name >= t.name {
+			break
+		}
+		if strings.HasSuffix(name, ".new") {
+			continue
+		}
+		path := filepath.Join(t.dir, name)
+		other, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			continue
+		}
+		err = syscall.Flock(int(other.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			os.Remove(path)
+		}
+		other.Close()
+		if err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// done leaves the line. The ticket is removed before its lock goes, so no
+// one finds it unlocked and takes it for a dead process's.
+func (t *ticket) done() {
+	if t == nil {
+		return
+	}
+	os.Remove(filepath.Join(t.dir, t.name))
+	t.f.Close()
 }
 
 // profile is the permission profile Codex's commands run under (D-0138):
