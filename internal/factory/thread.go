@@ -279,7 +279,13 @@ func DecodeMarker(body string) (Marker, bool) {
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
 		var fields map[string]json.RawMessage
-		if json.Unmarshal(b, &fields) != nil {
+		if err := json.Unmarshal(b, &fields); err != nil {
+			// An envelope that names a saved record but no longer parses, such
+			// as one cut short or with data after it, stays a broken reference.
+			// Read as no marker, it would let an older proposal stand in for it.
+			if bytes.Contains(bytes.ToLower(b), []byte(`"proposal_ref"`)) {
+				return Marker{ProposalRef: json.RawMessage("null"), referenceProblem: err.Error()}, true
+			}
 			return Marker{}, false
 		}
 		var ref json.RawMessage

@@ -227,6 +227,10 @@ func (m Marker) ResolveDraft(ctx context.Context, repository string, issue int,
 	return hydrated, &result, nil
 }
 
+// savedSlug is the kebab case formalize requires of every draft's slug, which
+// names the project's directory and its branch.
+var savedSlug = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
 func validateDraftResult(r *formalize.Result) error {
 	p := r.Proposal
 	if p == nil || r.CheckContext == nil || r.Problem != "" || p.Unsupported != "" {
@@ -235,7 +239,19 @@ func validateDraftResult(r *formalize.Result) error {
 	if p.Plan != nil || p.IssuePlan != nil || r.CheckContext.Planning != "" {
 		return fmt.Errorf("saved draft references require modeled evidence")
 	}
+	// Ratification writes where the proposal says, and a payload whose digest
+	// matches can still say anything there. Hold a saved directory, and a
+	// selected proposal's slug below, to the rules they meet when an issue
+	// names one or a draft is made.
+	if p.Dir != "" {
+		if problem := badDir(p.Dir); problem != "" {
+			return fmt.Errorf("saved project directory %q: %s", p.Dir, problem)
+		}
+	}
 	if target := p.Target; target != nil {
+		if problem := badDir(target.Dir); problem != "" {
+			return fmt.Errorf("saved amendment directory %q: %s", target.Dir, problem)
+		}
 		c := target.Baseline
 		if c == nil || target.Dir != c.Dir || !draftEqual(target.Manifest, c.Manifest) ||
 			target.Amends != project.ProposalHash(c.Lock.Bounds, c.Lock.Statements) || target.Previous != c.Previous() {
@@ -270,6 +286,9 @@ func validateDraftResult(r *formalize.Result) error {
 			}
 		}
 		return nil
+	}
+	if !savedSlug.MatchString(p.Slug) {
+		return fmt.Errorf("saved proposal slug %q must be kebab case", p.Slug)
 	}
 	if err := p.ValidateReader(); err != nil {
 		return err

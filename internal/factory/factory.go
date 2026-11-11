@@ -1676,7 +1676,7 @@ func codeLines(body string) []string {
 // badDir says what's wrong with a project directory an issue names.
 func badDir(dir string) string {
 	switch {
-	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || strings.HasPrefix(dir, "../"):
+	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || dir == ".." || strings.HasPrefix(dir, "../"):
 		return "that isn't a clean path inside the repository"
 	case dir == ".github" || strings.HasPrefix(dir, ".github/"):
 		return "the factory never touches CI configuration"
