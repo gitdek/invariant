@@ -19,7 +19,8 @@ import (
 	"github.com/gitdek/invariant/internal/project"
 )
 
-const decisionsUsage = `invariant decisions keeps every project's decisions in one graph (D-0096).
+const decisionsUsage = `invariant decisions keeps every project's decisions and ratified plans in one
+graph (D-0096).
 
 Recording:
   invariant decisions decide [-door two-way|one-way] [-status decided|proposed|ratified] [-who WHO]
@@ -35,13 +36,13 @@ Recording:
                                     record an edge between two decisions
 
 Asking:
-  invariant decisions show ID       a decision, the exact proposal its ratification names if it names
-                                    one, and every edge to and from it
-  invariant decisions dependents ID everything that rests on a decision: what reopening it touches
+  invariant decisions show ID       a decision or a ratified plan, the exact proposal its ratification
+                                    names if it names one, and every edge to and from it
+  invariant decisions dependents ID everything that rests on it: what reopening it touches
   invariant decisions implementers ID
                                     the code that implements it, or a decision resting on it
-  invariant decisions grounds ID    the decisions it rests on
-  invariant decisions search WORDS  decisions whose words hold every one of WORDS
+  invariant decisions grounds ID    the decisions and plans it rests on
+  invariant decisions search WORDS  decisions and plans whose words hold every one of WORDS
   invariant decisions sql QUERY     read-only SQL over the node and edge tables
 
 Keeping it whole:
@@ -55,7 +56,8 @@ Keeping it whole:
 Every command takes -C DIR, the checkout (default .), and -store FILE (default
 the store on this machine). A project is named after its repository's origin,
 or -project NAME. An ID is short within the project, as D-0096, or qualified,
-as copythis-ad/D-0001.
+as copythis-ad/D-0001. A ratified plan, .invariant/plans/issue-N.json, is a
+record of its own: its ID is P- and its issue's number, as P-0358.
 `
 
 // idList is a flag that can be given more than once.
@@ -490,7 +492,11 @@ func rebuildCmd(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Rebuilt %s from %s: %d decisions, %d edges.\n", r.Name, r.Dir, n, e)
+		plans, err := s.PlanCount(r.Name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Rebuilt %s from %s: %d decisions, %d ratified plans, %d edges.\n", r.Name, r.Dir, n, plans, e)
 	}
 	return nil
 }
@@ -548,7 +554,11 @@ func checkDecisionsCmd(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	fmt.Printf("✅ %s's decision graph holds: %d decisions and %d edges, every cited decision exists, the SPEC rests on none that's superseded, %s, and decisions/log.md is the journal's view.\n", repo.Name, n, e, handLocks(locks))
+	plans, err := s.PlanCount(repo.Name)
+	if err != nil {
+		return 0, err
+	}
+	fmt.Printf("✅ %s's decision graph holds: %d decisions, %d ratified plans and %d edges, every cited decision and plan exists, the SPEC rests on none that's superseded, %s, and decisions/log.md is the journal's view.\n", repo.Name, n, plans, e, handLocks(locks))
 	return 0, nil
 }
 
@@ -639,8 +649,8 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
-// label is what a list shows beside a node: a decision's status, or the
-// kind of text that cites one.
+// label is what a list shows beside a node: a decision's status, a ratified
+// plan, or the kind of text that cites one.
 func label(n decisions.Node) string {
 	if n.Kind == "decision" {
 		return n.Status
@@ -677,6 +687,9 @@ func printNodes(nodes []decisions.Node, asJSON bool) error {
 
 func printShow(n decisions.Node, near []decisions.Neighbor) {
 	head := []string{n.ID}
+	if n.Kind == "plan" {
+		head = append(head, "plan")
+	}
 	for _, v := range []string{n.Door, n.Status, n.Date, n.Who} {
 		if v != "" {
 			head = append(head, v)
@@ -687,7 +700,11 @@ func printShow(n decisions.Node, near []decisions.Neighbor) {
 	}
 	fmt.Println(strings.Join(head, " · "))
 	fmt.Println(n.Text)
-	if n.Record != "" {
+	switch {
+	case n.Record == "":
+	case n.Kind == "plan":
+		fmt.Printf("Record: %s\n", n.Record)
+	default:
 		fmt.Printf("Record: decisions/%s\n", n.Record)
 	}
 	for _, out := range []bool{true, false} {

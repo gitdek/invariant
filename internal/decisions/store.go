@@ -25,8 +25,8 @@ import (
 // nodes and edges and leaves every other project's alone.
 const schema = `
 CREATE TABLE IF NOT EXISTS node (
-	id      TEXT PRIMARY KEY,       -- invariant/D-0096, or invariant/SPEC.md:92 for a line that cites one
-	kind    TEXT NOT NULL,          -- decision, spec, doc or code
+	id      TEXT PRIMARY KEY,       -- invariant/D-0096, a ratified plan's ID, or invariant/SPEC.md:92 for a line that cites one
+	kind    TEXT NOT NULL,          -- decision, plan, spec, doc or code
 	project TEXT NOT NULL,
 	date    TEXT NOT NULL DEFAULT '',
 	door    TEXT NOT NULL DEFAULT '',
@@ -699,6 +699,9 @@ func exists(repo Repo, id string) error {
 	if full != repo.Name+"/"+short {
 		return nil
 	}
+	if isPlan(short) {
+		return planExists(repo, short)
+	}
 	if _, err := os.Stat(filepath.Join(repo.JournalDir(), short+".jsonl")); err != nil {
 		return fmt.Errorf("there's no decision %s in %s", short, repo.Dir)
 	}
@@ -757,6 +760,9 @@ func (s *Store) update(repo Repo, id, by string, next func(Decision) (Event, err
 	short := full[strings.LastIndex(full, "/")+1:]
 	if full != repo.Name+"/"+short {
 		return fmt.Errorf("%s belongs to another project, so it's changed in that project's repository", full)
+	}
+	if isPlan(short) {
+		return fmt.Errorf("%s is a ratified plan: its record is its file, which a person ratified on its issue, and no journal line changes it", short)
 	}
 	unlock, err := s.lockWrites()
 	if err != nil {
@@ -975,16 +981,16 @@ func (s *Store) Implementers(id string) ([]Node, error) {
 	return out, nil
 }
 
-// Grounds is what a decision rests on: the decisions it refines, directly
-// or through others, and the ones any of them cites or reopens. It says why
-// the decision exists.
+// Grounds is what a decision or a plan rests on: the decisions it refines,
+// directly or through others, and the decisions and ratified plans any of
+// them cites or reopens. It says why the decision exists.
 func (s *Store) Grounds(id string) ([]Node, error) {
 	return s.nodes(`WITH RECURSIVE chain(id) AS (
 			SELECT ?1
 			UNION
 			SELECT e.dst FROM edge e JOIN chain c ON e.src = c.id WHERE e.type = 'refines'
 		)
-		SELECT `+nodeColumns+` FROM node n WHERE n.kind = 'decision' AND n.id != ?1 AND n.id IN (
+		SELECT `+nodeColumns+` FROM node n WHERE n.kind IN ('decision', 'plan') AND n.id != ?1 AND n.id IN (
 			SELECT id FROM chain
 			UNION
 			SELECT e.dst FROM edge e JOIN chain c ON e.src = c.id WHERE e.type IN ('cites', 'reopens')
@@ -992,9 +998,10 @@ func (s *Store) Grounds(id string) ([]Node, error) {
 		ORDER BY n.id`, id)
 }
 
-// Search finds decisions whose words contain every one of the given words.
+// Search finds decisions and ratified plans whose words contain every one
+// of the given words.
 func (s *Store) Search(words string) ([]Node, error) {
-	q := `SELECT ` + nodeColumns + ` FROM node n WHERE n.kind = 'decision'`
+	q := `SELECT ` + nodeColumns + ` FROM node n WHERE n.kind IN ('decision', 'plan')`
 	var args []any
 	for _, w := range strings.Fields(words) {
 		q += ` AND n.text LIKE ? ESCAPE '\'`

@@ -10,12 +10,12 @@ import (
 )
 
 // Check reports what's wrong with the graph after a rebuild from the
-// journals: an edge to a decision that doesn't exist, a SPEC line that rests
-// on a superseded decision, a SPEC bullet that traces to no decision, a
-// record that isn't there, and a decisions/log.md that isn't the journal's
-// view. The journals' chains and rules were checked as they were read. A
-// repository whose log hasn't been carried into a journal yet is told to,
-// and checked no further.
+// journals: an edge to a decision or a ratified plan that doesn't exist, a
+// SPEC line that rests on a superseded decision, a SPEC bullet that traces
+// to no decision or plan, a record that isn't there, and a decisions/log.md
+// that isn't the journal's view. The journals' chains and rules were checked
+// as they were read. A repository whose log hasn't been carried into a
+// journal yet is told to, and checked no further.
 func (s *Store) Check(repos []Repo) ([]string, error) {
 	var problems []string
 	loaded := map[string]bool{}
@@ -24,7 +24,13 @@ func (s *Store) Check(repos []Repo) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if n > 0 {
+		plans, err := s.PlanCount(r.Name)
+		if err != nil {
+			return nil, err
+		}
+		// A repository with ratified plans and no journal yet has a graph
+		// to check too.
+		if n > 0 || plans > 0 {
 			loaded[r.Name] = true
 		} else if _, err := os.Stat(filepath.Join(r.Dir, "decisions", "log.md")); err == nil {
 			problems = append(problems, fmt.Sprintf("%s/decisions/log.md isn't in the journal yet: run `invariant decisions import`", r.Name))
@@ -41,7 +47,11 @@ func (s *Store) Check(repos []Repo) ([]string, error) {
 			return nil, err
 		}
 		if project := dst[:strings.LastIndex(dst, "/")]; loaded[project] {
-			problems = append(problems, fmt.Sprintf("%s %s %s, which isn't a decision", src, typ, dst))
+			what := "a decision"
+			if isPlan(dst[strings.LastIndex(dst, "/")+1:]) {
+				what = "a ratified plan the repository holds"
+			}
+			problems = append(problems, fmt.Sprintf("%s %s %s, which isn't %s", src, typ, dst, what))
 		}
 	}
 	rows.Close()
@@ -60,7 +70,7 @@ func (s *Store) Check(repos []Repo) ([]string, error) {
 		spec, err := os.ReadFile(filepath.Join(r.Dir, "SPEC.md"))
 		if err == nil {
 			for _, line := range Untraced(string(spec)) {
-				problems = append(problems, fmt.Sprintf("%s/SPEC.md: a bullet traces to no decision: %s", r.Name, line))
+				problems = append(problems, fmt.Sprintf("%s/SPEC.md: a bullet traces to no decision or ratified plan: %s", r.Name, line))
 			}
 		}
 		decisions, err := Load(r)
@@ -94,8 +104,8 @@ func (s *Store) Check(repos []Repo) ([]string, error) {
 
 var bullet = regexp.MustCompile(`^(\s*)(?:[-*] |\d+\. )`)
 
-// Untraced is every bullet of a SPEC that names no decision, itself or
-// through the bullets it sits under.
+// Untraced is every bullet of a SPEC that names no decision and no ratified
+// plan, itself or through the bullets it sits under.
 func Untraced(spec string) []string {
 	type open struct {
 		indent int
@@ -115,7 +125,7 @@ func Untraced(spec string) []string {
 		for len(stack) > 0 && stack[len(stack)-1].indent >= indent {
 			stack = stack[:len(stack)-1]
 		}
-		traced := mentionedID.MatchString(line) || (len(stack) > 0 && stack[len(stack)-1].traced)
+		traced := len(mentioned(line, false)) > 0 || (len(stack) > 0 && stack[len(stack)-1].traced)
 		if !traced {
 			out = append(out, strings.TrimSpace(line))
 		}

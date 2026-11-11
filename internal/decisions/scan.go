@@ -15,10 +15,23 @@ import (
 // jsonLine is an event as its journal line holds it.
 func jsonLine(e Event) ([]byte, error) { return json.Marshal(e) }
 
-// citeFrom adds an edge from src to every other decision its words mention,
-// as a citation, unless src already has an edge of its own to that one.
+// mentioned is the decisions a line of text names, then the ratified plans
+// it names. A plan's file path names it in prose, as a link in the SPEC or
+// the docs does. In code a path is usually data, such as a test's fixture,
+// so there only a plan's ID names it.
+func mentioned(text string, code bool) []string {
+	ids := mentionedID.FindAllString(text, -1)
+	if code {
+		return append(ids, planIDs(text)...)
+	}
+	return append(ids, planLinks(text)...)
+}
+
+// citeFrom adds an edge from src to every other decision or plan its words
+// mention, as a citation, unless src already has an edge of its own to that
+// one.
 func citeFrom(tx *sql.Tx, src, project, text string) error {
-	for _, m := range mentionedID.FindAllString(text, -1) {
+	for _, m := range mentioned(text, false) {
 		dst := project + "/" + m
 		if dst == src {
 			continue
@@ -43,11 +56,15 @@ var (
 	recordFile = regexp.MustCompile(`^decisions/(D-\d{4,})-[^/]*\.md$`)
 )
 
-// deriveCitations reads every decision's words, and every line of the
-// repository's docs and code that mentions a decision, into edges. A line of
-// code implements the decisions it names, and a line of the SPEC or the docs
-// cites them. decisions/log.md is left out: it's a view of the store.
+// deriveCitations reads the repository's ratified plans, every decision's
+// and plan's words, and every line of the repository's docs and code that
+// mentions a decision or a plan, into nodes and edges. A line of code
+// implements what it names, and a line of the SPEC or the docs cites it.
+// decisions/log.md is left out: it's a view of the store.
 func deriveCitations(tx *sql.Tx, repo Repo) error {
+	if err := putPlans(tx, repo); err != nil {
+		return err
+	}
 	rows, err := tx.Query(`SELECT id, text FROM node WHERE kind = 'decision' AND project = ?`, repo.Name)
 	if err != nil {
 		return err
@@ -110,7 +127,7 @@ func scanFile(tx *sql.Tx, repo Repo, path, rel, ext string) error {
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for n := 1; sc.Scan(); n++ {
 		line := sc.Text()
-		ids := mentionedID.FindAllString(line, -1)
+		ids := mentioned(line, kind == "code")
 		if len(ids) == 0 {
 			continue
 		}
