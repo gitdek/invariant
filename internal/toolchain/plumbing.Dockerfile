@@ -10,4 +10,4 @@ FROM golang@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43
 FROM python@sha256:79e7a9b9ff1cbceff819f856fb374477792a5967759d94df266de7b7b4120e6f
 COPY --from=go /usr/local/go /usr/local/go
 ENV GOTOOLCHAIN=local GOPATH=/go PATH=/go/bin:/usr/local/go/bin:$PATH INVARIANT_PYTHON_PINNED=1
-RUN apk add --no-cache git=2.54.0-r0 bash=5.3.9-r1 && mkdir -p /go/src /go/bin && chmod -R 1777 /go
+RUN apk add --no-cache git=2.54.1-r0 bash=5.3.9-r1 && mkdir -p /go/src /go/bin && chmod -R 1777 /go

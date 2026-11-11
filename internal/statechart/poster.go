@@ -156,22 +156,44 @@ func posterWrap(text string, width int) []string {
 }
 
 func posterTextW(s string, size, k float64) float64 {
-	return float64(utf8.RuneCountInString(s)) * size * k
+	return float64(float64(utf8.RuneCountInString(s)) * size * k)
 }
 
+// FMA preserves the original arm64 rounding. Explicit float64 conversions
+// keep other products rounded, even across assignments and inlined helpers.
 func cubicAt(s [4]point, t float64) point {
 	u := 1 - t
 	return point{
-		u*u*u*s[0].x + 3*u*u*t*s[1].x + 3*u*t*t*s[2].x + t*t*t*s[3].x,
-		u*u*u*s[0].y + 3*u*u*t*s[1].y + 3*u*t*t*s[2].y + t*t*t*s[3].y,
+		math.FMA(t*t*t, s[3].x, math.FMA(3*u*t*t, s[2].x, math.FMA(3*u*u*t, s[1].x, float64(u*u*u*s[0].x)))),
+		math.FMA(t*t*t, s[3].y, math.FMA(3*u*t*t, s[2].y, math.FMA(3*u*u*t, s[1].y, float64(u*u*u*s[0].y)))),
 	}
+}
+
+// posterHypot preserves Go 1.27.3's arm64 math.Hypot arithmetic. Other
+// processors and fusion-disabled builds round 1+q*q differently in math.
+func posterHypot(p, q float64) float64 {
+	p, q = math.Abs(p), math.Abs(q)
+	switch {
+	case math.IsInf(p, 1) || math.IsInf(q, 1):
+		return math.Inf(1)
+	case math.IsNaN(p) || math.IsNaN(q):
+		return math.NaN()
+	}
+	if p < q {
+		p, q = q, p
+	}
+	if p == 0 {
+		return 0
+	}
+	q /= p
+	return float64(p * math.Sqrt(math.FMA(q, q, 1)))
 }
 
 func segLen(s [4]point) float64 {
 	total, prev := 0.0, s[0]
 	for i := 1; i <= 24; i++ {
 		q := cubicAt(s, float64(i)/24)
-		total += math.Hypot(q.x-prev.x, q.y-prev.y)
+		total += posterHypot(q.x-prev.x, q.y-prev.y)
 		prev = q
 	}
 	return total
@@ -247,11 +269,11 @@ func (p *poster) layout() {
 	for _, s := range p.states {
 		lines := posterWrap(s.Label, 26)
 		p.lines[s.ID] = lines
-		h := 36 + float64(len(lines))*21 + 20
+		h := math.FMA(float64(len(lines)), 21, 36) + 20
 		if chips := p.loops[s.ID]; len(chips) > 0 {
 			h += 14
 			for _, a := range chips {
-				h += float64(len(posterWrap(a.Label, 30)))*17 + 10
+				h += math.FMA(float64(len(posterWrap(a.Label, 30))), 17, 10)
 			}
 		}
 		size[s.ID] = [2]float64{posterNodeW, h}
@@ -334,7 +356,7 @@ func (p *poster) layout() {
 			if strings.HasPrefix(u, "~") {
 				p.box[u] = posterBox{x, y, w, hmax}
 			} else {
-				p.box[u] = posterBox{x, y + (hmax-h)/2, w, h}
+				p.box[u] = posterBox{x, math.FMA(hmax-h, 0.5, y), w, h}
 			}
 			x += w + posterNodeGap
 		}
@@ -359,8 +381,8 @@ func (p *poster) layout() {
 		}
 		wp := waypoints(i)
 		next, prev := p.box[wp[1]], p.box[wp[len(wp)-2]]
-		outPorts[a.From] = append(outPorts[a.From], portUse{next.x + next.w/2, a.Label, i})
-		inPorts[a.To] = append(inPorts[a.To], portUse{prev.x + prev.w/2, a.Label, i})
+		outPorts[a.From] = append(outPorts[a.From], portUse{math.FMA(next.w, 0.5, next.x), a.Label, i})
+		inPorts[a.To] = append(inPorts[a.To], portUse{math.FMA(prev.w, 0.5, prev.x), a.Label, i})
 	}
 	for _, ports := range []map[string][]portUse{outPorts, inPorts} {
 		for _, list := range ports {
@@ -384,7 +406,7 @@ func (p *poster) layout() {
 				k = n
 			}
 		}
-		x := b.x + 28 + (b.w-56)*float64(k+1)/float64(len(list)+1)
+		x := b.x + 28 + float64((b.w-56)*float64(k+1)/float64(len(list)+1))
 		if top {
 			return point{x, b.y}
 		}
@@ -394,8 +416,8 @@ func (p *poster) layout() {
 	for i, a := range p.moves {
 		if back[[2]string{a.From, a.To}] {
 			f, t := p.box[a.From], p.box[a.To]
-			p0, p3 := point{f.x + f.w, f.y + f.h/2}, point{t.x + t.w, t.y + t.h/2}
-			bulge := 110 + 34*float64(backs)
+			p0, p3 := point{f.x + f.w, math.FMA(f.h, 0.5, f.y)}, point{t.x + t.w, math.FMA(t.h, 0.5, t.y)}
+			bulge := math.FMA(34, float64(backs), 110)
 			backs++
 			p.edges = append(p.edges, posterEdge{a, curve{{p0, {p0.x + bulge, p0.y}, {p3.x + bulge, p3.y}, p3}}, true})
 			continue
@@ -403,7 +425,7 @@ func (p *poster) layout() {
 		pts := []point{port(a.From, i, outPorts, false)}
 		for _, name := range chains[i] {
 			v := p.box[name]
-			pts = append(pts, point{v.x + v.w/2, v.y}, point{v.x + v.w/2, v.y + v.h})
+			pts = append(pts, point{math.FMA(v.w, 0.5, v.x), v.y}, point{math.FMA(v.w, 0.5, v.x), v.y + v.h})
 		}
 		pts = append(pts, port(a.To, i, inPorts, true))
 		var cv curve
@@ -427,7 +449,9 @@ func (p *poster) layout() {
 }
 
 func posterLabelW(a Arrow) float64 {
-	return posterTextW(a.Label, 13, 0.56) + posterTextW(fmt.Sprintf("×%d", a.Count), 12, 0.62) + 36
+	label := posterTextW(a.Label, 13, 0.56)
+	count := float64(utf8.RuneCountInString(fmt.Sprintf("×%d", a.Count))) * 12
+	return math.FMA(count, 0.62, label) + 36
 }
 
 type posterWalk struct {
@@ -542,7 +566,7 @@ func (p *poster) replay() {
 		byKey[arrowKey(e.arrow)] = e
 	}
 	first := p.box[tour[0].From]
-	cur := point{first.x + first.w/2, first.y + 28}
+	cur := point{math.FMA(first.w, 0.5, first.x), first.y + 28}
 	var b strings.Builder
 	fmt.Fprintf(&b, "M%.1f %.1f", cur.x, cur.y)
 	total := 0.0
@@ -555,29 +579,29 @@ func (p *poster) replay() {
 		if e, ok := byKey[arrowKey(a)]; ok {
 			p0 := e.segs[0][0]
 			fmt.Fprintf(&b, " L%.1f %.1f", p0.x, p0.y)
-			total += math.Hypot(p0.x-cur.x, p0.y-cur.y)
+			total += posterHypot(p0.x-cur.x, p0.y-cur.y)
 			for _, s := range e.segs {
 				fmt.Fprintf(&b, " C%.1f %.1f %.1f %.1f %.1f %.1f", s[1].x, s[1].y, s[2].x, s[2].y, s[3].x, s[3].y)
 				total += segLen(s)
 			}
 			t := p.box[a.To]
-			dest := point{t.x + t.w/2, t.y + 28}
+			dest := point{math.FMA(t.w, 0.5, t.x), t.y + 28}
 			end := e.segs[len(e.segs)-1][3]
 			fmt.Fprintf(&b, " L%.1f %.1f", dest.x, dest.y)
-			total += math.Hypot(dest.x-end.x, dest.y-end.y)
+			total += posterHypot(dest.x-end.x, dest.y-end.y)
 			cur = dest
 		} else {
 			// A step that stays: a small orbit in the card's corner.
 			f := p.box[a.From]
 			c0 := point{f.x + f.w - 36, f.y + 28}
 			fmt.Fprintf(&b, " L%.1f %.1f a12 12 0 1 1 0.1 0", c0.x, c0.y)
-			total += math.Hypot(c0.x-cur.x, c0.y-cur.y) + 2*math.Pi*12
+			total += posterHypot(c0.x-cur.x, c0.y-cur.y) + 2*math.Pi*12
 			cur = c0
 		}
 		marks = append(marks, mark{total, a.To})
 	}
 	p.token = b.String()
-	p.dur = 1.7*float64(len(tour)) + 2.5
+	p.dur = math.FMA(1.7, float64(len(tour)), 2.5)
 	for _, m := range marks {
 		f := 0.0
 		if total > 0 {
@@ -629,7 +653,95 @@ func drawIn(delay float64) string {
 }
 
 func (p *poster) strokeW(count int) float64 {
-	return 1.7 + 3.4*math.Log1p(float64(count))/math.Log1p(float64(max(p.maxStep, 1)))
+	return 1.7 + float64(3.4*posterLog1p(count)/posterLog1p(max(p.maxStep, 1)))
+}
+
+// Adapted from Go's src/math/log1p.go:
+// Copyright 2010 The Go Authors. All rights reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// * Redistributions of source code must retain the above copyright notice,
+//   this list of conditions and the following disclaimer.
+// * Redistributions in binary form must reproduce the above copyright
+//   notice, this list of conditions and the following disclaimer in the
+//   documentation and/or other materials provided with the distribution.
+// * Neither the name of Google LLC nor the names of its contributors may
+//   be used to endorse or promote products derived from this software
+//   without specific prior written permission.
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+//
+// The original algorithm and constants carry this notice:
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+// Developed at SunPro, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this software is freely
+// granted, provided that this notice is preserved.
+
+// posterLog1p preserves Go 1.27.3's arm64 math.Log1p arithmetic for
+// nonnegative integer counts. Only zero and the argument-reduction branches
+// are reachable for these inputs. Rounding outside math.Log1p cannot control
+// the fusion inside its polynomial and reconstruction.
+func posterLog1p(count int) float64 {
+	const (
+		ln2Hi = 6.93147180369123816490e-01
+		ln2Lo = 1.90821492927058770002e-10
+		lp1   = 6.666666666666735130e-01
+		lp2   = 3.999999999940941908e-01
+		lp3   = 2.857142874366239149e-01
+		lp4   = 2.222219843214978396e-01
+		lp5   = 1.818357216161805012e-01
+		lp6   = 1.531383769920937332e-01
+		lp7   = 1.479819860511658591e-01
+	)
+	if count == 0 {
+		return 0
+	}
+	x := float64(count)
+	u, c := x, 0.0
+	if x < 1<<53 {
+		u = 1 + x
+		c = (1 - (u - x)) / u
+	}
+	iu := math.Float64bits(u)
+	k := int((iu >> 52) - 1023)
+	iu &= 0x000fffffffffffff
+	if iu < 0x0006a09e667f3bcd {
+		u = math.Float64frombits(iu | 0x3ff0000000000000)
+	} else {
+		k++
+		u = math.Float64frombits(iu | 0x3fe0000000000000)
+		iu = (0x0010000000000000 - iu) >> 2
+	}
+	f := u - 1
+	hfsq := float64(0.5 * f * f)
+	if iu == 0 {
+		if f == 0 {
+			c = math.FMA(float64(k), ln2Lo, c)
+			return math.FMA(float64(k), ln2Hi, c)
+		}
+		r := math.FMA(-0.66666666666666666, f, 1)
+		return math.FMA(float64(k), ln2Hi, -(math.FMA(hfsq, r, -math.FMA(float64(k), ln2Lo, c)) - f))
+	}
+	s := f / (2 + f)
+	z := float64(s * s)
+	r := math.FMA(z, lp7, lp6)
+	r = math.FMA(z, r, lp5)
+	r = math.FMA(z, r, lp4)
+	r = math.FMA(z, r, lp3)
+	r = math.FMA(z, r, lp2)
+	r = math.FMA(z, r, lp1)
+	r = math.FMA(z, r, hfsq)
+	r = math.FMA(s, r, math.FMA(float64(k), ln2Lo, c))
+	return math.FMA(float64(k), ln2Hi, -(math.FMA(0.5*f, f, -r) - f))
 }
 
 func plural(n int64, noun string) string {
@@ -676,7 +788,9 @@ func (p *poster) draw() string {
 	W := p.w
 	subtitle := p.subtitle()
 	const subtitleGap = 22.0
-	extra := subtitleGap * float64(len(subtitle)-1)
+	// The conversion rounds the product here, so no processor fuses it into
+	// the sums below (#792).
+	extra := float64(subtitleGap * float64(len(subtitle)-1))
 	animated := p.o.Animated
 	explain := "Arrows are checked TLC steps, thicker for more concrete steps; ↻ marks steps that stay in a state."
 	tail := "Bounded model, explored completely; it adds no proof claim."
@@ -686,7 +800,7 @@ func (p *poster) draw() string {
 	explainLines := posterWrap(explain, int((W-2*posterPad)/(13*0.53)))
 	tailLines := posterWrap(tail, int((W-2*posterPad)/(12.5*0.53)))
 	sep := p.bottom + 70
-	H := math.Ceil(sep + 28 + 30 + 20*float64(len(explainLines)) + 4 + 19*float64(len(tailLines)) + 22 + extra)
+	H := math.Ceil(math.FMA(19, float64(len(tailLines)), math.FMA(20, float64(len(explainLines)), sep+28+30)+4) + 22 + extra)
 	p.h = H
 	counts := p.c.Report.Counts
 	add(`<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="poster-title poster-desc" viewBox="0 0 %.0f %.0f" width="%.0f" height="%.0f" font-family="%s">`, W, H, W, H, svgEscape(posterFont))
@@ -739,13 +853,13 @@ func (p *poster) draw() string {
 	seed := uint32(2166136261)
 	next := func() float64 {
 		seed = seed*1664525 + 1013904223
-		return float64(seed>>8) / float64(1<<24)
+		return float64(float64(seed>>8) / float64(1<<24))
 	}
 	for i := 0; i < int(W*H/9000); i++ {
-		x, y, r := 12+next()*(W-24), 12+next()*(H-24), 0.6+next()*1.1
+		x, y, r := math.FMA(next(), W-24, 12), math.FMA(next(), H-24, 12), math.FMA(next(), 1.1, 0.6)
 		twinkle := ""
 		if animated {
-			d := 2.5 + next()*5
+			d := math.FMA(next(), 5, 2.5)
 			twinkle = fmt.Sprintf(`<animate attributeName="opacity" values="0.15;0.85;0.15" dur="%.1fs" begin="-%.1fs" repeatCount="indefinite"/>`, d, next()*d)
 		}
 		add(`<circle cx="%.1f" cy="%.1f" r="%.2f" fill="#e0e7ff" opacity="0.35">%s</circle>`, x, y, r, twinkle)
@@ -762,7 +876,7 @@ func (p *poster) draw() string {
 	}
 	add(`<text x="%.0f" y="74" fill="#f8fafc" font-size="32" font-weight="700" letter-spacing="-0.6">%s</text>`, posterPad, svgEscape(title))
 	for i, line := range subtitle {
-		add(`<text x="%.0f" y="%.0f" fill="#94a3b8" font-size="14.5">%s</text>`, posterPad, 104+subtitleGap*float64(i), svgEscape(line))
+		add(`<text x="%.0f" y="%.0f" fill="#94a3b8" font-size="14.5">%s</text>`, posterPad, math.FMA(subtitleGap, float64(i), 104), svgEscape(line))
 	}
 	bx := W - posterPad - 214
 	pulse := ""
@@ -786,7 +900,7 @@ func (p *poster) draw() string {
 		add(`<g data-from="%s" data-to="%s" data-label="%s"><title>%s: %s</title>`, svgEscape(e.arrow.From), svgEscape(e.arrow.To), svgEscape(e.arrow.Label), svgEscape(e.arrow.Label), plural(int64(e.arrow.Count), "concrete step"))
 		add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-opacity="0.32" stroke-width="%.1f" stroke-linecap="round" filter="url(#poster-glow)"/>`, d, i, sw+5)
 		if animated {
-			add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-width="%.1f" stroke-linecap="round" marker-end="url(#poster-head-%s)" pathLength="1">%s</path>`, d, i, sw, p.roles[e.arrow.To], drawIn(0.35+0.22*float64(p.layer[e.arrow.From])))
+			add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-width="%.1f" stroke-linecap="round" marker-end="url(#poster-head-%s)" pathLength="1">%s</path>`, d, i, sw, p.roles[e.arrow.To], drawIn(math.FMA(0.22, float64(p.layer[e.arrow.From]), 0.35)))
 		} else {
 			add(`<path d="%s" fill="none" stroke="url(#poster-edge-%d)" stroke-width="%.1f" stroke-linecap="round" marker-end="url(#poster-head-%s)"/>`, d, i, sw, p.roles[e.arrow.To])
 		}
@@ -834,16 +948,16 @@ func (p *poster) draw() string {
 		}
 		// A back arc's label sits outside its arc, so it can't read as the
 		// forward arrow's.
-		shifts := []float64{0, -w/2 - 14, w/2 + 14}
+		shifts := []float64{0, math.FMA(-w, 0.5, -14), math.FMA(w, 0.5, 14)}
 		if e.back {
-			shifts = []float64{w/2 + 14, 0}
+			shifts = []float64{math.FMA(w, 0.5, 14), 0}
 		}
 		var spot *posterBox
 	search:
 		for _, dy := range []float64{0, -h - 6, h + 6, -2*h - 12, 2*h + 12} {
 			for _, c := range cands {
 				for _, dx := range shifts {
-					r := posterBox{c.x - w/2 + dx, c.y - h/2 + dy, w, h}
+					r := posterBox{math.FMA(-w, 0.5, c.x) + dx, c.y - h/2 + dy, w, h}
 					if r.x > 12 && r.x+w < W-12 && free(r) {
 						spot = &r
 						break search
@@ -852,7 +966,7 @@ func (p *poster) draw() string {
 			}
 		}
 		if spot == nil {
-			spot = &posterBox{cands[0].x - w/2, cands[0].y - h/2, w, h}
+			spot = &posterBox{math.FMA(-w, 0.5, cands[0].x), cands[0].y - h/2, w, h}
 		}
 		placed = append(placed, *spot)
 		add(`<g><rect x="%.1f" y="%.1f" width="%.1f" height="28" rx="14" fill="#0a1022" fill-opacity="0.94" stroke="#ffffff" stroke-opacity="0.16"/>`, spot.x, spot.y, w)
@@ -865,7 +979,7 @@ func (p *poster) draw() string {
 		role := p.roles[s.ID]
 		c := posterColor(role)
 		if animated {
-			add(`<g data-state-id="%s"><title>%s</title>%s`, svgEscape(s.ID), svgEscape(s.Label), riseIn(0.22*float64(p.layer[s.ID])))
+			add(`<g data-state-id="%s"><title>%s</title>%s`, svgEscape(s.ID), svgEscape(s.Label), riseIn(float64(0.22*float64(p.layer[s.ID]))))
 		} else {
 			add(`<g data-state-id="%s"><title>%s</title>`, svgEscape(s.ID), svgEscape(s.Label))
 		}
@@ -913,7 +1027,7 @@ func (p *poster) draw() string {
 			}
 			add(`<text x="%.1f" y="%.1f" fill="#94a3b8" font-family="%s" font-size="11.5" text-anchor="end">×%d</text>`, bx.x+bx.w-18, ty+11, svgEscape(posterMono), a.Count)
 			add(`</g>`)
-			ty += float64(len(lines))*17 + 10
+			ty += math.FMA(float64(len(lines)), 17, 10)
 		}
 		add(`</g>`)
 	}
@@ -934,8 +1048,8 @@ func (p *poster) draw() string {
 		// The tail follows the token a little later along the same path:
 		// each copy started a little less than one cycle earlier.
 		for k := 5; k >= 1; k-- {
-			lag := 0.045 * float64(k)
-			add(`<circle r="%.1f" fill="#a5f3fc" opacity="%.2f"><animateMotion dur="%.1fs" begin="-%.3fs" repeatCount="indefinite" path="%s"/></circle>`, 5.5-0.7*float64(k), 0.55-0.08*float64(k), p.dur, p.dur-lag, p.token)
+			begin := math.FMA(-0.045, float64(k), p.dur)
+			add(`<circle r="%.1f" fill="#a5f3fc" opacity="%.2f"><animateMotion dur="%.1fs" begin="-%.3fs" repeatCount="indefinite" path="%s"/></circle>`, math.FMA(-0.7, float64(k), 5.5), math.FMA(-0.08, float64(k), 0.55), p.dur, begin, p.token)
 		}
 		add(`<circle r="18" fill="url(#poster-token)" opacity="0.95"><animateMotion dur="%.1fs" repeatCount="indefinite" path="%s"/></circle>`, p.dur, p.token)
 		add(`<circle r="4.5" fill="#ffffff"><animateMotion dur="%.1fs" repeatCount="indefinite" path="%s"/></circle>`, p.dur, p.token)

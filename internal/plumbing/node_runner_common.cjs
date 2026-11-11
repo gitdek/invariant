@@ -74,21 +74,42 @@ function open(input, actor, endpoint) {
   recheck();
   const fd = fs.openSync(endpoint, 'w');
   let seq = 0;
-  const emit = (event, extra = {}) => {
-    let record = stringify({__proto__: null, Binding: input.Binding, Actor: actor, Seq: ++seq, Event: event, ...extra});
+  const frame = (event, extra, sequence) => {
+    let record = stringify({__proto__: null, Binding: input.Binding, Actor: actor, Seq: sequence, Event: event, ...extra});
     if (key) {
       const mac = hmacDigest(hmacUpdate(createHmac('sha256', key), record), 'hex');
       record = slice(record, 0, -1) + ',"MAC":"' + mac + '"}';
     }
-    const bytes = from(record + '\n');
+    return from(record + '\n');
+  };
+  const emit = (event, extra = {}) => {
+    const bytes = frame(event, extra, ++seq);
     // One pipe write is atomic across the parent and worker observers.
     if (bytes.length > 4096) throw new Error('Node evidence exceeds atomic frame size');
     if (write(fd, bytes) !== bytes.length) throw new Error('short Node evidence write');
   };
+  const diagnostic = text => {
+    if (!key) throw new Error('only the parent can report precheck diagnostics');
+    let chunk = '', size = 0;
+    let room = 4096 - frame('diagnostic', {Reason: ''}, seq + 1).length;
+    // Count JSON escaping and UTF-8 bytes, including the binding and MAC.
+    // Iterate code points so a chunk never splits a surrogate pair.
+    for (const character of text) {
+      const bytes = from(stringify(character)).length - 2;
+      if (size + bytes > room && chunk) {
+        emit('diagnostic', {Reason: chunk});
+        chunk = ''; size = 0;
+        room = 4096 - frame('diagnostic', {Reason: ''}, seq + 1).length;
+      }
+      if (bytes > room) throw new Error('Node evidence exceeds atomic frame size');
+      chunk += character; size += bytes;
+    }
+    if (chunk) emit('diagnostic', {Reason: chunk});
+  };
   // Prepared Node execution is Linux-only. Forked framework workers can open
   // this event descriptor without inheriting the consumed credential or sharing
   // the controller's heap. Their writes still have no terminal authentication.
-  return {input, file, emit, recheck, endpoint: '/proc/' + process.pid + '/fd/' + fd,
+  return {input, file, emit, diagnostic, recheck, endpoint: '/proc/' + process.pid + '/fd/' + fd,
     close: () => { if (key) clearKey(key, 0); fs.closeSync(fd); }};
 }
 
@@ -185,6 +206,24 @@ function assertion(error) {
     error.name === 'AssertionError' && ('actual' in error || 'expected' in error || error.code === 'ERR_ASSERTION')));
 }
 
+function diagnosticError(ts, diagnostics, reason) {
+  const error = new Error(reason);
+  error.diagnostics = diagnostics.map(diagnostic => {
+    let location = '', missing = '[no source location] ';
+    if (diagnostic.file) {
+      location = path.relative(root, diagnostic.file.fileName).split(path.sep).join('/');
+      if (typeof diagnostic.start === 'number' && diagnostic.start >= 0) {
+        const {line, character} = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start);
+        location += ':' + (line + 1) + ':' + (character + 1);
+        missing = '';
+      }
+      location += ' ';
+    }
+    return location + 'TS' + diagnostic.code + ': ' + missing + ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n') + '\n';
+  }).join('');
+  return error;
+}
+
 // TypeScript supplies structured diagnostics and syntax, never console parsing.
 // Attribution is intentionally narrow: one named relative import, used directly
 // by the first expression of the exact, statically named test. The production
@@ -199,7 +238,7 @@ function analyze(input, policy = {}) {
   }
   const file = regular(path.join(root, input.File));
   const converted = ts.convertCompilerOptionsFromJson(policy.compiler || {}, root);
-  if (converted.errors.length) throw new Error('invalid captured TypeScript compiler settings');
+  if (converted.errors.length) throw diagnosticError(ts, converted.errors, 'invalid captured TypeScript compiler settings');
   const types = ['node'];
   if (input.Binding.Framework === 'vitest' && policy.globals) types.push('vitest/globals');
   const settings = {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS,
@@ -218,7 +257,7 @@ function analyze(input, policy = {}) {
   const source = program.getSourceFile(file);
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (!diagnostics.length) return {proposed: null};
-  const refusal = () => { throw new Error('selected source has unattributed transform, import or type diagnostics'); };
+  const refusal = (details = diagnostics) => { throw diagnosticError(ts, details, 'selected source has unattributed transform, import or type diagnostics'); };
   if (diagnostics.length !== 1) return refusal();
   const diagnostic = diagnostics[0];
   if (diagnostic.code !== 2305 || diagnostic.file?.fileName !== file || !source) return refusal();
@@ -300,7 +339,8 @@ function analyze(input, policy = {}) {
   if (!resolved || resolved.includes('/node_modules/') || /(?:\.test|\.spec|\.d)\.[cm]?[jt]sx?$/.test(resolved)) return refusal();
   const product = regular(resolved);
   const production = ts.createProgram([product], settings);
-  if (ts.getPreEmitDiagnostics(production).length) return refusal();
+  const productionDiagnostics = ts.getPreEmitDiagnostics(production);
+  if (productionDiagnostics.length) return refusal([...diagnostics, ...productionDiagnostics]);
   const ast = production.getSourceFile(product);
   for (const statement of ast.statements) {
     if (statement.modifiers?.some(m => m.kind !== ts.SyntaxKind.ExportKeyword && m.kind !== ts.SyntaxKind.AsyncKeyword)) return refusal();

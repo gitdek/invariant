@@ -129,6 +129,10 @@ async function run() {
     session.emit('session_end', {Code: code, Outcome: code ? 'failed' : 'passed'});
     session.emit('finish', {Code: code});
   } catch (error) {
+    if (error.diagnostics) {
+      session.diagnostic(error.diagnostics);
+      process.stderr.write(error.diagnostics);
+    }
     session.emit('refused', {Reason: String(error.message).slice(0, 700)});
   } finally {
     if (ctx) await ctx.close();

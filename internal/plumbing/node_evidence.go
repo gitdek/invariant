@@ -47,6 +47,7 @@ func collectNodeAcceptance(in RepositoryAcceptanceInvocation, out RepositoryProc
 	sequence := map[string]int{"parent": 0, "worker": 0}
 	var events []nodeEvent
 	var names []string
+	var diagnostics strings.Builder
 	for _, line := range bytes.Split(bytes.TrimSuffix(out.Events, []byte("\n")), []byte("\n")) {
 		var event nodeEvent
 		if err := dependencyJSON(line, &event); err != nil {
@@ -81,7 +82,24 @@ func collectNodeAcceptance(in RepositoryAcceptanceInvocation, out RepositoryProc
 		}
 		sequence[event.Actor]++
 		if event.Event == "refused" {
-			return fail("Node execution refused: " + event.Reason)
+			reason := "Node execution refused: " + event.Reason
+			if diagnostics.Len() > 0 {
+				if event.Actor != "parent" {
+					return fail("Node diagnostic refusal came from the wrong observer")
+				}
+				reason += "\n" + diagnostics.String()
+			}
+			return fail(reason)
+		}
+		if event.Event == "diagnostic" {
+			if event.Actor != "parent" || len(names) != 1 || names[0] != "begin" || event.Reason == "" {
+				return fail("Node diagnostics require an authenticated precheck")
+			}
+			diagnostics.WriteString(event.Reason)
+			continue
+		}
+		if diagnostics.Len() > 0 {
+			return fail("Node diagnostics can only explain a refusal")
 		}
 		parent := slices.Contains([]string{"begin", "compile", "session_end", "finish"}, event.Event)
 		if parent != (event.Actor == "parent") {
@@ -89,6 +107,9 @@ func collectNodeAcceptance(in RepositoryAcceptanceInvocation, out RepositoryProc
 		}
 		events = append(events, event)
 		names = append(names, event.Event)
+	}
+	if diagnostics.Len() > 0 {
+		return fail("Node diagnostics have no authenticated refusal")
 	}
 	order := strings.Join(names, ",")
 	runtime := "begin,collection,body_start,body_end,hooks,suite_end,session_end,finish"
