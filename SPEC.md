@@ -417,6 +417,8 @@ A code factory that turns GitHub issues into merged pull requests. The code in e
   - They're built from real tool output only.
   - Public copy states the checked bounds instead of claiming "100%". `D-0015`
 
+- [#792's ratified plan](.invariant/plans/issue-792.json) makes statechart rendering processor-independent: the same checked input and options produce identical bytes for animated and still posters, ordinary reader SVGs and comparison panels, preserving the existing Go 1.27.3 arm64 bytes and dashboard image identities. Explicit `math.FMA` calls preserve exactly the operations the arm64 compiler fused, with their operands, signs and evaluation order; `float64` conversions force rounding elsewhere, including across temporary assignments and inlined helpers. Ordinary package tests pin representative arm64 image hashes, rerun the whole suite with `-gcflags=all=-d=fmahash=n` and a recursion guard, and cross-compile production code for arm64 to reject fused instructions without explicit source calls and require the same fused inventory in both modes. Run `go test ./internal/statechart -count=1 -timeout 20m`; [the rendering documentation](docs/statecharts.md#standalone-svg) gives the separate validation commands. Rendering contracts, receipts and existing acceptance assertions remain unchanged. The merger records the explicit arithmetic policy as a decision. `D-0347` `D-0364`
+
 ## Undecided: don't build against these
 
 Nothing is undecided right now.
