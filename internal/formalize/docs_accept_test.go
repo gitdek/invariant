@@ -10,9 +10,10 @@ import (
 // planDocsPhrases is what a plumbing issue's planning prompt tells its agent
 // about SPEC.md and the README (#147, D-0122): they describe Invariant as it
 // is, so a plan whose change makes either one wrong names that file and says
-// in its summary what changes there, a SPEC bullet cites its decisions, and
-// a decision no one has recorded yet is one the plan says whoever merges it
-// records, since a plumbing build can't write decisions/.
+// in its summary what changes there, and a SPEC bullet cites the decisions it
+// rests on or the plan itself, which is its own decision record once it's
+// ratified (#809). A decision the plan doesn't state is one the plan says
+// whoever merges it records, since a plumbing build can't write decisions/.
 var planDocsPhrases = []string{
 	"SPEC.md and the README describe Invariant as it is",
 	"a change that makes either one wrong fixes it in the same change",
@@ -20,9 +21,11 @@ var planDocsPhrases = []string{
 	"say in the summary what changes there",
 	"The README is the front page, at most 400 lines",
 	"detail belongs in the page under docs/ it links",
-	"A new or changed SPEC bullet cites the decisions it rests on, as `decisions check` requires",
+	"A ratified plan is its own decision record (#809)",
+	"A new or changed SPEC bullet cites what it rests on, as `decisions check` requires",
+	"the decisions it rests on, or this plan, by a link to its file, `[#147's ratified plan](.invariant/plans/issue-147.json)`",
 	"A plumbing build can't write decisions/",
-	"the change needs a decision no one has recorded yet",
+	"the change needs a decision this plan doesn't state, or makes a one-way door",
 	"whoever merges it records the decision",
 }
 
