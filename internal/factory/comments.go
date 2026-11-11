@@ -359,7 +359,7 @@ func checked(r *verify.Report) string {
 
 func stuckComment(problem string, m Marker, closing ...string) string {
 	return post("I couldn't draft this", "I couldn't draft statements for this issue that check out. What went wrong:\n\n"+
-		quote(problem, 40), m, strings.Join(closing, ""), "\n\nSay what you'd like in a comment, then comment `/invariant revise` to try again.")
+		quote(problem, strings.Count(problem, "\n")+1), m, strings.Join(closing, ""), "\n\nSay what you'd like in a comment, then comment `/invariant revise` to try again.")
 }
 
 // providerStuckComment says a draft stopped because its agent's provider
