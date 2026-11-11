@@ -160,6 +160,7 @@ func pythonApplicationIgnored(p *project.Project, app *project.PythonApplication
 			names = append(names, check.Target.Source)
 			refs := append([]project.ComponentRef(nil), check.Tests...)
 			refs = append(refs, check.Conformance...)
+			refs = append(refs, check.Observe...)
 			if check.Proof != nil {
 				refs = append(refs, check.Proof.Contracts...)
 			}

@@ -53,7 +53,9 @@ func componentInPlace(r *verify.Report) *verify.ComponentEvidence {
 	}
 	e.Conformance = slices.Clone(e.Conformance)
 	for i := range e.Conformance {
-		e.Conformance[i].Status = componentConformanceQualification(r, e.Conformance[i]).Status
+		origin := e.Conformance[i].Origin
+		e.Conformance[i] = componentConformanceQualification(r, e.Conformance[i])
+		e.Conformance[i].Origin = origin
 	}
 	return &e
 }
@@ -67,7 +69,7 @@ func componentUnqualified(r *verify.Report) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, row := range e.Proofs {
-		if row.Status == "proved" && len(verify.PythonApplicationTargetProblems(e, row.Target)) > 0 {
+		if row.Status == "proved" && len(verify.PythonApplicationTargetProblems(e, row.Target, r.Application)) > 0 {
 			out[row.Target] = true
 		}
 	}
@@ -82,7 +84,7 @@ func componentProofFailures(r *verify.Report) []string {
 		return nil
 	}
 	var out []string
-	for _, problem := range verify.PythonApplicationProofProblems(e) {
+	for _, problem := range verify.PythonApplicationProofProblems(e, r.Application) {
 		out = append(out, "In-place proof: "+componentText(problem))
 	}
 	return out

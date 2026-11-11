@@ -49,13 +49,11 @@ func pythonApplicationAdmit(p *project.Project) (*project.ComponentInventory, er
 	if err != nil {
 		return nil, err
 	}
-	// The gate qualifies an in-place proof only beside conformance on the
-	// same function (#359): its collector binds what conformance observes to
-	// the function's exact staged declaration, the same bytes Nagini's input
-	// copies, so the function proved is the function the application runs.
+	// The collector binds either the selected function or declared calls
+	// inside explored entries to the exact staged declaration (#359, #793).
 	for _, check := range inv.Checks {
-		if check.Proof != nil && len(check.Conformance) == 0 {
-			return nil, fmt.Errorf("%s selects a proof and no conformance: the gate qualifies an in-place proof only beside conformance on the same function, which shows the application runs the declaration Nagini proved", check.Target)
+		if check.Proof != nil && len(check.Conformance) == 0 && !pythonApplicationObservedTarget(inv, check.Target) {
+			return nil, fmt.Errorf("%s selects a proof and no conformance: select conformance on the same function or observe it in another check's exhaustive conformance, to show the application runs the declaration Nagini proved", check.Target)
 		}
 	}
 	app, err := project.ResolvePythonApplication(p)

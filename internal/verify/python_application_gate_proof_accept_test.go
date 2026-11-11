@@ -19,7 +19,7 @@ package verify
 // packaging wheel, with the second review's cases beside them:
 //
 //	INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify \
-//	  -run '^TestPythonApplicationGate(Proves|Refuses)' -count=1 -timeout 60m
+//	  -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793)' -count=1 -timeout 60m
 
 import (
 	"context"
@@ -345,7 +345,7 @@ func TestPythonApplicationGateProvesInPlace(t *testing.T) {
 		if len(r.Components.Conformance) != 1 || r.Components.Conformance[0].Status != "tested" {
 			t.Fatalf("conformance on admit: %+v", r.Components.Conformance)
 		}
-		if problems := PythonApplicationProofProblems(r.Components); len(problems) != 0 {
+		if problems := PythonApplicationProofProblems(r.Components, r.Application); len(problems) != 0 {
 			t.Fatalf("a qualified proof has problems: %v", problems)
 		}
 		// Nothing in the application changed, neighbors and stand-in included.
@@ -385,7 +385,7 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			if r.Components.Conformance[0].Status != "tested" || gp359Standing(t, r, b.id).Support != "tested" {
 				t.Fatalf("a failed proof erased independent evidence: %+v", r.Components)
 			}
-			if p := PythonApplicationProofProblems(r.Components); len(p) != 1 || !strings.Contains(p[0], admit+" isn't proved") {
+			if p := PythonApplicationProofProblems(r.Components, r.Application); len(p) != 1 || !strings.Contains(p[0], admit+" isn't proved") {
 				t.Fatalf("problems: %v", p)
 			}
 		})
@@ -418,7 +418,7 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			if r.Passed || gp359Standing(t, r, b.id).Support == "tested" {
 				t.Fatalf("a failing backing test supported its contract: %s", gp359Dump(t, r))
 			}
-			p := PythonApplicationProofProblems(r.Components)
+			p := PythonApplicationProofProblems(r.Components, r.Application)
 			if !slices.ContainsFunc(p, func(s string) bool {
 				return strings.Contains(s, "assumes trusted contract "+b.id+", which isn't tested")
 			}) {
@@ -455,7 +455,7 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			if r.Passed || row.Status != Unqualified || r.Components.Conformance[0].Status == "tested" {
 				t.Fatalf("a proof beside failing conformance qualified: %s, conformance %+v", row.Status, r.Components.Conformance)
 			}
-			p := PythonApplicationProofProblems(r.Components)
+			p := PythonApplicationProofProblems(r.Components, r.Application)
 			if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "no passing conformance on the same declaration") }) {
 				t.Fatalf("problems: %v", p)
 			}
@@ -580,7 +580,7 @@ func TestPythonApplicationGateRefusesWhatInPlaceProofNeeds(t *testing.T) {
 		f.p.Manifest.Components.Checks[0].Conformance = nil
 		f.p.Manifest.Components.Checks[0].Invocations = f.p.Manifest.Components.Checks[0].Invocations[:1]
 		pa342Save(t, f)
-		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), "selects a proof and no conformance") {
+		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), "observe it in another check's exhaustive conformance") {
 			t.Fatalf("Check: %v", err)
 		}
 	})
