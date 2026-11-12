@@ -239,11 +239,16 @@ jobs:
       # Each project is a directory and a name, its last element, which names
       # its receipts. The factory's own projects, the heaviest, come first, so
       # they start first when GitHub has fewer runners free than projects.
+      # The slowest of them comes before the rest: the gate takes as long as
+      # it does, and when this job ends the tests' shards hold every runner
+      # but the one it frees. Third in line, that project started 6 to 11
+      # minutes into a run.
       - name: Find the projects
         id: find
         env:
           BASE: ${{ github.base_ref }}
           FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') && steps.kind.outputs.plumbing != 'true' }}
+          SLOWEST: factory/protocol
         run: |
           manifests=$(git ls-files '*/.invariant/invariant.json')
           if [ "$FACTORY" = "true" ]; then
@@ -256,7 +261,8 @@ jobs:
             done | sort -u)
             if [ -z "$manifests" ]; then echo "The pull request changes no project."; exit 1; fi
           fi
-          projects=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##' | sort -r |
+          dirs=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##' | sort -r)
+          projects=$({ printf '%s\n' "$dirs" | grep -Fx "$SLOWEST" || true; printf '%s\n' "$dirs" | grep -Fxv "$SLOWEST" || true; } |
             jq -Rnc '[inputs | select(length > 0) | {dir: ., name: (split("/") | last)}]')
           echo "projects=$projects" >> "$GITHUB_OUTPUT"
           echo "$projects" | jq -r '.[].dir'
