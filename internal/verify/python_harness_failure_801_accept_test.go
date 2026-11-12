@@ -116,7 +116,9 @@ class TaskTests(unittest.TestCase):
 	pythongatetest.Write(t, f.Root, pythongatetest.ModelPath, model)
 	for i := range f.Project.Lock.Statements {
 		s := &f.Project.Lock.Statements[i]
-		h, err := tla.PinHash(model, s.Name, project.Model)
+		// The model extends the module beside it, so its pins cover that
+		// module's definitions too (#812).
+		h, err := tla.PinHashWith(model, map[string]string{"Local.tla": pythongatetest.Local}, s.Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}
