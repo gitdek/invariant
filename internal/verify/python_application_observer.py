@@ -1124,6 +1124,11 @@ except OSError:
                     result = self.entry.call(*args, **kwargs)
                     if inspect.isawaitable(result):
                         loop = asyncio.new_event_loop()
+                        # What the entry leaves scheduled is read from
+                        # asyncio's own loop below. A policy that makes
+                        # another kind keeps its queues to itself.
+                        if not isinstance(loop, asyncio.BaseEventLoop):
+                            raise ValueError("module entries run on asyncio's own event loop, and the application's event loop policy makes another")
                         asyncio.set_event_loop(loop)
                         loop.set_task_factory(self.task)
                         loop.set_exception_handler(self.async_error)
@@ -1148,6 +1153,14 @@ except OSError:
                    or (task.exception() is not None and not (task is self.await_task and task.exception() is escaped))
                    for task in self.tasks):
                 raise ValueError("module entry left unfinished or failed tasks")
+            # A callback the entry left on its loop, with call_later or
+            # call_at, or with call_soon from the loop's last batch, would
+            # run on a server's loop and is discarded when this one closes.
+            # The step's after-state would leave out what it does (#871).
+            # asyncio has no public way to ask a loop what it holds: these
+            # are BaseEventLoop's own queues. A cancelled handle does nothing.
+            if loop is not None and any(not handle.cancelled() for handle in [*loop._ready, *loop._scheduled]):
+                raise ValueError("module entry left scheduled callbacks on its event loop")
             # An explored step the application refuses before its selected
             # call completes the entry and leaves the state as it was (#342).
             refused = c.exploring and self.calls == 0 and releasing is None
