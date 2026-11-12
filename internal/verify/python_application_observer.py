@@ -23,6 +23,7 @@ import operator
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -335,6 +336,9 @@ class Collector:
         self.exploring = request.get("mode") == "explored"
         self.exploration = None
         self.explored = False
+        # The run's one deadline watchdog and the socket to it, once a module
+        # step has started it (#856).
+        self.watchdog = None
 
     def fail(self, error):
         self.failed = True
@@ -970,27 +974,65 @@ class _ModuleLifecycle(_Lifecycle):
 
     def watchdog(self):
         # A separate interpreter enforces the deadline even while application
-        # C code holds this interpreter's GIL. EOF cancels it on normal cleanup
-        # or parent death; no application thread can catch SIGKILL. The
-        # deadline starts once the watchdog runs, so its own start on a loaded
-        # machine spends none of the application's time (#645).
-        program = """import os, select, signal, sys, time
-parent, deadline = int(sys.argv[1]), time.monotonic() + float(sys.argv[2])
+        # C code holds this interpreter's GIL. One interpreter serves the whole
+        # run, since starting one per step cost more than the step (#856).
+        # Each step passes it a fresh pipe, and only EOF on that pipe, once
+        # every copy of its write end is closed, cancels that step's deadline:
+        # on normal cleanup, or when this process dies. A process the
+        # application forks during the step holds a copy, so the deadline
+        # stays armed, as it did when each step had a watchdog of its own. No
+        # application thread can catch SIGKILL. The deadline starts once the
+        # watchdog is armed, so its own start on a loaded machine spends none
+        # of the application's time (#645).
+        c = _collector
+        if c.watchdog is None:
+            program = """import os, select, signal, socket, sys, time
+parent = int(sys.argv[1])
+control = socket.socket(fileno=0)
 os.write(1, b'1')
-if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
-    if os.getppid() == parent:
-        os.write(2, b'module observation timed out or left unfinished work\\n')
-        os.kill(parent, signal.SIGKILL)
+try:
+    while True:
+        message, fds, _, _ = socket.recv_fds(control, 64, 1)
+        if not message or len(fds) != 1:
+            break
+        deadline = time.monotonic() + float(message)
+        control.sendall(b'1')
+        if not select.select([fds[0]], [], [], max(0, deadline - time.monotonic()))[0]:
+            if os.getppid() == parent:
+                os.write(2, b'module observation timed out or left unfinished work\\n')
+                os.kill(parent, signal.SIGKILL)
+            break
+        os.close(fds[0])
+        control.sendall(b'0')
+except OSError:
+    pass  # the run ended, and its socket with it
 """
-        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid()), str(self.timeout)],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        if process.stdout.read(1) != b"1":
-            process.stdin.close()
+            ours, theirs = socket.socketpair()
+            try:
+                process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid())],
+                                           stdin=theirs, stdout=subprocess.PIPE)
+            finally:
+                theirs.close()
+            if process.stdout.read(1) != b"1":
+                ours.close()
+                process.stdout.close()
+                process.wait()
+                raise ValueError("module deadline watchdog failed to start")
             process.stdout.close()
-            process.wait()
+            c.watchdog = (process, ours)
+        control = c.watchdog[1]
+        alive, held = os.pipe()
+        try:
+            socket.send_fds(control, [repr(float(self.timeout)).encode()], [alive])
+            armed = control.recv(1)
+        except OSError:
+            armed = b""
+        finally:
+            os.close(alive)
+        if armed != b"1":
+            os.close(held)
             raise ValueError("module deadline watchdog failed to start")
-        process.stdout.close()
-        return process, time.monotonic() + self.timeout
+        return held, time.monotonic() + self.timeout
 
     @guarded
     def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
@@ -1155,8 +1197,14 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                                                      and operation != "release")
                            for worker in self.threads)):
                 self.expire()
-            watchdog.stdin.close()
-            if watchdog.wait() != 0:
+            # Closing this step's pipe disarms its deadline, and the watchdog
+            # says so. One that died, or says anything else, fails the run.
+            os.close(watchdog)
+            try:
+                disarmed = c.watchdog[1].recv(1)
+            except OSError:
+                disarmed = b""
+            if disarmed != b"0":
                 c.fail(ValueError("module deadline watchdog failed"))
             c.active = None
             self.entry_frame = self.target_frame = self.await_frame = None
@@ -1522,4 +1570,14 @@ def run(request, emit, locations, codes, argv):
         for life in c.lives:
             if getattr(life, "held", None) is not None:
                 life.expire()
+        if c.watchdog is not None:
+            # An explicit stop, not EOF: a process the driver forked between
+            # steps may hold a copy of the socket.
+            process, control = c.watchdog
+            try:
+                control.sendall(b"stop")
+            except OSError:
+                pass
+            control.close()
+            process.wait()
     emit(dict(type="end", count=c.count))
