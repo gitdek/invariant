@@ -697,6 +697,8 @@ footer p { margin: 0; max-width: 60em; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+  /* No animation shows the opening page's words later, so they show at once. */
+  main.opening .hero > div:first-child { visibility: visible; }
   .seg { transform: none; }
   .mark { opacity: 1; }
 }
@@ -736,6 +738,18 @@ footer p { margin: 0; max-width: 60em; }
 /* Until the page knows what the bar holds, it keeps a row's height, so
    nothing below it moves when it fills (#855). */
 .scope.pending { min-height: 52px; }
+/* A page that shows one repository has no bar, and no strip where one
+   would be. */
+.scope:empty:not(.pending) { display: none; }
+/* Until the first snapshot is drawn, the page shows nothing the snapshot
+   will move (#867). A section drawn empty is pushed down when the hero
+   fills, and the hero's words, centered beside the orbit, move up as lines
+   join them: together a layout shift of 0.4 to 0.5. So the sections and the
+   footer wait, and the words wait unseen. After a second they show, so a
+   slow page still says it's reading. */
+main.opening > section:not(.hero), main.opening + footer { display: none; }
+main.opening .hero > div:first-child { visibility: hidden; animation: opening-words 0s linear 1s forwards; }
+@keyframes opening-words { to { visibility: visible; } }
 /* A section out of sight rests: nothing in it animates until it's back. */
 .resting, .resting *, .resting *::before, .resting *::after { animation-play-state: paused !important; }
 .scope a { flex: none; }

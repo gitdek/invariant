@@ -163,6 +163,8 @@
   }
 
   function render(s) {
+    // The first draw shows what waited for it (#867).
+    document.querySelector("main").classList.remove("opening");
     settleScope(s);
     renderTop(s);
     if (changed("scope", [scope, s.totals, (s.repos || []).map((r) => [r.name, r.totals, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
