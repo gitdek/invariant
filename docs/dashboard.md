@@ -58,6 +58,17 @@ This behavior implements [#639's ratified plan](../.invariant/plans/issue-639.js
 
 A restart serves the last run's snapshot at once, while it reads GitHub again, unless its cached reader evidence is damaged or obsolete, as after a change to how reader pages are drawn; then it serves a notice until that first read finishes. A snapshot that still carries a plan's acceptance sources inline, from before #715, is set aside the same way, and saved acceptance-source records are checked again before they serve. The dashboard also keeps two of GitHub's reads beside the snapshot: each issue's comments as of the issue's last update, and each merged pull request's head and whether its gate passed. So the first read after a restart asks GitHub only for what changed since the last run, rather than every issue's comments and every merge again. A damaged file keeps nothing, and the first read reads everything ([D-0368](../decisions/journal/D-0368.jsonl)).
 
+## What `/act` adds
+
+`/act` is the same page behind Cloudflare Access, for the repository's owner, with buttons where the public page has commands to copy ([D-0066](../decisions/journal/D-0066.jsonl), [D-0067](../decisions/journal/D-0067.jsonl)). Each card in the public page's Needs you links to the same card on `/act`, which opens scrolled to it.
+
+- **Answers, ratify, retry and revise.** A card offers only what the factory takes for its issue now, and asks before it posts. A retry's button says what it does: "Merge #N once CI passes", "Have a person merge #N once CI passes", "Build the plan again, replacing #N" or "Build ratified proposal again". What it posts is the `/invariant` command a person would write on the issue.
+- **Ratify all.** Proposals that change no statement, which are plans of either kind and rebuilds at their lock's hash, can be ratified together, after one confirmation that lists each one's issue, name and hash. The server checks each as it checks a single command, and posts nothing if any isn't the ratify its issue waits for. A proposal that changes statements ratifies alone, from its own card.
+- **New work.** The owner can open an issue for the factory to solve or a PRD for it to plan, and plan any open issue a writer opened that the factory hasn't taken. The page lists those.
+- **Show shell commands**, which [Factory activity](#factory-activity) describes.
+
+With `-agent-addr`, a coding agent acting for the owner posts through the same check, on a listener of its own on a loopback address such as `127.0.0.1:8485`, which the tunnel never publishes: `POST /act/api/comment` and `POST /act/api/issue`. It needs the token the dashboard writes where only the owner's account can read it. Browsers can't use it, it ratifies nothing in a batch, and everything it posts ends by saying a coding agent posted it for the owner.
+
 ## Factory activity
 
 The page reads the factory's state, each card's stage, the proposal it asks to ratify, its modeled options and its comparison, only from markers the repository's factory posted itself, as the factory reads only its own. The watcher names the account it posts as in its status file: its App's bot, or gh's user when it runs without an App. A marker anyone else posts, a person or another App, drives nothing, and a repository whose account no watcher has named shows no factory state rather than trusting any commenter. People's commands still count from people's own comments ([D-0365](../decisions/journal/D-0365.jsonl)).

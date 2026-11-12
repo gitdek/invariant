@@ -167,10 +167,10 @@ The command writes `receipt/receipt.json`, `receipt/receipt.md` and, in `receipt
 
 This is **sampled tested-against-the-model evidence**: exhaustive design checking does not make the implementation exhaustive, prove it, check every attempted step or cover every size. To test the application in every state it reaches, explore it instead, as below. Fractions and unsupported observation values fail TLC encoding explicitly; integer values are preserved exactly. D-0183's collector trust boundary and stateless handles remain as described below.
 
-The gate/receipt execution policy is recorded as [D-0185](../decisions/journal/D-0185.jsonl), and this real suite passed on #328's final head:
+The gate/receipt execution policy is recorded as [D-0185](../decisions/journal/D-0185.jsonl), and this real suite passed on #328's final head. It has grown since to the whole gate suite, exhaustive and proof cases included, so it gets 60 minutes:
 
 ```sh
-INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify ./internal/conformance ./cmd/invariant -run '^TestPythonApplicationGate' -count=1 -timeout 45m
+INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify ./internal/conformance ./cmd/invariant -run '^TestPythonApplicationGate' -count=1 -timeout 60m
 ```
 
 Default acceptance checks execute actual local Python with Docker transport and TLC doubles, and claim no real Docker/TLC validation. They run under Python 3.12 or newer; below it, the trusted-contract and exploration-execution cases skip, since the runner needs 3.12. The opt-in command requires real Docker, TLC and wheel installation and fails if prerequisites are absent. CI runs it, with every other Python opt-in set, on each pull request and push to main whose change can affect it ([D-0286](../decisions/journal/D-0286.jsonl), [D-0291](../decisions/journal/D-0291.jsonl)).
