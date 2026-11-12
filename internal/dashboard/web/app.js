@@ -1575,7 +1575,12 @@
   const STALLED_AFTER = 2 * 24 * 3600 * 1000;
   const stalled = (i) => Date.now() - new Date(i.waiting.since).getTime() > STALLED_AFTER;
   let stalledOpen = false;
+  // The lede names the repositories in view: every one, or the one chosen
+  // (#848). /act has words of its own.
+  let needsLede = (where) => `What the factory is waiting for from a person${where}: questions to answer, proposals to ratify, and pull requests that failed. Click an answer to copy its command, then comment it on the issue. The owner can post them from <a href="/act#inbox-block">/act</a> instead, with a button.`;
   function renderInbox(s) {
+    const several = (s.repos || []).length > 1;
+    $("#needs-lede").innerHTML = needsLede(!several ? "" : scope === "all" ? ", in every repository" : `, in ${esc(shortOf(s, scope))}`);
     const items = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
     // On /act, each issue acted on shows after those that wait, as the
     // snapshot says, until a read of GitHub finds what was posted (#175).
@@ -1896,7 +1901,8 @@
       if (takes(w, "revise")) actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
       body = `${proposalText(w, repo, "you")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name, posters: w.posters}) : ""}`;
-      actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
+      // A plan is ratified as a plan. Its hash is in the question that follows.
+      actions = ask(w.plan || w.issuePlan ? "Ratify this plan" : `Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
     } else if (w.kind === "closed") {
       body = `<p class="ask">${closedText(w, repo)}</p>`;
       actions = takes(w, "revise") ? ask("Draft again", "/invariant revise", true) : "";
@@ -1907,7 +1913,8 @@
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
     if (a.confirm) {
-      const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins these statements, and the factory starts building.`
+      const pins = w.plan ? "this plan and its acceptance tests, and the factory starts building" : w.issuePlan ? "this plan, and the factory opens its issues one at a time" : "these statements, and the factory starts building";
+      const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins ${pins}.`
         : a.confirm === "/invariant retry" ? esc(w.retry?.confirmation || "Have the factory try again, as you?")
         : "Have the factory draft again from the comments, as you?";
       row = `<div class="confirm"><span>${what}</span>${post("Yes, post it", a.confirm, true)}<button class="cmd" type="button" data-act-key="${esc(key)}" data-act-cancel>Cancel</button></div>`;
@@ -1984,8 +1991,7 @@
       }
       if (state) renderInbox(state);
     });
-    const lede = $("#needs-lede");
-    if (lede) lede.textContent = "What the factory is waiting for from you, in every repository. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first. Or open a new issue for the factory to solve or plan, or plan one of your open issues it hasn't taken.";
+    needsLede = (where) => `What the factory is waiting for from you${where}. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first. Or open a new issue for the factory to solve or plan, or plan one of your open issues it hasn't taken.`;
     composer();
     const who = document.createElement("span");
     who.className = "pill acting";
