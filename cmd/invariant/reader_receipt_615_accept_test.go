@@ -68,7 +68,7 @@ func TestReader615VerifyCLIArtifacts(t *testing.T) {
 	m := project.Manifest{Name: "CLI receipt", Module: ".invariant/specs/Reader603.tla", Code: "machine", Language: "go"}
 	lock := project.Lock{Decision: "receipt-fixture", Bounds: map[string]string{"Limit": "2"}, Statements: []project.Statement{{Name: "Spec", Kind: project.Spec, Says: "Advance, reset or poll."}, {Name: "Safe", Kind: project.Invariant, Says: "The count stays within its limit."}}}
 	for i := range lock.Statements {
-		h, err := tla.PinHash(reader603Model, lock.Statements[i].Name, project.Model)
+		h, err := tla.PinHashWith(reader603Model, map[string]string{"Helper603.tla": reader603Include}, lock.Statements[i].Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}

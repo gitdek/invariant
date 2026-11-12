@@ -227,13 +227,23 @@ func (d Draft) validateNames() error {
 // one's pin, and hashes the whole proposal.
 func (p *Proposal) Pin() error {
 	if name, err := tla.ModuleName(p.ModuleText); err != nil || name != p.Module {
+		if err != nil && !strings.Contains(err.Error(), "no MODULE header") {
+			return fmt.Errorf("%s.tla: %w", p.Module, err)
+		}
 		return fmt.Errorf("%s.tla must begin with ---- MODULE %s ----", p.Module, p.Module)
 	}
 	if err := project.Validate(p.Manifest(), project.Lock{Bounds: p.Bounds, Statements: p.Statements}); err != nil {
 		return err
 	}
+	// The model is read the way TLC reads it, with the modules beside it,
+	// and one the gate couldn't pin is refused here, where its drafter can
+	// fix it (#812).
+	model, err := tla.Read(p.ModuleText, p.Includes)
+	if err != nil {
+		return fmt.Errorf("%s.tla: %w", p.Module, err)
+	}
 	for i, s := range p.Statements {
-		h, err := tla.PinHash(p.ModuleText, s.Name, project.Model)
+		h, err := model.PinHash(s.Name, project.Model)
 		if err != nil {
 			return fmt.Errorf("statement %s: %w", s.Name, err)
 		}
@@ -380,9 +390,13 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 // Pinned is the part of the module a person ratifies: the statements and
 // every definition they depend on, in module order.
 func (p *Proposal) Pinned() (string, error) {
+	model, err := tla.Read(p.ModuleText, p.Includes)
+	if err != nil {
+		return "", err
+	}
 	keep := map[string]bool{}
 	for _, s := range p.Statements {
-		names, err := tla.Closure(p.ModuleText, s.Name, project.Model)
+		names, err := model.Closure(s.Name, project.Model)
 		if err != nil {
 			return "", err
 		}
@@ -391,11 +405,11 @@ func (p *Proposal) Pinned() (string, error) {
 		}
 	}
 	var out []string
-	for _, name := range tla.Definitions(p.ModuleText) {
+	for _, name := range model.Definitions() {
 		if !keep[name] {
 			continue
 		}
-		def, err := tla.Definition(p.ModuleText, name)
+		def, err := model.Definition(name)
 		if err != nil {
 			return "", err
 		}

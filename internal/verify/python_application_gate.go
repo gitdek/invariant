@@ -340,6 +340,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	if err != nil {
 		return nil, err
 	}
+	includes, err := tla.Siblings(filepath.Dir(p.ModulePath()), filepath.Base(p.ModulePath()))
+	if err != nil {
+		return nil, err
+	}
 	all := true
 	contracts := pythonApplicationContracts(s.inventory)
 	var contractSteps [][2]int
@@ -384,7 +388,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			c.Mode = "bounded-exhaustive"
 			c.Result.Exhaustive = true
 			model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
-			if steps, err := tla.Steps(string(raw)); err != nil {
+			if steps, err := modelSteps(string(raw), includes); err != nil {
 				model.Problem = err.Error()
 			} else {
 				model.Steps = steps
@@ -396,7 +400,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				return nil, errors.Join(e, recording.close())
 			}
 			checks := &pythonApplicationModelRunner{runner: runner, root: d}
-			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, model)
+			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, modelVariables(string(raw), includes), r.Design.DistinctStates, model)
 			if v.Explored {
 				// Attempts carry no runs; the exploration's are its replays.
 				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs

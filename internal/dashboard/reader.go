@@ -170,13 +170,23 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	if len(r.Pins) != len(e.Lock.Statements) {
 		return bad("snapshot_mismatch", "The receipt's statements differ from the lock at this commit.")
 	}
+	includes := map[string]string{}
+	for name, data := range e.Files {
+		if name != module+".tla" {
+			includes[name] = string(data)
+		}
+	}
+	checked, readErr := tla.Read(string(model), includes)
 	for i, st := range e.Lock.Statements {
 		pin := r.Pins[i]
 		if pin.Name != st.Name || pin.Kind != st.Kind || pin.Says != st.Says || pin.Want != st.SHA256 {
 			return bad("snapshot_mismatch", "The receipt's pinned rules differ from the lock at this commit.")
 		}
 		if rr.Chart != nil || rr.Limitation != nil {
-			got, err := tla.PinHash(string(model), st.Name, project.Model)
+			if readErr != nil {
+				return bad("snapshot_mismatch", "The checked reader's rule pins do not match the model at this commit.")
+			}
+			got, err := checked.PinHash(st.Name, project.Model)
 			if err != nil || got != st.SHA256 || !pin.Match || pin.Got != st.SHA256 {
 				return bad("snapshot_mismatch", "The checked reader's rule pins do not match the model at this commit.")
 			}

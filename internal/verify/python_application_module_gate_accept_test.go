@@ -87,7 +87,7 @@ func pa321GateFixture(t *testing.T, explicit bool) pa327Fixture {
 	// These are new test-fixture statements, not repository pins or decisions.
 	for i := range f.p.Lock.Statements {
 		s := &f.p.Lock.Statements[i]
-		h, err := tla.PinHash(pa321GateModel, s.Name, project.Model)
+		h, err := tla.PinHashWith(pa321GateModel, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, s.Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}

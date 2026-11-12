@@ -614,7 +614,7 @@ Eventually == <> (task = 2001)
 `
 	pa327Write(t, f.root, pa327ModelPath, model)
 	for i := range f.p.Lock.Statements {
-		h, err := tla.PinHash(model, f.p.Lock.Statements[i].Name, project.Model)
+		h, err := tla.PinHashWith(model, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, f.p.Lock.Statements[i].Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}

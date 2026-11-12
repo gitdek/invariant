@@ -145,7 +145,7 @@ func pa342New(t *testing.T, explicit, wheel bool) pa342Fixture {
 		Module: ".invariant/specs/Counter.tla", Conformance: "driver.py", Exhaustive: true, Existing: []string{pa342Source}},
 		Lock: project.Lock{Decision: "test-fixture-only", Bounds: map[string]string{"Limit": "2"}}}
 	for _, s := range []project.Statement{{Name: "Spec", Kind: project.Spec}, {Name: "Safe", Kind: project.Invariant}, {Name: "Full", Kind: project.Witness}, {Name: "Overflow", Kind: project.Bug, Expect: "Safe"}} {
-		h, err := tla.PinHash(pa342Model, s.Name, project.Model)
+		h, err := tla.PinHashWith(pa342Model, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, s.Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}

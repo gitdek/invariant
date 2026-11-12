@@ -139,7 +139,7 @@ func refusal392Fixture(t *testing.T, explicit bool, source, driver, model string
 	pa342Write(t, f.root, "tests/test_counter.py", "import unittest\nfrom counter import core\nclass CounterTests(unittest.TestCase):\n    def test_inc(self):\n        core.increment(1)\n        self.assertEqual(core.counts['value'], 1)\n")
 	for i := range f.p.Lock.Statements {
 		s := &f.p.Lock.Statements[i]
-		h, err := tla.PinHash(model, s.Name, project.Model)
+		h, err := tla.PinHashWith(model, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, s.Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -96,7 +96,7 @@ esac
 				}
 				staged = filepath.Join(work, "Bug_Stall")
 			} else {
-				proofs, _, err := proveTLAPS(t.Context(), work, p, tlapsPool)
+				proofs, _, err := proveTLAPS(t.Context(), work, p, tlapsPool, nil)
 				if err != nil || len(proofs) != 1 || !proofs[0].Proved {
 					t.Fatalf("TLAPS helper did not finish: %+v, %v", proofs, err)
 				}

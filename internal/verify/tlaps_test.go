@@ -128,7 +128,7 @@ func TestTLAPSClosesEveryKnownSoundnessIssue(t *testing.T) {
 		},
 		"235": func(t *testing.T) {
 			refuse("Bad == {x \\in Clients}", "#235")(t)
-			if err := tlapsModel(strings.Replace(tlapsPool, "Conns == 1..Size", "Conns == {x \\in 1..Size}", 1), "Spec"); err == nil || !strings.Contains(err.Error(), "#235") {
+			if err := tlapsModel(strings.Replace(tlapsPool, "Conns == 1..Size", "Conns == {x \\in 1..Size}", 1), nil, "Spec"); err == nil || !strings.Contains(err.Error(), "#235") {
 				t.Fatalf("tlapsModel accepted a dropped set element: %v", err)
 			}
 		},
@@ -165,7 +165,7 @@ func TestTLAPSClosesEveryKnownSoundnessIssue(t *testing.T) {
 func TestTLAPSRefusesTheAdversarialModel(t *testing.T) {
 	// The review's attack, through the real gate: the model is turned away
 	// for its dropped set element before any proof of it runs (#235, D-0231).
-	if err := tlapsModel(tlapsEvilPool(), "Spec"); err == nil || !strings.Contains(err.Error(), "#235") {
+	if err := tlapsModel(tlapsEvilPool(), nil, "Spec"); err == nil || !strings.Contains(err.Error(), "#235") {
 		t.Fatalf("tlapsModel accepted the adversarial model: %v", err)
 	}
 	got, _ := tlapsProve(t, tlapsEvilPool(), tlapsPoolProof)
@@ -420,7 +420,7 @@ Sets == /\ {c \in Clients : held[c] = {}} = {}
 }
 
 func TestTLAPSChecksTheModelItRestsOn(t *testing.T) {
-	if err := tlapsModel(tlapsPool, "Spec"); err != nil {
+	if err := tlapsModel(tlapsPool, nil, "Spec"); err != nil {
 		t.Fatalf("the connection pool's model: %v", err)
 	}
 	for _, tc := range []struct{ name, old, new, want string }{
@@ -439,7 +439,7 @@ func TestTLAPSChecksTheModelItRestsOn(t *testing.T) {
 			"Evil(c) == Size >= 4 /\\ \\E z \\in {Size \\in Clients} : held' = [held EXCEPT ![c] = Conns]\nNext == (\\E c \\in Clients : Acquire(c) \\/ Refuse(c) \\/ Release(c)) \\/ (\\E c \\in Clients : Evil(c))", "#235"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tlapsModel(strings.Replace(tlapsPool, tc.old, tc.new, 1), "Spec")
+			err := tlapsModel(strings.Replace(tlapsPool, tc.old, tc.new, 1), nil, "Spec")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("tlapsModel = %v, want a refusal naming %q", err, tc.want)
 			}

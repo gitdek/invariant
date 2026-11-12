@@ -411,28 +411,16 @@ func tlapsColliding(names []string) (string, string, bool) {
 // [][Next]_vars, and nothing else in it may use a construct tlapm's open
 // soundness issues touch, add an assumption, or state a fact without a
 // proof the gate checks.
-func tlapsModel(src, specName string) error {
-	spec, err := tla.Definition(src, specName)
-	if err != nil {
-		return err
-	}
-	if want := specName + " == Init /\\ [][Next]_vars"; tla.Canonical(spec) != want {
-		return fmt.Errorf("the spec must be %s for a TLAPS proof", want)
-	}
-	start := strings.Index(src, spec)
+func tlapsModel(src string, includes map[string]string, specName string) error {
 	toks, err := lexTLA(src)
 	if err != nil {
 		return fmt.Errorf("the model: %v", err)
 	}
-	if line, bad := tlapsSetEnum(toks); bad {
-		return fmt.Errorf("the model writes a set enumeration whose element is a membership at line %d, which tlapm reads as the empty set (tlaplus/tlapm#235)", line)
-	}
+	// What a proof can't rest on is said first, in a proof's terms. The
+	// gate's reader refuses some of it too, for any model, in its own.
 	for i, tok := range toks {
-		if tok.offset >= start && tok.offset < start+len(spec) || tok.str {
+		if tok.str {
 			continue
-		}
-		if why := unsound(tok); why != "" {
-			return fmt.Errorf("the model uses %s at line %d", why, tok.line)
 		}
 		switch tok.text {
 		case "AXIOM", "ASSUME", "ASSUMPTION":
@@ -453,6 +441,29 @@ func tlapsModel(src, specName string) error {
 					return fmt.Errorf("the model extends %s, and a TLAPS proof may rest only on standard modules", toks[j].text)
 				}
 			}
+		}
+	}
+	m, err := tla.Read(src, includes)
+	if err != nil {
+		return err
+	}
+	spec, err := m.Definition(specName)
+	if err != nil {
+		return err
+	}
+	if want := specName + " == Init /\\ [][Next]_vars"; tla.Canonical(spec) != want {
+		return fmt.Errorf("the spec must be %s for a TLAPS proof", want)
+	}
+	if line, bad := tlapsSetEnum(toks); bad {
+		return fmt.Errorf("the model writes a set enumeration whose element is a membership at line %d, which tlapm reads as the empty set (tlaplus/tlapm#235)", line)
+	}
+	start := strings.Index(src, spec)
+	for _, tok := range toks {
+		if tok.offset >= start && tok.offset < start+len(spec) || tok.str {
+			continue
+		}
+		if why := unsound(tok); why != "" {
+			return fmt.Errorf("the model uses %s at line %d", why, tok.line)
 		}
 	}
 	return nil
@@ -784,10 +795,10 @@ func tlapsTool(ctx context.Context, image string) (*TLAPSTool, error) {
 
 // proveTLAPS proves each invariant the manifest selects, in its own staged
 // copy of the model, one at a time.
-func proveTLAPS(ctx context.Context, work string, p *project.Project, src string) ([]TLAPSProof, *TLAPSTool, error) {
+func proveTLAPS(ctx context.Context, work string, p *project.Project, src string, includes map[string]string) ([]TLAPSProof, *TLAPSTool, error) {
 	model := sha(src)
 	var proofs []TLAPSProof
-	modelErr := tlapsModel(src, p.SpecName())
+	modelErr := tlapsModel(src, includes, p.SpecName())
 	modelToks, _ := lexTLA(src)
 	modelNames := tlapsNames(modelToks)
 	image, tool := "", (*TLAPSTool)(nil)
