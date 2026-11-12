@@ -18,7 +18,11 @@ func componentOrigin(origin string) string {
 // pythonApplication renders the application's executions and checks, and
 // larger, the overall check one size larger, when the receipt shows it
 // nowhere else, as when TLC couldn't finish there (#342).
-func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, larger *verify.Larger) {
+func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, larger *verify.Larger, reports ...*verify.Report) {
+	r := &verify.Report{Application: a}
+	if len(reports) > 0 {
+		r = reports[0]
+	}
 	explored := false
 	for _, c := range a.Conformance {
 		explored = explored || c.Mode == "bounded-exhaustive"
@@ -42,6 +46,21 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		// evidence, including keys, diagnostics and arbitrary observation values.
 		raw, _ := json.MarshalIndent(x, "", "  ")
 		fmt.Fprintf(b, "%s\n", componentLiteral(string(raw)))
+	}
+	if len(a.Conformance) > 0 {
+		b.WriteString("\n| Conformance invocation | Result | Evidence |\n| :-- | :-- | :-- |\n")
+		for _, c := range a.Conformance {
+			coverage := r.PythonCoverage(c)
+			identity := componentLiteral(c.Key.Target) + " · " + componentLiteral(c.Key.Check) + " · " + componentLiteral(c.Key.ID)
+			row(b, identity, coverage.Checked, conformanceResult(c.Result, coverage), conformanceEvidence(c.Result)+"; "+coverage.Detail())
+			if t := c.Result.Tried; t != nil {
+				result := "a step never tried"
+				if t.Passed {
+					result = "in every state reached, but where only the environment's bounds rule a step out"
+				}
+				row(b, "Every step tried · "+identity, t.Passed, result, (renderer{explicit: true}).triedEvidence(*t))
+			}
+		}
 	}
 	for _, c := range a.Conformance {
 		raw, _ := json.MarshalIndent(c, "", "  ")

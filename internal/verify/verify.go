@@ -857,7 +857,7 @@ func Fingerprint(r Report) string {
 	for i := range r.TLAPS {
 		r.TLAPS[i].Provers = nil
 	}
-	b, _ := json.Marshal(r)
+	b, _ := r.EvidenceJSON()
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
