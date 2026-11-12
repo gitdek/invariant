@@ -10,6 +10,7 @@ every observation it makes.
 
 import ast
 import asyncio
+import builtins
 import _thread
 import dis
 import functools
@@ -32,6 +33,10 @@ from itertools import compress, repeat
 
 
 _collector = None
+# Each builtin exception class by every name builtins binds to it, read
+# before any application code runs.
+_builtin_exceptions = tuple(sorted((key, value) for key, value in vars(builtins).items()
+                                   if type(value) is type and issubclass(value, BaseException)))
 
 
 def guarded(method):
@@ -456,7 +461,7 @@ class Collector:
         return self.thread_traces[current]
 
     def observe_call(self, life, frame, event, arg):
-        if not self.observed or not self.exploring or life.operation == "release" or event not in ("call", "return"):
+        if not self.observed or not self.exploring or life.operation == "release" or event not in ("call", "return", "exception"):
             return
         declaration = self.observed.get((os.path.abspath(frame.f_code.co_filename), frame.f_code.co_qualname))
         if declaration is None:
@@ -481,21 +486,52 @@ class Collector:
                 except ValueError as error:
                     raise ValueError("observed function %s: argument %s must be a JSON scalar, or a list or a "
                                      "dictionary with string keys of them: %s" % (binding.symbol, name, error)) from None
-            life.observed_frames[frame] = (binding, arguments, self.caller(frame))
+            # A list or a dictionary can change in place, so what a contract
+            # says of one after the call needs its value then (#838). The
+            # record keeps the objects passed in, whatever the body rebinds.
+            mutable = {name: frame.f_locals[name] for name in names if type(frame.f_locals[name]) in (list, dict)}
+            life.observed_frames[frame] = [binding, arguments, self.caller(frame), mutable, None]
+        if event == "exception" and frame in life.observed_frames:
+            # The last exception to reach the frame is the one it unwinds
+            # with, if it does: the body may still handle it. Only its class
+            # is kept, so nothing the application raised lives longer.
+            life.observed_frames[frame][4] = arg[0]
         if event == "return" and frame in life.observed_frames:
             kind = return_kind(frame)
             if kind == "yield":
                 return
-            binding, arguments, caller = life.observed_frames.pop(frame)
+            binding, arguments, caller, mutable, error = life.observed_frames.pop(frame)
             binding.frame(frame)
+            call = dict(target=binding.component, source_sha256=binding.digest, caller=caller, arguments=arguments)
+            after = {}
+            for name, value in mutable.items():
+                try:
+                    after[name] = copied(value)
+                except ValueError as problem:
+                    raise ValueError("observed function %s: argument %s must still be a JSON scalar, or a list or a "
+                                     "dictionary with string keys of them, after the call: %s" % (binding.symbol, name, problem)) from None
+            if after:
+                call["after"] = after
             if kind == "return":
                 try:
-                    result = copied(arg)
-                except ValueError as error:
+                    call["result"] = copied(arg)
+                except ValueError as problem:
                     raise ValueError("observed function %s: its result must be a JSON scalar, or a list or a "
-                                     "dictionary with string keys of them: %s" % (binding.symbol, error)) from None
-                life.observed_calls.append(dict(target=binding.component, source_sha256=binding.digest,
-                                                caller=caller, arguments=arguments, result=result))
+                                     "dictionary with string keys of them: %s" % (binding.symbol, problem)) from None
+            elif error is not None:
+                # A call that raised is recorded with the exception's class,
+                # so a contract's Exsures can be checked (#838). Which
+                # builtin classes it inherits from is told by identity.
+                classes = type.__dict__["__mro__"].__get__(error)
+                module, name = (type.__dict__[key].__get__(classes[0]) for key in ("__module__", "__qualname__"))
+                if type(module) is not str or type(name) is not str:
+                    raise ValueError("observed function %s raised an exception whose class has no name" % binding.symbol)
+                call.update(result=None, raised=dict(
+                    type=module + "." + name,
+                    builtins=sorted(key for key, value in _builtin_exceptions if any(value is cls for cls in classes))))
+            else:
+                return
+            life.observed_calls.append(call)
 
     def caller(self, frame):
         # Who made an observed call is the nearest frame beneath it that runs

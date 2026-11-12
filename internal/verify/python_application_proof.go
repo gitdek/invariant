@@ -170,7 +170,11 @@ type PythonApplicationProofInput struct {
 	Sources     []project.ComponentFile          `json:"sources"`
 	Assumed     []ComponentContractUse           `json:"assumed,omitempty"`
 	Unaccounted []ComponentUnaccounted           `json:"unaccounted,omitempty"`
-	Fingerprint string                           `json:"fingerprint"`
+	// Contract is what the function's contract asks of a call, read from
+	// the same bytes the input copies, which the gate checks on each call
+	// of the function it records (#838).
+	Contract    *PythonContract `json:"contract,omitempty"`
+	Fingerprint string          `json:"fingerprint"`
 }
 
 // PythonApplicationProof is one attempt to prove a selected function in its
@@ -363,7 +367,10 @@ type pythonProofDeclaration struct {
 	// Arithmetic is where the function, its signature, body and contract
 	// alike, holds arithmetic the pinned Nagini models apart from Python.
 	Arithmetic []pythonProofDynamic `json:"arithmetic"`
-	source     []byte
+	// Contract is what the function's contract asks of a call, for the gate
+	// to check on the calls it records (#838).
+	Contract *PythonContract `json:"contract"`
+	source   []byte
 }
 
 func runPythonProofAnalyzer(request any, out any) error {
@@ -1581,13 +1588,15 @@ func (b *pythonProofBuilder) write() error {
 	if err := b.check(); err != nil {
 		return err
 	}
+	b.in.Contract = b.d.Contract
 	b.in.Fingerprint = pythonApplicationFingerprint(struct {
 		Target     project.Component
 		Files      []PythonApplicationProofFile
 		Spans      []PythonApplicationProofSpan
 		Boundaries []PythonApplicationProofBoundary
 		Sources    []project.ComponentFile
-	}{b.in.Target, b.in.Files, b.in.Spans, b.in.Boundaries, b.in.Sources})
+		Contract   *PythonContract
+	}{b.in.Target, b.in.Files, b.in.Spans, b.in.Boundaries, b.in.Sources, b.in.Contract})
 	return nil
 }
 
