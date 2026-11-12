@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -61,12 +60,8 @@ func TestFinishedStepsFoldBelowNeedsYou822(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
-		"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", "--user-data-dir="+t.TempDir(),
-		"--virtual-time-budget=30000", "--dump-dom", server.URL+"/")
-	out, err := cmd.CombinedOutput()
+	// The second poll comes 12 seconds after the first, in the page's time.
+	out, err := browserDOM(t, browser, server.URL+"/", 30000)
 	if err != nil || !strings.Contains(string(out), `data-fold-check="passed"`) {
 		report := string(out)
 		if i := strings.Index(report, `id="fold-report"`); i >= 0 {
