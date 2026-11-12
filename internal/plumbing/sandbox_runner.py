@@ -42,6 +42,10 @@ class Runner:
         self.results = {}
         self.measured = {}
         self.acceptance = config.get("acceptance") or []
+        # The Go test files the build added, by package (#869).
+        self.added = {}
+        for name in config.get("added") or []:
+            self.added.setdefault(self.package_path(os.path.dirname(name)), []).append(name)
         self.packages = {}
         self.tests_ok = True
         self.compile_helper = None
@@ -371,6 +375,38 @@ class Runner:
             elif package.get("TestGoFiles") or package.get("XTestGoFiles"):
                 self.tests_ok = False
                 self.problem("build", "Package build produced no test binary: " + package["ImportPath"], package=package["ImportPath"])
+            if "binary" in package and self.added.get(package["path"]):
+                self.without_added(package, directory, index)
+
+    def without_added(self, package, directory, index):
+        # The plan's acceptance tests and the package's existing tests run
+        # from a binary built without the test files the build added, so
+        # nothing such a file declares, imports or runs as the binary starts
+        # decides how they go (#869). An overlay entry with no backing file
+        # hides a file from the go command. Only the tests the added files
+        # declare run from the binary that holds them.
+        added = sorted(self.added[package["path"]])
+        overlay = os.path.join(directory, str(index) + ".overlay.json")
+        with open(overlay, "w", encoding="utf-8") as out:
+            json.dump({"Replace": {os.path.abspath(name): "" for name in added}}, out)
+        clean = os.path.join(directory, str(index) + ".clean.test")
+        outcome = self.command(
+            ["go", "test", "-c", "-vet=off", "-overlay", overlay, "-o", clean, package["path"]], "build"
+        )
+        if outcome["code"] != 0:
+            # A pinned or existing test needs what an added file declares.
+            self.tests_ok = False
+            self.problem(
+                "build",
+                "The acceptance and existing tests of %s don't build without the test files the build added (%s): "
+                "they are judged without them, so what they need belongs in production code or in the plan's own files"
+                % (package["ImportPath"], ", ".join(added)),
+                package=package["ImportPath"],
+            )
+            package["clean"] = ""
+            return
+        # With no binary, the package has no tests but the added ones.
+        package["clean"] = clean if os.path.isfile(clean) else ""
 
     def discover(self):
         tests = []
@@ -380,15 +416,29 @@ class Runner:
                 break
             if "binary" not in package:
                 continue
-            outcome = self.command(
-                [package["binary"], "-test.list=^(Test|Fuzz|Example)"], "discovery",
-                cwd=package["Dir"], capture=True,
-            )
-            if outcome["code"] != 0:
+            names, failed = set(), False
+            # A package the build added test files to lists twice: its own
+            # tests from the binary without them, which is the one they run
+            # from, and then what the added files declare.
+            for binary in [package["clean"], package["binary"]] if "clean" in package else [package["binary"]]:
+                if not binary:
+                    continue
+                outcome = self.command(
+                    [binary, "-test.list=^(Test|Fuzz|Example)"], "discovery",
+                    cwd=package["Dir"], capture=True,
+                )
+                if outcome["code"] != 0:
+                    failed = True
+                    continue
+                listed = {line for line in outcome["output"].splitlines() if TOP_LEVEL.fullmatch(line)}
+                if binary == package.get("clean"):
+                    package["own"] = listed
+                names |= listed
+            if failed:
                 self.tests_ok = False
                 self.problem("discovery", "Test discovery failed: " + package["ImportPath"], package=package["ImportPath"])
                 continue
-            for name in sorted({line for line in outcome["output"].splitlines() if TOP_LEVEL.fullmatch(line)}):
+            for name in sorted(names):
                 tests.append((package, name))
                 self.record(package, name, "test", "not_run")
         return tests
@@ -503,8 +553,13 @@ class Runner:
 
         end = min(self.deadline, limit if limit is not None else self.deadline)
         remaining = max(0.001, end - time.monotonic())
+        # A test the package had, or the plan pinned, runs from the binary
+        # built without the test files the build added (#869).
+        binary = package["binary"]
+        if "clean" in package and (phase == "accept" or name in package.get("own", ())):
+            binary = package["clean"]
         outcome = self.command(
-            [package["binary"],
+            [binary,
              "-test.v=test2json", "-test.run=^" + re.escape(name) + "$", "-test.timeout=%.6fs" % remaining],
             phase, cwd=package["Dir"], limit=limit, on_line=event,
             convert_package=package["ImportPath"],
@@ -560,7 +615,8 @@ class Runner:
                 passed = False
                 break
             package = self.packages[self.package_path(os.path.dirname(item["file"]))]
-            if "binary" not in package:
+            # No binary, or none that builds without the added test files.
+            if "binary" not in package or package.get("clean") == "":
                 passed = False
                 continue
             if not self.test(package, item["name"], "accept"):

@@ -294,6 +294,10 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 	if err != nil {
 		return Result{}, err
 	}
+	added, err := addedGoTests(ctx, s.Original, src, plan)
+	if err != nil {
+		return Result{}, err
+	}
 	var pkgs []string
 	for _, dir := range dirs {
 		pkgs = append(pkgs, "./"+dir)
@@ -314,11 +318,12 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 	config := struct {
 		Packages     []string `json:"packages"`
 		Formatted    []string `json:"formatted"`
+		Added        []string `json:"added"`
 		Acceptance   []Test   `json:"acceptance"`
 		Deadline     float64  `json:"deadline"`
 		ShardTimeout float64  `json:"shard_timeout"`
 		Workers      int      `json:"workers"`
-	}{pkgs, formatted, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, shardTimeout).Seconds(), SandboxShards}
+	}{pkgs, formatted, added, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, shardTimeout).Seconds(), SandboxShards}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return Result{}, err
@@ -485,6 +490,38 @@ func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, e
 			}
 			rel, _ := filepath.Rel(src, name)
 			add(filepath.ToSlash(rel))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// addedGoTests is the Go test files the build added: the ones in src that
+// staging admits as regression tests against the original checkout. The
+// plan's own files, acceptance tests included, and every file the original
+// holds are not among them. The runner judges the plan's acceptance tests
+// and the packages' existing tests without these files (#869). Without the
+// original checkout, none can be told apart.
+func addedGoTests(ctx context.Context, original, src string, plan *Plan) ([]string, error) {
+	if original == "" {
+		return nil, nil
+	}
+	scope, err := checkoutRegressionScope(ctx, original, plan)
+	if err != nil {
+		return nil, err
+	}
+	files, err := sandboxWalk(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for f := range files {
+		names = append(names, f)
+	}
+	var out []string
+	for _, f := range scope.Files(names) {
+		if strings.HasSuffix(f, "_test.go") {
+			out = append(out, f)
 		}
 	}
 	sort.Strings(out)
