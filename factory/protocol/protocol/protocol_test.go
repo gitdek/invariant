@@ -1,5 +1,3 @@
-// +gobra
-
 package protocol
 
 import "testing"
