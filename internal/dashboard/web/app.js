@@ -2294,7 +2294,17 @@
   // card leaves when its step leaves the list.
   function renderLive() {
     const steps = liveSteps(), keys = steps.map(cardKey), box = $("#live-cards");
-    $("#live").hidden = !steps.length;
+    const section = $("#live"), inbox = $("#inbox-block");
+    section.hidden = !steps.length;
+    // While a step runs, the live cards come first. Once every step shown
+    // has ended, what needs a person comes first, and the steps that ended
+    // follow it, each folded to its heading.
+    const finished = steps.length > 0 && steps.every((l) => l.ended);
+    section.classList.toggle("finished", finished);
+    if (inbox) {
+      if (finished && inbox.nextElementSibling !== section) inbox.after(section);
+      else if (!finished && section.nextElementSibling !== inbox) inbox.before(section);
+    }
     for (const [key, c] of cards) {
       if (keys.includes(key)) continue;
       stripSize.unobserve(c.strip);
@@ -2312,6 +2322,12 @@
         c = { key: keys[i], el, strip: $(".strip", el), marks: 0, runs: 0, lit: "" };
         cards.set(c.key, c);
         stripSize.observe(c.strip);
+        // A step that ended shows its heading, and its run when asked.
+        const made = c;
+        $(".fold", el)?.addEventListener("click", () => {
+          el.classList.toggle("open");
+          renderCard(made);
+        });
       }
       if (box.children[i] !== c.el) box.insertBefore(c.el, box.children[i] || null);
       c.l = l;
@@ -2323,6 +2339,15 @@
   function renderCard(c) {
     const { el, l } = c;
     el.classList.toggle("ended", !!l.ended);
+    if (!l.ended) el.classList.remove("open");
+    const word = $(".live-word", el), fold = $(".fold", el);
+    if (word) word.textContent = l.ended ? "Finished" : "Live";
+    if (fold) {
+      const open = el.classList.contains("open");
+      fold.hidden = !l.ended;
+      fold.textContent = open ? "Hide the run" : "Show the run";
+      fold.setAttribute("aria-expanded", String(open));
+    }
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
     // The live JSON says what the step does, or, once it has ended, that it
     // ended, so a finished card never reads as still running (#269).
