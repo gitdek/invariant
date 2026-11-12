@@ -1140,7 +1140,7 @@ func ratificationCmd(ctx context.Context, args []string) int {
 				lock, err = plumbing.ReadLock(b)
 			}
 			if err == nil {
-				err = factory.VerifyPlan(ctx, gh, *repo, *lock)
+				err = settled(ctx, func() error { return factory.VerifyPlan(ctx, gh, *repo, *lock) })
 			}
 			if err != nil {
 				fmt.Printf("❌ %s: %v\n", dir, err)
@@ -1166,14 +1166,40 @@ func ratificationCmd(ctx context.Context, args []string) int {
 				continue
 			}
 			fmt.Printf("✅ %s: ratified by hand by %s, as %s records (%s)\n", dir, hand.By, p.Lock.Decision, hand.Proposal)
-		case factory.VerifyRatification(ctx, gh, *repo, p.Lock) == nil:
-			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
 		default:
-			fmt.Printf("❌ %s: %v\n", dir, factory.VerifyRatification(ctx, gh, *repo, p.Lock))
-			code = 1
+			if err := settled(ctx, func() error { return factory.VerifyRatification(ctx, gh, *repo, p.Lock) }); err != nil {
+				fmt.Printf("❌ %s: %v\n", dir, err)
+				code = 1
+				continue
+			}
+			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
 		}
 	}
 	return code
+}
+
+// ratificationWait is how long the ratification check waits before it asks
+// GitHub again, times the number of tries so far.
+var ratificationWait = 2 * time.Second
+
+// settled runs check, and runs it again, at most twice more, when GitHub
+// failed for a moment. The check reads one ratifying comment for every lock
+// and plan, on every change, so one request GitHub couldn't answer in time
+// failed CI's gate on a change that touched no lock (#827). A refusal, or an
+// answer that doesn't ratify, is never asked for twice.
+func settled(ctx context.Context, check func() error) error {
+	var err error
+	for try := 1; try <= 3; try++ {
+		if err = check(); err == nil || !github.Transient(err) || try == 3 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(try) * ratificationWait):
+		}
+	}
+	return err
 }
 
 // agentDoor serves the agent's door on a loopback address (D-0066), with a
