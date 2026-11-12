@@ -772,6 +772,8 @@ CODEX_HOME="$HOME/Library/Application Support/invariant/codex" codex login
 
 Codex's commands then run under a permission profile of Codex's own: they see only the workspace, the system and Go's toolchain, reach no network, and can't read your home directory. The watcher checks that before it runs Codex, and runs one Codex run at a time.
 
+`-every` is how often the watcher polls GitHub, a minute by default, and `-once` polls once and exits. `-base` is the branch pull requests merge into, `main` by default. `-timeout` caps an agent's run by the clock, at 40 minutes, `-max-turns` caps its turns, at 80, and `-gate-runs` is the most gate runs a synthesis gets, 4. `-codex` and `-claude` name each agent's CLI. `invariant watch -h` lists every flag with its default.
+
 The watcher keeps its clone and every run's transcript, checks and records in its work directory, `-work`, by default `invariant/watch` in your user cache directory. A plan's draft and build each give their checks a Go build cache of their own and remove it when they end, and a watcher removes any a stopped watcher left when it starts ([D-0233](../decisions/journal/D-0233.jsonl)).
 
 ## Draining and restarting

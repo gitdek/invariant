@@ -100,7 +100,7 @@ Two of the factory's own models are small enough to draw, and carry views of the
 | `04-api-rate-limiter` | `Apis = {a1, a2}`, `Capacity = 2`, `MaxCalls = 5`, `MaxTime = 3`, `MaxWaiting = 2` | 19,489 | No; above chart capacity |
 | `05-connection-pool` | `Clients = {c1, c2, c3}`, `Size = 2` | 13 | Yes |
 
-The default acceptance test checks the inventory, protected model/lock hashes, pure view grammar and vocabulary. It does **not** claim a completed TLC exploration. Before merging this change, the merger must complete the following pinned-tool validation with Docker:
+The default acceptance test checks the inventory, protected model/lock hashes, pure view grammar and vocabulary. It does **not** claim a completed TLC exploration. That is the pinned-tool validation with Docker, which the merger ran before the change merged:
 
 ```sh
 INVARIANT_DASHBOARD_READER_REAL=1 go test ./internal/dashboard \
