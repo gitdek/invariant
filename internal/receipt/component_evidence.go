@@ -39,9 +39,10 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 	componentCheckTable(b)
 	for _, row := range e.Conformance {
 		qualified := componentConformanceQualification(r, row)
+		coverage := r.ComponentCoverage(row)
 		result := row.Result
 		state, attempt, transitions := "not established", "not established", "not established"
-		if qualified.ExhaustiveStates {
+		if coverage.Qualification() == "tested in every state" {
 			state = "tested in every state"
 		}
 		if result.Attempts == nil {
@@ -56,6 +57,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			"Origin: " + componentOrigin(row.Origin),
 			"Mode: " + componentLiteral(result.Mode), "Outcome: " + componentOutcome(result.Outcome),
 			fmt.Sprintf("%d runs, %d steps, %d states, %d transitions, %d model states", result.Runs, result.Steps, result.States, result.Transitions, result.ModelStates),
+			coverage.Detail(),
 			"Transitions: " + transitions, "State coverage: " + state, "Attempt coverage: " + attempt,
 			"checked IDs: " + componentStrings(result.Checked),
 			componentInvocation(result.Invocation), componentTool(result.Runner), componentInputs(result.Inputs, result.FileInputs),
@@ -67,7 +69,11 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 				fmt.Sprintf("%d attempts in %d states", a.Attempts, a.States), componentObservations(a.Observations),
 				"attempt diagnostics: "+componentStrings(a.Diagnostics))
 		}
-		componentCheckRow(b, row.Target, row.Check, qualified.Status, parts)
+		status := qualified.Status
+		if coverage.Sampled {
+			status = coverage.Qualification()
+		}
+		componentCheckRow(b, row.Target, row.Check, status, parts)
 	}
 
 	componentCheckHeader(b, "runtime", len(e.Runtime))
@@ -319,23 +325,7 @@ func componentProofQualification(r *verify.Report, row verify.ComponentProof) st
 }
 
 func componentConformanceQualification(r *verify.Report, row verify.ComponentConformanceEvidence) verify.ComponentConformanceEvidence {
-	result := row.Result
-	result.Outcome = componentKnownOutcome(result.Outcome)
-	if result.Mode != "sampled" && result.Mode != "bounded-exhaustive" {
-		result.Mode = ""
-	}
-	if result.Attempts != nil {
-		a := *result.Attempts
-		a.Outcome = componentKnownOutcome(a.Outcome)
-		result.Attempts = &a
-	}
-	qualified := verify.Report{Bounds: r.Bounds, ModelOnly: r.ModelOnly}
-	if row.Target == result.Target && row.Check == result.Check {
-		if err := qualified.AttributeComponentConformance(&r.Components.Inventory, []verify.ComponentConformanceResult{result}); err == nil {
-			return qualified.Components.Conformance[0]
-		}
-	}
-	return verify.ComponentConformanceEvidence{Status: "unchecked"}
+	return r.QualifyComponentConformance(row)
 }
 
 func componentRuntimeQualification(r *verify.Report, row verify.ComponentRuntimeEvidence) verify.ComponentRuntimeEvidence {

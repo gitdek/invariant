@@ -971,6 +971,18 @@
     return m ? m[1] : langName[p.language] || p.language;
   };
   function codeEvidence(p) {
+    if (p.coverage?.length) {
+      // Fractions and truncated percentages come from checked integer evidence
+      // on the server; JavaScript numbers cannot retain all int64 counts.
+      const checks = p.coverage.map((c) => {
+        const who = [c.source, c.target, c.check, c.invocation].filter(Boolean).join(" · ");
+        const result = c.checked ? c.sampled ? "tested (sampled)" : "tested" : "unchecked";
+        const share = c.status === "unknown" ? "coverage unknown" : `${c.fraction} model states visited (${c.percent})`;
+        return `${who}: ${result} · ${share}`;
+      });
+      if (p.assurance === "proved") checks.unshift(`${p.verified} function${p.verified === 1 ? "" : "s"} proved`);
+      return checks.join("; ");
+    }
     if (p.assurance === "proved") return `${p.verified} function${p.verified === 1 ? "" : "s"} proved`;
     if (p.assurance === "tested in every state") return "every state reached";
     if (p.assurance === "tested") return `${nf.format(p.visited || 0)}/${nf.format(p.states)} states run`;
@@ -1036,11 +1048,12 @@
         </dl>`;
       const prov = provenance(row.ps);
       const chips = row.ps.map((q) => {
-        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" ? "tested" : "unchecked";
+        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" || q.assurance === "tested (sampled)" ? "tested" : "unchecked";
         const label = q.receiptMissing ? "receipt unavailable" : q.assurance;
         const tip = [q.dir, q.fingerprint ? q.fingerprint.slice(0, 19) : "", provOf(q)].filter(Boolean).join(" · ");
         const href = q.reader ? q.reader.page : "";
-        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? "passed" : "failed"}</span>`}`;
+        const pass = q.coverage?.some((c) => c.checked && c.sampled) ? "passed (sampled)" : "passed";
+        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? pass : "failed"}</span>`}`;
         return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}${comparisonDiagnostic(q)}</li>`;
       }).join("");
       return `${head}<article class="model${quiet(p.repo)}" ${tag(p.repo)}>
@@ -2192,7 +2205,7 @@
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
-        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
+        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.coverage?.length ? ` · ${esc(codeEvidence(p))}` : ""}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
         <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
