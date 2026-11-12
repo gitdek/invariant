@@ -222,7 +222,9 @@ func TestParseLog(t *testing.T) {
 	if len(d) != 3 || d[1].ID != "D-0045" || d[1].Text != "Slice 6 plan, with bold and code." || d[0].Text != "The kickoff brief is the baseline." {
 		t.Fatalf("%+v", d)
 	}
-	if d[2].Status != "proposed" || d[2].Who != "Claude" {
+	// An early row names the agent that wrote it, and reads as an agent's
+	// (#843).
+	if d[2].Status != "proposed" || d[2].Who != "agent" {
 		t.Errorf("%+v", d[2])
 	}
 }
