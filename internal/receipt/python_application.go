@@ -71,6 +71,11 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		fmt.Fprintf(b, "\n%s: %s\n", label, componentLiteral(string(raw)))
 	}
 	for _, l := range a.Larger {
+		if len(l.Skipped) > 0 {
+			fmt.Fprintf(b, "\nOne size larger, invocation %s: skipped; %s. No larger-bound result is claimed.\n", componentLiteral(l.Key.ID), componentStrings(l.Skipped))
+			l.Execution = nil
+			l.Result.Required, l.Result.Passed = false, false
+		}
 		if l.Execution != nil {
 			pythonApplicationFileSelection(b, l.Execution.Provenance.FileSelection)
 		}
@@ -140,7 +145,7 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 		execution("Python execution", x)
 	}
 	for _, l := range a.Larger {
-		if l.Execution != nil && l.Result.Required && !l.Result.Passed {
+		if len(l.Skipped) == 0 && l.Execution != nil && l.Result.Required && !l.Result.Passed {
 			execution("Python execution one size larger", *l.Execution)
 		}
 	}

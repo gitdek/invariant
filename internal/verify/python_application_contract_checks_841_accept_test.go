@@ -89,7 +89,7 @@ func TestPythonApplicationGateChecksCallsTestsMake841(t *testing.T) {
 				}
 				return
 			}
-			if r.Passed || calls793Proof(t, r).Status != Unqualified || !strings.Contains(problems, c.want) {
+			if r.Passed || calls793Proof(t, r).Status != "unchecked" || r.Application.Proofs[0].Ran || !strings.Contains(strings.Join(r.Application.Proofs[0].Skipped, "\n"), c.want) || !strings.Contains(problems, c.want) {
 				t.Fatalf("passed=%v; the problems don't say\n  %s\nthey say\n  %s", r.Passed, c.want, problems)
 			}
 		})

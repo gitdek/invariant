@@ -161,7 +161,7 @@ func TestPythonApplicationGateFailsCallsThatBreakContracts838(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tc, _ := hold393GateFake(t)
-			gp359Verifier(t, false)
+			calls := gp359Verifier(t, false)
 			f := callers838Fixture(t, c.admission, callers838Application(t, c.imports, c.call), hold393Driver)
 			if err := Check(f.p.Dir); err != nil {
 				t.Fatalf("check: %v", err)
@@ -170,11 +170,11 @@ func TestPythonApplicationGateFailsCallsThatBreakContracts838(t *testing.T) {
 			x, conformance := pa342Explored(t, r)
 			hold393Assert(t, x)
 			proof := calls793Proof(t, r)
-			if !conformance.passed() || proof.Result == nil || !proof.Result.Passed {
-				t.Fatalf("the fixture must conform and its proof attempt succeed: %s", gp359Dump(t, r))
+			if !conformance.passed() || proof.Result == nil || proof.Result.Passed || *calls != 0 || r.Application.Proofs[0].Ran || len(r.Application.Proofs[0].Skipped) == 0 {
+				t.Fatalf("the fixture must conform and skip its proof: %s", gp359Dump(t, r))
 			}
 			problems := strings.Join(PythonApplicationProofProblems(r.Components, r.Application), "\n")
-			if r.Passed || proof.Status != Unqualified {
+			if r.Passed || proof.Status != "unchecked" {
 				t.Fatalf("a call that breaks the contract passed: passed=%v status=%s\n%s", r.Passed, proof.Status, problems)
 			}
 			for _, want := range c.want {
@@ -247,12 +247,12 @@ def admission(busy: bool) -> int:
 				t.Fatal(err)
 			}
 			run(t, tc, true)
-			// The same function without its Exsures isn't proved.
+			// Without Exsures, a recorded exception skips the proof (#849).
 			gp359Verifier(t, true)
 			f := callers838Fixture(t, strings.Replace(admission, "    Exsures(Exception, busy)\n", "", 1), callers838Application(t, imports, call), hold393Driver)
 			r := pa342Run(t, f, tc)
-			if proof := calls793Proof(t, r); r.Passed || proof.Result == nil || proof.Result.Passed || !strings.Contains(strings.Join(proof.Result.Errors, "\n"), "raises no exceptions") {
-				t.Fatalf("Nagini took a function that raises what it doesn't declare: %s", gp359Dump(t, r))
+			if proof := calls793Proof(t, r); r.Passed || proof.Result == nil || proof.Result.Passed || r.Application.Proofs[0].Ran || !strings.Contains(strings.Join(r.Application.Proofs[0].Skipped, "\n"), "raises only what its Exsures declare") {
+				t.Fatalf("a recorded undeclared exception did not skip Nagini: %s", gp359Dump(t, r))
 			}
 		})
 	}
