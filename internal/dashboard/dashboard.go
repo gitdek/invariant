@@ -117,8 +117,11 @@ type sources struct {
 	readme   string
 	prd      string
 	merges   map[int]mergeCheck
-	changed  bool // comments or merges read since they were last kept (#674)
-	lease    *Lease
+	// pulls is each waiting card's pull request as the latest refresh read
+	// it (#865). One it couldn't read is absent.
+	pulls   map[int]PullNow
+	changed bool // comments or merges read since they were last kept (#674)
+	lease   *Lease
 	// gates says, for each finished gate run looked at, whether the gate
 	// ran in it: gateRan, gateSkipped or gateRefused. A finished run never
 	// changes, so each is looked up once.
@@ -557,6 +560,7 @@ func (s *Server) refresh(ctx context.Context) error {
 			fail("plans", err)
 		}
 		s.checkMerges(ctx, r)
+		s.readPulls(ctx, r)
 		if lease, err := readLease(ctx, r); err != nil {
 			fail("lease", err)
 		} else {
@@ -1084,6 +1088,66 @@ func (s *Server) checkMerges(ctx context.Context, r *Repo) {
 	}
 }
 
+// readPulls reads the pull request of each open issue's card that names
+// one, as GitHub has it now, and CI's gate on its head: two requests a
+// card, which GitHub answers from the copy the client holds while nothing
+// has changed. A card whose reads fail says nothing of now (#865).
+func (s *Server) readPulls(ctx context.Context, r *Repo) {
+	login := s.factoryOf(r)
+	read := map[int]PullNow{}
+	for _, is := range r.src.issues {
+		if is.State != "open" {
+			continue
+		}
+		l := factoryLane(is, r.src.comments[is.Number].comments, login, time.Now())
+		if l.Waiting == nil || l.Waiting.PR == 0 {
+			continue
+		}
+		pr, err := r.GitHub.PullRequest(ctx, l.Waiting.PR)
+		if err != nil {
+			continue
+		}
+		p := PullNow{State: pr.State, Draft: pr.Draft}
+		switch {
+		case pr.Merged:
+			p = PullNow{State: "merged"}
+		case pr.State != "open":
+			p = PullNow{State: "closed"}
+		default:
+			if pr.Mergeable == nil {
+				p.Unsettled = true
+			} else {
+				p.Conflicts = !*pr.Mergeable
+			}
+			runs, err := r.GitHub.CheckRuns(ctx, pr.Head.SHA, "invariant/gate")
+			if err != nil {
+				continue
+			}
+			p.Gate = gateNow(runs)
+		}
+		read[l.Waiting.PR] = p
+	}
+	r.src.pulls = read
+}
+
+// gateNow says how CI's gate stands on a head from its check runs there: a
+// run that hasn't finished is running, whatever an earlier one concluded,
+// one that passed is passed, and otherwise a finished run failed.
+func gateNow(runs []github.CheckRun) string {
+	state := ""
+	for _, run := range runs {
+		switch {
+		case run.Status != "completed":
+			return "running"
+		case run.Conclusion == "success":
+			state = "passed"
+		case state == "":
+			state = "failed"
+		}
+	}
+	return state
+}
+
 func (s *Server) assemble(now time.Time) Snapshot {
 	primary := s.Repos[0]
 	snap := Snapshot{Repo: primary.Name, GeneratedAt: now, Issues: []Issue{}, Repos: []RepoState{}, Projects: []Project{}, Activity: []Event{}}
@@ -1131,6 +1195,11 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			// dashboard serves it.
 			if l.Waiting != nil && s.Access != nil {
 				l.Waiting.ActURL = actURL(r.Name, l.Number)
+			}
+			if l.Waiting != nil && l.Waiting.PR != 0 {
+				if p, ok := r.src.pulls[l.Waiting.PR]; ok {
+					l.Waiting.Now = &p
+				}
 			}
 			if l.Stage == StageMerged && l.PR != 0 {
 				m, checked := r.src.merges[l.PR]

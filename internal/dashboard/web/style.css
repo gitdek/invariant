@@ -809,6 +809,13 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .need-top .since { margin-left: auto; font: 500 12px var(--mono); color: var(--ink3); }
 .need .ask { margin: 10px 0 4px; font-size: 15px; color: var(--ink); line-height: 1.5; }
 .need .ask b { font-family: var(--mono); color: var(--people-ink); margin-right: 6px; }
+/* What the card's pull request is now, ahead of how it was when the factory
+   stopped (#865). */
+.need .now { margin: 10px 0 0; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line2); font-size: 14.5px; line-height: 1.5; color: var(--ink); }
+.need .now strong { font-weight: 600; }
+.need .now.good { border-color: rgba(var(--accent-rgb), 0.5); background: var(--accent-soft); }
+.need .now.bad { border-color: rgba(var(--bug-rgb), 0.5); background: var(--bug-soft); }
+.need .cmd.review { text-decoration: none; border-color: rgba(var(--accent-rgb), 0.6); font-family: var(--sans); font-weight: 600; }
 .need .ask strong { color: var(--ink); font-weight: 600; }
 .need ol.planned { margin: 8px 0 4px; padding-left: 22px; display: grid; gap: 4px; font-size: 14.5px; color: var(--ink2); }
 .need .ask b.same, .batch .ask b.same { font-family: inherit; font-weight: 600; color: var(--accent-ink); margin-right: 4px; }

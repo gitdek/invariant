@@ -1879,6 +1879,30 @@
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look.`;
   }
+  // nowText says what a card's pull request is now, as the last refresh read
+  // it from GitHub. The rest of the card says how it was when the factory
+  // stopped, and a pull request moves on: a push, a passing gate, a conflict,
+  // a merge (#865). A card whose pull request couldn't be read says nothing.
+  const pullLink = (w, repo) => `<a href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener"><strong>${esc(ref(repo, w.pr))}</strong></a>`;
+  // pullGood is a pull request a person can merge as it stands: open, ready
+  // for review, mergeable, and past CI's gate on its head.
+  const pullGood = (w) => !!w.now && w.now.state === "open" && !w.now.draft && !w.now.conflicts && !w.now.unsettled && w.now.gate === "passed";
+  function nowText(w, repo) {
+    const p = w.now;
+    if (!p || !w.pr) return "";
+    if (p.state === "merged") return `<p class="now good">Now: ${pullLink(w, repo)} has merged. The factory records that on its next poll.</p>`;
+    if (p.state === "closed") return `<p class="now">Now: ${pullLink(w, repo)} is closed, and didn't merge.</p>`;
+    const gate = { passed: "CI's gate passed on its head", failed: "CI's gate failed on its head", running: "CI's gate is running on its head" }[p.gate] || "CI's gate hasn't run on its head";
+    const parts = [p.draft ? "is a draft" : "is ready for review", gate, p.conflicts ? "it conflicts with its base" : p.unsettled ? "" : "it can merge"].filter(Boolean);
+    const tone = pullGood(w) ? " good" : p.conflicts || p.gate === "failed" ? " bad" : "";
+    return `<p class="now${tone}">Now: ${pullLink(w, repo)} ${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}.</p>`;
+  }
+  // review is the first thing a card offers for a pull request that can
+  // merge as it stands: opening it, ahead of a retry that might replace it.
+  const review = (w, repo) => (pullGood(w) ? `<a class="cmd primary review" href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener">Review ${esc(ref(repo, w.pr))} on GitHub ↗</a>` : "");
+  // A retry leads a card unless its pull request can merge as it stands, or
+  // is no longer open.
+  const retryLeads = (w) => !w.now || (w.now.state === "open" && !pullGood(w));
   // takes says whether the factory takes a command now, as the server works
   // it out, so a card never offers one the factory refuses (#218).
   const takes = (w, verb) => (w.takes || []).includes(verb);
@@ -1919,12 +1943,12 @@
       body = `${proposalText(w, repo, "a person")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name, posters: w.posters}) : ""}
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "closed") {
-      body = `<p class="ask">${closedText(w, repo)}</p>
+      body = `${w.now && w.now.state !== "closed" ? nowText(w, repo) : ""}<p class="ask">${closedText(w, repo)}</p>
         <div class="cmds">${takes(w, "revise") ? cmd("/invariant revise", true) : ""}${open}</div>`;
     } else {
       cls = "failed";
-      body = `<p class="ask">${why(w, repo)}</p>${retryText(w)}
-        <div class="cmds">${fixes(w).map(([label, c], i) => cmd(c, i === 0, c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
+      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}
+        <div class="cmds">${review(w, repo)}${fixes(w).map(([label, c], i) => cmd(c, i === 0 && retryLeads(w), c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
     }
     return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)} data-issue="${esc(issueKey(is))}"><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
@@ -2016,12 +2040,12 @@
       // A plan is ratified as a plan. Its hash is in the question that follows.
       actions = ask(w.plan || w.issuePlan ? "Ratify this plan" : `Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
     } else if (w.kind === "closed") {
-      body = `<p class="ask">${closedText(w, repo)}</p>`;
+      body = `${w.now && w.now.state !== "closed" ? nowText(w, repo) : ""}<p class="ask">${closedText(w, repo)}</p>`;
       actions = takes(w, "revise") ? ask("Draft again", "/invariant revise", true) : "";
     } else {
       cls = "failed";
-      body = `<p class="ask">${why(w, repo)}</p>${retryText(w)}`;
-      actions = fixes(w).map(([label, c], i) => ask(label, c, i === 0)).join("");
+      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}`;
+      actions = review(w, repo) + fixes(w).map(([label, c], i) => ask(label, c, i === 0 && retryLeads(w))).join("");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
     if (a.confirm) {
