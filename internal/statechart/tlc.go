@@ -51,14 +51,22 @@ func EvaluateRules(ctx context.Context, runner GraphDumper, dir string, graph tl
 	if err != nil || module != graph.Module {
 		return nil, refuse("invalid_evidence", "source module differs from graph")
 	}
+	includes, err := tla.Siblings(dir, graph.Module+".tla")
+	if err != nil {
+		return nil, fmt.Errorf("statechart source: %w", err)
+	}
+	model, err := tla.Read(string(src), includes)
+	if err != nil {
+		return nil, refuse("invalid_evidence", "source can't be read as TLC reads it: "+err.Error())
+	}
 	for _, statement := range lock.Statements {
-		pin, err := tla.PinHash(string(src), statement.Name, project.Model)
+		pin, err := model.PinHash(statement.Name, project.Model)
 		if err != nil || pin != statement.SHA256 {
 			return nil, refuse("invalid_evidence", "source does not match locked pin for "+statement.Name)
 		}
 	}
 	variables := slices.Sorted(maps.Keys(graph.Graph.States[0].Values))
-	declared := tla.Variables(string(src))
+	declared := model.Variables()
 	for _, name := range declared {
 		if !slices.Contains(variables, name) {
 			return nil, refuse("invalid_evidence", "source variable missing from graph: "+name)

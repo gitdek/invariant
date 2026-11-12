@@ -103,7 +103,7 @@ func reader631FixtureFor(t *testing.T, n int, label string) reader631Fixture {
 	for i := range f.Lock.Statements {
 		s := &f.Lock.Statements[i]
 		var err error
-		s.SHA256, err = tla.PinHash(reader631Model, s.Name, project.Model)
+		s.SHA256, err = tla.PinHashWith(reader631Model, map[string]string{"Helper631.tla": "---- MODULE Helper631 ----\nZero == 0\n====\n"}, s.Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}

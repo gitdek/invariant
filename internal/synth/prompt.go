@@ -34,6 +34,9 @@ func Prompt(p *project.Project, skeleton, request string, gateRuns int, draft, a
 		modelTask = "It's already drafted in the module below, and TLC has checked it against the statements. Keep it unless the code needs it changed, and change only `Init`, the actions and `Next`."
 		moduleHeading = "The module"
 	}
+	// The gate reads the module the way TLC's parser does, and refuses one
+	// it can't read exactly (#812).
+	modelTask += " The module may extend Naturals, Integers, Sequences, FiniteSets, Bags and TLC. Keep its header on the first line, start each definition at column 0 as `Name == ...` or `Name(x) == ...` with its continuation lines indented, put a definition that is local to another in its `LET`, and write no `INSTANCE`: the gate reads the module the way TLC's parser does, and refuses one it can't read exactly."
 	var statements strings.Builder
 	statements.WriteString("| Statement | Kind | What it says |\n| --- | --- | --- |\n")
 	for _, s := range p.Lock.Statements {

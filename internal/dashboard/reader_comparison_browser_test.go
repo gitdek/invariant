@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -68,12 +67,7 @@ func TestReaderComparisonDiagnosticBrowser(t *testing.T) {
 	defer server.Close()
 	for _, page := range []string{"/", "/act"} {
 		t.Run(page, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
-				"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", "--user-data-dir="+t.TempDir(),
-				"--virtual-time-budget=20000", "--dump-dom", server.URL+page)
-			out, err := cmd.CombinedOutput()
+			out, err := browserDOM(t, browser, server.URL+page, 20000)
 			if err != nil || !strings.Contains(string(out), `data-comparison-check="passed"`) {
 				t.Fatalf("comparison diagnostic browser check: %v\n%s", err, out)
 			}

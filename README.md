@@ -112,7 +112,7 @@ The factory owns both the model and the code, and each Go method's contract rest
 
 | Check | Tool | Fails when |
 | :-- | :-- | :-- |
-| Pins | Invariant | A ratified statement's text, or anything it depends on, has changed |
+| Pins | Invariant | A ratified statement's text, or anything it depends on, has changed, or the model holds text [TLC would read differently](docs/gate.md#how-the-gate-reads-a-model) from the gate |
 | Design | TLA+ · TLC | An invariant is violated, or the system can deadlock, within the ratified bounds |
 | Design at every size | TLAPS | A ratified invariant the project selects for TLAPS isn't proved of the model at every size, or its proof leans on something the gate refuses |
 | Reachability | TLA+ · TLC | A ratified witness can't be reached, so the invariants might hold only because nothing happens |

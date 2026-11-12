@@ -362,7 +362,7 @@ func reader615Project(t *testing.T, limit int) string {
 		{Name: "Safe", Kind: project.Invariant, Says: "The count stays within its limit.\nKeep <literal> | `words` & spaces."},
 	}}
 	for i := range lock.Statements {
-		h, err := tla.PinHash(reader615Model, lock.Statements[i].Name, project.Model)
+		h, err := tla.PinHashWith(reader615Model, map[string]string{"Helper615.tla": reader615Include}, lock.Statements[i].Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}
