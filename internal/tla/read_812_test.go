@@ -2,6 +2,8 @@ package tla
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -346,5 +348,35 @@ func TestDivisionIsPinnedOnlyUnderIntegers812(t *testing.T) {
 	}
 	if _, err := PinHash(strings.Replace(model, "EXTENDS Naturals, FiniteSets", "EXTENDS Integers, FiniteSets", 1), "AtMostOne", nil); err != nil {
 		t.Errorf("a pin over \\div under Integers: %v", err)
+	}
+}
+
+// Siblings reads the other modules in a model's directory. Checks that share
+// a directory write modules of their own there and remove them, so one that
+// is listed and gone before it's read is left out, not an error: a replay
+// beside another failed on exactly that.
+func TestSiblingsLeavesOutAModuleThatIsGone812(t *testing.T) {
+	dir := t.TempDir()
+	for name, text := range map[string]string{"Main.tla": extending812, "Helper.tla": helper812, "notes.txt": "not a module"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Listed, and not there to read: what a module removed meanwhile looks like.
+	if err := os.Symlink(filepath.Join(dir, "removed-meanwhile.tla"), filepath.Join(dir, "Gone.tla")); err != nil {
+		t.Skipf("no symbolic links here: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "Folder.tla"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Siblings(dir, "Main.tla")
+	if err != nil || len(got) != 1 || got["Helper.tla"] != helper812 {
+		t.Fatalf("Siblings = %v, %v; want Helper.tla alone", got, err)
+	}
+	if _, err := Read(extending812, got); err != nil {
+		t.Errorf("the model with its sibling: %v", err)
+	}
+	if _, err := Siblings(filepath.Join(dir, "missing"), "Main.tla"); err == nil {
+		t.Error("a directory that isn't there has siblings")
 	}
 }
