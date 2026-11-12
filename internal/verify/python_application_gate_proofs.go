@@ -242,6 +242,12 @@ func PythonApplicationTargetProblems(e *ComponentEvidence, target string, applic
 			out = append(out, fmt.Sprintf("%s has no passing conformance on the same declaration or declared observed-call coverage, so nothing shows the application runs the function Nagini proved", target))
 		}
 	}
+	// Nagini proved the body against the contract; nothing proves the
+	// callers. Each recorded call must meet it, whoever made the call
+	// (#838).
+	if len(application) == 1 {
+		out = append(out, PythonApplicationContractChecks(e, application[0], target).problems()...)
+	}
 	return out
 }
 

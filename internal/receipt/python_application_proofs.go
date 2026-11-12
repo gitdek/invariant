@@ -168,3 +168,74 @@ func pythonApplicationProofBinding(x verify.PythonApplicationProofBoundary) stri
 	}
 	return componentLiteral(x.Kind)
 }
+
+// pythonApplicationContractChecks renders, for each in-place proof whose
+// attempt holds the function's contract, what checking that contract on the
+// calls exploration recorded found (#838). It is derived here from the
+// recorded calls, as the gate derived it, never read from a status.
+func pythonApplicationContractChecks(b *strings.Builder, r *verify.Report) {
+	e := componentInPlace(r)
+	if e == nil {
+		return
+	}
+	wrote := false
+	for _, p := range r.Application.Proofs {
+		checks := verify.PythonApplicationContractChecks(e, r.Application, p.Result.Target)
+		if checks == nil || p.Input.Contract == nil {
+			continue
+		}
+		if !wrote {
+			b.WriteString("\n### Python application · callers checked against proved contracts\n\nNagini proves a selected function's body against its contract, and nothing proves the code that calls it. The gate evaluated each contract on every call of its function that exploration recorded, replays apart, whoever made the call: the types its annotations name and each Requires on the arguments as they were on entry, and each Ensures and the result's type on the result, with Old reading the entry values and a list or dictionary argument read as it was after the call. A call that raised must have raised what an Exsures declares. A permission or a predicate holds wherever Python runs, so those are listed as proved and not checked. A clause the gate couldn't evaluate on a call is unresolved, which fails the gate as a clause that didn't hold does. This covers the calls exploration exercised, and says nothing about any other call.\n")
+			wrote = true
+		}
+		fmt.Fprintf(b, "\nContract of %s: ", componentLiteral(checks.Target))
+		switch {
+		case checks.Calls == 0:
+			b.WriteString("no call was recorded, so nothing was checked.\n")
+		case len(checks.Findings) > 0:
+			fmt.Fprintf(b, "%s recorded, %d by the application's own code. %s settled, and what's listed below failed the gate.\n",
+				plural(checks.Calls, "call", "calls"), checks.Own, plural(checks.Clauses, "check", "checks"))
+		default:
+			fmt.Fprintf(b, "%s recorded, %d by the application's own code. Each of %s held.\n",
+				plural(checks.Calls, "call", "calls"), checks.Own, plural(checks.Clauses, "check", "checks"))
+		}
+		if checks.Calls > 0 && checks.Own == 0 {
+			b.WriteString("\nNo call by the application's own code was recorded, so nothing here shows its callers meet the contract.\n")
+		}
+		var types []string
+		for _, param := range p.Input.Contract.Parameters {
+			types = append(types, componentLiteral(param.Name+": "+param.Type.String()))
+		}
+		if len(types) > 0 {
+			fmt.Fprintf(b, "\nParameter types checked on entry: %s.\n", strings.Join(types, ", "))
+		}
+		checked, partly, proofOnly := p.Input.Contract.Classes()
+		if len(checked)+len(partly)+len(proofOnly) > 0 {
+			b.WriteString("\n| Clause | On each recorded call |\n| :-- | :-- |\n")
+			for _, o := range p.Input.Contract.Obligations {
+				how := "evaluated"
+				switch {
+				case slices.Contains(proofOnly, o.Text):
+					how = "not evaluated: Nagini proves it, and no run can check it"
+				case slices.Contains(partly, o.Text):
+					how = "evaluated, apart from the permissions it states, which Nagini proves"
+				case o.Kind == "exsures":
+					how = "evaluated where the call raised " + componentLiteral(o.Exception)
+				case o.Kind == "ensures":
+					how = "evaluated where the call returned"
+				}
+				fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(o.Text), how)
+			}
+		}
+		for _, f := range checks.Findings {
+			fmt.Fprintf(b, "\n- %s\n", componentLiteral(f.String()))
+		}
+	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}

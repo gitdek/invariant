@@ -7,32 +7,60 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/gitdek/invariant/internal/project"
 )
 
-// PythonApplicationCall is a completed call inside an explored application
-// entry, in completion order. Arguments are copied on entry, by parameter
-// name, and the result on return; neither holds application objects.
-// Caller is the staged file whose code made the call: the nearest frame
-// beneath it that runs application code. A call counts toward a proof only
-// when that file is one of the application's own sources, so a call a
+// PythonApplicationCall is a call inside an explored application entry
+// that returned or raised, in the order they ended. Arguments are copied on
+// entry, by parameter name, and the result on return; neither holds
+// application objects. After holds what each list or dictionary argument
+// held when the call ended, and Raised the exception a call that didn't
+// return raised, so a contract's clauses about either can be checked
+// (#838). Caller is the staged file whose code made the call: the nearest
+// frame beneath it that runs application code. A call counts toward a proof
+// only when that file is one of the application's own sources, so a call a
 // driver, a helper beside it or a callback of theirs makes shows nothing
-// about the application.
+// about the application. One that raised counts as one that returned does:
+// either way the application ran the function.
 type PythonApplicationCall struct {
-	Target       string         `json:"target"`
-	SourceSHA256 string         `json:"source_sha256"`
-	Caller       string         `json:"caller,omitempty"`
-	Arguments    map[string]any `json:"arguments"`
-	Result       any            `json:"result"`
+	Target       string                   `json:"target"`
+	SourceSHA256 string                   `json:"source_sha256"`
+	Caller       string                   `json:"caller,omitempty"`
+	Arguments    map[string]any           `json:"arguments"`
+	Result       any                      `json:"result"`
+	After        map[string]any           `json:"after,omitempty"`
+	Raised       *PythonApplicationRaised `json:"raised,omitempty"`
+}
+
+// PythonApplicationRaised is the exception a recorded call raised: its
+// class by module and name, and each builtin name bound to a class it
+// inherits from, itself included, which the collector compares by identity.
+type PythonApplicationRaised struct {
+	Type     string   `json:"type"`
+	Builtins []string `json:"builtins"`
 }
 
 func (c *PythonApplicationCall) UnmarshalJSON(b []byte) error {
 	// The collector names every call's caller. A record with none, as one
 	// written before callers were recorded has, counts toward no proof.
-	if _, err := pythonApplicationJSONFields(b, true, "target", "source_sha256", "caller", "arguments", "result"); err != nil {
-		if _, err := pythonApplicationJSONFields(b, true, "target", "source_sha256", "arguments", "result"); err != nil {
-			return fmt.Errorf("observed call: %w", err)
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(b, &present); err != nil {
+		return fmt.Errorf("observed call: %w", err)
+	}
+	fields := []string{"target", "source_sha256", "arguments", "result"}
+	for _, optional := range []string{"caller", "after", "raised"} {
+		if _, ok := present[optional]; ok {
+			fields = append(fields, optional)
+		}
+	}
+	if _, err := pythonApplicationJSONFields(b, true, fields...); err != nil {
+		return fmt.Errorf("observed call: %w", err)
+	}
+	if raw, ok := present["raised"]; ok {
+		if _, err := pythonApplicationJSONFields(raw, false, "type", "builtins"); err != nil {
+			return fmt.Errorf("observed call's exception: %w", err)
 		}
 	}
 	type call PythonApplicationCall
@@ -41,12 +69,44 @@ func (c *PythonApplicationCall) UnmarshalJSON(b []byte) error {
 	if err := d.Decode((*call)(c)); err != nil {
 		return err
 	}
+	return c.valid()
+}
+
+// valid says whether the record holds what the collector writes.
+func (c *PythonApplicationCall) valid() error {
 	if c.Arguments == nil || !pythonApplicationValue(c.Arguments, true) || !pythonApplicationValue(c.Result, true) {
 		return fmt.Errorf("observed call arguments and result must be portable JSON values")
 	}
 	for name := range c.Arguments {
 		if !pythonApplicationEnv.MatchString(name) {
 			return fmt.Errorf("observed call arguments must be bound by parameter name")
+		}
+	}
+	for name, after := range c.After {
+		// Only a list or a dictionary can change in place, and it stays one.
+		before, ok := c.Arguments[name]
+		_, list := after.([]any)
+		_, wasList := before.([]any)
+		_, dict := after.(map[string]any)
+		_, wasDict := before.(map[string]any)
+		if !ok || !pythonApplicationValue(after, true) || !(list && wasList || dict && wasDict) {
+			return fmt.Errorf("observed call records a value after the call for %s, which isn't a list or a dictionary argument", name)
+		}
+	}
+	if c.Raised != nil {
+		if c.Result != nil {
+			return fmt.Errorf("observed call both returned and raised")
+		}
+		if c.Raised.Type == "" || strings.IndexFunc(c.Raised.Type, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 || c.Raised.Builtins == nil {
+			return fmt.Errorf("observed call names no exception class")
+		}
+		for _, name := range c.Raised.Builtins {
+			if !pythonApplicationEnv.MatchString(name) {
+				return fmt.Errorf("observed call's exception names an invalid builtin")
+			}
+		}
+		if !slices.IsSorted(c.Raised.Builtins) || len(slices.Compact(slices.Clone(c.Raised.Builtins))) != len(c.Raised.Builtins) {
+			return fmt.Errorf("observed call's exception lists its builtin classes out of order")
 		}
 	}
 	return nil
@@ -107,8 +167,8 @@ func pythonApplicationValidateCalls(row PythonApplicationObservation, declaratio
 		}) {
 			return fmt.Errorf("observed call names an undeclared or stale function: %s", call.Target)
 		}
-		if call.Arguments == nil || !pythonApplicationValue(call.Arguments, true) || !pythonApplicationValue(call.Result, true) {
-			return fmt.Errorf("observed call arguments and result must be portable JSON values")
+		if err := call.valid(); err != nil {
+			return err
 		}
 		// A caller is a file the run staged, or nothing when no application
 		// code made the call.

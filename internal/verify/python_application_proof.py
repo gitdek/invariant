@@ -941,6 +941,174 @@ def dynamic(tree):
     return sorted(out, key=lambda r: (r["line"], r["what"]))
 
 
+# What a selected function's contract asks of a call, for the gate to check
+# on the calls it records (#838): each parameter's type as its annotation
+# names it, the result's, and each Requires, Ensures, Exsures and Decreases
+# at the function's head, as written and as a tree the gate evaluates
+# itself. Nothing here runs the contract. What the gate can't evaluate is
+# written as unresolved, with why, so it fails there instead of passing.
+PROOF_ONLY = frozenset(("Acc", "Rd", "Wildcard", "list_pred", "dict_pred", "set_pred", "MayCreate", "Low", "LowVal"))
+COMPARISONS = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=",
+               ast.Is: "is", ast.IsNot: "is not", ast.In: "in", ast.NotIn: "not in"}
+BINARY = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.FloorDiv: "//", ast.Mod: "%"}
+UNARY = {ast.Not: "not", ast.USub: "-", ast.UAdd: "+"}
+SCALAR_TYPES = frozenset(("int", "bool", "str", "bytes", "float", "complex", "range", "object"))
+
+
+def contract_of(node, tree, text, names, kinds, bindings, rebound):
+    params = [a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
+
+    def unresolved(why):
+        return {"k": "unresolved", "why": why}
+
+    def shown(e):
+        return ast.unparse(e) if hasattr(ast, "unparse") else type(e).__name__
+
+    def typing_name(e):
+        """The typing name an annotation's head reads, or the builtin's."""
+        if isinstance(e, ast.Name):
+            if e.id in TYPE_NAMES | {"object"} and kinds.builtin(e.id):
+                return e.id
+            return kinds.typing.get(e.id)
+        if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name):
+            rows = bindings.get(e.value.id, ())
+            if len(rows) == 1 and rows[0]["kind"] == "import" and rows[0]["module"] == "typing" and e.value.id not in kinds.bound:
+                return e.attr
+        return None
+
+    def type_of(a):
+        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+            try:
+                a = ast.parse(a.value, mode="eval").body
+            except SyntaxError:
+                return {"k": "unknown", "text": a.value}
+        if a is None:
+            return {"k": "unknown", "text": ""}
+        if isinstance(a, ast.Constant) and a.value is None:
+            return {"k": "none"}
+        if isinstance(a, ast.BinOp) and isinstance(a.op, ast.BitOr):
+            return {"k": "union", "items": [type_of(a.left), type_of(a.right)]}
+        base, args = (a.value, a.slice.elts if isinstance(a.slice, ast.Tuple) else [a.slice]) if isinstance(a, ast.Subscript) else (a, None)
+        if INDEX and args is not None:
+            args = [x.value if isinstance(x, INDEX) else x for x in args]
+            args = list(args[0].elts) if len(args) == 1 and isinstance(args[0], ast.Tuple) else args
+        t = typing_name(base)
+        if t == "Optional" and args is not None and len(args) == 1:
+            return {"k": "union", "items": [type_of(args[0]), {"k": "none"}]}
+        if t == "Union" and args:
+            return {"k": "union", "items": [type_of(x) for x in args]}
+        k = GENERICS.get(t)
+        if k in ("list", "set"):
+            return {"k": k, "of": type_of(args[0])} if args is not None and len(args) == 1 else {"k": k}
+        if k == "dict":
+            return {"k": k, "key": type_of(args[0]), "of": type_of(args[1])} if args is not None and len(args) == 2 else {"k": k}
+        if k == "tuple":
+            if args is None:
+                return {"k": k}
+            if len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis:
+                return {"k": k, "of": type_of(args[0])}
+            return {"k": k, "items": [type_of(x) for x in args]}
+        if t in SCALAR_TYPES and args is None:
+            return {"k": t}
+        return {"k": "unknown", "text": shown(a)}
+
+    def literal(value):
+        if value is None:
+            return {"k": "none"}
+        if type(value) is bool:
+            return {"k": "bool", "v": "true" if value else "false"}
+        if type(value) is int:
+            return {"k": "int", "v": str(value)}
+        if type(value) is str:
+            return {"k": "str", "v": value}
+        if type(value) is tuple:
+            return {"k": "tuple", "items": [literal(v) for v in value]}
+        return unresolved("holds a %s, which the gate doesn't evaluate" % type(value).__name__)
+
+    def constant(name):
+        """A module constant's literal value: the one binding the module's
+        top level gives the name, which nothing rebinds."""
+        rows = bindings.get(name, ())
+        if len(rows) != 1 or rows[0]["kind"] != "assign" or not rows[0]["literal"] or name in rebound or name in kinds.bound:
+            return None
+        for s in tree.body:
+            if isinstance(s, (ast.Assign, ast.AnnAssign)) and s.lineno == rows[0]["line"] and s.value is not None:
+                try:
+                    return literal(ast.literal_eval(s.value))
+                except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                    return None
+        return None
+
+    def expr(e):
+        if isinstance(e, ast.Constant):
+            return literal(e.value)
+        if isinstance(e, ast.Name):
+            if e.id in params and e.id not in names:
+                return {"k": "name", "id": e.id}
+            value = constant(e.id)
+            return value if value is not None else unresolved("reads %s, which is neither a parameter nor a literal constant of its module" % e.id)
+        if isinstance(e, ast.Tuple) and not any(isinstance(x, ast.Starred) for x in e.elts):
+            return {"k": "tuple", "items": [expr(x) for x in e.elts]}
+        if isinstance(e, ast.BinOp) and type(e.op) in BINARY:
+            return {"k": "binop", "op": BINARY[type(e.op)], "l": expr(e.left), "r": expr(e.right)}
+        if isinstance(e, ast.UnaryOp) and type(e.op) in UNARY:
+            return {"k": "unary", "op": UNARY[type(e.op)], "e": expr(e.operand)}
+        if isinstance(e, ast.BoolOp):
+            return {"k": "and" if isinstance(e.op, ast.And) else "or", "items": [expr(v) for v in e.values]}
+        if isinstance(e, ast.IfExp):
+            return {"k": "if", "test": expr(e.test), "then": expr(e.body), "else": expr(e.orelse)}
+        if isinstance(e, ast.Compare) and all(type(op) in COMPARISONS for op in e.ops):
+            return {"k": "compare", "l": expr(e.left), "ops": [COMPARISONS[type(op)] for op in e.ops], "rest": [expr(c) for c in e.comparators]}
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not e.keywords and not any(isinstance(a, ast.Starred) for a in e.args):
+            f = e.func.id
+            if f in names and (f in ("Implies", "Old", "Result") or f in PROOF_ONLY):
+                if f in PROOF_ONLY:
+                    # A permission or a predicate holds where Python runs by
+                    # definition; what it's given isn't evaluated.
+                    return {"k": "call", "f": f, "args": []}
+                if len(e.args) == {"Implies": 2, "Old": 1, "Result": 0}[f]:
+                    return {"k": "call", "f": f, "args": [expr(a) for a in e.args]}
+            elif f in ("len", "abs") and kinds.builtin(f) and len(e.args) == 1:
+                return {"k": "call", "f": f, "args": [expr(e.args[0])]}
+            elif (f == "isinstance" and kinds.builtin(f) and len(e.args) == 2 and isinstance(e.args[1], ast.Name)
+                  and e.args[1].id in ISINSTANCE_TYPES and kinds.builtin(e.args[1].id)):
+                return {"k": "call", "f": f, "args": [expr(e.args[0]), {"k": "type", "id": e.args[1].id}]}
+        return unresolved("holds %s, which the gate doesn't evaluate" % shown(e))
+
+    def statement(s):
+        v = s.value if isinstance(s, ast.Expr) else None
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in ("Requires", "Ensures", "Exsures", "Decreases") and v.func.id in names:
+            return v
+        return None
+
+    out, head = [], True
+    for i, s in enumerate(node.body):
+        call = statement(s)
+        docstring = i == 0 and isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str)
+        if call is None:
+            head = head and docstring
+            continue
+        kind = call.func.id.lower()
+        row = {"kind": kind, "line": s.lineno, "text": ast.get_source_segment(text, s) or call.func.id}
+        plain = not call.keywords and not any(isinstance(a, ast.Starred) for a in call.args)
+        if not head:
+            row["expr"] = unresolved("isn't at the head of the function, where Nagini reads a contract")
+        elif kind == "decreases":
+            pass
+        elif kind == "exsures":
+            if plain and len(call.args) == 2 and isinstance(call.args[0], ast.Name) and kinds.builtin(call.args[0].id):
+                row["exception"], row["expr"] = call.args[0].id, expr(call.args[1])
+            else:
+                row["expr"] = unresolved("doesn't name a builtin exception class and a condition")
+        elif plain and len(call.args) == 1:
+            row["expr"] = expr(call.args[0])
+        else:
+            row["expr"] = unresolved("doesn't hold one condition")
+        out.append(row)
+    return {"parameters": [{"name": a.arg, "type": type_of(a.annotation)} for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs],
+            "returns": type_of(node.returns), "obligations": out}
+
+
 def declaration(request):
     raw = base64.b64decode(request["source"])
     tree = ast.parse(decode(raw))
@@ -994,13 +1162,15 @@ def declaration(request):
         unsupported.append("a declaration that isn't at the module's top level")
     # A selected function's contract, which runs where the application runs,
     # and the arithmetic Nagini models apart from Python, in any function.
-    eager, sums = [], []
+    eager, sums, contract = [], [], None
     if "standin" in request:
         standin = standin_of(base64.b64decode(request["standin"]))
         names = {n: standin[n] for n in standin if n not in bound}
         kinds = Kinds(node, tree, bindings, names)
         eager, sums = contracts(node, names, kinds), arithmetic(node, kinds)
+        contract = contract_of(node, tree, decode(raw), names, kinds, bindings, rebound)
     return {
+        "contract": contract,
         "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager, "arithmetic": sums,
         "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,
         "def_line": node.lineno, "async": isinstance(node, ast.AsyncFunctionDef), "decorators": decorators,
