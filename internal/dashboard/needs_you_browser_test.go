@@ -131,6 +131,9 @@ const needsYouBrowserCheck = `
     assert(chip === "3 issues need you · 2 stalled", "the headline's count reads: " + chip);
     const choices = [...document.querySelectorAll("#scope a")].map(text);
     assert(choices[0].endsWith("3 need you") && choices[1].endsWith("2 need you") && choices[2].endsWith("1 needs you"), "the Show choices read: " + choices.join(" / "));
+    // What's established sits apart from what needs a person, so a phone
+    // can leave it out and keep the count (#845).
+    assert([...document.querySelectorAll("#scope a")].every((a) => a.querySelector(".ct .est") && a.querySelector(".ct .needs")), "a Show choice doesn't keep its count apart");
     // Opened, the fold stays open when the list is drawn again.
     fold.querySelector("summary").click();
     await until(() => box.querySelector("details.stalled").open, "the fold opening");

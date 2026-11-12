@@ -60,6 +60,10 @@
     const d = Math.floor(h / 24), hh = h % 24;
     return hh ? `${d}d ${hh}h` : `${d}d`;
   }
+  // How far round something with this period is, in degrees, by the page's
+  // own clock. A graphic drawn again starts from there, so it carries on
+  // from where it was in place of jumping back to its start (#845).
+  const turned = (seconds) => (((performance.now() / 1000) % seconds) / seconds) * 360;
   const stamp = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const clockOf = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   // fillTimes writes every relative time under root.
@@ -71,8 +75,11 @@
     fillTimes();
     if (state) {
       const u = $("#updated");
-      u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
-      u.title = u.textContent;
+      // A read that failed says so until one succeeds.
+      if (!u.classList.contains("lost")) {
+        u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
+        u.title = u.textContent;
+      }
       u.classList.toggle("stale", !!state.stale?.length);
     }
     liveTick();
@@ -102,11 +109,14 @@
         const s = await r.json();
         if (read !== reads) return;
         state = s;
+        $("#updated").classList.remove("lost");
         if (ACT) untaken.refresh();
         render(state);
       }
     } catch (e) {
-      $("#updated").textContent = "can't reach the server; retrying";
+      const u = $("#updated");
+      u.classList.add("lost");
+      u.textContent = u.title = "can't reach the server; retrying";
     }
     if (read === reads) again = setTimeout(load, wait);
   }
@@ -117,7 +127,9 @@
     if (changed("scope", [scope, s.totals, (s.repos || []).map((r) => [r.name, r.totals, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
     if (ACT && changed("untaken", [scope, state?.repo])) untaken.paint();
-    if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
+    // The fleet is keyed on what it draws, never on a watcher's heartbeat or
+    // lease, which change every minute (#845).
+    if (changed("fleet", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals, r.factory?.running, r.factory?.doing, r.gate?.status]), s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
     // The headline counts what needs a person, which a post from /act
     // changes at once without changing anything else it draws (#175).
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
@@ -317,16 +329,20 @@
       let g = "";
       if (!REDUCED) {
         [0, 0.18, 0.34, 0.48].forEach((lag, i) => {
-          g += `<circle r="${[4.5, 3.4, 2.5, 1.8][i]}" class="ghost" opacity="${op * [1, 0.5, 0.3, 0.15][i]}"><animateMotion dur="${period}s" begin="-${lag + 1}s" repeatCount="indefinite" path="${path}"/></circle>`;
+          g += `<circle r="${[4.5, 3.4, 2.5, 1.8][i]}" class="ghost" opacity="${op * [1, 0.5, 0.3, 0.15][i]}"><animateMotion dur="${period}s" begin="-${(lag + 1 + (turned(period) / 360) * period).toFixed(2)}s" repeatCount="indefinite" path="${path}"/></circle>`;
         });
       }
       $("#ghost").innerHTML = g;
-      // Merged issues orbit the invariant like moons.
-      const merged = mine.filter((i) => i.stage === "merged").slice().reverse();
+      // Merged issues orbit the invariant like moons: the most recent ones
+      // that fit inside the orbit. Each merged issue's ring is wider than the
+      // last, and one per issue put most of them far outside the graphic,
+      // drifting across the words beside it (#845). The count says how many
+      // merged.
+      const merged = mine.filter((i) => i.stage === "merged").slice().reverse().slice(0, Math.floor((ORBIT_R - 52) / 13) + 1);
       $("#moons").innerHTML = merged.map((is, i) => {
-        const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137) % 360;
-        const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start}" to="${start + 360}" dur="${per}s" repeatCount="indefinite"/>`;
-        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
+        const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137 + (REDUCED ? 0 : turned(per))) % 360;
+        const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start.toFixed(1)}" to="${(start + 360).toFixed(1)}" dur="${per}s" repeatCount="indefinite"/>`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start.toFixed(1)})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
       }).join("");
       // Open issues sit at their stage.
       const open = mine.filter((i) => i.open);
@@ -1491,7 +1507,7 @@
     const needIn = (name) => s.issues.filter((i) => i.open && i.waiting && !stalled(i) && (!name || i.repo === name)).length;
     // Each choice is a link to its view, so it can open in a new tab.
     const link = (value, label, t, open, need, live) =>
-      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${esc(briefly(t))}${need ? ` · <b class="needs">${need === 1 ? "1 needs you" : `${need} need you`}</b>` : open ? ` · ${open} open` : ""}</span></a>`;
+      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct"><span class="est">${esc(briefly(t))}${need || open ? " · " : ""}</span>${need ? `<b class="needs">${need === 1 ? "1 needs you" : `${need} need you`}</b>` : open ? `${open} open` : ""}</span></a>`;
     nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), needIn(""), repos.some((r) => r.factory?.running)) +
       repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), needIn(r.name), r.factory?.running)).join("");
     nav.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
@@ -1499,6 +1515,10 @@
       e.preventDefault();
       setScope(a.dataset.scope);
     }));
+    // On a narrow screen the bar scrolls sideways, and the current choice's
+    // start stays in view (#845). Only the bar moves, never the page.
+    const current = nav.querySelector('a[aria-current="page"]');
+    if (current && (current.offsetLeft < nav.scrollLeft || current.offsetLeft > nav.scrollLeft + nav.clientWidth * 0.6)) nav.scrollLeft = Math.max(0, current.offsetLeft - 8);
   }
 
   // ---------- what's established ----------
@@ -1590,7 +1610,11 @@
     const folded = old.length ? `<details class="stalled"${stalledOpen ? " open" : ""}><summary>${old.length === 1 ? "1 issue has" : `${old.length} issues have`} waited more than two days</summary>${cards(old)}</details>` : "";
     const nothingNew = !fresh.length && old.length ? `<div class="calm">${calmGlyph()}<span>Nothing new needs you. What has waited more than two days is below.</span></div>` : "";
     const disclosures = new Map([...box.querySelectorAll("[data-plan-sources]")].map((el) => [planDisclosureKey(el), el]));
+    // A card fades in the first time it's shown. One that was there already
+    // is drawn again in place, without its entrance (#845).
+    const shown = new Set([...box.querySelectorAll(".need[data-issue]")].map((el) => el.dataset.issue));
     box.innerHTML = (items.length ? batchBanner(items) + nothingNew + cards(fresh) + folded : calm) + done.map(actedCard).join("");
+    box.querySelectorAll(".need[data-issue]").forEach((el) => el.classList.toggle("shown", shown.has(el.dataset.issue)));
     box.querySelector("details.stalled")?.addEventListener("toggle", (e) => { stalledOpen = e.currentTarget.open; });
     wirePlanSources(box, disclosures, items);
     if (toOpen) openAt(box);
@@ -2125,7 +2149,9 @@
     }));
   }
   function spin(from, dur) {
-    return REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${from}" to="${from + 360}" dur="${dur}s" repeatCount="indefinite"/>`;
+    if (REDUCED) return "";
+    const at = from + turned(dur);
+    return `<animateTransform attributeName="transform" type="rotate" from="${at.toFixed(1)}" to="${(at + 360).toFixed(1)}" dur="${dur}s" repeatCount="indefinite"/>`;
   }
   function systemCard(s, r, k) {
     const c = 200, R = 176;
@@ -2508,6 +2534,21 @@
     const marks = l.marks || [];
     const t0 = T(l.since) || (marks[0] ? T(marks[0].at) : end);
     const span = Math.max(60000, end - t0);
+    // The strip is drawn again only when it would look different: something
+    // new on it, another width, or enough time gone that it moves a pixel. A
+    // finished one is drawn once. Every redraw replaces its elements, which
+    // drops a tooltip under the pointer (#845).
+    const last = marks[marks.length - 1];
+    const what = JSON.stringify([W, t0, marks.length, last?.until, (l.runs || []).length, !!l.ended]);
+    // As a running step's time grows, what's on its strip slides left: by
+    // this many pixels since it was last drawn, at most.
+    const moved = l.ended ? 0 : ((W - 16) * (end - (c.drawnEnd || 0))) / span;
+    if (!landing && c.drawn === what && moved < 1) return;
+    c.drawn = what;
+    c.drawnEnd = end;
+    // What breathes or blinks takes its phase from the page's clock, so a
+    // redraw doesn't start it over.
+    box.style.setProperty("--phase", `-${Math.round(performance.now())}ms`);
     const x = (t) => 8 + ((T(t) - t0) / span) * (W - 16);
     const parts = [];
     const steps = [60, 300, 600, 900, 1800, 3600, 7200].map((s) => s * 1000);
