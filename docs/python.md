@@ -397,7 +397,7 @@ if __name__ == "__main__":
     drive()
 ```
 
-Here `application.start()` returns `"pending"`, and `application.tick(state)` returns `advance(state)`. These are unchanged application functions outside the driver. The entry must be distinct from the selected target and execute exactly one selected call; its returned state must equal that call's result. Functional state is value-semantic: strings, booleans, finite numbers or `None`, with no mutable-object identity claim.
+Here `application.start()` returns `"pending"`, and `application.tick(state)` returns `advance(state)`. These are unchanged application functions outside the driver. The entry must be distinct from the selected target and execute exactly one selected call; its returned state must equal that call's result. An entry or initializer must be the application's own code, in every form: one in a test file, or under the verification project's directory unless the manifest selects that file as existing, is refused, since a helper there could call the selected function itself and leave the application's entry, guards and all, unrun ([#879](https://github.com/gitdek/invariant/issues/879), [D-0451](../decisions/journal/D-0451.jsonl)). Functional state is value-semantic: strings, booleans, finite numbers or `None`, with no mutable-object identity claim.
 
 For ordinary instances, declare state-key-to-attribute readers instead. For example, `Task.advance` updates `self.state`, and `Application.tick` calls that method on its task:
 
