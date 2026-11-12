@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-	"time"
 )
 
 // This uses an installed browser, never a downloaded runtime or a substitute
@@ -63,12 +61,7 @@ func TestPlanSourcesBrowserControlledResponses(t *testing.T) {
 	defer server.Close()
 	for _, page := range []string{"/", "/act"} {
 		t.Run(page, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
-				"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", "--user-data-dir="+t.TempDir(),
-				"--virtual-time-budget=20000", "--dump-dom", server.URL+page)
-			out, err := cmd.CombinedOutput()
+			out, err := browserDOM(t, browser, server.URL+page, 20000)
 			if err != nil || !strings.Contains(string(out), `data-plan-check="passed"`) {
 				t.Fatalf("controlled-response browser check: %v\n%s", err, out)
 			}

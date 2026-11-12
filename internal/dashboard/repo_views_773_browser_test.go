@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -78,12 +77,7 @@ func TestRepositoryViewsBrowser773(t *testing.T) {
 	defer server.Close()
 	for _, page := range []string{"/?repo=ask3d", "/?repo=gitdek%2Fask3d", "/?repo=nope"} {
 		t.Run(page, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
-				"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", "--user-data-dir="+t.TempDir(),
-				"--virtual-time-budget=20000", "--dump-dom", server.URL+page)
-			out, err := cmd.CombinedOutput()
+			out, err := browserDOM(t, browser, server.URL+page, 20000)
 			if err != nil || !strings.Contains(string(out), `data-repo-views="passed"`) {
 				i := strings.Index(string(out), `data-repo-views="`)
 				t.Fatalf("repository views browser check: %v\n%s", err, string(out)[max(i, 0):min(max(i, 0)+400, len(out))])
