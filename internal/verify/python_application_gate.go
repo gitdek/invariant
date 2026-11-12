@@ -428,6 +428,9 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			}
 		} else {
 			c.Result.Message = traceErr.Error()
+			if x.HarnessError != "" {
+				c.Result.Message += ": " + x.HarnessError
+			}
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -540,7 +543,15 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		case x == nil:
 			return err
 		case !x.Success || x.Exploration == nil:
-			e = Exploration{Message: lastLines(strings.Join(x.Diagnostics, "\n"), 20)}
+			e = Exploration{Message: x.HarnessError}
+			if e.Message == "" && err != nil && len(x.Diagnostics) > 0 {
+				// The session appends its normalized execution/protocol error
+				// after process output. It is not a slice of the traceback.
+				e.Message = x.Diagnostics[len(x.Diagnostics)-1]
+			}
+			if e.Message == "" {
+				e.Message = "Python application driver did not complete successfully; see execution diagnostics"
+			}
 		default:
 			e = Exploration{OK: true, States: int64(x.Exploration.States), Depth: x.Exploration.Depth}
 		}

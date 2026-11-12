@@ -183,7 +183,10 @@ type PythonApplicationExecutionResult struct {
 	ExitCode    int                           `json:"exit_code"`
 	// Operational diagnostics may contain host paths or container IDs.
 	Diagnostics []string `json:"diagnostics,omitempty"`
-	Fingerprint string   `json:"fingerprint"`
+	// HarnessError is the first collector failure, normalized like Diagnostics.
+	// It is diagnostic text, never authenticated observation evidence.
+	HarnessError string `json:"harness_error,omitempty"`
+	Fingerprint  string `json:"fingerprint"`
 }
 
 type pythonApplicationRequest struct {
@@ -432,6 +435,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 		return pythonApplicationContainerName.ReplaceAllString(diagnostic, "<container>")
 	}
 	normalize := func() {
+		r.HarnessError = clean(r.HarnessError)
 		for i, diagnostic := range r.Diagnostics {
 			r.Diagnostics[i] = clean(diagnostic)
 		}
@@ -450,6 +454,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 				r.ObservationMode = "explored"
 			}
 		} else {
+			r.HarnessError = pythonApplicationHarnessError(process.Stderr)
 			r.Complete = false
 			r.Observations = nil
 			r.Exploration = nil
@@ -487,6 +492,21 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	normalize()
 	r.Fingerprint = pythonApplicationExecutionFingerprint(*r)
 	return r, err
+}
+
+// The collector writes its first error before cleanup can end the process.
+// Read only this diagnostic record, without accepting any observation prefix
+// or deriving a cause from the tail of a traceback. Output remains in Diagnostics.
+func pythonApplicationHarnessError(stderr string) string {
+	for line := range strings.SplitSeq(stderr, "\n") {
+		if raw, ok := strings.CutPrefix(line, "INVARIANT_HARNESS_ERROR "); ok {
+			var message string
+			if json.Unmarshal([]byte(raw), &message) == nil && message != "" {
+				return message
+			}
+		}
+	}
+	return ""
 }
 
 // RunPythonApplicationCommand is the production executor, also usable by
