@@ -342,7 +342,8 @@ type Project struct {
 	Dir            string              `json:"dir"`
 	Name           string              `json:"name"`
 	Language       string              `json:"language"`
-	Assurance      string              `json:"assurance"` // proved, tested in every state, tested, or unchecked; empty for model-only
+	Assurance      string              `json:"assurance"` // proved, tested in every state, tested (possibly sampled), or unchecked; empty for model-only
+	Coverage       []verify.Coverage   `json:"coverage"`
 	Passed         bool                `json:"passed"`
 	ReceiptMissing bool                `json:"receiptMissing,omitempty"` // no verification results are available
 	States         int64               `json:"states"`
@@ -1360,7 +1361,8 @@ func (s *Server) assemble(now time.Time) Snapshot {
 // state, when every passing conformance check reached every state its model
 // has; tested otherwise, with the most states one reached; or unchecked, when
 // no component earned any of those.
-func componentAssurance(c *verify.ComponentEvidence) (assurance string, proved int, visited int64) {
+func componentAssurance(r *verify.Report) (assurance string, proved int, visited int64) {
+	c := r.Components
 	if c == nil {
 		return "unchecked", 0, 0
 	}
@@ -1374,16 +1376,20 @@ func componentAssurance(c *verify.ComponentEvidence) (assurance string, proved i
 	}
 	assurance = "unchecked"
 	for _, e := range c.Conformance {
-		if !e.TransitionsChecked || e.Result.Outcome != "passed" {
+		coverage := r.ComponentCoverage(e)
+		if !coverage.Checked {
 			continue
 		}
 		visited = max(visited, e.Result.States)
 		switch {
-		case assurance == "unchecked" && e.ExhaustiveStates:
+		case assurance == "unchecked" && coverage.Qualification() == "tested in every state":
 			assurance = "tested in every state"
-		case !e.ExhaustiveStates:
+		case coverage.Qualification() != "tested in every state":
 			assurance = "tested"
 		}
+	}
+	if assurance == "tested" && r.Sampled() {
+		assurance = "tested (sampled)"
 	}
 	return assurance, 0, visited
 }
@@ -1519,7 +1525,7 @@ func issueRef(repo, primary string, n int) string {
 func projectOf(ps projectSource, r *verify.Report) Project {
 	p := Project{
 		Dir: ps.dir, Name: ps.manifest.Name, Language: ps.manifest.Language, Bounds: ps.lock.Bounds,
-		Model: ps.key, Statements: []Statement{}, Witnesses: []Witness{}, Bugs: []Bug{},
+		Model: ps.key, Statements: []Statement{}, Witnesses: []Witness{}, Bugs: []Bug{}, Coverage: []verify.Coverage{},
 	}
 	if p.Language == "" {
 		p.Language = "go"
@@ -1541,11 +1547,16 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 		p.Bugs = append(p.Bugs, Bug{Name: b.Name, Label: b.Label, Says: b.Says, Violated: b.Violated, Steps: b.Steps, Caught: b.Caught})
 	}
 	p.Assurance = r.CodeAssurance()
+	p.Coverage = r.Coverage()
 	if p.Assurance == "tested against the model" {
 		p.Assurance = "tested"
-		if c := r.Conformance; c != nil && c.Passed && c.Exhaustive && c.States > 0 &&
-			int64(c.States) == c.ModelStates && (c.Tried == nil || c.Tried.Passed) {
-			p.Assurance = "tested in every state"
+		if r.Conformance != nil {
+			if coverage := r.ConformanceCoverage(); coverage.Checked {
+				p.Assurance = coverage.Qualification()
+			}
+		}
+		if r.Sampled() {
+			p.Assurance = "tested (sampled)"
 		}
 	}
 	if a := r.Agreement; a != nil {
@@ -1564,7 +1575,7 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 	// says what the code earned, in the words it uses for every project, and
 	// never "unchecked" for code that ran against the model (#780).
 	if p.Assurance == "component evidence" {
-		p.Assurance, p.Verified, p.Visited = componentAssurance(r.Components)
+		p.Assurance, p.Verified, p.Visited = componentAssurance(r)
 	}
 	if rt := r.Ratified; rt != nil {
 		p.Ratified = &Provenance{By: rt.By, At: rt.At, Issue: rt.Issue, Previous: rt.Previous}

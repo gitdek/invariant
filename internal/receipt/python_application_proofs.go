@@ -185,7 +185,7 @@ func pythonApplicationContractChecks(b *strings.Builder, r *verify.Report) {
 			continue
 		}
 		if !wrote {
-			b.WriteString("\n### Python application · callers checked against proved contracts\n\nNagini proves a selected function's body against its contract, and nothing proves the code that calls it. The gate evaluated each contract on every call of its function that exploration recorded, replays apart, whoever made the call: the types its annotations name and each Requires on the arguments as they were on entry, and each Ensures and the result's type on the result, with Old reading the entry values and a list or dictionary argument read as it was after the call. A call that raised must have raised what an Exsures declares. A permission or a predicate holds wherever Python runs, so those are listed as proved and not checked. A clause the gate couldn't evaluate on a call is unresolved, which fails the gate as a clause that didn't hold does. This covers the calls exploration exercised, and says nothing about any other call.\n")
+			b.WriteString("\n### Python application · callers checked against proved contracts\n\nNagini proves a selected function's body against its contract, and nothing proves the code that calls it. The gate evaluated each contract on every call of its function that it recorded, inside an exploration's attempts, replays apart, and while the application's tests ran, whoever made the call: the types its annotations name and each Requires on the arguments as they were on entry, and each Ensures and the result's type on the result, with Old reading the entry values and a list or dictionary argument read as it was after the call. A call that raised must have raised what an Exsures declares. A permission or a predicate holds wherever Python runs, so those are listed as proved and not checked. A clause the gate couldn't evaluate on a call is unresolved, which fails the gate as a clause that didn't hold does. A value a test run's record can't hold leaves its clauses unresolved. This covers the calls exploration and the tests exercised, and says nothing about any other call.\n")
 			wrote = true
 		}
 		fmt.Fprintf(b, "\nContract of %s: ", componentLiteral(checks.Target))
@@ -193,11 +193,11 @@ func pythonApplicationContractChecks(b *strings.Builder, r *verify.Report) {
 		case checks.Calls == 0:
 			b.WriteString("no call was recorded, so nothing was checked.\n")
 		case len(checks.Findings) > 0:
-			fmt.Fprintf(b, "%s recorded, %d by the application's own code. %s settled, and what's listed below failed the gate.\n",
-				plural(checks.Calls, "call", "calls"), checks.Own, plural(checks.Clauses, "check", "checks"))
+			fmt.Fprintf(b, "%s recorded, %d while tests ran and %d by the application's own code. %s settled, and what's listed below failed the gate.\n",
+				plural(checks.Calls, "call", "calls"), checks.Tests, checks.Own, plural(checks.Clauses, "check", "checks"))
 		default:
-			fmt.Fprintf(b, "%s recorded, %d by the application's own code. Each of %s held.\n",
-				plural(checks.Calls, "call", "calls"), checks.Own, plural(checks.Clauses, "check", "checks"))
+			fmt.Fprintf(b, "%s recorded, %d while tests ran and %d by the application's own code. Each of %s held.\n",
+				plural(checks.Calls, "call", "calls"), checks.Tests, checks.Own, plural(checks.Clauses, "check", "checks"))
 		}
 		if checks.Calls > 0 && checks.Own == 0 {
 			b.WriteString("\nNo call by the application's own code was recorded, so nothing here shows its callers meet the contract.\n")

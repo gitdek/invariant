@@ -161,6 +161,11 @@ func (c *PythonContract) Check(call PythonApplicationCall) (evaluated int, findi
 	for _, p := range c.Parameters {
 		clause := p.Name + ": " + p.Type.String()
 		v, recorded := entry[p.Name]
+		if kind, ok := call.Unrecorded[p.Name]; ok {
+			findings = append(findings, PythonContractFinding{Clause: clause, Verdict: "unresolved", Why: fmt.Sprintf("the record can't hold %s, a %s", p.Name, kind)})
+			typed = false
+			continue
+		}
 		if !recorded {
 			findings = append(findings, PythonContractFinding{Clause: clause, Verdict: "unresolved", Why: "the record holds no argument for " + p.Name})
 			typed = false
@@ -197,6 +202,12 @@ func (c *PythonContract) Check(call PythonApplicationCall) (evaluated int, findi
 		}
 	}
 	result := pythonContractValue(call.Result)
+	// Nothing about the result can be checked where the record can't hold
+	// it; what the call was asked still can.
+	kind, lost := call.Unrecorded["return"]
+	if lost {
+		findings = append(findings, PythonContractFinding{Clause: "returns " + c.Returns.String(), Verdict: "unresolved", Why: "the record can't hold the result, a " + kind})
+	}
 	declared := false
 	for _, o := range c.Obligations {
 		if executable, _ := o.Expr.parts(); o.Expr == nil || (!executable && o.Kind != "exsures") {
@@ -206,7 +217,7 @@ func (c *PythonContract) Check(call PythonApplicationCall) (evaluated int, findi
 		case "requires":
 			judge(o, pythonContractEnv{names: entry, entry: entry})
 		case "ensures":
-			if call.Raised == nil {
+			if call.Raised == nil && !lost {
 				judge(o, pythonContractEnv{names: exit, entry: entry, result: result, returned: true})
 			}
 		case "exsures":
@@ -225,6 +236,7 @@ func (c *PythonContract) Check(call PythonApplicationCall) (evaluated int, findi
 		evaluated++
 	case call.Raised != nil:
 		evaluated++
+	case lost:
 	case c.Returns.K == "unknown" && c.Returns.Text == "":
 		// No annotation states what it returns.
 	default:

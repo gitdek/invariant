@@ -1025,7 +1025,32 @@
     const m = /\(([^)]*)\)\s*$/.exec(p.name || "");
     return m ? m[1] : langName[p.language] || p.language;
   };
+  // How much of the model's states each conformance check visited (#802), as
+  // short text: "2/5 states (40%)", or "coverage unknown". The fractions and
+  // truncated percentages are the server's, made from checked integers, since
+  // a JavaScript number can't hold every count. One check gives its share
+  // alone; several are named by invocation, each once, and never added up.
+  function coverageShares(p) {
+    const rows = [], seen = new Set();
+    for (const c of p.coverage || []) {
+      const name = c.invocation || (c.target || "").replace(/^[^#]*#/, "").replace(/@.*$/, "") || c.source;
+      const share = c.status === "unknown" ? "coverage unknown" : `${c.fraction} states (${c.percent})`;
+      // An application's invocation and the component check made from it
+      // say the same thing.
+      const key = `${name}\u0000${share}\u0000${c.checked}`;
+      if (!seen.has(key)) { seen.add(key); rows.push({ name, share }); }
+    }
+    return rows.length === 1 ? rows[0].share : rows.map((r) => `${r.name}: ${r.share}`).join("; ");
+  }
+  // Whether a passing check was sampled and the assurance doesn't say so, as
+  // a proved project's doesn't: then it's said beside the result.
+  const sampledBeside = (p) => !/sampled/.test(p.assurance || "") && !!p.coverage?.some((c) => c.checked && c.sampled);
   function codeEvidence(p) {
+    if (p.coverage?.length) {
+      const lead = p.assurance === "proved" ? `${p.verified} function${p.verified === 1 ? "" : "s"} proved`
+        : p.assurance === "tested in every state" ? "every state reached" : "";
+      return [lead, coverageShares(p)].filter(Boolean).join(" · ");
+    }
     if (p.assurance === "proved") return `${p.verified} function${p.verified === 1 ? "" : "s"} proved`;
     if (p.assurance === "tested in every state") return "every state reached";
     if (p.assurance === "tested") return `${nf.format(p.visited || 0)}/${nf.format(p.states)} states run`;
@@ -1091,11 +1116,12 @@
         </dl>`;
       const prov = provenance(row.ps);
       const chips = row.ps.map((q) => {
-        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" ? "tested" : "unchecked";
+        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" || q.assurance === "tested (sampled)" ? "tested" : "unchecked";
         const label = q.receiptMissing ? "receipt unavailable" : q.assurance;
         const tip = [q.dir, q.fingerprint ? q.fingerprint.slice(0, 19) : "", provOf(q)].filter(Boolean).join(" · ");
         const href = q.reader ? q.reader.page : "";
-        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? "passed" : "failed"}</span>`}`;
+        const pass = sampledBeside(q) ? "passed (sampled)" : "passed";
+        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? pass : "failed"}</span>`}`;
         return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}${comparisonDiagnostic(q)}</li>`;
       }).join("");
       return `${head}<article class="model${quiet(p.repo)}" ${tag(p.repo)}>
@@ -2266,7 +2292,7 @@
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
-        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
+        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc([p.assurance, sampledBeside(p) && "tested (sampled)", p.coverage?.length && coverageShares(p)].filter(Boolean).join(" · "))}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
         <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
