@@ -415,11 +415,14 @@ type Totals struct {
 	Merged        int   `json:"merged"` // pull requests the factory merged
 	MergesChecked int   `json:"mergesChecked"`
 	BadMerges     int   `json:"badMerges"` // merged without CI's gate passing on the merged head
-	LocksChecked  int   `json:"locksChecked"`
-	BadLocks      int   `json:"badLocks"` // a lock that isn't the proposal its ratification names
-	Decisions     int   `json:"decisions"`
-	Tested        int   `json:"tested"` // changes merged under a ratified plan (#775)
-	Tests         int   `json:"tests"`  // the acceptance tests those plans pinned
+	// BadMergeRefs names those pull requests as the page writes a
+	// reference: #690, or ask3d#12 from another repository.
+	BadMergeRefs []string `json:"badMergeRefs,omitempty"`
+	LocksChecked int      `json:"locksChecked"`
+	BadLocks     int      `json:"badLocks"` // a lock that isn't the proposal its ratification names
+	Decisions    int      `json:"decisions"`
+	Tested       int      `json:"tested"` // changes merged under a ratified plan (#775)
+	Tests        int      `json:"tests"`  // the acceptance tests those plans pinned
 }
 
 // Who is who builds what (D-0048): people decide, Invariant proves, and
@@ -1129,12 +1132,19 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			}
 			if l.Stage == StageMerged && l.PR != 0 {
 				m, checked := r.src.merges[l.PR]
-				for _, t := range []*Totals{&snap.Totals, &rs.Totals} {
+				for i, t := range []*Totals{&snap.Totals, &rs.Totals} {
 					t.Merged++
 					if checked {
 						t.MergesChecked++
 						if !m.green {
 							t.BadMerges++
+							// The page's own totals name another repository's
+							// pull request with its repository.
+							ref := issueRef(r.Name, r.Name, l.PR)
+							if i == 0 {
+								ref = issueRef(r.Name, primary.Name, l.PR)
+							}
+							t.BadMergeRefs = append(t.BadMergeRefs, ref)
 						}
 					}
 				}
@@ -1588,6 +1598,10 @@ func nowBy(ws []namedWatcher, issues []Issue, repos []RepoState, primary string)
 	return out
 }
 
+// betweenSteps is how long an open issue can sit in a stage with no step
+// running before the headline stops calling it work in progress.
+var betweenSteps = map[string]time.Duration{StageBuilding: 30 * time.Minute, StageGate: 3 * time.Hour, StageQueued: 30 * time.Minute}
+
 func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 	find := func(repo string, n int) *Issue {
 		for i := range issues {
@@ -1649,6 +1663,15 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 			ref := issueRef(is.Repo, primary, is.Number)
 			n := Now{Issue: is.Number, Repo: is.Repo, Detail: is.Title, Stage: stage}
 			if k := len(is.Spans); k > 0 && is.Spans[k-1].Open {
+				// No step is running here, so this issue is between steps.
+				// The factory picks one up within a few polls, and CI's gate
+				// finishes within the hour. One that has sat far longer isn't
+				// being worked on: it waits on something else, such as a
+				// step of its plan or a person, and doesn't take the page's
+				// biggest words as work in progress.
+				if span := is.Spans[k-1]; span.To.Sub(span.From) > betweenSteps[stage] {
+					continue
+				}
 				from := is.Spans[k-1].From
 				n.Since, n.WaitingOn = &from, is.Spans[k-1].Who
 			}

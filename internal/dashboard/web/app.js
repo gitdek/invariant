@@ -184,7 +184,10 @@
       chips.push(s.factory.running ? `<span class="chip factory pulse"><i></i>Watching for issues</span>` : `<span class="chip"><i></i>The watcher is off</span>`);
       if (needsChip) chips.push(needsChip);
       const t = totalsOf(s);
-      chips.push(`<span class="chip holds"><i></i>${t.badMerges} bad merges in ${t.merged}</span>`);
+      // A merge without a green gate is a failure, and is drawn as one.
+      chips.push(t.badMerges
+        ? `<a class="chip breaks" href="#numbers"><i></i>${t.badMerges} of ${t.merged} merges had no green gate</a>`
+        : `<span class="chip holds"><i></i>0 bad merges in ${t.merged}</span>`);
     } else {
       // With several steps running, the chip counts them, and no one step's
       // checks are shown (D-0113).
@@ -390,11 +393,16 @@
     const tiles = tilesOf(s), box = $("#numbers");
     counting++;
     if (!box.children.length) {
-      box.innerHTML = tiles.map((x) => `<div class="num${x.key === "bad" ? " holds" : ""}" data-k="${esc(x.key)}"><div class="v">0</div><div class="l"></div><div class="s"></div></div>`).join("");
+      box.innerHTML = tiles.map((x) => `<div class="num" data-k="${esc(x.key)}"><div class="v">0</div><div class="l"></div><div class="s"></div></div>`).join("");
     }
     tiles.forEach((x) => {
       const el = box.querySelector(`[data-k="${x.key}"]`);
       if (!el) return;
+      // The first tile holds at zero. Any other count there is a failure.
+      if (x.key === "bad") {
+        el.classList.toggle("holds", x.shown === "0");
+        el.classList.toggle("breaks", x.shown !== "0");
+      }
       el.title = x.title || "";
       el.querySelector(".l").textContent = x.label;
       el.querySelector(".s").textContent = x.small;
