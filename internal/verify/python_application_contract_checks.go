@@ -13,9 +13,12 @@ import (
 type PythonContractChecks struct {
 	Target string `json:"target"`
 	// Calls is how many calls of the function the gate recorded, replays
-	// apart, and Own how many of them the application's own code made.
+	// apart, Own how many of them the application's own code made, and
+	// Tests how many were made while the application's tests ran (#841);
+	// the rest were made inside an exploration's attempts.
 	Calls int `json:"calls"`
 	Own   int `json:"own"`
+	Tests int `json:"tests"`
 	// Clauses is how many checks settled, each a parameter's type, a clause
 	// or the result's type on one call, and Findings each one a call didn't
 	// meet or the gate couldn't evaluate on it.
@@ -33,7 +36,10 @@ type PythonContractCallFinding struct {
 	Result    any                      `json:"result"`
 	After     map[string]any           `json:"after,omitempty"`
 	Raised    *PythonApplicationRaised `json:"raised,omitempty"`
-	Count     int                      `json:"count"`
+	// Test is the test the call was made during, for one a test run
+	// recorded inside a test.
+	Test  string `json:"test,omitempty"`
+	Count int    `json:"count"`
 }
 
 // PythonApplicationContractChecks evaluates the contract of the function
@@ -77,41 +83,55 @@ func PythonApplicationContractChecks(e *ComponentEvidence, a *PythonApplicationR
 			executions = append(executions, *larger.Execution)
 		}
 	}
+	check := func(call PythonApplicationCall, own bool, test string) {
+		if call.Target != target {
+			return
+		}
+		out.Calls++
+		if own {
+			out.Own++
+		}
+		evaluated, findings := in.Contract.Check(call)
+		if call.SourceSHA256 != proved || proved == "" {
+			// The call ran other bytes than Nagini read.
+			evaluated, findings = 0, []PythonContractFinding{{Clause: "the function Nagini proved", Verdict: "unresolved",
+				Why: "the call was recorded against other source bytes than the proof read"}}
+		}
+		out.Clauses += evaluated
+		for _, f := range findings {
+			found := PythonContractCallFinding{PythonContractFinding: f, Caller: call.Caller, Own: own, Arguments: call.Arguments,
+				Result: call.Result, After: call.After, Raised: call.Raised, Test: test, Count: 1}
+			key := pythonApplicationKey(found)
+			if at, ok := seen[key]; ok {
+				out.Findings[at].Count++
+				continue
+			}
+			seen[key] = len(out.Findings)
+			out.Findings = append(out.Findings, found)
+		}
+	}
 	for _, x := range executions {
-		existing, driver := index.checks[x.Key.Target].Existing, index.declarations[x.Key.Check].Source
+		// A call counts as the application's own when one of its existing
+		// sources made it, and never the driver or the test's own file.
+		existing, checker := index.checks[x.Key.Target].Existing, index.declarations[x.Key.Check].Source
 		for _, row := range x.Observations {
 			if row.Replay == nil || *row.Replay {
 				continue
 			}
 			for _, call := range row.Calls {
-				if call.Target != target {
-					continue
-				}
-				own := pythonApplicationOwnCall(call, existing, driver)
-				out.Calls++
-				if own {
-					out.Own++
-				}
-				evaluated, findings := in.Contract.Check(call)
-				if call.SourceSHA256 != proved || proved == "" {
-					// The call ran other bytes than Nagini read.
-					evaluated, findings = 0, []PythonContractFinding{{Clause: "the function Nagini proved", Verdict: "unresolved",
-						Why: "the call was recorded against other source bytes than the proof read"}}
-				}
-				out.Clauses += evaluated
-				for _, f := range findings {
-					found := PythonContractCallFinding{PythonContractFinding: f, Caller: call.Caller, Own: own, Arguments: call.Arguments,
-						Result: call.Result, After: call.After, Raised: call.Raised, Count: 1}
-					key := pythonApplicationKey(found)
-					if at, ok := seen[key]; ok {
-						out.Findings[at].Count++
-						continue
-					}
-					seen[key] = len(out.Findings)
-					out.Findings = append(out.Findings, found)
-				}
+				check(call, pythonApplicationOwnCall(call, existing, checker), "")
 			}
 		}
+		before := out.Calls
+		for _, t := range x.Tests {
+			for _, call := range t.ContractCalls {
+				check(call, pythonApplicationOwnCall(call, existing, checker), t.ID)
+			}
+		}
+		for _, call := range x.Calls {
+			check(call, pythonApplicationOwnCall(call, existing, checker), "")
+		}
+		out.Tests += out.Calls - before
 	}
 	return out
 }
@@ -171,6 +191,9 @@ func (f PythonContractCallFinding) String() string {
 	}
 	if f.Why != "" {
 		what += ": " + f.Why
+	}
+	if f.Test != "" {
+		who += " during " + f.Test
 	}
 	out := fmt.Sprintf("%s %s, with %s", who, what, call)
 	if f.Count > 1 {

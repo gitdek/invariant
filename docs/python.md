@@ -809,13 +809,19 @@ The observed function qualifies only when the same complete, successful explorat
 
 #### Callers checked against the contract
 
-Nagini proves the function's body against its contract, and nothing proves the code that calls it. Where the application runs, `Requires` and `Ensures` are the stand-in's no-ops. So the gate evaluates the contract itself on every call of the function it records outside a replay, whoever made the call ([#838](https://github.com/gitdek/invariant/issues/838), [D-0431](../decisions/journal/D-0431.jsonl)):
+Nagini proves the function's body against its contract, and nothing proves the code that calls it. Where the application runs, `Requires` and `Ensures` are the stand-in's no-ops. So the gate evaluates the contract itself on every call of the function it records, whoever made the call: inside an exploration's attempts, outside a replay ([#838](https://github.com/gitdek/invariant/issues/838), [D-0431](../decisions/journal/D-0431.jsonl)), and while the application's own tests run ([#841](https://github.com/gitdek/invariant/issues/841), [D-0433](../decisions/journal/D-0433.jsonl)):
 
 - **On entry.** Each parameter is of the type its annotation names, and each `Requires` holds on the arguments as they were recorded on entry.
 - **On return.** Each `Ensures` holds, and the result is of the type the return annotation names. `Result()` is the recorded result, and `Old(e)` is `e` on the entry values. A list or a dictionary argument reads as it was when the call ended, which the call's record holds as `after`.
 - **On an exception.** The call's record holds `raised`: the exception's class, and each builtin exception name bound to a class it inherits from, which the collector tells by identity. The exception must match an `Exsures`, whose condition must hold, and no `Ensures` is evaluated. An exception no `Exsures` declares is a violation, since Nagini proves the function raises nothing else: the pinned Nagini refuses one that could, with "method raises no exceptions". A call that raises counts toward the coverage above as one that returns does, since either way the application ran the function.
 
 The gate evaluates on its own side, from the tree the proof's reader makes of each clause, with exact integers and Python's meaning for what a contract may hold. Nothing of the application runs again. `TestContractEvaluatorAgreesWithPython838` compares the evaluator with Python itself on generated clauses and arguments; `INVARIANT_CONTRACT_SEEDS=600` runs it over about five million of them.
+
+While the gate runs the application's unittest selections, its runner records each call of a function selected for proof in place: on each test's row, in `calls`, and for a call made outside any test, as a module's import or a class fixture makes one, on the run's own `calls`. It watches through `sys.monitoring` and changes nothing the application sees: no wrapper and no rebinding. It records only where the code that runs is the staged function's own, so a mock in the function's place records nothing. A value the record can't hold, such as a tuple or an object, is noted in the call's `unrecorded` by its class and left alone, where an exploration fails on one; a clause about it is then unresolved. A call the test's own file makes is checked and counts for nothing, as a driver's does, and a finding names the test:
+
+```
+a call from tests/test_service.py, which isn't the application's own code, during tests.test_service.ServiceTests.test_refuses didn't meet Requires(requested in KINDS), with (busy=False, requested="car") returning 0
+```
 
 A permission or a predicate (`Acc`, `Rd`, `Wildcard`, `list_pred`, `dict_pred`, `set_pred`, `MayCreate`, `Low`, `LowVal`) says what the function may read and write, which Python doesn't track, so it holds wherever Python runs. The receipt lists a clause made only of them, and `Decreases`, as proved and not checked, and evaluates the rest of a clause that also states one. The gate takes a permission as holding only where it stands alone, in an `and`, as an `Implies` consequent or as a conditional's branch.
 
@@ -837,9 +843,9 @@ The proof's row is then `unqualified`, and the gate fails. A call a driver or a 
 
 Limits:
 
-- This covers the calls exploration exercised, and says nothing about any other call. No exercised call by the application's own code is no evidence.
-- Calls made while the application's own tests run aren't recorded yet.
-- A function that qualifies by conformance on itself, with no `observe`, has no recorded calls, so nothing checks its callers.
+- This covers the calls exploration and the tests exercised, and says nothing about any other call. No exercised call by the application's own code is no evidence.
+- A test that calls the function outside its contract on purpose, to see what it does there, fails the gate: the proof says nothing about such a call.
+- A function that qualifies by conformance on itself, with no `observe`, has no calls recorded in exploration, so only its tests' calls are checked.
 - An entry may let only its declared refusal reach it, so an application that calls a function that raises does it from a helper of its own that handles the exception.
 
 Every operation beyond the function needs a [trusted contract](#trusted-dependency-contracts), here one on `packaging.utils.is_normalized_name` whose abstraction says what the proof relies on:

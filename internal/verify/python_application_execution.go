@@ -87,6 +87,10 @@ type PythonApplicationTest struct {
 	BoundaryCalls  *int64                       `json:"boundary_calls,omitempty"`
 	BoundaryRaised []PythonApplicationRaise     `json:"boundary_raised,omitempty"`
 	Assertions     []PythonApplicationAssertion `json:"assertions,omitempty"`
+	// ContractCalls are the calls of functions proved in place made during
+	// the test, whoever made them, for the gate to check against each
+	// function's contract (#841).
+	ContractCalls []PythonApplicationCall `json:"calls,omitempty"`
 }
 
 // PythonApplicationRaise is the runner's record of one exception type that
@@ -167,14 +171,18 @@ type pythonApplicationContractRequest struct {
 }
 
 type PythonApplicationExecutionResult struct {
-	Key             PythonApplicationInvocationKey      `json:"key"`
-	Declared        project.ResolvedComponentInvocation `json:"declared"`
-	Actual          PythonApplicationActual             `json:"actual"`
-	Provenance      PythonApplicationProvenance         `json:"provenance"`
-	Tests           []PythonApplicationTest             `json:"tests"`
-	Boundary        *PythonApplicationBoundary          `json:"boundary,omitempty"`
-	ObservationMode string                              `json:"observation_mode,omitempty"`
-	Observations    []PythonApplicationObservation      `json:"observations,omitempty"`
+	Key        PythonApplicationInvocationKey      `json:"key"`
+	Declared   project.ResolvedComponentInvocation `json:"declared"`
+	Actual     PythonApplicationActual             `json:"actual"`
+	Provenance PythonApplicationProvenance         `json:"provenance"`
+	Tests      []PythonApplicationTest             `json:"tests"`
+	// Calls are the calls of functions proved in place that a test run made
+	// outside any test, as a module's import or a class fixture makes one
+	// (#841).
+	Calls           []PythonApplicationCall        `json:"calls,omitempty"`
+	Boundary        *PythonApplicationBoundary     `json:"boundary,omitempty"`
+	ObservationMode string                         `json:"observation_mode,omitempty"`
+	Observations    []PythonApplicationObservation `json:"observations,omitempty"`
 	// Exploration is what an explored driver's harness declared and
 	// reached, counted from its authenticated observations (#342).
 	Exploration *PythonApplicationExploration `json:"exploration,omitempty"`
@@ -190,11 +198,14 @@ type PythonApplicationExecutionResult struct {
 }
 
 type pythonApplicationRequest struct {
-	Legacy         bool                           `json:"legacy,omitempty"`
-	Targets        []project.Component            `json:"targets,omitempty"`
-	Drivers        []project.Component            `json:"drivers,omitempty"`
-	Delegates      []string                       `json:"delegates,omitempty"`
-	Observe        []project.Component            `json:"observe,omitempty"`
+	Legacy    bool                `json:"legacy,omitempty"`
+	Targets   []project.Component `json:"targets,omitempty"`
+	Drivers   []project.Component `json:"drivers,omitempty"`
+	Delegates []string            `json:"delegates,omitempty"`
+	Observe   []project.Component `json:"observe,omitempty"`
+	// Contracts are the functions proved in place whose calls a test run
+	// records (#841).
+	Contracts      []project.Component            `json:"contracts,omitempty"`
 	Key            PythonApplicationInvocationKey `json:"key"`
 	SnapshotSHA256 string                         `json:"snapshot_sha256"`
 	RunnerSHA256   string                         `json:"runner_sha256"`
@@ -340,6 +351,11 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 		c.Mode, req.Mode = "explored", "explored"
 		req.Observe = s.observedDeclarations(key.Target)
 	}
+	if key.Kind != "conformance" {
+		for _, target := range pythonApplicationProofTargets(s.inventory) {
+			req.Contracts = append(req.Contracts, s.declarations[target])
+		}
+	}
 	var overlays []PythonApplicationOverlayFile
 	if larger != nil {
 		c.Overlays = []PythonApplicationOverlay{{Host: larger.host, Guest: path.Join("/src", s.driver)}}
@@ -392,7 +408,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 			protocolErr = fmt.Errorf("the Python application runner stopped before sealing its observations")
 		}
 	} else {
-		protocolErr = s.observe(c, req.Boundary, process.Events, r)
+		protocolErr = s.observe(c, req.Boundary, req.Contracts, process.Events, r)
 	}
 	freshErr := s.fresh()
 	freshErr = errors.Join(freshErr, s.freshObserver())
@@ -694,12 +710,53 @@ func pythonApplicationJSONFields(b []byte, allowNull bool, required ...string) (
 	return fields, nil
 }
 
-func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary *pythonApplicationContractRequest, events []byte, r *PythonApplicationExecutionResult) error {
+// pythonApplicationRow checks a test run's row as pythonApplicationJSON
+// does, apart from its recorded calls, where None is a value: an argument
+// or a result can be one.
+func pythonApplicationRow(line []byte, required ...string) error {
+	if !slices.Contains(required, "calls") {
+		_, err := pythonApplicationJSON(line, required...)
+		return err
+	}
+	fields, err := pythonApplicationJSONFields(line, true, required...)
+	if err != nil {
+		return err
+	}
+	delete(fields, "calls")
+	rest, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	_, err = pythonApplicationJSON(rest, slices.DeleteFunc(slices.Clone(required), func(name string) bool { return name == "calls" })...)
+	return err
+}
+
+func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary *pythonApplicationContractRequest, contracts []project.Component, events []byte, r *PythonApplicationExecutionResult) error {
 	seen := map[string]bool{}
 	begun, ended := false, false
 	testFields := []string{"type", "id", "check", "source_sha256", "exercised", "outcome", "diagnostics"}
+	endFields := []string{"type", "count"}
 	if boundary != nil {
 		testFields = append(testFields, "boundary_calls", "boundary_raised", "assertions")
+	}
+	// A run asked to record calls of functions proved in place says so on
+	// every row, an empty list included (#841).
+	if len(contracts) > 0 {
+		testFields, endFields = append(testFields, "calls"), append(endFields, "calls")
+	}
+	recorded := func(calls []PythonApplicationCall) error {
+		for _, call := range calls {
+			if !slices.ContainsFunc(contracts, func(c project.Component) bool { return c.ID == call.Target && c.SourceSHA256 == call.SourceSHA256 }) {
+				return fmt.Errorf("recorded call names a function the run wasn't asked to record, or other source bytes: %s", call.Target)
+			}
+			if err := call.valid(); err != nil {
+				return err
+			}
+			if _, staged := s.snapshot[call.Caller]; call.Caller != "" && (!staged || !strings.HasSuffix(call.Caller, ".py")) {
+				return fmt.Errorf("recorded call names a caller the run didn't stage: %s", call.Caller)
+			}
+		}
+		return nil
 	}
 	for len(events) > 0 {
 		n := bytes.IndexByte(events, '\n')
@@ -755,7 +812,7 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary 
 			if boundary != nil && r.Boundary == nil {
 				return fmt.Errorf("test before its contract's boundary record")
 			}
-			if _, err := pythonApplicationJSON(line, testFields...); err != nil {
+			if err := pythonApplicationRow(line, testFields...); err != nil {
 				return err
 			}
 			var row PythonApplicationTest
@@ -766,6 +823,9 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary 
 				if err := pythonApplicationBoundaryTest(line, r.Boundary, &row); err != nil {
 					return err
 				}
+			}
+			if err := recorded(row.ContractCalls); err != nil {
+				return err
 			}
 			if row.ID == "" || seen[row.ID] {
 				return fmt.Errorf("missing or duplicate runtime test ID")
@@ -812,11 +872,12 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary 
 			if !begun {
 				return fmt.Errorf("end before begin")
 			}
-			if _, err := pythonApplicationJSON(line, "type", "count"); err != nil {
+			if err := pythonApplicationRow(line, endFields...); err != nil {
 				return err
 			}
 			var e struct {
-				Count int `json:"count"`
+				Count int                     `json:"count"`
+				Calls []PythonApplicationCall `json:"calls"`
 			}
 			if err := json.Unmarshal(line, &e); err != nil {
 				return err
@@ -824,6 +885,10 @@ func (s *PythonApplicationSession) observe(c PythonApplicationCommand, boundary 
 			if e.Count != len(r.Tests) {
 				return fmt.Errorf("test count mismatch")
 			}
+			if err := recorded(e.Calls); err != nil {
+				return err
+			}
+			r.Calls = e.Calls
 			if boundary != nil && r.Boundary == nil {
 				return fmt.Errorf("missing contract boundary record")
 			}

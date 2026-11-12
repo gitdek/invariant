@@ -25,7 +25,7 @@ func TestContractChecksReceipt838(t *testing.T) {
 	md := receipt.Markdown(decoded)
 	for _, want := range []string{
 		"### Python application · callers checked against proved contracts",
-		"3 calls recorded, 3 by the application's own code. Each of 27 checks held.",
+		"3 calls recorded, 0 while tests ran and 3 by the application's own code. Each of 27 checks held.",
 		"<code>requested: str</code>",
 		"| <code>Requires(requested == 'engine' or requested == 'boat')</code> | evaluated |",
 		"| <code>Ensures(Implies(busy, Result() == 409))</code> | evaluated where the call returned |",
@@ -88,10 +88,58 @@ func TestContractChecksReceiptOfABrokenContract838(t *testing.T) {
 	for _, want := range []string{
 		"**What failed**",
 		"a call from counter/core.py didn't meet Requires(requested == 'engine' or requested == 'boat')",
-		"3 calls recorded, 3 by the application's own code. 27 checks settled, and what's listed below failed the gate.",
+		"3 calls recorded, 0 while tests ran and 3 by the application's own code. 27 checks settled, and what's listed below failed the gate.",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("the receipt lacks %q:\n%s", want, md)
+		}
+	}
+}
+
+// The receipt counts the calls an application's tests made, and derives
+// what it says of them from the test rows' recorded calls (#841): one
+// edited to break the contract fails the receipt, naming the test.
+func TestContractChecksReceiptOfTestCalls841(t *testing.T) {
+	r := verify.ContractChecksReport841(t)
+	if !r.Passed {
+		t.Fatal("the fixture's tests meet the contract")
+	}
+	decoded := calls793DecodeReport(t, calls793ReportWire(t, r))
+	if verify.Fingerprint(*decoded) != verify.Fingerprint(*r) {
+		t.Fatal("a test run's recorded calls changed on a report's round trip")
+	}
+	md := receipt.Markdown(decoded)
+	for _, want := range []string{
+		"5 calls recorded, 2 while tests ran and 5 by the application's own code. Each of 45 checks held.",
+		"inside an exploration's attempts, replays apart, and while the application's tests ran",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("the receipt lacks %q:\n%s", want, md)
+		}
+	}
+	wire := calls793ReportWire(t, r)
+	edited := 0
+	for _, x := range wire["application"].(map[string]any)["executions"].([]any) {
+		tests, _ := x.(map[string]any)["tests"].([]any)
+		for _, row := range tests {
+			calls, _ := row.(map[string]any)["calls"].([]any)
+			for _, call := range calls {
+				call.(map[string]any)["arguments"].(map[string]any)["requested"] = "car"
+				edited++
+			}
+		}
+	}
+	if edited != 2 {
+		t.Fatalf("the report's test rows record %d calls, want 2", edited)
+	}
+	broken := calls793DecodeReport(t, wire)
+	if verify.Fingerprint(*broken) == verify.Fingerprint(*r) {
+		t.Fatal("a test run's recorded calls aren't in the report's fingerprint")
+	}
+	md = receipt.Markdown(broken)
+	for _, want := range []string{"**What failed**", "a call from counter/core.py during tests.test&#95;counter.CounterTests.test&#95;inc didn't meet Requires(requested == 'engine' or requested == 'boat')"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("the receipt of an edited test call lacks %q:\n%s", want, md)
 		}
 	}
 }
