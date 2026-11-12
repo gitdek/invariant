@@ -56,6 +56,7 @@ type PythonApplicationLarger struct {
 	Original  project.ComponentFile             `json:"original"`
 	Execution *PythonApplicationExecutionResult `json:"execution,omitempty"`
 	Result    Larger                            `json:"result"`
+	Skipped   []string                          `json:"skipped,omitempty"`
 }
 
 // passed is a check's verdict for the gate. An explored check's

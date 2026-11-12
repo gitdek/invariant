@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -236,6 +237,7 @@ func gp359Verifier(t *testing.T, real bool) *int {
 	if real {
 		return calls
 	}
+	gp359TransportKey(t)
 	saved := pythonApplicationGateOptions
 	pythonApplicationGateOptions = PythonApplicationSessionOptions{
 		Nagini: func(_ context.Context, c PythonApplicationNaginiCommand) (PythonApplicationProcess, error) {
@@ -255,6 +257,43 @@ func gp359Verifier(t *testing.T, real bool) *int {
 	}
 	t.Cleanup(func() { pythonApplicationGateOptions = saved })
 	return calls
+}
+
+// The trusted transport may re-sign observations after the child exits
+// (#849). Keep its key outside that child while the runner consumes and
+// unlinks the bootstrap file, then restore it for the transport's hook.
+// This changes only the local Docker double, never the production runner.
+func gp359TransportKey(t *testing.T) {
+	t.Helper()
+	if os.Getenv("PA342_LOG") == "" {
+		return
+	}
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(filepath.Dir(docker), "docker.py")
+	body, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const before = "    result=subprocess.run([os.environ['PA342_PYTHON']]+argv,cwd=mapped(args[args.index('-w')+1]),env=env)"
+	const key = "    secret=pathlib.Path(mounts['/output'],'authentication.key')"
+	if strings.Contains(string(body), key) {
+		return
+	}
+	if !strings.Contains(string(body), before) {
+		t.Fatal("local Python transport fixture moved")
+	}
+	after := key + "\n    authentication=secret.read_bytes() if secret.exists() else None\n" + before + "\n    if authentication is not None: secret.write_bytes(authentication)"
+	if err := os.WriteFile(name, []byte(strings.Replace(string(body), before, after, 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(name, body, 0600); err != nil {
+			t.Error(err)
+		}
+	})
 }
 
 func gp359Proof(t *testing.T, r *Report) ComponentProof {
@@ -407,7 +446,7 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			}
 		})
 		t.Run("a failing backing test", func(t *testing.T) {
-			gp359Verifier(t, real)
+			calls := gp359Verifier(t, real)
 			f := gp359New(t, real)
 			if real {
 				gp359Edit(t, f, "tests/test_contracts.py", "self.assertTrue(is_normalized_name('counter'))", "self.assertTrue(is_normalized_name('Not_Normal'))")
@@ -424,8 +463,8 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			}) {
 				t.Fatalf("a failed required contract still supports the proof: %v", p)
 			}
-			// Nagini verified it, and the proof still isn't proved.
-			if row := gp359Proof(t, r); row.Status != Unqualified {
+			// A failed known prerequisite skips Nagini (#849).
+			if row := gp359Proof(t, r); row.Status != "unchecked" || row.Result.Passed || r.Application.Proofs[0].Ran || len(r.Application.Proofs[0].Skipped) == 0 || (!real && *calls != 0) {
 				t.Fatalf("a proof without its condition counts as %s", row.Status)
 			}
 			// Attributing other evidence later retains the proof and its mark.
@@ -435,24 +474,24 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 				runtime = append(runtime, row.Result)
 			}
 			if err := r.AttributeComponentRuntime(&inv, runtime); err != nil {
-				t.Fatalf("runtime attribution beside an unqualified proof: %v", err)
+				t.Fatalf("runtime attribution beside a skipped proof: %v", err)
 			}
 			if err := r.AttributeComponentAssumptions(&inv, nil); err != nil {
-				t.Fatalf("assumption attribution beside an unqualified proof: %v", err)
+				t.Fatalf("assumption attribution beside a skipped proof: %v", err)
 			}
-			if row := gp359Proof(t, r); row.Status != Unqualified {
-				t.Fatalf("attribution turned an unqualified proof %s", row.Status)
+			if row := gp359Proof(t, r); row.Status != "unchecked" {
+				t.Fatalf("attribution turned a skipped proof %s", row.Status)
 			}
 		})
 		t.Run("failing conformance on the function", func(t *testing.T) {
-			gp359Verifier(t, real)
+			calls := gp359Verifier(t, real)
 			f := gp359New(t, real)
 			// A third step takes the counter past Limit, which Next forbids.
 			gp359Edit(t, f, pa342DriverPath, "        life.step(service.inc)\n        life.step(service.inc)\n",
 				"        life.step(service.inc)\n        life.step(service.inc)\n        life.step(service.inc)\n")
 			r := pa342Run(t, f, tc)
 			row := gp359Proof(t, r)
-			if r.Passed || row.Status != Unqualified || r.Components.Conformance[0].Status == "tested" {
+			if r.Passed || row.Status != "unchecked" || row.Result.Passed || r.Application.Proofs[0].Ran || len(r.Application.Proofs[0].Skipped) == 0 || (!real && *calls != 0) || r.Components.Conformance[0].Status == "tested" {
 				t.Fatalf("a proof beside failing conformance qualified: %s, conformance %+v", row.Status, r.Components.Conformance)
 			}
 			p := PythonApplicationProofProblems(r.Components, r.Application)
