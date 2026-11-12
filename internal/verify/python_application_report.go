@@ -107,6 +107,20 @@ func (a *PythonApplicationReport) tested() bool {
 	return false
 }
 
+// An explored attempt with no arguments still has an argument list. Keep
+// that empty list through receipt JSON, while sampled rows may omit it.
+func (o PythonApplicationObservation) MarshalJSON() ([]byte, error) {
+	type observation PythonApplicationObservation
+	var args *[]any
+	if o.Args != nil {
+		args = &o.Args
+	}
+	return json.Marshal(struct {
+		observation
+		Args *[]any `json:"args,omitempty"`
+	}{observation(o), args})
+}
+
 // Preserve exact integers even when reports are read back through JSON.
 func (o *PythonApplicationObservation) UnmarshalJSON(b []byte) error {
 	type observation PythonApplicationObservation
@@ -158,6 +172,7 @@ func pythonApplicationExecutionFingerprint(x PythonApplicationExecutionResult) s
 	a := portablePythonApplication(&PythonApplicationReport{Executions: []PythonApplicationExecutionResult{x}})
 	// Process output is diagnostic, not the authenticated evidence stream.
 	a.Executions[0].Diagnostics = nil
+	a.Executions[0].HarnessError = ""
 	return pythonApplicationFingerprint(a.Executions[0])
 }
 

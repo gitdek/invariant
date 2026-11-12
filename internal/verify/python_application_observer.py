@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import types
 from itertools import compress, repeat
 
@@ -38,9 +39,9 @@ def guarded(method):
     def call(*args, **kwargs):
         try:
             return method(*args, **kwargs)
-        except BaseException:
+        except BaseException as error:
             if _collector is not None:
-                _collector.failed = True
+                _collector.fail(error)
             raise
     return call
 
@@ -301,6 +302,8 @@ class Collector:
         self.locations, self.codes = locations, codes
         self.sources = {}
         self.failed = False
+        self.harness_error = None
+        self.diagnostic_error = None
         self.lives, self.instances = [], []
         self.receivers = {}
         self.targets = {}
@@ -327,6 +330,22 @@ class Collector:
         self.exploring = request.get("mode") == "explored"
         self.exploration = None
         self.explored = False
+
+    def fail(self, error):
+        self.failed = True
+        if self.diagnostic_error is error:
+            return
+        self.diagnostic_error = error
+        # Retain and write the first cause before a caught error, exception
+        # wrapper or terminating cleanup can replace it. This is diagnostic
+        # output, never part of the authenticated observation stream.
+        if self.harness_error is None:
+            self.harness_error = error
+            os.write(2, ("\nINVARIANT_HARNESS_ERROR " + json.dumps(str(error)) + "\n").encode("utf-8"))
+        context = traceback.format_exception(type(error), error, error.__traceback__)
+        if error.__traceback__ is None:
+            context = traceback.format_stack()[:-1] + context
+        os.write(2, "".join(context).encode("utf-8", "backslashreplace"))
 
     def lexical(self, code):
         filename = os.path.abspath(code.co_filename)
@@ -378,8 +397,9 @@ class Collector:
     def write(self, life, entry, kind=None, **state):
         caller = sys._getframe(1)
         if not any(caller.f_code is code for code in self.writers) or caller.f_globals is not globals():
-            self.failed = True
-            raise ValueError("observation did not come from a lifecycle read-back")
+            error = ValueError("observation did not come from a lifecycle read-back")
+            self.fail(error)
+            raise error
         self.count += 1
         if life.form:
             state["form"] = life.form
@@ -404,8 +424,9 @@ class Collector:
         # The harness's own record of the steps it tries, before any run.
         caller = sys._getframe(1)
         if caller.f_code is not explore.__wrapped__.__code__ or caller.f_globals is not globals():
-            self.failed = True
-            raise ValueError("exploration steps did not come from the harness")
+            error = ValueError("exploration steps did not come from the harness")
+            self.fail(error)
+            raise error
         self.emit(dict(type="exploration", steps=steps))
 
     def trace(self, frame, event, arg):
@@ -424,13 +445,13 @@ class Collector:
             if frame.f_code.co_name == "<module>" and frame.f_code.co_filename.startswith(self.request["root"] + os.sep):
                 self.capture_definition(frame, event)
             if event == "exception" and frame.f_code in self.driver_codes:
-                self.failed = True
+                self.fail(arg[1])
             active = self.active
             if active is not None:
                 active.observe(frame, event, arg)
                 self.observe_call(active, frame, event, arg)
-        except BaseException:
-            self.failed = True
+        except BaseException as error:
+            self.fail(error)
             raise
         return self.thread_traces[current]
 
@@ -524,8 +545,9 @@ class Collector:
         if event == "c_call" and (arg is _thread.start_new_thread or arg is getattr(_thread, "start_joinable_thread", None)):
             worker = frame.f_locals.get("self")
             if worker not in self.internal_threads and (self.active is None or self.active.form != "module" or worker not in self.active.threads):
-                self.failed = True
-                raise ValueError("unowned thread creation is unsupported")
+                error = ValueError("unowned thread creation is unsupported")
+                self.fail(error)
+                raise error
 
     def start_thread(self, worker, *args, **kwargs):
         try:
@@ -539,8 +561,8 @@ class Collector:
             # started workers still reaches every descendant (#405).
             life.started.add(worker)
             return result
-        except BaseException:
-            self.failed = True
+        except BaseException as error:
+            self.fail(error)
             raise
 
 
@@ -627,11 +649,16 @@ class _Lifecycle:
     def escaped_refusal(self, exc):
         # A driver exception, a target exception, or a collector error must
         # never become a refusal, even when it has the declared type.
+        if _collector.failed:
+            raise exc
         escaped = exc is self.entry_raised or exc is getattr(self, "await_raised", None)
-        if (_collector.failed or not escaped or self.refusal is None or self.calls
-                or getattr(self, "threads", ()) or not self.refusal.matches(exc)):
+        valid = (escaped and self.refusal is not None and not self.calls
+                 and not getattr(self, "threads", ()) and self.refusal.matches(exc))
+        if _collector.failed:
+            raise exc
+        if not valid:
             raise ValueError("application call raised an undeclared or invalid refusal") from exc
-        if _collector.failed or self.calls or getattr(self, "threads", ()):
+        if self.calls or getattr(self, "threads", ()):
             raise ValueError("refusal attributes started application work")
         self.outcome = "refused"
 
@@ -886,7 +913,7 @@ class _ModuleLifecycle(_Lifecycle):
         # A Python thread cannot safely be killed or forcibly joined. End this
         # disposable runner without a seal, including for non-daemon workers
         # and code that catches cancellation. Go accepts none of its rows.
-        _collector.failed = True
+        _collector.fail(ValueError("module observation timed out or left unfinished work"))
         os.write(2, b"module observation timed out or left unfinished work\n")
         os._exit(1)
 
@@ -901,7 +928,7 @@ class _ModuleLifecycle(_Lifecycle):
         return task
 
     def async_error(self, loop, context):
-        _collector.failed = True
+        _collector.fail(ValueError("module event loop reported failed work"))
         _collector.misuse = "module event loop reported failed work"
         loop.default_exception_handler(context)
 
@@ -1073,6 +1100,9 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 self.state = copied(self.after)
                 c.write(self, self.entry or self.target, before=self.before, after=self.after)
             succeeded = True
+        except BaseException as error:
+            c.fail(error)
+            raise
         finally:
             if loop is not None:
                 try:
@@ -1091,15 +1121,16 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 self.expire()
             watchdog.stdin.close()
             if watchdog.wait() != 0:
-                c.failed = True
+                c.fail(ValueError("module deadline watchdog failed"))
             c.active = None
             self.entry_frame = self.target_frame = self.await_frame = None
 
 
 def _poison(message):
-    _collector.failed = True
+    error = AttributeError(message)
+    _collector.fail(error)
     _collector.misuse = _collector.misuse or message
-    raise AttributeError(message)
+    raise error
 
 
 class Lifecycle:
@@ -1155,9 +1186,10 @@ def _handle(record):
 def _record(handle):
     record = _collector.handles.get(handle)
     if type(handle) is not Lifecycle or record is None:
-        _collector.failed = True
+        error = ValueError("unknown lifecycle handle")
+        _collector.fail(error)
         _collector.misuse = _collector.misuse or "unknown lifecycle handle"
-        raise ValueError("unknown lifecycle handle")
+        raise error
     return record
 
 
@@ -1427,7 +1459,7 @@ def run(request, emit, locations, codes, argv):
     threading.setprofile(c.profile)
     previous_excepthook = threading.excepthook
     def thread_error(args):
-        c.failed = True
+        c.fail(args.exc_value)
         previous_excepthook(args)
     def start(worker, *args, **kwargs):
         return c.start_thread(worker, *args, **kwargs)
@@ -1439,6 +1471,9 @@ def run(request, emit, locations, codes, argv):
             raise ValueError("driver did not complete bound lifecycles")
         if c.exploring and not c.explored:
             raise ValueError("an explored invocation's driver did not complete explore()")
+    except BaseException as error:
+        c.fail(error)
+        raise
     finally:
         sys.settrace(None)
         sys.setprofile(None)
