@@ -188,8 +188,12 @@ func canonicalSnapshot(s ComparisonSnapshot) (ComparisonSnapshot, error) {
 			return s, fmt.Errorf("invalid sibling include %q", name)
 		}
 	}
+	model, err := tla.Read(s.Model, s.Includes)
+	if err != nil {
+		return s, fmt.Errorf("captured model can't be read as TLC reads it: %w", err)
+	}
 	for _, st := range s.Lock.Statements {
-		pin, err := tla.PinHash(s.Model, st.Name, project.Model)
+		pin, err := model.PinHash(st.Name, project.Model)
 		if err != nil || pin != st.SHA256 {
 			return s, fmt.Errorf("captured rule %s does not match model pin", st.Name)
 		}

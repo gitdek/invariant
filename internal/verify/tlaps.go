@@ -411,8 +411,12 @@ func tlapsColliding(names []string) (string, string, bool) {
 // [][Next]_vars, and nothing else in it may use a construct tlapm's open
 // soundness issues touch, add an assumption, or state a fact without a
 // proof the gate checks.
-func tlapsModel(src, specName string) error {
-	spec, err := tla.Definition(src, specName)
+func tlapsModel(src string, includes map[string]string, specName string) error {
+	m, err := tla.Read(src, includes)
+	if err != nil {
+		return err
+	}
+	spec, err := m.Definition(specName)
 	if err != nil {
 		return err
 	}
@@ -784,10 +788,10 @@ func tlapsTool(ctx context.Context, image string) (*TLAPSTool, error) {
 
 // proveTLAPS proves each invariant the manifest selects, in its own staged
 // copy of the model, one at a time.
-func proveTLAPS(ctx context.Context, work string, p *project.Project, src string) ([]TLAPSProof, *TLAPSTool, error) {
+func proveTLAPS(ctx context.Context, work string, p *project.Project, src string, includes map[string]string) ([]TLAPSProof, *TLAPSTool, error) {
 	model := sha(src)
 	var proofs []TLAPSProof
-	modelErr := tlapsModel(src, p.SpecName())
+	modelErr := tlapsModel(src, includes, p.SpecName())
 	modelToks, _ := lexTLA(src)
 	modelNames := tlapsNames(modelToks)
 	image, tool := "", (*TLAPSTool)(nil)

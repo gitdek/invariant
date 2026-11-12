@@ -58,7 +58,7 @@ func tlapsProject(t *testing.T, model, proof string) *project.Project {
 
 func tlapsProve(t *testing.T, model, proof string) (TLAPSProof, *TLAPSTool) {
 	t.Helper()
-	proofs, tool, err := proveTLAPS(context.Background(), t.TempDir(), tlapsProject(t, model, proof), model)
+	proofs, tool, err := proveTLAPS(context.Background(), t.TempDir(), tlapsProject(t, model, proof), model, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

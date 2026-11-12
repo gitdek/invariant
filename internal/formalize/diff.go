@@ -74,22 +74,25 @@ func Diff(c *Current, p *Proposal) *Changes {
 	if p.Reader != nil {
 		out.Reader = p.Reader.Comparison
 	}
+	// Each version is read with the modules beside it. One the gate can't
+	// read shows no text here, and its pins say why.
+	before, after := definitions(c.ModuleText, c.Includes), definitions(p.ModuleText, p.Includes)
 	seen := map[string]bool{}
 	for _, s := range p.Statements {
 		s := s
 		seen[s.Name] = true
 		ch := Change{Name: s.Name, New: &s}
-		ch.NewText, _ = tla.Definition(p.ModuleText, s.Name)
+		ch.NewText = after.text(s.Name)
 		if o, ok := old[s.Name]; !ok {
 			ch.How = Added
 		} else {
 			o := o
 			ch.Old = &o
-			ch.OldText, _ = tla.Definition(c.ModuleText, s.Name)
+			ch.OldText = before.text(s.Name)
 			ch.How = Unchanged
 			if o.SHA256 != s.SHA256 || o.Says != s.Says || o.Kind != s.Kind || o.Expect != s.Expect {
 				ch.How = Changed
-				ch.Through = changedUnder(c.ModuleText, p.ModuleText, s.Name)
+				ch.Through = changedUnder(before, after, s.Name)
 			}
 		}
 		out.Statements = append(out.Statements, ch)
@@ -101,15 +104,12 @@ func Diff(c *Current, p *Proposal) *Changes {
 		}
 	}
 	for _, n := range sortedNames(helpers) {
-		before, _ := tla.Definition(c.ModuleText, n)
-		after, _ := tla.Definition(p.ModuleText, n)
-		out.Definitions = append(out.Definitions, Definition{Name: n, OldText: before, NewText: after})
+		out.Definitions = append(out.Definitions, Definition{Name: n, OldText: before.text(n), NewText: after.text(n)})
 	}
 	for _, o := range c.Lock.Statements {
 		if !seen[o.Name] {
 			o := o
-			text, _ := tla.Definition(c.ModuleText, o.Name)
-			out.Statements = append(out.Statements, Change{Name: o.Name, How: Removed, Old: &o, OldText: text})
+			out.Statements = append(out.Statements, Change{Name: o.Name, How: Removed, Old: &o, OldText: before.text(o.Name)})
 		}
 	}
 	names := map[string]bool{}
@@ -130,10 +130,13 @@ func Diff(c *Current, p *Proposal) *Changes {
 
 // changedUnder lists the definitions a statement depends on, in either
 // version, whose text differs between the versions.
-func changedUnder(oldSrc, newSrc, name string) []string {
+func changedUnder(before, after definitionsOf, name string) []string {
 	names := map[string]bool{}
-	for _, src := range []string{oldSrc, newSrc} {
-		closure, _ := tla.Closure(src, name, project.Model)
+	for _, version := range []definitionsOf{before, after} {
+		if version.model == nil {
+			continue
+		}
+		closure, _ := version.model.Closure(name, project.Model)
 		for _, n := range closure {
 			if n != name {
 				names[n] = true
@@ -142,9 +145,7 @@ func changedUnder(oldSrc, newSrc, name string) []string {
 	}
 	var out []string
 	for _, n := range sortedNames(names) {
-		before, _ := tla.Definition(oldSrc, n)
-		after, _ := tla.Definition(newSrc, n)
-		if tla.Canonical(before) != tla.Canonical(after) {
+		if tla.Canonical(before.text(n)) != tla.Canonical(after.text(n)) {
 			out = append(out, n)
 		}
 	}
@@ -169,4 +170,22 @@ func (c *Changes) Of(how string) []Change {
 		}
 	}
 	return out
+}
+
+// definitionsOf is one version of a model, or nothing when the gate can't
+// read it.
+type definitionsOf struct{ model *tla.Model }
+
+func definitions(src string, includes map[string]string) definitionsOf {
+	m, _ := tla.Read(src, includes)
+	return definitionsOf{m}
+}
+
+// text is a definition's text, or nothing when the version doesn't hold it.
+func (d definitionsOf) text(name string) string {
+	if d.model == nil {
+		return ""
+	}
+	text, _ := d.model.Definition(name)
+	return text
 }
