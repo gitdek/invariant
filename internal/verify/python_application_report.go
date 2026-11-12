@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -176,6 +177,25 @@ func pythonApplicationExecutionFingerprint(x PythonApplicationExecutionResult) s
 	return pythonApplicationFingerprint(a.Executions[0])
 }
 
+// Module states use the recording's list and record semantics. Other forms
+// retain the conformance encoder's explicit tags.
+func pythonApplicationComponentState(state map[string]any, module bool) (map[string]string, error) {
+	fields := make(map[string]string, len(state))
+	for field, value := range state {
+		var err error
+		if module {
+			value, err = pythonApplicationModelValue(value)
+		}
+		if err == nil {
+			fields[field], err = conformance.Encode(value)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("field %q: %w", field, err)
+		}
+	}
+	return fields, nil
+}
+
 func (r *Report) attributePythonApplication(inv *project.ComponentInventory) error {
 	var runtime []ComponentRuntimeResult
 	var conform []ComponentConformanceResult
@@ -273,12 +293,13 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 				if o.Kind != "transition" || (o.Replay != nil && *o.Replay) {
 					continue
 				}
-				from, to := map[string]string{}, map[string]string{}
-				for k, v := range o.Before {
-					from[k], _ = conformance.Encode(v)
+				from, err := pythonApplicationComponentState(o.Before, o.Form == "module")
+				if err != nil {
+					return fmt.Errorf("%s check %s invocation %s run %d step %d before: %w", x.Key.Target, x.Key.Check, x.Key.ID, o.Run, o.Sequence, err)
 				}
-				for k, v := range o.After {
-					to[k], _ = conformance.Encode(v)
+				to, err := pythonApplicationComponentState(o.After, o.Form == "module")
+				if err != nil {
+					return fmt.Errorf("%s check %s invocation %s run %d step %d after: %w", x.Key.Target, x.Key.Check, x.Key.ID, o.Run, o.Sequence, err)
 				}
 				observation := ComponentConformanceObservation{Run: int64(o.Run), Step: int64(o.Sequence), Action: o.Entry, From: from, To: to}
 				// An attempt names the model step it tried, as Next names it.
