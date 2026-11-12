@@ -40,7 +40,10 @@ func takeRecording(ctx context.Context, path string) (r *recording, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(path)
+	// The producer owns the recording, and may have left a link or a pipe in
+	// its place. It's opened through its own directory, so a link out of
+	// that directory is never followed (#816).
+	f, err := openSandboxOutput(filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		return nil, err
 	}
