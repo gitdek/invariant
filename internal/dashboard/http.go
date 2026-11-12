@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -73,13 +74,25 @@ func (s *Server) Handler() http.Handler {
 		switch p := r.URL.Path; {
 		case p == "/api/state.json":
 			s.mu.RLock()
-			body := s.state
+			body, tag := s.state, s.stateTag
 			s.mu.RUnlock()
 			if body == nil {
 				http.Error(w, "reading GitHub for the first time; try again in a few seconds", http.StatusServiceUnavailable)
 				return
 			}
-			h.Set("Cache-Control", "no-store")
+			// The snapshot changes once per refresh, and a page reads it
+			// several times in between. One that names the tag it has gets
+			// no body (#854). A proxy that compresses the body again sends
+			// the tag back in its weak form.
+			h.Set("Cache-Control", "no-cache")
+			h.Set("ETag", tag)
+			h.Add("Vary", "Accept-Encoding")
+			if named := r.Header.Get("If-None-Match"); named != "" && slices.ContainsFunc(strings.Split(named, ","), func(one string) bool {
+				return strings.TrimPrefix(strings.TrimSpace(one), "W/") == tag
+			}) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 			serveGzip(w, r, "application/json", body)
 		case p == "/api/live.json":
 			body, err := s.LiveJSON(time.Now())

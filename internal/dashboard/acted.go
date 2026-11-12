@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -119,9 +121,7 @@ func (s *Server) publish(snap Snapshot) ([]byte, error) {
 		return nil, err
 	}
 	s.acted.read, s.acted.kept = &snap, left
-	s.mu.Lock()
-	s.state, s.issues = gz, shown.Issues
-	s.mu.Unlock()
+	s.setState(gz, shown.Issues)
 	s.pruneProposals(snap)
 	return gz, nil
 }
@@ -170,10 +170,18 @@ func (s *Server) serve(gz []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	s.state, s.issues = gz, snap.Issues
-	s.mu.Unlock()
+	s.setState(gz, snap.Issues)
 	return gz, nil
+}
+
+// setState keeps gz as what every page reads, with its entity tag: a hash
+// of the bytes served, so a page that has them is told so in place of
+// being sent them again (#854).
+func (s *Server) setState(gz []byte, issues []Issue) {
+	sum := sha256.Sum256(gz)
+	s.mu.Lock()
+	s.state, s.issues, s.stateTag = gz, issues, `"`+hex.EncodeToString(sum[:12])+`"`
+	s.mu.Unlock()
 }
 
 func (a *acted) encoded(gz []byte) (Snapshot, []byte, error) {
