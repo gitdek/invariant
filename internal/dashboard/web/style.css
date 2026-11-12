@@ -728,6 +728,8 @@ footer p { margin: 0; max-width: 60em; }
 .scope a:hover { color: var(--ink); border-color: rgba(var(--ink-rgb), 0.35); }
 .scope a[aria-current="page"] { color: var(--bg); background: var(--ink); border-color: var(--ink); }
 .scope a .ct { font: 600 11px var(--mono); opacity: 0.7; }
+.scope a .ct .needs { color: var(--people); }
+.scope a[aria-current="page"] .ct .needs { color: inherit; }
 .scope a i.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
 .scope a i.live.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.6); animation: livepulse 1.8s infinite; }
 
@@ -750,6 +752,16 @@ footer p { margin: 0; max-width: 60em; }
 
 /* ---------- Needs you ---------- */
 .inbox { display: grid; gap: 14px; }
+/* What needs a person is never dimmed, whichever repository it's in. */
+.need.aside, .need-repo.aside { opacity: 1; }
+.need-repo { display: flex; align-items: baseline; gap: 10px; margin: 8px 0 -2px; font: 600 12px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink2); }
+.need-repo:first-child { margin-top: 0; }
+.need-repo span { color: var(--people); letter-spacing: 0; }
+details.stalled { border: 1px dashed var(--line2); border-radius: var(--radius); padding: 0 14px; }
+details.stalled > summary { cursor: pointer; padding: 14px 4px; color: var(--ink2); font-size: 14.5px; }
+details.stalled[open] { padding-bottom: 14px; }
+details.stalled > .need, details.stalled > .need-repo { margin-top: 14px; }
+details.stalled > .need-repo + .need { margin-top: 8px; }
 .calm { display: flex; align-items: center; gap: 14px; padding: 18px 20px; border: 1px dashed var(--line2); border-radius: var(--radius); color: var(--ink2); }
 .calm svg { width: 34px; height: 34px; flex: none; }
 .need {
