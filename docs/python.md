@@ -803,9 +803,44 @@ A decision that refuses a request can instead be observed inside the entries of 
 
 This is the `components.checks` list; set `exhaustive: true`, include both modules in `existing`, and include their directories in `components.scope`. `observe` accepts module functions in the existing application. It resolves and pins their source/symbol declarations and requires exhaustive conformance on the check that declares it. The separate proof check needs no conformance invocation of its own.
 
-Each completed call inside an entry appears in completion order in that attempt observation's `calls`, with `target`, `source_sha256`, `caller`, `arguments` by parameter name and `result`. `caller` is the staged file whose code made the call: the nearest frame beneath it that runs application code. Positional, keyword and default arguments are recorded as Python binds them. The collector copies arguments on entry and results on return: finite JSON scalars, lists and string-keyed dictionaries, with exact integers, including integers larger than a float can represent. Callable substitutions, unsupported values and inconsistent replays invalidate the execution. Calls made outside entries, during initialization or during `release` earn no evidence; observing a decision does not count as calling or starting the selected worker. Held-call reservation, release and read-back keep their existing rules.
+Each call that returns or raises inside an entry appears, in the order they end, in that attempt observation's `calls`, with `target`, `source_sha256`, `caller`, `arguments` by parameter name and `result`, and with `after` and `raised` where [the contract's check](#callers-checked-against-the-contract) needs them. `caller` is the staged file whose code made the call: the nearest frame beneath it that runs application code. Positional, keyword and default arguments are recorded as Python binds them. The collector copies arguments on entry and results on return: finite JSON scalars, lists and string-keyed dictionaries, with exact integers, including integers larger than a float can represent. Callable substitutions, unsupported values and inconsistent replays invalidate the execution. Calls made outside entries, during initialization or during `release` earn no evidence; observing a decision does not count as calling or starting the selected worker. Held-call reservation, release and read-back keep their existing rules.
 
 The observed function qualifies only when the same complete, successful exploration invocation records it on both accepted and declared-refused non-replay attempts, against the proof's source bytes, beside passing transition, state and attempted-step conformance. An accepted attempt is the accepted outcome of a step that declares a refusal. Only calls the application's own code makes count: a call whose `caller` is one of the manifest's `existing` sources, or lies under one, and isn't the driver. A call that a driver, a helper outside those sources or a callback of theirs makes is recorded with its caller and counts for nothing, since it shows nothing about the application. A replay is compared with the attempt it repeats by the calls made, in any order, since calls on an entry's worker threads complete in an order that varies. A declaration alone, calls on only one outcome, replay-only calls, a sampled run or stale, incomplete or failed evidence leaves the proof not qualified, and the proof's diagnostic says which of these it lacks. Receipts retain the calls and declarations, bind them into fingerprints and check qualification again from the matching execution and conformance; missing coverage appears in the proof diagnostics.
+
+#### Callers checked against the contract
+
+Nagini proves the function's body against its contract, and nothing proves the code that calls it. Where the application runs, `Requires` and `Ensures` are the stand-in's no-ops. So the gate evaluates the contract itself on every call of the function it records outside a replay, whoever made the call ([#838](https://github.com/gitdek/invariant/issues/838), [D-0431](../decisions/journal/D-0431.jsonl)):
+
+- **On entry.** Each parameter is of the type its annotation names, and each `Requires` holds on the arguments as they were recorded on entry.
+- **On return.** Each `Ensures` holds, and the result is of the type the return annotation names. `Result()` is the recorded result, and `Old(e)` is `e` on the entry values. A list or a dictionary argument reads as it was when the call ended, which the call's record holds as `after`.
+- **On an exception.** The call's record holds `raised`: the exception's class, and each builtin exception name bound to a class it inherits from, which the collector tells by identity. The exception must match an `Exsures`, whose condition must hold, and no `Ensures` is evaluated. An exception no `Exsures` declares is a violation, since Nagini proves the function raises nothing else: the pinned Nagini refuses one that could, with "method raises no exceptions". A call that raises counts toward the coverage above as one that returns does, since either way the application ran the function.
+
+The gate evaluates on its own side, from the tree the proof's reader makes of each clause, with exact integers and Python's meaning for what a contract may hold. Nothing of the application runs again. `TestContractEvaluatorAgreesWithPython838` compares the evaluator with Python itself on generated clauses and arguments; `INVARIANT_CONTRACT_SEEDS=600` runs it over about five million of them.
+
+A permission or a predicate (`Acc`, `Rd`, `Wildcard`, `list_pred`, `dict_pred`, `set_pred`, `MayCreate`, `Low`, `LowVal`) says what the function may read and write, which Python doesn't track, so it holds wherever Python runs. The receipt lists a clause made only of them, and `Decreases`, as proved and not checked, and evaluates the rest of a clause that also states one. The gate takes a permission as holding only where it stands alone, in an `and`, as an `Implies` consequent or as a conditional's branch.
+
+A clause the gate can't evaluate on a recorded call is **unresolved**, and fails the gate as a violated one does:
+
+- a permission anywhere else: under a `not` or an `or`, in a comparison, or as a condition;
+- `Result()` on entry, and `is` between two values other than `None`, `True` and `False`, since a record holds values and not identities;
+- a contract statement after the function's first other statement;
+- a parameter whose annotation the gate can't read as a builtin type or a `typing` generic of them;
+- a string holding U+FFFD, which Go's JSON decoder writes for an unpaired surrogate, so it may not be the string the application passed.
+
+A finding names the caller's file, the clause, the recorded arguments and the result or the exception:
+
+```
+a call from tasks/service.py didn't meet Requires(requested in KINDS), with (busy=False, requested="car") returning 0
+```
+
+The proof's row is then `unqualified`, and the gate fails. A call a driver or a helper outside the application makes is checked too, and never counts as the application's. The receipt's section on callers gives each proof's recorded calls, how many the application's own code made, each clause with how it's treated, and every finding, and derives all of it again from the recorded calls rather than from any status.
+
+Limits:
+
+- This covers the calls exploration exercised, and says nothing about any other call. No exercised call by the application's own code is no evidence.
+- Calls made while the application's own tests run aren't recorded yet.
+- A function that qualifies by conformance on itself, with no `observe`, has no recorded calls, so nothing checks its callers.
+- An entry may let only its declared refusal reach it, so an application that calls a function that raises does it from a helper of its own that handles the exception.
 
 Every operation beyond the function needs a [trusted contract](#trusted-dependency-contracts), here one on `packaging.utils.is_normalized_name` whose abstraction says what the proof relies on:
 
@@ -922,7 +957,7 @@ The receipt keeps the three apart:
 
 No step proves a dependency, an unselected function or the whole application. In-place proof supports top-level functions that select their own inline contract, within the limits the table above lists. The gate doesn't check callers against a proved function's preconditions; #210 leaves that for later.
 
-`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793)' -count=1 -timeout 60m` runs the gate's in-place proof cases and the observed admission-decision fixture on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
+`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793|ChecksCallersAgainstContracts838|ChecksDeclaredExceptions838|StillChecksTheModel838)' -count=1 -timeout 60m` runs the gate's in-place proof cases, the observed admission-decision fixture and the checks of its callers against its contract on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
 
 - The valid proof passes, and so does one whose contract holds only what Python runs as Nagini reads it.
 - A body that breaks its postcondition only where conformance never goes fails at the original line.

@@ -115,6 +115,7 @@ func Markdown(r *verify.Report) string {
 			larger = r.Larger
 		}
 		pythonApplication(&b, r.Application, larger)
+		pythonApplicationContractChecks(&b, r)
 	}
 
 	proved := render.tlapsProved(r)
