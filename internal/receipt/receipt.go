@@ -77,6 +77,16 @@ func Markdown(r *verify.Report) string {
 			fmt.Fprintf(&b, "| One size larger | ➖ not claimed | %s |\n", strings.ReplaceAll(firstLine(l.Message), "|", "\\|"))
 		}
 	}
+	// A component receipt says what the check one size larger did too
+	// (#880): its headline can read Pass where that check claimed nothing,
+	// and the only trace was a JSON object further down.
+	if explicit && r.Application != nil {
+		if ok, result, evidence, shown := pythonApplicationLarger(r.Application, r.Larger); shown && ok != nil {
+			writeRow("One size larger", *ok, result, evidence)
+		} else if shown {
+			fmt.Fprintf(&b, "| One size larger | ➖ %s | %s |\n", result, evidence)
+		}
+	}
 	if c := r.Code; c != nil && !explicit {
 		writeRow("Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
 	}
@@ -120,7 +130,8 @@ func Markdown(r *verify.Report) string {
 		componentViews(&b, r)
 	}
 	if r.Application != nil {
-		// A component receipt has no row for the check one size larger.
+		// A legacy receipt's table has the check one size larger; a component
+		// receipt's section says it in words beside each invocation's record.
 		var larger *verify.Larger
 		if explicit {
 			larger = r.Larger
