@@ -186,6 +186,9 @@ func (p *Project) validate() error {
 	if len(l.Bounds) == 0 {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)
 	}
+	if err := validBounds(l.Bounds); err != nil {
+		return err
+	}
 	for _, name := range m.Parameters {
 		if _, ok := l.Bounds[name]; !ok {
 			return fmt.Errorf("%s: parameter %s isn't one of the ratified bounds", manifestFile, name)
