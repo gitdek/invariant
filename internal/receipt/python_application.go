@@ -102,10 +102,29 @@ func pythonApplicationFileSelection(b *strings.Builder, selection string) {
 	}
 }
 
-// pythonApplicationFailures names an explored check's failed claims, which
-// its JSON alone would leave to the reader (#342).
+// pythonApplicationFailures names failed executions and explored claims,
+// which their JSON alone would leave to the reader.
 func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationReport) []string {
 	var out []string
+	execution := func(label string, x verify.PythonApplicationExecutionResult) {
+		if x.Success && x.Complete {
+			return
+		}
+		cause := x.HarnessError
+		if cause == "" {
+			cause = "execution did not complete successfully; see execution diagnostics"
+		}
+		out = append(out, fmt.Sprintf("%s, target %s, check %s, invocation %s: %s", label,
+			componentLiteral(x.Key.Target), componentLiteral(x.Key.Check), componentLiteral(x.Key.ID), componentLiteral(cause)))
+	}
+	for _, x := range a.Executions {
+		execution("Python execution", x)
+	}
+	for _, l := range a.Larger {
+		if l.Execution != nil && l.Result.Required && !l.Result.Passed {
+			execution("Python execution one size larger", *l.Execution)
+		}
+	}
 	for _, c := range a.Conformance {
 		if c.Mode != "bounded-exhaustive" || !c.Result.Passed {
 			continue
