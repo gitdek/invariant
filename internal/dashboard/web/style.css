@@ -197,6 +197,7 @@ a.chip:hover { border-color: currentColor; }
 .chip.ci { color: var(--ci); border-color: rgba(var(--ci-rgb), 0.35); background: var(--ci-soft); }
 .chip.factory { color: var(--ink); border-color: rgba(var(--ink-rgb), 0.3); }
 .chip.holds { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.35); background: var(--accent-soft); }
+.chip.breaks { color: var(--bug); border-color: rgba(var(--bug-rgb), 0.45); background: var(--bug-soft); text-decoration: none; }
 .chip.bug { color: var(--bug); border-color: rgba(var(--bug-rgb), 0.35); background: var(--bug-soft); }
 .chip.agent { color: var(--agent); border-color: rgba(var(--agent-rgb), 0.35); background: var(--agent-soft); }
 .chip.pulse i { animation: glow 1.6s ease-in-out infinite; }
@@ -280,6 +281,12 @@ a.chip:hover { border-color: currentColor; }
 .num.holds::after {
   content: ""; position: absolute; right: -40px; top: -40px; width: 140px; height: 140px; border-radius: 50%;
   background: radial-gradient(circle, rgba(var(--accent-rgb), 0.16), transparent 70%);
+}
+.num.breaks { border-color: rgba(var(--bug-rgb), 0.45); }
+.num.breaks .v { color: var(--bug); text-shadow: 0 0 28px rgba(var(--bug-rgb), 0.4); }
+.num.breaks::after {
+  content: ""; position: absolute; right: -40px; top: -40px; width: 140px; height: 140px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(var(--bug-rgb), 0.16), transparent 70%);
 }
 
 /* Sections */
