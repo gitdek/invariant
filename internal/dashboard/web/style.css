@@ -474,8 +474,14 @@ div.tile.none { cursor: default; }
 .facts dd { margin: 4px 0 0; font: 600 18px/1 var(--sans); font-variant-numeric: tabular-nums; }
 .facts dd.holds { color: var(--accent-ink); }
 .impls { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; }
+/* A chip is never wider than its row: one that's too long for it wraps.
+   Between a phone's width and 1,000 pixels a long chip reached past the
+   page's edge, by up to 179 pixels, and though the page shows no sideways
+   scrollbar, a focus or a scroll into view could move it there, where it
+   stayed until the page was read again (#888). */
+.impls li { max-width: 100%; }
 .impl {
-  display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px; border: 1px solid var(--line2); border-radius: 9px;
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 4px 10px 4px 4px; border: 1px solid var(--line2); border-radius: 9px;
   background: var(--card-solid); color: var(--ink); text-decoration: none; font-size: 12.5px; transition: border-color 0.2s, transform 0.2s;
 }
 a.impl:hover { border-color: rgba(var(--accent-rgb), 0.55); transform: translateY(-1px); }
@@ -487,8 +493,6 @@ a.impl:hover { border-color: rgba(var(--accent-rgb), 0.55); transform: translate
   .model { grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 12px; }
   .tile { width: 100%; height: 170px; }
   .model .side { margin-left: 0; }
-  .impls li { max-width: 100%; }
-  .impl { flex-wrap: wrap; row-gap: 4px; }
 }
 
 /* A chart tile's poster, whole, beside the tile while it's hovered or
