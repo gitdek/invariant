@@ -294,12 +294,26 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 					continue
 				}
 				from, err := pythonApplicationComponentState(o.Before, o.Form == "module")
-				if err != nil {
-					return fmt.Errorf("%s check %s invocation %s run %d step %d before: %w", x.Key.Target, x.Key.Check, x.Key.ID, o.Run, o.Sequence, err)
+				side := "before"
+				var to map[string]string
+				if err == nil {
+					side = "after"
+					to, err = pythonApplicationComponentState(o.After, o.Form == "module")
 				}
-				to, err := pythonApplicationComponentState(o.After, o.Form == "module")
 				if err != nil {
-					return fmt.Errorf("%s check %s invocation %s run %d step %d after: %w", x.Key.Target, x.Key.Check, x.Key.ID, o.Run, o.Sequence, err)
+					problem := fmt.Errorf("%s check %s invocation %s run %d step %d %s: %w", x.Key.Target, x.Key.Check, x.Key.ID, o.Run, o.Sequence, side, err)
+					// The check's recording is made from these same states,
+					// so a check that passed on one that can't be written
+					// contradicts itself, and nothing is attributed. A check
+					// that failed already says so in the report: its row
+					// names the state and holds no observations, and the
+					// gate still returns its receipt.
+					if c.Result.Passed {
+						return problem
+					}
+					row.Diagnostics = append(row.Diagnostics, problem.Error())
+					row.Observations = nil
+					break
 				}
 				observation := ComponentConformanceObservation{Run: int64(o.Run), Step: int64(o.Sequence), Action: o.Entry, From: from, To: to}
 				// An attempt names the model step it tried, as Next names it.
