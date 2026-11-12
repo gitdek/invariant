@@ -12,7 +12,10 @@ concurrency:
   group: gate-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# actions: read lets a push to main ask whether a pull request's gate passed
+# on its tree (#874).
 permissions:
+  actions: read
   contents: read
   issues: read
 
@@ -42,10 +45,31 @@ jobs:
       gated: ${{ steps.diff.outputs.gated }}
       python: ${{ steps.diff.outputs.python }}
       tlaps: ${{ steps.diff.outputs.tlaps }}
+      tree: ${{ steps.tree.outputs.tree }}
+      tested: ${{ steps.tested.outputs.tested }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      # The tree this run checks: a pull request merged into its base, or the
+      # commit pushed. A pull request's gate records it when it passes, below.
+      - id: tree
+        run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      # A push to main whose tree a pull request's gate passed on holds
+      # exactly the files that gate checked, so the checks and tests don't
+      # run again. Every project is still verified, since the dashboard reads
+      # its receipts from this run, and invariant/gate still reports (#874).
+      # A pull request merged after main moved has a tree no gate has seen,
+      # and so has a direct push: they run everything. If this step fails,
+      # so does the job, and then everything runs.
+      - id: tested
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TREE: ${{ steps.tree.outputs.tree }}
+        run: .github/gated-tree.sh "$TREE" | tee -a "$GITHUB_OUTPUT"
 
       # A factory pull request always runs the gate, since the factory merges
       # only on a gate that passed, and so does a push this can't compare.
@@ -110,9 +134,10 @@ jobs:
     # merges on, and it needs this.
     name: invariant/verify
     needs: changes
-    # Skipped only when the step above says the change is docs alone. If that
-    # step fails, the gate runs.
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    # Skipped only when the step above says the change is docs alone, or that
+    # a pull request's gate passed on this push's tree (#874). If that step
+    # fails, the gate runs.
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -179,7 +204,7 @@ jobs:
     # exactly one shard, and a new one lands in a shard by itself (#345).
     name: invariant/verify-tests ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -346,7 +371,7 @@ jobs:
     # the rest (#345).
     name: invariant/integration ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -387,7 +412,7 @@ jobs:
     # shards, as internal/verify's tests do (#345).
     name: invariant/python ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -416,7 +441,7 @@ jobs:
     # 3.13, so CI tests every supported version.
     name: invariant/python-latest ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.gated == 'false') }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -447,7 +472,7 @@ jobs:
     # internal/verify's tests do (#345).
     name: invariant/real-python ${{ matrix.shard }}
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.python != 'true')) }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true' || needs.changes.outputs.python != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -482,7 +507,7 @@ jobs:
     # it must. Run as real-python is (#416).
     name: invariant/real-tlaps
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tlaps != 'true')) }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.gated == 'false' || needs.changes.outputs.tested == 'true' || needs.changes.outputs.tlaps != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -526,11 +551,42 @@ jobs:
           INTEGRATION: ${{ needs.integration.result }}
           REAL_PYTHON: ${{ needs.real-python.result }}
           REAL_TLAPS: ${{ needs.real-tlaps.result }}
+          TESTED: ${{ needs.changes.outputs.tested }}
         run: |
           echo "Checks: $VERIFY. internal/verify's tests: $VERIFY_TESTS. Python tests under the pinned image's Python: $PYTHON. Under Python 3.14: $PYTHON_LATEST. Finding the projects: $PROJECTS. Verifying them: $PROJECT. Their receipts: $RECEIPTS. The gate's own tests: $INTEGRATION. Real Python: $REAL_PYTHON. Real TLAPS: $REAL_TLAPS."
-          [ "$VERIFY" = success ] && [ "$VERIFY_TESTS" = success ] && [ "$PYTHON" = success ] && [ "$PYTHON_LATEST" = success ] && [ "$PROJECTS" = success ] || exit 1
+          # On a push whose tree a pull request's gate passed on, the checks
+          # and tests don't run again (#874). If they ran all the same,
+          # because the first job failed, they must have passed.
+          if [ "$TESTED" = true ]; then
+            echo "A pull request's gate passed on this tree, so the checks and tests didn't run again."
+            for result in "$VERIFY" "$VERIFY_TESTS" "$PYTHON" "$PYTHON_LATEST"; do
+              [ "$result" = skipped ] || [ "$result" = success ] || exit 1
+            done
+          else
+            [ "$VERIFY" = success ] && [ "$VERIFY_TESTS" = success ] && [ "$PYTHON" = success ] && [ "$PYTHON_LATEST" = success ] || exit 1
+          fi
+          [ "$PROJECTS" = success ] || exit 1
           # A repository with no projects has nothing to verify or gather.
           if [ "$FOUND" != "[]" ]; then [ "$PROJECT" = success ] && [ "$RECEIPTS" = success ] || exit 1; fi
           [ "$INTEGRATION" = success ] || [ "$INTEGRATION" = skipped ] || exit 1
           [ "$REAL_PYTHON" = success ] || [ "$REAL_PYTHON" = skipped ] || exit 1
           [ "$REAL_TLAPS" = success ] || [ "$REAL_TLAPS" = skipped ]
+
+      # What this gate passed on, for the push to main that lands it: the
+      # first job there asks for this artifact by the tree's name (#874). If
+      # the upload fails, that push runs everything.
+      - name: Record the tree the gate passed on
+        if: github.event_name == 'pull_request' && needs.changes.outputs.tree != ''
+        env:
+          TREE: ${{ needs.changes.outputs.tree }}
+        run: mkdir gated && printf '%s\n' "$TREE" > gated/tree
+
+      - name: Upload the record
+        if: github.event_name == 'pull_request' && needs.changes.outputs.tree != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: gated-${{ needs.changes.outputs.tree }}
+          path: gated
+          retention-days: 7
+          overwrite: true
