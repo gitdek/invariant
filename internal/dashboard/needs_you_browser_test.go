@@ -124,13 +124,16 @@ const needsYouBrowserCheck = `
     const elsewhere = document.createElement("div");
     elsewhere.className = "aside";
     document.body.append(elsewhere);
-    assert(getComputedStyle(elsewhere).opacity === "0.5", "another repository's items elsewhere are no longer quieter");
+    assert(getComputedStyle(elsewhere).opacity === "0.72", "another repository's items elsewhere are no longer quieter");
     elsewhere.remove();
     assert(box.querySelector('.need.aside[data-repo="gitdek/other"]'), "the other repository's cards aren't marked as another repository's");
     const chip = [...document.querySelectorAll("#nowmeta .chip")].map(text).find((c) => c.includes("need"));
     assert(chip === "3 issues need you · 2 stalled", "the headline's count reads: " + chip);
     const choices = [...document.querySelectorAll("#scope a")].map(text);
     assert(choices[0].endsWith("3 need you") && choices[1].endsWith("2 need you") && choices[2].endsWith("1 needs you"), "the Show choices read: " + choices.join(" / "));
+    // What's established sits apart from what needs a person, so a phone
+    // can leave it out and keep the count (#845).
+    assert([...document.querySelectorAll("#scope a")].every((a) => a.querySelector(".ct .est") && a.querySelector(".ct .needs")), "a Show choice doesn't keep its count apart");
     // Opened, the fold stays open when the list is drawn again.
     fold.querySelector("summary").click();
     await until(() => box.querySelector("details.stalled").open, "the fold opening");
@@ -142,6 +145,8 @@ const needsYouBrowserCheck = `
     document.querySelector('#scope a[data-scope="gitdek/other"]').click();
     await until(() => box.querySelectorAll(".need").length === 2, "the other repository's cards");
     assert(!box.querySelector("h3.need-repo") && outline() === "2 | stalled[5]", "one repository's list reads: " + outline());
+    // The lede names the repository in view, and every repository with all shown.
+    assert(text(document.querySelector("#needs-lede")).startsWith("What the factory is waiting for from a person, in other:"), "one repository's lede reads: " + text(document.querySelector("#needs-lede")));
     const own = [...document.querySelectorAll("#nowmeta .chip")].map(text).find((c) => c.includes("need"));
     assert(own === "1 issue needs you · 1 stalled", "one repository's count reads: " + own);
     document.body.dataset.needsCheck = "passed";
