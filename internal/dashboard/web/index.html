@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Invariant · Live</title>
-<meta name="description" content="A live view of Invariant, the code factory that proves every pull request against statements people ratified.">
+<meta name="description" content="A live view of Invariant, the code factory that checks every pull request against statements people ratified.">
 <meta name="theme-color" content="#090c11">
 <link rel="icon" href="/favicon.svg?v={{version}}" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -45,7 +45,7 @@
 </header>
 
 <main>
-  <nav class="scope" id="scope" aria-label="Choose which repositories to show"></nav>
+  <nav class="scope pending" id="scope" aria-label="Choose which repositories to show"></nav>
 
   <section class="hero" aria-live="polite">
     <div>
@@ -148,8 +148,8 @@
   <section class="block">
     <header>
       <div>
-        <h2>What's proved</h2>
-        <p class="lede">Every checked model, from CI's last passing gate receipt: one row per model, with a chip for each implementation. Rest on a chart to see it whole, and click it for its evidence page. A model with no reader chart says why. Charts are checked bounded models and add no proof claim.</p>
+        <h2>What's checked</h2>
+        <p class="lede">Every checked model, from CI's last passing gate receipt: one row per model, with a chip for each implementation. <span class="with-pointer">Rest on a chart to see it whole, and click it for its evidence page.</span><span class="with-touch">Tap a chart for its evidence page.</span> A model with no reader chart says why. Charts are checked bounded models and add no proof claim.</p>
       </div>
       <div class="viewtoggle" role="group" aria-label="Show models as"><button type="button" data-view="cards">Models</button><button type="button" data-view="table">Table</button></div>
     </header>

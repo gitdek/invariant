@@ -58,6 +58,7 @@ type Server struct {
 
 	mu        sync.RWMutex
 	state     []byte            // the latest snapshot, as every page reads it, gzipped JSON
+	stateTag  string            // its entity tag, which a read that already has it names (#854)
 	issues    []Issue           // the latest snapshot's issues, which say what each is waiting for
 	holders   map[string]string // each repository's lease holder, as last read, whose watcher the page follows
 	graphs    map[string][]byte

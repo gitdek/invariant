@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// A loaded runner can take seconds to start a step's watchdog. Its stand-in
-// here is an interpreter that starts every watchdog late, by more than the
-// step's whole two-second budget. That start spends none of the budget
-// (#645).
+// A loaded runner can take seconds to start the run's deadline watchdog,
+// which the first step starts (#856). Its stand-in here is an interpreter
+// that starts the watchdog late, by more than a step's whole two-second
+// budget. That start spends none of the budget (#645).
 func TestPythonApplicationModuleDeadlineStartsWithItsWatchdog(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -25,8 +25,8 @@ func TestPythonApplicationModuleDeadlineStartsWithItsWatchdog(t *testing.T) {
 	// is late; the gate's own Python checks find it on PATH too. It's Python,
 	// not a shell script, because hosts such as Alpine have no bash.
 	script := "#!" + python + " -IS\nimport os, sys, time\n" +
-		"if sys.argv[1:4] == ['-I', '-S', '-c'] and sys.argv[4].startswith('import os, select, signal, sys, time'):\n" +
-		"    with open(" + strconv.Quote(started) + ", 'a') as f:\n        f.write('watchdog ' + sys.argv[6] + '\\n')\n" +
+		"if sys.argv[1:4] == ['-I', '-S', '-c'] and sys.argv[4].startswith('import os, select, signal, socket, sys, time'):\n" +
+		"    with open(" + strconv.Quote(started) + ", 'a') as f:\n        f.write('watchdog\\n')\n" +
 		"    time.sleep(2.5)\n" +
 		"os.execv(" + strconv.Quote(python) + ", [sys.argv[0]] + sys.argv[1:])\n"
 	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(script), 0o755); err != nil {
@@ -39,8 +39,8 @@ func TestPythonApplicationModuleDeadlineStartsWithItsWatchdog(t *testing.T) {
 	if len(r.Observations) != 3 {
 		t.Fatalf("want initial and two steps: %+v", r)
 	}
-	if b, err := os.ReadFile(started); err != nil || string(b) != "watchdog 2\nwatchdog 2\n" {
-		t.Fatalf("the stand-in did not start each step's watchdog late: %q, %v", b, err)
+	if b, err := os.ReadFile(started); err != nil || string(b) != "watchdog\n" {
+		t.Fatalf("the stand-in did not start the run's one watchdog late: %q, %v", b, err)
 	}
 }
 

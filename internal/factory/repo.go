@@ -148,11 +148,25 @@ func (c Clone) ClearWorktrees(ctx context.Context) error {
 }
 
 // Commit commits everything under dir, and nothing outside it, as the
-// factory's author.
-func (c Clone) Commit(ctx context.Context, worktree, dir, message string) (string, error) {
+// factory's author. git leaves a file the repository's ignore rules match
+// out of that without a word, so each of written that exists is added by
+// name, rules or no rules: a build's files are what was tested, and a
+// branch without one of them isn't what was built (#840).
+func (c Clone) Commit(ctx context.Context, worktree, dir, message string, written ...string) (string, error) {
 	defer c.lock()()
 	if _, err := run(ctx, worktree, "git", "add", "--all", "--", dir); err != nil {
 		return "", err
+	}
+	forced := []string{"add", "--force", "--"}
+	for _, file := range written {
+		if _, err := os.Lstat(filepath.Join(worktree, filepath.FromSlash(file))); err == nil {
+			forced = append(forced, file)
+		}
+	}
+	if len(forced) > 3 {
+		if _, err := run(ctx, worktree, "git", forced...); err != nil {
+			return "", err
+		}
 	}
 	if _, err := run(ctx, worktree, "git", "diff", "--cached", "--quiet"); err == nil {
 		return "", ErrNothingToCommit

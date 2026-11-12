@@ -598,9 +598,17 @@ func postText(m factory.Marker, previous factory.Marker) string {
 		return plural(len(m.Forks), "asked a question", "asked %d questions")
 	case factory.KindProposal:
 		n := 0
-		if m.Proposal != nil {
-			n = len(m.Proposal.Statements)
-			if m.Proposal.Target != nil {
+		if p := m.Proposal; p != nil {
+			// A plan has no statements, and nothing of it was checked by
+			// TLC: it says what it is (#848).
+			switch {
+			case p.Plan != nil:
+				return fmt.Sprintf("proposed a plan: %s to write, %s", plural(len(p.Plan.Files), "1 file", "%d files"), plural(len(p.Plan.Tests), "1 acceptance test", "%d acceptance tests"))
+			case p.IssuePlan != nil:
+				return plural(len(p.IssuePlan.Issues), "proposed a plan of 1 issue", "proposed a plan of %d issues")
+			}
+			n = len(p.Statements)
+			if p.Target != nil {
 				return fmt.Sprintf("proposed an amendment: %d statements", n)
 			}
 		}

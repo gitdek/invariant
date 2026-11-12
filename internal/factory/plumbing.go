@@ -181,7 +181,7 @@ func (f *Factory) commitPlan(ctx context.Context, t Thread, state Post, c Comman
 		return Post{}, fmt.Errorf("the plan written for ratification isn't the proposal %s: %v", p.Hash, err)
 	}
 	msg := fmt.Sprintf("Ratify the plan for #%d\n\nRatified by @%s in %s.\nPlan %s.", n, c.By, c.URL, p.Hash)
-	_, err = f.Repo.Commit(ctx, wt, ".", msg)
+	_, err = f.Repo.Commit(ctx, wt, ".", msg, append(p.Plan.TestFiles(), plumbing.LockPath(n))...)
 	switch {
 	case errors.Is(err, ErrNothingToCommit) && from == "origin/"+branch:
 	case err != nil && !errors.Is(err, ErrNothingToCommit):
@@ -323,7 +323,7 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		verdict = "It passed every test, but the review asks for changes."
 	}
 	msg := fmt.Sprintf("Implement #%d: %s\n\nWritten by Invariant to the plan ratified in the previous commit. %s", n, t.Issue.Title, verdict)
-	code, err := f.Repo.Commit(ctx, wt, ".", msg)
+	code, err := f.Repo.Commit(ctx, wt, ".", msg, res.Changes.Written...)
 	if errors.Is(err, ErrNothingToCommit) {
 		code, err = f.Repo.RevParse(ctx, m.Branch)
 	}
