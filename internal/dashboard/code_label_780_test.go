@@ -12,9 +12,18 @@ import (
 // "component evidence" or "unchecked" for code that ran against the model
 // (#780).
 func TestComponentEvidenceSaysWhatTheCodeEarned780(t *testing.T) {
+	inv, result := coverageComponentFixture802()
 	ran := func(exhaustive bool, states int64) verify.ComponentConformanceEvidence {
-		return verify.ComponentConformanceEvidence{Target: "t", TransitionsChecked: true, ExhaustiveStates: exhaustive, EveryStep: exhaustive,
-			Result: verify.ComponentConformanceResult{Outcome: "passed", States: states, ModelStates: 5}}
+		c := result
+		c.States = states
+		if exhaustive {
+			c.Mode = "bounded-exhaustive"
+			call := *c.Invocation
+			call.ID = "exhaustive"
+			c.Invocation = &call
+			c.Attempts = &verify.ComponentAttemptResult{Outcome: "passed", Attempts: 7, States: states}
+		}
+		return verify.ComponentConformanceEvidence{Target: c.Target, Check: c.Check, TransitionsChecked: true, ExhaustiveStates: exhaustive, EveryStep: exhaustive, Result: c}
 	}
 	unchecked := verify.ComponentProof{Target: "t", Status: "unchecked"}
 	for _, c := range []struct {
@@ -25,13 +34,13 @@ func TestComponentEvidenceSaysWhatTheCodeEarned780(t *testing.T) {
 		visited   int64
 	}{
 		{"every state", verify.ComponentEvidence{Proofs: []verify.ComponentProof{unchecked}, Conformance: []verify.ComponentConformanceEvidence{ran(true, 5)}}, "tested in every state", 0, 5},
-		{"sampled", verify.ComponentEvidence{Proofs: []verify.ComponentProof{unchecked}, Conformance: []verify.ComponentConformanceEvidence{ran(false, 3)}}, "tested", 0, 3},
-		{"one sampled", verify.ComponentEvidence{Conformance: []verify.ComponentConformanceEvidence{ran(true, 5), ran(false, 3)}}, "tested", 0, 5},
+		{"sampled", verify.ComponentEvidence{Proofs: []verify.ComponentProof{unchecked}, Conformance: []verify.ComponentConformanceEvidence{ran(false, 3)}}, "tested (sampled)", 0, 3},
+		{"one sampled", verify.ComponentEvidence{Conformance: []verify.ComponentConformanceEvidence{ran(true, 5), ran(false, 3)}}, "tested (sampled)", 0, 5},
 		{"proved", verify.ComponentEvidence{Proofs: []verify.ComponentProof{{Target: "t", Status: "proved"}, unchecked}, Conformance: []verify.ComponentConformanceEvidence{ran(true, 5)}}, "proved", 1, 0},
 		{"failed", verify.ComponentEvidence{Conformance: []verify.ComponentConformanceEvidence{{Target: "t", TransitionsChecked: true, Result: verify.ComponentConformanceResult{Outcome: "failed", States: 2}}}}, "unchecked", 0, 0},
 		{"nothing", verify.ComponentEvidence{Proofs: []verify.ComponentProof{unchecked}}, "unchecked", 0, 0},
 	} {
-		c.evidence.Inventory.Mode = "explicit"
+		c.evidence.Inventory = inv
 		p := projectOf(projectSource{}, &verify.Report{Project: "Statue generation", Passed: true, Components: &c.evidence})
 		if p.Assurance != c.assurance || p.Verified != c.verified || p.Visited != c.visited {
 			t.Errorf("%s: the page says %q, %d proved, %d states reached; want %q, %d, %d", c.name, p.Assurance, p.Verified, p.Visited, c.assurance, c.verified, c.visited)

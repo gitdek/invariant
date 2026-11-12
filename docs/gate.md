@@ -12,6 +12,33 @@ Python application receipts retain the first collector failure in an execution's
 
 These diagnostics authorize no observations and do not enter execution fingerprints. Failed or incomplete observation streams retain no accepted prefix, while successful independent executions keep their evidence. Collector errors cannot become application refusals: [D-0279](../decisions/journal/D-0279.jsonl)'s exact declared-refusal and named-action checks still apply, and undeclared application exceptions still fail. The watchdog deadlines and stopped-before-sealing diagnostics from [D-0356](../decisions/journal/D-0356.jsonl) remain. [The Python execution reference](python.md#existing-python-application-foundation) describes the execution API and observation trust boundary.
 
+## Sampled state coverage
+
+Under [#802's ratified plan](../.invariant/plans/issue-802.json), both recording APIs count distinct canonical states actually referenced by trace visits, initial states or attempt endpoints. Repeated visits and canonically equal values count once. Initial-only states and unchanged attempts count; unused state-table entries do not. Recorded steps and distinct checked transitions retain their separate counts.
+
+Each numerator is compared only with that check's distinct reachable model-state count at the same ratified bounds. A missing per-check denominator is never filled from the design total; a conflicting positive design total makes ordinary or Python application coverage unknown. An explicitly unsuccessful model exploration cannot supply a denominator, even when its count matches the visited count: ordinary and Python coverage remain unknown, with successful conformance still checked and qualified as sampled. A nonempty design outcome must be `passed` with `design.passed` true; old reports that omit the outcome still use their per-check counts and the consistency rules. Component checks qualify from their own model, matching bounds and validated provenance. Invocations, different models, larger-bound checks and replay evidence are never added into a project share.
+
+Report and dashboard project JSON add a `coverage` array, empty when no conformance result exists. Each ordinary result, Python invocation and attributed component check gets its own record:
+
+| Field | Meaning |
+| :-- | :-- |
+| `source` | `conformance`, `python_application` or `component` |
+| `target`, `check`, `invocation` | The original identities where applicable; omitted for ordinary conformance |
+| `mode` | `sampled` or `bounded-exhaustive`; unavailable component mode remains empty |
+| `states`, `model_states` | Original integer counts, including invalid values retained for diagnosis |
+| `checked` | Successful conformance evidence, independently of the overall gate verdict and attempt coverage; component evidence must qualify from its outcomes and provenance |
+| `status` | `partial` for positive visited counts below the positive model total, `full` for exact positive integer equality, otherwise `unknown` |
+| `sampled` | True for a successful check whose coverage is partial or unknown |
+| `fraction`, `percent` | Exact ungrouped fraction and truncated percentage strings; both empty for unknown coverage |
+
+Failed checks and nonpositive, absent, conflicting or impossible counts have unknown coverage and no percentage. `2/5` displays as `40%`, `3/11` as `27.27%`, and `999999/1000000` as `99.99%`. Percentages truncate at two decimal places, removing trailing zeroes; integer arithmetic avoids floating-point rounding and multiplication overflow, including at the int64 limit. A tiny positive share can display `0%`, but its exact fraction remains visible. Full coverage is decided by integer equality, never the displayed percentage. JSON consumers should display the strings directly, since JavaScript numbers cannot represent every int64 count.
+
+Markdown puts **sampled** immediately beside a passing headline and each applicable ordinary, Python or component conformance result. Dashboard cards, grouped implementations, tables and script-free evidence pages do the same on public and `/act` views, showing every applicable check's fraction and percentage or **coverage unknown**. These are detached views derived afresh from original evidence, even for old JSON with stale assurance flags. Serialized `coverage` claims are ignored. Report and reader identities use their original evidence encodings, excluding derived display metadata while still binding checked counts; rendering and JSON round trips preserve archived evidence fingerprints.
+
+The coarse `Report.CodeAssurance` and `Claim` categories remain unchanged. Independently qualified proofs retain their claims beside sampled conformance. Full state coverage from a non-exhaustive sample grants no proof, exhaustive exploration, transition coverage or attempt coverage. Ordinary full exhaustive Markdown rows retain their exact original wording; their new JSON and dashboard views include the full fraction and percentage. Every-state/every-step requirements remain: failed attempt checks still block the claims they blocked before, checked transitions survive, and failures still fail the overall gate.
+
+This display rule for [#789](https://github.com/gitdek/invariant/issues/789) rests on [D-0024](../decisions/journal/D-0024.jsonl), [D-0029](../decisions/journal/D-0029.jsonl), [D-0043](../decisions/journal/D-0043.jsonl), [D-0082](../decisions/journal/D-0082.jsonl), [D-0088](../decisions/journal/D-0088.jsonl), [D-0163](../decisions/journal/D-0163.jsonl), [D-0170](../decisions/journal/D-0170.jsonl), [D-0185](../decisions/journal/D-0185.jsonl), [D-0122](../decisions/journal/D-0122.jsonl) and [D-0294](../decisions/journal/D-0294.jsonl). Validation includes the affected Go suites, installed-Chromium public, `/act`, grouped and table checks, documentation checks, and existing PR CI integration and affected real Python/TLAPS lanes; those CI lanes stay in this change's validation, with no CI changes or follow-up deferral.
+
 ## Reader artifacts
 
 [Modeled option previews](statecharts.md#modeled-alternatives) use the same model gate, complete graph, invariant replay and hiding checks, one isolated source snapshot per option. A whole-request check consumes one allowance and reports independent failures together; a failed alternative blocks publication without erasing healthy siblings' diagnostics or evidence. Previously authorized choices come from the caller, never from an option's derived output.

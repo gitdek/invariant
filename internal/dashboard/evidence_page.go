@@ -103,6 +103,7 @@ const evidenceParts = `{{define "top"}}<header class="top"><a class="brand" href
 
 type evidenceView struct {
 	Kind, Back, RepoShort, Eyebrow, Title string
+	Coverage                              []verify.Coverage
 	Chips                                 []evidenceChip
 	Links                                 []evidenceLink
 	Groups                                []evidenceGroup
@@ -231,6 +232,8 @@ func assuranceChip(assurance string) evidenceChip {
 		return evidenceChip{"Code tested in every state", "holds"}
 	case "tested":
 		return evidenceChip{"Code tested", "can"}
+	case "tested (sampled)":
+		return evidenceChip{"Code tested (sampled)", "can"}
 	case "":
 		return evidenceChip{"Model only", ""}
 	}
@@ -343,9 +346,14 @@ func projectView(e readerEvidence) evidenceView {
 	v.Chips = append(v.Chips, languageChip(e.Manifest.Language))
 	if r := e.Report; r != nil {
 		p := projectOf(projectSource{}, r)
+		v.Coverage = p.Coverage
 		v.Chips = append(v.Chips, assuranceChip(p.Assurance))
 		if r.Passed {
-			v.Chips = append(v.Chips, evidenceChip{"Passed", "holds"})
+			label := "Passed"
+			if r.Sampled() {
+				label = "Passed (sampled)"
+			}
+			v.Chips = append(v.Chips, evidenceChip{label, "holds"})
 		} else {
 			v.Chips = append(v.Chips, evidenceChip{"Failed", "bug"})
 		}

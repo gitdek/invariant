@@ -23,12 +23,16 @@ func Markdown(r *verify.Report) string {
 		row(&b, check, ok, result, evidence)
 	}
 	fmt.Fprintf(&b, "## ◉ Invariant receipt · %s\n\n", render.text(r.Project))
+	pass := "Pass."
+	if r.Sampled() {
+		pass = "Pass (sampled)."
+	}
 	if r.Passed && explicit {
-		fmt.Fprintf(&b, "**✅ Pass.** Gate passed. Assurance: **component evidence**. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
+		fmt.Fprintf(&b, "**✅ %s** Gate passed. Assurance: **component evidence**. Fingerprint %s\n\n", pass, render.literal(short(r.Fingerprint)))
 	} else if r.Passed && preview {
 		fmt.Fprintf(&b, "**✅ Pass.** Unratified alternative; model-only checks passed for candidate rules. No code was checked. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
 	} else if r.Passed {
-		fmt.Fprintf(&b, "**✅ Pass.** Every check passed. The code is **%s**. Fingerprint %s\n\n", r.Claim(), render.literal(short(r.Fingerprint)))
+		fmt.Fprintf(&b, "**✅ %s** Every check passed. The code is **%s**. Fingerprint %s\n\n", pass, r.Claim(), render.literal(short(r.Fingerprint)))
 	} else {
 		fmt.Fprintf(&b, "**❌ Fail.** At least one check failed. Fingerprint %s\n\n", render.literal(short(r.Fingerprint)))
 	}
@@ -77,7 +81,14 @@ func Markdown(r *verify.Report) string {
 		writeRow("Code · "+c.Verifier, c.Passed, codeResult(*c), codeEvidence(*c))
 	}
 	if c := r.Conformance; c != nil && !explicit {
-		writeRow("Code · conformance", c.Passed, conformanceResult(*c), conformanceEvidence(*c))
+		coverage := r.ConformanceCoverage()
+		evidence := conformanceEvidence(*c)
+		// Full exhaustive receipts keep their original wording. All other
+		// checks expose their share or its absence beside the result.
+		if coverage.Qualification() != "tested in every state" {
+			evidence += "; " + coverage.Detail()
+		}
+		writeRow("Code · conformance", c.Passed, conformanceResult(*c, coverage), evidence)
 		switch t := c.Tried; {
 		case t != nil && t.Passed:
 			writeRow("Every step tried", true, "in every state reached, but where only the environment's bounds rule a step out",
@@ -114,7 +125,7 @@ func Markdown(r *verify.Report) string {
 		if explicit {
 			larger = r.Larger
 		}
-		pythonApplication(&b, r.Application, larger)
+		pythonApplication(&b, r.Application, larger, r)
 		pythonApplicationContractChecks(&b, r)
 	}
 
@@ -595,11 +606,13 @@ func codeResult(c verify.Code) string {
 	return fmt.Sprintf("%d verification errors", len(c.Errors))
 }
 
-func conformanceResult(c conformance.Result) string {
+func conformanceResult(c conformance.Result, coverage verify.Coverage) string {
 	switch {
-	case c.Passed && c.Exhaustive && c.States > 0 && int64(c.States) == c.ModelStates && (c.Tried == nil || c.Tried.Passed):
+	case coverage.Qualification() == "tested in every state":
 		return "tested against the model: every reachable state, no step outside it"
-	case c.Passed:
+	case coverage.Sampled:
+		return "tested (sampled) against the model: no step outside it"
+	case c.Passed && coverage.Checked:
 		return "tested against the model: no step outside it"
 	case c.BadStart != "" || c.BadStep != nil:
 		return "the code left the model"
