@@ -963,7 +963,7 @@ The receipt keeps the three apart:
 
 No step proves a dependency, an unselected function or the whole application. In-place proof supports top-level functions that select their own inline contract, within the limits the table above lists. The gate doesn't check callers against a proved function's preconditions; #210 leaves that for later.
 
-`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793|ChecksCallersAgainstContracts838|ChecksDeclaredExceptions838|StillChecksTheModel838)' -count=1 -timeout 60m` runs the gate's in-place proof cases, the observed admission-decision fixture and the checks of its callers against its contract on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
+`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793|ChecksCallersAgainstContracts838|ChecksDeclaredExceptions838|StillChecksTheModel838|ChecksCallsTestsMakeReal841)' -count=1 -timeout 60m` runs the gate's in-place proof cases, the observed admission-decision fixture and the checks of its callers against its contract on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
 
 - The valid proof passes, and so does one whose contract holds only what Python runs as Nagini reads it.
 - A body that breaks its postcondition only where conformance never goes fails at the original line.

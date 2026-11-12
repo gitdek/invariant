@@ -1,9 +1,13 @@
 package verify
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // tests841 is the fixture's test file with lines added to its class and to
@@ -89,6 +93,31 @@ func TestPythonApplicationGateChecksCallsTestsMake841(t *testing.T) {
 				t.Fatalf("passed=%v; the problems don't say\n  %s\nthey say\n  %s", r.Passed, c.want, problems)
 			}
 		})
+	}
+}
+
+// The recorder runs in the pinned Python image as it does locally: the
+// application's test passes there, its calls are recorded and checked, and
+// the pinned Nagini and TLC take the same application.
+func TestPythonApplicationGateChecksCallsTestsMakeReal841(t *testing.T) {
+	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") != "1" {
+		t.Skip("needs the pinned Python, TLC and Nagini")
+	}
+	tc, err := toolchain.Ensure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gp359Verifier(t, true)
+	imports := "from .admission import admission\ndef allowed(requested, busy):\n    return admission(True, 'statue', requested, busy) == 0\n"
+	f := callers838Fixture(t, callers838Admission, callers838Application(t, imports, callers838Call), hold393Driver)
+	pa342Write(t, f.root, "tests/test_counter.py", tests841("    @classmethod\n    def setUpClass(cls):\n        cls.allowed = core.allowed('engine', False)\n",
+		"        self.assertTrue(self.allowed)\n        self.assertFalse(core.allowed('boat', True))\n        self.assertEqual(admission(True, 'statue', 'engine', False), 0)\n"))
+	r := pa342Unchanged(t, f, tc)
+	checks := callers838Checks(t, r)
+	// One call from the class fixture, one through the application and one
+	// the test makes itself, which counts for nothing.
+	if explored := checks.Calls - checks.Tests; !r.Passed || checks.Tests != 3 || checks.Own != explored+2 || !checks.Evidence() {
+		t.Fatalf("passed=%v checks=%+v\n%s", r.Passed, checks, strings.Join(PythonApplicationProofProblems(r.Components, r.Application), "\n"))
 	}
 }
 
