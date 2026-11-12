@@ -32,6 +32,11 @@ type PythonApplicationCall struct {
 	Result       any                      `json:"result"`
 	After        map[string]any           `json:"after,omitempty"`
 	Raised       *PythonApplicationRaised `json:"raised,omitempty"`
+	// Unrecorded names each argument the record couldn't hold, and "return"
+	// for a result it couldn't, with the value's class. A test run notes
+	// such a value and leaves it alone, where an exploration fails on it
+	// (#841). Nothing can be checked on a value the record doesn't hold.
+	Unrecorded map[string]string `json:"unrecorded,omitempty"`
 }
 
 // PythonApplicationRaised is the exception a recorded call raised: its
@@ -50,7 +55,7 @@ func (c *PythonApplicationCall) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("observed call: %w", err)
 	}
 	fields := []string{"target", "source_sha256", "arguments", "result"}
-	for _, optional := range []string{"caller", "after", "raised"} {
+	for _, optional := range []string{"caller", "after", "raised", "unrecorded"} {
 		if _, ok := present[optional]; ok {
 			fields = append(fields, optional)
 		}
@@ -91,6 +96,15 @@ func (c *PythonApplicationCall) valid() error {
 		_, wasDict := before.(map[string]any)
 		if !ok || !pythonApplicationValue(after, true) || !(list && wasList || dict && wasDict) {
 			return fmt.Errorf("observed call records a value after the call for %s, which isn't a list or a dictionary argument", name)
+		}
+	}
+	for name, kind := range c.Unrecorded {
+		value, argument := c.Arguments[name]
+		if name == "return" {
+			value, argument = c.Result, c.Raised == nil
+		}
+		if !argument || value != nil || kind == "" {
+			return fmt.Errorf("observed call says it couldn't hold %s, which it holds or doesn't have", name)
 		}
 	}
 	if c.Raised != nil {

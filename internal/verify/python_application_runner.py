@@ -1,6 +1,7 @@
 """Controlled startup and per-test observations for a prepared application."""
 
 import ast
+import builtins
 from collections import Counter
 import hashlib
 import hmac
@@ -96,6 +97,19 @@ def compiled_methods(code):
 sources = {}
 
 
+def staged(filename):
+    """A staged source file's digest, its declarations by where they start,
+    and the code it compiles to."""
+    if filename not in sources:
+        with open(filename, "rb") as stream:
+            raw = stream.read()
+        tree = ast.parse(raw, filename)
+        sources[filename] = ("sha256:" + hashlib.sha256(raw).hexdigest(),
+                             lexical_locations(tree),
+                             list(compiled_methods(compile(raw, filename, "exec"))))
+    return sources[filename]
+
+
 def identity(test):
     method = getattr(test, getattr(test, "_testMethodName", ""), None)
     method = inspect.unwrap(method)
@@ -105,14 +119,7 @@ def identity(test):
     filename = os.path.abspath(code.co_filename)
     if not filename.startswith(root + "/"):
         return "", "", code
-    if filename not in sources:
-        with open(filename, "rb") as stream:
-            raw = stream.read()
-        tree = ast.parse(raw, filename)
-        sources[filename] = ("sha256:" + hashlib.sha256(raw).hexdigest(),
-                             lexical_locations(tree),
-                             list(compiled_methods(compile(raw, filename, "exec"))))
-    digest, locations, compiled = sources[filename]
+    digest, locations, compiled = staged(filename)
     symbol = locations.get((code.co_firstlineno, code.co_name))
     if symbol is None or not any(code == original for original in compiled):
         return "", digest, code
@@ -609,6 +616,146 @@ def watch_assertions():
             context.__exit__ = wrap(name, context.__dict__["__exit__"], exit=True)
 
 
+# The gate checks a function proved in place against its contract on every
+# call of it that it records (#838). An application's tests make calls no
+# exploration does, so while they run, the runner records each call of such
+# a function (#841): its arguments on entry by parameter name, its result
+# or the class of the exception it raised, what a list or dictionary
+# argument held when the call ended, and the staged file whose code made
+# the call. It watches through sys.monitoring and touches nothing the
+# application sees: no wrapper, no rebinding, and a value it can't copy is
+# noted by its type and left alone. Only the staged function's own code is
+# recorded, so a mock in its place records nothing.
+contracts = {(os.path.join(root, d["source"]), d["symbol"]): d for d in request.get("contracts", [])}
+contract_frames = {}
+# Calls made outside any test, as a module's import or a class fixture makes.
+contract_stray = []
+contract_builtins = tuple(sorted((key, value) for key, value in vars(builtins).items()
+                                 if type(value) is type and issubclass(value, BaseException)))
+
+
+def contract_value(value, ancestors=()):
+    """A copy of a value a record can hold: None, a bool, an int, a finite
+    float, a string, or a list or a string-keyed dictionary of them, each of
+    exactly that type. Anything else raises ValueError."""
+    kind = type(value)
+    if kind in (str, bool, int, type(None)):
+        return value
+    if kind is float and value == value and value not in (float("inf"), float("-inf")):
+        return value
+    if kind not in (list, dict) or any(value is old for old in ancestors):
+        raise ValueError("unrecordable")
+    ancestors = ancestors + (value,)
+    if kind is list:
+        return [contract_value(v, ancestors) for v in value]
+    if any(type(k) is not str for k in value):
+        raise ValueError("unrecordable")
+    return {k: contract_value(v, ancestors) for k, v in value.items()}
+
+
+def contract_kind(value):
+    """The name of a value's class, read without running anything of it."""
+    return type.__dict__["__qualname__"].__get__(type(value))
+
+
+def contract_declared(code):
+    """The declaration a code object runs, where it is the staged function's
+    own code and nothing put in its place."""
+    filename = os.path.abspath(code.co_filename)
+    declaration = contracts.get((filename, code.co_qualname))
+    if declaration is None or code.co_flags & (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
+        return None
+    digest, locations, compiled = staged(filename)
+    if (digest != declaration["source_sha256"] or locations.get((code.co_firstlineno, code.co_name)) != declaration["symbol"]
+            or not any(code == original for original in compiled)):
+        return None
+    return declaration
+
+
+def contract_caller(frame):
+    """The staged file whose code made the call: the nearest frame beneath
+    it that runs one."""
+    frame = frame.f_back
+    while frame is not None:
+        filename = os.path.abspath(frame.f_code.co_filename)
+        if filename.startswith(root + os.sep) and filename.endswith(".py"):
+            return os.path.relpath(filename, root).replace(os.sep, "/")
+        frame = frame.f_back
+    return ""
+
+
+def contract_started(code, offset):
+    declaration = contract_declared(code)
+    if declaration is None:
+        return sys.monitoring.DISABLE
+    frame = sys._getframe(1)
+    arguments, unrecorded, kept = {}, {}, {}
+    for name in code.co_varnames[:code.co_argcount + code.co_kwonlyargcount]:
+        value = frame.f_locals[name]
+        try:
+            arguments[name] = contract_value(value)
+        except ValueError:
+            arguments[name], unrecorded[name] = None, contract_kind(value)
+        else:
+            if type(value) in (list, dict):
+                kept[name] = value
+    contract_frames[frame] = (declaration, arguments, unrecorded, kept, contract_caller(frame))
+
+
+def contract_ended(frame, value, raised):
+    declaration, arguments, unrecorded, kept, caller = contract_frames.pop(frame)
+    call = dict(target=declaration["id"], source_sha256=declaration["source_sha256"], caller=caller, arguments=arguments, result=None)
+    after = {}
+    for name, held in kept.items():
+        try:
+            after[name] = contract_value(held)
+        except ValueError:
+            unrecorded[name] = contract_kind(held)
+    if after:
+        call["after"] = after
+    if raised is None:
+        try:
+            call["result"] = contract_value(value)
+        except ValueError:
+            unrecorded["return"] = contract_kind(value)
+    else:
+        classes = type.__dict__["__mro__"].__get__(raised)
+        module, name = (type.__dict__[key].__get__(raised) for key in ("__module__", "__qualname__"))
+        call["raised"] = dict(type="%s.%s" % (module if type(module) is str else "?", name),
+                              builtins=sorted(key for key, cls in contract_builtins if any(cls is c for c in classes)))
+    if unrecorded:
+        call["unrecorded"] = unrecorded
+    pending = result.pending
+    (pending["calls"] if pending is not None else contract_stray).append(call)
+
+
+def contract_returned(code, offset, value):
+    frame = sys._getframe(1)
+    if frame in contract_frames:
+        contract_ended(frame, value, None)
+    elif contract_declared(code) is None:
+        return sys.monitoring.DISABLE
+
+
+def contract_unwound(code, offset, exception):
+    # Every frame an exception leaves comes through here, so the common case
+    # is one lookup.
+    if contract_frames:
+        frame = sys._getframe(1)
+        if frame in contract_frames:
+            contract_ended(frame, None, type(exception))
+
+
+def watch_contracts():
+    monitoring = sys.monitoring
+    tool = next(t for t in range(6) if monitoring.get_tool(t) is None)
+    monitoring.use_tool_id(tool, "invariant-contracts")
+    monitoring.register_callback(tool, monitoring.events.PY_START, contract_started)
+    monitoring.register_callback(tool, monitoring.events.PY_RETURN, contract_returned)
+    monitoring.register_callback(tool, monitoring.events.PY_UNWIND, contract_unwound)
+    monitoring.set_events(tool, monitoring.events.PY_START | monitoring.events.PY_RETURN | monitoring.events.PY_UNWIND)
+
+
 class Observations(unittest.TestResult):
     def __init__(self):
         super().__init__()
@@ -636,6 +783,8 @@ class Observations(unittest.TestResult):
                    outcome="not_run", diagnostics=[])
         if boundary is not None:
             row.update(boundary_calls=0, boundary_raised=[], assertions=[])
+        if contracts:
+            row.update(calls=[])
         return row, code
 
     def profile(self, frame, event, arg):
@@ -841,6 +990,9 @@ if sys.argv[2:4] != ["-m", "unittest"] or len(sys.argv) < 5:
 selections = sys.argv[4:]
 sys.argv = ["unittest"] + selections
 result = Observations()
+if contracts:
+    # Before any test's module loads, so a call an import makes is recorded.
+    watch_contracts()
 if boundary is not None:
     resolved, codes, callables, receivers, declared = resolve_boundary(boundary)
     boundary_python.update(((code.co_filename, code.co_firstlineno, code.co_name), code) for code in codes)
@@ -871,6 +1023,9 @@ if boundary is not None:
         if entry[1] is None:
             entry[1] = loaded_exception(entry[0])
 suite.run(result)
-emit(dict(type="end", count=count))
+if contracts:
+    emit(dict(type="end", count=count, calls=contract_stray))
+else:
+    emit(dict(type="end", count=count))
 events.close()
 sys.exit(0 if result.wasSuccessful() else 1)
