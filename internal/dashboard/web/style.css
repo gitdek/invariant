@@ -677,10 +677,6 @@ footer p { margin: 0; max-width: 60em; }
   .numbers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .num { min-height: 132px; padding: 16px 14px; }
   .top-right .muted { display: none; }
-  /* Show's choices keep what needs a person there, or how many are open,
-     and leave what's established to the section below, so every choice
-     fits on the bar. */
-  .scope a .ct .est { display: none; }
   /* The updated label has a width of its own, which a phone hasn't room
      for. It shows there only to say something is wrong (#845). */
   #updated { display: none; }
@@ -756,7 +752,10 @@ main.opening .hero > div:first-child { visibility: hidden; animation: opening-wo
 .scope .lbl { font: 600 11px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); margin-right: 4px; }
 .scope a {
   font: 500 13px/1 var(--sans); color: var(--ink2); background: rgba(var(--glass-rgb), 0.7); border: 1px solid var(--line2);
-  border-radius: 999px; padding: 8px 12px; cursor: pointer; display: inline-flex; text-decoration: none; gap: 8px; align-items: center;
+  border-radius: 999px; padding: 8px 12px; cursor: pointer; display: inline-flex; text-decoration: none; gap: 8px; align-items: center; white-space: nowrap;
+  /* A choice is as tall as the row the bar is held at before it fills
+     (#855), whatever its dot and its fonts come to. */
+  min-height: 32px;
   transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s;
 }
 /* A choice brightens rather than lifts when pointed at: a lift moves it out
@@ -766,8 +765,15 @@ main.opening .hero > div:first-child { visibility: hidden; animation: opening-wo
 .scope a .ct { font: 600 11px var(--mono); opacity: 0.7; }
 .scope a .ct .needs { color: var(--people-ink); }
 .scope a[aria-current="page"] .ct .needs { color: inherit; }
-.scope a i.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
-.scope a i.live.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.6); animation: livepulse 1.8s infinite; }
+/* What the bar leaves out when its column is too narrow for it, after what
+   each choice has established: its label and the words beside each count,
+   then the dots (#886). */
+.scope.tight .lbl, .scope.tight a .ct .w { display: none; }
+.scope.tighter a i.lamp { display: none; }
+/* The dot has a class of its own. As .live it took the header badge's
+   padding and border too, and was a 22 by 14 pixel oval (#886). */
+.scope a i.lamp { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ink3); }
+.scope a i.lamp.on { background: var(--accent); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.6); animation: livepulse 1.8s infinite; }
 
 /* ---------- Focus: one repository at a time ---------- */
 /* With everything shown, another repository's items are quieter than
@@ -778,13 +784,10 @@ main.opening .hero > div:first-child { visibility: hidden; animation: opening-wo
 .aside:hover, .aside:focus-within { opacity: 1; }
 .orbit .aside .issue-dot { filter: none; }
 .orbit .aside .issue-label { font-size: 10px; fill: var(--ink3); }
-.leaving { animation: leave 0.36s ease forwards !important; pointer-events: none; }
-@keyframes leave { to { opacity: 0; } }
-.arriving { animation: arrive 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both !important; }
-/* Views fade by opacity alone: a blur on every leaving and arriving element
-   at once is the heaviest thing the page asks of the browser (#781). */
+/* A choice's fades are animations the page starts and lets end, so no
+   class holds one on an element afterwards (#886). A decision new to the
+   graph still comes in by a rule of its own, with this. */
 @keyframes arrive { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .leaving, .arriving { animation: none !important; } }
 @keyframes livepulse { 70% { box-shadow: 0 0 0 8px rgba(var(--accent-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); } }
 
 /* ---------- Needs you ---------- */
@@ -984,7 +987,6 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
   background: radial-gradient(circle, rgba(var(--agent-rgb), 0.12), transparent 65%);
 }
 .livestep.ended::before { background: radial-gradient(circle, rgba(var(--ink-rgb), 0.06), transparent 65%); }
-.livestep.arrive { animation: arrive 0.6s ease-out; }
 .livestep > header { margin-bottom: 18px; }
 .livestep h2 .n { color: var(--accent-ink); }
 .livestep h2 q { color: var(--ink2); font-weight: 500; quotes: "\201C" "\201D"; }
