@@ -229,7 +229,9 @@
       rows.push(`<div ${tag(s.repo)}><span class="k">Main</span><span><code>${esc(m.sha.slice(0, 7))}</code> ${esc(m.title)} · @${esc(m.by)} · <span data-ago="${esc(m.at)}"></span></span></div>`);
       rows.push(`<div ${tag(s.repo)}><span class="k">CI</span><span>${gate}</span></div>`);
     }
-    if (s.receipts && mine) rows.push(`<div ${tag(s.repo)}><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>, <span data-ago="${esc(s.receipts.updated)}"></span></span></div>`);
+    // A time the page wasn't given is left out, never counted from year one.
+    const receiptsWhen = T(s.receipts?.updated) > 0 ? `, <span data-ago="${esc(s.receipts.updated)}"></span>` : "";
+    if (s.receipts && mine) rows.push(`<div ${tag(s.repo)}><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>${receiptsWhen}</span></div>`);
     // The lease: which one watcher may act, and until when it must renew.
     const lease = (l) => T(l.until) > Date.now()
       ? `<code>${esc(l.holder)}</code> holds it until ${esc(clockOf(l.until))}`

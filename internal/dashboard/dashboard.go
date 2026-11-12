@@ -1158,7 +1158,18 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			}
 		}
 		if set := r.src.receipts; set != nil {
-			rs.Receipts = r.runRef(set.run)
+			run := set.run
+			// A set restored from a snapshot saved without its run's times
+			// takes them from the runs read since, when its run is among them.
+			if run.UpdatedAt == "" {
+				for _, known := range r.src.runs {
+					if known.ID == run.ID {
+						run = known
+						break
+					}
+				}
+			}
+			rs.Receipts = r.runRef(run)
 			if i == 0 {
 				snap.Receipts = rs.Receipts
 			}

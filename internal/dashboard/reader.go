@@ -724,7 +724,10 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 		if run == nil {
 			continue
 		}
-		set := &receiptSet{run: github.Run{ID: run.ID, HeadSHA: run.SHA, Name: "gate", Status: run.Status, Conclusion: run.Conclusion},
+		// The saved snapshot holds the run with its title and times. A set
+		// restored without them said its receipts were from year one.
+		set := &receiptSet{run: github.Run{ID: run.ID, HeadSHA: run.SHA, Name: "gate", Status: run.Status, Conclusion: run.Conclusion,
+			DisplayTitle: run.Title, StartedAt: stampOf(run.Started), UpdatedAt: stampOf(run.Updated)},
 			reports: map[string]*verify.Report{}, readers: map[string]readerArtifacts{}, traces: map[string]map[string]tlc.TraceFile{}}
 		var sources []projectSource
 		for _, e := range evidence[r.Name] {
