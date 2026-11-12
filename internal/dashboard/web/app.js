@@ -9,6 +9,9 @@
   const VERSION = new URL(document.currentScript?.src || location.href).searchParams.get("v") || "";
   const $ = (s, el = document) => el.querySelector(s);
   const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // SMIL takes no notice of that preference, so the header's mark is stilled
+  // by hand.
+  if (REDUCED) document.querySelectorAll(".brand svg animate, .brand svg animateTransform").forEach((a) => a.remove());
   const nf = new Intl.NumberFormat("en-US");
 
   // The canvas can't read CSS variables, so the theme's colors are read
@@ -167,11 +170,11 @@
     if (ACT && changed("untaken", [scope, state?.repo])) untaken.paint();
     // The fleet is keyed on what it draws, never on a watcher's heartbeat or
     // lease, which change every minute (#845).
-    if (changed("fleet", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals, r.factory?.running, r.factory?.doing, r.gate?.status]), s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
+    if (changed("fleet", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals, r.factory?.running, r.factory?.doing, r.gate?.status]), s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title, i.waiting?.kind, i.waiting?.failure])])) renderFleet(s);
     // The headline counts what needs a person, which a post from /act
     // changes at once without changing anything else it draws (#175).
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
-    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
+    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title, i.waiting?.kind, i.waiting?.failure]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("assurance", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals])])) renderAssurance(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states, p.receiptMissing])])) renderTabs(s);
@@ -219,7 +222,10 @@
     document.title = other ? `${n.headline} · ${other} · Invariant` : `${n.headline} · Invariant`;
 
     const d = $("#detail");
-    const lastMerged = s.issues.find((i) => i.stage === "merged" && inScope(i.repo));
+    // The issue merged last, by when it closed: the snapshot lists issues in
+    // another order.
+    const lastMerged = s.issues.filter((i) => i.stage === "merged" && i.closed && inScope(i.repo))
+      .reduce((last, i) => (!last || Date.parse(i.closed) > Date.parse(last.closed) ? i : last), null);
     if (n.stage === "idle" && lastMerged) {
       const when = lastMerged.closed ? `, <span data-ago="${esc(lastMerged.closed)}"></span>` : "";
       d.innerHTML = `Last merged <b>${esc(ref(lastMerged.repo, lastMerged.pr))}</b> for ${esc(ref(lastMerged.repo, lastMerged.number))}, <q>${esc(lastMerged.title)}</q>${when}.`;
@@ -320,6 +326,18 @@
     { key: "merged", name: "Merge", sub: "gate passed", color: "accent" },
   ];
   const ORBIT_R = 160;
+  // An issue that needs a person after a failure is drawn where it stopped,
+  // in the color of a failure: at Issue when no draft checked out, at Build
+  // when the factory's own run failed or made no pull request, and at the
+  // Gate when its pull request did.
+  const stoppedAt = (is) => {
+    if (is.stage !== "review") return is.stage;
+    if (is.waiting?.kind === "stuck") return "queued";
+    return ["stopped", "limit", "gate"].includes(is.waiting?.failure) ? "building" : "gate";
+  };
+  // In one repository's view its issues need no repository before their
+  // numbers, on the orbit and the fleet, where labels are tight.
+  const dotLabel = (is) => (scope === is.repo ? `#${is.number}` : ref(is.repo, is.number));
   const stationAngle = (i) => -Math.PI / 2 + (i * Math.PI) / 3;
   const orbit = {
     built: false,
@@ -385,7 +403,7 @@
       }).join("");
       // Open issues sit at their stage.
       const open = mine.filter((i) => i.open);
-      const active = new Set(open.map((i) => (i.stage === "review" ? "gate" : i.stage)));
+      const active = new Set(open.map(stoppedAt));
       document.querySelectorAll("#orbit .station").forEach((el) => {
         el.classList.toggle("active", active.has(el.dataset.key));
         el.querySelector(".halo").setAttribute("opacity", active.has(el.dataset.key) ? "1" : "0");
@@ -393,14 +411,20 @@
       const dots = $("#dots");
       const counts = {};
       const want = open.map((is) => {
-        const k = is.stage === "review" ? "gate" : is.stage;
+        const k = stoppedAt(is);
         const idx = Math.max(0, STATIONS.findIndex((st) => st.key === k));
         const nth = (counts[k] = (counts[k] || 0) + 1) - 1;
-        return { is, angle: stationAngle(idx) + nth * 0.14 };
+        return { is, k, nth, angle: stationAngle(idx) + nth * 0.2 };
       });
-      dots.innerHTML = want.map(({ is }) => {
+      dots.innerHTML = want.map(({ is, k, nth }) => {
         const bug = is.stage === "review";
-        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" x="12" y="4">${esc(ref(is.repo, is.number))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
+        // Issues that share a station sit a label's width apart, and their
+        // labels take turns: one up and to the right, the next centered
+        // beneath its dot, so none covers its neighbor. At the Gate a label
+        // to the right would run into the orbit's caption, so it sits above.
+        const over = `x="0" y="-13" text-anchor="middle"`;
+        const at = counts[k] === 1 ? (k === "gate" ? over : `x="12" y="4"`) : nth % 2 ? `x="0" y="21" text-anchor="middle"` : k === "gate" ? over : `x="12" y="-7"`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" ${at}>${esc(dotLabel(is))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
       }).join("");
       want.forEach(({ is, angle }) => {
         const k = issueKey(is);
@@ -917,6 +941,34 @@
   }
 
   // ---------- lanes ----------
+  // A wait's label sits over the middle of its dashes. Near either end of a
+  // lane, as on a phone, it's moved in so it stays on the card. Offsets are
+  // read, not rectangles, since a segment is scaled while it draws in.
+  function fitWaits() {
+    document.querySelectorAll("#lanes .track").forEach((track) => {
+      const labels = [...track.querySelectorAll(".seg.people .wait")].map((label) => {
+        const seg = label.parentElement;
+        const mid = seg.offsetLeft + seg.offsetWidth / 2, half = label.offsetWidth / 2;
+        const shift = Math.max(0, half - mid) - Math.max(0, mid + half - track.clientWidth);
+        label.style.transform = shift ? `translateX(calc(-50% + ${shift.toFixed(1)}px))` : "";
+        return { label, from: mid + shift - half, to: mid + shift + half, weight: (label.dataset.open ? 1e12 : 0) + Number(label.dataset.secs) };
+      });
+      // Where two labels would overlap, the wait that's still open keeps
+      // its label, or else the longer one. The other is in its dashes' title.
+      const kept = [];
+      labels.sort((a, b) => b.weight - a.weight).forEach((l) => {
+        const clear = kept.every((k) => l.to + 4 <= k.from || l.from >= k.to + 4);
+        l.label.style.visibility = clear ? "" : "hidden";
+        if (clear) kept.push(l);
+      });
+    });
+  }
+  window.addEventListener("resize", fitWaits);
+  // On a phone a lane scaled to the longest one is a speck, so each fills
+  // its own card there, and lanes are drawn again when the width crosses over.
+  const NARROW = matchMedia("(max-width: 560px)");
+  NARROW.addEventListener("change", () => { delete seen.lanes; if (state) render(state); });
+
   let lanesShown = false;
   function renderLanes(all) {
     const box = $("#lanes");
@@ -939,12 +991,12 @@
     };
     box.innerHTML = issues.map((is) => {
       let acc = 0, segs = "", marks = "";
-      const at = [];
+      const at = [], own = Math.max(is.spans.reduce((a, sp) => a + unitsOf(sp), 0), 1);
       is.spans.forEach((sp, k) => {
-        const w = (unitsOf(sp) / widest) * 100;
+        const w = (unitsOf(sp) / (NARROW.matches ? own : widest)) * 100;
         const secs = (T(sp.to) - T(sp.from)) / 1000;
         const cls = `seg ${sp.who}${sp.open ? " open" : ""}`;
-        const inner = sp.who === "people" ? `<span class="wait">${sp.open ? "waiting " : ""}${dur(secs)}</span>` : "";
+        const inner = sp.who === "people" ? `<span class="wait" data-secs="${Math.round(secs)}"${sp.open ? ` data-open="1"` : ""}>${sp.open ? "waiting " : ""}${dur(secs)}</span>` : "";
         segs += `<div class="${cls}" style="width:${w.toFixed(3)}%;transition-delay:${k * 90}ms" title="${esc(sp.who === "people" ? "Waiting on a person" : sp.who === "ci" ? "CI's gate" : "The factory working")} · ${dur(secs)}">${inner}</div>`;
         at.push(acc);
         acc += w;
@@ -971,6 +1023,7 @@
       box.insertAdjacentHTML("beforeend", `<div class="more"><button class="btn" type="button" id="lanesmore">${lanesAll ? "Show fewer" : `Show ${hidden} more`}</button></div>`);
       $("#lanesmore").addEventListener("click", () => { lanesAll = !lanesAll; delete seen.lanes; render(state); });
     }
+    fitWaits();
     if (lanesShown || REDUCED) box.classList.add("shown");
     else {
       const io = new IntersectionObserver((es) => {
@@ -1138,7 +1191,6 @@
       const go = () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); };
       el.addEventListener("click", go);
     });
-    thumbs(s);
   }
 
   // A chart tile frames the top of its poster's chart: its first states,
@@ -1222,36 +1274,6 @@
   window.addEventListener("scroll", () => { scrolled = performance.now(); clearTimeout(peekIntent); peekArmed = null; if (peekTile) hidePeek(true); }, { passive: true });
   window.addEventListener("resize", () => { if (peekTile) hidePeek(true); });
 
-  function thumbs(s) {
-    const ready = new Set(s.projects.filter((p) => p.graph).map((p) => p.model));
-    document.querySelectorAll("canvas.thumb").forEach((cv) => {
-      if (!ready.has(cv.dataset.model)) return;
-      getGraph(cv.dataset.model).then((g) => drawThumb(cv, g)).catch(() => {});
-    });
-  }
-  function drawThumb(cv, g) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2), S = 150;
-    cv.width = S * dpr; cv.height = S * dpr;
-    const c = cv.getContext("2d");
-    c.scale(dpr, dpr);
-    c.translate(S / 2, S / 2);
-    const L = g.layout, pos = { x: new Float32Array(L.n), y: new Float32Array(L.n) };
-    place(L, 6, S / 2 - 6, pos);
-    const big = L.n > 2500;
-    c.lineWidth = 0.5;
-    c.strokeStyle = big ? rgba("ink", V.light ? 0.02 : 0.012) : rgba("ink", V.light ? 0.16 : 0.12);
-    c.beginPath();
-    for (let i = 0; i < g.edges.length; i += 3) {
-      const a = g.edges[i], b = g.edges[i + 1];
-      c.moveTo(pos.x[a], pos.y[a]); c.lineTo(pos.x[b], pos.y[b]);
-    }
-    c.stroke();
-    c.fillStyle = rgba("ink", big ? 0.16 : 0.75);
-    for (let i = 0; i < L.n; i++) c.fillRect(pos.x[i] - 0.6, pos.y[i] - 0.6, 1.2, 1.2);
-    c.fillStyle = rgba("accent", 1);
-    c.beginPath(); c.arc(0, 0, 3, 0, 2 * Math.PI); c.fill();
-  }
-
   // ---------- road ----------
   let roadShown = false;
   function renderRoad(slices) {
@@ -1310,7 +1332,7 @@
     const total = Math.max(1, d.total);
     const doors = { "one-way": "◆ one-way", "two-way": "◇ two-way" };
     $("#decisions").innerHTML = `<div class="bar">${parts.map(([k]) => `<span class="${k}" data-w="${((st[k] || 0) / total) * 100}"></span>`).join("")}</div>
-      <div class="barkey">${parts.map(([k, n, l]) => `<span><b>${n}</b> ${l}</span>`).join("")}</div>
+      <div class="barkey">${parts.map(([k, n, l]) => `<span><i class="${k}"></i><b>${n}</b> ${l}</span>`).join("")}</div>
       <ol class="dlist">${d.latest.map((x) => `<li><span class="id">${esc(x.id)}</span>
         <span class="meta"><span class="st ${esc(x.status)}">${esc(x.status)}</span><span>${esc(doors[x.door] || x.door)}</span><span>${esc(x.date)}</span></span>
         <span class="txt">${esc(x.text)}</span></li>`).join("")}</ol>`;
@@ -1347,7 +1369,19 @@
       this.map.addEventListener("click", (e) => pick(e.target.closest(".dn")));
       this.map.addEventListener("keydown", (e) => {
         const el = e.target.closest(".dn");
-        if (!el || (e.key !== "Enter" && e.key !== " ")) return;
+        if (!el) return;
+        // The graph is one tab stop, and the arrows walk the journal from
+        // there: a decision each way, or to its first or last.
+        const all = [...this.map.querySelectorAll(".dn")], at = all.indexOf(el);
+        const to = { ArrowRight: at + 1, ArrowDown: at + 1, ArrowLeft: at - 1, ArrowUp: at - 1, Home: 0, End: all.length - 1 }[e.key];
+        if (to !== undefined) {
+          e.preventDefault();
+          const next = all[Math.max(0, Math.min(all.length - 1, to))];
+          this.stop(next.dataset.id);
+          next.focus();
+          return;
+        }
+        if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
         pick(el);
       });
@@ -1362,7 +1396,7 @@
       if (repo !== this.repo) {
         this.repo = repo;
         this.known = new Set();
-        this.chosen = "";
+        this.chosen = this.stopped = "";
       }
       this.box.hidden = !g?.nodes?.length;
       if (this.box.hidden) return;
@@ -1409,7 +1443,7 @@
         const a = Math.atan2(y - cy, x - cx), ca = Math.cos(a), sa = Math.sin(a), d = r + 5;
         const anchor = ca > 0.38 ? "start" : ca < -0.38 ? "end" : "middle";
         const ly = sa * d + (anchor !== "middle" ? 3.5 : sa > 0 ? 8.5 : -1.5);
-        return `<g class="dn ${esc(n.status)}${this.fresh.has(n.id) ? " fresh" : ""}" data-id="${esc(n.id)}" transform="translate(${f(x)} ${f(y)})" style="--d:${Math.min(i * 8, 1200)}ms" tabindex="0" role="button" aria-pressed="false" aria-label="${esc(`${n.id}, ${n.status}: ${n.says}`)}">`
+        return `<g class="dn ${esc(n.status)}${this.fresh.has(n.id) ? " fresh" : ""}" data-id="${esc(n.id)}" transform="translate(${f(x)} ${f(y)})" style="--d:${Math.min(i * 8, 1200)}ms" tabindex="-1" role="button" aria-pressed="false" aria-label="${esc(`${n.id}, ${n.status}: ${n.says}`)}">`
           + `<title>${esc(`${n.id} · ${n.status} · ${n.says}`)}</title><circle class="hit" r="${f(Math.max(r + 4, Math.min(s / 2, 18)))}"/>${dot}`
           + `<text class="lbl" x="${f(ca * d)}" y="${f(ly)}" text-anchor="${anchor}">${esc(n.id.replace(/^D-0*(?=\d)/, ""))}</text></g>`;
       }).join("");
@@ -1418,9 +1452,19 @@
       this.fresh = new Set();
       this.choose(this.chosen);
     },
+    // stop makes one decision the graph's tab stop: the one given, else the
+    // chosen one, else the stop it had, else the newest.
+    stop(id) {
+      const all = [...this.map.querySelectorAll(".dn")];
+      const at = all.find((el) => el.dataset.id === id) || all.find((el) => el.dataset.id === this.chosen)
+        || all.find((el) => el.dataset.id === this.stopped) || all[all.length - 1];
+      all.forEach((el) => el.setAttribute("tabindex", el === at ? "0" : "-1"));
+      this.stopped = at ? at.dataset.id : "";
+    },
     choose(id) {
       const n = this.byId.get(id), svg = $("svg", this.map), lit = new Set(n ? n.dependents : []);
       this.chosen = n ? id : "";
+      this.stop(this.chosen);
       if (svg) {
         svg.classList.toggle("choosing", !!n);
         svg.querySelectorAll(".dn").forEach((el) => {
@@ -2211,7 +2255,7 @@
   })();
 
   // ---------- the fleet: every repository as a star system ----------
-  const STAGE_ANGLE = { queued: -90, asking: -30, ratifying: 30, building: 90, gate: 150, review: 150, merged: 210 };
+  const STAGE_ANGLE = { queued: -90, asking: -30, ratifying: 30, building: 90, gate: 150, merged: 210 };
   const langClass = (l) => (l === "typescript" ? "ts-c" : l === "python" ? "py-c" : "go-c");
   function renderFleet(s) {
     const box = $("#fleet");
@@ -2242,7 +2286,6 @@
     </defs>`;
     g += `<circle class="outer" cx="${c}" cy="${c}" r="${R}"/>`;
     for (const [stage, a] of Object.entries(STAGE_ANGLE)) {
-      if (stage === "review") continue;
       const t = (a * Math.PI) / 180;
       g += `<circle class="station2" cx="${c + R * Math.cos(t)}" cy="${c + R * Math.sin(t)}" r="3.2"><title>${stage}</title></circle>`;
     }
@@ -2262,13 +2305,13 @@
     });
     // Comets: open issues on the outer orbit, parked at their stage.
     open.forEach((is, j) => {
-      const a = (STAGE_ANGLE[is.stage] ?? -90) + j * 9, t = (a * Math.PI) / 180;
+      const a = (STAGE_ANGLE[stoppedAt(is)] ?? -90) + j * 9, t = (a * Math.PI) / 180;
       const x = c + R * Math.cos(t), y = c + R * Math.sin(t);
       const cls = is.stage === "review" ? "bug" : is.stage === "asking" || is.stage === "ratifying" ? "people" : "";
       const tailA = ((a - 28) * Math.PI) / 180;
       g += `<path d="M${c + R * Math.cos(tailA)} ${c + R * Math.sin(tailA)} A${R} ${R} 0 0 1 ${x} ${y}" fill="none" stroke="url(#tail${k})" stroke-width="3" stroke-linecap="round" opacity=".75"/>
         <circle class="comet-head ${cls}" cx="${x}" cy="${y}" r="6">${REDUCED ? "" : `<animate attributeName="r" values="5;7.5;5" dur="1.8s" repeatCount="indefinite"/>`}<title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: ${esc(is.stage)}</title></circle>
-        <text class="comet-label" x="${x + (x > c ? 10 : -10)}" y="${y - 10}" text-anchor="${x > c ? "start" : "end"}">${esc(ref(is.repo, is.number))}</text>`;
+        <text class="comet-label" x="${x + (x > c ? 10 : -10)}" y="${y - 10}" text-anchor="${x > c ? "start" : "end"}">#${esc(is.number)}</text>`;
     });
     // A shooting star crosses the system while the factory works in it.
     if (working && !REDUCED) g += `<line x1="40" y1="60" x2="120" y2="20" stroke="url(#tail${k})" stroke-width="2" stroke-linecap="round" opacity="0">
@@ -2279,7 +2322,7 @@
       : `<span>No models yet. The first model it checks will orbit here.</span>`;
     const state = r.factory?.running ? `<span class="chip factory pulse state"><i></i>${working ? "working" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
     return `<article class="system${quiet(r.name)}" ${tag(r.name)}>
-      <header><h3>${esc(r.short)}</h3><span class="meta">${esc(established(r.totals))} · ${open.length} open · ${merged.length} merged</span>${state}</header>
+      <header><h3>${esc(r.short)}</h3><span class="meta">${esc(established(r.totals))} · ${open.length} open · ${r.totals.merged} merged</span>${state}</header>
       <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${esc(established(r.totals))}, ${open.length} open issues">${g}</svg>
       <div class="legend2">${legend}</div></article>`;
   }
@@ -2316,7 +2359,6 @@
     document.querySelector('meta[name="theme-color"]').setAttribute("content", next === "light" ? "#f4f6f8" : "#090c11");
     readTheme();
     if (cosmos.g) { cosmos.prerender(); if (REDUCED) cosmos.frame(performance.now()); }
-    if (state) thumbs(state);
     setTimeout(() => root.classList.remove("theming"), 500);
   });
   document.querySelector('meta[name="theme-color"]').setAttribute("content", V.light ? "#f4f6f8" : "#090c11");
@@ -2339,6 +2381,19 @@
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
+  // A step's runs number from 1 again each time its agent tries again, so
+  // once there's a second try each run is named with its own: "Try 2 · test
+  // run 1". The names are in the runs' order.
+  function runNames(l) {
+    const runs = l.runs || [], tries = [];
+    let at = 1;
+    runs.forEach((r, i) => {
+      if (i && r.run <= runs[i - 1].run) at++;
+      tries.push(at);
+    });
+    const name = runName(l);
+    return runs.map((r, i) => (at > 1 ? `Try ${tries[i]} · ${name.toLowerCase()} ${r.run}` : `${name} ${r.run}`));
+  }
 
   // This choice belongs to this page alone. Reset even a checkbox a
   // browser restores, and clear again before entering its back/forward cache.
@@ -2507,7 +2562,10 @@
 
     const calls = Object.values(l.tools || {}).reduce((a, b) => a + b, 0);
     const thinking = l.thinkingPending ? "Pending" : l.thinkingExact ? nf.format(l.thinking) : `≈${kilo(l.thinking)}`;
-    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", thinking, l.thinkingPending ? "reported when the run ends" : "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
+    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", thinking, l.thinkingPending ? "reported when the run ends" : "tokens"], ["Tool calls", nf.format(calls), ""]];
+    // An agent that doesn't report what it holds in context gets no figure
+    // for it, not a zero.
+    if (l.context) stats.splice(2, 0, ["Holds", kilo(l.context), "tokens in context"]);
     if (l.output) stats.push(["Wrote", kilo(l.output), "output tokens"]);
     put($(".live-stats", el), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
 
@@ -2516,7 +2574,8 @@
 
     renderShellCommands(c);
 
-    put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
+    const named = runNames(l);
+    put($(".live-runs", el), (l.runs || []).map((r, i) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${named[i]} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
     put($(".live-files", el), !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
@@ -2662,9 +2721,10 @@
       const times = m.until ? `${clockOf(m.at)}–${clockOf(m.until)} · ${clock(Math.max(0, (T(m.until) - T(m.at)) / 1000))}` : `${clockOf(m.at)}${!l.ended ? " · running" : ""}`;
       parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(times)}</title></line>`);
     });
+    const named = runNames(l);
     (l.runs || []).forEach((r, i) => {
       if (!r.at) return;
-      const label = `${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? ": " + r.failed.join(", ") : ""}`;
+      const label = `${named[i]} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? ": " + r.failed.join(", ") : ""}`;
       const flash = landing && i >= c.runs && !REDUCED ? " new" : "";
       parts.push(`<g transform="translate(${x(r.at).toFixed(1)} ${bottom + 12})"><path d="M0 -7L7 0L0 7L-7 0Z" class="checkpoint ${r.passed ? "pass" : "fail"}${flash}"><title>${esc(label)}</title></path></g>`);
     });
