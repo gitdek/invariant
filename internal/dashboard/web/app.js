@@ -85,6 +85,31 @@
     liveTick();
   }
 
+  // ---------- nothing animates out of sight ----------
+  // The page's graphics animate all the time, and most of the page is out
+  // of sight at any moment. A section that's scrolled away rests: its SVG
+  // animations pause and its CSS animations stop, and they carry on from
+  // where they were when it comes back (#855). Idle, the page cost a fifth
+  // of the main thread wherever it was scrolled to.
+  const resting = new Set();
+  function rest(el, away) {
+    el.classList.toggle("resting", away);
+    if (away) resting.add(el); else resting.delete(el);
+    for (const svg of el.querySelectorAll("svg")) {
+      if (away) svg.pauseAnimations?.(); else svg.unpauseAnimations?.();
+    }
+  }
+  // What's drawn again in a resting section rests too.
+  function restAgain() {
+    for (const el of resting) {
+      for (const svg of el.querySelectorAll("svg")) if (svg.animationsPaused && !svg.animationsPaused()) svg.pauseAnimations();
+    }
+  }
+  if ("IntersectionObserver" in window) {
+    const sight = new IntersectionObserver((entries) => { for (const e of entries) rest(e.target, !e.isIntersecting); }, { rootMargin: "160px 0px" });
+    for (const el of document.querySelectorAll("main > section")) sight.observe(el);
+  }
+
   // ---------- the loop ----------
   let state = null;
   const seen = {};
@@ -100,6 +125,8 @@
   // between, so a read names the snapshot it has, and the server answers 304
   // with no body when that's still the one (#854).
   let reads = 0, again = 0, stateTag = "";
+  let liveAnswered = () => {};
+  const liveFirst = new Promise((resolve) => { liveAnswered = resolve; });
   async function load() {
     const read = ++reads;
     clearTimeout(again);
@@ -113,6 +140,9 @@
       } else if (!r.ok) throw new Error(`HTTP ${r.status}`);
       else {
         const s = await r.json();
+        // The first draw waits for the running steps too, a moment at most,
+        // so their cards don't arrive later and push the page down (#855).
+        if (!state) await Promise.race([liveFirst, new Promise((resolve) => setTimeout(resolve, 1500))]);
         if (read !== reads) return;
         state = s;
         stateTag = r.headers.get("ETag") || "";
@@ -160,6 +190,7 @@
     if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
     if (live) renderLive();
     tick();
+    restAgain();
   }
 
   // ---------- top and now ----------
@@ -1508,6 +1539,9 @@
   function renderScope(s) {
     const repos = s.repos || [];
     const nav = $("#scope");
+    // The bar keeps a row's height until now, so nothing below it moves
+    // when it fills (#855).
+    nav.classList.remove("pending");
     if (repos.length < 2) { nav.innerHTML = ""; return; }
     const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
     // What needs a person there now, which is what a choice is most often
@@ -2339,6 +2373,7 @@
     } catch (e) {
       if (read === liveReads && ACT) clearShellCommands(true);
     } finally {
+      liveAnswered();
       if (read === liveReads && !document.hidden) liveAgain = setTimeout(loadLive, wait);
     }
   }

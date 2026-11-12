@@ -735,6 +735,11 @@ footer p { margin: 0; max-width: 60em; }
   padding: 10px 0; margin: 0 0 6px; background: linear-gradient(var(--bg) 70%, transparent);
 }
 .scope::-webkit-scrollbar { display: none; }
+/* Until the page knows what the bar holds, it keeps a row's height, so
+   nothing below it moves when it fills (#855). */
+.scope.pending { min-height: 52px; }
+/* A section out of sight rests: nothing in it animates until it's back. */
+.resting, .resting *, .resting *::before, .resting *::after { animation-play-state: paused !important; }
 .scope a { flex: none; }
 .scope .lbl { font: 600 11px/1 var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); margin-right: 4px; }
 .scope a {
