@@ -159,12 +159,7 @@ func TestAssuranceWordsBrowser775(t *testing.T) {
 		handler.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking",
-		"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", "--user-data-dir="+t.TempDir(),
-		"--virtual-time-budget=20000", "--dump-dom", server.URL+"/?repo=ask3d")
-	out, err := cmd.CombinedOutput()
+	out, err := browserDOM(t, browser, server.URL+"/?repo=ask3d", 20000)
 	if err != nil || !strings.Contains(string(out), `data-assurance="passed"`) {
 		i := strings.Index(string(out), `data-assurance="`)
 		t.Fatalf("assurance browser check: %v\n%s", err, string(out)[max(i, 0):min(max(i, 0)+400, len(out))])
