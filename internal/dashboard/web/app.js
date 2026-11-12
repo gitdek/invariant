@@ -178,8 +178,12 @@
 
     const chips = [];
     // What waits on a person is counted here and shown in Needs you (D-0098).
-    const needs = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo)).length;
-    const needsChip = needs ? `<a class="chip people" href="#inbox"><i></i>${needs === 1 ? "1 issue needs you" : `${needs} issues need you`}</a>` : "";
+    // The count is what's new. What has waited more than two days is counted
+    // apart, as Needs you shows it apart.
+    const waiting = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
+    const needs = waiting.filter((i) => !stalled(i)).length, old = waiting.length - needs;
+    const needsText = (needs === 1 ? "1 issue needs you" : needs ? `${needs} issues need you` : "") + (needs && old ? " · " : "") + (old ? `${old} stalled` : "");
+    const needsChip = waiting.length ? `<a class="chip people" href="#inbox"><i></i>${needsText}</a>` : "";
     if (n.stage === "idle") {
       chips.push(s.factory.running ? `<span class="chip factory pulse"><i></i>Watching for issues</span>` : `<span class="chip"><i></i>The watcher is off</span>`);
       if (needsChip) chips.push(needsChip);
@@ -1480,11 +1484,14 @@
     const nav = $("#scope");
     if (repos.length < 2) { nav.innerHTML = ""; return; }
     const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
+    // What needs a person there now, which is what a choice is most often
+    // made for. Without any, the choice says how many issues are open.
+    const needIn = (name) => s.issues.filter((i) => i.open && i.waiting && !stalled(i) && (!name || i.repo === name)).length;
     // Each choice is a link to its view, so it can open in a new tab.
-    const link = (value, label, t, open, live) =>
-      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${esc(briefly(t))}${open ? ` · ${open} open` : ""}</span></a>`;
-    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), repos.some((r) => r.factory?.running)) +
-      repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), r.factory?.running)).join("");
+    const link = (value, label, t, open, need, live) =>
+      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${esc(briefly(t))}${need ? ` · <b class="needs">${need === 1 ? "1 needs you" : `${need} need you`}</b>` : open ? ` · ${open} open` : ""}</span></a>`;
+    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), needIn(""), repos.some((r) => r.factory?.running)) +
+      repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), needIn(r.name), r.factory?.running)).join("");
     nav.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
       if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
@@ -1540,6 +1547,12 @@
       <path d="M-6 0 l4 4 l8 -9" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
       <g>${REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="7s" repeatCount="indefinite"/>`}<circle cx="15" cy="0" r="2.4" style="fill:var(--ink)"/></g></svg>`;
   }
+  // What has waited on a person for more than two days isn't today's work.
+  // Needs you folds it under a line of its own, and the headline and the
+  // Show choices count what's new.
+  const STALLED_AFTER = 2 * 24 * 3600 * 1000;
+  const stalled = (i) => Date.now() - new Date(i.waiting.since).getTime() > STALLED_AFTER;
+  let stalledOpen = false;
   function renderInbox(s) {
     const items = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
     // On /act, each issue acted on shows after those that wait, as the
@@ -1554,13 +1567,29 @@
       toOpen = "";
       return;
     }
-    // Invariant's own first, then the longest wait first: the order the
-    // factory took them in. What was posted comes in the order it was.
-    const first = (i) => (i.repo === s.repo ? 0 : 1);
+    // Each repository's cards together, in the order Show lists them, then
+    // the longest wait first: the order the factory took them in. What was
+    // posted comes in the order it was.
+    const places = new Map((s.repos || []).map((r, k) => [r.name, k]));
+    const first = (i) => places.get(i.repo) ?? places.size;
     items.sort((a, b) => first(a) - first(b) || new Date(a.waiting.since) - new Date(b.waiting.since));
     done.sort((a, b) => first(a) - first(b) || new Date(a.acted.at) - new Date(b.acted.at));
+    // What has waited more than two days folds under a line of its own, so
+    // the list a person reads first is what's new. A card the page opened
+    // at is shown wherever it is.
+    const fresh = items.filter((i) => !stalled(i)), old = items.filter(stalled);
+    if (toOpen && old.some((i) => issueKey(i) === toOpen)) stalledOpen = true;
+    // With everything shown, each repository's cards sit under its name and
+    // how many there are. None is dimmed: every one waits on a person.
+    const named = scope === "all" && new Set(items.map((i) => i.repo)).size > 1;
+    const short = (repo) => (s.repos || []).find((r) => r.name === repo)?.short || repo;
+    const cards = (list) => list.map((i, k) => (named && (k === 0 || list[k - 1].repo !== i.repo)
+      ? `<h3 class="need-repo" ${tag(i.repo)}>${esc(short(i.repo))}<span>${list.filter((j) => j.repo === i.repo).length}</span></h3>` : "") + needCard(i)).join("");
+    const folded = old.length ? `<details class="stalled"${stalledOpen ? " open" : ""}><summary>${old.length === 1 ? "1 issue has" : `${old.length} issues have`} waited more than two days</summary>${cards(old)}</details>` : "";
+    const nothingNew = !fresh.length && old.length ? `<div class="calm">${calmGlyph()}<span>Nothing new needs you. What has waited more than two days is below.</span></div>` : "";
     const disclosures = new Map([...box.querySelectorAll("[data-plan-sources]")].map((el) => [planDisclosureKey(el), el]));
-    box.innerHTML = (items.length ? batchBanner(items) + items.map(needCard).join("") : calm) + done.map(actedCard).join("");
+    box.innerHTML = (items.length ? batchBanner(items) + nothingNew + cards(fresh) + folded : calm) + done.map(actedCard).join("");
+    box.querySelector("details.stalled")?.addEventListener("toggle", (e) => { stalledOpen = e.currentTarget.open; });
     wirePlanSources(box, disclosures, items);
     if (toOpen) openAt(box);
   }
