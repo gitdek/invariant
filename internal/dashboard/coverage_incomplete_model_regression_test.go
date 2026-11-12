@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func TestIncompleteModelCoverageDisplaysUnknown802(t *testing.T) {
 				r.Conformance = &result
 			} else {
 				r.Application = &verify.PythonApplicationReport{Conformance: []verify.PythonApplicationConformance{{
-					Key: verify.PythonApplicationInvocationKey{Target: "app", Check: "drive", ID: "one"},
+					Key:    verify.PythonApplicationInvocationKey{Target: "app", Check: "drive", ID: "one"},
 					Bounds: r.Bounds, Result: result,
 				}}}
 				prefix = "| <code>app</code> · <code>drive</code> · <code>one</code> |"
@@ -56,7 +57,9 @@ func TestIncompleteModelCoverageDisplaysUnknown802(t *testing.T) {
 				t.Fatalf("dashboard supplied incomplete model coverage: %+v", cs)
 			}
 			page := makeReader(readerEvidence{Report: &r})
-			visible := dashboardText802(page.html)
+			// The page's own stylesheet holds percentages, and isn't text
+			// a reader sees.
+			visible := dashboardText802(regexp.MustCompile(`(?s)<style>.*?</style>`).ReplaceAll(page.html, nil))
 			if !strings.Contains(visible, "coverage unknown") || !strings.Contains(visible, "tested (sampled)") || strings.Contains(visible, "100%") || strings.Contains(visible, "3/3") {
 				t.Fatalf("evidence page misstates coverage: %s", visible)
 			}

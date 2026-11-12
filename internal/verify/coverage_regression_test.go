@@ -36,7 +36,7 @@ func TestCoverageRejectsIncompleteModelExploration802(t *testing.T) {
 						r.Conformance = &result
 					} else {
 						r.Application = &verify.PythonApplicationReport{Conformance: []verify.PythonApplicationConformance{{
-							Key: verify.PythonApplicationInvocationKey{Target: "app", Check: "drive", ID: "one"},
+							Key:    verify.PythonApplicationInvocationKey{Target: "app", Check: "drive", ID: "one"},
 							Bounds: r.Bounds, Mode: mode, Result: result,
 						}}}
 					}
