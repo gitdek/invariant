@@ -96,19 +96,26 @@
   }
   // /act reads the snapshot again as soon as GitHub takes a post (#175), and
   // the newest read is the one drawn, and the one that reads again later.
-  let reads = 0, again = 0;
+  // The snapshot changes once per refresh and is read several times in
+  // between, so a read names the snapshot it has, and the server answers 304
+  // with no body when that's still the one (#854).
+  let reads = 0, again = 0, stateTag = "";
   async function load() {
     const read = ++reads;
     clearTimeout(again);
     let wait = 15000;
     try {
-      const r = await fetch("/api/state.json", { cache: "no-store" });
+      const r = await fetch("/api/state.json", { cache: "no-store", headers: stateTag ? { "If-None-Match": stateTag } : {} });
       if (r.status === 503) wait = 3000;
-      else if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      else if (r.status === 304) {
+        // Nothing changed, so nothing is drawn again.
+        if (read === reads) $("#updated").classList.remove("lost");
+      } else if (!r.ok) throw new Error(`HTTP ${r.status}`);
       else {
         const s = await r.json();
         if (read !== reads) return;
         state = s;
+        stateTag = r.headers.get("ETag") || "";
         $("#updated").classList.remove("lost");
         if (ACT) untaken.refresh();
         render(state);
@@ -118,7 +125,8 @@
       u.classList.add("lost");
       u.textContent = u.title = "can't reach the server; retrying";
     }
-    if (read === reads) again = setTimeout(load, wait);
+    // A hidden page reads nothing until it's shown again.
+    if (read === reads && !document.hidden) again = setTimeout(load, wait);
   }
 
   function render(s) {
@@ -2331,9 +2339,16 @@
     } catch (e) {
       if (read === liveReads && ACT) clearShellCommands(true);
     } finally {
-      if (read === liveReads) liveAgain = setTimeout(loadLive, wait);
+      if (read === liveReads && !document.hidden) liveAgain = setTimeout(loadLive, wait);
     }
   }
+  // A page nobody is looking at stops both of its reads, and reads at once
+  // when it's shown again (#854).
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(again);
+    clearTimeout(liveAgain);
+    if (!document.hidden) { load(); loadLive(); }
+  });
 
   // The steps to show: the ones running in the chosen repositories, or else
   // the ones that ended, in the live view's order.
