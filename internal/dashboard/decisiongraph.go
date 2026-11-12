@@ -80,7 +80,7 @@ func BuildDecisionGraph(project string, journal map[string][]byte) (*DecisionGra
 	short := func(id string) string { return strings.TrimPrefix(id, project+"/") }
 	g := &DecisionGraph{Nodes: []DecisionNode{}, Edges: []DecisionEdge{}}
 	for _, d := range all {
-		n := DecisionNode{ID: short(d.ID), Date: d.Date, Door: d.Door, Status: d.Status, Who: d.Who, Text: plain(d.Text), Dependents: []string{}}
+		n := DecisionNode{ID: short(d.ID), Date: d.Date, Door: d.Door, Status: d.Status, Who: madeBy(d.Who), Text: plain(d.Text), Dependents: []string{}}
 		n.Says = firstSentence(n.Text)
 		deps, err := store.Dependents(d.ID)
 		if err != nil {
