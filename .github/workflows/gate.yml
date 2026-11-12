@@ -262,18 +262,14 @@ jobs:
           fi
 
       # Each project is a directory and a name, its last element, which names
-      # its receipts. The factory's own projects, the heaviest, come first, so
-      # they start first when GitHub has fewer runners free than projects.
-      # The slowest of them comes before the rest: the gate takes as long as
-      # it does, and when this job ends the tests' shards hold every runner
-      # but the one it frees. Third in line, that project started 6 to 11
-      # minutes into a run.
+      # its receipts. Their order is only how a run lists them: GitHub starts
+      # waiting jobs in no order a workflow sets. Listed first, the slowest
+      # project started last of eighteen (#852).
       - name: Find the projects
         id: find
         env:
           BASE: ${{ github.base_ref }}
           FACTORY: ${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'invariant/') && steps.kind.outputs.plumbing != 'true' }}
-          SLOWEST: factory/protocol
         run: |
           manifests=$(git ls-files '*/.invariant/invariant.json')
           if [ "$FACTORY" = "true" ]; then
@@ -286,8 +282,7 @@ jobs:
             done | sort -u)
             if [ -z "$manifests" ]; then echo "The pull request changes no project."; exit 1; fi
           fi
-          dirs=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##' | sort -r)
-          projects=$({ printf '%s\n' "$dirs" | grep -Fx "$SLOWEST" || true; printf '%s\n' "$dirs" | grep -Fxv "$SLOWEST" || true; } |
+          projects=$(printf '%s\n' $manifests | sed 's#/.invariant/invariant.json$##' | sort -r |
             jq -Rnc '[inputs | select(length > 0) | {dir: ., name: (split("/") | last)}]')
           echo "projects=$projects" >> "$GITHUB_OUTPUT"
           echo "$projects" | jq -r '.[].dir'
@@ -295,8 +290,8 @@ jobs:
   project:
     # Each project's gate on a runner of its own, so verifying takes as long
     # as the slowest project rather than their sum, and a new project adds
-    # no time to it (D-0155). factory/protocol, the slowest, takes about
-    # 10 minutes, and the rest 1 to 4.
+    # no time to it (D-0155). factory/protocol, the slowest, takes 14 to 22
+    # minutes, and the rest 1 to 9.
     name: ${{ matrix.project.dir }}
     needs: projects
     if: ${{ !cancelled() && needs.projects.result == 'success' && needs.projects.outputs.projects != '[]' }}
