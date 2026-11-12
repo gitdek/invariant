@@ -166,8 +166,7 @@ func largerExplorer(src []byte, sizes map[string]int) []byte {
 // agreementOnly runs just the agreement step, in the same sandbox.
 const agreementOnly = `exec 2>&1
 cd /src
-cp /agree/zz_invariant_agreement_test.go "./$PKG/" && go test -count=1 -run '^TestInvariantAgreement$' -v "./$PKG" ; echo "@@invariant agree=$?"
-`
+` + agreementStep
 
 // exploreLarger explores the package again with its explorer one size
 // larger.
@@ -223,15 +222,18 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 			return Exploration{}, fmt.Errorf("running the Go sandbox: %w", err)
 		}
 	}
-	s, err := splitMarkers(out.String(), 1)
+	return parseLarger(out.String())
+}
+
+// parseLarger reads the output of the sandbox that runs the agreement step
+// alone.
+func parseLarger(out string) (Exploration, error) {
+	s, err := splitMarkers(out, 1)
 	if err != nil {
 		return Exploration{}, err
 	}
-	if m := explored.FindStringSubmatch(s[0].out); m != nil && s[0].code == 0 {
-		e := Exploration{OK: true}
-		e.States, _ = strconv.ParseInt(m[1], 10, 64)
-		e.Depth, _ = strconv.Atoi(m[2])
-		return e, nil
+	if states, depth, ok := agreement(s[0].out); ok && s[0].code == 0 {
+		return Exploration{OK: true, States: states, Depth: depth}, nil
 	}
 	return Exploration{Message: lastLines(s[0].out, 20)}, nil
 }

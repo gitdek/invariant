@@ -246,13 +246,35 @@ const sandboxScript = `exec 2>&1
 cd /src
 go vet ./... ; echo "@@invariant vet=$?"
 go test -count=1 ./... ; echo "@@invariant test=$?"
-cp /agree/zz_invariant_agreement_test.go "./$PKG/" && go test -count=1 -run '^TestInvariantAgreement$' -v "./$PKG" ; echo "@@invariant agree=$?"
+` + agreementStep
+
+// agreementStep runs the gate's harness in the package, alone. The package's
+// own tests ran in the step before. They aren't compiled into this one,
+// where a TestMain or an init of theirs would run in the harness's process,
+// and could print a result of its own or rewrite the recording the harness
+// wrote (#818). The sandbox works on a copy, so removing them changes
+// nothing a person keeps.
+const agreementStep = `rm -f "./$PKG"/*_test.go && cp /agree/zz_invariant_agreement_test.go "./$PKG/" && go test -count=1 -run '^TestInvariantAgreement$' -v "./$PKG" ; echo "@@invariant agree=$?"
 `
 
 var (
 	marker   = regexp.MustCompile(`(?m)@@invariant (\w+)=(\d+)$`)
-	explored = regexp.MustCompile(`invariant-agreement states=(\d+) depth=(\d+)`)
+	explored = regexp.MustCompile(`(?m)^invariant-agreement states=(\d+) depth=(\d+)$`)
 )
+
+// agreement reads the harness's result from the agreement step's output: how
+// many states it reached, and how deep. The harness prints it once, on a
+// line of its own, so output that holds it twice, or inside another line,
+// holds no result the gate takes.
+func agreement(out string) (states int64, depth int, ok bool) {
+	found := explored.FindAllStringSubmatch(strings.ReplaceAll(out, "\r\n", "\n"), -1)
+	if len(found) != 1 {
+		return 0, 0, false
+	}
+	states, _ = strconv.ParseInt(found[0][1], 10, 64)
+	depth, _ = strconv.Atoi(found[0][2])
+	return states, depth, true
+}
 
 func (g Go) Check(ctx context.Context, p *project.Project) (Build, Evidence, error) {
 	return recordingBytes(g.checkRecording(ctx, p))
@@ -392,10 +414,8 @@ func parseSandbox(out string, tries bool) (Build, Exploration, error) {
 	b.Passed = vet == 0 && test == 0
 	b.Output = strings.TrimSpace(vetOut + "\n" + testOut)
 	var e Exploration
-	if m := explored.FindStringSubmatch(agreeOut); m != nil && agreed == 0 {
-		e.OK = true
-		e.States, _ = strconv.ParseInt(m[1], 10, 64)
-		e.Depth, _ = strconv.Atoi(m[2])
+	if states, depth, ok := agreement(agreeOut); ok && agreed == 0 {
+		e.OK, e.States, e.Depth = true, states, depth
 	} else {
 		e.Message = exploreProblem(tries) + ":\n" + lastLines(agreeOut, 20)
 	}
