@@ -684,3 +684,12 @@ func parseTime(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339, s)
 	return t
 }
+
+// stampOf writes a time as GitHub does, and no time as nothing, so that
+// parseTime reads it back as it was.
+func stampOf(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
