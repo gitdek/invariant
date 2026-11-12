@@ -202,7 +202,9 @@
   function renderTop(s) {
     const f = $("#factory");
     f.classList.toggle("on", !!s.factory.running);
-    f.innerHTML = `<i></i>${s.factory.running ? "Factory on" : "Factory off"}`;
+    // Written only when it changes: made again at every draw, its dot's
+    // glow started over each time (#886).
+    put(f, `<i></i>${s.factory.running ? "Factory on" : "Factory off"}`);
     f.title = s.factory.running && s.factory.started ? `Watching ${s.repo} since ${stamp(s.factory.started)}` : "The watcher isn't running. It runs when @gitdek starts it.";
   }
 
@@ -211,7 +213,11 @@
     // Find the issue numbers first, then escape the rest. Escaping first
     // turns an apostrophe into &#39;, whose #39 would look like an issue.
     const html = n.headline.split(/(#\d+)/).map((part) => (/^#\d+$/.test(part) ? `<span class="n">${part}</span>` : esc(part))).join("");
-    if (h.innerHTML !== html) {
+    // Compared with what was last written here. What the browser gives
+    // back spells an apostrophe its own way, so a headline that held one
+    // never matched, and came in again at every draw (#886).
+    if (h.dataset.html !== html) {
+      h.dataset.html = html;
       h.innerHTML = html;
       h.classList.remove("swap");
       void h.offsetWidth;
@@ -1571,7 +1577,57 @@
   const totalsOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.totals) || s.totals;
   // And their tiles, in the server's words.
   const tilesOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.tiles) || s.tiles || [];
-  let fading = 0;
+  let fading = 0, fades = [];
+  // What a choice leaves out fades away, and what it brings back fades in,
+  // by opacity alone: a blur on every element at once is the heaviest thing
+  // the page asks of a browser (#781). Each fade is an animation the page
+  // starts and lets end. A class that held a finished animation stayed on
+  // every element it had touched until that part of the page was drawn
+  // again, or the page was read again (#886).
+  //
+  // A fade names one end only, nothing, or where a fade away had got to.
+  // The other end is whatever the element shows by its own rules at each
+  // moment, so a card that has an entrance of its own comes in with both
+  // together. Faded to the opacity it had when the fade began, a card
+  // whose entrance began at nothing stayed unseen for the whole fade and
+  // then appeared at once.
+  function fade(el, away, from = 0) {
+    try {
+      return el.animate(away ? { opacity: 0 } : { opacity: from, offset: 0 },
+        { duration: away ? 360 : 500, easing: away ? "ease" : "cubic-bezier(0.2, 0.8, 0.2, 1)", fill: away ? "forwards" : "none" });
+    } catch (e) {
+      // A browser that can't fade this way shows the change at once.
+      return null;
+    }
+  }
+  // What has faded away stays away until the page is drawn for the choice.
+  // Then every such fade ends, so nothing drawn again, kept or brought back
+  // by a second choice stays unseen.
+  function endFades() {
+    for (const a of fades) a.cancel();
+    fades = [];
+  }
+  // The section a reader is in, and where its top is, so that it's there
+  // again once the page is drawn for a choice: what's above it grows and
+  // shrinks with what's shown, and moved the page thousands of pixels.
+  function placeNow() {
+    const under = $("#scope").getBoundingClientRect().bottom;
+    const el = [...document.querySelectorAll("main > section")].find((s) => s.getClientRects().length && s.getBoundingClientRect().bottom > under + 1);
+    return el ? { el, top: el.getBoundingClientRect().top } : null;
+  }
+  function keepPlace(place) {
+    if (!place) return;
+    // A section the choice leaves out gives its place to the one before it.
+    let el = place.el, same = true;
+    while (el && (el.tagName !== "SECTION" || !el.getClientRects().length)) { el = el.previousElementSibling; same = false; }
+    if (!el) return;
+    const under = $("#scope").getBoundingClientRect().bottom, box = el.getBoundingClientRect();
+    // Its top goes back where it was. If that leaves it out of sight, since
+    // it's shorter now, it starts under the bar.
+    let by = same ? box.top - place.top : box.top - under;
+    if (same && box.bottom - by < under + 40) by = box.top - under;
+    if (Math.abs(by) >= 1) scrollBy(0, by);
+  }
   // The scope settles before anything is drawn, so what each part last drew
   // for is the scope it drew: on the repository the address asked for, or on
   // everything when the page doesn't show the one chosen. The address follows
@@ -1593,42 +1649,108 @@
     try { localStorage.setItem("invariant-scope", v); } catch (e) {}
     if (!state) return;
     address(push);
+    markScope();
+    // A choice made before the last one was drawn takes its place. What
+    // had started to fade away for that one, and is shown again by this
+    // one, comes back from where it had got to.
+    clearTimeout(fading);
+    const partly = new Map(fades.map((a) => [a.effect.target, getComputedStyle(a.effect.target).opacity]));
+    endFades();
+    const place = placeNow();
     // What the choice leaves out fades first. Then the page is drawn for it,
-    // and what comes back fades in.
+    // with the reader's section where it was, and what comes back fades in.
+    // Only what's in sight fades: when nothing there leaves, the page is
+    // drawn for the choice at once.
+    const inSight = (el) => !el.closest(".resting");
     const draw = () => {
       render(state);
+      endFades();
+      keepPlace(place);
       if (REDUCED || was === "all") return;
       document.querySelectorAll("[data-repo]").forEach((el) => {
-        if (el.dataset.repo && el.dataset.repo !== was) el.classList.add("arriving");
+        if (el.dataset.repo && el.dataset.repo !== was && inSight(el)) fade(el, false, partly.get(el) || 0);
       });
     };
-    const leaving = [...document.querySelectorAll("[data-repo]")].filter((el) => el.dataset.repo && !inScope(el.dataset.repo));
-    clearTimeout(fading);
+    const leaving = [...document.querySelectorAll("[data-repo]")].filter((el) => el.dataset.repo && !inScope(el.dataset.repo) && inSight(el));
     if (REDUCED || !leaving.length) return draw();
-    leaving.forEach((el) => el.classList.add("leaving"));
+    fades = leaving.map((el) => fade(el, true)).filter(Boolean);
     fading = setTimeout(draw, 380);
   }
+  // The bar says as much as fits its column, the same for every choice, so
+  // no choice is cut off and choosing one never moves the bar. First what
+  // each choice has established goes, from the end: tested, then checked,
+  // then proved. Then the bar's own label and the words beside each count,
+  // and last the dots. The page's column is 1,200 pixels at most and three
+  // choices in full need more, so the last one was cut off, and choosing it
+  // scrolled the bar sideways, out from under the pointer, where it stayed
+  // (#886). What's left out is hidden, not removed, and each choice's
+  // tooltip and its name for a screen reader keep the words in full. A bar
+  // that still doesn't fit scrolls sideways, as before.
+  let fitted = -1;
+  function fitScope() {
+    const nav = $("#scope"), all = [...nav.querySelectorAll(".est")].map((est) => ({ parts: [...est.querySelectorAll(".p")], then: est.querySelector(".then") }));
+    const fits = () => nav.scrollWidth <= nav.clientWidth + 1;
+    fitted = nav.clientWidth;
+    nav.classList.remove("tight", "tighter");
+    const most = Math.max(0, ...all.map((est) => est.parts.length));
+    for (let drop = 0; drop <= most; drop++) {
+      for (const { parts, then } of all) {
+        const keep = Math.max(0, parts.length - drop);
+        parts.forEach((p, i) => { p.hidden = i >= keep; });
+        if (then) then.hidden = !keep;
+      }
+      if (fits()) return;
+    }
+    nav.classList.add("tight");
+    if (!fits()) nav.classList.add("tighter");
+  }
+  // The fit is made again when the bar's width changes, and when the page's
+  // fonts arrive, since they're wider or narrower than what stood in for
+  // them.
+  window.addEventListener("resize", () => { if ($("#scope").clientWidth !== fitted) fitScope(); });
+  document.fonts?.addEventListener?.("loadingdone", fitScope);
+  // The current choice is marked on the bar as it stands, at once. The page
+  // under it is drawn a moment later, once what the choice leaves out has
+  // faded, and until then the bar still marked the last choice (#886).
+  function markScope() {
+    for (const a of document.querySelectorAll("#scope a")) {
+      if (a.dataset.scope === scope) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
+    }
+  }
+  // One listener hears every choice, so the bar's links can stay as they
+  // are from one draw to the next. Each is a link to its view, so a click
+  // that asks for a new tab or window is left to the browser.
+  $("#scope").addEventListener("click", (e) => {
+    const a = e.target.closest?.("a[data-scope]");
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    setScope(a.dataset.scope);
+  });
   function renderScope(s) {
     const repos = s.repos || [];
     const nav = $("#scope");
     // The bar keeps a row's height until now, so nothing below it moves
     // when it fills (#855).
     nav.classList.remove("pending");
-    if (repos.length < 2) { nav.innerHTML = ""; return; }
+    if (repos.length < 2) { put(nav, ""); return; }
     const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
     // What needs a person there now, which is what a choice is most often
     // made for. Without any, the choice says how many issues are open.
     const needIn = (name) => s.issues.filter((i) => i.open && i.waiting && !stalled(i) && (!name || i.repo === name)).length;
     // Each choice is a link to its view, so it can open in a new tab.
     const link = (value, label, t, open, need, live) =>
-      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct"><span class="est">${esc(briefly(t))}${need || open ? " · " : ""}</span>${need ? `<b class="needs">${need === 1 ? "1 needs you" : `${need} need you`}</b>` : open ? `${open} open` : ""}</span></a>`;
-    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), needIn(""), repos.some((r) => r.factory?.running)) +
+      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}" aria-label="${esc(`${label}: ${established(t)}${need ? `, ${need === 1 ? "1 needs you" : `${need} need you`}` : open ? `, ${open} open` : ""}`)}"><i class="lamp${live ? " on" : ""}"></i>${esc(label)}<span class="ct"><span class="est">${briefly(t).split(" · ").map((part, i) => `<span class="p">${i ? " · " : ""}${esc(part)}</span>`).join("")}${need || open ? `<span class="then"> · </span>` : ""}</span>${need ? `<b class="needs">${need}<span class="w">${need === 1 ? " needs you" : " need you"}</span></b>` : open ? `${open}<span class="w"> open</span>` : ""}</span></a>`;
+    const html = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), needIn(""), repos.some((r) => r.factory?.running)) +
       repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), needIn(r.name), r.factory?.running)).join("");
-    nav.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
-      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      e.preventDefault();
-      setScope(a.dataset.scope);
-    }));
+    // The choices are written only when what they say changes, and the
+    // current one is marked on them. Written again at every choice, the one
+    // under the pointer was a new element each time: its dot's glow started
+    // over, and it lost the pointer until the pointer moved (#886).
+    const written = nav.dataset.html !== html;
+    put(nav, html);
+    markScope();
+    if (written) fitScope();
     // On a narrow screen the bar scrolls sideways, and the current choice's
     // start stays in view (#845). Only the bar moves, never the page.
     const current = nav.querySelector('a[aria-current="page"]');
@@ -2537,7 +2659,6 @@
       let c = cards.get(keys[i]);
       if (!c) {
         const el = $("#live-card").content.firstElementChild.cloneNode(true);
-        el.classList.add("arrive");
         if (shellToggle) $(".fineprint", el).textContent = "Counts, times and file paths from the agent's transcript, read every few seconds while it works. Shell commands appear only when you enable them.";
         c = { key: keys[i], el, strip: $(".strip", el), marks: 0, runs: 0, lit: "" };
         cards.set(c.key, c);
@@ -2550,6 +2671,10 @@
         });
       }
       if (box.children[i] !== c.el) box.insertBefore(c.el, box.children[i] || null);
+      // A new card comes in once. A class that held the entrance played it
+      // again whenever the card, or the section it's in, moved on the page,
+      // as both do when a choice in Show changes which steps show (#886).
+      if (!c.l && !REDUCED && c.el.animate) c.el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 600, easing: "ease-out" });
       c.l = l;
       renderCard(c);
     });

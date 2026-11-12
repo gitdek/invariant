@@ -135,7 +135,7 @@ const steadyBrowserCheck = `
     const spins = [...fleet.querySelectorAll("animateTransform")];
     assert(spins.length > 0 && spins.some((a) => Number(a.getAttribute("from")) % 120 !== 0), "the fleet's bodies start again from their first angle: " + spins.slice(0, 4).map((a) => a.getAttribute("from")).join(" "));
     // On a phone the updated label is left out, unless something is wrong.
-    let hidden = false, shown = false, brief = false;
+    let hidden = false, shown = false;
     for (const sheet of document.styleSheets) {
       let rules = [];
       // A sheet from another origin keeps its rules to itself.
@@ -145,13 +145,12 @@ const steadyBrowserCheck = `
         for (const inner of rule.cssRules) {
           if (inner.selectorText === "#updated" && inner.style.display === "none") hidden = true;
           if (/#updated\.lost/.test(inner.selectorText || "") && inner.style.display === "inline-block") shown = true;
-          if (inner.selectorText === ".scope a .ct .est" && inner.style.display === "none") brief = true;
         }
       }
     }
     assert(hidden && shown, "at a phone's width the updated label isn't left out, or can't say the server is lost");
-    // And Show's choices leave out what's established there, so each fits.
-    assert(brief, "at a phone's width Show's choices keep everything they say on a wide screen");
+    // Show's choices fit a phone by the rule that fits them to any width,
+    // which has a check of its own (#886).
     document.body.dataset.steadyCheck = "passed";
   }
   addEventListener("DOMContentLoaded", () => run().catch((error) => {
