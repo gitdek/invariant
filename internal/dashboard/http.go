@@ -116,7 +116,7 @@ func (s *Server) Handler() http.Handler {
 		case readerPath.MatchString(p):
 			s.serveReader(w, r)
 		case p == "/" || p == "/index.html":
-			page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
+			page := pageFor(len(s.Repos))
 			h.Set("Cache-Control", "no-cache")
 			h.Set("Content-Type", "text/html; charset=utf-8")
 			w.Write([]byte(page))

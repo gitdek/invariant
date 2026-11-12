@@ -697,6 +697,8 @@ footer p { margin: 0; max-width: 60em; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+  /* No animation shows the opening page's words later, so they show at once. */
+  main.opening .hero > div:first-child { visibility: visible; }
   .seg { transform: none; }
   .mark { opacity: 1; }
 }
@@ -736,6 +738,18 @@ footer p { margin: 0; max-width: 60em; }
 /* Until the page knows what the bar holds, it keeps a row's height, so
    nothing below it moves when it fills (#855). */
 .scope.pending { min-height: 52px; }
+/* A page that shows one repository has no bar, and no strip where one
+   would be. */
+.scope:empty:not(.pending) { display: none; }
+/* Until the first snapshot is drawn, the page shows nothing the snapshot
+   will move (#867). A section drawn empty is pushed down when the hero
+   fills, and the hero's words, centered beside the orbit, move up as lines
+   join them: together a layout shift of 0.4 to 0.5. So the sections and the
+   footer wait, and the words wait unseen. After a second they show, so a
+   slow page still says it's reading. */
+main.opening > section:not(.hero), main.opening + footer { display: none; }
+main.opening .hero > div:first-child { visibility: hidden; animation: opening-words 0s linear 1s forwards; }
+@keyframes opening-words { to { visibility: visible; } }
 /* A section out of sight rests: nothing in it animates until it's back. */
 .resting, .resting *, .resting *::before, .resting *::after { animation-play-state: paused !important; }
 .scope a { flex: none; }
@@ -809,6 +823,13 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .need-top .since { margin-left: auto; font: 500 12px var(--mono); color: var(--ink3); }
 .need .ask { margin: 10px 0 4px; font-size: 15px; color: var(--ink); line-height: 1.5; }
 .need .ask b { font-family: var(--mono); color: var(--people-ink); margin-right: 6px; }
+/* What the card's pull request is now, ahead of how it was when the factory
+   stopped (#865). */
+.need .now { margin: 10px 0 0; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line2); font-size: 14.5px; line-height: 1.5; color: var(--ink); }
+.need .now strong { font-weight: 600; }
+.need .now.good { border-color: rgba(var(--accent-rgb), 0.5); background: var(--accent-soft); }
+.need .now.bad { border-color: rgba(var(--bug-rgb), 0.5); background: var(--bug-soft); }
+.need .cmd.review { text-decoration: none; border-color: rgba(var(--accent-rgb), 0.6); font-family: var(--sans); font-weight: 600; }
 .need .ask strong { color: var(--ink); font-weight: 600; }
 .need ol.planned { margin: 8px 0 4px; padding-left: 22px; display: grid; gap: 4px; font-size: 14.5px; color: var(--ink2); }
 .need .ask b.same, .batch .ask b.same { font-family: inherit; font-weight: 600; color: var(--accent-ink); margin-right: 4px; }
