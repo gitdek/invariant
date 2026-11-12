@@ -33,6 +33,9 @@ func TestGraphicsOutOfSightRestAndThePageOpensInPlace(t *testing.T) {
 	other := snap.Repos[0]
 	other.Name, other.Short, other.Primary = "gitdek/other", "other", false
 	snap.Repos = append(snap.Repos, other)
+	// The dashboard serves two repositories, so its page keeps the Show
+	// bar's row. A page of one keeps none (#867).
+	s.Repos = append(s.Repos, &Repo{Name: other.Name})
 	script := fmt.Sprintf("const fixture = %s;\n", reader631JSON(t, snap)) + restBrowserCheck
 	handler := s.Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -119,6 +119,25 @@ type Waiting struct {
 	// the plan's ratification is gone, so the card offers only drafting the
 	// plan again (D-0220, D-0238).
 	Gone bool `json:"gone,omitempty"`
+	// Now is the card's pull request as GitHub had it at the last refresh,
+	// when the card names one and it could be read (#865). Everything else
+	// here says how it was when the factory stopped.
+	Now *PullNow `json:"now,omitempty"`
+}
+
+// PullNow is a pull request as GitHub has it: whether it's open, and for an
+// open one whether it's a draft, whether it can merge into its base, and how
+// CI's gate went on its head.
+type PullNow struct {
+	State string `json:"state"` // open, closed or merged
+	Draft bool   `json:"draft,omitempty"`
+	// Conflicts says GitHub can't merge it into its base. Unsettled says
+	// GitHub hasn't worked that out yet, as right after a push.
+	Conflicts bool `json:"conflicts,omitempty"`
+	Unsettled bool `json:"unsettled,omitempty"`
+	// Gate is how CI's gate went on its head: passed, failed, running, or
+	// empty when none has run there.
+	Gate string `json:"gate,omitempty"`
 }
 
 // RetryCopy is what a card says of its retry, as plain text both pages
