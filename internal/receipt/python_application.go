@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/verify"
+	"slices"
 )
 
 func componentOrigin(origin string) string {
@@ -69,6 +70,17 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 			label = "TLC exploration check"
 		}
 		fmt.Fprintf(b, "\n%s: %s\n", label, componentLiteral(string(raw)))
+	}
+	// In words, what a component receipt's table says of the check one size
+	// larger, ahead of each invocation's record of it (#880).
+	if len(reports) == 1 && hasComponentEvidence(reports[0]) {
+		if ok, result, evidence, shown := pythonApplicationLarger(a, larger); shown {
+			verdict := "➖ " + result
+			if ok != nil {
+				verdict = mark(*ok) + " " + result
+			}
+			fmt.Fprintf(b, "\nOne size larger: %s. %s.\n", verdict, evidence)
+		}
 	}
 	for _, l := range a.Larger {
 		if len(l.Skipped) > 0 {
@@ -161,4 +173,43 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 		}
 	}
 	return out
+}
+
+// pythonApplicationLarger says what the check one size larger did for an
+// application whose driver explores every state (#880), as a result and its
+// evidence, each fit for a table cell. ok is nil where the check claimed
+// nothing, which never fails the gate (D-0070): the exploration didn't
+// finish, TLC found a problem at that size, every invocation was skipped
+// for a prerequisite that failed, or no check ran at all. An application
+// that samples its states has no such check, and nothing is shown.
+func pythonApplicationLarger(a *verify.PythonApplicationReport, overall *verify.Larger) (ok *bool, result, evidence string, shown bool) {
+	explored := slices.ContainsFunc(a.Conformance, func(c verify.PythonApplicationConformance) bool { return c.Mode == "bounded-exhaustive" })
+	var skipped []string
+	for _, l := range a.Larger {
+		if len(l.Skipped) > 0 {
+			skipped = append(skipped, componentLiteral(l.Key.ID)+": "+componentStrings(l.Skipped))
+		}
+	}
+	within := func(l *verify.Larger) string { return (renderer{explicit: true}).bounds(l.Bounds) }
+	also := ""
+	if len(skipped) > 0 {
+		also = "; skipped for " + strings.Join(skipped, "; ")
+	}
+	yes, no := true, false
+	switch l := overall; {
+	case l != nil && l.Passed:
+		// Counts are what the check compares, so counts are what it says.
+		return &yes, "the code reaches as many states as the model, as deep",
+			fmt.Sprintf("%s states, depth %d, within %s%s", thousands(l.States), l.Depth, within(l), also), true
+	case l != nil && l.Required:
+		return &no, "code and model differ, so the code carries a bound",
+			fmt.Sprintf("%s states, depth %d, where the model has %s, depth %d, within %s%s", thousands(l.States), l.Depth, thousands(l.WantStates), l.WantDepth, within(l), also), true
+	case l != nil:
+		return nil, "not claimed", componentText(firstLine(l.Message)) + also, true
+	case len(skipped) > 0:
+		return nil, "not claimed", "skipped for " + strings.Join(skipped, "; "), true
+	case explored:
+		return nil, "not checked", "no check ran one size larger, which takes an exhaustive manifest and a driver that names a constant for each bound", true
+	}
+	return nil, "", "", false
 }

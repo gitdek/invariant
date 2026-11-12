@@ -142,16 +142,23 @@ def ordinary(obj):
     return data
 
 
-def coroutine_objects():
+def coroutine_objects(_objects=gc.get_objects, _is=operator.is_, _coroutine=types.CoroutineType, _generator=types.GeneratorType,
+                      _iterable=inspect.CO_ITERABLE_COROUTINE, _type=type, _map=map, _list=list, _set=set,
+                      _compress=compress, _repeat=repeat):
     # A module step scans the heap twice under the collector's hooks, so a
     # Python loop here raised a trace and a profile event for every object
     # (#796). These C callables compare exact types, as type() is does, with
     # no event per object, and unlike isinstance they never read __class__.
-    objects = gc.get_objects()
-    kinds = list(map(type, objects))
-    found = set(compress(objects, map(operator.is_, kinds, repeat(types.CoroutineType))))
-    found.update([value for value in compress(objects, map(operator.is_, kinds, repeat(types.GeneratorType)))
-                  if value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE])
+    #
+    # Each is bound here, when the collector loads and before any application
+    # code runs, so the scan calls nothing an application has rebound since:
+    # read through its module at each use, operator.is_ was whatever the
+    # application had left there, called once for every object (#882).
+    objects = _objects()
+    kinds = _list(_map(_type, objects))
+    found = _set(_compress(objects, _map(_is, kinds, _repeat(_coroutine))))
+    found.update([value for value in _compress(objects, _map(_is, kinds, _repeat(_generator)))
+                  if value.gi_code.co_flags & _iterable])
     return found
 
 

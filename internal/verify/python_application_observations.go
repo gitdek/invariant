@@ -165,6 +165,10 @@ type pythonApplicationObservations struct {
 	runLimit        int
 	stepLimit       int
 	explorer        *pythonApplicationExplorer
+	// application says whether a staged source is the application's own
+	// code, which every entry must be (#879). It's nil where a decoded
+	// receipt's rows are read again: they were held to it when collected.
+	application func(source string) bool
 }
 
 func newPythonApplicationObservations(key PythonApplicationInvocationKey, sampling, files map[string]string, observed []project.Component, explorer *pythonApplicationExplorer) *pythonApplicationObservations {
@@ -206,6 +210,12 @@ func (v *pythonApplicationObservations) observe(row PythonApplicationObservation
 		hash, staged := v.files[source]
 		if !ok || !named || !staged || !strings.HasSuffix(source, ".py") || module != "python:"+strings.ReplaceAll(strings.TrimSuffix(source, ".py"), "/", ".") || !pythonApplicationName.MatchString(symbol) || row.EntrySHA256 != hash || source == driver.Source {
 			return fmt.Errorf("unknown or substituted application entry")
+		}
+		// A helper in the verification project, or a test file, could call
+		// the selected function itself and leave the application's own
+		// entry, guards and all, unrun (#879).
+		if v.application != nil && !v.application(source) {
+			return fmt.Errorf("an application entry must be the application's own code, and %s is the verification project's or a test's", source)
 		}
 		if isModule && strings.Contains(symbol, ".") {
 			return fmt.Errorf("module observations require module functions")
@@ -344,6 +354,11 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 		files[path] = file.hash
 	}
 	observations := newPythonApplicationObservations(c.Key, c.Sampling, files, s.observedDeclarations(c.Key.Target), explorer)
+	verification, err := filepath.Rel(s.root, s.project.Dir)
+	if err != nil {
+		return err
+	}
+	observations.application = func(source string) bool { return s.production(source, filepath.ToSlash(verification)) }
 	for len(events) > 0 {
 		n := bytes.IndexByte(events, '\n')
 		if n < 0 {

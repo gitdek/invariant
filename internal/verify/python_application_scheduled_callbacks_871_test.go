@@ -31,7 +31,10 @@ async def submit(request, *, status):
 		left           bool
 		status         string
 	}{
-		{"a timer that fires after the entry returns", "    loop.call_later(0.05, late, key)", true, ""},
+		// A minute is past any step: the entry sleeps 30 ms, and at 50 ms a
+		// loaded machine let the timer come due inside the step, where it
+		// is the step's own and nothing is left.
+		{"a timer that fires after the entry returns", "    loop.call_later(60, late, key)", true, ""},
 		{"a timer set for a moment that never comes in the step", "    loop.call_at(loop.time() + 3600, late, key)", true, ""},
 		{"a callback scheduled from the loop's last batch", "    loop.call_soon(again, key)", true, ""},
 		// The timer is due by the time the entry returns, so it runs in the
