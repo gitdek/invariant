@@ -610,25 +610,10 @@ func pythonContractOrder(a, b any) (int, error) {
 	}
 	// Two lists, or two tuples, order by the first items that differ, and
 	// by length where none does.
-	var left, right []any
-	switch x := a.(type) {
-	case []any:
-		if y, ok := b.([]any); ok {
-			left, right = x, y
-		}
-	case pythonTuple:
-		if y, ok := b.(pythonTuple); ok {
-			left, right = x, y
-		}
-	}
-	if left == nil && right == nil {
-		_, listA := a.([]any)
-		_, listB := b.([]any)
-		_, tupleA := a.(pythonTuple)
-		_, tupleB := b.(pythonTuple)
-		if !(listA && listB) && !(tupleA && tupleB) {
-			return 0, unresolvedf("orders %s and %s, which Python doesn't order", pythonContractShow(a), pythonContractShow(b))
-		}
+	left, kind := pythonContractItems(a)
+	right, other := pythonContractItems(b)
+	if kind == "" || kind != other {
+		return 0, unresolvedf("orders %s and %s, which Python doesn't order", pythonContractShow(a), pythonContractShow(b))
 	}
 	for i := 0; i < len(left) && i < len(right); i++ {
 		same, err := pythonContractEqual(left[i], right[i])
@@ -642,20 +627,28 @@ func pythonContractOrder(a, b any) (int, error) {
 	return len(left) - len(right), nil
 }
 
+// pythonContractItems is a list's or a tuple's items, and which it is.
+func pythonContractItems(v any) ([]any, string) {
+	switch v := v.(type) {
+	case []any:
+		return v, "list"
+	case pythonTuple:
+		return v, "tuple"
+	}
+	return nil, ""
+}
+
 // pythonContractContains is Python's in.
 func pythonContractContains(item, container any) (bool, error) {
-	switch c := container.(type) {
-	case []any, pythonTuple:
-		items, _ := c.([]any)
-		if t, ok := c.(pythonTuple); ok {
-			items = t
-		}
+	if items, kind := pythonContractItems(container); kind != "" {
 		for _, x := range items {
 			if same, err := pythonContractEqual(item, x); err != nil || same {
 				return same, err
 			}
 		}
 		return false, nil
+	}
+	switch c := container.(type) {
 	case string:
 		whole, _, err := pythonContractString(c)
 		if err != nil {
@@ -924,12 +917,8 @@ func pythonContractArithmetic(op string, l, r any) (any, error) {
 				return nil, unresolvedf("repeats a sequence more often than the gate builds")
 			}
 			return strings.Repeat(a, n), nil
-		case []any, pythonTuple:
-			items, _ := a.([]any)
-			t, tuple := a.(pythonTuple)
-			if tuple {
-				items = t
-			}
+		}
+		if items, kind := pythonContractItems(seq); kind != "" {
 			if n*len(items) > pythonContractRepeat {
 				return nil, unresolvedf("repeats a sequence more often than the gate builds")
 			}
@@ -937,7 +926,7 @@ func pythonContractArithmetic(op string, l, r any) (any, error) {
 			for range n {
 				out = append(out, items...)
 			}
-			if tuple {
+			if kind == "tuple" {
 				return pythonTuple(out), nil
 			}
 			return out, nil

@@ -813,7 +813,7 @@ Nagini proves the function's body against its contract, and nothing proves the c
 
 - **On entry.** Each parameter is of the type its annotation names, and each `Requires` holds on the arguments as they were recorded on entry.
 - **On return.** Each `Ensures` holds, and the result is of the type the return annotation names. `Result()` is the recorded result, and `Old(e)` is `e` on the entry values. A list or a dictionary argument reads as it was when the call ended, which the call's record holds as `after`.
-- **On an exception.** The call's record holds `raised`: the exception's class, and each builtin exception name bound to a class it inherits from, which the collector tells by identity. The exception must match an `Exsures`, whose condition must hold, and no `Ensures` is evaluated. An exception no `Exsures` declares is a violation. A call that raises counts toward the coverage above as one that returns does, since either way the application ran the function.
+- **On an exception.** The call's record holds `raised`: the exception's class, and each builtin exception name bound to a class it inherits from, which the collector tells by identity. The exception must match an `Exsures`, whose condition must hold, and no `Ensures` is evaluated. An exception no `Exsures` declares is a violation, since Nagini proves the function raises nothing else: the pinned Nagini refuses one that could, with "method raises no exceptions". A call that raises counts toward the coverage above as one that returns does, since either way the application ran the function.
 
 The gate evaluates on its own side, from the tree the proof's reader makes of each clause, with exact integers and Python's meaning for what a contract may hold. Nothing of the application runs again. `TestContractEvaluatorAgreesWithPython838` compares the evaluator with Python itself on generated clauses and arguments; `INVARIANT_CONTRACT_SEEDS=600` runs it over about five million of them.
 
@@ -957,7 +957,7 @@ The receipt keeps the three apart:
 
 No step proves a dependency, an unselected function or the whole application. In-place proof supports top-level functions that select their own inline contract, within the limits the table above lists. The gate doesn't check callers against a proved function's preconditions; #210 leaves that for later.
 
-`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793|ChecksCallersAgainstContracts838|StillChecksTheModel838)' -count=1 -timeout 60m` runs the gate's in-place proof cases, the observed admission-decision fixture and the checks of its callers against its contract on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
+`INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793|ChecksCallersAgainstContracts838|ChecksDeclaredExceptions838|StillChecksTheModel838)' -count=1 -timeout 60m` runs the gate's in-place proof cases, the observed admission-decision fixture and the checks of its callers against its contract on a counter application with real Docker, the pinned Python image, TLC, the pinned Nagini and the installed `packaging` wheel, and locally too:
 
 - The valid proof passes, and so does one whose contract holds only what Python runs as Nagini reads it.
 - A body that breaks its postcondition only where conformance never goes fails at the original line.

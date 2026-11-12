@@ -190,10 +190,10 @@ func TestPythonApplicationGateFailsCallsThatBreakContracts838(t *testing.T) {
 }
 
 // A call that raises what the contract declares is checked like any other,
-// and counts as the application running the function (#838).
+// and counts as the application running the function (#838). The pinned
+// Nagini proves the function raises nothing else: it refuses one that
+// raises what no Exsures declares.
 func TestPythonApplicationGateChecksDeclaredExceptions838(t *testing.T) {
-	tc, _ := hold393GateFake(t)
-	gp359Verifier(t, false)
 	admission := `from nagini_contracts.contracts import *
 
 def admission(busy: bool) -> int:
@@ -207,31 +207,54 @@ def admission(busy: bool) -> int:
 	// application's own helper turns admission's exception into a status.
 	imports := "from .admission import admission\ndef admit(busy):\n    try:\n        return admission(busy)\n    except Exception:\n        return 409\n"
 	call := "status = admit(counts['active'] != 0)\n        if status != 0:\n            raise Refused(status)"
-	f := callers838Fixture(t, admission, callers838Application(t, imports, call), hold393Driver)
-	if err := Check(f.p.Dir); err != nil {
-		t.Fatalf("check: %v", err)
-	}
-	r := pa342Unchanged(t, f, tc)
-	if !r.Passed || calls793Proof(t, r).Status != "proved" {
-		t.Fatalf("a declared exception didn't pass: %s", strings.Join(PythonApplicationProofProblems(r.Components, r.Application), "\n"))
-	}
-	raised, returned := 0, 0
-	for _, x := range r.Application.Executions {
-		for _, row := range x.Observations {
-			for _, call := range row.Calls {
-				switch {
-				case call.Raised == nil:
-					returned++
-				case call.Raised.Type == "builtins.Exception" && strings.Join(call.Raised.Builtins, " ") == "BaseException Exception" && row.Outcome == "refused":
-					raised++
-				default:
-					t.Fatalf("a raising call was recorded as %+v on a %s attempt", call.Raised, row.Outcome)
+	run := func(t *testing.T, tc toolchain.Toolchain, real bool) {
+		gp359Verifier(t, real)
+		f := callers838Fixture(t, admission, callers838Application(t, imports, call), hold393Driver)
+		if err := Check(f.p.Dir); err != nil {
+			t.Fatalf("check: %v", err)
+		}
+		r := pa342Unchanged(t, f, tc)
+		if !r.Passed || calls793Proof(t, r).Status != "proved" {
+			t.Fatalf("a declared exception didn't pass: %s", strings.Join(PythonApplicationProofProblems(r.Components, r.Application), "\n"))
+		}
+		raised, returned := 0, 0
+		for _, x := range r.Application.Executions {
+			for _, row := range x.Observations {
+				for _, call := range row.Calls {
+					switch {
+					case call.Raised == nil:
+						returned++
+					case call.Raised.Type == "builtins.Exception" && strings.Join(call.Raised.Builtins, " ") == "BaseException Exception" && row.Outcome == "refused":
+						raised++
+					default:
+						t.Fatalf("a raising call was recorded as %+v on a %s attempt", call.Raised, row.Outcome)
+					}
 				}
 			}
 		}
+		if checks := callers838Checks(t, r); raised == 0 || returned == 0 || !checks.Evidence() {
+			t.Fatalf("%d raising and %d returning calls recorded: %+v", raised, returned, checks)
+		}
 	}
-	if checks := callers838Checks(t, r); raised == 0 || returned == 0 || !checks.Evidence() {
-		t.Fatalf("%d raising and %d returning calls recorded: %+v", raised, returned, checks)
+	t.Run("actual Python and verifier doubles", func(t *testing.T) {
+		tc, _ := hold393GateFake(t)
+		run(t, tc, false)
+	})
+	if os.Getenv("INVARIANT_PYTHON_APPLICATION_GATE_REAL") == "1" {
+		t.Run("pinned Python TLC and Nagini", func(t *testing.T) {
+			tc, err := toolchain.Ensure(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			run(t, tc, true)
+			// The same function without its Exsures isn't proved.
+			gp359Verifier(t, true)
+			f := callers838Fixture(t, strings.Replace(admission, "    Exsures(Exception, busy)\n", "", 1), callers838Application(t, imports, call), hold393Driver)
+			r := pa342Run(t, f, tc)
+			if proof := calls793Proof(t, r); r.Passed || proof.Result == nil || proof.Result.Passed || !strings.Contains(strings.Join(proof.Result.Errors, "\n"), "raises no exceptions") {
+				t.Fatalf("Nagini took a function that raises what it doesn't declare: %s", gp359Dump(t, r))
+			}
+		})
 	}
 }
 
