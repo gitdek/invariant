@@ -1323,7 +1323,8 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			snap.Activity = append(snap.Activity, e)
 		}
 		snap.Who.Answered += l.Answers
-		if l.Stage == StageMerged {
+		// A merged pull request, as the totals count one (#861).
+		if l.Stage == StageMerged && l.PR != 0 {
 			snap.Who.Merged++
 		}
 	}

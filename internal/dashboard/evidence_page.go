@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -75,7 +76,6 @@ h3.group{margin:24px 0 2px;font-size:16px;letter-spacing:-.01em}
 .rule p{margin:0;color:var(--ink2);font-size:15px}
 .rule .found{margin-top:10px;color:var(--accent);font:500 12px/1.4 var(--mono)}
 .rule.can .found{color:var(--ci)}
-.rule.bug .found{color:var(--bug)}
 .rule .found.missed{color:var(--bug)}
 .rule .pin{margin-top:8px;color:var(--ink3);font:11px/1.4 var(--mono);overflow-wrap:anywhere}
 .bounds{display:flex;flex-wrap:wrap;gap:8px;margin:0;padding:0;list-style:none}
@@ -253,7 +253,12 @@ func counted(n int64, one string) string {
 	if n == 1 {
 		return "1 " + one
 	}
-	return fmt.Sprintf("%d %ss", n, one)
+	// Grouped in threes, as the receipt writes a count.
+	digits := strconv.FormatInt(n, 10)
+	for i := len(digits) - 3; i > 0; i -= 3 {
+		digits = digits[:i] + "," + digits[i:]
+	}
+	return digits + " " + one + "s"
 }
 
 // rulesOf groups statements by what they promise, with what a receipt found
