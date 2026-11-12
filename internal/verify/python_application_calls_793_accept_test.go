@@ -236,21 +236,21 @@ func TestPythonApplicationGateObservedDecisionCoverage793(t *testing.T) {
 	for _, mode := range []string{"never", "accepted only", "refused only", "outside entry"} {
 		t.Run(mode, func(t *testing.T) {
 			tc, _ := hold393GateFake(t)
-			gp359Verifier(t, false)
+			calls := gp359Verifier(t, false)
 			f := calls793Fixture(t, mode)
 			r := pa342Unchanged(t, f, tc)
 			x, c := pa342Explored(t, r)
 			hold393Assert(t, x)
 			proof := calls793Proof(t, r)
-			if !c.passed() || proof.Result == nil || !proof.Result.Passed {
-				t.Fatalf("fixture must have passing worker conformance and a successful Nagini attempt: %s", gp359Dump(t, r))
+			if !c.passed() || proof.Result == nil || proof.Result.Passed || *calls != 0 || r.Application.Proofs[0].Ran || len(r.Application.Proofs[0].Skipped) == 0 {
+				t.Fatalf("fixture must have passing worker conformance and skip Nagini: %s", gp359Dump(t, r))
 			}
-			if r.Passed || proof.Status != Unqualified {
+			if r.Passed || proof.Status != "unchecked" {
 				t.Fatalf("%s calls incorrectly qualified the proof: %s", mode, gp359Dump(t, r))
 			}
-			// Other attribution cannot turn an unqualified proof into a proof.
+			// Other attribution cannot turn a skipped proof into a proof.
 			inv := r.Components.Inventory
-			if err := r.AttributeComponentAssumptions(&inv, nil); err != nil || calls793Proof(t, r).Status != Unqualified {
+			if err := r.AttributeComponentAssumptions(&inv, nil); err != nil || calls793Proof(t, r).Status != "unchecked" {
 				t.Fatalf("later attribution lost the missing-call qualification: %v", err)
 			}
 		})
