@@ -60,8 +60,8 @@ func TestADraftsCheckPreparesACurrentBugsReplay910(t *testing.T) {
 	// An operation that's enabled where Put is gives the first step two
 	// actions, and TLC can't say which one took it: refused, by the step.
 	_, err = check("typescript", map[string]func(string) string{"proposal.json": current, "BoundedBuffer.tla": unguarded})
-	if err == nil || !strings.Contains(err.Error(), "replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, has no single action that takes it") ||
-		!strings.Contains(err.Error(), "guard the bug's operation") {
+	if err == nil || !strings.Contains(err.Error(), "replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, can be taken 2 ways, ") ||
+		!strings.Contains(err.Error(), "Put(m1)") || !strings.Contains(err.Error(), "PutAnyway(m1)") || !strings.Contains(err.Error(), "guard the bug's operation") {
 		t.Fatalf("a current bug whose operation takes a step Put takes too: %v", err)
 	}
 	// Named as a parameter and guarded, the choice is one TLC attributes:
