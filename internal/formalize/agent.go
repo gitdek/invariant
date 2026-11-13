@@ -380,7 +380,7 @@ func readRuns(path string) ([]synth.GateRun, error) {
 // name, module, package and language, and records which lock it replaces.
 func (p *Proposal) Amend(c *Current) error {
 	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous(), Baseline: detachCurrent(c)}
-	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), filepath.Base(c.Manifest.Code), c.Manifest.Language
+	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), seedPackage(c), c.Manifest.Language
 	if p.Ratifiable() && p.Module != c.ModuleName() {
 		return fmt.Errorf("an amendment keeps its module: %s, not %s", c.ModuleName(), p.Module)
 	}
@@ -403,7 +403,8 @@ func slugOf(dir string) string {
 // a directory the rules for a new project's wouldn't, with capitals or an
 // underscore in it. Only the seed carries this name: Amend gives the
 // checked draft its directory's own, which a saved amendment is found and
-// ratified by (#799).
+// ratified by (#799). The package is the seed's in both, so a revision
+// copied from an amendment's saved proposal passes the rules too.
 func seedSlug(c *Current) string {
 	slug := slugOf(c.Dir)
 	if slugRE.MatchString(slug) {

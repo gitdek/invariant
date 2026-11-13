@@ -2,6 +2,7 @@ package toolchain
 
 import (
 	"context"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -15,7 +16,10 @@ func TestTheDefaultQuotaFitsASmallMachine920(t *testing.T) {
 	real := machineCPUs
 	t.Cleanup(func() { machineCPUs = real })
 	t.Setenv(ContainerCPUsEnv, "")
-	for cpus, want := range map[int]string{1: "1", 2: "2", 3: "3", 4: "4", 8: "4", 18: "4", 0: "4", -1: "4"} {
+	if machineCPUs() != runtime.NumCPU() {
+		t.Errorf("the machine's count is taken as %d; it has %d CPUs", machineCPUs(), runtime.NumCPU())
+	}
+	for cpus, want := range map[int]string{1: "1", 2: "2", 3: "3", 4: "4", 5: "4", 7: "4", 8: "4", 18: "4", 0: "4", -1: "4"} {
 		machineCPUs = func() int { return cpus }
 		if got, err := ContainerCPUs(); err != nil || got != want {
 			t.Errorf("on a machine with %d CPUs the default quota is %q, %v; want %q", cpus, got, err, want)
