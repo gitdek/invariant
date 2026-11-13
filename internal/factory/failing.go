@@ -33,10 +33,10 @@ import (
 // succeeding ends (#760).
 
 // failingFor is how long GitHub may keep failing a request before the
-// factory stops asking and says so: half an hour, about 60 polls at 30
-// seconds and 30 at the watcher's default minute. It outlasts a blip, a
-// watcher's restart and another watcher taking the lease over, which waits a
-// minute past the lease's five, and a person hears within it.
+// factory stops asking and says so: half an hour, about 30 polls at the
+// watcher's default minute. It outlasts a blip, a watcher's restart and
+// another watcher taking the lease over, which waits a minute past the
+// lease's fifteen, and a person hears within it.
 const failingFor = 30 * time.Minute
 
 // rateLimitWait is how much longer a request GitHub's primary rate limit

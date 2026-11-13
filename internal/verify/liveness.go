@@ -53,8 +53,12 @@ type condition struct {
 var fairnessForm = regexp.MustCompile(`^(?:\\A\s*([A-Za-z_]\w*)\s*\\in\s*(.+?)\s*:\s*)?([WS])F_vars\s*\((.+)\)$`)
 
 // fairnessOf reads a fairness statement's condition from its definition.
-func fairnessOf(src, name string) (condition, error) {
-	def, err := tla.Definition(src, name)
+func fairnessOf(src string, includes map[string]string, name string) (condition, error) {
+	model, err := tla.Read(src, includes)
+	if err != nil {
+		return condition{}, err
+	}
+	def, err := model.Definition(name)
 	if err != nil {
 		return condition{}, err
 	}
@@ -112,13 +116,17 @@ func (c condition) inNext() string {
 // gate's property and bug checks build their specs from Init, Next and the
 // fairness statements, so fairness stated anywhere else would be missing
 // from some checks and unchecked by all of them.
-func specFairness(src string, p *project.Project) bool {
-	names, err := tla.Closure(src, p.SpecName(), project.Model)
+func specFairness(src string, includes map[string]string, p *project.Project) bool {
+	m, err := tla.Read(src, includes)
+	if err != nil {
+		return false
+	}
+	names, err := m.Closure(p.SpecName(), project.Model)
 	if err != nil {
 		return false
 	}
 	for _, n := range names {
-		if def, err := tla.Definition(src, n); err == nil && fairnessWord.MatchString(tla.Canonical(def)) {
+		if def, err := m.Definition(n); err == nil && fairnessWord.MatchString(tla.Canonical(def)) {
 			return true
 		}
 	}

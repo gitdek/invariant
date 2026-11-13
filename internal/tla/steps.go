@@ -27,7 +27,16 @@ type Binder struct {
 // else, such as a conjunction or an IF, is an error, so a driver's steps can
 // always be named the way Next names them.
 func Steps(src string) ([]Step, error) {
-	def, err := Definition(src, "Next")
+	m, err := alone(src)
+	if err != nil {
+		return nil, err
+	}
+	return m.Steps()
+}
+
+// Steps reads the named steps from the model's Next. See the function Steps.
+func (m *Model) Steps() ([]Step, error) {
+	def, err := m.Definition("Next")
 	if err != nil {
 		return nil, err
 	}
@@ -61,18 +70,10 @@ type token struct {
 // an expression joined back from its tokens means what it meant.
 var tokenPattern = regexp.MustCompile(`\\\*.*|"(?:[^"\\]|\\.)*"|<<|>>|\\/|/\\|\\[A-Za-z]+|[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[(){}\[\],]|[-+*/<>=:|@#.~&^$!?%]+|\S`)
 
-// tokenize splits text into tokens, dropping comments. Block comments are
-// blanked out first, byte for byte, so every token keeps its column.
+// tokenize splits text into tokens, dropping comments. Comments are blanked
+// out first, byte for byte, so every token keeps its column.
 func tokenize(text string) []token {
-	text = blockComment.ReplaceAllStringFunc(strings.ReplaceAll(text, "\r\n", "\n"), func(c string) string {
-		b := []byte(c)
-		for i := range b {
-			if b[i] != '\n' {
-				b[i] = ' '
-			}
-		}
-		return string(b)
-	})
+	text = withoutComments(strings.ReplaceAll(text, "\r\n", "\n"))
 	var out []token
 	for n, line := range strings.Split(text, "\n") {
 		first := true

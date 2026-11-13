@@ -50,6 +50,19 @@ def comprehension_targets(node):
     return names
 
 
+def captured(node):
+    """The names a match pattern captures, or an except clause binds, at
+    this node: case NAME, case [*NAME], case {**NAME} and except E as NAME
+    hold them as strings, where every other binding is a Name node."""
+    if isinstance(node, ast.ExceptHandler):
+        return [node.name] if node.name else []
+    if isinstance(node, (getattr(ast, "MatchAs", ()), getattr(ast, "MatchStar", ()))):
+        return [node.name] if node.name else []
+    if isinstance(node, getattr(ast, "MatchMapping", ())):
+        return [node.rest] if node.rest else []
+    return []
+
+
 class Bound(ast.NodeVisitor):
     """The names a function binds in its own scope. A comprehension's
     variables are its own, but an assignment expression in one binds in the
@@ -66,9 +79,10 @@ class Bound(ast.NodeVisitor):
         self.names.add(node.arg)
 
     def visit_ExceptHandler(self, node):
-        if node.name:
-            self.names.add(node.name)
+        self.names.update(captured(node))
         self.generic_visit(node)
+
+    visit_MatchAs = visit_MatchStar = visit_MatchMapping = visit_ExceptHandler
 
     def visit_comprehension_node(self, node):
         self.visit(node.generators[0].iter)
@@ -748,6 +762,45 @@ DIVIDES = ("holds a %s by other than a positive integer literal, which the pinne
            "Python for a negative divisor")
 REPEATED = ("multiplies what the gate can't tell are both ints by other than an int literal, so it may repeat a sequence "
             "more often than Python can index, which fails where Nagini's model doesn't")
+# More that the pinned Nagini models apart from Python (#872). Each was
+# shown by a run of the pinned image, and the real proof tests repeat them.
+#
+# It proves a is b of two equal ints, or two equal strings, where Python
+# compares objects: two equal ints outside the small-int cache aren't one
+# object. A test against None, or of a list, a dict or a set, means the same
+# to both.
+IDENTITY = ("tests identity with is or is not on other than None, a list, a dict or a set: the pinned Nagini proves two equal "
+            "ints, or two equal strings, identical, where Python compares objects, and two equal ints past its small-int "
+            "cache are two")
+# It gives formatting no precondition. An f-string is an arbitrary string
+# whatever its fields and format codes, str.format takes any arguments, and
+# str(), print() and an object's __str__ and __repr__ never fail. Python
+# raises for a format code the value doesn't take, for a missing argument
+# and for an int of more than 4,300 digits, and runs an object's own
+# __str__. A string or a boolean formats without failing.
+FORMATTED = ("holds an f-string with a field the gate can't tell is a string or a boolean, or one with a conversion or a "
+             "format code: the pinned Nagini doesn't model formatting, where Python raises for a format code the value "
+             "doesn't take and for an int of more than 4,300 digits")
+FORMATS = ("reads format, a string's formatting method, which the pinned Nagini gives no precondition: it proves a call on "
+           "a format string it can't see, where Python raises for a missing argument or a format code the value doesn't take")
+CONVERTS = ("makes a string with %s of what the gate can't tell is a string or a boolean: the pinned Nagini proves it of "
+            "anything, where Python raises for an int of more than 4,300 digits and runs an object's own __str__")
+CONVERTERS = ("reads %s, which makes a string as str() does: the pinned Nagini proves it of anything, where Python raises "
+              "for an int of more than 4,300 digits and runs an object's own")
+# It gives bytes() and bytearray() of an int no precondition, and from a
+# bytearray of a negative count proves anything, and gives a range's len
+# none either.
+COUNTED = ("makes %s of what the gate can't tell is bytes: of an int Python makes that many zero bytes, raising for a "
+           "negative count and past what it can index, where the pinned Nagini's model raises nothing")
+RANGE_LEN = ("takes the len of a range, which Python raises on past what it can index, where the pinned Nagini's model "
+             "doesn't")
+# And it takes every object to be hashable.
+UNHASHABLE = ("hashes a list, a dict or a set, as a set's element or a dict's key, in a lookup in one, or with hash(), "
+              "which Python raises on, where the pinned Nagini takes every object to be hashable")
+# The builtin kinds Python can't hash, and the methods that hash their first
+# argument, by the kind they're a method of.
+UNHASHED = frozenset(("list", "dict", "set"))
+HASHING = {"add": "set", "get": "dict"}
 # A marked file may divide in a permission fraction (#380).
 FRACTION = DIVISION + (", and a file marked # +nagini may divide only in Acc's permission fraction, a positive int literal "
                        "over one at least as large, as Acc(x, 1/2) does")
@@ -817,6 +870,16 @@ def arithmetic(node, kinds, nodes=None, fractions=False):
     string or a module's string constant a lookup by name takes, or as a
     namespace's key, and any string that's one of the methods' names.
 
+    And what else it proves where Python raises (#872): an identity test on
+    other than None, a list, a dict or a set, since it finds two equal ints
+    or strings identical; an f-string field that isn't a string or a
+    boolean, or has a conversion or a format code, a read of format,
+    __str__ or __repr__, and str() or print() of other than strings and
+    booleans, since it gives formatting no precondition; bytes() or
+    bytearray() of other than bytes and the len of a range, which fail past
+    what Python can index; and a list, a dict or a set where Python hashes
+    it.
+
     For a file marked # +nagini (#380), nodes are one of its scopes, a
     function's own or the rest of the file's, read by that scope's kinds,
     and fractions lets Acc's second argument be a permission fraction: a
@@ -841,6 +904,11 @@ def arithmetic(node, kinds, nodes=None, fractions=False):
 
     def positive(x):
         return isinstance(x, ast.Constant) and type(x.value) is int and x.value > 0
+
+    def plain(x):
+        """Whether the gate can tell x is a string or a boolean, which
+        Python makes a string of without failing."""
+        return kinds.kind(x) in ("str", "bool")
 
     permissions = set()
     if fractions:
@@ -925,6 +993,44 @@ def arithmetic(node, kinds, nodes=None, fractions=False):
                 problem(n, REPEATED)
         elif isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Invert):
             problem(n, BITWISE)
+        elif isinstance(n, ast.Compare):
+            operands = [n.left] + n.comparators
+            for i, op in enumerate(n.ops):
+                left, right = operands[i], operands[i + 1]
+                # None is one object, and a list, a dict or a set is its
+                # own: Nagini and Python agree on those.
+                if isinstance(op, (ast.Is, ast.IsNot)) and not any(
+                        isinstance(x, ast.Constant) and x.value is None or kinds.kind(x) in UNHASHED for x in (left, right)):
+                    problem(n, IDENTITY)
+                elif isinstance(op, (ast.In, ast.NotIn)) and kinds.kind(left) in UNHASHED and kinds.kind(right) in ("set", "dict"):
+                    problem(n, UNHASHABLE)
+        elif isinstance(n, ast.JoinedStr):
+            if any(isinstance(v, ast.FormattedValue) and (v.conversion != -1 or v.format_spec is not None or not plain(v.value))
+                   for v in n.values):
+                problem(n, FORMATTED)
+        elif isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and n.attr in ("format", "__str__", "__repr__"):
+            problem(n, FORMATS if n.attr == "format" else CONVERTERS % n.attr)
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and kinds.builtin(n.func.id):
+            f, starred = n.func.id, any(isinstance(a, ast.Starred) for a in n.args)
+            if f in ("str", "print") and (n.keywords or starred or not all(plain(a) for a in n.args)):
+                problem(n, CONVERTS % (f + "()"))
+            elif f in ("bytes", "bytearray") and (n.keywords or starred or len(n.args) > 1 or n.args and kinds.kind(n.args[0]) != "bytes"):
+                problem(n, COUNTED % (f + "()"))
+            elif f == "len" and any(kinds.kind(a) == "range" for a in n.args):
+                problem(n, RANGE_LEN)
+            elif f == "hash" and any(kinds.kind(a) in UNHASHED for a in n.args):
+                problem(n, UNHASHABLE)
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in HASHING:
+            # A set's add and a dict's get hash what they're given.
+            if kinds.kind(n.func.value) == HASHING[n.func.attr] and n.args and kinds.kind(n.args[0]) in UNHASHED:
+                problem(n, UNHASHABLE)
+        elif isinstance(n, (ast.Set, ast.Dict, ast.SetComp, ast.DictComp)):
+            keys = n.elts if isinstance(n, ast.Set) else n.keys if isinstance(n, ast.Dict) else [n.elt if isinstance(n, ast.SetComp) else n.key]
+            if any(k is not None and kinds.kind(k) in UNHASHED for k in keys):
+                problem(n, UNHASHABLE)
+        elif isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store) and kinds.kind(n.value) == "dict":
+            if kinds.kind(n.slice.value if isinstance(n.slice, INDEX) else n.slice) in UNHASHED:
+                problem(n, UNHASHABLE)
     return sorted({(r["line"], r["what"]): r for r in out}.values(), key=lambda r: (r["line"], r["what"]))
 
 
@@ -939,6 +1045,174 @@ def dynamic(tree):
         elif isinstance(sub, (ast.Name, ast.Attribute)) and getattr(sub, "id", getattr(sub, "attr", "")) == "__builtins__" and not isinstance(sub.ctx, ast.Load):
             out.append({"line": sub.lineno, "what": "__builtins__"})
     return sorted(out, key=lambda r: (r["line"], r["what"]))
+
+
+# What a selected function's contract asks of a call, for the gate to check
+# on the calls it records (#838): each parameter's type as its annotation
+# names it, the result's, and each Requires, Ensures, Exsures and Decreases
+# at the function's head, as written and as a tree the gate evaluates
+# itself. Nothing here runs the contract. What the gate can't evaluate is
+# written as unresolved, with why, so it fails there instead of passing.
+PROOF_ONLY = frozenset(("Acc", "Rd", "Wildcard", "list_pred", "dict_pred", "set_pred", "MayCreate", "Low", "LowVal"))
+COMPARISONS = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=",
+               ast.Is: "is", ast.IsNot: "is not", ast.In: "in", ast.NotIn: "not in"}
+BINARY = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.FloorDiv: "//", ast.Mod: "%"}
+UNARY = {ast.Not: "not", ast.USub: "-", ast.UAdd: "+"}
+SCALAR_TYPES = frozenset(("int", "bool", "str", "bytes", "float", "complex", "range", "object"))
+
+
+def contract_of(node, tree, text, names, kinds, bindings, rebound):
+    params = [a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
+
+    def unresolved(why):
+        return {"k": "unresolved", "why": why}
+
+    def shown(e):
+        return ast.unparse(e) if hasattr(ast, "unparse") else type(e).__name__
+
+    def typing_name(e):
+        """The typing name an annotation's head reads, or the builtin's."""
+        if isinstance(e, ast.Name):
+            if e.id in TYPE_NAMES | {"object"} and kinds.builtin(e.id):
+                return e.id
+            return kinds.typing.get(e.id)
+        if isinstance(e, ast.Attribute) and isinstance(e.value, ast.Name):
+            rows = bindings.get(e.value.id, ())
+            if len(rows) == 1 and rows[0]["kind"] == "import" and rows[0]["module"] == "typing" and e.value.id not in kinds.bound:
+                return e.attr
+        return None
+
+    def type_of(a):
+        if isinstance(a, ast.Constant) and isinstance(a.value, str):
+            try:
+                a = ast.parse(a.value, mode="eval").body
+            except SyntaxError:
+                return {"k": "unknown", "text": a.value}
+        if a is None:
+            return {"k": "unknown", "text": ""}
+        if isinstance(a, ast.Constant) and a.value is None:
+            return {"k": "none"}
+        if isinstance(a, ast.BinOp) and isinstance(a.op, ast.BitOr):
+            return {"k": "union", "items": [type_of(a.left), type_of(a.right)]}
+        base, args = (a.value, a.slice.elts if isinstance(a.slice, ast.Tuple) else [a.slice]) if isinstance(a, ast.Subscript) else (a, None)
+        if INDEX and args is not None:
+            args = [x.value if isinstance(x, INDEX) else x for x in args]
+            args = list(args[0].elts) if len(args) == 1 and isinstance(args[0], ast.Tuple) else args
+        t = typing_name(base)
+        if t == "Optional" and args is not None and len(args) == 1:
+            return {"k": "union", "items": [type_of(args[0]), {"k": "none"}]}
+        if t == "Union" and args:
+            return {"k": "union", "items": [type_of(x) for x in args]}
+        k = GENERICS.get(t)
+        if k in ("list", "set"):
+            return {"k": k, "of": type_of(args[0])} if args is not None and len(args) == 1 else {"k": k}
+        if k == "dict":
+            return {"k": k, "key": type_of(args[0]), "of": type_of(args[1])} if args is not None and len(args) == 2 else {"k": k}
+        if k == "tuple":
+            if args is None:
+                return {"k": k}
+            if len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis:
+                return {"k": k, "of": type_of(args[0])}
+            return {"k": k, "items": [type_of(x) for x in args]}
+        if t in SCALAR_TYPES and args is None:
+            return {"k": t}
+        return {"k": "unknown", "text": shown(a)}
+
+    def literal(value):
+        if value is None:
+            return {"k": "none"}
+        if type(value) is bool:
+            return {"k": "bool", "v": "true" if value else "false"}
+        if type(value) is int:
+            return {"k": "int", "v": str(value)}
+        if type(value) is str:
+            return {"k": "str", "v": value}
+        if type(value) is tuple:
+            return {"k": "tuple", "items": [literal(v) for v in value]}
+        return unresolved("holds a %s, which the gate doesn't evaluate" % type(value).__name__)
+
+    def constant(name):
+        """A module constant's literal value: the one binding the module's
+        top level gives the name, which nothing rebinds."""
+        rows = bindings.get(name, ())
+        if len(rows) != 1 or rows[0]["kind"] != "assign" or not rows[0]["literal"] or name in rebound or name in kinds.bound:
+            return None
+        for s in tree.body:
+            if isinstance(s, (ast.Assign, ast.AnnAssign)) and s.lineno == rows[0]["line"] and s.value is not None:
+                try:
+                    return literal(ast.literal_eval(s.value))
+                except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                    return None
+        return None
+
+    def expr(e):
+        if isinstance(e, ast.Constant):
+            return literal(e.value)
+        if isinstance(e, ast.Name):
+            if e.id in params and e.id not in names:
+                return {"k": "name", "id": e.id}
+            value = constant(e.id)
+            return value if value is not None else unresolved("reads %s, which is neither a parameter nor a literal constant of its module" % e.id)
+        if isinstance(e, ast.Tuple) and not any(isinstance(x, ast.Starred) for x in e.elts):
+            return {"k": "tuple", "items": [expr(x) for x in e.elts]}
+        if isinstance(e, ast.BinOp) and type(e.op) in BINARY:
+            return {"k": "binop", "op": BINARY[type(e.op)], "l": expr(e.left), "r": expr(e.right)}
+        if isinstance(e, ast.UnaryOp) and type(e.op) in UNARY:
+            return {"k": "unary", "op": UNARY[type(e.op)], "e": expr(e.operand)}
+        if isinstance(e, ast.BoolOp):
+            return {"k": "and" if isinstance(e.op, ast.And) else "or", "items": [expr(v) for v in e.values]}
+        if isinstance(e, ast.IfExp):
+            return {"k": "if", "test": expr(e.test), "then": expr(e.body), "else": expr(e.orelse)}
+        if isinstance(e, ast.Compare) and all(type(op) in COMPARISONS for op in e.ops):
+            return {"k": "compare", "l": expr(e.left), "ops": [COMPARISONS[type(op)] for op in e.ops], "rest": [expr(c) for c in e.comparators]}
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not e.keywords and not any(isinstance(a, ast.Starred) for a in e.args):
+            f = e.func.id
+            if f in names and (f in ("Implies", "Old", "Result") or f in PROOF_ONLY):
+                if f in PROOF_ONLY:
+                    # A permission or a predicate holds where Python runs by
+                    # definition; what it's given isn't evaluated.
+                    return {"k": "call", "f": f, "args": []}
+                if len(e.args) == {"Implies": 2, "Old": 1, "Result": 0}[f]:
+                    return {"k": "call", "f": f, "args": [expr(a) for a in e.args]}
+            elif f in ("len", "abs") and kinds.builtin(f) and len(e.args) == 1:
+                return {"k": "call", "f": f, "args": [expr(e.args[0])]}
+            elif (f == "isinstance" and kinds.builtin(f) and len(e.args) == 2 and isinstance(e.args[1], ast.Name)
+                  and e.args[1].id in ISINSTANCE_TYPES and kinds.builtin(e.args[1].id)):
+                return {"k": "call", "f": f, "args": [expr(e.args[0]), {"k": "type", "id": e.args[1].id}]}
+        return unresolved("holds %s, which the gate doesn't evaluate" % shown(e))
+
+    def statement(s):
+        v = s.value if isinstance(s, ast.Expr) else None
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in ("Requires", "Ensures", "Exsures", "Decreases") and v.func.id in names:
+            return v
+        return None
+
+    out, head = [], True
+    for i, s in enumerate(node.body):
+        call = statement(s)
+        docstring = i == 0 and isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str)
+        if call is None:
+            head = head and docstring
+            continue
+        kind = call.func.id.lower()
+        row = {"kind": kind, "line": s.lineno, "text": ast.get_source_segment(text, s) or call.func.id}
+        plain = not call.keywords and not any(isinstance(a, ast.Starred) for a in call.args)
+        if not head:
+            row["expr"] = unresolved("isn't at the head of the function, where Nagini reads a contract")
+        elif kind == "decreases":
+            pass
+        elif kind == "exsures":
+            if plain and len(call.args) == 2 and isinstance(call.args[0], ast.Name) and kinds.builtin(call.args[0].id):
+                row["exception"], row["expr"] = call.args[0].id, expr(call.args[1])
+            else:
+                row["expr"] = unresolved("doesn't name a builtin exception class and a condition")
+        elif plain and len(call.args) == 1:
+            row["expr"] = expr(call.args[0])
+        else:
+            row["expr"] = unresolved("doesn't hold one condition")
+        out.append(row)
+    return {"parameters": [{"name": a.arg, "type": type_of(a.annotation)} for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs],
+            "returns": type_of(node.returns), "obligations": out}
 
 
 def declaration(request):
@@ -994,13 +1268,15 @@ def declaration(request):
         unsupported.append("a declaration that isn't at the module's top level")
     # A selected function's contract, which runs where the application runs,
     # and the arithmetic Nagini models apart from Python, in any function.
-    eager, sums = [], []
+    eager, sums, contract = [], [], None
     if "standin" in request:
         standin = standin_of(base64.b64decode(request["standin"]))
         names = {n: standin[n] for n in standin if n not in bound}
         kinds = Kinds(node, tree, bindings, names)
         eager, sums = contracts(node, names, kinds), arithmetic(node, kinds)
+        contract = contract_of(node, tree, decode(raw), names, kinds, bindings, rebound)
     return {
+        "contract": contract,
         "globals": rebound, "future": future, "dynamic": dynamic(tree), "bound": bound, "tries": tries, "contracts": eager, "arithmetic": sums,
         "start": offset(first, 0), "end": line_end(node.end_lineno), "line": first, "end_line": node.end_lineno,
         "def_line": node.lineno, "async": isinstance(node, ast.AsyncFunctionDef), "decorators": decorators,
@@ -1078,6 +1354,11 @@ def top_level(tree, raw):
                 elif isinstance(sub, (ast.Import, ast.ImportFrom)):
                     for alias in sub.names:
                         bind(alias.asname or alias.name.split(".")[0], dict(where, kind="conditional"))
+                else:
+                    # A match capture and an except clause's name bind too,
+                    # as plain strings no store context marks (#872).
+                    for name in captured(sub):
+                        bind(name, dict(where, kind="conditional"))
     return bindings, star, shared
 
 

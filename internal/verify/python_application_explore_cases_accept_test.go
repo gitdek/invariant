@@ -230,7 +230,7 @@ func pa342Invariant(t *testing.T, f pa342Fixture, name, body string) {
 		}
 	}
 	for i := range statements {
-		h, err := tla.PinHash(model, statements[i].Name, project.Model)
+		h, err := tla.PinHashWith(model, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, statements[i].Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -408,8 +408,11 @@ func TestPythonApplicationGateExplorationFingerprints(t *testing.T) {
 			{"model", func(f pa342Fixture) {
 				pa342Edit(t, f, pa342ModelPath, "Overflow == count' = Limit + 1\n", "Overflow == count' = Limit + 1\n\\* Explored by the gate's harness.\n")
 			}},
+			// The module beside the model defines Helper, which Safe uses, so
+			// its definitions are pinned with Safe (#812). A comment changes
+			// its bytes, and so the fingerprint, and no pin.
 			{"model include", func(f pa342Fixture) {
-				pa342Write(t, f.root, pa342Project+"/.invariant/specs/Local.tla", "---- MODULE Local ----\nHelper == TRUE /\\ TRUE\n====\n")
+				pa342Write(t, f.root, pa342Project+"/.invariant/specs/Local.tla", "---- MODULE Local ----\n\\* Read with the model.\nHelper == TRUE\n====\n")
 			}},
 			{"driver", func(f pa342Fixture) {
 				pa342Edit(t, f, pa342DriverPath, "STEPS = ", "# Every step, everywhere.\nSTEPS = ")
@@ -437,6 +440,22 @@ func TestPythonApplicationGateExplorationFingerprints(t *testing.T) {
 				}
 			})
 		}
+		// Changing what the module beside the model defines changes what
+		// Safe means, so Safe's pin no longer matches and the gate fails.
+		t.Run("model include's definition", func(t *testing.T) {
+			g := pa342New(t, true, real)
+			pa342Write(t, g.root, pa342Project+"/.invariant/specs/Local.tla", "---- MODULE Local ----\nHelper == TRUE /\\ TRUE\n====\n")
+			r := pa342Run(t, g, tc)
+			matched := true
+			for _, pin := range r.Pins {
+				if pin.Name == "Safe" {
+					matched = pin.Match
+				}
+			}
+			if r.Passed || matched {
+				t.Fatalf("a definition changed under Safe's pin: passed=%v, Safe's pin matched=%v", r.Passed, matched)
+			}
+		})
 		// The bounds are the lock's, so changing them needs new pins, and
 		// still changes the fingerprint.
 		g := pa342New(t, true, real)
@@ -551,7 +570,7 @@ func TestPythonApplicationGateExplorationStarts(t *testing.T) {
 				model := strings.Replace(pa342Model, "Init == count = 0\n", "Init == count \\in {0, 1}\n", 1)
 				pa342Write(t, f.root, pa342ModelPath, model)
 				for i := range f.p.Lock.Statements {
-					h, err := tla.PinHash(model, f.p.Lock.Statements[i].Name, project.Model)
+					h, err := tla.PinHashWith(model, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, f.p.Lock.Statements[i].Name, project.Model)
 					if err != nil {
 						t.Fatal(err)
 					}

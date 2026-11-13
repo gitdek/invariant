@@ -58,6 +58,7 @@ type Server struct {
 
 	mu        sync.RWMutex
 	state     []byte            // the latest snapshot, as every page reads it, gzipped JSON
+	stateTag  string            // its entity tag, which a read that already has it names (#854)
 	issues    []Issue           // the latest snapshot's issues, which say what each is waiting for
 	holders   map[string]string // each repository's lease holder, as last read, whose watcher the page follows
 	graphs    map[string][]byte
@@ -116,8 +117,11 @@ type sources struct {
 	readme   string
 	prd      string
 	merges   map[int]mergeCheck
-	changed  bool // comments or merges read since they were last kept (#674)
-	lease    *Lease
+	// pulls is each waiting card's pull request as the latest refresh read
+	// it (#865). One it couldn't read is absent.
+	pulls   map[int]PullNow
+	changed bool // comments or merges read since they were last kept (#674)
+	lease   *Lease
 	// gates says, for each finished gate run looked at, whether the gate
 	// ran in it: gateRan, gateSkipped or gateRefused. A finished run never
 	// changes, so each is looked up once.
@@ -341,7 +345,8 @@ type Project struct {
 	Dir            string              `json:"dir"`
 	Name           string              `json:"name"`
 	Language       string              `json:"language"`
-	Assurance      string              `json:"assurance"` // proved, tested in every state, tested, or unchecked; empty for model-only
+	Assurance      string              `json:"assurance"` // proved, tested in every state, tested (possibly sampled), or unchecked; empty for model-only
+	Coverage       []verify.Coverage   `json:"coverage"`
 	Passed         bool                `json:"passed"`
 	ReceiptMissing bool                `json:"receiptMissing,omitempty"` // no verification results are available
 	States         int64               `json:"states"`
@@ -415,11 +420,14 @@ type Totals struct {
 	Merged        int   `json:"merged"` // pull requests the factory merged
 	MergesChecked int   `json:"mergesChecked"`
 	BadMerges     int   `json:"badMerges"` // merged without CI's gate passing on the merged head
-	LocksChecked  int   `json:"locksChecked"`
-	BadLocks      int   `json:"badLocks"` // a lock that isn't the proposal its ratification names
-	Decisions     int   `json:"decisions"`
-	Tested        int   `json:"tested"` // changes merged under a ratified plan (#775)
-	Tests         int   `json:"tests"`  // the acceptance tests those plans pinned
+	// BadMergeRefs names those pull requests as the page writes a
+	// reference: #690, or ask3d#12 from another repository.
+	BadMergeRefs []string `json:"badMergeRefs,omitempty"`
+	LocksChecked int      `json:"locksChecked"`
+	BadLocks     int      `json:"badLocks"` // a lock that isn't the proposal its ratification names
+	Decisions    int      `json:"decisions"`
+	Tested       int      `json:"tested"` // changes merged under a ratified plan (#775)
+	Tests        int      `json:"tests"`  // the acceptance tests those plans pinned
 }
 
 // Who is who builds what (D-0048): people decide, Invariant proves, and
@@ -552,6 +560,7 @@ func (s *Server) refresh(ctx context.Context) error {
 			fail("plans", err)
 		}
 		s.checkMerges(ctx, r)
+		s.readPulls(ctx, r)
 		if lease, err := readLease(ctx, r); err != nil {
 			fail("lease", err)
 		} else {
@@ -1079,6 +1088,66 @@ func (s *Server) checkMerges(ctx context.Context, r *Repo) {
 	}
 }
 
+// readPulls reads the pull request of each open issue's card that names
+// one, as GitHub has it now, and CI's gate on its head: two requests a
+// card, which GitHub answers from the copy the client holds while nothing
+// has changed. A card whose reads fail says nothing of now (#865).
+func (s *Server) readPulls(ctx context.Context, r *Repo) {
+	login := s.factoryOf(r)
+	read := map[int]PullNow{}
+	for _, is := range r.src.issues {
+		if is.State != "open" {
+			continue
+		}
+		l := factoryLane(is, r.src.comments[is.Number].comments, login, time.Now())
+		if l.Waiting == nil || l.Waiting.PR == 0 {
+			continue
+		}
+		pr, err := r.GitHub.PullRequest(ctx, l.Waiting.PR)
+		if err != nil {
+			continue
+		}
+		p := PullNow{State: pr.State, Draft: pr.Draft}
+		switch {
+		case pr.Merged:
+			p = PullNow{State: "merged"}
+		case pr.State != "open":
+			p = PullNow{State: "closed"}
+		default:
+			if pr.Mergeable == nil {
+				p.Unsettled = true
+			} else {
+				p.Conflicts = !*pr.Mergeable
+			}
+			runs, err := r.GitHub.CheckRuns(ctx, pr.Head.SHA, "invariant/gate")
+			if err != nil {
+				continue
+			}
+			p.Gate = gateNow(runs)
+		}
+		read[l.Waiting.PR] = p
+	}
+	r.src.pulls = read
+}
+
+// gateNow says how CI's gate stands on a head from its check runs there: a
+// run that hasn't finished is running, whatever an earlier one concluded,
+// one that passed is passed, and otherwise a finished run failed.
+func gateNow(runs []github.CheckRun) string {
+	state := ""
+	for _, run := range runs {
+		switch {
+		case run.Status != "completed":
+			return "running"
+		case run.Conclusion == "success":
+			state = "passed"
+		case state == "":
+			state = "failed"
+		}
+	}
+	return state
+}
+
 func (s *Server) assemble(now time.Time) Snapshot {
 	primary := s.Repos[0]
 	snap := Snapshot{Repo: primary.Name, GeneratedAt: now, Issues: []Issue{}, Repos: []RepoState{}, Projects: []Project{}, Activity: []Event{}}
@@ -1127,14 +1196,26 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			if l.Waiting != nil && s.Access != nil {
 				l.Waiting.ActURL = actURL(r.Name, l.Number)
 			}
+			if l.Waiting != nil && l.Waiting.PR != 0 {
+				if p, ok := r.src.pulls[l.Waiting.PR]; ok {
+					l.Waiting.Now = &p
+				}
+			}
 			if l.Stage == StageMerged && l.PR != 0 {
 				m, checked := r.src.merges[l.PR]
-				for _, t := range []*Totals{&snap.Totals, &rs.Totals} {
+				for i, t := range []*Totals{&snap.Totals, &rs.Totals} {
 					t.Merged++
 					if checked {
 						t.MergesChecked++
 						if !m.green {
 							t.BadMerges++
+							// The page's own totals name another repository's
+							// pull request with its repository.
+							ref := issueRef(r.Name, r.Name, l.PR)
+							if i == 0 {
+								ref = issueRef(r.Name, primary.Name, l.PR)
+							}
+							t.BadMergeRefs = append(t.BadMergeRefs, ref)
 						}
 					}
 				}
@@ -1148,7 +1229,18 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			}
 		}
 		if set := r.src.receipts; set != nil {
-			rs.Receipts = r.runRef(set.run)
+			run := set.run
+			// A set restored from a snapshot saved without its run's times
+			// takes them from the runs read since, when its run is among them.
+			if run.UpdatedAt == "" {
+				for _, known := range r.src.runs {
+					if known.ID == run.ID {
+						run = known
+						break
+					}
+				}
+			}
+			rs.Receipts = r.runRef(run)
 			if i == 0 {
 				snap.Receipts = rs.Receipts
 			}
@@ -1300,7 +1392,8 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			snap.Activity = append(snap.Activity, e)
 		}
 		snap.Who.Answered += l.Answers
-		if l.Stage == StageMerged {
+		// A merged pull request, as the totals count one (#861).
+		if l.Stage == StageMerged && l.PR != 0 {
 			snap.Who.Merged++
 		}
 	}
@@ -1338,7 +1431,8 @@ func (s *Server) assemble(now time.Time) Snapshot {
 // state, when every passing conformance check reached every state its model
 // has; tested otherwise, with the most states one reached; or unchecked, when
 // no component earned any of those.
-func componentAssurance(c *verify.ComponentEvidence) (assurance string, proved int, visited int64) {
+func componentAssurance(r *verify.Report) (assurance string, proved int, visited int64) {
+	c := r.Components
 	if c == nil {
 		return "unchecked", 0, 0
 	}
@@ -1352,16 +1446,20 @@ func componentAssurance(c *verify.ComponentEvidence) (assurance string, proved i
 	}
 	assurance = "unchecked"
 	for _, e := range c.Conformance {
-		if !e.TransitionsChecked || e.Result.Outcome != "passed" {
+		coverage := r.ComponentCoverage(e)
+		if !coverage.Checked {
 			continue
 		}
 		visited = max(visited, e.Result.States)
 		switch {
-		case assurance == "unchecked" && e.ExhaustiveStates:
+		case assurance == "unchecked" && coverage.Qualification() == "tested in every state":
 			assurance = "tested in every state"
-		case !e.ExhaustiveStates:
+		case coverage.Qualification() != "tested in every state":
 			assurance = "tested"
 		}
+	}
+	if assurance == "tested" && r.Sampled() {
+		assurance = "tested (sampled)"
 	}
 	return assurance, 0, visited
 }
@@ -1497,7 +1595,7 @@ func issueRef(repo, primary string, n int) string {
 func projectOf(ps projectSource, r *verify.Report) Project {
 	p := Project{
 		Dir: ps.dir, Name: ps.manifest.Name, Language: ps.manifest.Language, Bounds: ps.lock.Bounds,
-		Model: ps.key, Statements: []Statement{}, Witnesses: []Witness{}, Bugs: []Bug{},
+		Model: ps.key, Statements: []Statement{}, Witnesses: []Witness{}, Bugs: []Bug{}, Coverage: []verify.Coverage{},
 	}
 	if p.Language == "" {
 		p.Language = "go"
@@ -1519,11 +1617,16 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 		p.Bugs = append(p.Bugs, Bug{Name: b.Name, Label: b.Label, Says: b.Says, Violated: b.Violated, Steps: b.Steps, Caught: b.Caught})
 	}
 	p.Assurance = r.CodeAssurance()
+	p.Coverage = r.Coverage()
 	if p.Assurance == "tested against the model" {
 		p.Assurance = "tested"
-		if c := r.Conformance; c != nil && c.Passed && c.Exhaustive && c.States > 0 &&
-			int64(c.States) == c.ModelStates && (c.Tried == nil || c.Tried.Passed) {
-			p.Assurance = "tested in every state"
+		if r.Conformance != nil {
+			if coverage := r.ConformanceCoverage(); coverage.Checked {
+				p.Assurance = coverage.Qualification()
+			}
+		}
+		if r.Sampled() {
+			p.Assurance = "tested (sampled)"
 		}
 	}
 	if a := r.Agreement; a != nil {
@@ -1542,7 +1645,7 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 	// says what the code earned, in the words it uses for every project, and
 	// never "unchecked" for code that ran against the model (#780).
 	if p.Assurance == "component evidence" {
-		p.Assurance, p.Verified, p.Visited = componentAssurance(r.Components)
+		p.Assurance, p.Verified, p.Visited = componentAssurance(r)
 	}
 	if rt := r.Ratified; rt != nil {
 		p.Ratified = &Provenance{By: rt.By, At: rt.At, Issue: rt.Issue, Previous: rt.Previous}
@@ -1587,6 +1690,10 @@ func nowBy(ws []namedWatcher, issues []Issue, repos []RepoState, primary string)
 	}
 	return out
 }
+
+// betweenSteps is how long an open issue can sit in a stage with no step
+// running before the headline stops calling it work in progress.
+var betweenSteps = map[string]time.Duration{StageBuilding: 30 * time.Minute, StageGate: 3 * time.Hour, StageQueued: 30 * time.Minute}
 
 func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 	find := func(repo string, n int) *Issue {
@@ -1649,6 +1756,15 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 			ref := issueRef(is.Repo, primary, is.Number)
 			n := Now{Issue: is.Number, Repo: is.Repo, Detail: is.Title, Stage: stage}
 			if k := len(is.Spans); k > 0 && is.Spans[k-1].Open {
+				// No step is running here, so this issue is between steps.
+				// The factory picks one up within a few polls, and CI's gate
+				// finishes within the hour. One that has sat far longer isn't
+				// being worked on: it waits on something else, such as a
+				// step of its plan or a person, and doesn't take the page's
+				// biggest words as work in progress.
+				if span := is.Spans[k-1]; span.To.Sub(span.From) > betweenSteps[stage] {
+					continue
+				}
 				from := is.Spans[k-1].From
 				n.Since, n.WaitingOn = &from, is.Spans[k-1].Who
 			}

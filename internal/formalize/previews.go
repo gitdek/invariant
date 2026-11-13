@@ -382,9 +382,13 @@ func (f Fork) ValidatePreview(o Option) error {
 		r.Fingerprint != verify.Fingerprint(*r) || len(r.Pins) != len(m.Statements) || !r.Design.Passed {
 		return fmt.Errorf("preview receipt does not match the candidate source and model check")
 	}
+	model, err := tla.Read(m.ModuleText, m.Includes)
+	if err != nil {
+		return fmt.Errorf("preview receipt candidate model: %w", err)
+	}
 	for i, st := range m.Statements {
 		pin := r.Pins[i]
-		got, err := tla.PinHash(m.ModuleText, st.Name, project.Model)
+		got, err := model.PinHash(st.Name, project.Model)
 		if err != nil || got != st.SHA256 || !pin.Match || pin.Got != got || pin.Want != got ||
 			pin.Name != st.Name || pin.Kind != st.Kind || pin.Says != st.Says {
 			return fmt.Errorf("preview receipt candidate pins disagree with its model")

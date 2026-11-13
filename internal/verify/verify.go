@@ -321,13 +321,19 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		return nil, err
 	}
 	reader := snapshotReader(p, modelDir, raw, completion)
+	// The modules beside the model are read from the snapshot every check
+	// runs on, so a pin covers what TLC is given (#812).
+	includes, err := tla.Siblings(modelDir, p.ModuleName()+".tla")
+	if err != nil {
+		return nil, err
+	}
 
 	r := &Report{
 		Project:   p.Manifest.Name,
 		Decision:  p.Lock.Decision,
 		ModelOnly: model,
 		Bounds:    p.Lock.Bounds,
-		Pins:      checkPins(src, p.Lock.Statements),
+		Pins:      checkPins(src, includes, p.Lock.Statements),
 		Toolchain: Toolchain{TLCRelease: toolchain.TLCRelease, TLCJarSHA256: toolchain.TLCJarSHA256, JavaImage: tc.JavaImage},
 		// The gate reads only the project, so it names the agent its manifest
 		// records, if any (#179).
@@ -425,7 +431,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	// checks and unchecked, so a project with properties states it only in
 	// fairness statements.
 	unfairSpec := ""
-	if len(properties) > 0 && specFairness(src, p) {
+	if len(properties) > 0 && specFairness(src, includes, p) {
 		unfairSpec = "the spec states fairness itself. State it in fairness statements instead, so every check uses it and the gate can check it"
 	}
 	var evidence recordedEvidence
@@ -524,7 +530,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 
 	for i, f := range fairness {
 		spawn(func() error {
-			c, err := fairnessOf(src, f.Name)
+			c, err := fairnessOf(src, includes, f.Name)
 			if err != nil {
 				r.Fairness[i] = Fair{Name: f.Name, Says: f.Says, Message: err.Error()}
 				return nil
@@ -580,7 +586,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 
 	if !model && len(p.Manifest.TLAPS) > 0 {
 		spawn(func() (err error) {
-			r.TLAPS, r.Toolchain.TLAPS, err = proveTLAPS(ctx, work, p, src)
+			r.TLAPS, r.Toolchain.TLAPS, err = proveTLAPS(ctx, work, p, src, includes)
 			return err
 		})
 	}
@@ -696,14 +702,14 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 			var model *conformance.Model
 			if Explores(p) {
 				model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
-				if model.Steps, err = tla.Steps(src); err != nil {
+				if model.Steps, err = modelSteps(src, includes); err != nil {
 					model.Problem = err.Error()
 				}
 			}
 			if evidence.recording != nil {
-				c, err = evidence.recording.check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, model)
+				c, err = evidence.recording.check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, modelVariables(src, includes), r.Design.DistinctStates, model)
 			} else {
-				c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(src), r.Design.DistinctStates, evidence.Traces, model)
+				c, err = conformance.Check(ctx, runner, d, p.ModuleName(), p.Lock.Bounds, modelVariables(src, includes), r.Design.DistinctStates, evidence.Traces, model)
 			}
 			if err != nil {
 				return nil, err
@@ -857,16 +863,22 @@ func Fingerprint(r Report) string {
 	for i := range r.TLAPS {
 		r.TLAPS[i].Provers = nil
 	}
-	b, _ := json.Marshal(r)
+	b, _ := r.EvidenceJSON()
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func checkPins(src string, statements []project.Statement) []Pin {
+// checkPins compares each ratified statement's pin with the model's text. The
+// model is read the way TLC reads it, with the modules beside it, and one the
+// gate can't read that way matches no pin.
+func checkPins(src string, includes map[string]string, statements []project.Statement) []Pin {
 	pins := make([]Pin, 0, len(statements))
+	model, readErr := tla.Read(src, includes)
 	for _, s := range statements {
 		pin := Pin{Name: s.Name, Kind: s.Kind, Says: s.Says, Want: s.SHA256}
-		if h, err := tla.PinHash(src, s.Name, project.Model); err != nil {
+		if readErr != nil {
+			pin.Error = readErr.Error()
+		} else if h, err := model.PinHash(s.Name, project.Model); err != nil {
 			pin.Error = err.Error()
 		} else {
 			pin.Got = h
@@ -875,6 +887,25 @@ func checkPins(src string, statements []project.Statement) []Pin {
 		pins = append(pins, pin)
 	}
 	return pins
+}
+
+// modelSteps reads the named steps of the model's Next.
+func modelSteps(src string, includes map[string]string) ([]tla.Step, error) {
+	m, err := tla.Read(src, includes)
+	if err != nil {
+		return nil, err
+	}
+	return m.Steps()
+}
+
+// modelVariables names the model's variables, or none for a model the gate
+// can't read, which its pins report.
+func modelVariables(src string, includes map[string]string) []string {
+	m, err := tla.Read(src, includes)
+	if err != nil {
+		return nil
+	}
+	return m.Variables()
 }
 
 // stage copies the project's TLA+ modules into a fresh directory, with the

@@ -166,8 +166,7 @@ func largerExplorer(src []byte, sizes map[string]int) []byte {
 // agreementOnly runs just the agreement step, in the same sandbox.
 const agreementOnly = `exec 2>&1
 cd /src
-cp /agree/zz_invariant_agreement_test.go "./$PKG/" && go test -count=1 -run '^TestInvariantAgreement$' -v "./$PKG" ; echo "@@invariant agree=$?"
-`
+` + agreementStep
 
 // exploreLarger explores the package again with its explorer one size
 // larger.
@@ -223,15 +222,18 @@ func (g Go) exploreLarger(ctx context.Context, projectDir, pkg string, sizes map
 			return Exploration{}, fmt.Errorf("running the Go sandbox: %w", err)
 		}
 	}
-	s, err := splitMarkers(out.String(), 1)
+	return parseLarger(out.String())
+}
+
+// parseLarger reads the output of the sandbox that runs the agreement step
+// alone.
+func parseLarger(out string) (Exploration, error) {
+	s, err := splitMarkers(out, 1)
 	if err != nil {
 		return Exploration{}, err
 	}
-	if m := explored.FindStringSubmatch(s[0].out); m != nil && s[0].code == 0 {
-		e := Exploration{OK: true}
-		e.States, _ = strconv.ParseInt(m[1], 10, 64)
-		e.Depth, _ = strconv.Atoi(m[2])
-		return e, nil
+	if states, depth, ok := agreement(s[0].out); ok && s[0].code == 0 {
+		return Exploration{OK: true, States: states, Depth: depth}, nil
 	}
 	return Exploration{Message: lastLines(s[0].out, 20)}, nil
 }
@@ -320,21 +322,40 @@ func countLarger(ctx context.Context, image, runner string, p *project.Project, 
 	if err != nil {
 		return Exploration{}, err
 	}
-	log, _ := os.ReadFile(filepath.Join(out, "driver.log"))
-	raw, readErr := os.ReadFile(filepath.Join(out, "count.json"))
+	return countOutcome(out, s[0].code), nil
+}
+
+// A driver's log is kept to its last megabyte, and a count is a few bytes.
+const (
+	driverLogLimit = 1 << 20
+	countLimit     = 1 << 16
+)
+
+// countOutcome says how the count one size larger went, from the run's exit
+// code and what it left in out, the directory the sandbox shared with the
+// gate. The driver owns those files, so each is read only as a regular file
+// inside that directory: a link out of it, to a file on the host, is never
+// followed, and nothing of it reaches the message (#816).
+func countOutcome(out string, code int) Exploration {
 	var count struct {
 		States int64 `json:"states"`
 		Depth  int   `json:"depth"`
 	}
 	switch {
-	case s[0].code == 124 || s[0].code == 143:
-		return Exploration{Unfinished: true, Message: fmt.Sprintf("the driver didn't finish counting one size larger within %s", countTimeout)}, nil
-	case s[0].code != 0:
-		return Exploration{Message: "the driver failed one size larger:\n" + lastLines(string(log), 20)}, nil
-	case readErr != nil || json.Unmarshal(raw, &count) != nil || count.States <= 0:
-		return Exploration{Message: "the driver wrote no count to $INVARIANT_COUNT, as {\"states\": N, \"depth\": D}"}, nil
+	case code == 124 || code == 143:
+		return Exploration{Unfinished: true, Message: fmt.Sprintf("the driver didn't finish counting one size larger within %s", countTimeout)}
+	case code != 0:
+		log, err := readSandboxOutput(out, "driver.log", driverLogLimit)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Exploration{Message: "the driver failed one size larger, and its log wasn't read: " + err.Error()}
+		}
+		return Exploration{Message: "the driver failed one size larger:\n" + lastLines(string(log), 20)}
 	}
-	return Exploration{OK: true, States: count.States, Depth: count.Depth}, nil
+	raw, err := readSandboxOutput(out, "count.json", countLimit)
+	if err != nil || json.Unmarshal(raw, &count) != nil || count.States <= 0 {
+		return Exploration{Message: "the driver wrote no count to $INVARIANT_COUNT, as {\"states\": N, \"depth\": D}"}
+	}
+	return Exploration{OK: true, States: count.States, Depth: count.Depth}
 }
 
 // largerTimeout caps TLC's run one size larger. A model that grows past it

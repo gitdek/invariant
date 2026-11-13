@@ -32,7 +32,7 @@ func isPythonApplication(p *project.Project) bool {
 }
 
 // pythonApplicationGateOptions are the options the gate prepares its
-// session with. The gate's own are the zero value: every selected proof runs
+// session with. The gate's own are the zero value: every eligible proof runs
 // the pinned Nagini, and the dependency image's own records name its
 // distributions. This package's tests substitute doubles; no caller can.
 var pythonApplicationGateOptions PythonApplicationSessionOptions
@@ -49,13 +49,11 @@ func pythonApplicationAdmit(p *project.Project) (*project.ComponentInventory, er
 	if err != nil {
 		return nil, err
 	}
-	// The gate qualifies an in-place proof only beside conformance on the
-	// same function (#359): its collector binds what conformance observes to
-	// the function's exact staged declaration, the same bytes Nagini's input
-	// copies, so the function proved is the function the application runs.
+	// The collector binds either the selected function or declared calls
+	// inside explored entries to the exact staged declaration (#359, #793).
 	for _, check := range inv.Checks {
-		if check.Proof != nil && len(check.Conformance) == 0 {
-			return nil, fmt.Errorf("%s selects a proof and no conformance: the gate qualifies an in-place proof only beside conformance on the same function, which shows the application runs the declaration Nagini proved", check.Target)
+		if check.Proof != nil && len(check.Conformance) == 0 && !pythonApplicationObservedTarget(inv, check.Target) {
+			return nil, fmt.Errorf("%s selects a proof and no conformance: select conformance on the same function or observe it in another check's exhaustive conformance, to show the application runs the declaration Nagini proved", check.Target)
 		}
 	}
 	app, err := project.ResolvePythonApplication(p)
@@ -342,6 +340,10 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	if err != nil {
 		return nil, err
 	}
+	includes, err := tla.Siblings(filepath.Dir(p.ModulePath()), filepath.Base(p.ModulePath()))
+	if err != nil {
+		return nil, err
+	}
 	all := true
 	contracts := pythonApplicationContracts(s.inventory)
 	var contractSteps [][2]int
@@ -386,7 +388,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			c.Mode = "bounded-exhaustive"
 			c.Result.Exhaustive = true
 			model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
-			if steps, err := tla.Steps(string(raw)); err != nil {
+			if steps, err := modelSteps(string(raw), includes); err != nil {
 				model.Problem = err.Error()
 			} else {
 				model.Steps = steps
@@ -398,7 +400,7 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 				return nil, errors.Join(e, recording.close())
 			}
 			checks := &pythonApplicationModelRunner{runner: runner, root: d}
-			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, tla.Variables(string(raw)), r.Design.DistinctStates, model)
+			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, modelVariables(string(raw), includes), r.Design.DistinctStates, model)
 			if v.Explored {
 				// Attempts carry no runs; the exploration's are its replays.
 				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs
@@ -426,6 +428,9 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			}
 		} else {
 			c.Result.Message = traceErr.Error()
+			if x.HarnessError != "" {
+				c.Result.Message += ": " + x.HarnessError
+			}
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -438,11 +443,22 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			return nil, err
 		}
 	}
-	// Each selected function is proved in its module, by the pinned Nagini,
-	// apart from the application's image (#359).
+	if s.inventory.Mode == "explicit" {
+		if err := r.attributePythonApplication(s.inventory); err != nil {
+			return nil, err
+		}
+	}
+	// Qualify each prepared input against the evidence already collected,
+	// before acquiring or running Nagini (#849).
 	var proofs []ComponentProofResult
 	for _, target := range proofTargets {
-		proof, err := s.Prove(ctx, target)
+		proof, err := s.prove(ctx, target, func(proof *PythonApplicationProof) []string {
+			e := *r.Components
+			e.Proofs = []ComponentProof{{Target: target, Result: &proof.Result}}
+			a := *r.Application
+			a.Proofs = append(slices.Clone(a.Proofs), *proof)
+			return pythonApplicationProofPrerequisites(&e, target, &proof.Result, &a)
+		})
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -456,9 +472,6 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 		r.Toolchain.NaginiRecipe = toolchain.NaginiRecipe()
 	}
 	if s.inventory.Mode == "explicit" {
-		if err := r.attributePythonApplication(s.inventory); err != nil {
-			return nil, err
-		}
 		// Conformance-only applications keep their reports exactly as before.
 		if len(proofTargets) > 0 {
 			if err := r.AttributeComponentProofs(s.inventory, proofs); err != nil {
@@ -488,9 +501,10 @@ var pythonApplicationLargerTimeouts = struct{ model, explore time.Duration }{lar
 
 // runPythonApplicationLarger checks an exhaustive application one size past
 // the ratified bounds when its driver names every bound with a next size, as
-// every exhaustive driver is checked (D-0068, D-0076). TLC runs first; only
-// once it finishes there does each explored invocation run again, with the
-// same snapshot and image, its driver copy supplying the larger bounds.
+// every exhaustive driver is checked (D-0068, D-0076). Each invocation needs
+// passing base execution and conformance first (#849). TLC runs only when
+// one qualifies; once it finishes there, eligible invocations run again with
+// the same snapshot and image, their driver copy supplying the larger bounds.
 func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession, r *Report, p *project.Project, work, src string, runner tlc.Runner) error {
 	larger, sizes := largerBounds(p.Lock.Bounds)
 	driver, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(s.driver)))
@@ -499,6 +513,25 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 	}
 	if !declaresBounds(driver, sizes) {
 		return nil
+	}
+	original := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(driver)}
+	var eligible []PythonApplicationInvocation
+	order := map[PythonApplicationInvocationKey]int{}
+	for i, v := range s.Invocations() {
+		if !v.Explored {
+			continue
+		}
+		order[v.Key] = i
+		if why := pythonApplicationLargerPrerequisites(r.Application, v.Key); len(why) > 0 {
+			r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{
+				Key: v.Key, Bounds: maps.Clone(larger), Original: original, Skipped: why,
+				Result: Larger{Bounds: maps.Clone(larger)}})
+		} else {
+			eligible = append(eligible, v)
+		}
+	}
+	if len(eligible) == 0 {
+		return ctx.Err()
 	}
 	d, err := stage(work, "larger", p, src, "")
 	if err != nil {
@@ -517,11 +550,7 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		r.Larger = compareLarger(larger, &res, nil, "")
 		return nil
 	}
-	original := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(driver)}
-	for _, v := range s.Invocations() {
-		if !v.Explored {
-			continue
-		}
+	for _, v := range eligible {
 		lctx, cancel := context.WithTimeout(ctx, timeouts.explore)
 		x, file, err := s.RunLarger(lctx, v.Key, sizes)
 		unfinished := lctx.Err() != nil
@@ -538,13 +567,22 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		case x == nil:
 			return err
 		case !x.Success || x.Exploration == nil:
-			e = Exploration{Message: lastLines(strings.Join(x.Diagnostics, "\n"), 20)}
+			e = Exploration{Message: x.HarnessError}
+			if e.Message == "" && err != nil && len(x.Diagnostics) > 0 {
+				// The session appends its normalized execution/protocol error
+				// after process output. It is not a slice of the traceback.
+				e.Message = x.Diagnostics[len(x.Diagnostics)-1]
+			}
+			if e.Message == "" {
+				e.Message = "Python application driver did not complete successfully; see execution diagnostics"
+			}
 		default:
 			e = Exploration{OK: true, States: int64(x.Exploration.States), Depth: x.Exploration.Depth}
 		}
 		l := compareLarger(larger, &res, &e, "")
 		r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{Key: v.Key, Bounds: maps.Clone(larger), Driver: file, Original: original, Execution: x, Result: *l})
 	}
+	slices.SortFunc(r.Application.Larger, func(a, b PythonApplicationLarger) int { return order[a.Key] - order[b.Key] })
 	// The report claims the weakest result: any disagreement, else any run
 	// that couldn't finish, else agreement.
 	weakness := func(l *Larger) int {
@@ -557,12 +595,40 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		return 0
 	}
 	for i := range r.Application.Larger {
+		if len(r.Application.Larger[i].Skipped) > 0 {
+			continue
+		}
 		l := r.Application.Larger[i].Result
 		if r.Larger == nil || weakness(&l) > weakness(r.Larger) {
 			r.Larger = &l
 		}
 	}
 	return nil
+}
+
+// A larger exploration depends on its own completed execution and all three
+// conformance obligations at the ratified bounds, never a sibling's verdict.
+func pythonApplicationLargerPrerequisites(a *PythonApplicationReport, key PythonApplicationInvocationKey) []string {
+	var out []string
+	x := slices.IndexFunc(a.Executions, func(x PythonApplicationExecutionResult) bool { return x.Key == key })
+	if x < 0 || !a.Executions[x].Success || !a.Executions[x].Complete || a.Executions[x].Exploration == nil {
+		out = append(out, "base exploration execution did not complete successfully")
+	}
+	i := slices.IndexFunc(a.Conformance, func(c PythonApplicationConformance) bool { return c.Key == key })
+	if i < 0 {
+		return append(out, "base exploration has no transition, exhaustive-state or attempted-step conformance")
+	}
+	c := a.Conformance[i]
+	if !c.Result.Passed || c.OperationalError {
+		out = append(out, "base exploration transition conformance did not pass")
+	}
+	if c.Mode != "bounded-exhaustive" || !c.Result.Exhaustive || c.Result.ModelStates <= 0 || int64(c.Result.States) != c.Result.ModelStates {
+		out = append(out, "base exploration exhaustive-state conformance did not pass")
+	}
+	if c.Result.Tried == nil || !c.Result.Tried.Passed {
+		out = append(out, "base exploration attempted-step conformance did not pass")
+	}
+	return out
 }
 
 // Actual completed windows and original logical obligations are separate

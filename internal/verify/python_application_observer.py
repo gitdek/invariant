@@ -10,6 +10,7 @@ every observation it makes.
 
 import ast
 import asyncio
+import builtins
 import _thread
 import dis
 import functools
@@ -22,15 +23,21 @@ import operator
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import types
 from itertools import compress, repeat
 
 
 _collector = None
+# Each builtin exception class by every name builtins binds to it, read
+# before any application code runs.
+_builtin_exceptions = tuple(sorted((key, value) for key, value in vars(builtins).items()
+                                   if type(value) is type and issubclass(value, BaseException)))
 
 
 def guarded(method):
@@ -38,9 +45,9 @@ def guarded(method):
     def call(*args, **kwargs):
         try:
             return method(*args, **kwargs)
-        except BaseException:
+        except BaseException as error:
             if _collector is not None:
-                _collector.failed = True
+                _collector.fail(error)
             raise
     return call
 
@@ -135,16 +142,23 @@ def ordinary(obj):
     return data
 
 
-def coroutine_objects():
+def coroutine_objects(_objects=gc.get_objects, _is=operator.is_, _coroutine=types.CoroutineType, _generator=types.GeneratorType,
+                      _iterable=inspect.CO_ITERABLE_COROUTINE, _type=type, _map=map, _list=list, _set=set,
+                      _compress=compress, _repeat=repeat):
     # A module step scans the heap twice under the collector's hooks, so a
     # Python loop here raised a trace and a profile event for every object
     # (#796). These C callables compare exact types, as type() is does, with
     # no event per object, and unlike isinstance they never read __class__.
-    objects = gc.get_objects()
-    kinds = list(map(type, objects))
-    found = set(compress(objects, map(operator.is_, kinds, repeat(types.CoroutineType))))
-    found.update([value for value in compress(objects, map(operator.is_, kinds, repeat(types.GeneratorType)))
-                  if value.gi_code.co_flags & inspect.CO_ITERABLE_COROUTINE])
+    #
+    # Each is bound here, when the collector loads and before any application
+    # code runs, so the scan calls nothing an application has rebound since:
+    # read through its module at each use, operator.is_ was whatever the
+    # application had left there, called once for every object (#882).
+    objects = _objects()
+    kinds = _list(_map(_type, objects))
+    found = _set(_compress(objects, _map(_is, kinds, _repeat(_coroutine))))
+    found.update([value for value in _compress(objects, _map(_is, kinds, _repeat(_generator)))
+                  if value.gi_code.co_flags & _iterable])
     return found
 
 
@@ -301,6 +315,8 @@ class Collector:
         self.locations, self.codes = locations, codes
         self.sources = {}
         self.failed = False
+        self.harness_error = None
+        self.diagnostic_error = None
         self.lives, self.instances = [], []
         self.receivers = {}
         self.targets = {}
@@ -311,6 +327,9 @@ class Collector:
         self.handles = {}
         self.original_defaults = {}
         self.original_functions = {}
+        self.observed = {(os.path.join(request["root"], d["source"]), d["symbol"]): d
+                         for d in request.get("observe", [])}
+        self.observed_bindings = {}
         self.definitions = {}
         self.internal_threads = set()
         self.thread_traces = {}
@@ -324,6 +343,25 @@ class Collector:
         self.exploring = request.get("mode") == "explored"
         self.exploration = None
         self.explored = False
+        # The run's one deadline watchdog and the socket to it, once a module
+        # step has started it (#856).
+        self.watchdog = None
+
+    def fail(self, error):
+        self.failed = True
+        if self.diagnostic_error is error:
+            return
+        self.diagnostic_error = error
+        # Retain and write the first cause before a caught error, exception
+        # wrapper or terminating cleanup can replace it. This is diagnostic
+        # output, never part of the authenticated observation stream.
+        if self.harness_error is None:
+            self.harness_error = error
+            os.write(2, ("\nINVARIANT_HARNESS_ERROR " + json.dumps(str(error)) + "\n").encode("utf-8"))
+        context = traceback.format_exception(type(error), error, error.__traceback__)
+        if error.__traceback__ is None:
+            context = traceback.format_stack()[:-1] + context
+        os.write(2, "".join(context).encode("utf-8", "backslashreplace"))
 
     def lexical(self, code):
         filename = os.path.abspath(code.co_filename)
@@ -375,8 +413,9 @@ class Collector:
     def write(self, life, entry, kind=None, **state):
         caller = sys._getframe(1)
         if not any(caller.f_code is code for code in self.writers) or caller.f_globals is not globals():
-            self.failed = True
-            raise ValueError("observation did not come from a lifecycle read-back")
+            error = ValueError("observation did not come from a lifecycle read-back")
+            self.fail(error)
+            raise error
         self.count += 1
         if life.form:
             state["form"] = life.form
@@ -384,6 +423,8 @@ class Collector:
             kind = "initial" if life.sequence == 0 else "transition"
         if self.exploration is not None:
             state.update(self.exploration.fields(life, kind))
+            if kind == "transition" and life.operation != "release" and life.observed_calls:
+                state["calls"] = life.observed_calls
         row = dict(type="observation", kind=kind,
                    run=life.run, instance=life.identity, sequence=life.sequence,
                    key=self.request["key"], target=life.target.component,
@@ -399,8 +440,9 @@ class Collector:
         # The harness's own record of the steps it tries, before any run.
         caller = sys._getframe(1)
         if caller.f_code is not explore.__wrapped__.__code__ or caller.f_globals is not globals():
-            self.failed = True
-            raise ValueError("exploration steps did not come from the harness")
+            error = ValueError("exploration steps did not come from the harness")
+            self.fail(error)
+            raise error
         self.emit(dict(type="exploration", steps=steps))
 
     def trace(self, frame, event, arg):
@@ -419,14 +461,106 @@ class Collector:
             if frame.f_code.co_name == "<module>" and frame.f_code.co_filename.startswith(self.request["root"] + os.sep):
                 self.capture_definition(frame, event)
             if event == "exception" and frame.f_code in self.driver_codes:
-                self.failed = True
+                self.fail(arg[1])
             active = self.active
             if active is not None:
                 active.observe(frame, event, arg)
-        except BaseException:
-            self.failed = True
+                self.observe_call(active, frame, event, arg)
+        except BaseException as error:
+            self.fail(error)
             raise
         return self.thread_traces[current]
+
+    def observe_call(self, life, frame, event, arg):
+        if not self.observed or not self.exploring or life.operation == "release" or event not in ("call", "return", "exception"):
+            return
+        declaration = self.observed.get((os.path.abspath(frame.f_code.co_filename), frame.f_code.co_qualname))
+        if declaration is None:
+            return
+        if event == "call" and frame not in life.observed_frames:
+            if not life.owns(frame):
+                return
+            function = frame.f_globals.get(frame.f_code.co_name)
+            binding = Binding(self, function, module=True)
+            if binding.component != declaration["id"] or binding.digest != declaration["source_sha256"]:
+                raise ValueError("observed function differs from selected staged declaration")
+            binding.frame(frame)
+            self.observed_bindings[binding.component] = binding
+            code = binding.code
+            if code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS):
+                raise ValueError("observed functions require named parameters")
+            names = code.co_varnames[:code.co_argcount + code.co_kwonlyargcount]
+            arguments = {}
+            for name in names:
+                try:
+                    arguments[name] = copied(frame.f_locals[name])
+                except ValueError as error:
+                    raise ValueError("observed function %s: argument %s must be a JSON scalar, or a list or a "
+                                     "dictionary with string keys of them: %s" % (binding.symbol, name, error)) from None
+            # A list or a dictionary can change in place, so what a contract
+            # says of one after the call needs its value then (#838). The
+            # record keeps the objects passed in, whatever the body rebinds.
+            mutable = {name: frame.f_locals[name] for name in names if type(frame.f_locals[name]) in (list, dict)}
+            life.observed_frames[frame] = [binding, arguments, self.caller(frame), mutable, None]
+        if event == "exception" and frame in life.observed_frames:
+            # The last exception to reach the frame is the one it unwinds
+            # with, if it does: the body may still handle it. Only its class
+            # is kept, so nothing the application raised lives longer.
+            life.observed_frames[frame][4] = arg[0]
+        if event == "return" and frame in life.observed_frames:
+            kind = return_kind(frame)
+            if kind == "yield":
+                return
+            binding, arguments, caller, mutable, error = life.observed_frames.pop(frame)
+            binding.frame(frame)
+            call = dict(target=binding.component, source_sha256=binding.digest, caller=caller, arguments=arguments)
+            after = {}
+            for name, value in mutable.items():
+                try:
+                    after[name] = copied(value)
+                except ValueError as problem:
+                    raise ValueError("observed function %s: argument %s must still be a JSON scalar, or a list or a "
+                                     "dictionary with string keys of them, after the call: %s" % (binding.symbol, name, problem)) from None
+            if after:
+                call["after"] = after
+            if kind == "return":
+                try:
+                    call["result"] = copied(arg)
+                except ValueError as problem:
+                    raise ValueError("observed function %s: its result must be a JSON scalar, or a list or a "
+                                     "dictionary with string keys of them: %s" % (binding.symbol, problem)) from None
+            elif error is not None:
+                # A call that raised is recorded with the exception's class,
+                # so a contract's Exsures can be checked (#838). Which
+                # builtin classes it inherits from is told by identity.
+                classes = type.__dict__["__mro__"].__get__(error)
+                module, name = (type.__dict__[key].__get__(classes[0]) for key in ("__module__", "__qualname__"))
+                if type(module) is not str or type(name) is not str:
+                    raise ValueError("observed function %s raised an exception whose class has no name" % binding.symbol)
+                call.update(result=None, raised=dict(
+                    type=module + "." + name,
+                    builtins=sorted(key for key, value in _builtin_exceptions if any(value is cls for cls in classes))))
+            else:
+                return
+            life.observed_calls.append(call)
+
+    def caller(self, frame):
+        # Who made an observed call is the nearest frame beneath it that runs
+        # a staged application file: the application's own code, a driver, a
+        # helper beside it, or a callback one of them passed in. Go counts
+        # the call only when that file is one of the application's own.
+        root = self.request["root"]
+        frame = frame.f_back
+        while frame is not None:
+            filename = os.path.abspath(frame.f_code.co_filename)
+            if filename.startswith(root + os.sep) and filename.endswith(".py"):
+                return os.path.relpath(filename, root).replace(os.sep, "/")
+            frame = frame.f_back
+        return ""
+
+    def check_observed(self):
+        for binding in self.observed_bindings.values():
+            binding.check()
 
     def capture_definition(self, frame, event):
         # Observe MAKE_FUNCTION before any decorator receives the object, even
@@ -458,8 +592,9 @@ class Collector:
         if event == "c_call" and (arg is _thread.start_new_thread or arg is getattr(_thread, "start_joinable_thread", None)):
             worker = frame.f_locals.get("self")
             if worker not in self.internal_threads and (self.active is None or self.active.form != "module" or worker not in self.active.threads):
-                self.failed = True
-                raise ValueError("unowned thread creation is unsupported")
+                error = ValueError("unowned thread creation is unsupported")
+                self.fail(error)
+                raise error
 
     def start_thread(self, worker, *args, **kwargs):
         try:
@@ -473,8 +608,8 @@ class Collector:
             # started workers still reaches every descendant (#405).
             life.started.add(worker)
             return result
-        except BaseException:
-            self.failed = True
+        except BaseException as error:
+            self.fail(error)
             raise
 
 
@@ -561,11 +696,16 @@ class _Lifecycle:
     def escaped_refusal(self, exc):
         # A driver exception, a target exception, or a collector error must
         # never become a refusal, even when it has the declared type.
+        if _collector.failed:
+            raise exc
         escaped = exc is self.entry_raised or exc is getattr(self, "await_raised", None)
-        if (_collector.failed or not escaped or self.refusal is None or self.calls
-                or getattr(self, "threads", ()) or not self.refusal.matches(exc)):
+        valid = (escaped and self.refusal is not None and not self.calls
+                 and not getattr(self, "threads", ()) and self.refusal.matches(exc))
+        if _collector.failed:
+            raise exc
+        if not valid:
             raise ValueError("application call raised an undeclared or invalid refusal") from exc
-        if _collector.failed or self.calls or getattr(self, "threads", ()):
+        if self.calls or getattr(self, "threads", ()):
             raise ValueError("refusal attributes started application work")
         self.outcome = "refused"
 
@@ -683,6 +823,8 @@ class _Lifecycle:
             raise ValueError("state changed between transitions")
         expect(self.before, expected_before)
         self.calls, self.after = 0, None
+        self.observed_calls, self.observed_frames = [], {}
+        c.check_observed()
         self.delegate_called = not bool(c.request.get('delegates'))
         self.entry_frame = self.target_frame = None
         self.entry_raised = None
@@ -702,6 +844,7 @@ class _Lifecycle:
                 raise ValueError("incomplete selected call")
             self.check_target()
             self.entry.check()
+            c.check_observed()
             expect(self.after, expected_after)
             self.sequence += 1
             self.state = self.after.copy()
@@ -817,7 +960,7 @@ class _ModuleLifecycle(_Lifecycle):
         # A Python thread cannot safely be killed or forcibly joined. End this
         # disposable runner without a seal, including for non-daemon workers
         # and code that catches cancellation. Go accepts none of its rows.
-        _collector.failed = True
+        _collector.fail(ValueError("module observation timed out or left unfinished work"))
         os.write(2, b"module observation timed out or left unfinished work\n")
         os._exit(1)
 
@@ -832,33 +975,71 @@ class _ModuleLifecycle(_Lifecycle):
         return task
 
     def async_error(self, loop, context):
-        _collector.failed = True
+        _collector.fail(ValueError("module event loop reported failed work"))
         _collector.misuse = "module event loop reported failed work"
         loop.default_exception_handler(context)
 
     def watchdog(self):
         # A separate interpreter enforces the deadline even while application
-        # C code holds this interpreter's GIL. EOF cancels it on normal cleanup
-        # or parent death; no application thread can catch SIGKILL. The
-        # deadline starts once the watchdog runs, so its own start on a loaded
-        # machine spends none of the application's time (#645).
-        program = """import os, select, signal, sys, time
-parent, deadline = int(sys.argv[1]), time.monotonic() + float(sys.argv[2])
+        # C code holds this interpreter's GIL. One interpreter serves the whole
+        # run, since starting one per step cost more than the step (#856).
+        # Each step passes it a fresh pipe, and only EOF on that pipe, once
+        # every copy of its write end is closed, cancels that step's deadline:
+        # on normal cleanup, or when this process dies. A process the
+        # application forks during the step holds a copy, so the deadline
+        # stays armed, as it did when each step had a watchdog of its own. No
+        # application thread can catch SIGKILL. The deadline starts once the
+        # watchdog is armed, so its own start on a loaded machine spends none
+        # of the application's time (#645).
+        c = _collector
+        if c.watchdog is None:
+            program = """import os, select, signal, socket, sys, time
+parent = int(sys.argv[1])
+control = socket.socket(fileno=0)
 os.write(1, b'1')
-if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
-    if os.getppid() == parent:
-        os.write(2, b'module observation timed out or left unfinished work\\n')
-        os.kill(parent, signal.SIGKILL)
+try:
+    while True:
+        message, fds, _, _ = socket.recv_fds(control, 64, 1)
+        if not message or len(fds) != 1:
+            break
+        deadline = time.monotonic() + float(message)
+        control.sendall(b'1')
+        if not select.select([fds[0]], [], [], max(0, deadline - time.monotonic()))[0]:
+            if os.getppid() == parent:
+                os.write(2, b'module observation timed out or left unfinished work\\n')
+                os.kill(parent, signal.SIGKILL)
+            break
+        os.close(fds[0])
+        control.sendall(b'0')
+except OSError:
+    pass  # the run ended, and its socket with it
 """
-        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid()), str(self.timeout)],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        if process.stdout.read(1) != b"1":
-            process.stdin.close()
+            ours, theirs = socket.socketpair()
+            try:
+                process = subprocess.Popen([sys.executable, "-I", "-S", "-c", program, str(os.getpid())],
+                                           stdin=theirs, stdout=subprocess.PIPE)
+            finally:
+                theirs.close()
+            if process.stdout.read(1) != b"1":
+                ours.close()
+                process.stdout.close()
+                process.wait()
+                raise ValueError("module deadline watchdog failed to start")
             process.stdout.close()
-            process.wait()
+            c.watchdog = (process, ours)
+        control = c.watchdog[1]
+        alive, held = os.pipe()
+        try:
+            socket.send_fds(control, [repr(float(self.timeout)).encode()], [alive])
+            armed = control.recv(1)
+        except OSError:
+            armed = b""
+        finally:
+            os.close(alive)
+        if armed != b"1":
+            os.close(held)
             raise ValueError("module deadline watchdog failed to start")
-        process.stdout.close()
-        return process, time.monotonic() + self.timeout
+        return held, time.monotonic() + self.timeout
 
     @guarded
     def step(self, entry, *args, expected_before=None, expected_after=None, **kwargs):
@@ -919,6 +1100,8 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
             raise ValueError("state changed between transitions")
         expect(self.before, expected_before, module=True)
         self.calls = 0
+        self.observed_calls, self.observed_frames = [], {}
+        c.check_observed()
         self.completed = self.entry_completed = False
         self.entry_frame = self.target_frame = self.await_frame = None
         self.entry_raised = self.await_raised = self.await_task = None
@@ -948,6 +1131,11 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                     result = self.entry.call(*args, **kwargs)
                     if inspect.isawaitable(result):
                         loop = asyncio.new_event_loop()
+                        # What the entry leaves scheduled is read from
+                        # asyncio's own loop below. A policy that makes
+                        # another kind keeps its queues to itself.
+                        if not isinstance(loop, asyncio.BaseEventLoop):
+                            raise ValueError("module entries run on asyncio's own event loop, and the application's event loop policy makes another")
                         asyncio.set_event_loop(loop)
                         loop.set_task_factory(self.task)
                         loop.set_exception_handler(self.async_error)
@@ -972,6 +1160,14 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                    or (task.exception() is not None and not (task is self.await_task and task.exception() is escaped))
                    for task in self.tasks):
                 raise ValueError("module entry left unfinished or failed tasks")
+            # A callback the entry left on its loop, with call_later or
+            # call_at, or with call_soon from the loop's last batch, would
+            # run on a server's loop and is discarded when this one closes.
+            # The step's after-state would leave out what it does (#871).
+            # asyncio has no public way to ask a loop what it holds: these
+            # are BaseEventLoop's own queues. A cancelled handle does nothing.
+            if loop is not None and any(not handle.cancelled() for handle in [*loop._ready, *loop._scheduled]):
+                raise ValueError("module entry left scheduled callbacks on its event loop")
             # An explored step the application refuses before its selected
             # call completes the entry and leaves the state as it was (#342).
             refused = c.exploring and self.calls == 0 and releasing is None
@@ -986,6 +1182,7 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 raise ValueError("incomplete selected call")
             if self.entry is not None:
                 self.entry.check()
+            c.check_observed()
             self.after = self.read()
             if refused and not equal(self.after, self.before):
                 raise ValueError("a refused step changed the state without a selected call")
@@ -1001,6 +1198,9 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                 self.state = copied(self.after)
                 c.write(self, self.entry or self.target, before=self.before, after=self.after)
             succeeded = True
+        except BaseException as error:
+            c.fail(error)
+            raise
         finally:
             if loop is not None:
                 try:
@@ -1017,17 +1217,24 @@ if not select.select([0], [], [], max(0, deadline - time.monotonic()))[0]:
                                                      and operation != "release")
                            for worker in self.threads)):
                 self.expire()
-            watchdog.stdin.close()
-            if watchdog.wait() != 0:
-                c.failed = True
+            # Closing this step's pipe disarms its deadline, and the watchdog
+            # says so. One that died, or says anything else, fails the run.
+            os.close(watchdog)
+            try:
+                disarmed = c.watchdog[1].recv(1)
+            except OSError:
+                disarmed = b""
+            if disarmed != b"0":
+                c.fail(ValueError("module deadline watchdog failed"))
             c.active = None
             self.entry_frame = self.target_frame = self.await_frame = None
 
 
 def _poison(message):
-    _collector.failed = True
+    error = AttributeError(message)
+    _collector.fail(error)
     _collector.misuse = _collector.misuse or message
-    raise AttributeError(message)
+    raise error
 
 
 class Lifecycle:
@@ -1083,9 +1290,10 @@ def _handle(record):
 def _record(handle):
     record = _collector.handles.get(handle)
     if type(handle) is not Lifecycle or record is None:
-        _collector.failed = True
+        error = ValueError("unknown lifecycle handle")
+        _collector.fail(error)
         _collector.misuse = _collector.misuse or "unknown lifecycle handle"
-        raise ValueError("unknown lifecycle handle")
+        raise error
     return record
 
 
@@ -1355,7 +1563,7 @@ def run(request, emit, locations, codes, argv):
     threading.setprofile(c.profile)
     previous_excepthook = threading.excepthook
     def thread_error(args):
-        c.failed = True
+        c.fail(args.exc_value)
         previous_excepthook(args)
     def start(worker, *args, **kwargs):
         return c.start_thread(worker, *args, **kwargs)
@@ -1367,6 +1575,9 @@ def run(request, emit, locations, codes, argv):
             raise ValueError("driver did not complete bound lifecycles")
         if c.exploring and not c.explored:
             raise ValueError("an explored invocation's driver did not complete explore()")
+    except BaseException as error:
+        c.fail(error)
+        raise
     finally:
         sys.settrace(None)
         sys.setprofile(None)
@@ -1379,4 +1590,14 @@ def run(request, emit, locations, codes, argv):
         for life in c.lives:
             if getattr(life, "held", None) is not None:
                 life.expire()
+        if c.watchdog is not None:
+            # An explicit stop, not EOF: a process the driver forked between
+            # steps may hold a copy of the socket.
+            process, control = c.watchdog
+            try:
+                control.sendall(b"stop")
+            except OSError:
+                pass
+            control.close()
+            process.wait()
     emit(dict(type="end", count=c.count))

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gitdek/invariant/internal/decisions"
@@ -36,6 +38,9 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 	}
 	if err != nil {
 		return &Checked{Problem: err.Error()}, nil
+	}
+	if problem := ignoredByGit(ctx, repo, plan); problem != "" {
+		return &Checked{Plan: plan, Problem: problem}, nil
 	}
 	c := &Checked{Plan: plan}
 	if plan.Native() && s.Repository == nil {
@@ -143,6 +148,41 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 	}
 	c.Problem = strings.Join(problems, "; ")
 	return c, nil
+}
+
+// ignoredByGit says which files of a plan the checkout's ignore rules match:
+// the files it names for the build, its acceptance tests, and the record a
+// ratification writes. git leaves such a file out of a commit without a
+// word, so a build that wrote it would publish a branch that lacks it
+// (#840). A file the repository already tracks is never ignored, and a
+// directory that isn't a checkout has no rules to ask.
+func ignoredByGit(ctx context.Context, repo string, plan *Plan) string {
+	record := LockPath(0)
+	files := append(append(slices.Clone(plan.Files), plan.TestFiles()...), record)
+	// The paths go in on stdin, which is what git reads NUL-separated.
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "check-ignore", "-v", "-z", "--stdin")
+	cmd.Stdin = strings.NewReader(strings.Join(files, "\x00") + "\x00")
+	// It exits 1 where nothing matches, and 128 where repo isn't a checkout.
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	// Each match is the rule's file, its line, the pattern and the path.
+	fields := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	var problems []string
+	for i := 0; i+3 < len(fields); i += 4 {
+		source, line, pattern, file := fields[i], fields[i+1], fields[i+2], fields[i+3]
+		if strings.HasPrefix(pattern, "!") {
+			continue // a rule that takes the file back out of what's ignored
+		}
+		rule := fmt.Sprintf("%s line %s: %s", source, line, pattern)
+		if file == record {
+			problems = append(problems, fmt.Sprintf("the repository's ignore rules leave %s out of every commit (%s), so a ratified plan can't be recorded there", LockDir, rule))
+			continue
+		}
+		problems = append(problems, fmt.Sprintf("the plan names %s, which the repository's ignore rules leave out of every commit (%s), so a build couldn't publish it; give the file a name those rules don't match", file, rule))
+	}
+	return strings.Join(problems, "; ")
 }
 
 // checkPlanDecisions checks the staged copy in a fresh store, so neither

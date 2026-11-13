@@ -319,6 +319,11 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 		if _, err := pythonApplicationTargetSources(p, root, target); err != nil {
 			return nil, err
 		}
+		for _, id := range check.Observe {
+			if err := pythonApplicationObservedDeclaration(p, root, decls[id]); err != nil {
+				return nil, err
+			}
+		}
 		for _, group := range []struct {
 			kind string
 			ids  []string

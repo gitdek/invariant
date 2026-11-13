@@ -76,6 +76,34 @@ type readerEvidence struct {
 	Problem   string
 }
 
+// Reader identities and saved inputs retain their original encoding. Report
+// JSON for display adds coverage; it must not move an archived evidence URL.
+func (e readerEvidence) MarshalJSON() ([]byte, error) {
+	var report json.RawMessage
+	if e.Report != nil {
+		b, err := e.Report.EvidenceJSON()
+		if err != nil {
+			return nil, err
+		}
+		report = b
+	}
+	return json.Marshal(struct {
+		Format, Repo, Dir, Commit string
+		Manifest                  project.Manifest
+		Lock                      project.Lock
+		ManifestBytes, LockBytes  []byte
+		Files                     map[string][]byte
+		View                      []byte
+		Comparison                []byte            `json:",omitzero"`
+		Code                      map[string]string `json:",omitzero"`
+		Report                    json.RawMessage
+		Artifacts                 readerArtifacts
+		Traces                    map[string]tlc.TraceFile
+		Problem                   string
+	}{e.Format, e.Repo, e.Dir, e.Commit, e.Manifest, e.Lock, e.ManifestBytes, e.LockBytes, e.Files,
+		e.View, e.Comparison, e.Code, report, e.Artifacts, e.Traces, e.Problem})
+}
+
 type readerPage struct {
 	repo                     string
 	presentation             ReaderPresentation
@@ -170,13 +198,23 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	if len(r.Pins) != len(e.Lock.Statements) {
 		return bad("snapshot_mismatch", "The receipt's statements differ from the lock at this commit.")
 	}
+	includes := map[string]string{}
+	for name, data := range e.Files {
+		if name != module+".tla" {
+			includes[name] = string(data)
+		}
+	}
+	checked, readErr := tla.Read(string(model), includes)
 	for i, st := range e.Lock.Statements {
 		pin := r.Pins[i]
 		if pin.Name != st.Name || pin.Kind != st.Kind || pin.Says != st.Says || pin.Want != st.SHA256 {
 			return bad("snapshot_mismatch", "The receipt's pinned rules differ from the lock at this commit.")
 		}
 		if rr.Chart != nil || rr.Limitation != nil {
-			got, err := tla.PinHash(string(model), st.Name, project.Model)
+			if readErr != nil {
+				return bad("snapshot_mismatch", "The checked reader's rule pins do not match the model at this commit.")
+			}
+			got, err := checked.PinHash(st.Name, project.Model)
 			if err != nil || got != st.SHA256 || !pin.Match || pin.Got != st.SHA256 {
 				return bad("snapshot_mismatch", "The checked reader's rule pins do not match the model at this commit.")
 			}
@@ -478,6 +516,7 @@ const readerHTML = `<!doctype html>
 <p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}</div>
 <section><h2>Locked rules</h2><p class="note">Ratified, then pinned by hash: the code is checked against these, and nothing can change them without a new ratification.</p>{{template "rules" .View}}</section>
 <section><h2>Checked bounds</h2><p class="note">TLC explored every state the model reaches within these.</p>{{template "bounds" .View}}</section>
+{{if .View.Coverage}}<section><h2>Conformance coverage</h2><p class="note">Each check's distinct visited states at its ratified bounds. A full state sample alone establishes no exhaustive exploration, transition or attempt coverage, or proof.</p><ul>{{range .View.Coverage}}<li><code>{{.Source}}{{if .Target}} · {{.Target}}{{end}}{{if .Check}} · {{.Check}}{{end}}{{if .Invocation}} · {{.Invocation}}{{end}}</code>: <strong>{{.Qualification}}</strong> · {{.Detail}}</li>{{end}}</ul></section>{{end}}
 {{if .Record}}<details><summary>Complete receipt reader record</summary><pre>{{.Record}}</pre></details>{{end}}
 <p class="meta">Receipt commit: <code>{{.Presentation.Commit}}</code><br>Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
 <p class="foot">This explanation describes the model at the receipt's bounds. It does not change the receipt's verification verdict or code assurance.</p>
@@ -658,6 +697,9 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 	}
 	projects := snap.Projects[:0]
 	for _, p := range snap.Projects {
+		// A cached display cannot supply coverage. Restore it only from the
+		// original report after the saved evidence has been validated.
+		p.Coverage = []verify.Coverage{}
 		if p.Repo == "" {
 			p.Repo = snap.Repo
 		}
@@ -677,7 +719,12 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 			}
 			if ok {
 				page := makeReader(e)
-				ok = page.presentation == *old
+				// The HTML hash may change with the renderer. Compare the
+				// immutable evidence path and all other presentation fields.
+				saved, current := *old, page.presentation
+				saved.Page, _, _ = strings.Cut(saved.Page, "?")
+				current.Page, _, _ = strings.Cut(current.Page, "?")
+				ok = current == saved
 				if ok {
 					s.mu.Lock()
 					if s.readers == nil {
@@ -685,7 +732,10 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 					}
 					s.readers[parts[1]] = page
 					s.mu.Unlock()
-					p.Poster = page.posters
+					restored := projectOf(projectSource{dir: e.Dir, manifest: e.Manifest, lock: e.Lock, key: p.Model}, e.Report)
+					restored.Repo, restored.Graph = p.Repo, p.Graph
+					restored.Reader, restored.Poster = &page.presentation, page.posters
+					p = restored
 				}
 			}
 			if !ok {
@@ -714,7 +764,10 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 		if run == nil {
 			continue
 		}
-		set := &receiptSet{run: github.Run{ID: run.ID, HeadSHA: run.SHA, Name: "gate", Status: run.Status, Conclusion: run.Conclusion},
+		// The saved snapshot holds the run with its title and times. A set
+		// restored without them said its receipts were from year one.
+		set := &receiptSet{run: github.Run{ID: run.ID, HeadSHA: run.SHA, Name: "gate", Status: run.Status, Conclusion: run.Conclusion,
+			DisplayTitle: run.Title, StartedAt: stampOf(run.Started), UpdatedAt: stampOf(run.Updated)},
 			reports: map[string]*verify.Report{}, readers: map[string]readerArtifacts{}, traces: map[string]map[string]tlc.TraceFile{}}
 		var sources []projectSource
 		for _, e := range evidence[r.Name] {

@@ -119,6 +119,25 @@ type Waiting struct {
 	// the plan's ratification is gone, so the card offers only drafting the
 	// plan again (D-0220, D-0238).
 	Gone bool `json:"gone,omitempty"`
+	// Now is the card's pull request as GitHub had it at the last refresh,
+	// when the card names one and it could be read (#865). Everything else
+	// here says how it was when the factory stopped.
+	Now *PullNow `json:"now,omitempty"`
+}
+
+// PullNow is a pull request as GitHub has it: whether it's open, and for an
+// open one whether it's a draft, whether it can merge into its base, and how
+// CI's gate went on its head.
+type PullNow struct {
+	State string `json:"state"` // open, closed or merged
+	Draft bool   `json:"draft,omitempty"`
+	// Conflicts says GitHub can't merge it into its base. Unsettled says
+	// GitHub hasn't worked that out yet, as right after a push.
+	Conflicts bool `json:"conflicts,omitempty"`
+	Unsettled bool `json:"unsettled,omitempty"`
+	// Gate is how CI's gate went on its head: passed, failed, running, or
+	// empty when none has run there.
+	Gate string `json:"gate,omitempty"`
 }
 
 // RetryCopy is what a card says of its retry, as plain text both pages
@@ -598,9 +617,17 @@ func postText(m factory.Marker, previous factory.Marker) string {
 		return plural(len(m.Forks), "asked a question", "asked %d questions")
 	case factory.KindProposal:
 		n := 0
-		if m.Proposal != nil {
-			n = len(m.Proposal.Statements)
-			if m.Proposal.Target != nil {
+		if p := m.Proposal; p != nil {
+			// A plan has no statements, and nothing of it was checked by
+			// TLC: it says what it is (#848).
+			switch {
+			case p.Plan != nil:
+				return fmt.Sprintf("proposed a plan: %s to write, %s", plural(len(p.Plan.Files), "1 file", "%d files"), plural(len(p.Plan.Tests), "1 acceptance test", "%d acceptance tests"))
+			case p.IssuePlan != nil:
+				return plural(len(p.IssuePlan.Issues), "proposed a plan of 1 issue", "proposed a plan of %d issues")
+			}
+			n = len(p.Statements)
+			if p.Target != nil {
 				return fmt.Sprintf("proposed an amendment: %d statements", n)
 			}
 		}
@@ -683,4 +710,13 @@ func plural(n int, one, many string) string {
 func parseTime(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339, s)
 	return t
+}
+
+// stampOf writes a time as GitHub does, and no time as nothing, so that
+// parseTime reads it back as it was.
+func stampOf(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }

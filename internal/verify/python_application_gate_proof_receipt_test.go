@@ -57,8 +57,8 @@ func TestInPlaceProofReceiptsSayWhatIsProvedAndWhatIsTested(t *testing.T) {
 	if failed.Passed || !strings.Contains(md, "In-place proof: ") || !strings.Contains(md, "keyword.iskeyword, which isn") {
 		t.Errorf("a failed required contract isn't named among the failures:\n%s", md)
 	}
-	// Nagini verified it, and it isn't counted as proved (#359's review).
-	if !strings.Contains(md, "Component proofs: **0 proved; 1 not qualified;") || !strings.Contains(md, "| not qualified |") {
+	// The failed prerequisite skips Nagini, so the proof is unchecked (#849).
+	if !strings.Contains(md, "Component proofs: **0 proved;") || !strings.Contains(md, "skipped") || strings.Contains(md, "verified by Nagini") || failed.Application.Proofs[0].Ran {
 		t.Errorf("a proof without its condition is counted as proved:\n%s", md)
 	}
 

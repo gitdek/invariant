@@ -9,6 +9,9 @@
   const VERSION = new URL(document.currentScript?.src || location.href).searchParams.get("v") || "";
   const $ = (s, el = document) => el.querySelector(s);
   const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // SMIL takes no notice of that preference, so the header's mark is stilled
+  // by hand.
+  if (REDUCED) document.querySelectorAll(".brand svg animate, .brand svg animateTransform").forEach((a) => a.remove());
   const nf = new Intl.NumberFormat("en-US");
 
   // The canvas can't read CSS variables, so the theme's colors are read
@@ -60,6 +63,10 @@
     const d = Math.floor(h / 24), hh = h % 24;
     return hh ? `${d}d ${hh}h` : `${d}d`;
   }
+  // How far round something with this period is, in degrees, by the page's
+  // own clock. A graphic drawn again starts from there, so it carries on
+  // from where it was in place of jumping back to its start (#845).
+  const turned = (seconds) => (((performance.now() / 1000) % seconds) / seconds) * 360;
   const stamp = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const clockOf = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   // fillTimes writes every relative time under root.
@@ -71,11 +78,39 @@
     fillTimes();
     if (state) {
       const u = $("#updated");
-      u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
-      u.title = u.textContent;
+      // A read that failed says so until one succeeds.
+      if (!u.classList.contains("lost")) {
+        u.textContent = `updated ${ago(state.generatedAt)}` + (state.stale?.length ? " · some sources stale" : "");
+        u.title = u.textContent;
+      }
       u.classList.toggle("stale", !!state.stale?.length);
     }
     liveTick();
+  }
+
+  // ---------- nothing animates out of sight ----------
+  // The page's graphics animate all the time, and most of the page is out
+  // of sight at any moment. A section that's scrolled away rests: its SVG
+  // animations pause and its CSS animations stop, and they carry on from
+  // where they were when it comes back (#855). Idle, the page cost a fifth
+  // of the main thread wherever it was scrolled to.
+  const resting = new Set();
+  function rest(el, away) {
+    el.classList.toggle("resting", away);
+    if (away) resting.add(el); else resting.delete(el);
+    for (const svg of el.querySelectorAll("svg")) {
+      if (away) svg.pauseAnimations?.(); else svg.unpauseAnimations?.();
+    }
+  }
+  // What's drawn again in a resting section rests too.
+  function restAgain() {
+    for (const el of resting) {
+      for (const svg of el.querySelectorAll("svg")) if (svg.animationsPaused && !svg.animationsPaused()) svg.pauseAnimations();
+    }
+  }
+  if ("IntersectionObserver" in window) {
+    const sight = new IntersectionObserver((entries) => { for (const e of entries) rest(e.target, !e.isIntersecting); }, { rootMargin: "160px 0px" });
+    for (const el of document.querySelectorAll("main > section")) sight.observe(el);
   }
 
   // ---------- the loop ----------
@@ -89,39 +124,59 @@
   }
   // /act reads the snapshot again as soon as GitHub takes a post (#175), and
   // the newest read is the one drawn, and the one that reads again later.
-  let reads = 0, again = 0;
+  // The snapshot changes once per refresh and is read several times in
+  // between, so a read names the snapshot it has, and the server answers 304
+  // with no body when that's still the one (#854).
+  let reads = 0, again = 0, stateTag = "";
+  let liveAnswered = () => {};
+  const liveFirst = new Promise((resolve) => { liveAnswered = resolve; });
   async function load() {
     const read = ++reads;
     clearTimeout(again);
     let wait = 15000;
     try {
-      const r = await fetch("/api/state.json", { cache: "no-store" });
+      const r = await fetch("/api/state.json", { cache: "no-store", headers: stateTag ? { "If-None-Match": stateTag } : {} });
       if (r.status === 503) wait = 3000;
-      else if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      else if (r.status === 304) {
+        // Nothing changed, so nothing is drawn again.
+        if (read === reads) $("#updated").classList.remove("lost");
+      } else if (!r.ok) throw new Error(`HTTP ${r.status}`);
       else {
         const s = await r.json();
+        // The first draw waits for the running steps too, a moment at most,
+        // so their cards don't arrive later and push the page down (#855).
+        if (!state) await Promise.race([liveFirst, new Promise((resolve) => setTimeout(resolve, 1500))]);
         if (read !== reads) return;
         state = s;
+        stateTag = r.headers.get("ETag") || "";
+        $("#updated").classList.remove("lost");
         if (ACT) untaken.refresh();
         render(state);
       }
     } catch (e) {
-      $("#updated").textContent = "can't reach the server; retrying";
+      const u = $("#updated");
+      u.classList.add("lost");
+      u.textContent = u.title = "can't reach the server; retrying";
     }
-    if (read === reads) again = setTimeout(load, wait);
+    // A hidden page reads nothing until it's shown again.
+    if (read === reads && !document.hidden) again = setTimeout(load, wait);
   }
 
   function render(s) {
+    // The first draw shows what waited for it (#867).
+    document.querySelector("main").classList.remove("opening");
     settleScope(s);
     renderTop(s);
     if (changed("scope", [scope, s.totals, (s.repos || []).map((r) => [r.name, r.totals, r.factory.running]), s.issues.filter((i) => i.open).map((i) => i.repo)])) renderScope(s);
     if (changed("inbox", [scope, s.issues.filter((i) => i.open).map((i) => [i.repo, i.number, i.title, i.waiting, i.acted]), [...acts]])) renderInbox(s);
     if (ACT && changed("untaken", [scope, state?.repo])) untaken.paint();
-    if (changed("fleet", [scope, s.repos, s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title])])) renderFleet(s);
+    // The fleet is keyed on what it draws, never on a watcher's heartbeat or
+    // lease, which change every minute (#845).
+    if (changed("fleet", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals, r.factory?.running, r.factory?.doing, r.gate?.status]), s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title, i.waiting?.kind, i.waiting?.failure])])) renderFleet(s);
     // The headline counts what needs a person, which a post from /act
     // changes at once without changing anything else it draws (#175).
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
-    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title]), s.factory.running, s.totals.merged])) orbit.update(s);
+    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title, i.waiting?.kind, i.waiting?.failure]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("assurance", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals])])) renderAssurance(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states, p.receiptMissing])])) renderTabs(s);
@@ -140,13 +195,16 @@
     if (changed("activity", [scope, s.activity])) renderActivity(s.activity.filter((e) => inScope(e.repo)));
     if (live) renderLive();
     tick();
+    restAgain();
   }
 
   // ---------- top and now ----------
   function renderTop(s) {
     const f = $("#factory");
     f.classList.toggle("on", !!s.factory.running);
-    f.innerHTML = `<i></i>${s.factory.running ? "Factory on" : "Factory off"}`;
+    // Written only when it changes: made again at every draw, its dot's
+    // glow started over each time (#886).
+    put(f, `<i></i>${s.factory.running ? "Factory on" : "Factory off"}`);
     f.title = s.factory.running && s.factory.started ? `Watching ${s.repo} since ${stamp(s.factory.started)}` : "The watcher isn't running. It runs when @gitdek starts it.";
   }
 
@@ -155,7 +213,11 @@
     // Find the issue numbers first, then escape the rest. Escaping first
     // turns an apostrophe into &#39;, whose #39 would look like an issue.
     const html = n.headline.split(/(#\d+)/).map((part) => (/^#\d+$/.test(part) ? `<span class="n">${part}</span>` : esc(part))).join("");
-    if (h.innerHTML !== html) {
+    // Compared with what was last written here. What the browser gives
+    // back spells an apostrophe its own way, so a headline that held one
+    // never matched, and came in again at every draw (#886).
+    if (h.dataset.html !== html) {
+      h.dataset.html = html;
       h.innerHTML = html;
       h.classList.remove("swap");
       void h.offsetWidth;
@@ -168,7 +230,10 @@
     document.title = other ? `${n.headline} · ${other} · Invariant` : `${n.headline} · Invariant`;
 
     const d = $("#detail");
-    const lastMerged = s.issues.find((i) => i.stage === "merged" && inScope(i.repo));
+    // The issue merged last, by when it closed: the snapshot lists issues in
+    // another order.
+    const lastMerged = s.issues.filter((i) => i.stage === "merged" && i.closed && inScope(i.repo))
+      .reduce((last, i) => (!last || Date.parse(i.closed) > Date.parse(last.closed) ? i : last), null);
     if (n.stage === "idle" && lastMerged) {
       const when = lastMerged.closed ? `, <span data-ago="${esc(lastMerged.closed)}"></span>` : "";
       d.innerHTML = `Last merged <b>${esc(ref(lastMerged.repo, lastMerged.pr))}</b> for ${esc(ref(lastMerged.repo, lastMerged.number))}, <q>${esc(lastMerged.title)}</q>${when}.`;
@@ -178,13 +243,20 @@
 
     const chips = [];
     // What waits on a person is counted here and shown in Needs you (D-0098).
-    const needs = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo)).length;
-    const needsChip = needs ? `<a class="chip people" href="#inbox"><i></i>${needs === 1 ? "1 issue needs you" : `${needs} issues need you`}</a>` : "";
+    // The count is what's new. What has waited more than two days is counted
+    // apart, as Needs you shows it apart.
+    const waiting = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
+    const needs = waiting.filter((i) => !stalled(i)).length, old = waiting.length - needs;
+    const needsText = (needs === 1 ? "1 issue needs you" : needs ? `${needs} issues need you` : "") + (needs && old ? " · " : "") + (old ? `${old} stalled` : "");
+    const needsChip = waiting.length ? `<a class="chip people" href="#inbox"><i></i>${needsText}</a>` : "";
     if (n.stage === "idle") {
       chips.push(s.factory.running ? `<span class="chip factory pulse"><i></i>Watching for issues</span>` : `<span class="chip"><i></i>The watcher is off</span>`);
       if (needsChip) chips.push(needsChip);
       const t = totalsOf(s);
-      chips.push(`<span class="chip holds"><i></i>${t.badMerges} bad merges in ${t.merged}</span>`);
+      // A merge without a green gate is a failure, and is drawn as one.
+      chips.push(t.badMerges
+        ? `<a class="chip breaks" href="#numbers"><i></i>${t.badMerges} of ${t.merged} merges had no green gate</a>`
+        : `<span class="chip holds"><i></i>0 bad merges in ${t.merged}</span>`);
     } else {
       // With several steps running, the chip counts them, and no one step's
       // checks are shown (D-0113).
@@ -226,7 +298,9 @@
       rows.push(`<div ${tag(s.repo)}><span class="k">Main</span><span><code>${esc(m.sha.slice(0, 7))}</code> ${esc(m.title)} · @${esc(m.by)} · <span data-ago="${esc(m.at)}"></span></span></div>`);
       rows.push(`<div ${tag(s.repo)}><span class="k">CI</span><span>${gate}</span></div>`);
     }
-    if (s.receipts && mine) rows.push(`<div ${tag(s.repo)}><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>, <span data-ago="${esc(s.receipts.updated)}"></span></span></div>`);
+    // A time the page wasn't given is left out, never counted from year one.
+    const receiptsWhen = T(s.receipts?.updated) > 0 ? `, <span data-ago="${esc(s.receipts.updated)}"></span>` : "";
+    if (s.receipts && mine) rows.push(`<div ${tag(s.repo)}><span class="k">Receipts</span><span>from CI's gate on <code>${esc(s.receipts.sha.slice(0, 7))}</code>${receiptsWhen}</span></div>`);
     // The lease: which one watcher may act, and until when it must renew.
     const lease = (l) => T(l.until) > Date.now()
       ? `<code>${esc(l.holder)}</code> holds it until ${esc(clockOf(l.until))}`
@@ -260,6 +334,18 @@
     { key: "merged", name: "Merge", sub: "gate passed", color: "accent" },
   ];
   const ORBIT_R = 160;
+  // An issue that needs a person after a failure is drawn where it stopped,
+  // in the color of a failure: at Issue when no draft checked out, at Build
+  // when the factory's own run failed or made no pull request, and at the
+  // Gate when its pull request did.
+  const stoppedAt = (is) => {
+    if (is.stage !== "review") return is.stage;
+    if (is.waiting?.kind === "stuck") return "queued";
+    return ["stopped", "limit", "gate"].includes(is.waiting?.failure) ? "building" : "gate";
+  };
+  // In one repository's view its issues need no repository before their
+  // numbers, on the orbit and the fleet, where labels are tight.
+  const dotLabel = (is) => (scope === is.repo ? `#${is.number}` : ref(is.repo, is.number));
   const stationAngle = (i) => -Math.PI / 2 + (i * Math.PI) / 3;
   const orbit = {
     built: false,
@@ -308,20 +394,24 @@
       let g = "";
       if (!REDUCED) {
         [0, 0.18, 0.34, 0.48].forEach((lag, i) => {
-          g += `<circle r="${[4.5, 3.4, 2.5, 1.8][i]}" class="ghost" opacity="${op * [1, 0.5, 0.3, 0.15][i]}"><animateMotion dur="${period}s" begin="-${lag + 1}s" repeatCount="indefinite" path="${path}"/></circle>`;
+          g += `<circle r="${[4.5, 3.4, 2.5, 1.8][i]}" class="ghost" opacity="${op * [1, 0.5, 0.3, 0.15][i]}"><animateMotion dur="${period}s" begin="-${(lag + 1 + (turned(period) / 360) * period).toFixed(2)}s" repeatCount="indefinite" path="${path}"/></circle>`;
         });
       }
       $("#ghost").innerHTML = g;
-      // Merged issues orbit the invariant like moons.
-      const merged = mine.filter((i) => i.stage === "merged").slice().reverse();
+      // Merged issues orbit the invariant like moons: the most recent ones
+      // that fit inside the orbit. Each merged issue's ring is wider than the
+      // last, and one per issue put most of them far outside the graphic,
+      // drifting across the words beside it (#845). The count says how many
+      // merged.
+      const merged = mine.filter((i) => i.stage === "merged").slice().reverse().slice(0, Math.floor((ORBIT_R - 52) / 13) + 1);
       $("#moons").innerHTML = merged.map((is, i) => {
-        const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137) % 360;
-        const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start}" to="${start + 360}" dur="${per}s" repeatCount="indefinite"/>`;
-        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
+        const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137 + (REDUCED ? 0 : turned(per))) % 360;
+        const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start.toFixed(1)}" to="${(start + 360).toFixed(1)}" dur="${per}s" repeatCount="indefinite"/>`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start.toFixed(1)})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
       }).join("");
       // Open issues sit at their stage.
       const open = mine.filter((i) => i.open);
-      const active = new Set(open.map((i) => (i.stage === "review" ? "gate" : i.stage)));
+      const active = new Set(open.map(stoppedAt));
       document.querySelectorAll("#orbit .station").forEach((el) => {
         el.classList.toggle("active", active.has(el.dataset.key));
         el.querySelector(".halo").setAttribute("opacity", active.has(el.dataset.key) ? "1" : "0");
@@ -329,14 +419,20 @@
       const dots = $("#dots");
       const counts = {};
       const want = open.map((is) => {
-        const k = is.stage === "review" ? "gate" : is.stage;
+        const k = stoppedAt(is);
         const idx = Math.max(0, STATIONS.findIndex((st) => st.key === k));
         const nth = (counts[k] = (counts[k] || 0) + 1) - 1;
-        return { is, angle: stationAngle(idx) + nth * 0.14 };
+        return { is, k, nth, angle: stationAngle(idx) + nth * 0.2 };
       });
-      dots.innerHTML = want.map(({ is }) => {
+      dots.innerHTML = want.map(({ is, k, nth }) => {
         const bug = is.stage === "review";
-        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" x="12" y="4">${esc(ref(is.repo, is.number))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
+        // Issues that share a station sit a label's width apart, and their
+        // labels take turns: one up and to the right, the next centered
+        // beneath its dot, so none covers its neighbor. At the Gate a label
+        // to the right would run into the orbit's caption, so it sits above.
+        const over = `x="0" y="-13" text-anchor="middle"`;
+        const at = counts[k] === 1 ? (k === "gate" ? over : `x="12" y="4"`) : nth % 2 ? `x="0" y="21" text-anchor="middle"` : k === "gate" ? over : `x="12" y="-7"`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} data-n="${esc(issueKey(is))}"><circle r="7" class="issue-dot${bug ? " bug" : ""}"/><text class="issue-label" ${at}>${esc(dotLabel(is))}</text><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}</title></g>`;
       }).join("");
       want.forEach(({ is, angle }) => {
         const k = issueKey(is);
@@ -390,11 +486,16 @@
     const tiles = tilesOf(s), box = $("#numbers");
     counting++;
     if (!box.children.length) {
-      box.innerHTML = tiles.map((x) => `<div class="num${x.key === "bad" ? " holds" : ""}" data-k="${esc(x.key)}"><div class="v">0</div><div class="l"></div><div class="s"></div></div>`).join("");
+      box.innerHTML = tiles.map((x) => `<div class="num" data-k="${esc(x.key)}"><div class="v">0</div><div class="l"></div><div class="s"></div></div>`).join("");
     }
     tiles.forEach((x) => {
       const el = box.querySelector(`[data-k="${x.key}"]`);
       if (!el) return;
+      // The first tile holds at zero. Any other count there is a failure.
+      if (x.key === "bad") {
+        el.classList.toggle("holds", x.shown === "0");
+        el.classList.toggle("breaks", x.shown !== "0");
+      }
       el.title = x.title || "";
       el.querySelector(".l").textContent = x.label;
       el.querySelector(".s").textContent = x.small;
@@ -848,6 +949,34 @@
   }
 
   // ---------- lanes ----------
+  // A wait's label sits over the middle of its dashes. Near either end of a
+  // lane, as on a phone, it's moved in so it stays on the card. Offsets are
+  // read, not rectangles, since a segment is scaled while it draws in.
+  function fitWaits() {
+    document.querySelectorAll("#lanes .track").forEach((track) => {
+      const labels = [...track.querySelectorAll(".seg.people .wait")].map((label) => {
+        const seg = label.parentElement;
+        const mid = seg.offsetLeft + seg.offsetWidth / 2, half = label.offsetWidth / 2;
+        const shift = Math.max(0, half - mid) - Math.max(0, mid + half - track.clientWidth);
+        label.style.transform = shift ? `translateX(calc(-50% + ${shift.toFixed(1)}px))` : "";
+        return { label, from: mid + shift - half, to: mid + shift + half, weight: (label.dataset.open ? 1e12 : 0) + Number(label.dataset.secs) };
+      });
+      // Where two labels would overlap, the wait that's still open keeps
+      // its label, or else the longer one. The other is in its dashes' title.
+      const kept = [];
+      labels.sort((a, b) => b.weight - a.weight).forEach((l) => {
+        const clear = kept.every((k) => l.to + 4 <= k.from || l.from >= k.to + 4);
+        l.label.style.visibility = clear ? "" : "hidden";
+        if (clear) kept.push(l);
+      });
+    });
+  }
+  window.addEventListener("resize", fitWaits);
+  // On a phone a lane scaled to the longest one is a speck, so each fills
+  // its own card there, and lanes are drawn again when the width crosses over.
+  const NARROW = matchMedia("(max-width: 560px)");
+  NARROW.addEventListener("change", () => { delete seen.lanes; if (state) render(state); });
+
   let lanesShown = false;
   function renderLanes(all) {
     const box = $("#lanes");
@@ -870,12 +999,12 @@
     };
     box.innerHTML = issues.map((is) => {
       let acc = 0, segs = "", marks = "";
-      const at = [];
+      const at = [], own = Math.max(is.spans.reduce((a, sp) => a + unitsOf(sp), 0), 1);
       is.spans.forEach((sp, k) => {
-        const w = (unitsOf(sp) / widest) * 100;
+        const w = (unitsOf(sp) / (NARROW.matches ? own : widest)) * 100;
         const secs = (T(sp.to) - T(sp.from)) / 1000;
         const cls = `seg ${sp.who}${sp.open ? " open" : ""}`;
-        const inner = sp.who === "people" ? `<span class="wait">${sp.open ? "waiting " : ""}${dur(secs)}</span>` : "";
+        const inner = sp.who === "people" ? `<span class="wait" data-secs="${Math.round(secs)}"${sp.open ? ` data-open="1"` : ""}>${sp.open ? "waiting " : ""}${dur(secs)}</span>` : "";
         segs += `<div class="${cls}" style="width:${w.toFixed(3)}%;transition-delay:${k * 90}ms" title="${esc(sp.who === "people" ? "Waiting on a person" : sp.who === "ci" ? "CI's gate" : "The factory working")} · ${dur(secs)}">${inner}</div>`;
         at.push(acc);
         acc += w;
@@ -902,6 +1031,7 @@
       box.insertAdjacentHTML("beforeend", `<div class="more"><button class="btn" type="button" id="lanesmore">${lanesAll ? "Show fewer" : `Show ${hidden} more`}</button></div>`);
       $("#lanesmore").addEventListener("click", () => { lanesAll = !lanesAll; delete seen.lanes; render(state); });
     }
+    fitWaits();
     if (lanesShown || REDUCED) box.classList.add("shown");
     else {
       const io = new IntersectionObserver((es) => {
@@ -956,7 +1086,32 @@
     const m = /\(([^)]*)\)\s*$/.exec(p.name || "");
     return m ? m[1] : langName[p.language] || p.language;
   };
+  // How much of the model's states each conformance check visited (#802), as
+  // short text: "2/5 states (40%)", or "coverage unknown". The fractions and
+  // truncated percentages are the server's, made from checked integers, since
+  // a JavaScript number can't hold every count. One check gives its share
+  // alone; several are named by invocation, each once, and never added up.
+  function coverageShares(p) {
+    const rows = [], seen = new Set();
+    for (const c of p.coverage || []) {
+      const name = c.invocation || (c.target || "").replace(/^[^#]*#/, "").replace(/@.*$/, "") || c.source;
+      const share = c.status === "unknown" ? "coverage unknown" : `${c.fraction} states (${c.percent})`;
+      // An application's invocation and the component check made from it
+      // say the same thing.
+      const key = `${name}\u0000${share}\u0000${c.checked}`;
+      if (!seen.has(key)) { seen.add(key); rows.push({ name, share }); }
+    }
+    return rows.length === 1 ? rows[0].share : rows.map((r) => `${r.name}: ${r.share}`).join("; ");
+  }
+  // Whether a passing check was sampled and the assurance doesn't say so, as
+  // a proved project's doesn't: then it's said beside the result.
+  const sampledBeside = (p) => !/sampled/.test(p.assurance || "") && !!p.coverage?.some((c) => c.checked && c.sampled);
   function codeEvidence(p) {
+    if (p.coverage?.length) {
+      const lead = p.assurance === "proved" ? `${p.verified} function${p.verified === 1 ? "" : "s"} proved`
+        : p.assurance === "tested in every state" ? "every state reached" : "";
+      return [lead, coverageShares(p)].filter(Boolean).join(" · ");
+    }
     if (p.assurance === "proved") return `${p.verified} function${p.verified === 1 ? "" : "s"} proved`;
     if (p.assurance === "tested in every state") return "every state reached";
     if (p.assurance === "tested") return `${nf.format(p.visited || 0)}/${nf.format(p.states)} states run`;
@@ -1022,11 +1177,12 @@
         </dl>`;
       const prov = provenance(row.ps);
       const chips = row.ps.map((q) => {
-        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" ? "tested" : "unchecked";
+        const assure = q.assurance === "proved" ? "proved" : q.assurance === "tested in every state" ? "every" : q.assurance === "tested" || q.assurance === "tested (sampled)" ? "tested" : "unchecked";
         const label = q.receiptMissing ? "receipt unavailable" : q.assurance;
         const tip = [q.dir, q.fingerprint ? q.fingerprint.slice(0, 19) : "", provOf(q)].filter(Boolean).join(" · ");
         const href = q.reader ? q.reader.page : "";
-        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? "passed" : "failed"}</span>`}`;
+        const pass = sampledBeside(q) ? "passed (sampled)" : "passed";
+        const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? pass : "failed"}</span>`}`;
         return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}${comparisonDiagnostic(q)}</li>`;
       }).join("");
       return `${head}<article class="model${quiet(p.repo)}" ${tag(p.repo)}>
@@ -1043,7 +1199,6 @@
       const go = () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); };
       el.addEventListener("click", go);
     });
-    thumbs(s);
   }
 
   // A chart tile frames the top of its poster's chart: its first states,
@@ -1127,36 +1282,6 @@
   window.addEventListener("scroll", () => { scrolled = performance.now(); clearTimeout(peekIntent); peekArmed = null; if (peekTile) hidePeek(true); }, { passive: true });
   window.addEventListener("resize", () => { if (peekTile) hidePeek(true); });
 
-  function thumbs(s) {
-    const ready = new Set(s.projects.filter((p) => p.graph).map((p) => p.model));
-    document.querySelectorAll("canvas.thumb").forEach((cv) => {
-      if (!ready.has(cv.dataset.model)) return;
-      getGraph(cv.dataset.model).then((g) => drawThumb(cv, g)).catch(() => {});
-    });
-  }
-  function drawThumb(cv, g) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2), S = 150;
-    cv.width = S * dpr; cv.height = S * dpr;
-    const c = cv.getContext("2d");
-    c.scale(dpr, dpr);
-    c.translate(S / 2, S / 2);
-    const L = g.layout, pos = { x: new Float32Array(L.n), y: new Float32Array(L.n) };
-    place(L, 6, S / 2 - 6, pos);
-    const big = L.n > 2500;
-    c.lineWidth = 0.5;
-    c.strokeStyle = big ? rgba("ink", V.light ? 0.02 : 0.012) : rgba("ink", V.light ? 0.16 : 0.12);
-    c.beginPath();
-    for (let i = 0; i < g.edges.length; i += 3) {
-      const a = g.edges[i], b = g.edges[i + 1];
-      c.moveTo(pos.x[a], pos.y[a]); c.lineTo(pos.x[b], pos.y[b]);
-    }
-    c.stroke();
-    c.fillStyle = rgba("ink", big ? 0.16 : 0.75);
-    for (let i = 0; i < L.n; i++) c.fillRect(pos.x[i] - 0.6, pos.y[i] - 0.6, 1.2, 1.2);
-    c.fillStyle = rgba("accent", 1);
-    c.beginPath(); c.arc(0, 0, 3, 0, 2 * Math.PI); c.fill();
-  }
-
   // ---------- road ----------
   let roadShown = false;
   function renderRoad(slices) {
@@ -1215,7 +1340,7 @@
     const total = Math.max(1, d.total);
     const doors = { "one-way": "◆ one-way", "two-way": "◇ two-way" };
     $("#decisions").innerHTML = `<div class="bar">${parts.map(([k]) => `<span class="${k}" data-w="${((st[k] || 0) / total) * 100}"></span>`).join("")}</div>
-      <div class="barkey">${parts.map(([k, n, l]) => `<span><b>${n}</b> ${l}</span>`).join("")}</div>
+      <div class="barkey">${parts.map(([k, n, l]) => `<span><i class="${k}"></i><b>${n}</b> ${l}</span>`).join("")}</div>
       <ol class="dlist">${d.latest.map((x) => `<li><span class="id">${esc(x.id)}</span>
         <span class="meta"><span class="st ${esc(x.status)}">${esc(x.status)}</span><span>${esc(doors[x.door] || x.door)}</span><span>${esc(x.date)}</span></span>
         <span class="txt">${esc(x.text)}</span></li>`).join("")}</ol>`;
@@ -1252,7 +1377,19 @@
       this.map.addEventListener("click", (e) => pick(e.target.closest(".dn")));
       this.map.addEventListener("keydown", (e) => {
         const el = e.target.closest(".dn");
-        if (!el || (e.key !== "Enter" && e.key !== " ")) return;
+        if (!el) return;
+        // The graph is one tab stop, and the arrows walk the journal from
+        // there: a decision each way, or to its first or last.
+        const all = [...this.map.querySelectorAll(".dn")], at = all.indexOf(el);
+        const to = { ArrowRight: at + 1, ArrowDown: at + 1, ArrowLeft: at - 1, ArrowUp: at - 1, Home: 0, End: all.length - 1 }[e.key];
+        if (to !== undefined) {
+          e.preventDefault();
+          const next = all[Math.max(0, Math.min(all.length - 1, to))];
+          this.stop(next.dataset.id);
+          next.focus();
+          return;
+        }
+        if (e.key !== "Enter" && e.key !== " ") return;
         e.preventDefault();
         pick(el);
       });
@@ -1267,7 +1404,7 @@
       if (repo !== this.repo) {
         this.repo = repo;
         this.known = new Set();
-        this.chosen = "";
+        this.chosen = this.stopped = "";
       }
       this.box.hidden = !g?.nodes?.length;
       if (this.box.hidden) return;
@@ -1314,7 +1451,7 @@
         const a = Math.atan2(y - cy, x - cx), ca = Math.cos(a), sa = Math.sin(a), d = r + 5;
         const anchor = ca > 0.38 ? "start" : ca < -0.38 ? "end" : "middle";
         const ly = sa * d + (anchor !== "middle" ? 3.5 : sa > 0 ? 8.5 : -1.5);
-        return `<g class="dn ${esc(n.status)}${this.fresh.has(n.id) ? " fresh" : ""}" data-id="${esc(n.id)}" transform="translate(${f(x)} ${f(y)})" style="--d:${Math.min(i * 8, 1200)}ms" tabindex="0" role="button" aria-pressed="false" aria-label="${esc(`${n.id}, ${n.status}: ${n.says}`)}">`
+        return `<g class="dn ${esc(n.status)}${this.fresh.has(n.id) ? " fresh" : ""}" data-id="${esc(n.id)}" transform="translate(${f(x)} ${f(y)})" style="--d:${Math.min(i * 8, 1200)}ms" tabindex="-1" role="button" aria-pressed="false" aria-label="${esc(`${n.id}, ${n.status}: ${n.says}`)}">`
           + `<title>${esc(`${n.id} · ${n.status} · ${n.says}`)}</title><circle class="hit" r="${f(Math.max(r + 4, Math.min(s / 2, 18)))}"/>${dot}`
           + `<text class="lbl" x="${f(ca * d)}" y="${f(ly)}" text-anchor="${anchor}">${esc(n.id.replace(/^D-0*(?=\d)/, ""))}</text></g>`;
       }).join("");
@@ -1323,9 +1460,19 @@
       this.fresh = new Set();
       this.choose(this.chosen);
     },
+    // stop makes one decision the graph's tab stop: the one given, else the
+    // chosen one, else the stop it had, else the newest.
+    stop(id) {
+      const all = [...this.map.querySelectorAll(".dn")];
+      const at = all.find((el) => el.dataset.id === id) || all.find((el) => el.dataset.id === this.chosen)
+        || all.find((el) => el.dataset.id === this.stopped) || all[all.length - 1];
+      all.forEach((el) => el.setAttribute("tabindex", el === at ? "0" : "-1"));
+      this.stopped = at ? at.dataset.id : "";
+    },
     choose(id) {
       const n = this.byId.get(id), svg = $("svg", this.map), lit = new Set(n ? n.dependents : []);
       this.chosen = n ? id : "";
+      this.stop(this.chosen);
       if (svg) {
         svg.classList.toggle("choosing", !!n);
         svg.querySelectorAll(".dn").forEach((el) => {
@@ -1430,7 +1577,57 @@
   const totalsOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.totals) || s.totals;
   // And their tiles, in the server's words.
   const tilesOf = (s) => (scope !== "all" && (s.repos || []).find((r) => r.name === scope)?.tiles) || s.tiles || [];
-  let fading = 0;
+  let fading = 0, fades = [];
+  // What a choice leaves out fades away, and what it brings back fades in,
+  // by opacity alone: a blur on every element at once is the heaviest thing
+  // the page asks of a browser (#781). Each fade is an animation the page
+  // starts and lets end. A class that held a finished animation stayed on
+  // every element it had touched until that part of the page was drawn
+  // again, or the page was read again (#886).
+  //
+  // A fade names one end only, nothing, or where a fade away had got to.
+  // The other end is whatever the element shows by its own rules at each
+  // moment, so a card that has an entrance of its own comes in with both
+  // together. Faded to the opacity it had when the fade began, a card
+  // whose entrance began at nothing stayed unseen for the whole fade and
+  // then appeared at once.
+  function fade(el, away, from = 0) {
+    try {
+      return el.animate(away ? { opacity: 0 } : { opacity: from, offset: 0 },
+        { duration: away ? 360 : 500, easing: away ? "ease" : "cubic-bezier(0.2, 0.8, 0.2, 1)", fill: away ? "forwards" : "none" });
+    } catch (e) {
+      // A browser that can't fade this way shows the change at once.
+      return null;
+    }
+  }
+  // What has faded away stays away until the page is drawn for the choice.
+  // Then every such fade ends, so nothing drawn again, kept or brought back
+  // by a second choice stays unseen.
+  function endFades() {
+    for (const a of fades) a.cancel();
+    fades = [];
+  }
+  // The section a reader is in, and where its top is, so that it's there
+  // again once the page is drawn for a choice: what's above it grows and
+  // shrinks with what's shown, and moved the page thousands of pixels.
+  function placeNow() {
+    const under = $("#scope").getBoundingClientRect().bottom;
+    const el = [...document.querySelectorAll("main > section")].find((s) => s.getClientRects().length && s.getBoundingClientRect().bottom > under + 1);
+    return el ? { el, top: el.getBoundingClientRect().top } : null;
+  }
+  function keepPlace(place) {
+    if (!place) return;
+    // A section the choice leaves out gives its place to the one before it.
+    let el = place.el, same = true;
+    while (el && (el.tagName !== "SECTION" || !el.getClientRects().length)) { el = el.previousElementSibling; same = false; }
+    if (!el) return;
+    const under = $("#scope").getBoundingClientRect().bottom, box = el.getBoundingClientRect();
+    // Its top goes back where it was. If that leaves it out of sight, since
+    // it's shorter now, it starts under the bar.
+    let by = same ? box.top - place.top : box.top - under;
+    if (same && box.bottom - by < under + 40) by = box.top - under;
+    if (Math.abs(by) >= 1) scrollBy(0, by);
+  }
   // The scope settles before anything is drawn, so what each part last drew
   // for is the scope it drew: on the repository the address asked for, or on
   // everything when the page doesn't show the one chosen. The address follows
@@ -1452,36 +1649,112 @@
     try { localStorage.setItem("invariant-scope", v); } catch (e) {}
     if (!state) return;
     address(push);
+    markScope();
+    // A choice made before the last one was drawn takes its place. What
+    // had started to fade away for that one, and is shown again by this
+    // one, comes back from where it had got to.
+    clearTimeout(fading);
+    const partly = new Map(fades.map((a) => [a.effect.target, getComputedStyle(a.effect.target).opacity]));
+    endFades();
+    const place = placeNow();
     // What the choice leaves out fades first. Then the page is drawn for it,
-    // and what comes back fades in.
+    // with the reader's section where it was, and what comes back fades in.
+    // Only what's in sight fades: when nothing there leaves, the page is
+    // drawn for the choice at once.
+    const inSight = (el) => !el.closest(".resting");
     const draw = () => {
       render(state);
+      endFades();
+      keepPlace(place);
       if (REDUCED || was === "all") return;
       document.querySelectorAll("[data-repo]").forEach((el) => {
-        if (el.dataset.repo && el.dataset.repo !== was) el.classList.add("arriving");
+        if (el.dataset.repo && el.dataset.repo !== was && inSight(el)) fade(el, false, partly.get(el) || 0);
       });
     };
-    const leaving = [...document.querySelectorAll("[data-repo]")].filter((el) => el.dataset.repo && !inScope(el.dataset.repo));
-    clearTimeout(fading);
+    const leaving = [...document.querySelectorAll("[data-repo]")].filter((el) => el.dataset.repo && !inScope(el.dataset.repo) && inSight(el));
     if (REDUCED || !leaving.length) return draw();
-    leaving.forEach((el) => el.classList.add("leaving"));
+    fades = leaving.map((el) => fade(el, true)).filter(Boolean);
     fading = setTimeout(draw, 380);
   }
+  // The bar says as much as fits its column, the same for every choice, so
+  // no choice is cut off and choosing one never moves the bar. First what
+  // each choice has established goes, from the end: tested, then checked,
+  // then proved. Then the bar's own label and the words beside each count,
+  // and last the dots. The page's column is 1,200 pixels at most and three
+  // choices in full need more, so the last one was cut off, and choosing it
+  // scrolled the bar sideways, out from under the pointer, where it stayed
+  // (#886). What's left out is hidden, not removed, and each choice's
+  // tooltip and its name for a screen reader keep the words in full. A bar
+  // that still doesn't fit scrolls sideways, as before.
+  let fitted = -1;
+  function fitScope() {
+    const nav = $("#scope"), all = [...nav.querySelectorAll(".est")].map((est) => ({ parts: [...est.querySelectorAll(".p")], then: est.querySelector(".then") }));
+    const fits = () => nav.scrollWidth <= nav.clientWidth + 1;
+    fitted = nav.clientWidth;
+    nav.classList.remove("tight", "tighter");
+    const most = Math.max(0, ...all.map((est) => est.parts.length));
+    for (let drop = 0; drop <= most; drop++) {
+      for (const { parts, then } of all) {
+        const keep = Math.max(0, parts.length - drop);
+        parts.forEach((p, i) => { p.hidden = i >= keep; });
+        if (then) then.hidden = !keep;
+      }
+      if (fits()) return;
+    }
+    nav.classList.add("tight");
+    if (!fits()) nav.classList.add("tighter");
+  }
+  // The fit is made again when the bar's width changes, and when the page's
+  // fonts arrive, since they're wider or narrower than what stood in for
+  // them.
+  window.addEventListener("resize", () => { if ($("#scope").clientWidth !== fitted) fitScope(); });
+  document.fonts?.addEventListener?.("loadingdone", fitScope);
+  // The current choice is marked on the bar as it stands, at once. The page
+  // under it is drawn a moment later, once what the choice leaves out has
+  // faded, and until then the bar still marked the last choice (#886).
+  function markScope() {
+    for (const a of document.querySelectorAll("#scope a")) {
+      if (a.dataset.scope === scope) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
+    }
+  }
+  // One listener hears every choice, so the bar's links can stay as they
+  // are from one draw to the next. Each is a link to its view, so a click
+  // that asks for a new tab or window is left to the browser.
+  $("#scope").addEventListener("click", (e) => {
+    const a = e.target.closest?.("a[data-scope]");
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    setScope(a.dataset.scope);
+  });
   function renderScope(s) {
     const repos = s.repos || [];
     const nav = $("#scope");
-    if (repos.length < 2) { nav.innerHTML = ""; return; }
+    // The bar keeps a row's height until now, so nothing below it moves
+    // when it fills (#855).
+    nav.classList.remove("pending");
+    if (repos.length < 2) { put(nav, ""); return; }
     const openIn = (name) => s.issues.filter((i) => i.open && (!name || i.repo === name)).length;
+    // What needs a person there now, which is what a choice is most often
+    // made for. Without any, the choice says how many issues are open.
+    const needIn = (name) => s.issues.filter((i) => i.open && i.waiting && !stalled(i) && (!name || i.repo === name)).length;
     // Each choice is a link to its view, so it can open in a new tab.
-    const link = (value, label, t, open, live) =>
-      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}"${scope === value ? ` aria-current="page"` : ""}><i class="live${live ? " on" : ""}"></i>${esc(label)}<span class="ct">${esc(briefly(t))}${open ? ` · ${open} open` : ""}</span></a>`;
-    nav.innerHTML = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), repos.some((r) => r.factory?.running)) +
-      repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), r.factory?.running)).join("");
-    nav.querySelectorAll("a").forEach((a) => a.addEventListener("click", (e) => {
-      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      e.preventDefault();
-      setScope(a.dataset.scope);
-    }));
+    const link = (value, label, t, open, need, live) =>
+      `<a href="${esc(addressOf(value).href)}" data-scope="${esc(value)}" title="${esc(established(t))}" aria-label="${esc(`${label}: ${established(t)}${need ? `, ${need === 1 ? "1 needs you" : `${need} need you`}` : open ? `, ${open} open` : ""}`)}"><i class="lamp${live ? " on" : ""}"></i>${esc(label)}<span class="ct"><span class="est">${briefly(t).split(" · ").map((part, i) => `<span class="p">${i ? " · " : ""}${esc(part)}</span>`).join("")}${need || open ? `<span class="then"> · </span>` : ""}</span>${need ? `<b class="needs">${need}<span class="w">${need === 1 ? " needs you" : " need you"}</span></b>` : open ? `${open}<span class="w"> open</span>` : ""}</span></a>`;
+    const html = `<span class="lbl">Show</span>` + link("all", "Everything", s.totals, openIn(""), needIn(""), repos.some((r) => r.factory?.running)) +
+      repos.map((r) => link(r.name, r.short, r.totals, openIn(r.name), needIn(r.name), r.factory?.running)).join("");
+    // The choices are written only when what they say changes, and the
+    // current one is marked on them. Written again at every choice, the one
+    // under the pointer was a new element each time: its dot's glow started
+    // over, and it lost the pointer until the pointer moved (#886).
+    const written = nav.dataset.html !== html;
+    put(nav, html);
+    markScope();
+    if (written) fitScope();
+    // On a narrow screen the bar scrolls sideways, and the current choice's
+    // start stays in view (#845). Only the bar moves, never the page.
+    const current = nav.querySelector('a[aria-current="page"]');
+    if (current && (current.offsetLeft < nav.scrollLeft || current.offsetLeft > nav.scrollLeft + nav.clientWidth * 0.6)) nav.scrollLeft = Math.max(0, current.offsetLeft - 8);
   }
 
   // ---------- what's established ----------
@@ -1532,7 +1805,18 @@
       <path d="M-6 0 l4 4 l8 -9" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
       <g>${REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="7s" repeatCount="indefinite"/>`}<circle cx="15" cy="0" r="2.4" style="fill:var(--ink)"/></g></svg>`;
   }
+  // What has waited on a person for more than two days isn't today's work.
+  // Needs you folds it under a line of its own, and the headline and the
+  // Show choices count what's new.
+  const STALLED_AFTER = 2 * 24 * 3600 * 1000;
+  const stalled = (i) => Date.now() - new Date(i.waiting.since).getTime() > STALLED_AFTER;
+  let stalledOpen = false;
+  // The lede names the repositories in view: every one, or the one chosen
+  // (#848). /act has words of its own.
+  let needsLede = (where) => `What the factory is waiting for from a person${where}: questions to answer, proposals to ratify, and pull requests that failed. Click an answer to copy its command, then comment it on the issue. The owner can post them from <a href="/act#inbox-block">/act</a> instead, with a button.`;
   function renderInbox(s) {
+    const several = (s.repos || []).length > 1;
+    $("#needs-lede").innerHTML = needsLede(!several ? "" : scope === "all" ? ", in every repository" : `, in ${esc(shortOf(s, scope))}`);
     const items = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
     // On /act, each issue acted on shows after those that wait, as the
     // snapshot says, until a read of GitHub finds what was posted (#175).
@@ -1546,13 +1830,33 @@
       toOpen = "";
       return;
     }
-    // Invariant's own first, then the longest wait first: the order the
-    // factory took them in. What was posted comes in the order it was.
-    const first = (i) => (i.repo === s.repo ? 0 : 1);
+    // Each repository's cards together, in the order Show lists them, then
+    // the longest wait first: the order the factory took them in. What was
+    // posted comes in the order it was.
+    const places = new Map((s.repos || []).map((r, k) => [r.name, k]));
+    const first = (i) => places.get(i.repo) ?? places.size;
     items.sort((a, b) => first(a) - first(b) || new Date(a.waiting.since) - new Date(b.waiting.since));
     done.sort((a, b) => first(a) - first(b) || new Date(a.acted.at) - new Date(b.acted.at));
+    // What has waited more than two days folds under a line of its own, so
+    // the list a person reads first is what's new. A card the page opened
+    // at is shown wherever it is.
+    const fresh = items.filter((i) => !stalled(i)), old = items.filter(stalled);
+    if (toOpen && old.some((i) => issueKey(i) === toOpen)) stalledOpen = true;
+    // With everything shown, each repository's cards sit under its name and
+    // how many there are. None is dimmed: every one waits on a person.
+    const named = scope === "all" && new Set(items.map((i) => i.repo)).size > 1;
+    const short = (repo) => (s.repos || []).find((r) => r.name === repo)?.short || repo;
+    const cards = (list) => list.map((i, k) => (named && (k === 0 || list[k - 1].repo !== i.repo)
+      ? `<h3 class="need-repo" ${tag(i.repo)}>${esc(short(i.repo))}<span>${list.filter((j) => j.repo === i.repo).length}</span></h3>` : "") + needCard(i)).join("");
+    const folded = old.length ? `<details class="stalled"${stalledOpen ? " open" : ""}><summary>${old.length === 1 ? "1 issue has" : `${old.length} issues have`} waited more than two days</summary>${cards(old)}</details>` : "";
+    const nothingNew = !fresh.length && old.length ? `<div class="calm">${calmGlyph()}<span>Nothing new needs you. What has waited more than two days is below.</span></div>` : "";
     const disclosures = new Map([...box.querySelectorAll("[data-plan-sources]")].map((el) => [planDisclosureKey(el), el]));
-    box.innerHTML = (items.length ? batchBanner(items) + items.map(needCard).join("") : calm) + done.map(actedCard).join("");
+    // A card fades in the first time it's shown. One that was there already
+    // is drawn again in place, without its entrance (#845).
+    const shown = new Set([...box.querySelectorAll(".need[data-issue]")].map((el) => el.dataset.issue));
+    box.innerHTML = (items.length ? batchBanner(items) + nothingNew + cards(fresh) + folded : calm) + done.map(actedCard).join("");
+    box.querySelectorAll(".need[data-issue]").forEach((el) => el.classList.toggle("shown", shown.has(el.dataset.issue)));
+    box.querySelector("details.stalled")?.addEventListener("toggle", (e) => { stalledOpen = e.currentTarget.open; });
     wirePlanSources(box, disclosures, items);
     if (toOpen) openAt(box);
   }
@@ -1699,6 +2003,30 @@
     }
     return `${w.pr ? `Pull request ${pr} didn't pass. ` : ""}A person needs to look.`;
   }
+  // nowText says what a card's pull request is now, as the last refresh read
+  // it from GitHub. The rest of the card says how it was when the factory
+  // stopped, and a pull request moves on: a push, a passing gate, a conflict,
+  // a merge (#865). A card whose pull request couldn't be read says nothing.
+  const pullLink = (w, repo) => `<a href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener"><strong>${esc(ref(repo, w.pr))}</strong></a>`;
+  // pullGood is a pull request a person can merge as it stands: open, ready
+  // for review, mergeable, and past CI's gate on its head.
+  const pullGood = (w) => !!w.now && w.now.state === "open" && !w.now.draft && !w.now.conflicts && !w.now.unsettled && w.now.gate === "passed";
+  function nowText(w, repo) {
+    const p = w.now;
+    if (!p || !w.pr) return "";
+    if (p.state === "merged") return `<p class="now good">Now: ${pullLink(w, repo)} has merged. The factory records that on its next poll.</p>`;
+    if (p.state === "closed") return `<p class="now">Now: ${pullLink(w, repo)} is closed, and didn't merge.</p>`;
+    const gate = { passed: "CI's gate passed on its head", failed: "CI's gate failed on its head", running: "CI's gate is running on its head" }[p.gate] || "CI's gate hasn't run on its head";
+    const parts = [p.draft ? "is a draft" : "is ready for review", gate, p.conflicts ? "it conflicts with its base" : p.unsettled ? "" : "it can merge"].filter(Boolean);
+    const tone = pullGood(w) ? " good" : p.conflicts || p.gate === "failed" ? " bad" : "";
+    return `<p class="now${tone}">Now: ${pullLink(w, repo)} ${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}.</p>`;
+  }
+  // review is the first thing a card offers for a pull request that can
+  // merge as it stands: opening it, ahead of a retry that might replace it.
+  const review = (w, repo) => (pullGood(w) ? `<a class="cmd primary review" href="https://github.com/${esc(repo)}/pull/${esc(w.pr)}" target="_blank" rel="noopener">Review ${esc(ref(repo, w.pr))} on GitHub ↗</a>` : "");
+  // A retry leads a card unless its pull request can merge as it stands, or
+  // is no longer open.
+  const retryLeads = (w) => !w.now || (w.now.state === "open" && !pullGood(w));
   // takes says whether the factory takes a command now, as the server works
   // it out, so a card never offers one the factory refuses (#218).
   const takes = (w, verb) => (w.takes || []).includes(verb);
@@ -1739,12 +2067,12 @@
       body = `${proposalText(w, repo, "a person")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name, posters: w.posters}) : ""}
         <div class="cmds">${cmd(`/invariant ratify ${w.hash}`, true)}${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "closed") {
-      body = `<p class="ask">${closedText(w, repo)}</p>
+      body = `${w.now && w.now.state !== "closed" ? nowText(w, repo) : ""}<p class="ask">${closedText(w, repo)}</p>
         <div class="cmds">${takes(w, "revise") ? cmd("/invariant revise", true) : ""}${open}</div>`;
     } else {
       cls = "failed";
-      body = `<p class="ask">${why(w, repo)}</p>${retryText(w)}
-        <div class="cmds">${fixes(w).map(([label, c], i) => cmd(c, i === 0, c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
+      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}
+        <div class="cmds">${review(w, repo)}${fixes(w).map(([label, c], i) => cmd(c, i === 0 && retryLeads(w), c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
     }
     return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)} data-issue="${esc(issueKey(is))}"><div>${needGlyph(w.kind)}</div><div>
       <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
@@ -1833,18 +2161,20 @@
       if (takes(w, "revise")) actions += ask("Draft again instead", "/invariant revise");
     } else if (w.kind === "proposal") {
       body = `${proposalText(w, repo, "you")}${said(w)}${w.reader ? readerEvidence({reader: w.reader, name: w.name, posters: w.posters}) : ""}`;
-      actions = ask(`Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
+      // A plan is ratified as a plan. Its hash is in the question that follows.
+      actions = ask(w.plan || w.issuePlan ? "Ratify this plan" : `Ratify ${w.hash}`, `/invariant ratify ${w.hash}`, true) + (takes(w, "revise") ? ask("Draft again", "/invariant revise") : "");
     } else if (w.kind === "closed") {
-      body = `<p class="ask">${closedText(w, repo)}</p>`;
+      body = `${w.now && w.now.state !== "closed" ? nowText(w, repo) : ""}<p class="ask">${closedText(w, repo)}</p>`;
       actions = takes(w, "revise") ? ask("Draft again", "/invariant revise", true) : "";
     } else {
       cls = "failed";
-      body = `<p class="ask">${why(w, repo)}</p>${retryText(w)}`;
-      actions = fixes(w).map(([label, c], i) => ask(label, c, i === 0)).join("");
+      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}`;
+      actions = review(w, repo) + fixes(w).map(([label, c], i) => ask(label, c, i === 0 && retryLeads(w))).join("");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
     if (a.confirm) {
-      const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins these statements, and the factory starts building.`
+      const pins = w.plan ? "this plan and its acceptance tests, and the factory starts building" : w.issuePlan ? "this plan, and the factory opens its issues one at a time" : "these statements, and the factory starts building";
+      const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins ${pins}.`
         : a.confirm === "/invariant retry" ? esc(w.retry?.confirmation || "Have the factory try again, as you?")
         : "Have the factory draft again from the comments, as you?";
       row = `<div class="confirm"><span>${what}</span>${post("Yes, post it", a.confirm, true)}<button class="cmd" type="button" data-act-key="${esc(key)}" data-act-cancel>Cancel</button></div>`;
@@ -1921,8 +2251,7 @@
       }
       if (state) renderInbox(state);
     });
-    const lede = $("#needs-lede");
-    if (lede) lede.textContent = "What the factory is waiting for from you, in every repository. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first. Or open a new issue for the factory to solve or plan, or plan one of your open issues it hasn't taken.";
+    needsLede = (where) => `What the factory is waiting for from you${where}. You're signed in, so your answers post to GitHub as you: choose, then post. A ratify or a retry asks first. Or open a new issue for the factory to solve or plan, or plan one of your open issues it hasn't taken.`;
     composer();
     const who = document.createElement("span");
     who.className = "pill acting";
@@ -2074,7 +2403,7 @@
   })();
 
   // ---------- the fleet: every repository as a star system ----------
-  const STAGE_ANGLE = { queued: -90, asking: -30, ratifying: 30, building: 90, gate: 150, review: 150, merged: 210 };
+  const STAGE_ANGLE = { queued: -90, asking: -30, ratifying: 30, building: 90, gate: 150, merged: 210 };
   const langClass = (l) => (l === "typescript" ? "ts-c" : l === "python" ? "py-c" : "go-c");
   function renderFleet(s) {
     const box = $("#fleet");
@@ -2086,7 +2415,9 @@
     }));
   }
   function spin(from, dur) {
-    return REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${from}" to="${from + 360}" dur="${dur}s" repeatCount="indefinite"/>`;
+    if (REDUCED) return "";
+    const at = from + turned(dur);
+    return `<animateTransform attributeName="transform" type="rotate" from="${at.toFixed(1)}" to="${(at + 360).toFixed(1)}" dur="${dur}s" repeatCount="indefinite"/>`;
   }
   function systemCard(s, r, k) {
     const c = 200, R = 176;
@@ -2103,7 +2434,6 @@
     </defs>`;
     g += `<circle class="outer" cx="${c}" cy="${c}" r="${R}"/>`;
     for (const [stage, a] of Object.entries(STAGE_ANGLE)) {
-      if (stage === "review") continue;
       const t = (a * Math.PI) / 180;
       g += `<circle class="station2" cx="${c + R * Math.cos(t)}" cy="${c + R * Math.sin(t)}" r="3.2"><title>${stage}</title></circle>`;
     }
@@ -2123,13 +2453,13 @@
     });
     // Comets: open issues on the outer orbit, parked at their stage.
     open.forEach((is, j) => {
-      const a = (STAGE_ANGLE[is.stage] ?? -90) + j * 9, t = (a * Math.PI) / 180;
+      const a = (STAGE_ANGLE[stoppedAt(is)] ?? -90) + j * 9, t = (a * Math.PI) / 180;
       const x = c + R * Math.cos(t), y = c + R * Math.sin(t);
       const cls = is.stage === "review" ? "bug" : is.stage === "asking" || is.stage === "ratifying" ? "people" : "";
       const tailA = ((a - 28) * Math.PI) / 180;
       g += `<path d="M${c + R * Math.cos(tailA)} ${c + R * Math.sin(tailA)} A${R} ${R} 0 0 1 ${x} ${y}" fill="none" stroke="url(#tail${k})" stroke-width="3" stroke-linecap="round" opacity=".75"/>
         <circle class="comet-head ${cls}" cx="${x}" cy="${y}" r="6">${REDUCED ? "" : `<animate attributeName="r" values="5;7.5;5" dur="1.8s" repeatCount="indefinite"/>`}<title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: ${esc(is.stage)}</title></circle>
-        <text class="comet-label" x="${x + (x > c ? 10 : -10)}" y="${y - 10}" text-anchor="${x > c ? "start" : "end"}">${esc(ref(is.repo, is.number))}</text>`;
+        <text class="comet-label" x="${x + (x > c ? 10 : -10)}" y="${y - 10}" text-anchor="${x > c ? "start" : "end"}">#${esc(is.number)}</text>`;
     });
     // A shooting star crosses the system while the factory works in it.
     if (working && !REDUCED) g += `<line x1="40" y1="60" x2="120" y2="20" stroke="url(#tail${k})" stroke-width="2" stroke-linecap="round" opacity="0">
@@ -2140,7 +2470,7 @@
       : `<span>No models yet. The first model it checks will orbit here.</span>`;
     const state = r.factory?.running ? `<span class="chip factory pulse state"><i></i>${working ? "working" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
     return `<article class="system${quiet(r.name)}" ${tag(r.name)}>
-      <header><h3>${esc(r.short)}</h3><span class="meta">${esc(established(r.totals))} · ${open.length} open · ${merged.length} merged</span>${state}</header>
+      <header><h3>${esc(r.short)}</h3><span class="meta">${esc(established(r.totals))} · ${open.length} open · ${r.totals.merged} merged</span>${state}</header>
       <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${esc(established(r.totals))}, ${open.length} open issues">${g}</svg>
       <div class="legend2">${legend}</div></article>`;
   }
@@ -2153,7 +2483,7 @@
       const caught = p.bugs.filter((b) => b.caught).length;
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
-        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc(p.assurance)}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
+        <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc([p.assurance, sampledBeside(p) && "tested (sampled)", p.coverage?.length && coverageShares(p)].filter(Boolean).join(" · "))}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
         <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
@@ -2177,7 +2507,6 @@
     document.querySelector('meta[name="theme-color"]').setAttribute("content", next === "light" ? "#f4f6f8" : "#090c11");
     readTheme();
     if (cosmos.g) { cosmos.prerender(); if (REDUCED) cosmos.frame(performance.now()); }
-    if (state) thumbs(state);
     setTimeout(() => root.classList.remove("theming"), 500);
   });
   document.querySelector('meta[name="theme-color"]').setAttribute("content", V.light ? "#f4f6f8" : "#090c11");
@@ -2200,6 +2529,19 @@
   const bytes = (n) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
   const clock = (s) => (s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`);
   const runName = (l) => ({ check: "Draft check", test: "Test run" }[l.runsKind] || "Gate run");
+  // A step's runs number from 1 again each time its agent tries again, so
+  // once there's a second try each run is named with its own: "Try 2 · test
+  // run 1". The names are in the runs' order.
+  function runNames(l) {
+    const runs = l.runs || [], tries = [];
+    let at = 1;
+    runs.forEach((r, i) => {
+      if (i && r.run <= runs[i - 1].run) at++;
+      tries.push(at);
+    });
+    const name = runName(l);
+    return runs.map((r, i) => (at > 1 ? `Try ${tries[i]} · ${name.toLowerCase()} ${r.run}` : `${name} ${r.run}`));
+  }
 
   // This choice belongs to this page alone. Reset even a checkbox a
   // browser restores, and clear again before entering its back/forward cache.
@@ -2260,9 +2602,17 @@
     } catch (e) {
       if (read === liveReads && ACT) clearShellCommands(true);
     } finally {
-      if (read === liveReads) liveAgain = setTimeout(loadLive, wait);
+      liveAnswered();
+      if (read === liveReads && !document.hidden) liveAgain = setTimeout(loadLive, wait);
     }
   }
+  // A page nobody is looking at stops both of its reads, and reads at once
+  // when it's shown again (#854).
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(again);
+    clearTimeout(liveAgain);
+    if (!document.hidden) { load(); loadLive(); }
+  });
 
   // The steps to show: the ones running in the chosen repositories, or else
   // the ones that ended, in the live view's order.
@@ -2286,7 +2636,17 @@
   // card leaves when its step leaves the list.
   function renderLive() {
     const steps = liveSteps(), keys = steps.map(cardKey), box = $("#live-cards");
-    $("#live").hidden = !steps.length;
+    const section = $("#live"), inbox = $("#inbox-block");
+    section.hidden = !steps.length;
+    // While a step runs, the live cards come first. Once every step shown
+    // has ended, what needs a person comes first, and the steps that ended
+    // follow it, each folded to its heading.
+    const finished = steps.length > 0 && steps.every((l) => l.ended);
+    section.classList.toggle("finished", finished);
+    if (inbox) {
+      if (finished && inbox.nextElementSibling !== section) inbox.after(section);
+      else if (!finished && section.nextElementSibling !== inbox) inbox.before(section);
+    }
     for (const [key, c] of cards) {
       if (keys.includes(key)) continue;
       stripSize.unobserve(c.strip);
@@ -2299,13 +2659,22 @@
       let c = cards.get(keys[i]);
       if (!c) {
         const el = $("#live-card").content.firstElementChild.cloneNode(true);
-        el.classList.add("arrive");
         if (shellToggle) $(".fineprint", el).textContent = "Counts, times and file paths from the agent's transcript, read every few seconds while it works. Shell commands appear only when you enable them.";
         c = { key: keys[i], el, strip: $(".strip", el), marks: 0, runs: 0, lit: "" };
         cards.set(c.key, c);
         stripSize.observe(c.strip);
+        // A step that ended shows its heading, and its run when asked.
+        const made = c;
+        $(".fold", el)?.addEventListener("click", () => {
+          el.classList.toggle("open");
+          renderCard(made);
+        });
       }
       if (box.children[i] !== c.el) box.insertBefore(c.el, box.children[i] || null);
+      // A new card comes in once. A class that held the entrance played it
+      // again whenever the card, or the section it's in, moved on the page,
+      // as both do when a choice in Show changes which steps show (#886).
+      if (!c.l && !REDUCED && c.el.animate) c.el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 600, easing: "ease-out" });
       c.l = l;
       renderCard(c);
     });
@@ -2315,6 +2684,15 @@
   function renderCard(c) {
     const { el, l } = c;
     el.classList.toggle("ended", !!l.ended);
+    if (!l.ended) el.classList.remove("open");
+    const word = $(".live-word", el), fold = $(".fold", el);
+    if (word) word.textContent = l.ended ? "Finished" : "Live";
+    if (fold) {
+      const open = el.classList.contains("open");
+      fold.hidden = !l.ended;
+      fold.textContent = open ? "Hide the run" : "Show the run";
+      fold.setAttribute("aria-expanded", String(open));
+    }
     const issue = state?.issues.find((i) => i.repo === l.repo && i.number === l.issue);
     // The live JSON says what the step does, or, once it has ended, that it
     // ended, so a finished card never reads as still running (#269).
@@ -2335,7 +2713,10 @@
 
     const calls = Object.values(l.tools || {}).reduce((a, b) => a + b, 0);
     const thinking = l.thinkingPending ? "Pending" : l.thinkingExact ? nf.format(l.thinking) : `≈${kilo(l.thinking)}`;
-    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", thinking, l.thinkingPending ? "reported when the run ends" : "tokens"], ["Holds", kilo(l.context), "tokens in context"], ["Tool calls", nf.format(calls), ""]];
+    const stats = [["Turns", nf.format(l.turns || 0), ""], ["Thinking", thinking, l.thinkingPending ? "reported when the run ends" : "tokens"], ["Tool calls", nf.format(calls), ""]];
+    // An agent that doesn't report what it holds in context gets no figure
+    // for it, not a zero.
+    if (l.context) stats.splice(2, 0, ["Holds", kilo(l.context), "tokens in context"]);
     if (l.output) stats.push(["Wrote", kilo(l.output), "output tokens"]);
     put($(".live-stats", el), stats.map(([k, v, u]) => `<div class="stat"><span class="k">${k}</span><b>${v}</b>${u ? `<span class="u">${u}</span>` : ""}</div>`).join(""));
 
@@ -2344,7 +2725,8 @@
 
     renderShellCommands(c);
 
-    put($(".live-runs", el), (l.runs || []).map((r) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
+    const named = runNames(l);
+    put($(".live-runs", el), (l.runs || []).map((r, i) => `<span class="chip ${r.passed ? "holds" : "bug"}"><i></i>${named[i]} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? `: ${esc(r.failed.join(", "))}` : ""}</span>`).join(""));
 
     const files = l.files || [], shown = files.slice(0, 12);
     put($(".live-files", el), !files.length ? `<div class="muted">No files touched yet.</div>` : `<div class="k">Files it touched</div>` + shown.map((f) => {
@@ -2444,6 +2826,21 @@
     const marks = l.marks || [];
     const t0 = T(l.since) || (marks[0] ? T(marks[0].at) : end);
     const span = Math.max(60000, end - t0);
+    // The strip is drawn again only when it would look different: something
+    // new on it, another width, or enough time gone that it moves a pixel. A
+    // finished one is drawn once. Every redraw replaces its elements, which
+    // drops a tooltip under the pointer (#845).
+    const last = marks[marks.length - 1];
+    const what = JSON.stringify([W, t0, marks.length, last?.until, (l.runs || []).length, !!l.ended]);
+    // As a running step's time grows, what's on its strip slides left: by
+    // this many pixels since it was last drawn, at most.
+    const moved = l.ended ? 0 : ((W - 16) * (end - (c.drawnEnd || 0))) / span;
+    if (!landing && c.drawn === what && moved < 1) return;
+    c.drawn = what;
+    c.drawnEnd = end;
+    // What breathes or blinks takes its phase from the page's clock, so a
+    // redraw doesn't start it over.
+    box.style.setProperty("--phase", `-${Math.round(performance.now())}ms`);
     const x = (t) => 8 + ((T(t) - t0) / span) * (W - 16);
     const parts = [];
     const steps = [60, 300, 600, 900, 1800, 3600, 7200].map((s) => s * 1000);
@@ -2475,9 +2872,10 @@
       const times = m.until ? `${clockOf(m.at)}–${clockOf(m.until)} · ${clock(Math.max(0, (T(m.until) - T(m.at)) / 1000))}` : `${clockOf(m.at)}${!l.ended ? " · running" : ""}`;
       parts.push(`<line x1="${mx}" x2="${mx}" y1="${top}" y2="${bottom}" class="tool ${esc(m.kind)}${land}"><title>${esc(LIVE_NOW[m.kind] || m.kind)} · ${esc(times)}</title></line>`);
     });
+    const named = runNames(l);
     (l.runs || []).forEach((r, i) => {
       if (!r.at) return;
-      const label = `${runName(l)} ${r.run} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? ": " + r.failed.join(", ") : ""}`;
+      const label = `${named[i]} ${r.passed ? "passed" : "failed"}${!r.passed && r.failed?.length ? ": " + r.failed.join(", ") : ""}`;
       const flash = landing && i >= c.runs && !REDUCED ? " new" : "";
       parts.push(`<g transform="translate(${x(r.at).toFixed(1)} ${bottom + 12})"><path d="M0 -7L7 0L0 7L-7 0Z" class="checkpoint ${r.passed ? "pass" : "fail"}${flash}"><title>${esc(label)}</title></path></g>`);
     });

@@ -38,9 +38,17 @@ func componentInPlace(r *verify.Report) *verify.ComponentEvidence {
 	for i, row := range e.Proofs {
 		e.Proofs[i].Status = componentProofQualification(r, row)
 		if row.Result != nil && !componentInPlaceRecorded(r, row.Result) {
-			// Nagini may have verified it; what's missing is the attempt.
 			result := *row.Result
 			result.Errors = []string{"the receipt doesn't record the attempt its result names, so nothing here shows what Nagini read"}
+			if p := componentInPlaceAttempt(r, row.Result); p != nil {
+				result.Passed, result.Verified = false, nil
+				result.Errors = slices.Clone(p.Result.Errors)
+				if len(p.Skipped) > 0 {
+					result.Errors = append(result.Errors, "Nagini was skipped: "+strings.Join(p.Skipped, "; "))
+				} else if len(result.Errors) == 0 {
+					result.Errors = []string{"Nagini did not run"}
+				}
+			}
 			e.Proofs[i].Result = &result
 		}
 	}
@@ -53,7 +61,9 @@ func componentInPlace(r *verify.Report) *verify.ComponentEvidence {
 	}
 	e.Conformance = slices.Clone(e.Conformance)
 	for i := range e.Conformance {
-		e.Conformance[i].Status = componentConformanceQualification(r, e.Conformance[i]).Status
+		origin := e.Conformance[i].Origin
+		e.Conformance[i] = componentConformanceQualification(r, e.Conformance[i])
+		e.Conformance[i].Origin = origin
 	}
 	return &e
 }
@@ -67,7 +77,7 @@ func componentUnqualified(r *verify.Report) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, row := range e.Proofs {
-		if row.Status == "proved" && len(verify.PythonApplicationTargetProblems(e, row.Target)) > 0 {
+		if row.Status == "proved" && len(verify.PythonApplicationTargetProblems(e, row.Target, r.Application)) > 0 {
 			out[row.Target] = true
 		}
 	}
@@ -82,7 +92,7 @@ func componentProofFailures(r *verify.Report) []string {
 		return nil
 	}
 	var out []string
-	for _, problem := range verify.PythonApplicationProofProblems(e) {
+	for _, problem := range verify.PythonApplicationProofProblems(e, r.Application) {
 		out = append(out, "In-place proof: "+componentText(problem))
 	}
 	return out
@@ -96,12 +106,20 @@ func componentInPlaceRecorded(r *verify.Report, result *verify.ComponentProofRes
 	if result.Tool == nil || result.Tool.Pins[verify.InPlaceInputPin] == "" {
 		return true
 	}
+	p := componentInPlaceAttempt(r, result)
+	return p != nil && p.Ran && len(p.Skipped) == 0
+}
+
+func componentInPlaceAttempt(r *verify.Report, result *verify.ComponentProofResult) *verify.PythonApplicationProof {
 	if r.Application == nil {
-		return false
+		return nil
 	}
-	return slices.ContainsFunc(r.Application.Proofs, func(p verify.PythonApplicationProof) bool {
-		return p.Result.Target == result.Target && p.Input.Fingerprint == result.Tool.Pins[verify.InPlaceInputPin]
-	})
+	for i, p := range r.Application.Proofs {
+		if p.Result.Target == result.Target && p.Input.Fingerprint == result.Tool.Pins[verify.InPlaceInputPin] {
+			return &r.Application.Proofs[i]
+		}
+	}
+	return nil
 }
 
 // pythonApplicationProofs renders each in-place proof attempt (#359): what
@@ -112,10 +130,16 @@ func pythonApplicationProofs(b *strings.Builder, a *verify.PythonApplicationRepo
 	if len(a.Proofs) == 0 {
 		return
 	}
-	b.WriteString("\n### Python application · in-place proof\n\nNagini checked each selected function's own body against its own contract, from the function's original bytes in its module. Every other name the function reads is bound to Nagini's own contract functions, a builtin Nagini models, a literal constant copied as it is, or a trusted contract's abstraction, which Nagini assumes. A proof holds only on the condition that those trusted contracts hold: their backing tests support them, and nothing proves them. It covers no dependency, no unselected function, its neighbors in the same module included, and not the whole application. Nagini ran from its pinned recipe in its own image, with none of the application's requirements installed.\n")
+	if slices.ContainsFunc(a.Proofs, func(p verify.PythonApplicationProof) bool { return !p.Ran || len(p.Skipped) > 0 }) {
+		b.WriteString("\n### Python application · in-place proof\n\nEach record retains the selected function's prepared verifier input, copied from its original bytes in its module. Skipped proofs grant no proof evidence. A proof that runs checks only the selected function's body against its contract, conditional on the trusted contracts it assumes. It covers no dependency, no unselected function, its neighbors in the same module included, and not the whole application.\n")
+	} else {
+		b.WriteString("\n### Python application · in-place proof\n\nNagini checked each selected function's own body against its own contract, from the function's original bytes in its module. Every other name the function reads is bound to Nagini's own contract functions, a builtin Nagini models, a literal constant copied as it is, or a trusted contract's abstraction, which Nagini assumes. A proof holds only on the condition that those trusted contracts hold: their backing tests support them, and nothing proves them. It covers no dependency, no unselected function, its neighbors in the same module included, and not the whole application. Nagini ran from its pinned recipe in its own image, with none of the application's requirements installed.\n")
+	}
 	for _, p := range a.Proofs {
 		verdict := "not proved"
 		switch {
+		case len(p.Skipped) > 0:
+			verdict = "skipped: " + componentStrings(p.Skipped)
 		case !p.Ran:
 			verdict = "not run, since no trusted contract binds something the function reaches"
 		case p.Result.Passed && slices.Contains(p.Result.Verified, p.Result.Target) && len(p.Result.Unaccounted) > 0:
@@ -165,4 +189,86 @@ func pythonApplicationProofBinding(x verify.PythonApplicationProofBoundary) stri
 		return "no trusted contract binds it"
 	}
 	return componentLiteral(x.Kind)
+}
+
+// pythonApplicationContractChecks renders, for each in-place proof whose
+// attempt holds the function's contract, what checking that contract on the
+// calls exploration recorded found (#838). It is derived here from the
+// recorded calls, as the gate derived it, never read from a status.
+func pythonApplicationContractChecks(b *strings.Builder, r *verify.Report) {
+	e := componentInPlace(r)
+	if e == nil {
+		return
+	}
+	wrote := false
+	for _, p := range r.Application.Proofs {
+		checks := verify.PythonApplicationContractChecks(e, r.Application, p.Result.Target)
+		if checks == nil || p.Input.Contract == nil {
+			continue
+		}
+		if !wrote {
+			if slices.ContainsFunc(r.Application.Proofs, func(p verify.PythonApplicationProof) bool { return !p.Ran || len(p.Skipped) > 0 }) {
+				b.WriteString("\n### Python application · callers checked against selected contracts\n")
+			} else {
+				b.WriteString("\n### Python application · callers checked against proved contracts\n")
+			}
+			b.WriteString("\nNagini proves a selected function's body against its contract, and nothing proves the code that calls it. The gate evaluated each contract on every call of its function that it recorded, inside an exploration's attempts, replays apart, and while the application's tests ran, whoever made the call: the types its annotations name and each Requires on the arguments as they were on entry, and each Ensures and the result's type on the result, with Old reading the entry values and a list or dictionary argument read as it was after the call. A call that raised must have raised what an Exsures declares. A permission or a predicate holds wherever Python runs, so those are reserved for proof and not checked at runtime. A clause the gate couldn't evaluate on a call is unresolved, which fails the gate as a clause that didn't hold does. A value a test run's record can't hold leaves its clauses unresolved. This covers the calls exploration and the tests exercised, and says nothing about any other call.\n")
+			wrote = true
+		}
+		fmt.Fprintf(b, "\nContract of %s: ", componentLiteral(checks.Target))
+		switch {
+		case checks.Calls == 0:
+			b.WriteString("no call was recorded, so nothing was checked.\n")
+		case len(checks.Findings) > 0:
+			fmt.Fprintf(b, "%s recorded, %d while tests ran and %d by the application's own code. %s settled, and what's listed below failed the gate.\n",
+				plural(checks.Calls, "call", "calls"), checks.Tests, checks.Own, plural(checks.Clauses, "check", "checks"))
+		default:
+			fmt.Fprintf(b, "%s recorded, %d while tests ran and %d by the application's own code. Each of %s held.\n",
+				plural(checks.Calls, "call", "calls"), checks.Tests, checks.Own, plural(checks.Clauses, "check", "checks"))
+		}
+		if checks.Calls > 0 && checks.Own == 0 {
+			b.WriteString("\nNo call by the application's own code was recorded, so nothing here shows its callers meet the contract.\n")
+		}
+		var types []string
+		for _, param := range p.Input.Contract.Parameters {
+			types = append(types, componentLiteral(param.Name+": "+param.Type.String()))
+		}
+		if len(types) > 0 {
+			fmt.Fprintf(b, "\nParameter types checked on entry: %s.\n", strings.Join(types, ", "))
+		}
+		checked, partly, proofOnly := p.Input.Contract.Classes()
+		if len(checked)+len(partly)+len(proofOnly) > 0 {
+			b.WriteString("\n| Clause | On each recorded call |\n| :-- | :-- |\n")
+			for _, o := range p.Input.Contract.Obligations {
+				how := "evaluated"
+				switch {
+				case slices.Contains(proofOnly, o.Text):
+					how = "not evaluated: Nagini proves it, and no run can check it"
+					if !p.Ran || len(p.Skipped) > 0 {
+						how = "not evaluated: reserved for Nagini, which did not run"
+					}
+				case slices.Contains(partly, o.Text):
+					how = "evaluated, apart from the permissions it states, which Nagini proves"
+					if !p.Ran || len(p.Skipped) > 0 {
+						how = "evaluated, apart from the permissions it states, reserved for Nagini, which did not run"
+					}
+				case o.Kind == "exsures":
+					how = "evaluated where the call raised " + componentLiteral(o.Exception)
+				case o.Kind == "ensures":
+					how = "evaluated where the call returned"
+				}
+				fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(o.Text), how)
+			}
+		}
+		for _, f := range checks.Findings {
+			fmt.Fprintf(b, "\n- %s\n", componentLiteral(f.String()))
+		}
+	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }

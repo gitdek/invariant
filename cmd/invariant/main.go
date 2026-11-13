@@ -5,11 +5,15 @@
 //	invariant formalize [-out DIR] FILE  have a coding agent draft statements for a request
 //	invariant watch -repo OWNER/NAME     turn the repository's issues into merged pull requests
 //	invariant scope [-base REF] [HEAD]   check that a factory pull request stays in bounds
+//	invariant check-repository [HEAD]    run a repository's committed checks and native acceptance
 //	invariant ratification -repo R DIR   check a factory project's ratification on GitHub
 //	invariant pin DIR                    record the current statement text as ratified
 //	invariant trace FILE                 replay a counterexample trace
 //	invariant decisions ...              record decisions and ask what rests on them
-//	invariant mcp ...                    serve the gate or the check to an agent (synthesize and formalize start it)
+//	invariant mcp ...                    serve the gate, the check or the decision graph to an agent
+//	invariant dashboard -repo OWNER/NAME serve a live view of the factory and its evidence
+//	invariant ledger -repo OWNER/NAME    what each of the factory's issues took
+//	invariant init [DIR]                 set up another repository's gate
 package main
 
 import (
@@ -55,23 +59,26 @@ import (
 const usage = `Invariant proves code against statements people ratified.
 
 Usage:
-  invariant verify [-out DIR] PROJECT          run every gate check and print the receipt
+  invariant verify [-out DIR] [-tlc-parallel N] PROJECT
+                                               run every gate check and print the receipt
   invariant synthesize [-out DIR] PROJECT      have a coding agent write the model and code, then gate them
   invariant formalize [-out DIR] REQUEST.md    have a coding agent draft statements for a request
   invariant watch -repo OWNER/NAME [-once] [-app-id ID] [-agent A] [-language L] [-lease D] [-parallel N] [-check-parallel N]
                                                turn the repository's issues into merged pull requests
-  invariant scope [-base REF] [HEAD]           check that a factory pull request stays in bounds
+  invariant scope [-C DIR] [-base REF] [-issue N] [HEAD]
+                                               check that a factory pull request stays in bounds
   invariant check-repository [-C DIR] [-base REF] [-issue N -repo OWNER/NAME] [HEAD]
                                                run committed repository checks and native acceptance
   invariant ratification -repo OWNER/NAME PROJECT|PLAN...
                                                check factory projects' and plans' ratifications on GitHub
   invariant decisions COMMAND ...              record decisions and ask what rests on them
+  invariant mcp [-decisions [-write]] ...      serve the gate, the check or the decision graph to a coding agent;
+                                               invariant mcp -h lists its forms
   invariant pin PROJECT                        record the statements' current text as ratified
   invariant trace FILE                         replay a counterexample trace
   invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-work DIR]... [-addr HOST:PORT]
                                                serve a live view of the factory and its evidence
-
-  invariant ledger -repo OWNER/NAME [-json]      what each of the factory's issues took: time, comments, spend
+  invariant ledger -repo OWNER/NAME [-json]    what each of the factory's issues took: time, comments, spend
   invariant init [-repo OWNER/NAME] [-invariant COMMIT] [DIR]
                                                set up another repository's gate
 `
@@ -167,7 +174,17 @@ func verifyCmd(ctx context.Context, args []string) int {
 	return 0
 }
 
+// asksForHelp says a command's one argument asks for help rather than
+// naming a path, so pin -h and trace -h print the usage and succeed.
+func asksForHelp(args []string) bool {
+	return len(args) == 1 && (args[0] == "-h" || args[0] == "-help" || args[0] == "--help")
+}
+
 func pinCmd(args []string) int {
+	if asksForHelp(args) {
+		fmt.Print(usage)
+		return 0
+	}
 	if len(args) != 1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -197,6 +214,10 @@ func pinCmd(args []string) int {
 }
 
 func traceCmd(args []string) int {
+	if asksForHelp(args) {
+		fmt.Print(usage)
+		return 0
+	}
 	if len(args) != 1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -1140,7 +1161,7 @@ func ratificationCmd(ctx context.Context, args []string) int {
 				lock, err = plumbing.ReadLock(b)
 			}
 			if err == nil {
-				err = factory.VerifyPlan(ctx, gh, *repo, *lock)
+				err = settled(ctx, func() error { return factory.VerifyPlan(ctx, gh, *repo, *lock) })
 			}
 			if err != nil {
 				fmt.Printf("❌ %s: %v\n", dir, err)
@@ -1166,14 +1187,40 @@ func ratificationCmd(ctx context.Context, args []string) int {
 				continue
 			}
 			fmt.Printf("✅ %s: ratified by hand by %s, as %s records (%s)\n", dir, hand.By, p.Lock.Decision, hand.Proposal)
-		case factory.VerifyRatification(ctx, gh, *repo, p.Lock) == nil:
-			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
 		default:
-			fmt.Printf("❌ %s: %v\n", dir, factory.VerifyRatification(ctx, gh, *repo, p.Lock))
-			code = 1
+			if err := settled(ctx, func() error { return factory.VerifyRatification(ctx, gh, *repo, p.Lock) }); err != nil {
+				fmt.Printf("❌ %s: %v\n", dir, err)
+				code = 1
+				continue
+			}
+			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
 		}
 	}
 	return code
+}
+
+// ratificationWait is how long the ratification check waits before it asks
+// GitHub again, times the number of tries so far.
+var ratificationWait = 2 * time.Second
+
+// settled runs check, and runs it again, at most twice more, when GitHub
+// failed for a moment. The check reads one ratifying comment for every lock
+// and plan, on every change, so one request GitHub couldn't answer in time
+// failed CI's gate on a change that touched no lock (#827). A refusal, or an
+// answer that doesn't ratify, is never asked for twice.
+func settled(ctx context.Context, check func() error) error {
+	var err error
+	for try := 1; try <= 3; try++ {
+		if err = check(); err == nil || !github.Transient(err) || try == 3 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(try) * ratificationWait):
+		}
+	}
+	return err
 }
 
 // agentDoor serves the agent's door on a loopback address (D-0066), with a

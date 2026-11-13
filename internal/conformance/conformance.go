@@ -104,7 +104,7 @@ func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds 
 		return r, nil
 	}
 	r.Runs, r.Steps = rec.runs, rec.recorded
-	r.States, r.Transitions = len(s.states), len(rec.steps)
+	r.States, r.Transitions = referencedStates(rec), len(rec.steps)
 
 	values := modelValues(bounds)
 	constants := map[string]string{}
@@ -264,6 +264,22 @@ func CheckReader(ctx context.Context, runner Runner, dir, module string, bounds 
 }
 
 const initBatch = 1000
+
+// The store canonicalizes states, but an attempt recording can also supply
+// unused table entries. Count only visits, starts and attempt endpoints.
+func referencedStates(rec recorded) int {
+	seen := map[int]bool{}
+	for _, id := range rec.starts {
+		seen[id] = true
+	}
+	for _, step := range rec.steps {
+		seen[step[0]], seen[step[1]] = true, true
+	}
+	for _, a := range rec.attempts {
+		seen[a.from], seen[a.to] = true, true
+	}
+	return len(seen)
+}
 
 func checkBatch(ctx context.Context, runner Runner, source, root string, c tlc.ConformanceCheck, module string, cfg tlc.Config, emit func(*moduleWriter) error) (result tlc.Result, err error) {
 	if err := ctx.Err(); err != nil {

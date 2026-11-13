@@ -3,6 +3,7 @@ package statechart
 import (
 	"cmp"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 )
@@ -40,7 +41,7 @@ func measureSVGText(s string) svgText {
 		}
 		t.width = max(t.width, width)
 	}
-	t.height = float64(len(t.lines)) * svgLineHeight
+	t.height = float64(float64(len(t.lines)) * svgLineHeight)
 	return t
 }
 
@@ -179,17 +180,17 @@ func layoutSVG(c *Result) svgLayout {
 		col := &columns[k]
 		col.x = x
 		col.nearX = x + col.width + svgLaneGap
-		col.localX = col.nearX + float64(col.nearCount)*svgLaneGap + svgPadding
+		col.localX = math.FMA(float64(col.nearCount), svgLaneGap, col.nearX) + svgPadding
 		col.farX = col.localX + col.localWidth + svgLaneGap
-		col.forwardX = col.farX + float64(len(col.local))*svgLaneGap
-		col.labelX = col.forwardX + float64(len(col.forward))*svgLaneGap + svgPadding
+		col.forwardX = math.FMA(float64(len(col.local)), svgLaneGap, col.farX)
+		col.labelX = math.FMA(float64(len(col.forward)), svgLaneGap, col.forwardX) + svgPadding
 		col.arrivalX = col.labelX + col.gapWidth + svgLaneGap
-		x = col.arrivalX + float64(len(col.forward))*svgLaneGap + svgPadding
+		x = math.FMA(float64(len(col.forward)), svgLaneGap, col.arrivalX) + svgPadding
 	}
 	for i := range l.nodes {
 		n, col := &l.nodes[i], &columns[rank[i]]
 		n.x = col.x
-		n.y = rowY[row[i]] + (rowHeight[row[i]]-n.height)/2
+		n.y = math.FMA(rowHeight[row[i]]-n.height, 0.5, rowY[row[i]])
 		y := rowY[row[i]] + rowHeight[row[i]] + svgMargin
 		for _, a := range local[i] {
 			l.arrows[a].label.x, l.arrows[a].label.y = col.localX, y
@@ -212,7 +213,7 @@ func layoutSVG(c *Result) svgLayout {
 				if side == 1 {
 					px += n.width
 				}
-				py := n.y + svgPadding + (n.height-2*svgPadding)*float64(j+1)/float64(len(ports)+1)
+				py := n.y + svgPadding + float64((n.height-2*svgPadding)*float64(j+1)/float64(len(ports)+1))
 				if p.out {
 					a.fromX, a.fromY = px, py
 				} else {
@@ -239,7 +240,7 @@ func layoutSVG(c *Result) svgLayout {
 			}
 		}
 		for j, i := range col.local {
-			l.arrows[i].toLane = col.farX + float64(j)*svgLaneGap
+			l.arrows[i].toLane = math.FMA(float64(j), svgLaneGap, col.farX)
 		}
 		// Preserve the vertical order of independent branches. Each label
 		// receives its own row between the two sets of vertical legs.
@@ -250,8 +251,8 @@ func layoutSVG(c *Result) svgLayout {
 		bottom := 112.0
 		for j, i := range col.forward {
 			a := &l.arrows[i]
-			a.fromLane = col.forwardX + float64(j)*svgLaneGap
-			a.toLane = col.arrivalX + float64(j)*svgLaneGap
+			a.fromLane = math.FMA(float64(j), svgLaneGap, col.forwardX)
+			a.toLane = math.FMA(float64(j), svgLaneGap, col.arrivalX)
 			a.label.x = col.labelX
 			a.label.y = max(bottom, (a.fromY+a.toY-a.label.height)/2)
 			bottom = a.label.y + a.label.height + svgPadding
@@ -270,7 +271,7 @@ func layoutSVG(c *Result) svgLayout {
 	}
 	for i := range l.arrows {
 		a := &l.arrows[i]
-		cy := a.label.y + a.label.height/2
+		cy := math.FMA(a.label.height, 0.5, a.label.y)
 		a.path = fmt.Sprintf("M %g %g L %g %g L %g %g L %g %g L %g %g L %g %g",
 			a.fromX, a.fromY, a.fromLane, a.fromY, a.fromLane, cy,
 			a.toLane, cy, a.toLane, a.toY, a.toX, a.toY)

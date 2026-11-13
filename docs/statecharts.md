@@ -112,7 +112,7 @@ Two of the factory's own models are small enough to draw, and carry views of the
 | `04-api-rate-limiter` | `Apis = {a1, a2}`, `Capacity = 2`, `MaxCalls = 5`, `MaxTime = 3`, `MaxWaiting = 2` | 19,489 | No; above chart capacity |
 | `05-connection-pool` | `Clients = {c1, c2, c3}`, `Size = 2` | 13 | Yes |
 
-The default acceptance test checks the inventory, protected model/lock hashes, pure view grammar and vocabulary. It does **not** claim a completed TLC exploration. Before merging this change, the merger must complete the following pinned-tool validation with Docker:
+The default acceptance test checks the inventory, protected model/lock hashes, pure view grammar and vocabulary. It does **not** claim a completed TLC exploration. That is the pinned-tool validation with Docker, which the merger ran before the change merged:
 
 ```sh
 INVARIANT_DASHBOARD_READER_REAL=1 go test ./internal/dashboard \
@@ -153,6 +153,20 @@ if err != nil {
 
 Layout and XML serialization run entirely in Go, without host fonts, a browser, rendering executables, network access or external resources. Repeated and concurrent calls on the same input return identical bytes and never mutate any part of the result. Callers must not mutate it during rendering. The renderer checks structure and representability; the caller still owns the checked evidence, snapshot association, ratification and tool pins. Rendering a hand-built result does not authenticate it.
 
+Rendering is processor-independent: the same checked input and options produce identical bytes for ordinary reader SVGs, comparison panels, animated posters and still posters. [#792's ratified plan](../.invariant/plans/issue-792.json) preserves the existing Go 1.27.3 arm64 output, including dashboard image identities. Arithmetic uses explicit `math.FMA` for the operations that compiler fused, preserving operands, signs and evaluation order; `float64` conversions force rounding elsewhere, including across temporary assignments and inlined helpers. This implements the deterministic rendering of [D-0347](../decisions/journal/D-0347.jsonl) and [D-0364](../decisions/journal/D-0364.jsonl).
+
+Poster curve lengths and replay distances use the same explicit arithmetic for scaled hypotenuse calculations, preserving arm64's fused `1+q*q` and rounding the final product before accumulation. This keeps nearly equal segments in the same order when choosing arrow label positions; `math.Hypot` otherwise varies by processor and compiler fusion mode.
+
+Poster arrow widths likewise preserve arm64's logarithm arithmetic for concrete step counts, including fusion inside the polynomial and reconstruction. Rounding the return value of `math.Log1p` alone cannot preserve widths at a decimal formatting boundary.
+
+The ordinary package suite pins representative whole-image arm64 SHA-256 hashes and reruns the entire suite with implicit fusion disabled, using a recursion guard. It also checks poster label placement for nearly equal curve lengths and arrow widths at a logarithm rounding boundary, cross-compiles production code for arm64, rejects fused instructions without an explicit `math.FMA` source call and requires the same fused instruction inventory with implicit fusion disabled. Existing CI runs these checks automatically. From the repository root:
+
+```sh
+go test ./internal/statechart -count=1 -timeout 20m
+go test ./internal/statechart -count=1 -timeout 20m -gcflags=all=-d=fmahash=n
+go test ./internal/statechart -run '^TestStatechartOnlyExplicitFMA792$' -count=1 -timeout 5m
+```
+
 Every chart state, initial and visible arrow is drawn, including all self-loops, parallel arrows and reverse arrows. [#613's ratified plan](../.invariant/plans/issue-613.json) arranges states in left-to-right columns by their shortest visible-arrow distance from any initial state. Hidden arrows do not affect these distances. Stable neighbour-ordering passes reduce crossings within those columns; a forward chain has no crossings. Each rectangular state outline is sized from its own displayed text, independently of incident arrows and other states' labels. States are numbered in reading order, column by column and then top to bottom within a column, so initial states come first ([D-0354](../decisions/journal/D-0354.jsonl)). The drawing, each arrow's description, the initial indicators and the report use the same numbers, and the report lists states and arrows in that order.
 
 Forward routes stay between adjacent columns. Same-column arrows and self-loops use separate side lanes, and back arrows return below the drawing. Each incidence has its own connection point; literal arrow labels occupy reserved areas on their own routes, clear of states and other labels. Vertical legs stay outside those label areas. Explicit newlines become positioned SVG lines, and long lines remain complete. The full report follows below the drawing in up to three balanced text columns at the same readable font size. State and occurrence captions use singular and plural wording. Large charts and long labels can still produce large images; the viewBox contains the entire drawing and report. The existing 500-concrete-state capacity applies, with no additional arrow cutoff or sampling; the 20-arrow target remains visible advice.
@@ -178,6 +192,8 @@ Nil or empty results, unsupported versions, missing or repeated initials, unknow
 ## Posters
 
 `(*statechart.Result).Poster(statechart.PosterOptions{Title, Animated}) (string, error)` draws the same checked chart for people to read. The complete report stays in the standalone SVG and the reader record; a poster leaves it out, so its size follows the chart, not the TLC graph. It validates the result exactly as `SVG` does, and refuses an unprintable title.
+
+The subtitle keeps the reader label, checked-state count and bounds sorted by name. It wraps between whole items into as many lines as the final poster width needs, within the existing padding, with middle dots between items on each line. An item wider than a line is shortened at a Unicode character boundary with an ellipsis; its full literal text stays in the unchanged complete evidence image and reader record. Animated and still posters share this layout. Extra lines leave the title and exploration badge in place, move the whole chart, arrow labels, initial markers, replay and legend down together, and increase the canvas height. A subtitle that already fits leaves the poster bytes unchanged.
 
 A poster reads top to bottom. States are layered by their longest path from the initial states and ordered within each layer by their neighbors. An arrow that skips layers threads through a slot of its own in each, clear of the cards it passes, and arrows that close a cycle sweep around the right, with their labels outside the arc. Each state is a card colored by its role: start, ordinary, final (no arrow leaves it) or breaking a rule. Its caption counts the concrete states it holds, and the steps that stay in it are chips inside the card, each with a small loop of its own and its count. An arrow's width follows its concrete steps, and its label pill carries its exact label and count. A poster keeps the standalone SVG's inspectable `g[data-state-id]`, `g[data-initial]` and `g[data-from][data-to][data-label]` elements, with exact labels in `title`, but not its `metadata`.
 

@@ -110,10 +110,12 @@ func (e Event) sealed() bool {
 }
 
 // idPattern is a decision ID, alone or qualified by its project,
-// proposalPattern a proposal's hash, and personPattern a person: @ and a
-// GitHub login, letters and digits joined by single hyphens.
+// nodePattern a decision's or a ratified plan's (#809), proposalPattern a
+// proposal's hash, and personPattern a person: @ and a GitHub login,
+// letters and digits joined by single hyphens.
 var (
 	idPattern       = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?(D-\d{4,})$`)
+	nodePattern     = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]*)/)?([DP]-\d{4,})$`)
 	mentionedID     = regexp.MustCompile(`\bD-\d{4,}\b`)
 	proposalPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	personPattern   = regexp.MustCompile(`^@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
@@ -126,12 +128,12 @@ func IsPerson(who string) bool {
 	return len(who) <= 40 && personPattern.MatchString(who)
 }
 
-// Qualify turns a short ID into its store ID within project, and leaves a
-// qualified one as it is.
+// Qualify turns a short ID, a decision's or a ratified plan's, into its
+// store ID within project, and leaves a qualified one as it is.
 func Qualify(project, id string) (string, error) {
-	m := idPattern.FindStringSubmatch(strings.TrimSpace(id))
+	m := nodePattern.FindStringSubmatch(strings.TrimSpace(id))
 	if m == nil {
-		return "", fmt.Errorf("%q isn't a decision ID, such as D-0096 or copythis-ad/D-0001", id)
+		return "", fmt.Errorf("%q isn't a decision's or a plan's ID, such as D-0096, P-0358 or copythis-ad/D-0001", id)
 	}
 	if m[1] != "" {
 		return m[1] + "/" + m[2], nil

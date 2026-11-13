@@ -22,6 +22,12 @@ type Tile struct {
 // calls, from who.
 func Tiles(t Totals, who Who) []Tile {
 	merged := "CI's gate passed on the exact head of all " + inFull(t.MergesChecked) + " pull requests the factory merged. "
+	if t.BadMerges > 0 {
+		// The sentence under a count that isn't zero says which ones, and
+		// never that every gate passed.
+		merged = "CI's gate passed on the exact head of " + inFull(t.MergesChecked-t.BadMerges) + " of the " + inFull(t.MergesChecked) +
+			" pull requests merged. " + list(t.BadMergeRefs, 6) + " merged without it. "
+	}
 	if t.BadLocks == 0 {
 		merged += "All " + inFull(t.LocksChecked) + " factory locks are exactly what a person ratified."
 	} else {
@@ -38,6 +44,21 @@ func Tiles(t Totals, who Who) []Tile {
 		tile("bugs", "planted bugs caught", "planted bugs caught,", "each one breaks an invariant, and TLC finds the step", t.BugsCaught, t.Bugs),
 		tile("proved", "functions proved", "functions proved,", "by Gobra and Nagini, against contracts that restate the model", t.Proved),
 		tile("dec", "decisions logged", "decisions,", logged, t.Decisions),
+	}
+}
+
+// list writes refs as a sentence's subject, #686, #690 and #703, naming at
+// most most of them and counting the rest.
+func list(refs []string, most int) string {
+	switch n := len(refs); {
+	case n == 0:
+		return "Some"
+	case n == 1:
+		return refs[0]
+	case n <= most:
+		return strings.Join(refs[:n-1], ", ") + " and " + refs[n-1]
+	default:
+		return strings.Join(refs[:most], ", ") + " and " + inFull(n-most) + " more"
 	}
 }
 

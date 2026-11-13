@@ -95,7 +95,9 @@ type Repo interface {
 	Worktree(ctx context.Context, branch, from string) (string, error)
 	RemoveWorktree(ctx context.Context, dir string) error
 	ClearWorktrees(ctx context.Context) error
-	Commit(ctx context.Context, worktree, dir, message string) (string, error)
+	// Commit commits everything under dir. Each of written that exists is
+	// committed whatever the repository's ignore rules say.
+	Commit(ctx context.Context, worktree, dir, message string, written ...string) (string, error)
 	Push(ctx context.Context, worktree, branch string) error
 	RevParse(ctx context.Context, ref string) (string, error)
 	Show(ctx context.Context, ref, file string) ([]byte, error)

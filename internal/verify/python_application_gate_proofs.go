@@ -15,14 +15,14 @@ import (
 
 // The gate proves selected Python functions in place (#359, #294's step 6).
 // It builds each selected function's verifier input before anything runs,
-// runs the pinned Nagini on it after the application's tests, conformance
-// and backing tests, and attributes the attempt as component proof
+// runs the pinned Nagini on eligible inputs after the application's tests,
+// conformance and backing tests, and attributes the attempt as component proof
 // evidence. A proof qualifies only as an effective guarantee: proved from
 // the function's original bytes with nothing it reached unaccounted for,
 // every trusted contract it assumed tested, and conformance on the same
-// function, in the same session, observing calls into that very
-// declaration. The proof is conditional on those trusted contracts, which
-// tests support and nothing proves.
+// function, or declared calls on accepted and refused explored attempts in
+// the same session, observing that very declaration. The proof is conditional
+// on those trusted contracts, which tests support and nothing proves.
 
 // preparePythonApplicationProofs checks that the application ships
 // Invariant's runtime stand-in for nagini_contracts, which every module that
@@ -162,17 +162,18 @@ func (r *Report) pythonApplicationProofProblems() []string {
 	if r.Components == nil || r.Application == nil {
 		return nil
 	}
-	return PythonApplicationProofProblems(r.Components)
+	return PythonApplicationProofProblems(r.Components, r.Application)
 }
 
 // PythonApplicationProofProblems says why each proof e's inventory selects
 // falls short of an effective guarantee, in the inventory's order, from e's
 // statuses as they stand; none means every one qualifies. A receipt passes
 // evidence it has qualified again, so an edited status can't pass here.
-func PythonApplicationProofProblems(e *ComponentEvidence) []string {
+// Observed-call qualification also needs the session's application report.
+func PythonApplicationProofProblems(e *ComponentEvidence, application ...*PythonApplicationReport) []string {
 	var out []string
 	for _, target := range pythonApplicationProofTargets(&e.Inventory) {
-		out = append(out, PythonApplicationTargetProblems(e, target)...)
+		out = append(out, PythonApplicationTargetProblems(e, target, application...)...)
 	}
 	return out
 }
@@ -190,7 +191,7 @@ func (r *Report) qualifyPythonApplicationProofs() {
 		return
 	}
 	for i, row := range r.Components.Proofs {
-		if row.Status == "proved" && len(PythonApplicationTargetProblems(r.Components, row.Target)) > 0 &&
+		if row.Status == "proved" && len(PythonApplicationTargetProblems(r.Components, row.Target, r.Application)) > 0 &&
 			slices.Contains(pythonApplicationProofTargets(&r.Components.Inventory), row.Target) {
 			r.Components.Proofs[i].Status = Unqualified
 		}
@@ -199,18 +200,24 @@ func (r *Report) qualifyPythonApplicationProofs() {
 
 // PythonApplicationTargetProblems says why the proof selected on target falls
 // short of an effective guarantee.
-func PythonApplicationTargetProblems(e *ComponentEvidence, target string) []string {
-	standing := map[string]ComponentContractEvidence{}
-	for _, c := range e.Contracts {
-		standing[c.Contract] = c
-	}
+func PythonApplicationTargetProblems(e *ComponentEvidence, target string, application ...*PythonApplicationReport) []string {
 	i := slices.IndexFunc(e.Proofs, func(row ComponentProof) bool { return row.Target == target })
 	if i < 0 || e.Proofs[i].Result == nil {
 		return []string{fmt.Sprintf("%s has no proof attempt", target)}
 	}
 	row := e.Proofs[i]
 	var out []string
-	if row.Status != "proved" && row.Status != Unqualified {
+	var skipped []string
+	if len(application) == 1 && application[0] != nil {
+		for _, p := range application[0].Proofs {
+			if p.Result.Target == target {
+				skipped = append(skipped, p.Skipped...)
+			}
+		}
+	}
+	if len(skipped) > 0 {
+		out = append(out, fmt.Sprintf("%s proof was skipped: %s", target, strings.Join(skipped, "; ")))
+	} else if row.Status != "proved" && row.Status != Unqualified {
 		why := slices.Clone(row.Result.Errors)
 		for _, u := range row.Result.Unaccounted {
 			if u.Kind != MissingContract || u.Operation == nil {
@@ -222,13 +229,44 @@ func PythonApplicationTargetProblems(e *ComponentEvidence, target string) []stri
 		}
 		out = append(out, fmt.Sprintf("%s isn't proved: %s", target, strings.Join(why, "; ")))
 	}
-	for _, use := range row.Result.Assumed {
+	return append(out, pythonApplicationProofPrerequisites(e, target, row.Result, application...)...)
+}
+
+// pythonApplicationProofPrerequisites checks what is knowable from a prepared
+// input and requalified execution evidence, without requiring a verifier verdict.
+// Any passing same-declaration route suffices, independently of other failures.
+func pythonApplicationProofPrerequisites(e *ComponentEvidence, target string, proof *ComponentProofResult, application ...*PythonApplicationReport) []string {
+	standing := map[string]ComponentContractEvidence{}
+	for _, c := range e.Contracts {
+		standing[c.Contract] = c
+	}
+	var out []string
+	for _, u := range proof.Unaccounted {
+		out = append(out, fmt.Sprintf("%s has unaccounted input: %s", target, unaccountedText(u)))
+	}
+	for _, use := range proof.Assumed {
 		if standing[use.Contract].Support != "tested" {
 			out = append(out, fmt.Sprintf("%s assumes trusted contract %s, which isn't tested, so it can't support the proof", target, use.Contract))
 		}
 	}
-	if !pythonApplicationProofExercised(e, target, row.Result) {
-		out = append(out, fmt.Sprintf("%s has no passing conformance on the same declaration, so nothing shows the application runs the function Nagini proved", target))
+	if !pythonApplicationProofExercised(e, target, proof) {
+		if pythonApplicationObservedTarget(&e.Inventory, target) {
+			missing := "the session's application report"
+			qualified := false
+			if len(application) == 1 {
+				qualified, missing = pythonApplicationObservedProof(e, application[0], target, proof)
+			}
+			if !qualified {
+				out = append(out, fmt.Sprintf("%s lacks completed observed calls on both accepted and declared-refused non-replay attempts in one complete exploration with passing transition, state and attempted-step conformance against the proof's source bytes. It needs %s", target, missing))
+			}
+		} else {
+			out = append(out, fmt.Sprintf("%s has no passing conformance on the same declaration or declared observed-call coverage, so nothing shows the application runs the function selected for proof", target))
+		}
+	}
+	// Each recorded call must meet the contract, whoever made the call,
+	// before Nagini runs as well as after it (#838, #841, #849).
+	if len(application) == 1 {
+		out = append(out, PythonApplicationContractChecks(e, application[0], target).problems()...)
 	}
 	return out
 }

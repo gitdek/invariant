@@ -1,5 +1,7 @@
-// Package tla reads the parts of a TLA+ module that Invariant pins: top-level
-// operator definitions, and what each depends on.
+// Package tla reads the parts of a TLA+ model that Invariant pins: top-level
+// operator definitions, and what each depends on. It reads a module the way
+// SANY, TLC's parser, reads it, and refuses a module it can't read exactly,
+// so that the text a pin covers is the text TLC checks (#812).
 package tla
 
 import (
@@ -9,84 +11,194 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 )
 
-var (
-	lineComment  = regexp.MustCompile(`\\\*.*`)
-	blockComment = regexp.MustCompile(`(?s)\(\*.*?\*\)`)
-	whitespace   = regexp.MustCompile(`\s+`)
-	moduleHeader = regexp.MustCompile(`-{4,}\s*MODULE\s+(\w+)\s*-{4,}`)
-)
+var moduleHeader = regexp.MustCompile(`-{4,}\s*MODULE\s+(\w+)\s*-{4,}`)
 
-// ModuleName returns the name in the module's header line.
-func ModuleName(src string) (string, error) {
-	m := moduleHeader.FindStringSubmatch(src)
-	if m == nil {
-		return "", fmt.Errorf("no MODULE header")
+// A Model is a main module and the modules beside it that it extends, read
+// as SANY reads them: one space of definitions.
+type Model struct {
+	Main    *Module
+	modules []*Module          // each module after the ones it extends; Main last
+	owner   map[string]*Module // a definition's name to the module that holds it
+}
+
+// Read reads a model: its main module's text, and the sibling modules beside
+// it by file name, such as Helper.tla. A module may extend the standard
+// modules TLC ships and the siblings supplied here, which are read the same
+// way; their definitions join the main module's, as they do for SANY.
+func Read(src string, includes map[string]string) (*Model, error) {
+	return cachedRead(src, includes, true)
+}
+
+// alone reads one module by itself, without the modules it extends: enough
+// to say what the module itself defines and declares, and never enough to
+// take a pin.
+func alone(src string) (*Model, error) { return cachedRead(src, nil, false) }
+
+func cachedRead(src string, includes map[string]string, whole bool) (*Model, error) {
+	key := cacheKey(src, includes, whole)
+	cache.Lock()
+	hit, ok := cache.models[key]
+	cache.Unlock()
+	if ok {
+		return hit.model, hit.err
 	}
-	return m[1], nil
-}
-
-// Definition returns the text of the top-level definition of name: the line
-// that starts `name ==` (or `name(args) ==`) at column 0, plus every
-// following line that is blank or indented.
-func Definition(src, name string) (string, error) {
-	head := regexp.MustCompile(`^` + regexp.QuoteMeta(name) + `(\s*\([^)]*\))?\s*==`)
-	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
-	for i, line := range lines {
-		if !head.MatchString(line) {
-			continue
-		}
-		j := i + 1
-		for j < len(lines) && (strings.TrimSpace(lines[j]) == "" || lines[j][0] == ' ' || lines[j][0] == '\t') {
-			j++
-		}
-		return strings.TrimRight(strings.Join(lines[i:j], "\n"), " \t\n"), nil
+	model, err := read(src, includes, whole)
+	cache.Lock()
+	if len(cache.models) >= 32 {
+		cache.models = map[[32]byte]cached{}
 	}
-	return "", fmt.Errorf("no top-level definition of %s", name)
+	cache.models[key] = cached{model, err}
+	cache.Unlock()
+	return model, err
 }
 
-// Canonical strips comments and collapses whitespace, so reformatting a
-// definition leaves its hash alone but any change to its meaning does not.
-func Canonical(def string) string {
-	def = blockComment.ReplaceAllString(def, " ")
-	def = lineComment.ReplaceAllString(def, " ")
-	return strings.TrimSpace(whitespace.ReplaceAllString(def, " "))
+// A gate run reads the same model once for each statement and dependency,
+// so the last few models read are kept. A Model is never changed once read.
+type cached struct {
+	model *Model
+	err   error
 }
 
-// Hash is the pin for a definition: the SHA-256 of its canonical text.
-func Hash(def string) string {
-	sum := sha256.Sum256([]byte(Canonical(def)))
-	return "sha256:" + hex.EncodeToString(sum[:])
+var cache = struct {
+	sync.Mutex
+	models map[[32]byte]cached
+}{models: map[[32]byte]cached{}}
+
+func cacheKey(src string, includes map[string]string, whole bool) [32]byte {
+	h := sha256.New()
+	fmt.Fprintf(h, "%v:%d:%s", whole, len(src), src)
+	names := make([]string, 0, len(includes))
+	for name := range includes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(h, "%d:%s%d:%s", len(name), name, len(includes[name]), includes[name])
+	}
+	var key [32]byte
+	h.Sum(key[:0])
+	return key
 }
 
-var (
-	definitionHead = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(\s*\([^)]*\))?\s*==`)
-	identifier     = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
-	stringLiteral  = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-	declaration    = regexp.MustCompile(`^(CONSTANTS?|VARIABLES?)\b`)
-	subscript      = regexp.MustCompile(`(\]|>>|\bWF|\bSF)_`)
-)
+func read(src string, includes map[string]string, whole bool) (*Model, error) {
+	main, err := ParseModule(src)
+	if err != nil {
+		return nil, err
+	}
+	if !whole {
+		m := &Model{Main: main, modules: []*Module{main}, owner: map[string]*Module{}}
+		for _, name := range main.definitions() {
+			m.owner[name] = main
+		}
+		return m, nil
+	}
+	if shipped[main.Name] {
+		return nil, fmt.Errorf("a model can't be named %s: TLC has a module of that name, and would run its own code in place of this module's definitions", main.Name)
+	}
+	for name := range includes {
+		stem := strings.TrimSuffix(name, ".tla")
+		if shipped[stem] {
+			return nil, fmt.Errorf("%s: TLC has a module named %s, and would load this file in its place. Give the module another name", name, stem)
+		}
+	}
+	m := &Model{Main: main, owner: map[string]*Module{}}
+	loaded, loading := map[string]bool{main.Name: true}, map[string]bool{main.Name: true}
+	var load func(*Module) error
+	load = func(mod *Module) error {
+		for _, name := range mod.Extends {
+			if standard[name] {
+				continue
+			}
+			if loading[name] {
+				return fmt.Errorf("%s extends %s, which extends it in turn", mod.Name, name)
+			}
+			if loaded[name] {
+				continue
+			}
+			text, ok := includes[name+".tla"]
+			switch {
+			case !ok && shipped[name]:
+				return fmt.Errorf("%s: EXTENDS %s. A model the gate pins may extend Naturals, Integers, Sequences, FiniteSets, Bags and TLC, and modules beside it", mod.at(mod.units[0].first), name)
+			case !ok:
+				return fmt.Errorf("%s: EXTENDS %s, and there's no %s.tla beside the model. A model may extend Naturals, Integers, Sequences, FiniteSets, Bags and TLC, and modules beside it", mod.at(mod.units[0].first), name, name)
+			}
+			sibling, err := parseModule(text, name+".tla")
+			if err != nil {
+				return err
+			}
+			if sibling.Name != name {
+				return fmt.Errorf("%s.tla holds module %s; a module's file is named for it", name, sibling.Name)
+			}
+			loading[name] = true
+			if err := load(sibling); err != nil {
+				return err
+			}
+			loading[name], loaded[name] = false, true
+			m.modules = append(m.modules, sibling)
+		}
+		return nil
+	}
+	if err := load(main); err != nil {
+		return nil, err
+	}
+	m.modules = append(m.modules, main)
+	for _, mod := range m.modules {
+		for _, name := range mod.definitions() {
+			if other, twice := m.owner[name]; twice {
+				return nil, fmt.Errorf("%s is defined in both %s and %s", name, other.Name, mod.Name)
+			}
+			m.owner[name] = mod
+		}
+	}
+	return m, nil
+}
 
-// Definitions names the module's top-level definitions, in source order.
-func Definitions(src string) []string {
+// Name is the main module's name.
+func (m *Model) Name() string { return m.Main.Name }
+
+// Definitions names the model's top-level definitions: those of the modules
+// it extends, then its own, each in source order.
+func (m *Model) Definitions() []string {
 	var names []string
-	for _, line := range strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n") {
-		if m := definitionHead.FindStringSubmatch(line); m != nil {
-			names = append(names, m[1])
-		}
+	for _, mod := range m.modules {
+		names = append(names, mod.definitions()...)
 	}
 	return names
 }
 
+// Definition returns the text of the top-level definition of name: its line,
+// Name == or Name(args) ==, and every line after it up to the next
+// definition or declaration.
+func (m *Model) Definition(name string) (string, error) {
+	mod, ok := m.owner[name]
+	if !ok {
+		return "", fmt.Errorf("no top-level definition of %s", name)
+	}
+	return mod.text(&mod.units[mod.defs[name]]), nil
+}
+
+// Variables names the model's variables, from its VARIABLE declarations.
+func (m *Model) Variables() []string {
+	var names []string
+	for _, mod := range m.modules {
+		names = append(names, mod.variables()...)
+	}
+	return names
+}
+
+var (
+	identifier    = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+	stringLiteral = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+	subscript     = regexp.MustCompile(`(\]|>>|\bWF|\bSF)_`)
+)
+
 // Closure returns name and every top-level definition it depends on,
 // directly or indirectly, sorted. It doesn't follow the names in stop,
 // which belong to the factory's model.
-func Closure(src, name string, stop map[string]bool) ([]string, error) {
-	defined := map[string]bool{}
-	for _, d := range Definitions(src) {
-		defined[d] = true
-	}
+func (m *Model) Closure(name string, stop map[string]bool) ([]string, error) {
 	seen := map[string]bool{}
 	var visit func(string) error
 	visit = func(n string) error {
@@ -94,7 +206,7 @@ func Closure(src, name string, stop map[string]bool) ([]string, error) {
 			return nil
 		}
 		seen[n] = true
-		def, err := Definition(src, n)
+		def, err := m.Definition(n)
 		if err != nil {
 			return err
 		}
@@ -103,7 +215,7 @@ func Closure(src, name string, stop map[string]bool) ([]string, error) {
 		// part of a name.
 		body = subscript.ReplaceAllString(body, "$1 ")
 		for _, ref := range identifier.FindAllString(body, -1) {
-			if defined[ref] && !stop[ref] && ref != n {
+			if m.owner[ref] != nil && !stop[ref] && ref != n {
 				if err := visit(ref); err != nil {
 					return err
 				}
@@ -124,46 +236,124 @@ func Closure(src, name string, stop map[string]bool) ([]string, error) {
 
 // PinHash is the pin for a statement: the SHA-256 of the canonical text of
 // its closure. Pinning the closure means a statement can't be weakened by
-// redefining something it depends on. For a statement with no dependencies
-// it equals Hash of its definition.
-func PinHash(src, name string, stop map[string]bool) (string, error) {
-	names, err := Closure(src, name, stop)
+// redefining something it depends on, in the model or in a module it
+// extends. For a statement with no dependencies it equals Hash of its
+// definition.
+func (m *Model) PinHash(name string, stop map[string]bool) (string, error) {
+	names, err := m.Closure(name, stop)
 	if err != nil {
 		return "", err
 	}
 	parts := make([]string, len(names))
 	for i, n := range names {
-		def, err := Definition(src, n)
+		def, err := m.Definition(n)
 		if err != nil {
 			return "", err
 		}
 		parts[i] = Canonical(def)
+		if division.MatchString(stringLiteral.ReplaceAllString(parts[i], " ")) && !m.extends("Integers") {
+			return "", fmt.Errorf(`%s uses \div, and the model doesn't extend Integers. TLC rounds \div toward zero under Naturals and down under Integers when one side is negative, so what a pin covers may use \div only in a model that extends Integers, where it means one thing`, n)
+		}
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-// Variables names the module's variables, from its VARIABLE declarations.
-func Variables(src string) []string {
-	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
-	var names []string
-	for i := 0; i < len(lines); i++ {
-		m := declaration.FindStringSubmatch(lines[i])
-		if m == nil || !strings.HasPrefix(m[1], "VARIABLE") {
-			continue
-		}
-		text := lineComment.ReplaceAllString(strings.TrimPrefix(lines[i], m[1]), " ")
-		for i+1 < len(lines) && strings.HasPrefix(lines[i+1], " ") && strings.TrimSpace(lines[i+1]) != "" {
-			i++
-			text += " " + lineComment.ReplaceAllString(lines[i], " ")
-		}
-		for _, n := range strings.Split(text, ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				names = append(names, n)
+// division is the one operator TLC evaluates differently by which of the
+// modules that define it a model extends: its code for Naturals leaves a
+// quotient of zero alone where Integers rounds it down to -1.
+// TestSANYReadsAsTheReaderDoes holds that, and that the others agree.
+var division = regexp.MustCompile(`\\div\b`)
+
+// extends says whether the model, or a module it extends, extends name.
+func (m *Model) extends(name string) bool {
+	for _, mod := range m.modules {
+		for _, e := range mod.Extends {
+			if e == name {
+				return true
 			}
 		}
 	}
-	return names
+	return false
+}
+
+// ModuleName returns the name in the module's header line, which must be the
+// first line that isn't blank. It reads nothing after the header.
+func ModuleName(src string) (string, error) {
+	m := &Module{lines: strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")}
+	if err := m.readHeader(); err != nil {
+		return "", err
+	}
+	return m.Name, nil
+}
+
+// Definition returns the text of the top-level definition of name in one
+// module, read alone. See Model.Definition.
+func Definition(src, name string) (string, error) {
+	m, err := alone(src)
+	if err != nil {
+		return "", err
+	}
+	return m.Definition(name)
+}
+
+// Hash is the pin for a definition: the SHA-256 of its canonical text.
+func Hash(def string) string {
+	sum := sha256.Sum256([]byte(Canonical(def)))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// Definitions names the top-level definitions of one module, read alone, in
+// source order. It names none for a module the gate refuses, which
+// Definition, Closure and PinHash report.
+func Definitions(src string) []string {
+	m, err := alone(src)
+	if err != nil {
+		return nil
+	}
+	return m.Definitions()
+}
+
+// Closure is Model.Closure for a model with no modules beside it. A model
+// that extends one is refused: its closure would miss what the module
+// beside it defines.
+func Closure(src, name string, stop map[string]bool) ([]string, error) {
+	m, err := Read(src, nil)
+	if err != nil {
+		return nil, err
+	}
+	return m.Closure(name, stop)
+}
+
+// PinHash is Model.PinHash for a model with no modules beside it. A model
+// that extends one is refused: its pin would miss what the module beside it
+// defines.
+func PinHash(src, name string, stop map[string]bool) (string, error) {
+	m, err := Read(src, nil)
+	if err != nil {
+		return "", err
+	}
+	return m.PinHash(name, stop)
+}
+
+// PinHashWith is PinHash for a model with modules beside it: includes holds
+// them by file name, as Read takes them.
+func PinHashWith(src string, includes map[string]string, name string, stop map[string]bool) (string, error) {
+	m, err := Read(src, includes)
+	if err != nil {
+		return "", err
+	}
+	return m.PinHash(name, stop)
+}
+
+// Variables names the variables one module declares, from its VARIABLE
+// declarations. It names none for a module the gate refuses.
+func Variables(src string) []string {
+	m, err := alone(src)
+	if err != nil {
+		return nil
+	}
+	return m.Variables()
 }
 
 // ModelMarker opens the part of a skeleton the factory writes.
@@ -178,47 +368,38 @@ const ModelMarker = `\* --------------------------------------------------------
 // the spec first, which refer to the model, go after ModelMarker, where the
 // factory adds the model, in that order.
 func Skeleton(src string, keep map[string]bool, last []string) (string, error) {
+	m, err := ParseModule(src)
+	if err != nil {
+		return "", err
+	}
 	isLast := map[string]bool{}
 	for _, n := range last {
 		isLast[n] = true
 	}
-	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
-	var header, decls, defs []string
+	var decls, defs []string
 	lastDefs := map[string][2]string{} // each definition, alone and with its comment
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
+	for i := range m.units {
+		u := &m.units[i]
 		switch {
-		case moduleHeader.MatchString(line) && header == nil:
-			header = []string{line}
-		case declaration.MatchString(line):
-			decls = append(decls, line)
-			for i+1 < len(lines) && strings.HasPrefix(lines[i+1], " ") && strings.TrimSpace(lines[i+1]) != "" {
-				i++
-				decls = append(decls, lines[i])
+		case u.kind == declarationUnit && u.word != "RECURSIVE":
+			end := u.last + 1
+			for end < u.next && strings.HasPrefix(m.lines[end], " ") && strings.TrimSpace(m.lines[end]) != "" {
+				end++
 			}
-		default:
-			m := definitionHead.FindStringSubmatch(line)
-			if m == nil || !keep[m[1]] {
-				continue
-			}
-			def, err := Definition(src, m[1])
-			if err != nil {
-				return "", err
-			}
-			start := i
-			for start > 0 && strings.HasPrefix(lines[start-1], `\*`) {
+			decls = append(decls, m.lines[u.first:end]...)
+		case u.kind == definitionUnit && keep[u.name]:
+			def := m.text(u)
+			start := u.first
+			for start > m.header+1 && strings.HasPrefix(m.lines[start-1], `\*`) {
 				start--
 			}
-			text := strings.Join(append(append([]string{}, lines[start:i]...), def), "\n")
-			if isLast[m[1]] {
-				lastDefs[m[1]] = [2]string{def, text}
+			text := strings.Join(append(append([]string{}, m.lines[start:u.first]...), def), "\n")
+			if isLast[u.name] {
+				lastDefs[u.name] = [2]string{def, text}
 			} else {
 				defs = append(defs, text)
 			}
 		}
-	}
-	if header == nil {
-		return "", fmt.Errorf("no MODULE header")
 	}
 	var after []string
 	for i, n := range last {
@@ -234,7 +415,7 @@ func Skeleton(src string, keep map[string]bool, last []string) (string, error) {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(header[0] + "\n")
+	b.WriteString(m.lines[m.header] + "\n")
 	b.WriteString(strings.Join(decls, "\n") + "\n\n")
 	b.WriteString(strings.Join(defs, "\n\n") + "\n\n")
 	b.WriteString(ModelMarker + "\n\n")

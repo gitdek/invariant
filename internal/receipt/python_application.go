@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gitdek/invariant/internal/verify"
+	"slices"
 )
 
 func componentOrigin(origin string) string {
@@ -18,7 +19,11 @@ func componentOrigin(origin string) string {
 // pythonApplication renders the application's executions and checks, and
 // larger, the overall check one size larger, when the receipt shows it
 // nowhere else, as when TLC couldn't finish there (#342).
-func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, larger *verify.Larger) {
+func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, larger *verify.Larger, reports ...*verify.Report) {
+	r := &verify.Report{Application: a}
+	if len(reports) > 0 {
+		r = reports[0]
+	}
 	explored := false
 	for _, c := range a.Conformance {
 		explored = explored || c.Mode == "bounded-exhaustive"
@@ -43,6 +48,21 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		raw, _ := json.MarshalIndent(x, "", "  ")
 		fmt.Fprintf(b, "%s\n", componentLiteral(string(raw)))
 	}
+	if len(a.Conformance) > 0 {
+		b.WriteString("\n| Conformance invocation | Result | Evidence |\n| :-- | :-- | :-- |\n")
+		for _, c := range a.Conformance {
+			coverage := r.PythonCoverage(c)
+			identity := componentLiteral(c.Key.Target) + " · " + componentLiteral(c.Key.Check) + " · " + componentLiteral(c.Key.ID)
+			row(b, identity, coverage.Checked, conformanceResult(c.Result, coverage), conformanceEvidence(c.Result)+"; "+coverage.Detail())
+			if t := c.Result.Tried; t != nil {
+				result := "a step never tried"
+				if t.Passed {
+					result = "in every state reached, but where only the environment's bounds rule a step out"
+				}
+				row(b, "Every step tried · "+identity, t.Passed, result, (renderer{explicit: true}).triedEvidence(*t))
+			}
+		}
+	}
 	for _, c := range a.Conformance {
 		raw, _ := json.MarshalIndent(c, "", "  ")
 		label := "TLC sampled check"
@@ -51,7 +71,23 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		}
 		fmt.Fprintf(b, "\n%s: %s\n", label, componentLiteral(string(raw)))
 	}
+	// In words, what a component receipt's table says of the check one size
+	// larger, ahead of each invocation's record of it (#880).
+	if len(reports) == 1 && hasComponentEvidence(reports[0]) {
+		if ok, result, evidence, shown := pythonApplicationLarger(a, larger); shown {
+			verdict := "➖ " + result
+			if ok != nil {
+				verdict = mark(*ok) + " " + result
+			}
+			fmt.Fprintf(b, "\nOne size larger: %s. %s.\n", verdict, evidence)
+		}
+	}
 	for _, l := range a.Larger {
+		if len(l.Skipped) > 0 {
+			fmt.Fprintf(b, "\nOne size larger, invocation %s: skipped; %s. No larger-bound result is claimed.\n", componentLiteral(l.Key.ID), componentStrings(l.Skipped))
+			l.Execution = nil
+			l.Result.Required, l.Result.Passed = false, false
+		}
 		if l.Execution != nil {
 			pythonApplicationFileSelection(b, l.Execution.Provenance.FileSelection)
 		}
@@ -102,10 +138,29 @@ func pythonApplicationFileSelection(b *strings.Builder, selection string) {
 	}
 }
 
-// pythonApplicationFailures names an explored check's failed claims, which
-// its JSON alone would leave to the reader (#342).
+// pythonApplicationFailures names failed executions and explored claims,
+// which their JSON alone would leave to the reader.
 func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationReport) []string {
 	var out []string
+	execution := func(label string, x verify.PythonApplicationExecutionResult) {
+		if x.Success && x.Complete {
+			return
+		}
+		cause := x.HarnessError
+		if cause == "" {
+			cause = "execution did not complete successfully; see execution diagnostics"
+		}
+		out = append(out, fmt.Sprintf("%s, target %s, check %s, invocation %s: %s", label,
+			componentLiteral(x.Key.Target), componentLiteral(x.Key.Check), componentLiteral(x.Key.ID), componentLiteral(cause)))
+	}
+	for _, x := range a.Executions {
+		execution("Python execution", x)
+	}
+	for _, l := range a.Larger {
+		if len(l.Skipped) == 0 && l.Execution != nil && l.Result.Required && !l.Result.Passed {
+			execution("Python execution one size larger", *l.Execution)
+		}
+	}
 	for _, c := range a.Conformance {
 		if c.Mode != "bounded-exhaustive" || !c.Result.Passed {
 			continue
@@ -118,4 +173,43 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 		}
 	}
 	return out
+}
+
+// pythonApplicationLarger says what the check one size larger did for an
+// application whose driver explores every state (#880), as a result and its
+// evidence, each fit for a table cell. ok is nil where the check claimed
+// nothing, which never fails the gate (D-0070): the exploration didn't
+// finish, TLC found a problem at that size, every invocation was skipped
+// for a prerequisite that failed, or no check ran at all. An application
+// that samples its states has no such check, and nothing is shown.
+func pythonApplicationLarger(a *verify.PythonApplicationReport, overall *verify.Larger) (ok *bool, result, evidence string, shown bool) {
+	explored := slices.ContainsFunc(a.Conformance, func(c verify.PythonApplicationConformance) bool { return c.Mode == "bounded-exhaustive" })
+	var skipped []string
+	for _, l := range a.Larger {
+		if len(l.Skipped) > 0 {
+			skipped = append(skipped, componentLiteral(l.Key.ID)+": "+componentStrings(l.Skipped))
+		}
+	}
+	within := func(l *verify.Larger) string { return (renderer{explicit: true}).bounds(l.Bounds) }
+	also := ""
+	if len(skipped) > 0 {
+		also = "; skipped for " + strings.Join(skipped, "; ")
+	}
+	yes, no := true, false
+	switch l := overall; {
+	case l != nil && l.Passed:
+		// Counts are what the check compares, so counts are what it says.
+		return &yes, "the code reaches as many states as the model, as deep",
+			fmt.Sprintf("%s states, depth %d, within %s%s", thousands(l.States), l.Depth, within(l), also), true
+	case l != nil && l.Required:
+		return &no, "code and model differ, so the code carries a bound",
+			fmt.Sprintf("%s states, depth %d, where the model has %s, depth %d, within %s%s", thousands(l.States), l.Depth, thousands(l.WantStates), l.WantDepth, within(l), also), true
+	case l != nil:
+		return nil, "not claimed", componentText(firstLine(l.Message)) + also, true
+	case len(skipped) > 0:
+		return nil, "not claimed", "skipped for " + strings.Join(skipped, "; "), true
+	case explored:
+		return nil, "not checked", "no check ran one size larger, which takes an exhaustive manifest and a driver that names a constant for each bound", true
+	}
+	return nil, "", "", false
 }

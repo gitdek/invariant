@@ -186,6 +186,9 @@ func (p *Project) validate() error {
 	if len(l.Bounds) == 0 {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)
 	}
+	if err := validBounds(l.Bounds); err != nil {
+		return err
+	}
 	for _, name := range m.Parameters {
 		if _, ok := l.Bounds[name]; !ok {
 			return fmt.Errorf("%s: parameter %s isn't one of the ratified bounds", manifestFile, name)
@@ -295,12 +298,26 @@ func (p *Project) names(kind string) []string {
 	return names
 }
 
+// ReadModel reads src, the text of the project's module, as a model: with
+// the modules beside it in the project, the way TLC reads it.
+func (p *Project) ReadModel(src string) (*tla.Model, error) {
+	includes, err := tla.Siblings(filepath.Dir(p.ModulePath()), filepath.Base(p.ModulePath()))
+	if err != nil {
+		return nil, err
+	}
+	return tla.Read(src, includes)
+}
+
 // Pinned names every definition a pin covers: each statement and everything
 // it depends on, up to the factory's model.
 func (p *Project) Pinned(src string) (map[string]bool, error) {
+	model, err := p.ReadModel(src)
+	if err != nil {
+		return nil, err
+	}
 	pinned := map[string]bool{}
 	for _, s := range p.Lock.Statements {
-		names, err := tla.Closure(src, s.Name, Model)
+		names, err := model.Closure(s.Name, Model)
 		if err != nil {
 			return nil, err
 		}
@@ -318,9 +335,13 @@ func (p *Project) Pin() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	model, err := p.ReadModel(string(src))
+	if err != nil {
+		return nil, err
+	}
 	var changed []string
 	for i, s := range p.Lock.Statements {
-		h, err := tla.PinHash(string(src), s.Name, Model)
+		h, err := model.PinHash(s.Name, Model)
 		if err != nil {
 			return nil, err
 		}

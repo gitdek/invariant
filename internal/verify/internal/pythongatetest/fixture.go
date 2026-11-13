@@ -25,6 +25,9 @@ const ProjectPath = "verification/lifecycle"
 const Source = "tasks/lifecycle.py"
 const DriverPath = ProjectPath + "/driver.py"
 const ModelPath = ProjectPath + "/.invariant/specs/Lifecycle.tla"
+
+// Local is the module beside the model, which the model extends.
+const Local = "---- MODULE Local ----\nHelper == TRUE\n====\n"
 const Model = `---- MODULE Lifecycle ----
 EXTENDS Naturals, Local
 CONSTANT Limit
@@ -102,7 +105,13 @@ func New(t *testing.T, explicit, wheel bool) Fixture {
 	root := filepath.Join(t.TempDir(), "application")
 	p := &project.Project{Dir: filepath.Join(root, ProjectPath), Manifest: project.Manifest{Name: "sampled task lifecycle", Language: "python", Code: ".", Module: ".invariant/specs/Lifecycle.tla", Conformance: "driver.py", Existing: []string{Source}}, Lock: project.Lock{Decision: "test-fixture-only", Bounds: map[string]string{"Limit": "2"}}}
 	for _, s := range []project.Statement{{Name: "Spec", Kind: project.Spec}, {Name: "Safe", Kind: project.Invariant}, {Name: "Seen", Kind: project.Witness}, {Name: "Bad", Kind: project.Bug, Expect: "Safe"}, {Name: "Fair", Kind: project.Fairness}, {Name: "Eventually", Kind: project.Property}} {
-		h, e := tla.PinHash(Model, s.Name, project.Model)
+		// Safe rests on Helper, which the module beside the model defines, so
+		// its pin covers both (#812).
+		model, e := tla.Read(Model, map[string]string{"Local.tla": Local})
+		if e != nil {
+			t.Fatal(e)
+		}
+		h, e := model.PinHash(s.Name, project.Model)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -116,7 +125,7 @@ func New(t *testing.T, explicit, wheel bool) Fixture {
 		"tasks/next.txt":  "running\n", "tasks/application.py": "from .lifecycle import advance\ndef start():\n    return 'pending'\ndef tick(state):\n    return advance(state)\n",
 		"tasks/neighbor.py": "def unchecked():\n    return 17\n", "tasks/constants.py": "VALUE = 19\n", "resources/payload.txt": "unchanged resource\n",
 		"tests/__init__.py": "", "tests/test_tasks.py": TestSource, DriverPath: Driver, ModelPath: Model,
-		ProjectPath + "/.invariant/specs/Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n",
+		ProjectPath + "/.invariant/specs/Local.tla": Local,
 		"assumptions.txt": "The local clock is monotonic.\n",
 	}
 	if wheel {

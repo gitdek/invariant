@@ -1,6 +1,7 @@
 package receipt
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -20,6 +21,9 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			parts = append(parts, "selected proof contracts: "+componentStrings(check.Proof.Contracts))
 		}
 		parts = append(parts, "selected conformance: "+componentStrings(check.Conformance), "selected tests: "+componentStrings(check.Tests))
+		if len(check.Observe) > 0 {
+			parts = append(parts, "observe calls inside explored entries: "+componentStrings(check.Observe))
+		}
 		for _, a := range check.Assumptions {
 			parts = append(parts, "declared assumptions (assumed / unverified): "+componentAssumption(a))
 		}
@@ -28,15 +32,17 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 		}
 		fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(check.Target), strings.Join(parts, "; "))
 	}
+	componentObservedCalls(b, r.Application)
 
 	componentCheckHeader(b, "conformance", len(e.Conformance))
 	b.WriteString("\nSampled observations describe the supplied runs. Bounded-exhaustive state coverage and attempt coverage are qualified separately, within the supplied model and bounds.\n\n")
 	componentCheckTable(b)
 	for _, row := range e.Conformance {
 		qualified := componentConformanceQualification(r, row)
+		coverage := r.ComponentCoverage(row)
 		result := row.Result
 		state, attempt, transitions := "not established", "not established", "not established"
-		if qualified.ExhaustiveStates {
+		if coverage.Qualification() == "tested in every state" {
 			state = "tested in every state"
 		}
 		if result.Attempts == nil {
@@ -51,6 +57,7 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 			"Origin: " + componentOrigin(row.Origin),
 			"Mode: " + componentLiteral(result.Mode), "Outcome: " + componentOutcome(result.Outcome),
 			fmt.Sprintf("%d runs, %d steps, %d states, %d transitions, %d model states", result.Runs, result.Steps, result.States, result.Transitions, result.ModelStates),
+			coverage.Detail(),
 			"Transitions: " + transitions, "State coverage: " + state, "Attempt coverage: " + attempt,
 			"checked IDs: " + componentStrings(result.Checked),
 			componentInvocation(result.Invocation), componentTool(result.Runner), componentInputs(result.Inputs, result.FileInputs),
@@ -62,7 +69,11 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 				fmt.Sprintf("%d attempts in %d states", a.Attempts, a.States), componentObservations(a.Observations),
 				"attempt diagnostics: "+componentStrings(a.Diagnostics))
 		}
-		componentCheckRow(b, row.Target, row.Check, qualified.Status, parts)
+		status := qualified.Status
+		if coverage.Sampled {
+			status = coverage.Qualification()
+		}
+		componentCheckRow(b, row.Target, row.Check, status, parts)
 	}
 
 	componentCheckHeader(b, "runtime", len(e.Runtime))
@@ -102,6 +113,33 @@ func componentViews(b *strings.Builder, r *verify.Report) {
 		b.WriteString("\n| Module file | Identity |\n| :-- | :-- |\n")
 		for _, f := range p.Modules {
 			fmt.Fprintf(b, "| %s | %s |\n", componentLiteral(f.Path), componentLiteral(short(f.SHA256)))
+		}
+	}
+}
+
+// Keep the copied argument names and values readable as JSON. JSON escapes
+// newlines inside strings, so no value can close this fenced block.
+func componentObservedCalls(b *strings.Builder, application *verify.PythonApplicationReport) {
+	if application == nil {
+		return
+	}
+	heading := false
+	for _, x := range application.Executions {
+		for _, row := range x.Observations {
+			// A replay repeats an attempt's calls, which Go has compared, so
+			// each attempt's calls print once.
+			if len(row.Calls) == 0 || row.Replay != nil && *row.Replay {
+				continue
+			}
+			if !heading {
+				b.WriteString("\n### Observed calls inside application entries\n")
+				heading = true
+			}
+			fmt.Fprintf(b, "\nInvocation %s on %s, run %d, step %d: %s via %s; outcome %s. Calls in completion order, each with the staged file whose code made it:\n\n",
+				componentLiteral(x.Key.ID), componentLiteral(x.Key.Target), row.Run, row.Sequence,
+				componentLiteral(row.Step), componentLiteral(row.Entry), componentLiteral(row.Outcome))
+			raw, _ := json.MarshalIndent(row.Calls, "", "  ")
+			fmt.Fprintf(b, "```json\n%s\n```\n", raw)
 		}
 	}
 }
@@ -287,23 +325,7 @@ func componentProofQualification(r *verify.Report, row verify.ComponentProof) st
 }
 
 func componentConformanceQualification(r *verify.Report, row verify.ComponentConformanceEvidence) verify.ComponentConformanceEvidence {
-	result := row.Result
-	result.Outcome = componentKnownOutcome(result.Outcome)
-	if result.Mode != "sampled" && result.Mode != "bounded-exhaustive" {
-		result.Mode = ""
-	}
-	if result.Attempts != nil {
-		a := *result.Attempts
-		a.Outcome = componentKnownOutcome(a.Outcome)
-		result.Attempts = &a
-	}
-	qualified := verify.Report{Bounds: r.Bounds, ModelOnly: r.ModelOnly}
-	if row.Target == result.Target && row.Check == result.Check {
-		if err := qualified.AttributeComponentConformance(&r.Components.Inventory, []verify.ComponentConformanceResult{result}); err == nil {
-			return qualified.Components.Conformance[0]
-		}
-	}
-	return verify.ComponentConformanceEvidence{Status: "unchecked"}
+	return r.QualifyComponentConformance(row)
 }
 
 func componentRuntimeQualification(r *verify.Report, row verify.ComponentRuntimeEvidence) verify.ComponentRuntimeEvidence {

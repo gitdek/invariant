@@ -79,6 +79,42 @@ func list(export bool, packages ...string) ([]packageInfo, error) {
 	return result, nil
 }
 
+// compileStanding compiles the package's tests as they stand, without the
+// plan's acceptance files, which an overlay hides from the go command. A
+// package that compiles has had every directive in those tests checked by
+// the compiler. Nothing it builds is kept or run.
+func compileStanding(path string, acceptance map[string]bool) error {
+	hidden := map[string]string{}
+	for name := range acceptance {
+		hidden[name] = ""
+	}
+	data, err := json.Marshal(map[string]any{"Replace": hidden})
+	if err != nil {
+		return err
+	}
+	overlay, err := os.CreateTemp("", "standing-tests-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(overlay.Name())
+	_, err = overlay.Write(data)
+	if closed := overlay.Close(); err == nil {
+		err = closed
+	}
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "test", "-c", "-vet=off", "-o", os.DevNull, "-overlay", overlay.Name(), path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		const most = 2000
+		if len(out) > most {
+			out = out[:most]
+		}
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func analyze(path string, pinned []string) (string, error) {
 	loaded, err := list(false, path)
 	if err != nil {
@@ -88,9 +124,19 @@ func analyze(path string, pinned []string) (string, error) {
 		return "", fmt.Errorf("compiler attribution needs one ordinary Go package")
 	}
 	pkg := loaded[0]
+	acceptance := map[string]bool{}
+	for _, file := range pinned {
+		name, err := filepath.Abs(file)
+		if err != nil {
+			return "", fmt.Errorf("acceptance file is not included in compiler analysis: %s", file)
+		}
+		acceptance[name] = true
+	}
 	positions := token.NewFileSet()
 	var groups [3][]*ast.File
 	included := map[string]bool{}
+	// What type analysis can't check in the test files the plan didn't write.
+	var standing []string
 	for group, names := range [][]string{pkg.GoFiles, pkg.TestGoFiles, pkg.XTestGoFiles} {
 		for _, base := range names {
 			name := filepath.Join(pkg.Dir, base)
@@ -101,30 +147,40 @@ func analyze(path string, pinned []string) (string, error) {
 			if group != 0 {
 				// Compiler-only directives and bodyless declarations need the
 				// compiler's validation; a neighboring API error cannot hide them.
+				// Nothing has compiled an acceptance file, so one there is
+				// refused. A test file the plan didn't write is the compiler's
+				// to check, below (#858).
+				var unchecked []string
 				for _, comments := range file.Comments {
 					for _, comment := range comments.List {
 						if strings.HasPrefix(comment.Text, "//go:") && !strings.HasPrefix(comment.Text, "//go:build ") {
-							return "", fmt.Errorf("%s: test compiler directive is outside API attribution: %s", positions.Position(comment.Pos()), comment.Text)
+							unchecked = append(unchecked, fmt.Sprintf("%s: test compiler directive is outside API attribution: %s", positions.Position(comment.Pos()), comment.Text))
 						}
 					}
 				}
 				for _, decl := range file.Decls {
 					if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body == nil {
-						return "", fmt.Errorf("%s: test function has no body", positions.Position(fn.Pos()))
+						unchecked = append(unchecked, fmt.Sprintf("%s: test function has no body", positions.Position(fn.Pos())))
 					}
 				}
+				if len(unchecked) != 0 && acceptance[name] {
+					return "", fmt.Errorf("%s", unchecked[0])
+				}
+				standing = append(standing, unchecked...)
 				included[name] = true
 			}
 			groups[group] = append(groups[group], file)
 		}
 	}
-	acceptance := map[string]bool{}
 	for _, file := range pinned {
-		name, err := filepath.Abs(file)
-		if err != nil || !included[name] {
+		if name, err := filepath.Abs(file); err != nil || !included[name] {
 			return "", fmt.Errorf("acceptance file is not included in compiler analysis: %s", file)
 		}
-		acceptance[name] = true
+	}
+	if len(standing) != 0 {
+		if err := compileStanding(path, acceptance); err != nil {
+			return "", fmt.Errorf("%s; the package's tests don't compile without the acceptance files, so the compiler hasn't checked it: %v", standing[0], err)
+		}
 	}
 	// Validate package setup and compile actual production and dependency
 	// exports. No test binary or package initializer runs during analysis.

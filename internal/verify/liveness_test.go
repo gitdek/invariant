@@ -17,7 +17,7 @@ func TestFairnessOf(t *testing.T) {
 		`Fair == \A w \in {w1, w2} : SF_vars(Poll(w, 1))`: {Strong: true, Bound: "w", Set: "{w1, w2}", Action: "Poll(w, 1)"},
 	}
 	for def, want := range good {
-		got, err := fairnessOf("---- MODULE M ----\n"+def+"\n====\n", "Fair")
+		got, err := fairnessOf("---- MODULE M ----\n"+def+"\n====\n", nil, "Fair")
 		if err != nil || got != want {
 			t.Errorf("fairnessOf(%s) = %+v, %v; want %+v", def, got, err, want)
 		}
@@ -29,7 +29,7 @@ func TestFairnessOf(t *testing.T) {
 		`Fair == []<>(x = 1)`,
 		`Fair == WF_vars(A)) /\ (WF_vars(B)`,
 	} {
-		if got, err := fairnessOf("---- MODULE M ----\n"+def+"\n====\n", "Fair"); err == nil {
+		if got, err := fairnessOf("---- MODULE M ----\n"+def+"\n====\n", nil, "Fair"); err == nil {
 			t.Errorf("fairnessOf(%s) = %+v; want an error", def, got)
 		}
 	}

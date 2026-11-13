@@ -96,7 +96,7 @@ func TestDashboardAssuranceRequiresSuccessfulEvidence(t *testing.T) {
 			name: "empty proof with successful conformance", language: "python",
 			report: verify.Report{Assurance: "proved", Code: &verify.Code{Verifier: "Nagini", Passed: true},
 				Conformance: &conformance.Result{Passed: true, States: 2, ModelStates: 5}},
-			want: "tested",
+			want: "tested (sampled)",
 		},
 		{
 			name: "sampled conformance", language: "typescript",
@@ -133,17 +133,17 @@ func TestDashboardAssuranceRequiresSuccessfulEvidence(t *testing.T) {
 		{
 			name: "empty exhaustive counts", language: "typescript",
 			report: verify.Report{Conformance: &conformance.Result{Passed: true, Exhaustive: true}},
-			want:   "tested",
+			want:   "tested (sampled)",
 		},
 		{
 			name: "negative matching exhaustive counts", language: "typescript",
 			report: verify.Report{Conformance: &conformance.Result{Passed: true, Exhaustive: true, States: -1, ModelStates: -1}},
-			want:   "tested",
+			want:   "tested (sampled)",
 		},
 		{
 			name: "unequal exhaustive counts", language: "typescript",
 			report: verify.Report{Conformance: &conformance.Result{Passed: true, Exhaustive: true, States: 4, ModelStates: 5}},
-			want:   "tested",
+			want:   "tested (sampled)",
 		},
 		{
 			name: "failed conformance does not erase agreement", language: "go",
@@ -156,7 +156,7 @@ func TestDashboardAssuranceRequiresSuccessfulEvidence(t *testing.T) {
 			name: "failed agreement does not erase conformance", language: "go",
 			report: verify.Report{Assurance: "unchecked", Agreement: &verify.Agreement{Passed: false},
 				Conformance: &conformance.Result{Passed: true, States: 3, ModelStates: 5}},
-			want: "tested",
+			want: "tested (sampled)",
 		},
 		{
 			name: "overall failure preserves exhaustive evidence", language: "typescript",

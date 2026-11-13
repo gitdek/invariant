@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -55,6 +56,7 @@ type PythonApplicationLarger struct {
 	Original  project.ComponentFile             `json:"original"`
 	Execution *PythonApplicationExecutionResult `json:"execution,omitempty"`
 	Result    Larger                            `json:"result"`
+	Skipped   []string                          `json:"skipped,omitempty"`
 }
 
 // passed is a check's verdict for the gate. An explored check's
@@ -105,6 +107,20 @@ func (a *PythonApplicationReport) tested() bool {
 		}
 	}
 	return false
+}
+
+// An explored attempt with no arguments still has an argument list. Keep
+// that empty list through receipt JSON, while sampled rows may omit it.
+func (o PythonApplicationObservation) MarshalJSON() ([]byte, error) {
+	type observation PythonApplicationObservation
+	var args *[]any
+	if o.Args != nil {
+		args = &o.Args
+	}
+	return json.Marshal(struct {
+		observation
+		Args *[]any `json:"args,omitempty"`
+	}{observation(o), args})
 }
 
 // Preserve exact integers even when reports are read back through JSON.
@@ -158,7 +174,27 @@ func pythonApplicationExecutionFingerprint(x PythonApplicationExecutionResult) s
 	a := portablePythonApplication(&PythonApplicationReport{Executions: []PythonApplicationExecutionResult{x}})
 	// Process output is diagnostic, not the authenticated evidence stream.
 	a.Executions[0].Diagnostics = nil
+	a.Executions[0].HarnessError = ""
 	return pythonApplicationFingerprint(a.Executions[0])
+}
+
+// Module states use the recording's list and record semantics. Other forms
+// retain the conformance encoder's explicit tags.
+func pythonApplicationComponentState(state map[string]any, module bool) (map[string]string, error) {
+	fields := make(map[string]string, len(state))
+	for field, value := range state {
+		var err error
+		if module {
+			value, err = pythonApplicationModelValue(value)
+		}
+		if err == nil {
+			fields[field], err = conformance.Encode(value)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("field %q: %w", field, err)
+		}
+	}
+	return fields, nil
 }
 
 func (r *Report) attributePythonApplication(inv *project.ComponentInventory) error {
@@ -258,12 +294,27 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 				if o.Kind != "transition" || (o.Replay != nil && *o.Replay) {
 					continue
 				}
-				from, to := map[string]string{}, map[string]string{}
-				for k, v := range o.Before {
-					from[k], _ = conformance.Encode(v)
+				from, err := pythonApplicationComponentState(o.Before, o.Form == "module")
+				side := "before"
+				var to map[string]string
+				if err == nil {
+					side = "after"
+					to, err = pythonApplicationComponentState(o.After, o.Form == "module")
 				}
-				for k, v := range o.After {
-					to[k], _ = conformance.Encode(v)
+				if err != nil {
+					problem := fmt.Errorf("%s check %s invocation %s run %d step %d %s: %w", x.Key.Target, x.Key.Check, x.Key.ID, o.Run, o.Sequence, side, err)
+					// The check's recording is made from these same states,
+					// so a check that passed on one that can't be written
+					// contradicts itself, and nothing is attributed. A check
+					// that failed already says so in the report: its row
+					// names the state and holds no observations, and the
+					// gate still returns its receipt.
+					if c.Result.Passed {
+						return problem
+					}
+					row.Diagnostics = append(row.Diagnostics, problem.Error())
+					row.Observations = nil
+					break
 				}
 				observation := ComponentConformanceObservation{Run: int64(o.Run), Step: int64(o.Sequence), Action: o.Entry, From: from, To: to}
 				// An attempt names the model step it tried, as Next names it.

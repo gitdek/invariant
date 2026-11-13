@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/gitdek/invariant/internal/conformance"
 )
@@ -78,6 +79,19 @@ type pythonApplicationExplorer struct {
 func pythonApplicationKey(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// pythonApplicationCallSet is an attempt's observed calls in a fixed order,
+// for comparing a replay with the attempt it repeats. A row lists calls as
+// they completed, and calls on an entry's own worker threads complete in an
+// order that varies from run to run, while the calls made are the same.
+func pythonApplicationCallSet(calls []PythonApplicationCall) []string {
+	set := make([]string, len(calls))
+	for i, call := range calls {
+		set[i] = pythonApplicationKey(call)
+	}
+	slices.Sort(set)
+	return set
 }
 
 func (x *pythonApplicationExplorer) declare(line []byte) error {
@@ -296,14 +310,14 @@ func (x *pythonApplicationExplorer) observe(row PythonApplicationObservation) er
 		return fmt.Errorf("a step without the selected call or a held release changed the state")
 	}
 	k := [3]string{from, row.Step, args}
-	outcome := pythonApplicationKey([]any{row.Operation, *row.Called, row.Outcome, row.Refusal})
+	outcome := pythonApplicationKey([]any{row.Operation, *row.Called, row.Outcome, row.Refusal, pythonApplicationCallSet(row.Calls)})
 	if *row.Replay {
 		// A replay repeats an attempt the exploration already made.
 		if was, ok := x.attempts[k]; !ok || was != to {
 			return fmt.Errorf("the application is not deterministic: a replay of %s reached another state", row.Step)
 		}
 		if x.outcomes[k] != outcome {
-			return fmt.Errorf("the application is not deterministic: a replay of %s changed its operation, selected start or outcome", row.Step)
+			return fmt.Errorf("the application is not deterministic: a replay of %s changed its operation, selected start, outcome or observed calls", row.Step)
 		}
 		return nil
 	}

@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"path"
 	"slices"
 	"sort"
@@ -131,6 +134,23 @@ func (s *RegressionScope) Files(candidates []string) []string {
 // CheckPolicy prevents even explicitly named policy edits from hiding implicit
 // additions. A plan changing discovery can name its new tests explicitly.
 func (s *RegressionScope) CheckPolicy(candidates []string, read func(string) ([]byte, error)) error {
+	// A Go test file the build added can't run code as a test binary
+	// starts. The sandbox judges the plan's acceptance tests and a
+	// package's existing tests without the added files, but CI's own go
+	// test runs every file together, where a TestMain or an init decides
+	// how the others go (#869).
+	for _, file := range s.Files(candidates) {
+		if !strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		data, err := read(file)
+		if err != nil {
+			return fmt.Errorf("%s: an added test file can't be read: %w", file, err)
+		}
+		if name := startsTestBinary(data); name != "" {
+			return fmt.Errorf("%s declares %s: a test file the build adds can't run code as the test binary starts, since it would decide how the plan's acceptance tests and the package's own tests run. Put the setup inside the tests that need it", file, name)
+		}
+	}
 	active := map[string]bool{}
 	for _, file := range s.Files(candidates) {
 		if owner := s.owner(file); owner != nil {
@@ -171,6 +191,22 @@ func (s *RegressionScope) CheckPolicy(candidates []string, read func(string) ([]
 		}
 	}
 	return nil
+}
+
+// startsTestBinary names the function in a Go test file that runs as its
+// test binary starts, TestMain or init, or "" when it has none. A file that
+// doesn't parse names none: the compiler reports it.
+func startsTestBinary(source []byte) string {
+	file, err := parser.ParseFile(token.NewFileSet(), "", source, parser.SkipObjectResolution)
+	if err != nil {
+		return ""
+	}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && (fn.Name.Name == "TestMain" || fn.Name.Name == "init") {
+			return fn.Name.Name
+		}
+	}
+	return ""
 }
 
 func mapKeys(m map[string]bool) []string {

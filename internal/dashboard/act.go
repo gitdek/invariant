@@ -371,10 +371,22 @@ func actURL(repo string, n int) string {
 	return fmt.Sprintf("/act?issue=%s%%23%d", repo, n)
 }
 
+// pageFor is the page as a dashboard of this many repositories serves it.
+// The page keeps a row for its Show bar until its first snapshot says what
+// the bar holds (#855). One repository has no bar, so its page keeps no
+// row, and nothing moves up when the snapshot arrives (#867).
+func pageFor(repos int) string {
+	page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
+	if repos < 2 {
+		page = strings.Replace(page, `class="scope pending"`, `class="scope"`, 1)
+	}
+	return page
+}
+
 // actPage is the page, marked for acting as the person signed in, and for
 // opening at the card of the issue open names, if any.
-func actPage(email, open string) []byte {
-	page := strings.ReplaceAll(string(assets["/index.html"]), "{{version}}", version)
+func actPage(email, open string, repos int) []byte {
+	page := pageFor(repos)
 	page = strings.Replace(page, "<!-- act-shell-toggle -->", `<div class="shell-command-control"><input type="checkbox" id="show-shell-commands" aria-controls="live-cards" autocomplete="off"><label for="show-shell-commands">Show shell commands</label></div>`, 1)
 	page = strings.Replace(page, "<!-- act-shell-commands -->", `<div class="shell-commands" hidden aria-label="Shell commands"></div>`, 1)
 	body := `<body data-act="` + html.EscapeString(email) + `"`
@@ -414,7 +426,7 @@ func (s *Server) serveAct(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/act" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(actPage(email, s.shows(r.URL.Query().Get("issue"))))
+		w.Write(actPage(email, s.shows(r.URL.Query().Get("issue")), len(s.Repos)))
 	case r.URL.Path == "/act/api/live.json" && r.Method == http.MethodGet:
 		body, err := s.liveJSON(time.Now(), r.URL.Query().Get("commands") == "1")
 		if err != nil {

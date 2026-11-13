@@ -35,7 +35,8 @@ import (
 // from and checked against them before Nagini runs, so a rewritten or
 // detached implementation can't stand for the application's. The pinned
 // Nagini runs in its own image, where no application requirement is
-// installed. The gate runs it on every selected function (#359).
+// installed. The gate runs it on selected functions whose known prerequisites
+// pass (#359, #849).
 
 //go:embed python_application_proof.py
 var pythonApplicationProofAnalyzer string
@@ -170,16 +171,20 @@ type PythonApplicationProofInput struct {
 	Sources     []project.ComponentFile          `json:"sources"`
 	Assumed     []ComponentContractUse           `json:"assumed,omitempty"`
 	Unaccounted []ComponentUnaccounted           `json:"unaccounted,omitempty"`
-	Fingerprint string                           `json:"fingerprint"`
+	// Contract is what the function's contract asks of a call, read from
+	// the same bytes the input copies, which the gate checks on each call
+	// of the function it records (#838).
+	Contract    *PythonContract `json:"contract,omitempty"`
+	Fingerprint string          `json:"fingerprint"`
 }
 
 // PythonApplicationProof is one attempt to prove a selected function in its
 // module: the input Nagini got, the recipe and the local image it ran in and
 // how it ran, its output with the session's paths removed, and the result in
 // the form proof attribution takes, whose pins name the recipe, never a
-// local image. An attempt that reaches an operation no trusted contract
-// binds doesn't run, since no complete input exists; one that ran reports
-// exactly what Nagini said. It grants no gate success.
+// local image. An attempt with failed known prerequisites retains its input
+// and skipped reasons without running; one that ran reports exactly what
+// Nagini said. It grants no gate success.
 type PythonApplicationProof struct {
 	Result  ComponentProofResult        `json:"result"`
 	Input   PythonApplicationProofInput `json:"input"`
@@ -189,6 +194,7 @@ type PythonApplicationProof struct {
 	Ran     bool                        `json:"ran"`
 	Exit    int                         `json:"exit"`
 	Output  string                      `json:"output,omitempty"`
+	Skipped []string                    `json:"skipped,omitempty"`
 }
 
 // PythonApplicationNaginiCommand is one Nagini run: the pinned image, the
@@ -363,7 +369,10 @@ type pythonProofDeclaration struct {
 	// Arithmetic is where the function, its signature, body and contract
 	// alike, holds arithmetic the pinned Nagini models apart from Python.
 	Arithmetic []pythonProofDynamic `json:"arithmetic"`
-	source     []byte
+	// Contract is what the function's contract asks of a call, for the gate
+	// to check on the calls it records (#838).
+	Contract *PythonContract `json:"contract"`
+	source   []byte
 }
 
 func runPythonProofAnalyzer(request any, out any) error {
@@ -457,6 +466,12 @@ func (s *PythonApplicationSession) ProofInput(ctx context.Context, target string
 // An unsupported selection, or context the input can't preserve, is an
 // error; a failed proof is a result.
 func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*PythonApplicationProof, error) {
+	return s.prove(ctx, target, nil)
+}
+
+// prove checks the gate's known prerequisites before acquiring Nagini. The
+// direct session API has no conformance or backing-test evidence to qualify.
+func (s *PythonApplicationSession) prove(ctx context.Context, target string, prerequisites func(*PythonApplicationProof) []string) (*PythonApplicationProof, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -495,9 +510,12 @@ func (s *PythonApplicationSession) Prove(ctx context.Context, target string) (*P
 			incomplete = append(incomplete, u.Detail)
 		}
 	}
-	if len(incomplete) > 0 {
-		result.Errors = incomplete
-		proof.Result = result
+	result.Errors = incomplete
+	proof.Result = result
+	if prerequisites != nil {
+		proof.Skipped = prerequisites(proof)
+	}
+	if len(incomplete) > 0 || len(proof.Skipped) > 0 {
 		return proof, nil
 	}
 	work, err := os.MkdirTemp("", "invariant-nagini-input-")
@@ -1581,13 +1599,15 @@ func (b *pythonProofBuilder) write() error {
 	if err := b.check(); err != nil {
 		return err
 	}
+	b.in.Contract = b.d.Contract
 	b.in.Fingerprint = pythonApplicationFingerprint(struct {
 		Target     project.Component
 		Files      []PythonApplicationProofFile
 		Spans      []PythonApplicationProofSpan
 		Boundaries []PythonApplicationProofBoundary
 		Sources    []project.ComponentFile
-	}{b.in.Target, b.in.Files, b.in.Spans, b.in.Boundaries, b.in.Sources})
+		Contract   *PythonContract
+	}{b.in.Target, b.in.Files, b.in.Spans, b.in.Boundaries, b.in.Sources, b.in.Contract})
 	return nil
 }
 

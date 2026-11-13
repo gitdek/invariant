@@ -96,22 +96,22 @@ func (s *Store) Refresh(repo Repo, short string) error {
 // which are offered only when write is true. None ratifies: that's a
 // person's (D-0101).
 func (s *Session) Tools(write bool) []mcp.Tool {
-	id := map[string]any{"type": "string", "description": "a decision's ID: D-0096 within this project, or qualified by its project, as copythis-ad/D-0001"}
+	id := map[string]any{"type": "string", "description": "a decision's ID: D-0096 within this project, or qualified by its project, as copythis-ad/D-0001. A ratified plan has one too: P- and its issue's number, as P-0358 for #358's plan"}
 	byID := map[string]any{"type": "object", "properties": map[string]any{"id": id}, "required": []string{"id"}, "additionalProperties": false}
 	tools := []mcp.Tool{
 		{Name: "decision", Schema: byID, Call: s.show,
-			Description: "A decision: what it says, its door, status, date and who made it, the exact proposal its ratification names if it names one, its record, and every edge to and from it, with the text at each end."},
+			Description: "A decision or a ratified plan: what it says, its door, status, date and who made or ratified it, the exact proposal its ratification names if it names one, its record, and every edge to and from it, with the text at each end."},
 		{Name: "dependents", Schema: byID, Call: s.walk("dependents"),
-			Description: "Everything that rests on a decision: what reopening it would touch. That's every decision that refines it, directly or through others, and every decision, SPEC line, doc or piece of code that mentions or implements any of them. Each line cites the node and its text."},
+			Description: "Everything that rests on a decision or a ratified plan: what reopening it would touch. That's every decision that refines it, directly or through others, and every decision, plan, SPEC line, doc or piece of code that mentions or implements any of them. Each line cites the node and its text."},
 		{Name: "implementers", Schema: byID, Call: s.walk("implementers"),
 			Description: "The code that implements a decision, or a decision that refines it, as file:line with the line's text."},
 		{Name: "grounds", Schema: byID, Call: s.walk("grounds"),
-			Description: "What a decision rests on: the decisions it refines, all the way, and the ones they cite. It says why the decision exists."},
+			Description: "What a decision or a ratified plan rests on: the decisions it refines, all the way, and the decisions and plans they cite. It says why the decision exists."},
 		{Name: "search_decisions", Call: s.search,
 			Schema: map[string]any{"type": "object", "properties": map[string]any{
-				"words": map[string]any{"type": "string", "description": "words every decision found must contain, in any case"}},
+				"words": map[string]any{"type": "string", "description": "words every decision or plan found must contain, in any case"}},
 				"required": []string{"words"}, "additionalProperties": false},
-			Description: "Decisions whose words contain every one of the given words."},
+			Description: "Decisions and ratified plans whose words contain every one of the given words."},
 		{Name: "query_decisions", Call: s.query,
 			Schema: map[string]any{"type": "object", "properties": map[string]any{
 				"sql": map[string]any{"type": "string", "description": "one SQL query over node(id, kind, project, date, door, status, who, text, record, proposal) and edge(src, type, dst, project, derived), where proposal is what a ratification names, or empty"}},
@@ -169,12 +169,20 @@ func (s *Session) show(_ context.Context, args json.RawMessage) (string, bool) {
 		return fail(err)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · %s door · %s · %s · %s", n.ID, n.Door, n.Status, n.Date, n.Who)
+	if n.Kind == "plan" {
+		fmt.Fprintf(&b, "%s · plan · %s · %s · %s", n.ID, n.Status, n.Date, n.Who)
+	} else {
+		fmt.Fprintf(&b, "%s · %s door · %s · %s · %s", n.ID, n.Door, n.Status, n.Date, n.Who)
+	}
 	if n.Proposal != "" {
 		fmt.Fprintf(&b, " · proposal %s", n.Proposal)
 	}
 	fmt.Fprintf(&b, "\n%s\n", n.Text)
-	if n.Record != "" {
+	switch {
+	case n.Record == "":
+	case n.Kind == "plan":
+		fmt.Fprintf(&b, "Its record: %s\n", n.Record)
+	default:
 		fmt.Fprintf(&b, "Its full record: decisions/%s\n", n.Record)
 	}
 	for _, out := range []bool{true, false} {
@@ -229,7 +237,7 @@ func (s *Session) search(_ context.Context, args json.RawMessage) (string, bool)
 	if err != nil {
 		return fail(err)
 	}
-	return listNodes(fmt.Sprintf("decisions with %q: %d", a.Words, len(nodes)), nodes), false
+	return listNodes(fmt.Sprintf("decisions and plans with %q: %d", a.Words, len(nodes)), nodes), false
 }
 
 func (s *Session) query(_ context.Context, args json.RawMessage) (string, bool) {
@@ -337,8 +345,8 @@ func listNodes(head string, nodes []Node) string {
 	b.WriteString(head + "\n")
 	for _, n := range nodes {
 		label := n.Kind
-		if n.Kind == "decision" {
-			label = "decision, " + n.Status
+		if n.Kind == "decision" || n.Kind == "plan" {
+			label = n.Kind + ", " + n.Status
 		}
 		fmt.Fprintf(&b, "- %s [%s] %s\n", n.ID, label, clip(n.Text, 300))
 	}

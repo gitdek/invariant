@@ -242,7 +242,7 @@ func indexComponentInventory(inv project.ComponentInventory) (*componentIndex, e
 		for _, selection := range []struct {
 			kind string
 			ids  []string
-		}{{"test", check.Tests}, {"conformance", check.Conformance}} {
+		}{{"test", check.Tests}, {"conformance", check.Conformance}, {"observe", check.Observe}} {
 			if err := componentProofReferences(declarationSets[1], selection.ids, selection.kind); err != nil {
 				return nil, err
 			}
@@ -622,6 +622,10 @@ func copyComponentInventory(inv project.ComponentInventory) project.ComponentInv
 		sort.Strings(check.Tests)
 		check.Conformance = slices.Clone(check.Conformance)
 		sort.Strings(check.Conformance)
+		check.Observe = slices.Clone(check.Observe)
+		sort.Strings(check.Observe)
+		check.Existing = slices.Clone(check.Existing)
+		sort.Strings(check.Existing)
 		check.Assumptions = slices.Clone(check.Assumptions)
 		sort.Slice(check.Assumptions, func(i, j int) bool { return check.Assumptions[i].ID < check.Assumptions[j].ID })
 		check.Invocations = slices.Clone(check.Invocations)

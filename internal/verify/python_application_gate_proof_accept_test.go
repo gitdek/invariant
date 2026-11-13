@@ -19,13 +19,14 @@ package verify
 // packaging wheel, with the second review's cases beside them:
 //
 //	INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify \
-//	  -run '^TestPythonApplicationGate(Proves|Refuses)' -count=1 -timeout 60m
+//	  -run '^TestPythonApplicationGate(Proves|Refuses|ObservedDecision793)' -count=1 -timeout 60m
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -173,7 +174,7 @@ func gp359New(t *testing.T, wheel bool) pa342Fixture {
 		Module: ".invariant/specs/Counter.tla", Conformance: "driver.py", Existing: []string{gp359Source}},
 		Lock: project.Lock{Decision: "test-fixture-only", Bounds: map[string]string{"Limit": "2"}}}
 	for _, s := range []project.Statement{{Name: "Spec", Kind: project.Spec}, {Name: "Safe", Kind: project.Invariant}, {Name: "Full", Kind: project.Witness}, {Name: "Overflow", Kind: project.Bug, Expect: "Safe"}} {
-		h, err := tla.PinHash(pa342Model, s.Name, project.Model)
+		h, err := tla.PinHashWith(pa342Model, map[string]string{"Local.tla": "---- MODULE Local ----\nHelper == TRUE\n====\n"}, s.Name, project.Model)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -236,6 +237,7 @@ func gp359Verifier(t *testing.T, real bool) *int {
 	if real {
 		return calls
 	}
+	gp359TransportKey(t)
 	saved := pythonApplicationGateOptions
 	pythonApplicationGateOptions = PythonApplicationSessionOptions{
 		Nagini: func(_ context.Context, c PythonApplicationNaginiCommand) (PythonApplicationProcess, error) {
@@ -255,6 +257,43 @@ func gp359Verifier(t *testing.T, real bool) *int {
 	}
 	t.Cleanup(func() { pythonApplicationGateOptions = saved })
 	return calls
+}
+
+// The trusted transport may re-sign observations after the child exits
+// (#849). Keep its key outside that child while the runner consumes and
+// unlinks the bootstrap file, then restore it for the transport's hook.
+// This changes only the local Docker double, never the production runner.
+func gp359TransportKey(t *testing.T) {
+	t.Helper()
+	if os.Getenv("PA342_LOG") == "" {
+		return
+	}
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(filepath.Dir(docker), "docker.py")
+	body, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const before = "    result=subprocess.run([os.environ['PA342_PYTHON']]+argv,cwd=mapped(args[args.index('-w')+1]),env=env)"
+	const key = "    secret=pathlib.Path(mounts['/output'],'authentication.key')"
+	if strings.Contains(string(body), key) {
+		return
+	}
+	if !strings.Contains(string(body), before) {
+		t.Fatal("local Python transport fixture moved")
+	}
+	after := key + "\n    authentication=secret.read_bytes() if secret.exists() else None\n" + before + "\n    if authentication is not None: secret.write_bytes(authentication)"
+	if err := os.WriteFile(name, []byte(strings.Replace(string(body), before, after, 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(name, body, 0600); err != nil {
+			t.Error(err)
+		}
+	})
 }
 
 func gp359Proof(t *testing.T, r *Report) ComponentProof {
@@ -345,7 +384,7 @@ func TestPythonApplicationGateProvesInPlace(t *testing.T) {
 		if len(r.Components.Conformance) != 1 || r.Components.Conformance[0].Status != "tested" {
 			t.Fatalf("conformance on admit: %+v", r.Components.Conformance)
 		}
-		if problems := PythonApplicationProofProblems(r.Components); len(problems) != 0 {
+		if problems := PythonApplicationProofProblems(r.Components, r.Application); len(problems) != 0 {
 			t.Fatalf("a qualified proof has problems: %v", problems)
 		}
 		// Nothing in the application changed, neighbors and stand-in included.
@@ -385,7 +424,7 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			if r.Components.Conformance[0].Status != "tested" || gp359Standing(t, r, b.id).Support != "tested" {
 				t.Fatalf("a failed proof erased independent evidence: %+v", r.Components)
 			}
-			if p := PythonApplicationProofProblems(r.Components); len(p) != 1 || !strings.Contains(p[0], admit+" isn't proved") {
+			if p := PythonApplicationProofProblems(r.Components, r.Application); len(p) != 1 || !strings.Contains(p[0], admit+" isn't proved") {
 				t.Fatalf("problems: %v", p)
 			}
 		})
@@ -407,7 +446,7 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			}
 		})
 		t.Run("a failing backing test", func(t *testing.T) {
-			gp359Verifier(t, real)
+			calls := gp359Verifier(t, real)
 			f := gp359New(t, real)
 			if real {
 				gp359Edit(t, f, "tests/test_contracts.py", "self.assertTrue(is_normalized_name('counter'))", "self.assertTrue(is_normalized_name('Not_Normal'))")
@@ -418,14 +457,14 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 			if r.Passed || gp359Standing(t, r, b.id).Support == "tested" {
 				t.Fatalf("a failing backing test supported its contract: %s", gp359Dump(t, r))
 			}
-			p := PythonApplicationProofProblems(r.Components)
+			p := PythonApplicationProofProblems(r.Components, r.Application)
 			if !slices.ContainsFunc(p, func(s string) bool {
 				return strings.Contains(s, "assumes trusted contract "+b.id+", which isn't tested")
 			}) {
 				t.Fatalf("a failed required contract still supports the proof: %v", p)
 			}
-			// Nagini verified it, and the proof still isn't proved.
-			if row := gp359Proof(t, r); row.Status != Unqualified {
+			// A failed known prerequisite skips Nagini (#849).
+			if row := gp359Proof(t, r); row.Status != "unchecked" || row.Result.Passed || r.Application.Proofs[0].Ran || len(r.Application.Proofs[0].Skipped) == 0 || (!real && *calls != 0) {
 				t.Fatalf("a proof without its condition counts as %s", row.Status)
 			}
 			// Attributing other evidence later retains the proof and its mark.
@@ -435,27 +474,27 @@ func TestPythonApplicationGateProvesNothingItShouldnt(t *testing.T) {
 				runtime = append(runtime, row.Result)
 			}
 			if err := r.AttributeComponentRuntime(&inv, runtime); err != nil {
-				t.Fatalf("runtime attribution beside an unqualified proof: %v", err)
+				t.Fatalf("runtime attribution beside a skipped proof: %v", err)
 			}
 			if err := r.AttributeComponentAssumptions(&inv, nil); err != nil {
-				t.Fatalf("assumption attribution beside an unqualified proof: %v", err)
+				t.Fatalf("assumption attribution beside a skipped proof: %v", err)
 			}
-			if row := gp359Proof(t, r); row.Status != Unqualified {
-				t.Fatalf("attribution turned an unqualified proof %s", row.Status)
+			if row := gp359Proof(t, r); row.Status != "unchecked" {
+				t.Fatalf("attribution turned a skipped proof %s", row.Status)
 			}
 		})
 		t.Run("failing conformance on the function", func(t *testing.T) {
-			gp359Verifier(t, real)
+			calls := gp359Verifier(t, real)
 			f := gp359New(t, real)
 			// A third step takes the counter past Limit, which Next forbids.
 			gp359Edit(t, f, pa342DriverPath, "        life.step(service.inc)\n        life.step(service.inc)\n",
 				"        life.step(service.inc)\n        life.step(service.inc)\n        life.step(service.inc)\n")
 			r := pa342Run(t, f, tc)
 			row := gp359Proof(t, r)
-			if r.Passed || row.Status != Unqualified || r.Components.Conformance[0].Status == "tested" {
+			if r.Passed || row.Status != "unchecked" || row.Result.Passed || r.Application.Proofs[0].Ran || len(r.Application.Proofs[0].Skipped) == 0 || (!real && *calls != 0) || r.Components.Conformance[0].Status == "tested" {
 				t.Fatalf("a proof beside failing conformance qualified: %s, conformance %+v", row.Status, r.Components.Conformance)
 			}
-			p := PythonApplicationProofProblems(r.Components)
+			p := PythonApplicationProofProblems(r.Components, r.Application)
 			if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "no passing conformance on the same declaration") }) {
 				t.Fatalf("problems: %v", p)
 			}
@@ -580,7 +619,7 @@ func TestPythonApplicationGateRefusesWhatInPlaceProofNeeds(t *testing.T) {
 		f.p.Manifest.Components.Checks[0].Conformance = nil
 		f.p.Manifest.Components.Checks[0].Invocations = f.p.Manifest.Components.Checks[0].Invocations[:1]
 		pa342Save(t, f)
-		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), "selects a proof and no conformance") {
+		if err := Check(f.p.Dir); err == nil || !strings.Contains(err.Error(), "observe it in another check's exhaustive conformance") {
 			t.Fatalf("Check: %v", err)
 		}
 	})

@@ -38,9 +38,22 @@ func ParseLog(md string) []Decision {
 		if !logID.MatchString(cells[0]) {
 			continue
 		}
-		out = append(out, Decision{ID: cells[0], Date: cells[1], Door: cells[2], Status: cells[3], Text: cells[4], Who: cells[5]})
+		out = append(out, Decision{ID: cells[0], Date: cells[1], Door: cells[2], Status: cells[3], Text: cells[4], Who: madeBy(cells[5])})
 	}
 	return out
+}
+
+// madeBy reads who made a decision as the journal means it (D-0052): a
+// person's handle is that person, and anything else is an agent. The
+// journal's earliest records name the agent that wrote them, the journal
+// isn't edited, and Invariant names roles, never the agent doing the work
+// (#843).
+func madeBy(who string) string {
+	who = strings.TrimSpace(who)
+	if who == "" || strings.HasPrefix(who, "@") {
+		return who
+	}
+	return "agent"
 }
 
 // plain turns a line of Markdown into text: links become their text, and
