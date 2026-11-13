@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"time"
 
 	"github.com/gitdek/invariant/factory/recovery/recovery"
 	"github.com/gitdek/invariant/internal/github"
@@ -201,16 +202,11 @@ const (
 // started, as when a writer retried while its watcher was away. Such a
 // watcher records the run as its own and publishes nothing of it (D-0212).
 func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (supersession, error) {
-	comments, err := f.GitHub.Comments(ctx, n)
+	posts, err := f.postsOn(ctx, n)
 	if err != nil {
 		return current, err
 	}
-	var t Thread
-	for _, c := range comments {
-		if m, ok := DecodeMarker(c.Body); ok && (f.Self == "" || c.User.Login == f.Self) {
-			t.Posts = append(t.Posts, Post{Comment: c, Marker: m})
-		}
-	}
+	t := Thread{Posts: posts}
 	state, ok := t.State()
 	switch {
 	case !ok || state.Comment.ID == ratified.Comment.ID:
@@ -219,6 +215,34 @@ func (f *Factory) superseded(ctx context.Context, n int, ratified Post) (superse
 		return replaced, nil
 	}
 	return answered, nil
+}
+
+// buildLookupWaits is how long a finished build waits before it asks again
+// whether it was superseded, after each time the question couldn't be
+// answered.
+var buildLookupWaits = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// supersededAfterBuild is superseded for a build whose agent has finished
+// and whose result is saved but not yet stored with its run. superseded
+// reads every saved record the issue's posts name, as any reader that acts
+// on the thread must (#790), so a moment's trouble reaching one fails it.
+// Failing there left the run with no result: the next poll reported a
+// finished build as stopped partway, with no pull request, for a retry to
+// build again. So the question is asked again, a few times, before the
+// build gives up.
+func (f *Factory) supersededAfterBuild(ctx context.Context, n int, ratified Post) (supersession, error) {
+	for try := 0; ; try++ {
+		why, err := f.superseded(ctx, n, ratified)
+		if err == nil || try == len(buildLookupWaits) {
+			return why, err
+		}
+		f.logf("#%d: its build has finished, but the issue's posts couldn't be read, so it asks again in %s: %v", n, buildLookupWaits[try], err)
+		select {
+		case <-ctx.Done():
+			return why, err
+		case <-time.After(buildLookupWaits[try]):
+		}
+	}
 }
 
 // buildPullRequest finds the pull request the build ratified started opened

@@ -155,11 +155,18 @@ type Marker struct {
 	Forks    []formalize.Fork    `json:"forks,omitempty"`
 	Answers  []formalize.Answer  `json:"answers,omitempty"` // the forks decided so far
 	Proposal *formalize.Proposal `json:"proposal,omitempty"`
-	Project  string              `json:"project,omitempty"` // the project's directory
-	Branch   string              `json:"branch,omitempty"`
-	Hash     string              `json:"hash,omitempty"` // the ratified proposal
-	PR       int                 `json:"pr,omitempty"`
-	Failure  string              `json:"failure,omitempty"` // why a failed post failed: Fail*
+	// ProposalRef stays raw until ResolveDraft validates it. A malformed
+	// reference must remain an error, never reveal an older working state.
+	ProposalRef json.RawMessage `json:"proposal_ref,omitempty"`
+	// ProposalCarrier resolves only the baseline and target after the last
+	// answer, including when the following draft fails before publication.
+	ProposalCarrier  bool `json:"proposal_carrier,omitempty"`
+	referenceProblem string
+	Project          string `json:"project,omitempty"` // the project's directory
+	Branch           string `json:"branch,omitempty"`
+	Hash             string `json:"hash,omitempty"` // the ratified proposal
+	PR               int    `json:"pr,omitempty"`
+	Failure          string `json:"failure,omitempty"` // why a failed post failed: Fail*
 	// A writer's retry of a plan's failed draft builds the plan again on a
 	// branch of its own (#271). Replaces is the draft its build replaces,
 	// which the factory closed, and From the commit its branch starts from:
@@ -243,6 +250,26 @@ func (m Marker) failure() string {
 // comment. Markers from before that are read as they are.
 var markerRE = regexp.MustCompile(`<!-- invariant:(z:)?([A-Za-z0-9+/=]+) -->`)
 
+// markerStart is how every marker begins.
+const markerStart = "<!-- invariant:"
+
+// endMarker reads the marker a comment ends with, as every post of the
+// factory's is written. A comment that ends with anything else was cut or
+// changed: in its marker's JSON, gzip or base64, before its marker, or
+// after it. DecodeMarker reads such a comment as holding no marker, or as
+// holding one its text shows, which is right for a stranger's. In a comment
+// of the factory's own it means the thread's newest state can't be read,
+// and neither the post before it nor a marker in its text may stand in for
+// it (#790).
+func endMarker(body string) (Marker, bool) {
+	body = strings.TrimRight(body, " \t\r\n")
+	all := markerRE.FindAllStringIndex(body, -1)
+	if all == nil || all[len(all)-1][1] != len(body) {
+		return Marker{}, false
+	}
+	return DecodeMarker(body)
+}
+
 // maxMarker is the most a marker may unzip to. Anyone can post one, so a
 // small one can't make the factory unzip a huge one.
 const maxMarker = 4 << 20
@@ -256,19 +283,55 @@ func (m Marker) encode() string {
 	return "<!-- invariant:z:" + base64.StdEncoding.EncodeToString(z.Bytes()) + " -->"
 }
 
-// DecodeMarker reads the marker in a comment, if it has one.
+// DecodeMarker reads the marker in a comment, if it has one. A post is
+// written with its marker last, so the last one is read: a post that shows
+// a marker in its text, as a plan's does when an acceptance test's source
+// holds one, still reads as itself (#790).
 func DecodeMarker(body string) (Marker, bool) {
-	match := markerRE.FindStringSubmatch(body)
-	if match == nil {
+	all := markerRE.FindAllStringSubmatch(body, -1)
+	if all == nil {
 		return Marker{}, false
 	}
+	match := all[len(all)-1]
 	b, err := base64.StdEncoding.DecodeString(match[2])
 	if err == nil && match[1] == "z:" {
 		b, err = unzip(b)
 	}
 	var m Marker
-	if err != nil || json.Unmarshal(b, &m) != nil || m.Kind == "" {
+	if err != nil {
 		return Marker{}, false
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(b, &fields); err != nil {
+			// An envelope that names a saved record but no longer parses, such
+			// as one cut short or with data after it, stays a broken reference.
+			// Read as no marker, it would let an older proposal stand in for it.
+			if bytes.Contains(bytes.ToLower(b), []byte(`"proposal_ref"`)) {
+				return Marker{ProposalRef: json.RawMessage("null"), referenceProblem: err.Error()}, true
+			}
+			return Marker{}, false
+		}
+		var ref json.RawMessage
+		for name, value := range fields {
+			if strings.EqualFold(name, "proposal_ref") {
+				ref = value
+				break
+			}
+		}
+		if ref == nil {
+			return Marker{}, false
+		}
+		m = Marker{ProposalRef: ref, referenceProblem: err.Error()}
+		_ = json.Unmarshal(fields["kind"], &m.Kind)
+	}
+	if m.Kind == "" && m.ProposalRef == nil {
+		return Marker{}, false
+	}
+	if m.ProposalRef != nil {
+		if _, err := draftObject(b); err != nil {
+			m.referenceProblem = err.Error()
+		}
 	}
 	return m, true
 }
