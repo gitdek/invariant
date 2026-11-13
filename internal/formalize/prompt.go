@@ -102,6 +102,7 @@ Each statement is a definition in the module, with a kind and `+"`says`"+`: one 
 
 The gate enforces these rules:
 
+- Every bug in a new modeled proposal or preview must have code_behavior set to current or hypothetical. Classify bugs reported by the issue, unchanged code or tests as current. Use hypothetical for a possible mistake without evidence that the code has it. This classification is part of what a person ratifies; adding, changing or removing it is a statement amendment. Never infer a classification for an existing lock that omits it: in an amendment, leave such a bug exactly as the draft you were given has it, unless the issue asks to change it, and the gate accepts it unclassified while its name, its words, what it must break and its definition are the lock's. Classify every bug you add or change.
 - Statements may depend on helper definitions, which are pinned along with them. They must not depend on `+"`Init`"+`, `+"`Next`"+` or the model's actions, which can still change. A fairness statement is the exception: the action it names is pinned with it, so define that action in full and make it a part of `+"`Next`"+`. The gate checks that every step of it is a `+"`Next`"+` step.
 - Fairness goes in fairness statements, never in `+"`Spec`"+`.
 - TLC always checks for deadlock: every reachable state needs an enabled action. If the system can legitimately finish, give it an action for that, such as one that leaves a finished state unchanged.
@@ -198,7 +199,7 @@ Spec == Init /\ [][Next]_vars
     {"name": "OnePrinter", "kind": "invariant", "says": "Two processes never print at the same time."},
     {"name": "TypeOK", "kind": "invariant", "says": "Every process is always idle, waiting or printing."},
     {"name": "SomeonePrints", "kind": "witness", "says": "A process can get to print."},
-    {"name": "EnterUnchecked", "kind": "bug", "says": "A process starts printing without checking whether another one is.", "expect": "OnePrinter"}
+    {"name": "EnterUnchecked", "kind": "bug", "says": "A process starts printing without checking whether another one is.", "expect": "OnePrinter", "code_behavior": "hypothetical"}
   ],
   "forks": []
 }

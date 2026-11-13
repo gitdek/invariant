@@ -208,7 +208,7 @@ func TestRulesSayWhatTheCheckFound786(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		"Safe": "Held in all 438 checked states", "Ends": "Holds under the model's fairness", "CanFinish": "Reached in 8 steps",
-		"Lost": "Not reached", "SkipCheck": "Caught: breaks Safe in 3 steps", "Spec": "",
+		"Lost": "Not reached", "SkipCheck": "Caught: breaks Safe in 3 steps; not replayed: not classified", "Spec": "",
 	} {
 		if found[name] != want {
 			t.Errorf("%s found %q; want %q", name, found[name], want)

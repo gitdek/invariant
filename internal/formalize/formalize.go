@@ -153,8 +153,17 @@ var (
 )
 
 // Read loads the draft an agent left in its workspace, validates it, and
-// pins its statements.
+// pins its statements. The draft amends nothing, so it classifies each of
+// its bugs.
 func Read(ws string) (*Proposal, error) {
+	return ReadAmending(ws, nil)
+}
+
+// ReadAmending is Read for a draft that amends a lock with these
+// statements: a bug the draft keeps exactly as that lock has it may stay
+// unclassified, as PinAmending has it. The statements are the caller's,
+// never the workspace's, which the drafting agent writes.
+func ReadAmending(ws string, amended []project.Statement) (*Proposal, error) {
 	b, err := regular.ReadFile(ws, "proposal.json")
 	if err != nil {
 		return nil, fmt.Errorf("the draft has no proposal.json: %w", err)
@@ -187,7 +196,7 @@ func Read(ws string) (*Proposal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p, p.Pin()
+	return p, p.PinAmending(amended)
 }
 
 func validateForks(forks []Fork) error {
@@ -262,8 +271,27 @@ func (d Draft) validateNames() error {
 }
 
 // Pin validates the proposal's statements against its module, records each
-// one's pin, and hashes the whole proposal.
+// one's pin, and hashes the whole proposal. An amendment that carries its
+// target's baseline is pinned against that lock's statements.
 func (p *Proposal) Pin() error {
+	if p.Target != nil && p.Target.Baseline != nil {
+		return p.PinAmending(p.Target.Baseline.Lock.Statements)
+	}
+	return p.PinAmending(nil)
+}
+
+// PinAmending is Pin for a proposal that amends a lock with these
+// statements, or none.
+//
+// A new proposal classifies each of its bugs (#857). An amendment
+// classifies each bug it adds or changes, and keeps a bug it carries
+// exactly as the lock has it: one the lock doesn't classify stays that way.
+// Classifying it would infer what nobody ratified, and would amend a
+// statement its issue didn't ask to change, so a rule that asked for it
+// would let no project ratified before the rule be amended at all. A
+// carried bug is the lock's when its name, its words, what it must break
+// and its pin are all the lock's.
+func (p *Proposal) PinAmending(amended []project.Statement) error {
 	if name, err := tla.ModuleName(p.ModuleText); err != nil || name != p.Module {
 		if err != nil && !strings.Contains(err.Error(), "no MODULE header") {
 			return fmt.Errorf("%s.tla: %w", p.Module, err)
@@ -286,6 +314,21 @@ func (p *Proposal) Pin() error {
 			return fmt.Errorf("statement %s: %w", s.Name, err)
 		}
 		p.Statements[i].SHA256 = h
+	}
+	carried := map[string]project.Statement{}
+	for _, s := range amended {
+		if s.Kind == project.Bug && s.CodeBehavior == "" {
+			carried[s.Name] = s
+		}
+	}
+	for _, s := range p.Statements {
+		if s.Kind != project.Bug || s.CodeBehavior != "" || carried[s.Name] == s {
+			continue
+		}
+		if len(amended) > 0 {
+			return fmt.Errorf("statement %s: an amendment must classify each bug it adds or changes with code_behavior current or hypothetical", s.Name)
+		}
+		return fmt.Errorf("statement %s: a new proposal must classify each bug with code_behavior current or hypothetical", s.Name)
 	}
 	p.Hash = project.ProposalHash(p.Bounds, p.Statements)
 	return nil
@@ -395,7 +438,7 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 	if err := CheckStepDraft(ws, authority.ParentPlan); err != nil {
 		return nil, nil, err
 	}
-	p, err := Read(ws)
+	p, err := ReadAmending(ws, authority.Amended)
 	if err != nil {
 		return nil, nil, err
 	}

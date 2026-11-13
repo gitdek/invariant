@@ -58,6 +58,14 @@ func Markdown(r *verify.Report) string {
 		writeRow("Fairness", fairnessOK(r), fmt.Sprintf("%d of %d on steps the model takes", count(r.Fairness, func(f verify.Fair) bool { return f.InNext }), len(r.Fairness)), render.fairnessEvidence(r))
 	}
 	writeRow("Known bugs", bugsOK(r), fmt.Sprintf("%d of %d caught", count(r.Bugs, func(g verify.Bug) bool { return g.Caught }), len(r.Bugs)), render.bugEvidence(r))
+	if required := count(r.Bugs, func(g verify.Bug) bool { return g.ReplayStatus().Required }); required > 0 {
+		replayed := count(r.Bugs, func(g verify.Bug) bool { return g.ReplayStatus().Replayed })
+		if r.ModelOnly {
+			fmt.Fprintf(&b, "| Bug replay | ➖ model only; no code replay | %s |\n", render.bugReplayEvidence(r))
+		} else {
+			writeRow("Bug replay", replayed == required, fmt.Sprintf("%d of %d required replays passed", replayed, required), render.bugReplayEvidence(r))
+		}
+	}
 	if a := r.Agreement; a != nil && !explicit {
 		writeRow("Agreement", a.Passed, agreementResult(*a), agreementEvidence(*a))
 		// A Go explorer with Successors and no Try says where it went, not
@@ -582,12 +590,22 @@ func (render renderer) bugEvidence(r *verify.Report) string {
 	var parts []string
 	for _, g := range r.Bugs {
 		if g.Caught {
-			parts = append(parts, fmt.Sprintf("%s: %s violated after %s", render.text(g.Label), render.literal(g.Violated), steps(g.Steps)))
+			parts = append(parts, fmt.Sprintf("%s: %s violated after %s; %s", render.text(g.Label), render.literal(g.Violated), steps(g.Steps), EscapeText(g.ReplayStatus().Label)))
 		} else {
-			parts = append(parts, render.text(g.Label)+": not caught")
+			parts = append(parts, render.text(g.Label)+": not caught; "+EscapeText(g.ReplayStatus().Label))
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+func (render renderer) bugReplayEvidence(r *verify.Report) string {
+	var parts []string
+	for _, g := range r.Bugs {
+		if g.Replay != nil && g.Replay.Required {
+			parts = append(parts, EscapeText(g.Label+": "+g.Replay.Status+". "+g.Replay.Message))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func agreementResult(a verify.Agreement) string {
@@ -729,6 +747,9 @@ func (render renderer) failures(r *verify.Report) []string {
 	for _, g := range r.Bugs {
 		if !g.Caught {
 			out = append(out, fmt.Sprintf("Known bug %s: %s", render.literal(g.Name), render.text(g.Message)))
+		}
+		if g.Replay != nil && g.Replay.Required && !g.Replay.Passed && !r.ModelOnly {
+			out = append(out, fmt.Sprintf("Bug replay %s: %s. %s", render.literal(g.Name), EscapeText(g.Replay.Status), EscapeText(g.Replay.Message)))
 		}
 	}
 	if l := r.Larger; l != nil && l.Required && !l.Passed {

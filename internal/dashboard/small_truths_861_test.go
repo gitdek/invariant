@@ -55,10 +55,10 @@ func TestEvidencePageCountsAndCaughtBugs861(t *testing.T) {
 	if found, missed := foundFor(project.Statement{Name: "Safe", Kind: project.Invariant}, r); found != "Held in all 132,486 checked states" || missed {
 		t.Errorf("an invariant that held reads %q, missed %v", found, missed)
 	}
-	if found, missed := foundFor(project.Statement{Name: "Lost", Kind: project.Bug}, r); found != "Caught: breaks Safe in 5 steps" || missed {
+	if found, missed := foundFor(project.Statement{Name: "Lost", Kind: project.Bug}, r); found != "Caught: breaks Safe in 5 steps; not replayed: not classified" || missed {
 		t.Errorf("a caught bug reads %q, missed %v", found, missed)
 	}
-	if found, missed := foundFor(project.Statement{Name: "Slipped", Kind: project.Bug}, r); found != "Not caught" || !missed {
+	if found, missed := foundFor(project.Statement{Name: "Slipped", Kind: project.Bug}, r); found != "Not caught; not replayed: not classified" || !missed {
 		t.Errorf("a bug the model didn't catch reads %q, missed %v", found, missed)
 	}
 	// Only a miss takes the bug color. A bug rule's left edge still marks
