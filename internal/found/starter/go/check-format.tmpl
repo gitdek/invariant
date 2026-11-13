@@ -1,0 +1,9 @@
+#!/bin/sh
+# Fails when a Go file isn't formatted: gofmt -l lists such files and still
+# exits successfully, and the gate needs a check that doesn't.
+unformatted=$(gofmt -l .) || exit 1
+if [ -n "$unformatted" ]; then
+	echo "not formatted with gofmt:"
+	echo "$unformatted"
+	exit 1
+fi
