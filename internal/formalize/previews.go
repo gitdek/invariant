@@ -51,6 +51,12 @@ type CheckContext struct {
 	// context, so the check the drafting agent runs holds a draft to what
 	// the caller's own check will.
 	Amended []project.Statement `json:"amended,omitempty"`
+	// Language is the language the draft's project is written in: the
+	// request's, TypeScript for code checked as it is, or the language of
+	// the project an amendment changes. The model doesn't depend on it. A
+	// current bug's replay does: the gate requires one only where a driver
+	// checks the code, so the check has to know (#910).
+	Language string `json:"language,omitempty"`
 }
 
 var checkContexts sync.Map
@@ -67,7 +73,12 @@ func (r Request) CheckContext() CheckContext {
 		c.Choices[a.Fork] = a.Option
 	}
 	c.Baseline = r.comparisonBaseline()
+	c.Language = r.Language
+	if r.Existing != nil {
+		c.Language = "typescript"
+	}
 	if current := r.CapturedCurrent(); current != nil {
+		c.Language = current.Manifest.Language
 		c.Amended = slices.Clone(current.Lock.Statements)
 		if current.View != "" {
 			c.BaselineViewPath = filepath.ToSlash(filepath.Join(current.Dir, ".invariant/view.json"))
@@ -250,7 +261,7 @@ func (p *Proposal) checkPreviews(ctx context.Context, tc toolchain.Toolchain, c 
 				err = previewInput(f, o, choices)
 			}
 			if err == nil {
-				err = v.check(ctx, tc, c.Amended)
+				err = v.check(ctx, tc, c.Amended, c.Language)
 			}
 			if err != nil {
 				err = fmt.Errorf("fork %s option %s: %w", f.ID, o.ID, err)
@@ -267,7 +278,7 @@ func (p *Proposal) checkPreviews(ctx context.Context, tc toolchain.Toolchain, c 
 	return errors.Join(failures...)
 }
 
-func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []project.Statement) error {
+func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []project.Statement, language string) error {
 	m := v.Model
 	if err := m.PinAmending(amended); err != nil {
 		return err
@@ -277,7 +288,7 @@ func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []p
 		return err
 	}
 	defer os.RemoveAll(dir)
-	if err := m.Write(dir, "", nil); err != nil {
+	if err := m.stagedIn(language).Write(dir, "", nil); err != nil {
 		return err
 	}
 	r, err := verify.RunModel(ctx, dir, tc)
@@ -290,6 +301,9 @@ func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []p
 	}
 	if !r.Passed {
 		return fmt.Errorf("%s", verify.Feedback(r))
+	}
+	if err := replayPrepared(r); err != nil {
+		return err
 	}
 	if r.Reader == nil {
 		return fmt.Errorf("model check returned no reader evidence")

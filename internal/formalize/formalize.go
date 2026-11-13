@@ -416,6 +416,40 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 	return writeFile(filepath.Join(dir, ".invariant/request.md"), request)
 }
 
+// stagedIn is the draft as the check stages it: itself, in the language its
+// project is written in. A draft is checked before it's given its language,
+// or made an amendment, and the gate decides from the language whether a
+// current bug has to be replayed against the code (#910). Only a language a
+// driver checks changes anything, and only the staged copy carries it.
+func (p *Proposal) stagedIn(language string) *Proposal {
+	if p.Target != nil || p.Language != "" || len(p.Existing) > 0 || (language != "typescript" && language != "python") {
+		return p
+	}
+	staged := *p
+	staged.Language = language
+	return &staged
+}
+
+// replayPrepared refuses a draft whose current bug the gate could never
+// replay for a reason the drafter can fix: TLC can't say which action each
+// step of the counterexample is. The statements aren't pinned yet, so the
+// model can still be rewritten. Left alone, the build's gate would find it
+// after a person had ratified them. A temporal counterexample isn't the
+// drafter's to fix: the draft stands, and its proposal says so.
+func replayPrepared(r *verify.Report) error {
+	for _, b := range r.Bugs {
+		e := b.Replay
+		if e == nil || !e.Required || e.Request != nil || e.Status == "replay-unsupported-temporal" {
+			continue
+		}
+		return fmt.Errorf("bug %s is current, so the gate has to replay TLC's counterexample against the code step by step, and it can't prepare that path: %s. "+
+			"Write the bug, and each action on the way to it, so that every choice is a parameter named in Next or in the bug's own definition, as in Bug == \\E x \\in S : BugStep(x), "+
+			"and guard the bug's operation so it's enabled only where no action of Next takes the same step",
+			b.Name, e.Message)
+	}
+	return nil
+}
+
 // Check stages the draft in ws as a project and runs the gate's model
 // checks on it: TLC, the witnesses and the known bugs.
 func Check(ctx context.Context, ws string, tc toolchain.Toolchain) (*Proposal, *verify.Report, error) {
@@ -454,11 +488,14 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 		return nil, nil, err
 	}
 	defer os.RemoveAll(dir)
-	if err := p.Write(dir, "", nil); err != nil {
+	if err := p.stagedIn(authority.Language).Write(dir, "", nil); err != nil {
 		return nil, nil, err
 	}
 	r, err := verify.RunModel(ctx, dir, tc)
 	if err != nil || r == nil || !r.Passed {
+		return p, r, err
+	}
+	if err := replayPrepared(r); err != nil {
 		return p, r, err
 	}
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
