@@ -42,8 +42,10 @@ type Config struct {
 	// Later are constants written after Constants. TLC orders model values
 	// as its configuration introduces them, and CHOOSE follows that order,
 	// so a check that declares a model's values itself writes the ratified
-	// bounds first, as the run it's checking did.
-	Later map[string]string
+	// bounds first, as the run it's checking did. They're no part of a
+	// configuration as it's saved: a chart's record holds the configuration
+	// its model was checked with, byte for byte.
+	Later map[string]string `json:"-"`
 }
 
 func (c Config) render() string {

@@ -1,6 +1,7 @@
 package tlc
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -62,5 +63,16 @@ func TestTheChecksConfigurationWritesTheBoundsFirst857(t *testing.T) {
 	const want = "SPECIFICATION S\nCONSTANT Limit = 2\nCONSTANT People = {B, A}\nCONSTANT A = A\nCONSTANT B = B\nINVARIANT I\n"
 	if got != want {
 		t.Errorf("the configuration is\n%s\nwant\n%s", got, want)
+	}
+	// A chart's record saves the configuration its model was checked with,
+	// and its fingerprint is made from those bytes. The values a check
+	// declares for itself are no part of them.
+	saved, err := json.Marshal(Config{Specification: "S", Constants: bounds, Later: values, Invariants: []string{"I"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const record = `{"Specification":"S","Constants":{"Limit":"2","People":"{B, A}"},"Invariants":["I"],"Properties":null}`
+	if string(saved) != record {
+		t.Errorf("a saved configuration is %s; want %s", saved, record)
 	}
 }
