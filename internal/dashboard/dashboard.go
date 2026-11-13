@@ -1108,6 +1108,7 @@ func (s *Server) readPulls(ctx context.Context, r *Repo) {
 			continue
 		}
 		p := PullNow{State: pr.State, Draft: pr.Draft}
+		changed := pr.UpdatedAt
 		switch {
 		case pr.Merged:
 			p = PullNow{State: "merged"}
@@ -1124,10 +1125,33 @@ func (s *Server) readPulls(ctx context.Context, r *Repo) {
 				continue
 			}
 			p.Gate = gateNow(runs)
+			for _, run := range runs {
+				changed = later(changed, later(run.StartedAt, run.CompletedAt))
+			}
+		}
+		if at, err := time.Parse(time.RFC3339, changed); err == nil {
+			p.Changed = &at
 		}
 		read[l.Waiting.PR] = p
 	}
 	r.src.pulls = read
+}
+
+// later is the later of two times as GitHub writes them. One that's empty
+// or isn't a time is never the later.
+func later(a, b string) string {
+	at, errA := time.Parse(time.RFC3339, a)
+	bt, errB := time.Parse(time.RFC3339, b)
+	switch {
+	case errA != nil:
+		if errB != nil {
+			return ""
+		}
+		return b
+	case errB != nil || !bt.After(at):
+		return a
+	}
+	return b
 }
 
 // gateNow says how CI's gate stands on a head from its check runs there: a
