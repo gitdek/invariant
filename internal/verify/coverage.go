@@ -230,6 +230,18 @@ func (r Report) EvidenceJSON() ([]byte, error) {
 	return json.Marshal(evidence(r))
 }
 
+// SavedJSON is the evidence with the coverage view and no other: what a
+// saved preview's fingerprint has been made from since that view arrived
+// (#802). A view added later stays out of it, so adding one changes no
+// fingerprint that was saved before it.
+func (r Report) SavedJSON() ([]byte, error) {
+	type evidence Report
+	return json.Marshal(struct {
+		evidence
+		Coverage []Coverage `json:"coverage"`
+	}{evidence(r), r.Coverage()})
+}
+
 // MarshalJSON adds coverage and bug replay status views, derived from the
 // evidence as it stands and excluded from its fingerprint.
 func (r Report) MarshalJSON() ([]byte, error) {

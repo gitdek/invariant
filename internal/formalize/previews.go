@@ -326,17 +326,42 @@ func receiptReaderFingerprint(r *verify.Reader, lock project.Lock) string {
 	return h
 }
 
+// previewFingerprint is a preview's identity: the fork and option it
+// answers, and everything in it but the fingerprint itself. Its receipt
+// goes in as saved previews have carried it, the evidence and the coverage
+// view (verify.Report.SavedJSON), and not as the receipt is published
+// today. A view the receipt gained since, such as each bug's replay status
+// (#857), is derived from that evidence, so a preview saved before the view
+// existed still reads as itself.
 func previewFingerprint(f Fork, o Option) (string, error) {
-	copyPreview := *o.Preview
-	copyPreview.Fingerprint = ""
+	v := o.Preview
+	var receipt json.RawMessage
+	if v.Receipt != nil {
+		b, err := v.Receipt.SavedJSON()
+		if err != nil {
+			return "", err
+		}
+		receipt = b
+	}
 	return previewHash(struct {
-		Fork     string  `json:"fork"`
-		Kind     string  `json:"kind,omitempty"`
-		Question string  `json:"question"`
-		Option   string  `json:"option"`
-		Says     string  `json:"says"`
-		Preview  Preview `json:"preview"`
-	}{f.ID, f.Kind, f.Question, o.ID, o.Says, copyPreview})
+		Fork     string          `json:"fork"`
+		Kind     string          `json:"kind,omitempty"`
+		Question string          `json:"question"`
+		Option   string          `json:"option"`
+		Says     string          `json:"says"`
+		Preview  previewIdentity `json:"preview"`
+	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem}})
+}
+
+// previewIdentity is Preview's fields in Preview's order, less the
+// fingerprint, with the receipt already encoded.
+type previewIdentity struct {
+	Fork    string            `json:"fork"`
+	Option  string            `json:"option"`
+	Choices map[string]string `json:"choices,omitempty"`
+	Model   *Proposal         `json:"model"`
+	Receipt json.RawMessage   `json:"receipt,omitempty"`
+	Problem string            `json:"problem,omitempty"`
 }
 
 // ValidatePreview validates just this option, so a damaged dashboard sibling
