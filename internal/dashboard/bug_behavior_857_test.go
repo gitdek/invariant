@@ -9,6 +9,7 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/statechart"
+	"github.com/gitdek/invariant/internal/verify"
 )
 
 func bug857(name, behavior string) project.Statement {
@@ -97,5 +98,41 @@ func TestTheRatifyCardSaysWhatEachBugSaysOfTheCode857(t *testing.T) {
 	p.Target = &formalize.Target{Previous: "#12", Amends: "sha256:old"}
 	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: p}, time.Now()); len(w.Relaxed) != 0 || w.Statements[3].Was != "" {
 		t.Errorf("an amendment with no lock to compare says %q was %q, and stops calling %v current", w.Statements[3].Name, w.Statements[3].Was, w.Relaxed)
+	}
+}
+
+// A proposal's evidence page, before any receipt, gives each bug its
+// classification in words, and a rule that isn't a bug none. With a check of
+// the model alone, a current bug's replay is prepared and not run: the page
+// says so without marking the bug as one the check missed, which it does
+// once a gate that runs the code leaves the replay undone.
+func TestAnEvidencePageSaysWhatABugSaysOfTheCode857(t *testing.T) {
+	statements := []project.Statement{{Name: "Safe", Kind: project.Invariant, Says: "It's safe."}, bug857("Now", "current"), bug857("Maybe", "hypothetical"), bug857("Old", "")}
+	found := map[string]string{}
+	for _, g := range rulesOf(statements, nil) {
+		for _, rule := range g.Rules {
+			found[rule.Name] = rule.Found
+		}
+	}
+	want := map[string]string{"Safe": "", "Now": "Code behavior: current", "Maybe": "Code behavior: hypothetical", "Old": "Code behavior: not classified"}
+	if !reflect.DeepEqual(found, want) {
+		t.Errorf("with no receipt the page says %v; want %v", found, want)
+	}
+	pending := verify.Bug{Name: "Now", CodeBehavior: "current", Caught: true, Violated: "Safe", Steps: 3,
+		Replay: &verify.BugReplayEvidence{Required: true, Status: "pending", Request: &verify.BugReplayRequest{}}}
+	for _, tc := range []struct {
+		name      string
+		modelOnly bool
+		missed    bool
+	}{{"a check of the model alone", true, false}, {"a gate that runs the code", false, true}} {
+		r := &verify.Report{ModelOnly: tc.modelOnly, Bugs: []verify.Bug{pending}}
+		got, missed := foundFor(bug857("Now", "current"), r)
+		if got != "Caught: breaks Safe in 3 steps; current; pending" || missed != tc.missed {
+			t.Errorf("%s says %q, missed %v; want the replay pending and missed %v", tc.name, got, missed, tc.missed)
+		}
+	}
+	// A bug the model doesn't catch is missed either way.
+	if _, missed := foundFor(bug857("Now", "current"), &verify.Report{ModelOnly: true, Bugs: []verify.Bug{{Name: "Now", CodeBehavior: "current"}}}); !missed {
+		t.Error("a bug the model doesn't catch isn't marked as missed")
 	}
 }

@@ -332,6 +332,13 @@ func (v ReplayValue) canonical(depth int) (ReplayValue, error) {
 	return v, nil
 }
 
+// Canonical is the value as every equal value is written: a set's elements
+// and a function's entries sorted and without repeats, a sequence in its
+// own order. A malformed value has none.
+func (v ReplayValue) Canonical() (ReplayValue, error) {
+	return v.canonical(0)
+}
+
 // TLA accepts only validated data, never an arbitrary expression from a result.
 func (v ReplayValue) TLA() (string, error) {
 	c, err := v.canonical(0)

@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tlc"
@@ -135,10 +137,10 @@ func CheckBugReplay(ctx context.Context, runner tlc.Runner, dir string, q BugRep
 	if !observed.Started || !observed.Completed || observed.ExitCode != 0 {
 		return fail("execution did not start and finish successfully")
 	}
-	if !reflect.DeepEqual(result.Initial, observed.Initial) || !reflect.DeepEqual(result.Calls, observed.Calls) {
+	if !sameReplayState(result.Initial, observed.Initial) || !sameReplayCalls(result.Calls, observed.Calls) {
 		return fail("result differs from independently observed calls")
 	}
-	if !reflect.DeepEqual(result.Initial, q.Path.States[0]) {
+	if !sameReplayState(result.Initial, q.Path.States[0]) {
 		return fail("initial state differs from the requested path")
 	}
 	if len(result.Calls) != q.Path.Offending+1 {
@@ -151,20 +153,20 @@ func CheckBugReplay(ctx context.Context, runner tlc.Runner, dir string, q BugRep
 	}
 	for i, call := range result.Calls {
 		step := q.Path.Steps[i]
-		if call.Index != i || call.Action != step.Action || !reflect.DeepEqual(call.Args, step.Args) ||
-			!reflect.DeepEqual(call.Before, q.Path.States[step.From]) || !call.Dispatched || call.Error != "" {
+		if call.Index != i || call.Action != step.Action || !sameReplayValues(call.Args, step.Args) ||
+			!sameReplayState(call.Before, q.Path.States[step.From]) || !call.Dispatched || call.Error != "" {
 			return fail(fmt.Sprintf("call %d was not the requested, actually dispatched operation", i))
 		}
 		if call.Outcome != "returned" && call.Outcome != "refused" {
 			return fail(fmt.Sprintf("call %d did not return normally", i))
 		}
-		if i < q.Path.Offending && (call.Outcome != "returned" || !reflect.DeepEqual(call.After, q.Path.States[step.To])) {
+		if i < q.Path.Offending && (call.Outcome != "returned" || !sameReplayState(call.After, q.Path.States[step.To])) {
 			return fail(fmt.Sprintf("setup call %d diverged from the path", i))
 		}
 	}
 	last := result.Calls[q.Path.Offending]
 	forbidden := q.Path.States[q.Path.Steps[q.Path.Offending].To]
-	if result.Outcome == "reproduced" || reflect.DeepEqual(last.After, forbidden) {
+	if result.Outcome == "reproduced" || sameReplayState(last.After, forbidden) {
 		e.Status, e.Message = "reproduced", "The offending operation reproduced the forbidden successor."
 		return e, nil
 	}
@@ -176,6 +178,60 @@ func CheckBugReplay(ctx context.Context, runner tlc.Runner, dir string, q BugRep
 	}
 	e.Status, e.Passed = result.Outcome, true
 	return e, nil
+}
+
+// An adapter writes its records in JSON of its own, and a value can be
+// spelled more than one way there: an empty argument list as [] or as
+// null, a set's elements in the order they were found. Records are
+// compared by the values they hold. Comparing their spelling would refuse
+// a faithful replay, or miss a reproduced bug whose forbidden state lists
+// a set in another order. A malformed value equals nothing.
+func sameReplayValue(a, b tlc.ReplayValue) bool {
+	x, err := a.Canonical()
+	if err != nil {
+		return false
+	}
+	y, err := b.Canonical()
+	return err == nil && reflect.DeepEqual(x, y)
+}
+
+func sameReplayValues(a, b []tlc.ReplayValue) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !sameReplayValue(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameReplayState(a, b tlc.ReplayState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, value := range a {
+		other, ok := b[name]
+		if !ok || !sameReplayValue(value, other) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameReplayCalls(a, b []BugReplayCall) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.Index != y.Index || x.Action != y.Action || x.Dispatched != y.Dispatched || x.Outcome != y.Outcome || x.Error != y.Error ||
+			!sameReplayValues(x.Args, y.Args) || !sameReplayState(x.Before, y.Before) || !sameReplayState(x.After, y.After) {
+			return false
+		}
+	}
+	return true
 }
 
 func replayRecordValues(record BugReplayObservation) error {
@@ -237,11 +293,34 @@ func prepareBugReplay(ctx context.Context, out *Bug, b project.Statement, p *pro
 		}
 	}
 	if err != nil {
-		e.Status, e.Message = "replay-unavailable", strings.ReplaceAll(err.Error(), dir, "<model>")
+		e.Status, e.Message = "replay-unavailable", replayMessage(err, dir)
 		if strings.Contains(err.Error(), "replay-unsupported-temporal") {
 			e.Status = "replay-unsupported-temporal"
 		}
 	}
+}
+
+var replayPath = regexp.MustCompile(`(?:/[A-Za-z0-9._@+-]+){2,}`)
+
+// replayMessage is why a path couldn't be prepared, as a receipt keeps it:
+// the refusal's first line, with no directory of the machine that ran it,
+// and short enough to read in a table. TLC's whole output isn't evidence
+// here. The retained counterexample is.
+func replayMessage(err error, dir string) string {
+	s := strings.ReplaceAll(err.Error(), dir, "<model>")
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(replayPath.ReplaceAllString(s, "<path>"))
+	const most = 400
+	if len(s) > most {
+		cut := most
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "…"
+	}
+	return s
 }
 
 // activateBugReplays is independent of conformance options, budgets and the
@@ -279,8 +358,19 @@ func (b Bug) ReplayStatus() BugReplayStatus {
 		return BugReplayStatus{Status: "not-replayed", Label: "current; not replayed"}
 	}
 	e := b.Replay
-	replayed := e.Passed && e.Request != nil && e.Result != nil && e.Observation != nil && (e.Status == "complete" || e.Status == "refused")
-	return BugReplayStatus{Status: e.Status, Label: "current; " + e.Status, Required: e.Required, Replayed: replayed}
+	finished := e.Status == "complete" || e.Status == "refused"
+	replayed := finished && e.Passed && e.Request != nil && e.Result != nil && e.Observation != nil
+	status, label := e.Status, "current; "+e.Status
+	switch {
+	case status == "not-replayed":
+		// The same words as a current bug with no replay evidence at all.
+		label = "current; not replayed"
+	case finished && !replayed:
+		// A replay isn't called finished without the request, the result
+		// and the observation that show it, whatever its status says.
+		status, label = "incomplete", "current; incomplete"
+	}
+	return BugReplayStatus{Status: status, Label: label, Required: e.Required, Replayed: replayed}
 }
 
 func portableBugReplay(e *BugReplayEvidence) *BugReplayEvidence {

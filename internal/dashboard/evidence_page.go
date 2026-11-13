@@ -342,8 +342,10 @@ func foundFor(s project.Statement, r *verify.Report) (string, bool) {
 					if b.Steps > 0 {
 						found += " in " + counted(int64(b.Steps), "step")
 					}
+					// A check of the model alone runs no code, so a replay
+					// it has only prepared isn't one it missed.
 					status := b.ReplayStatus()
-					return found + "; " + status.Label, status.Required && !status.Replayed
+					return found + "; " + status.Label, status.Required && !status.Replayed && !r.ModelOnly
 				}
 				return "Not caught; " + b.ReplayStatus().Label, true
 			}
