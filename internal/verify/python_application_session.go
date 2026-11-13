@@ -77,9 +77,11 @@ type PythonApplicationSession struct {
 	mu                           sync.Mutex
 	closed                       bool
 	root, runtime, image, driver string
-	invocations                  []PythonApplicationInvocation
-	provenance                   PythonApplicationProvenance
-	declarations                 map[string]project.Component
+	// originalRoot is only for diagnostics; execution uses the staged root.
+	originalRoot string
+	invocations  []PythonApplicationInvocation
+	provenance   PythonApplicationProvenance
+	declarations map[string]project.Component
 	// contracts holds each trusted contract by its declaration's ID, the
 	// target of its backing tests' invocation keys.
 	contracts     map[string]project.ResolvedComponentContract
@@ -210,7 +212,7 @@ func PreparePythonApplicationSession(ctx context.Context, p *project.Project, ds
 	if !reflect.DeepEqual(files, w.Files) {
 		return nil, fmt.Errorf("Python application changed during staging")
 	}
-	s := &PythonApplicationSession{root: w.Root, snapshot: snapshot, invocations: prepared,
+	s := &PythonApplicationSession{root: w.Root, originalRoot: app.Root, snapshot: snapshot, invocations: prepared,
 		declarations: map[string]project.Component{}, contracts: map[string]project.ResolvedComponentContract{}, execute: options.Execute, nagini: options.Nagini, distributions: options.Distributions}
 	for _, c := range w.Inventory.TrustedContracts {
 		s.contracts[c.Contract] = c
