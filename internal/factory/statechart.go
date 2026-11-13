@@ -29,10 +29,17 @@ func previewForksComment(forks []formalize.Fork, m Marker) string {
 }
 
 func readerComment(p *formalize.Proposal) string {
+	return readerCommentWithEvidence(p, "")
+}
+
+func readerCommentWithEvidence(p *formalize.Proposal, evidence string) string {
 	if p.Reader == nil {
 		return ""
 	}
 	if p.Reader.Comparison != nil {
+		if evidence != "" {
+			return "\n**Reader proposal comparison**\n\n" + p.Reader.Comparison.CompactMarkdown()
+		}
 		return "\n**Reader proposal comparison**\n\n" + p.Reader.Comparison.Markdown()
 	}
 	var b strings.Builder
@@ -42,6 +49,10 @@ func readerComment(p *formalize.Proposal) string {
 		fmt.Fprintf(&b, "The chart is not drawn: TLC reached %d states at these bounds, more than the %d states charts are drawn for. Model checks passed; the view is well-formed, but its mappings and hiding were not evaluated (too_large).\n", l.Actual, l.Limit)
 		return b.String()
 	}
-	b.WriteString(p.Reader.Chart.Markdown())
+	if evidence != "" {
+		b.WriteString(p.Reader.Chart.CompactMarkdown())
+	} else {
+		b.WriteString(p.Reader.Chart.Markdown())
+	}
 	return b.String()
 }

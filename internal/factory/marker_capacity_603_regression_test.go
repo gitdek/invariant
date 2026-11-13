@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +15,60 @@ import (
 type markerCapacityFormalizer struct {
 	result *formalize.Result
 	calls  int
+}
+
+// Valid completed evidence may outgrow a marker without outgrowing the
+// decision. Only an explicitly configured dashboard enables that publication.
+func TestModeledPublicationExpandedMarkerWithDashboard(t *testing.T) {
+	tc, _ := reader603Tools(t)
+	ws := t.TempDir()
+	reader603Workspace(t, ws)
+	reader603Write(t, filepath.Join(ws, "Helper603.tla"), strings.Replace(reader603Include, "====", "\\* "+strings.Repeat("x", maxMarker+1024)+"\n====", 1))
+	p, report, err := formalize.CheckWithContext(t.Context(), ws, tc, formalize.CheckContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &formalize.Result{Proposal: p, Report: report, CheckContext: &formalize.CheckContext{}}
+	for _, recovered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovered=%v", recovered), func(t *testing.T) {
+			r := newRig(t)
+			r.f.DashboardURL = "https://dashboard.example/repository"
+			form := &markerCapacityFormalizer{result: result}
+			r.f.Formalizer = form
+			r.gh.open(603, "gitdek", "A complete saved draft", "/invariant solve")
+			if recovered {
+				saved := &savedDraftResult{Result: *result, Publication: &draftPublication{Agent: "claude-code"}}
+				commit, err := r.f.saveResult(t.Context(), saved, "completed checked evidence", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := r.f.Repo.Record(t.Context(), 603, "draft-issue", "draft before restart"); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.f.Repo.Finish(t.Context(), 603, "draft-issue", commit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r.poll()
+			post := r.expect(603, KindProposal, LabelProposal)
+			m, ok := DecodeMarker(post.Comment.Body)
+			if !ok || m.ProposalRef == nil || m.Proposal != nil || !completeComment(post.Comment.Body, m) {
+				t.Fatal("valid evidence overflow must publish one readable reference")
+			}
+			_, saved, err := m.ResolveDraft(t.Context(), r.f.Repository, 603, r.f.Repo.Run, r.f.Repo.Show)
+			if err != nil || !draftEqual(saved.Proposal, p) || !draftEqual(saved.Report, report) {
+				t.Fatalf("reference lost the full checked result: %v", err)
+			}
+			r.poll()
+			wantCalls := 1
+			if recovered {
+				wantCalls = 0
+			}
+			if form.calls != wantCalls || len(r.gh.comments[603]) != 1 {
+				t.Fatal("completed evidence was drafted or posted again")
+			}
+		})
+	}
 }
 
 func (f *markerCapacityFormalizer) Formalize(context.Context, formalize.Request, string) (*formalize.Result, error) {

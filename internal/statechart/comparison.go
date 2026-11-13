@@ -474,3 +474,36 @@ func (c *Comparison) Markdown() string {
 	}
 	return b.String()
 }
+
+// CompactMarkdown retains the captured baseline, both checking scopes and
+// material qualifications. Full delta evidence stays in the linked record.
+func (c *Comparison) CompactMarkdown() string {
+	var b strings.Builder
+	for _, line := range c.Qualifications() {
+		b.WriteString(TableLiteral(line) + "\n\n")
+	}
+	for i, s := range []ComparisonSnapshot{c.Baseline, c.Candidate} {
+		side := "Baseline"
+		if i == 1 {
+			side = "Candidate"
+		}
+		fmt.Fprintf(&b, "%s: %s\n\n%s", side, TableLiteral(s.Name), BoundsMarkdown(s.Lock.Bounds))
+		if l := s.Limitation; l != nil {
+			fmt.Fprintf(&b, "The chart is not drawn (too_large): TLC reached %d states, more than the %d states charts are drawn for. View mappings and hiding were not evaluated.\n\n", l.Actual, l.Limit)
+		}
+	}
+	if c.Candidate.Chart != nil {
+		b.WriteString("Complete candidate chart:\n\n" + c.Candidate.Chart.CompactMarkdown())
+	}
+	if c.Unavailable != nil && c.Baseline.Chart != nil {
+		b.WriteString("\nComplete baseline chart:\n\n" + c.Baseline.Chart.CompactMarkdown())
+	}
+	if c.Unavailable == nil {
+		d := c.Visible
+		fmt.Fprintf(&b, "\nVisible changes: states added %d, removed %d, changed %d; arrows added %d, removed %d, changed %d.\n\n",
+			len(d.AddedStates), len(d.RemovedStates), len(d.ChangedStates), len(d.AddedArrows), len(d.RemovedArrows), len(d.ChangedArrows))
+		b.WriteString("Legend: added (green, solid); removed (red, dashed); changed retains before and after evidence in the complete record.\n\n")
+		b.WriteString(c.changeMermaidWithInitials(true))
+	}
+	return b.String()
+}

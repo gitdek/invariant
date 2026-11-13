@@ -82,7 +82,9 @@ This behavior implements [#639's ratified plan](../.invariant/plans/issue-639.js
 
 Under [#897's ratified plan](../.invariant/plans/issue-897.json), Needs you reads authenticated `proposal_ref` markers using [#790's saved-reference contract](factory.md#recovering-saved-drafts). The configured repository's known factory account must have posted the marker before any saved-run read. The dashboard uses its existing GitHub GET client to check `invariant/runs/<issue>/<step>` and its completed commit message, then reads only `result.json` at that full immutable commit. `factory.Marker.ResolveDraft` validates the complete result, sources, receipts and captured check context. Local work directories, branch tips, caller-selected paths and copied markers supply no authority.
 
-Both public and `/act` cards link the same permanent locator alongside their existing proposal or option presentations:
+Compact factory comments also link this exact saved evidence under [#911's ratified plan](../.invariant/plans/issue-911.json). Operators enable them with `watch -dashboard-url BASE`, passing the address of a dashboard configured to serve that watcher's repository and factory account. There is no default deployment: omitted or explicitly empty disables compact publication. Nonempty bases must be absolute HTTP(S) without credentials, query or fragment, and may include a deployment path prefix. The watcher validates the base before work and constructs escaped links without contacting the dashboard. The dashboard must serve the repository and retain its authenticated saved records as described below.
+
+Both public and `/act` cards and compact factory comments link the same permanent locator alongside their existing proposal or option presentations:
 
 ```text
 /draft/<owner>/<repository>/<issue>/<full-result-commit>/<64-lowercase-payload-digest>
