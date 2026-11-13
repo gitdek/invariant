@@ -254,7 +254,10 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		p.Baseline = detachedSnapshot(authority.Baseline)
 	}
 	if p != nil {
-		p.Language = req.Language
+		// The issue decides a draft's language and the code it checks as
+		// it is, never proposal.json, which the check read neither from
+		// (#910).
+		p.Language, p.Existing = req.Language, nil
 		if e := req.Existing; e != nil {
 			p.Existing, p.Language = e.Paths, "typescript"
 		}
