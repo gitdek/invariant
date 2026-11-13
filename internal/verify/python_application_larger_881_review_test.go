@@ -162,6 +162,7 @@ func TestPythonApplicationLargerUnreadableEvidenceSignals881(t *testing.T) {
 		// another check, in either order.
 		{"unreadable evidence, then the runner's own error", []PythonApplicationModelCheck{failed(150, "Semantic errors:"), cut}, true, "Semantic errors:"},
 		{"an operational end, then unreadable evidence", []PythonApplicationModelCheck{failed(73, "TLC fixture unavailable"), stalled, failed(75, "TLC threw an unexpected exception.")}, true, "TLC threw an unexpected exception."},
+		{"the runner's own error, then unreadable evidence", []PythonApplicationModelCheck{cut, erred, failed(76, "Evaluating invariant Init failed.")}, true, "Evaluating invariant Init failed."},
 		{"a status that isn't TLC's verdict on the module", []PythonApplicationModelCheck{failed(73, "TLC fixture unavailable")}, false, ""},
 		{"a configuration TLC can't read", []PythonApplicationModelCheck{failed(151, "TLC found an error in the configuration file")}, false, ""},
 		{"an assumption of the model", []PythonApplicationModelCheck{failed(10, "Assumption line 4, col 8 is false.")}, false, ""},
