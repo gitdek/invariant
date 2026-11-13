@@ -75,7 +75,11 @@ func largerFixture881(t *testing.T, mode string, explicit bool) pa342Fixture {
 	case "wrong start":
 		// At the base this is the usual 0,1,2 exploration. One size larger
 		// it starts outside Init and visits -1,0,1,2: still four levels.
-		driver := strings.Replace(pa342Driver, "service.start, argument=", "lambda: (0 if Limit == 2 else -1), argument=", 1)
+		// The other start is a function of the staged application, as an
+		// initializer has to be: the collector refuses one written in the
+		// driver (D-0183, D-0451), so a lambda here never reached the check.
+		pa342Edit(t, f, "counter/service.py", "def inc(", "def below():\n    return -1\n\n\ndef inc(")
+		driver := strings.Replace(pa342Driver, "service.start, argument=", "service.start if Limit == 2 else service.below, argument=", 1)
 		driver = strings.Replace(driver, "state['count'] >= Limit:", "state['count'] >= Limit - (1 if Limit > 2 else 0):", 1)
 		pa342Write(t, f.root, pa342DriverPath, driver)
 	case "untried":
