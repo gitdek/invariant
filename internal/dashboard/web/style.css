@@ -812,6 +812,9 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
   position: relative; display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 18px; padding: 20px;
   background: var(--card); border: 1px solid rgba(var(--people-rgb), 0.45); border-radius: var(--radius); overflow: hidden;
   animation: needin 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  /* A word too long for a line breaks, as a file's name in a plan's
+     summary is on a phone (#889). */
+  overflow-wrap: anywhere;
 }
 .need::before {
   content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
@@ -830,6 +833,9 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .need-top .since { margin-left: auto; font: 500 12px var(--mono); color: var(--ink3); }
 .need .ask { margin: 10px 0 4px; font-size: 15px; color: var(--ink); line-height: 1.5; }
 .need .ask b { font-family: var(--mono); color: var(--people-ink); margin-right: 6px; }
+/* A plan's summary, a sentence to a line (#889). */
+.need .ask.says span { display: block; }
+.need .ask.says span + span { margin-top: 8px; }
 /* What the card's pull request is now, ahead of how it was when the factory
    stopped (#865). */
 .need .now { margin: 10px 0 0; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line2); font-size: 14.5px; line-height: 1.5; color: var(--ink); }
@@ -870,7 +876,7 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .stmts { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 .stmts summary { cursor: pointer; font-size: 14px; color: var(--ink2); }
 .stmts ul { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
-.stmts li { font-size: 13.5px; color: var(--ink2); display: grid; grid-template-columns: 90px 1fr; gap: 10px; }
+.stmts li { font-size: 13.5px; color: var(--ink2); display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; }
 .stmts li .k { font: 600 10.5px/1.9 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); }
 .stmts li b { color: var(--ink); font-weight: 500; font-family: var(--mono); font-size: 12.5px; margin-right: 6px; }
 
@@ -924,10 +930,14 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); }
 .more { margin-top: 12px; }
 @media (max-width: 560px) {
-  .need { grid-template-columns: 1fr; }
+  /* One column, never wider than what holds it. Written 1fr, a column is
+     at least as wide as its longest word, and a card whose plan named a
+     file was wider than itself: it hides what's past its edge, so every
+     line ended a few letters short (#889). */
+  .need { grid-template-columns: minmax(0, 1fr); }
   .need .glyph { width: 44px; height: 44px; }
-  .fleet { grid-template-columns: 1fr; }
-  .stmts li { grid-template-columns: 1fr; }
+  .fleet { grid-template-columns: minmax(0, 1fr); }
+  .stmts li { grid-template-columns: minmax(0, 1fr); }
 }
 .runchip { animation: needin 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
