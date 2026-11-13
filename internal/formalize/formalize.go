@@ -9,6 +9,7 @@ package formalize
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -22,6 +23,7 @@ import (
 	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/statechart"
 	"github.com/gitdek/invariant/internal/tla"
+	"github.com/gitdek/invariant/internal/tlc"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
 )
@@ -416,38 +418,62 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 	return writeFile(filepath.Join(dir, ".invariant/request.md"), request)
 }
 
-// stagedIn is the draft as the check stages it: itself, in the language its
-// project is written in. A draft is checked before it's given its language,
-// or made an amendment, and the gate decides from the language whether a
-// current bug has to be replayed against the code (#910). Only a language a
-// driver checks changes anything, and only the staged copy carries it.
+// stagedIn is the draft as the check stages it: itself, in the language the
+// caller says its project is written in. The gate decides from a project's
+// language whether a current bug has to be replayed against the code
+// (#910). The factory gives a draft its language, and the code it checks as
+// it is, after the check and from the issue (D-0040, D-0054). So what
+// proposal.json says of either counts for nothing here: a revision copied
+// from an earlier proposal carries the language that one was given, and a
+// draft checked as one project and built as another could be ratified with
+// a bug the gate can never replay. The draft itself is left as it was.
 func (p *Proposal) stagedIn(language string) *Proposal {
-	if p.Target != nil || p.Language != "" || len(p.Existing) > 0 || (language != "typescript" && language != "python") {
-		return p
-	}
 	staged := *p
-	staged.Language = language
+	staged.Language, staged.Existing = language, nil
 	return &staged
 }
 
 // replayPrepared refuses a draft whose current bug the gate could never
-// replay for a reason the drafter can fix: TLC can't say which action each
-// step of the counterexample is. The statements aren't pinned yet, so the
-// model can still be rewritten. Left alone, the build's gate would find it
-// after a person had ratified them. A temporal counterexample isn't the
-// drafter's to fix: the draft stands, and its proposal says so.
+// replay as the draft stands: the path's check couldn't say which action
+// each step of TLC's counterexample is. The statements aren't pinned yet,
+// so the model can still be rewritten. Left alone, the build's gate would
+// find it after a person had ratified them. Every such bug is named, with
+// the check's reason and what that reason asks of the drafter. Only a bug
+// that breaks a property stands unprepared: its counterexample never ends,
+// no rewrite gives it a path of finitely many steps, and its proposal says
+// so. A specification the path's check can't read is given the same code
+// as that one, and is the drafter's to fix.
 func replayPrepared(r *verify.Report) error {
+	var refused []string
 	for _, b := range r.Bugs {
 		e := b.Replay
-		if e == nil || !e.Required || e.Request != nil || e.Status == "replay-unsupported-temporal" {
+		if e == nil || !e.Required || e.Request != nil || b.Outcome == string(tlc.PropertyViolated) {
 			continue
 		}
-		return fmt.Errorf("bug %s is current, so the gate has to replay TLC's counterexample against the code step by step, and it can't prepare that path: %s. "+
-			"Write the bug, and each action on the way to it, so that every choice is a parameter named in Next or in the bug's own definition, as in Bug == \\E x \\in S : BugStep(x), "+
-			"and guard the bug's operation so it's enabled only where no action of Next takes the same step",
-			b.Name, e.Message)
+		refused = append(refused, fmt.Sprintf("bug %s is current, so the gate has to replay TLC's counterexample against the code step by step, and it can't prepare that path: %s. %s",
+			b.Name, e.Message, replayAdvice(e.Message)))
 	}
-	return nil
+	if len(refused) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(refused, "\n"))
+}
+
+// replayAdvice is what a drafter does about the reason a path couldn't be
+// prepared, by the class the path's check gives the reason. A reason with
+// no class a rewrite answers is the check's own failure: TLC stalling or
+// running out of memory, or the check's tool not running.
+func replayAdvice(reason string) string {
+	switch class, _, _ := strings.Cut(reason, ":"); class {
+	case "replay-unsupported-action", "replay-ambiguous-edge":
+		return "Write the bug, and every action Next names, so that every choice is a parameter named in Next or in the bug's own definition, as in Bug == \\E x \\in S : BugStep(x), " +
+			"and guard the bug's operation so it's enabled only where no action of Next takes the same step"
+	case "replay-unsupported-model":
+		return "Change what that names in the model"
+	case "replay-unsupported-temporal":
+		return "Write the specification as Spec == Init /\\ [][Next]_vars, with fairness in fairness statements and nowhere else: a replay follows a path of Init and Next steps"
+	}
+	return "That is the check's own failure, not a shape of the draft: check again, and change the model only if the reason names something in it"
 }
 
 // Check stages the draft in ws as a project and runs the gate's model
@@ -495,17 +521,18 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 	if err != nil || r == nil || !r.Passed {
 		return p, r, err
 	}
-	if err := replayPrepared(r); err != nil {
-		return p, r, err
-	}
+	// A draft has few checks, so one check says everything it finds: a
+	// replay path that couldn't be prepared says nothing of the view, which
+	// is checked whether or not the path was.
+	refused := replayPrepared(r)
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
-	if err == nil {
+	if err == nil && refused == nil {
 		err = p.computeComparison(ctx, ws, tc, authority, memo)
 	}
 	if err == nil {
 		err = ctx.Err()
 	}
-	return p, r, err
+	return p, r, errors.Join(refused, err)
 }
 
 // Pinned is the part of the module a person ratifies: the statements and

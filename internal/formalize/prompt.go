@@ -102,7 +102,7 @@ Each statement is a definition in the module, with a kind and `+"`says`"+`: one 
 
 The gate enforces these rules:
 
-- Every bug in a new modeled proposal or preview must have code_behavior set to current or hypothetical. Classify bugs reported by the issue, unchanged code or tests as current. Use hypothetical for a possible mistake without evidence that the code has it. This classification is part of what a person ratifies; adding, changing or removing it is a statement amendment. Never infer a classification for an existing lock that omits it: in an amendment, leave such a bug exactly as the draft you were given has it, unless the issue asks to change it, and the gate accepts it unclassified while its name, its words, what it must break and its definition are the lock's. Classify every bug you add or change. The gate replays a current bug against the code step by step, so TLC has to be able to say which action each step of its counterexample is and with which arguments: write a current bug, and each action on the way to it, with every choice as a parameter named in Next or in the bug's own definition, as in Bug == \E x \in S : BugStep(x), never as an \E inside an action's body, and give no bound variable the name of a constant or a model value. TLC has to find exactly one action for each step, so guard a current bug's operation to be enabled only where no action of Next takes the same step: a bug that drops a guard states the guard's negation, as in PutWhenFull(m) == Len(buf) >= Cap /\ buf' = Append(buf, m).
+- Every bug in a new modeled proposal or preview must have code_behavior set to current or hypothetical. Classify bugs reported by the issue, unchanged code or tests as current. Use hypothetical for a possible mistake without evidence that the code has it. This classification is part of what a person ratifies; adding, changing or removing it is a statement amendment. Never infer a classification for an existing lock that omits it: in an amendment, leave such a bug exactly as the draft you were given has it, unless the issue asks to change it, and the gate accepts it unclassified while its name, its words, what it must break and its definition are the lock's. Classify every bug you add or change. The gate replays a current bug against the code step by step, so TLC has to be able to say which action each step of its counterexample is and with which arguments: write a current bug, and every action Next names, with every choice as a parameter named in Next or in the bug's own definition, as in Bug == \E x \in S : BugStep(x), never as an \E inside an action's body, and give no bound variable the name of a constant or a model value. TLC has to find exactly one action for each step, so guard a current bug's operation to be enabled only where no action of Next takes the same step: a bug that drops a guard states the guard's negation, as in PutWhenFull(m) == Len(buf) >= Cap /\ buf' = Append(buf, m).
 - Statements may depend on helper definitions, which are pinned along with them. They must not depend on `+"`Init`"+`, `+"`Next`"+` or the model's actions, which can still change. A fairness statement is the exception: the action it names is pinned with it, so define that action in full and make it a part of `+"`Next`"+`. The gate checks that every step of it is a `+"`Next`"+` step.
 - Fairness goes in fairness statements, never in `+"`Spec`"+`.
 - TLC always checks for deadlock: every reachable state needs an enabled action. If the system can legitimately finish, give it an action for that, such as one that leaves a finished state unchanged.
@@ -178,8 +178,15 @@ Leave(p) == pc[p] = "printing" /\ pc' = [pc EXCEPT ![p] = "idle"]
 
 Next == \E p \in Procs : Request(p) \/ Enter(p) \/ Leave(p)
 
-\* A known bug: a process starts printing without checking whether another one is.
-EnterUnchecked == \E p \in Procs : pc[p] = "waiting" /\ pc' = [pc EXCEPT ![p] = "printing"]
+\* A known bug: a process starts printing without checking whether another
+\* one is. Its operation names the process, and takes only the step Enter
+\* refuses.
+EnterWhilePrinting(p) ==
+    /\ pc[p] = "waiting"
+    /\ \E q \in Procs : pc[q] = "printing"
+    /\ pc' = [pc EXCEPT ![p] = "printing"]
+
+EnterUnchecked == \E p \in Procs : EnterWhilePrinting(p)
 
 Spec == Init /\ [][Next]_vars
 ====
