@@ -206,6 +206,7 @@ func checkPropertyBug(ctx context.Context, out *Bug, b project.Statement, work, 
 		return err
 	}
 	out.Outcome = string(res.Outcome)
+	prepareBugReplay(ctx, out, b, p, filepath.Join(work, "model-snapshot"), runner, cfg, res, project.Property)
 	if res.Outcome == tlc.PropertyViolated {
 		out.Caught, out.Violated, out.Steps = true, b.Expect, len(res.Trace)-1
 	} else {

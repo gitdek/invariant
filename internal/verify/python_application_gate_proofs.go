@@ -127,7 +127,7 @@ func (s *PythonApplicationSession) shipsNaginiStandIn() error {
 		}
 		want["nagini_contracts/"+name] = pythonApplicationHash(b)
 	}
-	const remedy = "ship Invariant's runtime stand-in, the nagini_contracts package in internal/verify/naginiruntime, at the application's root, exactly as it is"
+	remedy := func() string { return pythonApplicationStandInRemedy(s.originalRoot, want) }
 	paths := make([]string, 0, len(s.snapshot))
 	for path := range s.snapshot {
 		paths = append(paths, path)
@@ -136,21 +136,21 @@ func (s *PythonApplicationSession) shipsNaginiStandIn() error {
 	for _, path := range paths {
 		if !strings.HasPrefix(path, "nagini_contracts/") {
 			if parts := strings.Split(path, "/"); slices.Contains(parts[:len(parts)-1], "nagini_contracts") || parts[len(parts)-1] == "nagini_contracts.py" {
-				return fmt.Errorf("the application ships another nagini_contracts at %s, which a change to the import path could load in place of Invariant's runtime stand-in: %s, and no other", path, remedy)
+				return fmt.Errorf("the application ships another nagini_contracts at %s, which a change to the import path could load in place of Invariant's runtime stand-in: %s", path, remedy())
 			}
 			continue
 		}
 		hash, ok := want[path]
 		switch {
 		case !ok:
-			return fmt.Errorf("the application's nagini_contracts holds %s, which Invariant's runtime stand-in doesn't: %s", path, remedy)
+			return fmt.Errorf("the application's nagini_contracts holds %s, which Invariant's runtime stand-in doesn't: %s", path, remedy())
 		case s.snapshot[path].hash != hash:
-			return fmt.Errorf("the application's %s isn't Invariant's runtime stand-in: %s", path, remedy)
+			return fmt.Errorf("the application's %s isn't Invariant's runtime stand-in: %s", path, remedy())
 		}
 	}
 	for path := range want {
 		if _, ok := s.snapshot[path]; !ok {
-			return fmt.Errorf("the application doesn't ship %s: %s", path, remedy)
+			return fmt.Errorf("the application doesn't ship %s: %s", path, remedy())
 		}
 	}
 	return nil

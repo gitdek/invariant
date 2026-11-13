@@ -45,6 +45,18 @@ type CheckContext struct {
 	Planning         string                         `json:"planning,omitempty"`
 	Choices          map[string]string              `json:"choices,omitempty"`
 	Revisions        []Revision                     `json:"revisions,omitempty"`
+	// Amended is the statements of the lock an amendment replaces, from
+	// the project as the caller captured it. A draft may keep one of its
+	// unclassified bugs as it is (#857). It travels with the rest of the
+	// context, so the check the drafting agent runs holds a draft to what
+	// the caller's own check will.
+	Amended []project.Statement `json:"amended,omitempty"`
+	// Language is the language the draft's project is written in: the
+	// request's, TypeScript for code checked as it is, or the language of
+	// the project an amendment changes. The model doesn't depend on it. A
+	// current bug's replay does: the gate requires one only where a driver
+	// checks the code, so the check has to know (#910).
+	Language string `json:"language,omitempty"`
 }
 
 var checkContexts sync.Map
@@ -61,8 +73,16 @@ func (r Request) CheckContext() CheckContext {
 		c.Choices[a.Fork] = a.Option
 	}
 	c.Baseline = r.comparisonBaseline()
-	if current := r.CapturedCurrent(); current != nil && current.View != "" {
-		c.BaselineViewPath = filepath.ToSlash(filepath.Join(current.Dir, ".invariant/view.json"))
+	c.Language = r.Language
+	if r.Existing != nil {
+		c.Language = "typescript"
+	}
+	if current := r.CapturedCurrent(); current != nil {
+		c.Language = current.Manifest.Language
+		c.Amended = slices.Clone(current.Lock.Statements)
+		if current.View != "" {
+			c.BaselineViewPath = filepath.ToSlash(filepath.Join(current.Dir, ".invariant/view.json"))
+		}
 	}
 	if c.Baseline != nil {
 		// Only sources are authority. Derived evidence stays session-local.
@@ -241,7 +261,7 @@ func (p *Proposal) checkPreviews(ctx context.Context, tc toolchain.Toolchain, c 
 				err = previewInput(f, o, choices)
 			}
 			if err == nil {
-				err = v.check(ctx, tc)
+				err = v.check(ctx, tc, c.Amended, c.Language)
 			}
 			if err != nil {
 				err = fmt.Errorf("fork %s option %s: %w", f.ID, o.ID, err)
@@ -258,9 +278,9 @@ func (p *Proposal) checkPreviews(ctx context.Context, tc toolchain.Toolchain, c 
 	return errors.Join(failures...)
 }
 
-func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain) error {
+func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []project.Statement, language string) error {
 	m := v.Model
-	if err := m.Pin(); err != nil {
+	if err := m.PinAmending(amended); err != nil {
 		return err
 	}
 	dir, err := os.MkdirTemp("", "invariant-option-")
@@ -268,7 +288,7 @@ func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	if err := m.Write(dir, "", nil); err != nil {
+	if err := m.stagedIn(language).Write(dir, "", nil); err != nil {
 		return err
 	}
 	r, err := verify.RunModel(ctx, dir, tc)
@@ -282,11 +302,17 @@ func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain) error {
 	if !r.Passed {
 		return fmt.Errorf("%s", verify.Feedback(r))
 	}
+	// As for a draft, one check says everything it finds: a refused path
+	// and a view the reader can't take are reported together.
+	refused := replayPrepared(r)
 	if r.Reader == nil {
-		return fmt.Errorf("model check returned no reader evidence")
+		return errors.Join(refused, fmt.Errorf("model check returned no reader evidence"))
 	}
 	if d := r.Reader.Unavailable; d != nil {
-		return fmt.Errorf("%s: %s", d.Code, d.Message)
+		return errors.Join(refused, fmt.Errorf("%s: %s", d.Code, d.Message))
+	}
+	if refused != nil {
+		return refused
 	}
 	scope := statechart.Preview{Fork: v.Fork, Option: v.Option, Choices: maps.Clone(v.Choices)}
 	r.Reader.Preview = scope
@@ -318,17 +344,51 @@ func receiptReaderFingerprint(r *verify.Reader, lock project.Lock) string {
 	return h
 }
 
+// previewFingerprint is a preview's identity: the fork and option it
+// answers, and everything in it but the fingerprint itself. Its receipt
+// goes in as saved previews have carried it, the evidence and the coverage
+// view (verify.Report.SavedJSON), and not as the receipt is published
+// today. A view the receipt gained since, such as each bug's replay status
+// (#857), is derived from that evidence, so a preview saved before the view
+// existed still reads as itself.
 func previewFingerprint(f Fork, o Option) (string, error) {
-	copyPreview := *o.Preview
-	copyPreview.Fingerprint = ""
+	v := o.Preview
+	var receipt json.RawMessage
+	if v.Receipt != nil {
+		b, err := v.Receipt.SavedJSON()
+		if err != nil {
+			return "", err
+		}
+		receipt = b
+	}
 	return previewHash(struct {
-		Fork     string  `json:"fork"`
-		Kind     string  `json:"kind,omitempty"`
-		Question string  `json:"question"`
-		Option   string  `json:"option"`
-		Says     string  `json:"says"`
-		Preview  Preview `json:"preview"`
-	}{f.ID, f.Kind, f.Question, o.ID, o.Says, copyPreview})
+		Fork     string          `json:"fork"`
+		Kind     string          `json:"kind,omitempty"`
+		Question string          `json:"question"`
+		Option   string          `json:"option"`
+		Says     string          `json:"says"`
+		Preview  previewIdentity `json:"preview"`
+	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem}})
+}
+
+// PreviewFingerprint is the fingerprint ValidatePreview holds an option's
+// preview to, for a caller that builds or repairs one, as a fixture does.
+func (f Fork) PreviewFingerprint(o Option) (string, error) {
+	if o.Preview == nil {
+		return "", fmt.Errorf("fork %s option %s: missing preview evidence", f.ID, o.ID)
+	}
+	return previewFingerprint(f, o)
+}
+
+// previewIdentity is Preview's fields in Preview's order, less the
+// fingerprint, with the receipt already encoded.
+type previewIdentity struct {
+	Fork    string            `json:"fork"`
+	Option  string            `json:"option"`
+	Choices map[string]string `json:"choices,omitempty"`
+	Model   *Proposal         `json:"model"`
+	Receipt json.RawMessage   `json:"receipt,omitempty"`
+	Problem string            `json:"problem,omitempty"`
 }
 
 // ValidatePreview validates just this option, so a damaged dashboard sibling

@@ -90,7 +90,7 @@ func excludedDirectory(name string) bool {
 }
 
 func repositoryPath(name string) bool {
-	if name == "" || name == "." || !utf8.ValidString(name) || path.IsAbs(name) || path.Clean(name) != name || strings.ContainsAny(name, "\\:*?[]") {
+	if name == "" || name == "." || !utf8.ValidString(name) || path.IsAbs(name) || path.Clean(name) != name || strings.ContainsAny(name, "\\:*?") {
 		return false
 	}
 	for _, component := range strings.Split(name, "/") {
@@ -270,7 +270,11 @@ func (d *repositoryDraft) ownership() {
 			slices.Sort(owners[name])
 			owners[name] = slices.Compact(owners[name])
 			if len(owners[name]) > 1 || repository.CI(name) {
-				d.config.SharedPaths = append(d.config.SharedPaths, repository.SharedPath{Path: name, Parts: owners[name]})
+				if strings.ContainsAny(name, "[]") {
+					d.unresolved = append(d.unresolved, fmt.Sprintf("%s ownership: shared selectors cannot contain brackets; review shared ownership for %s", name, strings.Join(owners[name], ", ")))
+				} else {
+					d.config.SharedPaths = append(d.config.SharedPaths, repository.SharedPath{Path: name, Parts: owners[name]})
+				}
 			}
 			continue
 		}

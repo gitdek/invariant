@@ -9,6 +9,7 @@ package formalize
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -22,6 +23,7 @@ import (
 	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/statechart"
 	"github.com/gitdek/invariant/internal/tla"
+	"github.com/gitdek/invariant/internal/tlc"
 	"github.com/gitdek/invariant/internal/toolchain"
 	"github.com/gitdek/invariant/internal/verify"
 )
@@ -153,8 +155,17 @@ var (
 )
 
 // Read loads the draft an agent left in its workspace, validates it, and
-// pins its statements.
+// pins its statements. The draft amends nothing, so it classifies each of
+// its bugs.
 func Read(ws string) (*Proposal, error) {
+	return ReadAmending(ws, nil)
+}
+
+// ReadAmending is Read for a draft that amends a lock with these
+// statements: a bug the draft keeps exactly as that lock has it may stay
+// unclassified, as PinAmending has it. The statements are the caller's,
+// never the workspace's, which the drafting agent writes.
+func ReadAmending(ws string, amended []project.Statement) (*Proposal, error) {
 	b, err := regular.ReadFile(ws, "proposal.json")
 	if err != nil {
 		return nil, fmt.Errorf("the draft has no proposal.json: %w", err)
@@ -187,7 +198,7 @@ func Read(ws string) (*Proposal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p, p.Pin()
+	return p, p.PinAmending(amended)
 }
 
 func validateForks(forks []Fork) error {
@@ -262,8 +273,27 @@ func (d Draft) validateNames() error {
 }
 
 // Pin validates the proposal's statements against its module, records each
-// one's pin, and hashes the whole proposal.
+// one's pin, and hashes the whole proposal. An amendment that carries its
+// target's baseline is pinned against that lock's statements.
 func (p *Proposal) Pin() error {
+	if p.Target != nil && p.Target.Baseline != nil {
+		return p.PinAmending(p.Target.Baseline.Lock.Statements)
+	}
+	return p.PinAmending(nil)
+}
+
+// PinAmending is Pin for a proposal that amends a lock with these
+// statements, or none.
+//
+// A new proposal classifies each of its bugs (#857). An amendment
+// classifies each bug it adds or changes, and keeps a bug it carries
+// exactly as the lock has it: one the lock doesn't classify stays that way.
+// Classifying it would infer what nobody ratified, and would amend a
+// statement its issue didn't ask to change, so a rule that asked for it
+// would let no project ratified before the rule be amended at all. A
+// carried bug is the lock's when its name, its words, what it must break
+// and its pin are all the lock's.
+func (p *Proposal) PinAmending(amended []project.Statement) error {
 	if name, err := tla.ModuleName(p.ModuleText); err != nil || name != p.Module {
 		if err != nil && !strings.Contains(err.Error(), "no MODULE header") {
 			return fmt.Errorf("%s.tla: %w", p.Module, err)
@@ -286,6 +316,21 @@ func (p *Proposal) Pin() error {
 			return fmt.Errorf("statement %s: %w", s.Name, err)
 		}
 		p.Statements[i].SHA256 = h
+	}
+	carried := map[string]project.Statement{}
+	for _, s := range amended {
+		if s.Kind == project.Bug && s.CodeBehavior == "" {
+			carried[s.Name] = s
+		}
+	}
+	for _, s := range p.Statements {
+		if s.Kind != project.Bug || s.CodeBehavior != "" || carried[s.Name] == s {
+			continue
+		}
+		if len(amended) > 0 {
+			return fmt.Errorf("statement %s: an amendment must classify each bug it adds or changes with code_behavior current or hypothetical", s.Name)
+		}
+		return fmt.Errorf("statement %s: a new proposal must classify each bug with code_behavior current or hypothetical", s.Name)
 	}
 	p.Hash = project.ProposalHash(p.Bounds, p.Statements)
 	return nil
@@ -373,6 +418,66 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 	return writeFile(filepath.Join(dir, ".invariant/request.md"), request)
 }
 
+// stagedIn is the draft as the check stages it: itself, in the language the
+// caller says its project is written in. The gate decides from a project's
+// language whether a current bug has to be replayed against the code
+// (#910). The factory gives a draft its language, and the code it checks as
+// it is, after the check and from the issue (D-0040, D-0054). So what
+// proposal.json says of either counts for nothing here: a revision copied
+// from an earlier proposal carries the language that one was given, and a
+// draft checked as one project and built as another could be ratified with
+// a bug the gate can never replay. The draft itself is left as it was.
+func (p *Proposal) stagedIn(language string) *Proposal {
+	staged := *p
+	staged.Language, staged.Existing = language, nil
+	return &staged
+}
+
+// replayPrepared refuses a draft whose current bug the gate could never
+// replay as the draft stands: the path's check couldn't say which action
+// each step of TLC's counterexample is. The statements aren't pinned yet,
+// so the model can still be rewritten. Left alone, the build's gate would
+// find it after a person had ratified them. Every such bug is named, with
+// the check's reason and what that reason asks of the drafter. Only a bug
+// that breaks a property stands unprepared: the replay contract reads an
+// invariant's counterexample, a path of finitely many steps, and not yet a
+// property's, which is a behavior. No rewrite of the model changes that,
+// and the bug's proposal says so. A specification the path's check can't
+// read is given the same code as that one, and is the drafter's to fix.
+func replayPrepared(r *verify.Report) error {
+	var refused []string
+	for _, b := range r.Bugs {
+		e := b.Replay
+		if e == nil || !e.Required || e.Request != nil || b.Outcome == string(tlc.PropertyViolated) {
+			continue
+		}
+		refused = append(refused, fmt.Sprintf("bug %s is current, so the gate has to replay TLC's counterexample against the code step by step, and it can't prepare that path: %s. %s",
+			b.Name, e.Message, replayAdvice(e.Message)))
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(refused, "\n"))
+}
+
+// replayAdvice is what a drafter does about the reason a path couldn't be
+// prepared, by the class the path's check gives the reason. A reason with
+// no class of its own may name something in the model, as a Next that isn't
+// a disjunction of named steps does, or nothing there, as TLC stalling
+// does. The advice for it covers both and blames neither.
+func replayAdvice(reason string) string {
+	switch class, _, _ := strings.Cut(reason, ":"); class {
+	case "replay-unsupported-action", "replay-ambiguous-edge":
+		return "Write the bug, and every action Next names, so that every choice is a parameter named in Next or in the bug's own definition, as in Bug == \\E x \\in S : BugStep(x), " +
+			"and guard the bug's operation so it's enabled only where no action of Next takes the same step"
+	case "replay-unsupported-model":
+		return "Change what that names in the model"
+	case "replay-unsupported-temporal":
+		return "Write the specification as Spec == Init /\\ [][Next]_vars, with fairness in fairness statements and nowhere else: a replay follows a path of Init and Next steps"
+	}
+	return "Change what the reason names in the model. If it names nothing there, the check itself failed: check again"
+}
+
 // Check stages the draft in ws as a project and runs the gate's model
 // checks on it: TLC, the witnesses and the known bugs.
 func Check(ctx context.Context, ws string, tc toolchain.Toolchain) (*Proposal, *verify.Report, error) {
@@ -395,7 +500,7 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 	if err := CheckStepDraft(ws, authority.ParentPlan); err != nil {
 		return nil, nil, err
 	}
-	p, err := Read(ws)
+	p, err := ReadAmending(ws, authority.Amended)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -411,21 +516,31 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 		return nil, nil, err
 	}
 	defer os.RemoveAll(dir)
-	if err := p.Write(dir, "", nil); err != nil {
+	if err := p.stagedIn(authority.Language).Write(dir, "", nil); err != nil {
 		return nil, nil, err
 	}
 	r, err := verify.RunModel(ctx, dir, tc)
 	if err != nil || r == nil || !r.Passed {
 		return p, r, err
 	}
+	// A draft has few checks, so one check says everything it finds: a
+	// replay path that couldn't be prepared says nothing of the view, which
+	// is checked whether or not the path was.
+	refused := replayPrepared(r)
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
-	if err == nil {
+	if err == nil && refused == nil {
 		err = p.computeComparison(ctx, ws, tc, authority, memo)
+	}
+	if refused != nil {
+		// A refused draft keeps no reader. A reader is how a revision
+		// tells the draft a person was last shown, which it's compared
+		// with, from one that failed its checks.
+		p.Reader = nil
 	}
 	if err == nil {
 		err = ctx.Err()
 	}
-	return p, r, err
+	return p, r, errors.Join(refused, err)
 }
 
 // Pinned is the part of the module a person ratifies: the statements and

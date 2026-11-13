@@ -879,6 +879,12 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .stmts li { font-size: 13.5px; color: var(--ink2); display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; }
 .stmts li .k { font: 600 10.5px/1.9 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink3); }
 .stmts li b { color: var(--ink); font-weight: 500; font-family: var(--mono); font-size: 12.5px; margin-right: 6px; }
+/* What a bug's statement says of the code (#857), set off from its words.
+   One an amendment changes takes the color of what waits on a person. */
+.stmts li .cb { display: block; margin-top: 2px; font: 500 11.5px/1.6 var(--mono); color: var(--ink3); }
+.stmts li .cb.changed { color: var(--people-ink); }
+.stmts li .cb em { font-style: normal; font-weight: 600; }
+.need .ask.relaxed b.same, .batch .ask.relaxed b.same, .need .ask.unreplayed b.same, .batch .ask.unreplayed b.same { color: var(--people-ink); }
 
 /* ---------- The fleet ---------- */
 .fleet { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }

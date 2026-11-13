@@ -728,8 +728,12 @@
     },
     bugCard(b) {
       const card = $("#bugcard");
-      card.innerHTML = `<div class="k">Planted bug · caught</div><div class="t">${esc(b.label)}</div><div class="d">${esc(b.says)}</div>
-        <div class="c">After ${b.steps} steps, <code>${esc(b.action)}</code> breaks <b>${esc(b.violated)}</b>. TLC finds that step, so the gate refuses any code that could take it.</div>`;
+      const projects = state ? models(state).find((m) => m.key === this.key)?.projects || [] : [];
+      const replay = projects.flatMap((p) => p.bugs.filter((bug) => bug.name === b.name)
+        .map((bug) => `${p.repo ? p.repo + " · " : ""}${p.language} · ${p.dir}: ${bug.replay_status?.label || "not replayed: not classified"}`));
+      card.innerHTML = `<div class="k">Model bug · caught</div><div class="t">${esc(b.label)}</div><div class="d">${esc(b.says)}</div>
+        <div class="c">After ${b.steps} steps, <code>${esc(b.action)}</code> breaks <b>${esc(b.violated)}</b> in the model.</div>
+        <div class="c">${replay.length ? replay.map(esc).join("<br>") : "No code replay evidence is available."}</div>`;
       card.classList.add("show");
     },
     escapePoint(i) {
@@ -940,6 +944,7 @@
     const cur = ms.find((m) => m.key === currentModel);
     if (cur.meta.graph && cosmos.key !== currentModel) cosmos.show(currentModel, cur.meta);
     else if (!cur.meta.graph) $("#caption").innerHTML = `<div class="t">${esc(cap(cur.meta.name))}</div><div class="m">TLC is drawing this state graph…</div>`;
+    if (cosmos.key === currentModel && cosmos.bug?.b && $("#bugcard").classList.contains("show")) cosmos.bugCard(cosmos.bug.b);
   }
   function selectModel(key) {
     currentModel = key;
@@ -1106,6 +1111,10 @@
   // Whether a passing check was sampled and the assurance doesn't say so, as
   // a proved project's doesn't: then it's said beside the result.
   const sampledBeside = (p) => !/sampled/.test(p.assurance || "") && !!p.coverage?.some((c) => c.checked && c.sampled);
+  function bugReplayLabel(p) {
+    return [...new Set(p.bugs.map((b) => b.replay_status?.label || "not replayed: not classified"))].join("; ");
+  }
+
   function codeEvidence(p) {
     if (p.coverage?.length) {
       const lead = p.assurance === "proved" ? `${p.verified} function${p.verified === 1 ? "" : "s"} proved`
@@ -1183,7 +1192,7 @@
         const href = q.reader ? q.reader.page : "";
         const pass = sampledBeside(q) ? "passed (sampled)" : "passed";
         const inner = `<span class="lang ${esc(q.language)}">${esc(variant(q))}</span><span class="assure ${assure}">${esc(label)}</span>${q.receiptMissing ? "" : `<span class="ev">${esc(codeEvidence(q))}</span>${same(tally) ? "" : `<span class="ev">${esc(tally(q))} bugs</span>`}<span class="${q.passed ? "ok" : "bad"}">${q.passed ? pass : "failed"}</span>`}`;
-        return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}${comparisonDiagnostic(q)}</li>`;
+        return `<li>${href ? `<a class="impl" href="${esc(href)}" title="${esc(tip)}">${inner}</a>` : `<span class="impl" title="${esc(tip)}">${inner}</span>`}${q.receiptMissing || !q.bugs.length ? "" : `<span class="ev">Bug replay: ${esc(bugReplayLabel(q))}</span>`}${comparisonDiagnostic(q)}</li>`;
       }).join("");
       return `${head}<article class="model${quiet(p.repo)}" ${tag(p.repo)}>
         ${tile(p, title)}
@@ -1899,9 +1908,41 @@
       const titles = w.issuePlan.issues || [];
       return `<p class="ask">A plan for ${name}: <strong>${titles.length}</strong> issue${titles.length === 1 ? "" : "s"}, in order. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.issuePlan.summary)}</p><ol class="planned">${titles.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>`;
     }
-    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
-    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>`;
+    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>${unreplayedText(w)}`;
+    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>${unreplayedText(w)}${relaxedText(w, repo)}`;
   }
+  // A bug a proposal calls current is one the gate has to replay against
+  // the code. Until the gate can run a replay, a build of such a proposal
+  // stops there, and a person should know before ratifying it (#857).
+  function unreplayedText(w) {
+    const names = w.unreplayed || [];
+    if (!names.length) return "";
+    const one = names.length === 1;
+    return `<p class="ask unreplayed"><b class="same">This can't be built yet.</b> It calls ${names.map((name) => `<strong>${esc(name)}</strong>`).join(", ")} current, so the gate has to replay ${one ? "it" : "each"} against the code, and the gate can't run a replay yet. A build would stop there.</p>`;
+  }
+  // A bug the lock being amended calls current is one the gate has to show
+  // in the code, by replaying it. An amendment that calls it something
+  // else, or leaves it out, ends that, and nothing else on the card would
+  // say so before the statements are opened (#857).
+  function relaxedText(w, repo) {
+    const names = w.relaxed || [];
+    if (!names.length) return "";
+    const list = names.map((name) => `<strong>${esc(name)}</strong>`).join(", ");
+    const replayed = w.replays ? `, and the gate has to show that by replaying ${names.length === 1 ? "it" : "each"} against the code` : "";
+    return `<p class="ask relaxed"><b class="same">${names.length === 1 ? "One bug is" : `${names.length} bugs are`} no longer called current.</b> What ${esc(amendsRef(repo, w.amends))} ratified says the code has ${list} today${replayed}. This amendment doesn't say so.</p>`;
+  }
+  // behaviorText is what a bug's statement says of the code (#857), in the
+  // words the proposal's comment and the receipt use, and what the lock
+  // being amended said when that's something else.
+  // The gate replays a current bug only where a driver checks the code.
+  const BEHAVIOR = {
+    current: (w) => (w.replays ? "The code has this bug today, so the gate has to replay it against the code." : "The code has this bug today."),
+    hypothetical: () => "A mistake the model has to catch. Nothing says the code has it.",
+    "not classified": () => "A lock from before bugs were classified. It's caught in the model, and not replayed against the code.",
+  };
+  const behaviorText = (st, w) => (st.behavior
+    ? `<span class="cb${st.was ? " changed" : ""}" title="${esc(BEHAVIOR[st.behavior]?.(w) || "")}">Code behavior: ${esc(st.behavior)}${st.was ? ` <em>(was ${esc(st.was)})</em>` : ""}</span>`
+    : "");
   // The same disclosure serves both pages. Keep the node on ordinary inbox
   // refreshes, including its open files, loading state and explicit retry.
   const planSources = new Map();
@@ -2064,7 +2105,7 @@
   // said is what a proposal's statements, or a plan's tests, say. A plan of
   // issues has none: its card lists the issues.
   const said = (w) => (w.statements || []).length
-    ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>`
+    ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}${behaviorText(st, w)}</span></li>`).join("")}</ul></details>`
     : "";
   const savedDraftLink = (w) => w.savedDraft && !w.savedDraft.problem
     ? `<p class="reader-note"><a href="${esc(w.savedDraft.locator)}">Complete saved draft and exact result.json</a></p>` : "";
@@ -2532,7 +2573,7 @@
       const who = p.ratified ? `@${esc(p.ratified.by)} on ${esc(ref(p.repo, p.ratified.issue))}` : esc(p.decision || "by hand");
       return `<tr class="${quiet(p.repo)}" ${tag(p.repo)} data-model="${esc(p.model)}"><td class="name">${esc(cap(p.name))}<div class="repo">${p.repo !== s.repo ? esc(short(p.repo)) + " · " : ""}${esc(p.dir)}</div></td>
         <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc([p.assurance, sampledBeside(p) && "tested (sampled)", p.coverage?.length && coverageShares(p)].filter(Boolean).join(" · "))}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
-        <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
+        <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}<div class="ev">${esc(bugReplayLabel(p))}</div>`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
   }

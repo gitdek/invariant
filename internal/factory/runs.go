@@ -188,7 +188,7 @@ func (c Clone) Save(ctx context.Context, dir, message, parent string) (string, e
 	index := filepath.Join(c.Dir, ".git", "invariant-save-index")
 	defer os.Remove(index)
 	env := []string{"GIT_INDEX_FILE=" + index, "GIT_WORK_TREE=" + dir}
-	if _, err := runEnv(ctx, c.Dir, env, "git", "add", "--all", "--force", "."); err != nil {
+	if _, err := runEnv(ctx, c.Dir, env, "git", "--literal-pathspecs", "add", "--all", "--force", "--", "."); err != nil {
 		return "", err
 	}
 	tree, err := runEnv(ctx, c.Dir, env, "git", "write-tree")
@@ -227,7 +227,7 @@ func (c Clone) Holds(ctx context.Context, ref, commit string) (bool, error) {
 // "" when none did: a plan's ratification, which records it (#271).
 func (c Clone) FirstCommit(ctx context.Context, base, head, path string) (string, error) {
 	defer c.lock()()
-	out, err := c.git(ctx, "rev-list", "--reverse", base+".."+head, "--", path)
+	out, err := c.git(ctx, "--literal-pathspecs", "rev-list", "--reverse", base+".."+head, "--", path)
 	if err != nil {
 		return "", err
 	}
