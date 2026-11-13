@@ -164,6 +164,15 @@ func (s *PythonApplicationSession) Close() error {
 	return os.RemoveAll(s.runtime)
 }
 
+// Explicit conformance runs the selected source, already matched to its
+// script argument. Legacy and test startup keep the manifest driver.
+func (s *PythonApplicationSession) driverPath(key PythonApplicationInvocationKey) string {
+	if !s.legacy && key.Kind == "conformance" {
+		return s.declarations[key.Check].Source
+	}
+	return s.driver
+}
+
 func PreparePythonApplicationSession(ctx context.Context, p *project.Project, dst string, options PythonApplicationSessionOptions) (*PythonApplicationSession, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -291,14 +300,6 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 	for _, c := range inv.Provenance.Declarations {
 		decls[c.ID] = c
 	}
-	dir, err := filepath.Abs(p.Dir)
-	if err != nil {
-		return nil, err
-	}
-	driver, err := filepath.Rel(root, filepath.Join(dir, p.Manifest.Conformance))
-	if err != nil {
-		return nil, err
-	}
 	var out []PythonApplicationInvocation
 	for _, check := range inv.Checks {
 		var target project.Component
@@ -369,8 +370,8 @@ func pythonApplicationInvocations(p *project.Project, root string, inv *project.
 					}
 				}
 				info, e := os.Stat(current)
-				if e != nil || !info.Mode().IsRegular() || current != filepath.Join(root, driver) || current != filepath.Join(root, filepath.FromSlash(decls[v.Check].Source)) {
-					return nil, fmt.Errorf("conformance driver does not match manifest and selected source")
+				if e != nil || !info.Mode().IsRegular() || current != filepath.Join(root, filepath.FromSlash(decls[v.Check].Source)) {
+					return nil, fmt.Errorf("conformance driver does not match selected source")
 				}
 				sampling = map[string]string{"runs": "1000", "steps": "40", "seed": "1"}
 				for k, value := range v.Sampling {

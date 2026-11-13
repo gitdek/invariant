@@ -1808,8 +1808,13 @@
   // What has waited on a person for more than two days isn't today's work.
   // Needs you folds it under a line of its own, and the headline and the
   // Show choices count what's new.
+  // A card's wait counts from the factory's post, or from when its pull
+  // request last changed if that's later. A gate that has passed since, a
+  // push, or a conflict that's gone is news however old the post is: a card
+  // that became ready to merge once sat in the fold for half a day (#902).
   const STALLED_AFTER = 2 * 24 * 3600 * 1000;
-  const stalled = (i) => Date.now() - new Date(i.waiting.since).getTime() > STALLED_AFTER;
+  const waitingSince = (i) => Math.max(new Date(i.waiting.since).getTime(), i.waiting.now?.changed ? new Date(i.waiting.now.changed).getTime() : 0);
+  const stalled = (i) => Date.now() - waitingSince(i) > STALLED_AFTER;
   let stalledOpen = false;
   // The lede names the repositories in view: every one, or the one chosen
   // (#848). /act has words of its own.
@@ -2015,6 +2020,13 @@
   // pullGood is a pull request a person can merge as it stands: open, ready
   // for review, mergeable, and past CI's gate on its head.
   const pullGood = (w) => !!w.now && w.now.state === "open" && !w.now.draft && !w.now.conflicts && !w.now.unsettled && w.now.gate === "passed";
+  // pullPassed is a pull request nothing keeps from merging but a retry:
+  // open, mergeable and past CI's gate on its head, a draft or not, since
+  // the factory marks a draft ready when a retry has it watch one.
+  const pullPassed = (w) => !!w.now && w.now.state === "open" && !w.now.conflicts && !w.now.unsettled && w.now.gate === "passed";
+  // stoppedThen dates what the rest of a card says, where a line above it
+  // says what the pull request is now: the two can disagree, and did (#902).
+  const stoppedThen = (w) => (w.now && w.pr ? `When the factory stopped, <span data-since="${esc(w.since)}"></span> ago: ` : "");
   function nowText(w, repo) {
     const p = w.now;
     if (!p || !w.pr) return "";
@@ -2042,7 +2054,7 @@
   // make, offers: a retry, a draft again, or both, the main one first. A
   // retry's label says what it does, as the server says it (#263).
   const fixes = (w) => (w.takes || []).filter((v) => v === "retry" || v === "revise")
-    .map((v) => (v === "retry" ? [w.retry?.label || "Retry", "/invariant retry"] : ["Draft again", "/invariant revise"]));
+    .map((v) => (v === "retry" ? [(pullPassed(w) && w.retry?.labelPassed) || w.retry?.label || "Retry", "/invariant retry"] : ["Draft again", "/invariant revise"]));
   // retryText is what the retry a card offers leads to: building the
   // ratified proposal again, building a plan's failed draft again in a new
   // pull request that replaces it (#271), or watching its pull request again
@@ -2083,7 +2095,7 @@
         <div class="cmds">${takes(w, "revise") ? cmd("/invariant revise", true) : ""}${open}</div>`;
     } else {
       cls = "failed";
-      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}
+      body = `${nowText(w, repo)}<p class="ask">${stoppedThen(w)}${why(w, repo)}</p>${retryText(w)}
         <div class="cmds">${review(w, repo)}${fixes(w).map(([label, c], i) => cmd(c, i === 0 && retryLeads(w), c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
     }
     return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)} data-issue="${esc(issueKey(is))}"><div>${needGlyph(w.kind)}</div><div>
@@ -2189,7 +2201,7 @@
       actions = takes(w, "revise") ? ask("Draft again", "/invariant revise", true) : "";
     } else {
       cls = "failed";
-      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}`;
+      body = `${nowText(w, repo)}<p class="ask">${stoppedThen(w)}${why(w, repo)}</p>${retryText(w)}`;
       actions = review(w, repo) + fixes(w).map(([label, c], i) => ask(label, c, i === 0 && retryLeads(w))).join("");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
@@ -2361,8 +2373,15 @@
   const untaken = (() => {
     const box = $("#untaken");
     const key = (u) => `${u.repo}#${u.number}`;
-    let list = [], asked = "", busy = "", seen = "";
+    let list = [], asked = "", busy = "", seen = "", waitsOpen = false;
     const posted = {}, error = {};
+    // What handing an issue over does, by the command the server says hands
+    // it over: solve for one change, plan for a PRD (#900).
+    const HAND = {
+      solve: { label: "Hand to the factory", ask: "Have the factory draft this change for you to ratify, as you?", done: "The factory takes it on its next poll, and drafts it when an agent is free." },
+      plan: { label: "Plan it", ask: "Have the factory read this as a PRD and draft a plan of issues for it, as you?", done: "The factory drafts a plan of issues within 30 seconds." },
+    };
+    const hand = (u) => (HAND[u.hand] ? u.hand : "plan");
     async function refresh() {
       if (!box || !ACT) return;
       try {
@@ -2378,10 +2397,13 @@
       paint();
     }
     function card(u) {
-      const k = key(u), p = posted[k];
-      let row = `<div class="cmds"><button class="cmd act primary" type="button" data-untaken-ask="${esc(k)}">Plan it</button><a class="gh" href="${esc(u.url)}" target="_blank" rel="noopener">Open on GitHub ↗</a></div>`;
-      if (asked === k) row = `<div class="confirm"><span>Have the factory read this as a PRD and draft a plan of issues for it, as you?</span><button class="cmd act primary" type="button" data-untaken-post="${esc(k)}"${busy ? " disabled" : ""}>Yes, post it</button><button class="cmd" type="button" data-untaken-cancel>Cancel</button></div>`;
-      if (p) row = `<p class="posted">✓ Posted <a href="${esc(p.url)}" target="_blank" rel="noopener">/invariant plan on GitHub</a> as you. The factory drafts a plan of issues within 30 seconds.</p>`;
+      const k = key(u), p = posted[k], h = HAND[hand(u)];
+      const open = `<a class="gh" href="${esc(u.url)}" target="_blank" rel="noopener">Open on GitHub ↗</a>`;
+      let row = `<div class="cmds"><button class="cmd act primary" type="button" data-untaken-ask="${esc(k)}">${h.label}</button>${open}</div>`;
+      // An issue that says it waits shows why, and offers no command.
+      if (u.waits && !p) row = `<p class="ask"><b>Waits</b>${esc(u.waits)}</p><div class="cmds">${open}</div>`;
+      else if (asked === k) row = `<div class="confirm"><span>${h.ask}</span><button class="cmd act primary" type="button" data-untaken-post="${esc(k)}"${busy ? " disabled" : ""}>Yes, post it</button><button class="cmd" type="button" data-untaken-cancel>Cancel</button></div>`;
+      if (p) row = `<p class="posted">✓ Posted <a href="${esc(p.url)}" target="_blank" rel="noopener">/invariant ${esc(p.hand)} on GitHub</a> as you. ${HAND[p.hand].done}</p>`;
       if (error[k]) row += `<p class="acterr">${esc(error[k])}</p>`;
       return `<article class="need plan${quiet(u.repo)}" ${tag(u.repo)} data-issue="${esc(k)}"><div>${needGlyph("plan")}</div><div>
         <div class="need-top"><span class="ref">${esc(ref(u.repo, u.number))}</span><span class="title">${esc(u.title)}</span><span class="since">opened <span data-since="${esc(u.opened)}"></span></span></div>${row}</div></article>`;
@@ -2391,7 +2413,12 @@
       // A posted issue stays where it was, newest first, once the list drops it.
       const items = [...list.filter((u) => !posted[key(u)]), ...Object.values(posted).map((p) => p.u)].filter((u) => inScope(u.repo))
         .sort((a, b) => (a.repo === b.repo ? b.number - a.number : 0));
-      box.innerHTML = items.length ? `<div class="untaken"><h3>Not the factory's yet</h3><p class="lede">Open issues a writer opened that the factory hasn't taken. Plan one, and the factory reads it as a PRD and drafts the issues that carry it out, for you to ratify.</p>${items.map(card).join("")}</div>` : "";
+      // What's ready comes first. What says it waits folds under one line,
+      // as what has waited long does in Needs you.
+      const ready = items.filter((u) => !u.waits || posted[key(u)]), waits = items.filter((u) => u.waits && !posted[key(u)]);
+      const folded = waits.length ? `<details class="stalled waits"${waitsOpen ? " open" : ""}><summary>${waits.length === 1 ? "1 waits, and says why" : `${waits.length} wait, and say why`}</summary>${waits.map(card).join("")}</details>` : "";
+      box.innerHTML = items.length ? `<div class="untaken"><h3>Not the factory's yet</h3><p class="lede">Open issues a writer opened that the factory hasn't taken. Hand one over, and the factory drafts its change for you to ratify. One that names no Kind, Project or Code is planned as a PRD instead: the factory drafts the issues that carry it out. One that waits says why, in a <code>Waits:</code> line of its text.</p>${ready.map(card).join("")}${folded}</div>` : "";
+      box.querySelector("details.waits")?.addEventListener("toggle", (e) => { waitsOpen = e.currentTarget.open; });
       tick();
     }
     box?.addEventListener("click", async (e) => {
@@ -2409,9 +2436,9 @@
         paint();
         try {
           const r = await actFetch("/act/api/comment", { method: "POST", headers: { "Content-Type": "application/json", "X-Invariant": "act" },
-            body: JSON.stringify({ repo: u.repo, issue: u.number, body: "/invariant plan" }) });
+            body: JSON.stringify({ repo: u.repo, issue: u.number, body: `/invariant ${hand(u)}` }) });
           if (!r.ok) throw new Error((await r.text()).trim() || `HTTP ${r.status}`);
-          posted[k] = { u, url: (await r.json()).url || u.url };
+          posted[k] = { u, hand: hand(u), url: (await r.json()).url || u.url };
           asked = "";
         } catch (err) {
           error[k] = `Not posted: ${err.message}`;

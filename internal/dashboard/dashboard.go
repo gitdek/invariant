@@ -70,7 +70,7 @@ type Server struct {
 	pending       chan graphJob
 	live          live
 	acted         acted     // the snapshot as last read, and the commands posted since, which it's served with
-	untaken       []Untaken // what /act offers to plan, as the latest refresh read it
+	untaken       []Untaken // what /act offers to hand to the factory, as the latest refresh read it
 	// planned is each issue /act planned, by repo#n, and when: a refresh
 	// that read GitHub before the post leaves it out for a while (#201).
 	planned map[string]time.Time
@@ -575,8 +575,7 @@ func (s *Server) refresh(ctx context.Context) error {
 	var untaken []Untaken
 	for _, r := range s.Repos {
 		for _, is := range r.src.untaken {
-			opened, _ := time.Parse(time.RFC3339, is.CreatedAt)
-			untaken = append(untaken, Untaken{Repo: r.Name, Number: is.Number, Title: is.Title, Opened: opened, URL: is.URL})
+			untaken = append(untaken, untakenOf(r.Name, is))
 		}
 	}
 	s.mu.Lock()
@@ -1112,6 +1111,7 @@ func (s *Server) readPulls(ctx context.Context, r *Repo) {
 			continue
 		}
 		p := PullNow{State: pr.State, Draft: pr.Draft}
+		changed := pr.UpdatedAt
 		switch {
 		case pr.Merged:
 			p = PullNow{State: "merged"}
@@ -1128,10 +1128,33 @@ func (s *Server) readPulls(ctx context.Context, r *Repo) {
 				continue
 			}
 			p.Gate = gateNow(runs)
+			for _, run := range runs {
+				changed = later(changed, later(run.StartedAt, run.CompletedAt))
+			}
+		}
+		if at, err := time.Parse(time.RFC3339, changed); err == nil {
+			p.Changed = &at
 		}
 		read[l.Waiting.PR] = p
 	}
 	r.src.pulls = read
+}
+
+// later is the later of two times as GitHub writes them. One that's empty
+// or isn't a time is never the later.
+func later(a, b string) string {
+	at, errA := time.Parse(time.RFC3339, a)
+	bt, errB := time.Parse(time.RFC3339, b)
+	switch {
+	case errA != nil:
+		if errB != nil {
+			return ""
+		}
+		return b
+	case errB != nil || !bt.After(at):
+		return a
+	}
+	return b
 }
 
 // gateNow says how CI's gate stands on a head from its check runs there: a

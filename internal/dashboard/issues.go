@@ -140,6 +140,12 @@ type PullNow struct {
 	// Gate is how CI's gate went on its head: passed, failed, running, or
 	// empty when none has run there.
 	Gate string `json:"gate,omitempty"`
+	// Changed is when what this says last changed, as far as GitHub tells:
+	// the later of the pull request's last update and the latest start or
+	// end of its gate's runs on its head. A card whose pull request has
+	// changed since the factory's post has waited only since then, so one
+	// whose gate has passed since isn't folded away as old (#902).
+	Changed *time.Time `json:"changed,omitempty"`
 }
 
 // RetryCopy is what a card says of its retry, as plain text both pages
@@ -147,7 +153,12 @@ type PullNow struct {
 // the retry leads to, and what the page says once GitHub takes it. The
 // command it posts is /invariant retry all the same.
 type RetryCopy struct {
-	Label        string `json:"label"`
+	Label string `json:"label"`
+	// LabelPassed is the label once CI's gate has passed on the pull
+	// request's head and nothing keeps it from merging, so the button
+	// doesn't speak of a gate still to pass (#902). It's empty where the
+	// retry doesn't wait on the gate.
+	LabelPassed  string `json:"labelPassed,omitempty"`
 	Confirmation string `json:"confirmation"`
 	Guidance     string `json:"guidance"`
 	Posted       string `json:"posted"`
@@ -590,12 +601,14 @@ func retryCopy(m factory.Marker) *RetryCopy {
 	r := &RetryCopy{}
 	if trusted {
 		r.Label = fmt.Sprintf("Have a person merge #%d once CI passes", pr)
+		r.LabelPassed = fmt.Sprintf("Have a person merge #%d", pr)
 		r.Confirmation = fmt.Sprintf("Have the factory watch #%d again until CI's gate passes on its current head, as you? A person merges #%d because it changes the trusted base. It won't review #%d again.", pr, pr, pr)
 		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again until CI's gate passes on its current head. It changes the trusted base, so a person merges it: the factory won't mark it ready or merge it.", pr)
 		r.Posted = fmt.Sprintf("Asked for a retry. The factory watches #%d again until CI's gate passes on its current head, then waits for a person to merge it. It won't review #%d again.", pr, pr)
 	} else {
 		const exception = " If it changes the trusted base, a person merges it."
 		r.Label = fmt.Sprintf("Merge #%d once CI passes", pr)
+		r.LabelPassed = fmt.Sprintf("Merge #%d", pr)
 		r.Confirmation = fmt.Sprintf("Have the factory merge #%d once CI's gate passes on its current head, as you? It won't review #%d again.", pr, pr) + exception
 		r.Guidance = fmt.Sprintf("Retrying has the factory watch #%d again. Once CI's gate passes on its current head, and it's in scope with its ratified lock, the factory marks it ready, if it's a draft, once GitHub says it can merge it, and merges it.", pr) + exception
 		r.Posted = fmt.Sprintf("Asked for a retry. The factory watches #%d again, then marks it ready and merges it once CI's gate passes on its current head. It won't review #%d again.", pr, pr) + exception
