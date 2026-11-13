@@ -1,7 +1,0 @@
-{
-  "name": "two-phase commit (TypeScript)",
-  "module": ".invariant/specs/TwoPhase.tla",
-  "code": "src",
-  "language": "typescript",
-  "conformance": "conformance.ts"
-}
