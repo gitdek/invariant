@@ -147,16 +147,18 @@ type Witness struct {
 // Bug shows the invariants catch a ratified bug: with the bug's action added
 // to Next, TLC must find the expected invariant violated.
 type Bug struct {
-	Name     string `json:"name"`  // the bug's TLA+ action
-	Label    string `json:"label"` // the same name in kebab case, for files and receipts
-	Says     string `json:"says"`
-	Expect   string `json:"expect"`
-	Caught   bool   `json:"caught"`
-	Outcome  string `json:"outcome"`
-	Violated string `json:"violated,omitempty"`
-	Steps    int    `json:"steps,omitempty"`
-	Trace    string `json:"trace,omitempty"` // file under traces/, when written
-	Message  string `json:"message,omitempty"`
+	Name         string             `json:"name"`  // the bug's TLA+ action
+	Label        string             `json:"label"` // the same name in kebab case, for files and receipts
+	Says         string             `json:"says"`
+	Expect       string             `json:"expect"`
+	Caught       bool               `json:"caught"`
+	Outcome      string             `json:"outcome"`
+	Violated     string             `json:"violated,omitempty"`
+	Steps        int                `json:"steps,omitempty"`
+	Trace        string             `json:"trace,omitempty"` // file under traces/, when written
+	Message      string             `json:"message,omitempty"`
+	CodeBehavior string             `json:"code_behavior,omitempty"`
+	Replay       *BugReplayEvidence `json:"replay,omitempty"`
 }
 
 // Agreement compares the implementation's state space with the model's:
@@ -553,7 +555,10 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 
 	for i, b := range bugs {
 		spawn(func() error {
-			out := Bug{Name: b.Name, Label: kebab(b.Name), Says: b.Says, Expect: b.Expect}
+			out := Bug{Name: b.Name, Label: kebab(b.Name), Says: b.Says, Expect: b.Expect, CodeBehavior: b.CodeBehavior}
+			if driverBugReplay(p, b) {
+				out.Replay = &BugReplayEvidence{Required: true, Status: "replay-unavailable", Message: "No checked counterexample is available."}
+			}
 			defer func() { r.Bugs[i] = out }()
 			if isProperty[b.Expect] {
 				return checkPropertyBug(ctx, &out, b, work, outDir, p, src, runner, cfg, unfairSpec)
@@ -571,6 +576,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 				return err
 			}
 			out.Outcome, out.Violated = string(res.Outcome), res.Invariant
+			prepareBugReplay(ctx, &out, b, p, modelDir, runner, cfg, res, project.Invariant)
 			if res.Outcome == tlc.Violated && res.Invariant == b.Expect {
 				out.Caught, out.Steps = true, len(res.Trace)-1
 			} else {
@@ -738,7 +744,8 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	if r.Code != nil {
 		r.Passed = r.Passed && r.Code.Passed
 	}
-	r.Passed = r.Passed && modelPassed(r)
+	replaysOK := activateBugReplays(r)
+	r.Passed = r.Passed && modelPassed(r) && replaysOK
 	if larger != nil && (largerTLC != nil || largerError != "") {
 		r.Larger = compareLarger(larger, largerTLC, largerCode, largerError)
 		// Code split from its environment must agree one size larger too,
@@ -852,6 +859,7 @@ func Fingerprint(r Report) string {
 	r.Bugs = append([]Bug(nil), r.Bugs...)
 	for i := range r.Bugs {
 		r.Bugs[i].Trace = ""
+		r.Bugs[i].Replay = portableBugReplay(r.Bugs[i].Replay)
 	}
 	r.Properties = append([]Property(nil), r.Properties...)
 	for i := range r.Properties {

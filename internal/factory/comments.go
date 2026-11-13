@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -126,6 +127,69 @@ func thenWhat(p *formalize.Proposal, verb string) string {
 	return "I'll " + verb + " " + formalize.Languages[p.Manifest().Language]
 }
 
+// Unreplayed names the bugs a proposal calls current that the gate would
+// have to replay against the code and can't yet (#857). A build of such a
+// proposal stops at the gate, so the person ratifying it is told first.
+func Unreplayed(p *formalize.Proposal) []string {
+	if verify.BugReplayExecutes {
+		return nil
+	}
+	var names []string
+	language := p.Manifest().Language
+	for _, s := range p.Statements {
+		if verify.RequiresBugReplay(language, s) {
+			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
+func unbuildable(p *formalize.Proposal) string {
+	names := Unreplayed(p)
+	if len(names) == 0 {
+		return ""
+	}
+	it, bug, them := "each", "those bugs", "them"
+	if len(names) == 1 {
+		it, bug, them = "it", "that bug", "it"
+	}
+	note := fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and the gate can't run a replay yet. "+
+		"A build would stop there, at `replay-unavailable`.", list(names), it)
+	// A bug that must break a property has a counterexample that never
+	// ends, which no replay can run: waiting for replays doesn't help it.
+	kinds := map[string]string{}
+	for _, s := range p.Statements {
+		kinds[s.Name] = s.Kind
+	}
+	var endless []string
+	for _, s := range p.Statements {
+		if slices.Contains(names, s.Name) && kinds[s.Expect] == project.Property {
+			endless = append(endless, s.Name)
+		}
+	}
+	if len(endless) < len(names) {
+		note += fmt.Sprintf(" Ratify it once replays run, or have it drafted again with %s as hypothetical if nothing shows the code has %s.", bug, them)
+	}
+	if len(endless) > 0 {
+		must := "must each break a property"
+		if len(endless) == 1 {
+			must = "must break a property"
+		}
+		note += fmt.Sprintf(" %s %s, and a counterexample that never ends isn't one a replay can run, now or once replays run.", list(endless), must)
+	}
+	return note
+}
+
+func bugClassification(s project.Statement) string {
+	if s.Kind != project.Bug {
+		return ""
+	}
+	if s.CodeBehavior == "" {
+		return " Code behavior: not classified."
+	}
+	return " Code behavior: " + tableLiteral(s.CodeBehavior) + "."
+}
+
 func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's what I propose must always be true for **%s**. Once you ratify it, these statements are pinned by hash, and I can't change them. "+
@@ -136,10 +200,14 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 		if s.Expect != "" {
 			says += fmt.Sprintf(" It must break `%s`.", s.Expect)
 		}
+		says += bugClassification(s)
 		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", s.Name, s.Kind, says)
 	}
 	if r != nil {
 		fmt.Fprintf(&b, "\n**Already checked** against a draft model, within %s: %s\n", bounds(p.Bounds), checked(r))
+	}
+	if note := unbuildable(p); note != "" {
+		b.WriteString("\n" + note + "\n")
 	}
 	b.WriteString(readerComment(p))
 	if p.Reader != nil && p.Reader.Comparison != nil {
@@ -225,6 +293,29 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if len(assumed) > 0 {
 		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
 	}
+	// A bug the ratified lock calls current is one the code is said to
+	// have today, and where a driver checks the code the gate has to replay
+	// it. Calling it anything else ends both (#857).
+	var lowered []formalize.Change
+	for _, c := range ch.Of(formalize.Changed) {
+		if c.Old.Kind == project.Bug && c.Old.CodeBehavior == "current" && c.New.CodeBehavior != "current" {
+			lowered = append(lowered, c)
+		}
+	}
+	if len(lowered) > 0 {
+		that, one := "those bugs", "those"
+		if len(lowered) == 1 {
+			that, one = "that bug", "that one"
+		}
+		if verify.ReplaysBugs(p.Manifest().Language) {
+			fmt.Fprintf(&b, "**This stops calling %s current.** The gate has to replay a current bug against the code, and it would no longer replay %s.\n\n", names(lowered), one)
+		} else {
+			fmt.Fprintf(&b, "**This stops calling %s current.** Nothing would say any more that the code has %s today.\n\n", names(lowered), that)
+		}
+	}
+	if note := unbuildable(p); note != "" {
+		b.WriteString(note + "\n\n")
+	}
 	changed := len(ch.Of(formalize.Added)) + len(ch.Of(formalize.Changed)) + len(ch.Of(formalize.Removed))
 	if changed == 0 {
 		if p.Reader != nil && p.Reader.Comparison != nil && (p.Reader.Comparison.ModelChanged || p.Reader.Comparison.ViewChanged || p.Reader.Comparison.BoundsChanged) {
@@ -238,9 +329,13 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	for _, c := range ch.Statements {
 		switch c.How {
 		case formalize.Added:
-			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, tableLiteral(c.New.Says))
+			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, tableLiteral(c.New.Says)+bugClassification(*c.New))
 		case formalize.Changed:
 			says := tableLiteral(c.New.Says)
+			says += bugClassification(*c.New)
+			if c.Old.CodeBehavior != c.New.CodeBehavior {
+				says += " *(was:" + bugClassification(*c.Old) + ")*"
+			}
 			if c.Old.Says != c.New.Says {
 				says += " *(was: " + tableLiteral(c.Old.Says) + ")*"
 			}
@@ -250,7 +345,7 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", c.Name, how, says)
 		case formalize.Removed:
-			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, tableLiteral(c.Old.Says))
+			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, tableLiteral(c.Old.Says)+bugClassification(*c.Old))
 		}
 	}
 	if same := ch.Of(formalize.Unchanged); len(same) > 0 {

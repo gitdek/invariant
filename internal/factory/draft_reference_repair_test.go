@@ -230,8 +230,8 @@ Starve == /\ n > 0 /\ n' = n - 1
 	draft.Statements = append(draft.Statements,
 		project.Statement{Name: "Seen", Kind: project.Witness, Says: "An advance is reachable."},
 		project.Statement{Name: "Done", Kind: project.Witness, Says: "Completion is reachable."},
-		project.Statement{Name: "Overflow", Kind: project.Bug, Says: "An overflow breaks safety.", Expect: "Safe"},
-		project.Statement{Name: "Starve", Kind: project.Bug, Says: "Going backwards can prevent completion.", Expect: "Finish"},
+		project.Statement{Name: "Overflow", Kind: project.Bug, Says: "An overflow breaks safety.", Expect: "Safe", CodeBehavior: "hypothetical"},
+		project.Statement{Name: "Starve", Kind: project.Bug, Says: "Going backwards can prevent completion.", Expect: "Finish", CodeBehavior: "hypothetical"},
 		project.Statement{Name: "Finish", Kind: project.Property, Says: "Eventually finish."},
 		project.Statement{Name: "Repeat", Kind: project.Property, Says: "Always return to the start."},
 		project.Statement{Name: "FairAdvance", Kind: project.Fairness, Says: "Advances are weakly fair."},
@@ -315,16 +315,10 @@ Starve == /\ n > 0 /\ n' = n - 1
 					if len(broken.Proposal.Forks) > 0 {
 						f := broken.Proposal.Forks[0]
 						o := f.Options[0]
-						v := *o.Preview
-						v.Fingerprint = ""
-						o.Preview.Fingerprint = saved790Digest(reader603JSON(t, struct {
-							Fork     string            `json:"fork"`
-							Kind     string            `json:"kind,omitempty"`
-							Question string            `json:"question"`
-							Option   string            `json:"option"`
-							Says     string            `json:"says"`
-							Preview  formalize.Preview `json:"preview"`
-						}{f.ID, f.Kind, f.Question, o.ID, o.Says, v}))
+						var err error
+						if o.Preview.Fingerprint, err = f.PreviewFingerprint(o); err != nil {
+							t.Fatal(err)
+						}
 						if err := broken.Proposal.ValidatePreviewContext(*broken.CheckContext); err != nil {
 							t.Fatalf("fixture changed unrelated preview evidence: %v", err)
 						}

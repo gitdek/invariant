@@ -457,7 +457,7 @@ func bufferProposal(t *testing.T) *formalize.Proposal {
 			{Name: "WithinCap", Kind: project.Invariant, Says: "The buffer never holds more than its capacity."},
 			{Name: "TypeOK", Kind: project.Invariant, Says: "The buffer always holds a sequence of messages."},
 			{Name: "CanFill", Kind: project.Witness, Says: "The buffer can fill up."},
-			{Name: "PutWhenFull", Kind: project.Bug, Says: "A producer adds a message to a full buffer.", Expect: "WithinCap"},
+			{Name: "PutWhenFull", Kind: project.Bug, Says: "A producer adds a message to a full buffer.", Expect: "WithinCap", CodeBehavior: "hypothetical"},
 		},
 	}}
 	if err := p.Pin(); err != nil {

@@ -45,7 +45,7 @@ type Change struct {
 // it says, stayed the same, so it changed only through what it depends on.
 func (c Change) OwnTextSame() bool {
 	return c.Old != nil && c.New != nil && tla.Canonical(c.OldText) == tla.Canonical(c.NewText) &&
-		c.Old.Says == c.New.Says && c.Old.Kind == c.New.Kind && c.Old.Expect == c.New.Expect
+		c.Old.Says == c.New.Says && c.Old.Kind == c.New.Kind && c.Old.Expect == c.New.Expect && c.Old.CodeBehavior == c.New.CodeBehavior
 }
 
 const (
@@ -90,7 +90,7 @@ func Diff(c *Current, p *Proposal) *Changes {
 			ch.Old = &o
 			ch.OldText = before.text(s.Name)
 			ch.How = Unchanged
-			if o.SHA256 != s.SHA256 || o.Says != s.Says || o.Kind != s.Kind || o.Expect != s.Expect {
+			if o.SHA256 != s.SHA256 || o.Says != s.Says || o.Kind != s.Kind || o.Expect != s.Expect || o.CodeBehavior != s.CodeBehavior {
 				ch.How = Changed
 				ch.Through = changedUnder(before, after, s.Name)
 			}

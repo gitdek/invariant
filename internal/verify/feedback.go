@@ -65,6 +65,9 @@ func Feedback(r *Report) string {
 		}
 	}
 	for _, bug := range r.Bugs {
+		if bug.Replay != nil && bug.Replay.Required && !bug.Replay.Passed && !r.ModelOnly {
+			section("Bug replay "+bug.Name, bug.Replay.Status+". "+bug.Replay.Message)
+		}
 		if !bug.Caught {
 			section("Known bug "+bug.Name, fmt.Sprintf("It says: %s. With %s added to Next, TLC must find %s violated. Instead: %s.",
 				bug.Says, bug.Name, bug.Expect, bug.Message))
@@ -110,14 +113,30 @@ func Feedback(r *Report) string {
 	}
 	if len(failed) == 0 && r.ModelOnly {
 		return fmt.Sprintf("The model checks out. TLC explored %d states (depth %d) and found no invariant violated and no deadlock, "+
-			"every witness was reached,%s and every known bug was caught.", d.DistinctStates, d.Depth, properties) + tlcAttemptsFeedback(r.TLCAttempts)
+			"every witness was reached,%s and every known bug was caught.", d.DistinctStates, d.Depth, properties) + bugReplayFeedback(r) + tlcAttemptsFeedback(r.TLCAttempts)
 	}
 	if len(failed) == 0 {
 		return fmt.Sprintf("The gate passed. Every check passed: TLC explored %d states (depth %d), every witness was reached,%s "+
 			"every known bug was caught, the code-level evidence holds (%s), and the build is green.",
-			d.DistinctStates, d.Depth, properties, r.Assurance) + tlcAttemptsFeedback(r.TLCAttempts)
+			d.DistinctStates, d.Depth, properties, r.Assurance) + bugReplayFeedback(r) + tlcAttemptsFeedback(r.TLCAttempts)
 	}
-	return fmt.Sprintf("The gate failed. What to fix: %s.\n%s", strings.Join(failed, "; "), b.String()) + tlcAttemptsFeedback(r.TLCAttempts)
+	return fmt.Sprintf("The gate failed. What to fix: %s.\n%s", strings.Join(failed, "; "), b.String()) + bugReplayFeedback(r) + tlcAttemptsFeedback(r.TLCAttempts)
+}
+
+func bugReplayFeedback(r *Report) string {
+	if len(r.Bugs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nKnown bug evidence:\n")
+	for _, bug := range r.Bugs {
+		model := "not caught in the model"
+		if bug.Caught {
+			model = "caught in the model"
+		}
+		fmt.Fprintf(&b, "- %s: %s; %s\n", bug.Name, model, bug.ReplayStatus().Label)
+	}
+	return b.String()
 }
 
 func tlcAttemptsFeedback(attempts []tlc.Attempt) string {
@@ -182,6 +201,9 @@ func Failed(r *Report) []string {
 	for _, b := range r.Bugs {
 		if !b.Caught {
 			out = append(out, "bug "+b.Name)
+		}
+		if b.Replay != nil && b.Replay.Required && !b.Replay.Passed && !r.ModelOnly {
+			out = append(out, "bug replay "+b.Name+": "+b.Replay.Status)
 		}
 	}
 	if l := r.Larger; l != nil && l.Required && !l.Passed {
