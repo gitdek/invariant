@@ -128,15 +128,29 @@ func TestADraftsCheckPreparesACurrentBugsReplay910(t *testing.T) {
 	// One check says everything it finds. A draft with few checks left
 	// learns of its view in the check that refuses its bug's path.
 	unread := replace(`"when":true,"label":"Buffer"`, `"when":"Len(nothing) = 0","label":"Buffer"`)
-	p, _, err := CheckWithContext(ctx, workspace(t, map[string]func(string) string{"proposal.json": current, "view.json": unread}), tc, CheckContext{Language: "typescript"})
-	if err == nil || !strings.Contains(err.Error(), "bug PutWhenFull is current") || !strings.Contains(err.Error(), "replay-unsupported-action") || !strings.Contains(err.Error(), "invalid_view") {
-		t.Errorf("a draft whose bug hides its choice, and whose view the reader can't take, is told:\n%v", err)
+	p, _, both := CheckWithContext(ctx, workspace(t, map[string]func(string) string{"proposal.json": current, "view.json": unread}), tc, CheckContext{Language: "typescript"})
+	if both == nil || !strings.Contains(both.Error(), "bug PutWhenFull is current") || !strings.Contains(both.Error(), "replay-unsupported-action") || !strings.Contains(both.Error(), "invalid_view") {
+		t.Fatalf("a draft whose bug hides its choice, and whose view the reader can't take, is told:\n%v", both)
 	}
 	if p == nil || p.Reader != nil {
 		t.Errorf("a draft whose view is refused keeps a reader: %+v", p)
 	}
+	if path, view := strings.Index(both.Error(), "bug PutWhenFull is current"), strings.Index(both.Error(), "invalid_view"); path < 0 || view < path {
+		t.Errorf("the path's refusal doesn't come first:\n%v", both)
+	}
+	// A draft refused for its path alone keeps no reader either. A reader
+	// is how a revision tells the draft a person was last shown from one
+	// that failed its checks, and a revision isn't compared with a draft
+	// nobody could ratify.
+	p, _, err = CheckWithContext(ctx, workspace(t, map[string]func(string) string{"proposal.json": current}), tc, CheckContext{Language: "typescript"})
+	if err == nil || strings.Contains(err.Error(), "invalid_view") || p == nil || p.Reader != nil {
+		t.Errorf("a draft refused for its path alone: reader %v, %v", p != nil && p.Reader != nil, err)
+	}
+	if baseline := (Request{Repo: "o/r", Issue: 5, Title: "t", Language: "typescript", Previous: p}).comparisonBaseline(); baseline != nil {
+		t.Error("a revision is compared with a first draft that was refused for its path")
+	}
 	if _, _, alone := CheckWithContext(ctx, workspace(t, map[string]func(string) string{"view.json": unread}), tc, CheckContext{Language: "typescript"}); alone == nil ||
-		strings.Contains(alone.Error(), "is current") || !strings.Contains(err.Error(), alone.Error()) {
+		strings.Contains(alone.Error(), "is current") || !strings.Contains(both.Error(), alone.Error()) {
 		t.Errorf("the same view alone is refused with %v, which the draft with both wasn't told in full", alone)
 	}
 }
@@ -331,21 +345,24 @@ func TestAnOptionsPreviewPreparesACurrentBugsReplay910(t *testing.T) {
 	current := replace(`"code_behavior": "hypothetical"`, `"code_behavior": "current"`)
 	named := replace("PutWhenFull == \\E m \\in Msgs : buf' = Append(buf, m)", "PutAnyway(m) == Len(buf) >= Cap /\\ buf' = Append(buf, m)\n\nPutWhenFull == \\E m \\in Msgs : PutAnyway(m)")
 	fork := Fork{ID: "F1", Question: "How is the overfilling put written?"}
-	for id, edits := range map[string]map[string]func(string) string{
+	options := map[string]map[string]func(string) string{
 		"A": {"proposal.json": current},
 		"B": {"proposal.json": current, "BoundedBuffer.tla": named},
-	} {
-		m, err := ReadAmending(workspace(t, edits), nil)
+		"C": {"proposal.json": current},
+	}
+	for _, id := range []string{"A", "B", "C"} {
+		m, err := ReadAmending(workspace(t, options[id]), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		m.Statements[1].Says = "Candidate " + id + " keeps its own capacity."
 		// A preview's model is staged as its project too, whatever it says.
 		m.Language = "go"
+		if id == "A" {
+			// Option A's view is one the reader can't take, besides.
+			m.View = strings.Replace(m.View, `"when":true,"label":"Buffer"`, `"when":"Len(nothing) = 0","label":"Buffer"`, 1)
+		}
 		fork.Options = append(fork.Options, Option{ID: id, Says: "Write it as option " + id + " does.", Preview: &Preview{Fork: fork.ID, Option: id, Model: m}})
-	}
-	if fork.Options[0].ID != "A" {
-		fork.Options[0], fork.Options[1] = fork.Options[1], fork.Options[0]
 	}
 	ws := t.TempDir()
 	b, err := json.Marshal(Draft{Forks: []Fork{fork}})
@@ -369,11 +386,26 @@ func TestAnOptionsPreviewPreparesACurrentBugsReplay910(t *testing.T) {
 	if a.Receipt == nil || !a.Receipt.Passed || a.Receipt.Bugs[0].Replay == nil || !a.Receipt.Bugs[0].Replay.Required || a.Receipt.Bugs[0].Replay.Request != nil {
 		t.Errorf("option A's receipt doesn't keep the path that couldn't be prepared: %+v", a.Receipt)
 	}
+	// Option C hides its choice as A does, with a view the reader takes: it
+	// is refused for its path alone, and keeps no reader.
+	if c := p.Forks[0].Options[2].Preview; !strings.Contains(c.Problem, "fork F1 option C: bug PutWhenFull is current") || strings.Contains(c.Problem, "invalid_view") || c.Model.Reader != nil {
+		t.Errorf("option C, refused for its path alone, is told %q, and keeps a reader: %v", c.Problem, c.Model.Reader != nil)
+	}
+	// One check says everything it finds of an option too: option A is told
+	// of its path and of its view together, the path first.
+	if path, view := strings.Index(a.Problem, "replay-unsupported-action"), strings.Index(a.Problem, "invalid_view"); path < 0 || view < path || a.Model.Reader != nil {
+		t.Errorf("option A, with a path that can't be prepared and a view the reader can't take, is told %q, and keeps a reader: %v", a.Problem, a.Model.Reader != nil)
+	}
 	if err := p.Forks[0].ValidatePreview(p.Forks[0].Options[1]); err != nil || good.Model.Reader == nil || good.Model.Language != "go" {
 		t.Errorf("option B doesn't stand on its own: %v, reader %v, language %q", err, good.Model.Reader != nil, good.Model.Language)
 	}
-	// In Go neither is replayed, and both stand.
-	if _, _, err := CheckWithContext(t.Context(), ws, tc, CheckContext{Language: "go"}); err != nil {
+	// In Go neither is replayed: option A is told of its view alone, and
+	// option B stands.
+	p, _, err = CheckWithContext(t.Context(), ws, tc, CheckContext{Language: "go"})
+	if err == nil || !strings.Contains(err.Error(), "fork F1 option A: invalid_view") || strings.Contains(err.Error(), "is current") || strings.Contains(err.Error(), "option B") || strings.Contains(err.Error(), "option C") {
 		t.Fatalf("the same options in Go: %v", err)
+	}
+	if b := p.Forks[0].Options[1].Preview; b.Problem != "" || b.Model.Reader == nil {
+		t.Errorf("option B in Go: problem %q, reader %v", b.Problem, b.Model.Reader != nil)
 	}
 }

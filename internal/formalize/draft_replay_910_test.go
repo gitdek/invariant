@@ -112,7 +112,7 @@ func TestADraftWithAnUnpreparedReplayIsRefused910(t *testing.T) {
 
 	// What each reason asks for, and nothing another reason asks for.
 	const rewrite, rename, respell, again = `as in Bug == \E x \in S : BugStep(x)`, "Change what that names in the model",
-		`Write the specification as Spec == Init /\ [][Next]_vars`, "the check's own failure, not a shape of the draft: check again"
+		`Write the specification as Spec == Init /\ [][Next]_vars`, "Change what the reason names in the model. If it names nothing there, the check itself failed: check again"
 	for name, tc := range map[string]struct{ message, advice string }{
 		"a hidden choice":                             {"replay-unsupported-action: step 1 of the counterexample, from its state 1 to its state 2, is taken by an operation that could have reached another state with the same arguments", rewrite},
 		"a step with two readings":                    {"replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, can be taken 2 ways, Put(m1) and PutAnyway(m1)", rewrite},
@@ -121,6 +121,8 @@ func TestADraftWithAnUnpreparedReplayIsRefused910(t *testing.T) {
 		"a specification the path's check can't read": {`replay-unsupported-temporal: specification is not Init /\ [][Next]_vars`, respell},
 		"TLC stalling in the path's check":            {"replay-check-failed: Invariant_ReplayPath: error TLC stopped making progress: no output for 2m0s", again},
 		"the path's check not running":                {"docker: Cannot connect to the Docker daemon", again},
+		"a Next that isn't a list of named steps":     {`Next must be a disjunction of named steps: an \E binds "a"; want "x \in S"`, again},
+		"names the path's check keeps for itself":     {"model uses reserved replay names", again},
 	} {
 		err := replayPrepared(report(bug("Now", "violated", unprepared(tc.message))))
 		if err == nil || !strings.Contains(err.Error(), "bug Now is current") || !strings.Contains(err.Error(), tc.message+". ") || !strings.Contains(err.Error(), tc.advice) {
@@ -131,6 +133,11 @@ func TestADraftWithAnUnpreparedReplayIsRefused910(t *testing.T) {
 			if other != tc.advice && strings.Contains(err.Error(), other) {
 				t.Errorf("a draft with %s is told %q, which another reason asks for: %v", name, other, err)
 			}
+		}
+		// A reason with no class of its own may be the model's or the
+		// check's, so its advice doesn't say whose fault it is.
+		if strings.Contains(err.Error(), "not a shape of the draft") || strings.Contains(err.Error(), "check's own failure") {
+			t.Errorf("a draft with %s is told whose fault it is: %v", name, err)
 		}
 	}
 

@@ -11,9 +11,9 @@ Classification is part of the exact proposal hash a person ratifies. Reclassific
 - Each choice an action of `Next` makes has to be a parameter named in `Next` or in the bug's own definition, and a bug's operation has to be enabled only where no action of `Next` takes the same step.
 - A model changes what the reason names when it defines an operator the path's check takes from the standard modules, or uses one that doesn't give the same answer twice.
 - The specification has to be written `Spec == Init /\ [][Next]_vars`, with fairness in fairness statements.
-- Any other reason, such as TLC stalling, is the check's own failure, and the refusal says so, since rewriting the bug wouldn't help.
+- Any other reason is given as it is, without saying whose fault it is: the draft changes what the reason names in the model, and checks again when it names nothing there, as when TLC stalls.
 
-The same check reads the draft's view, so a draft with few checks left learns of both at once. Only a bug that breaks a property stands with no path: its counterexample never ends, and its proposal says a build can't pass yet ([#910](https://github.com/gitdek/invariant/issues/910)).
+The same check reads the draft's view, so a draft or an option with few checks left learns of both at once. A draft refused for its path keeps no reader, so a later revision isn't compared with it as if a person had been shown it. Only a bug that breaks a property stands with no path: the replay contract doesn't read a property's counterexample yet, and its proposal says a build can't pass ([#910](https://github.com/gitdek/invariant/issues/910)).
 
 A saved option preview keeps its fingerprint across a change to what a receipt publishes. The fingerprint is made from the receipt's evidence and its coverage view, and from no view added since, such as each bug's replay status.
 

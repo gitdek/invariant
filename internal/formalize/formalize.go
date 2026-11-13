@@ -439,10 +439,11 @@ func (p *Proposal) stagedIn(language string) *Proposal {
 // so the model can still be rewritten. Left alone, the build's gate would
 // find it after a person had ratified them. Every such bug is named, with
 // the check's reason and what that reason asks of the drafter. Only a bug
-// that breaks a property stands unprepared: its counterexample never ends,
-// no rewrite gives it a path of finitely many steps, and its proposal says
-// so. A specification the path's check can't read is given the same code
-// as that one, and is the drafter's to fix.
+// that breaks a property stands unprepared: the replay contract reads an
+// invariant's counterexample, a path of finitely many steps, and not yet a
+// property's, which is a behavior. No rewrite of the model changes that,
+// and the bug's proposal says so. A specification the path's check can't
+// read is given the same code as that one, and is the drafter's to fix.
 func replayPrepared(r *verify.Report) error {
 	var refused []string
 	for _, b := range r.Bugs {
@@ -461,8 +462,9 @@ func replayPrepared(r *verify.Report) error {
 
 // replayAdvice is what a drafter does about the reason a path couldn't be
 // prepared, by the class the path's check gives the reason. A reason with
-// no class a rewrite answers is the check's own failure: TLC stalling or
-// running out of memory, or the check's tool not running.
+// no class of its own may name something in the model, as a Next that isn't
+// a disjunction of named steps does, or nothing there, as TLC stalling
+// does. The advice for it covers both and blames neither.
 func replayAdvice(reason string) string {
 	switch class, _, _ := strings.Cut(reason, ":"); class {
 	case "replay-unsupported-action", "replay-ambiguous-edge":
@@ -473,7 +475,7 @@ func replayAdvice(reason string) string {
 	case "replay-unsupported-temporal":
 		return "Write the specification as Spec == Init /\\ [][Next]_vars, with fairness in fairness statements and nowhere else: a replay follows a path of Init and Next steps"
 	}
-	return "That is the check's own failure, not a shape of the draft: check again, and change the model only if the reason names something in it"
+	return "Change what the reason names in the model. If it names nothing there, the check itself failed: check again"
 }
 
 // Check stages the draft in ws as a project and runs the gate's model
@@ -528,6 +530,12 @@ func checkWithContext(ctx context.Context, ws string, tc toolchain.Toolchain, au
 	err = p.computeReader(ctx, filepath.Join(dir, filepath.Dir(p.Manifest().Module)), tc, r.Design.DistinctStates)
 	if err == nil && refused == nil {
 		err = p.computeComparison(ctx, ws, tc, authority, memo)
+	}
+	if refused != nil {
+		// A refused draft keeps no reader. A reader is how a revision
+		// tells the draft a person was last shown, which it's compared
+		// with, from one that failed its checks.
+		p.Reader = nil
 	}
 	if err == nil {
 		err = ctx.Err()

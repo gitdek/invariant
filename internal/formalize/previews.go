@@ -302,14 +302,17 @@ func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []p
 	if !r.Passed {
 		return fmt.Errorf("%s", verify.Feedback(r))
 	}
-	if err := replayPrepared(r); err != nil {
-		return err
-	}
+	// As for a draft, one check says everything it finds: a refused path
+	// and a view the reader can't take are reported together.
+	refused := replayPrepared(r)
 	if r.Reader == nil {
-		return fmt.Errorf("model check returned no reader evidence")
+		return errors.Join(refused, fmt.Errorf("model check returned no reader evidence"))
 	}
 	if d := r.Reader.Unavailable; d != nil {
-		return fmt.Errorf("%s: %s", d.Code, d.Message)
+		return errors.Join(refused, fmt.Errorf("%s: %s", d.Code, d.Message))
+	}
+	if refused != nil {
+		return refused
 	}
 	scope := statechart.Preview{Fork: v.Fork, Option: v.Option, Choices: maps.Clone(v.Choices)}
 	r.Reader.Preview = scope
