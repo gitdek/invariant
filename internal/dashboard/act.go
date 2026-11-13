@@ -214,15 +214,56 @@ func (a audience) has(want string) bool {
 
 // Untaken is an open issue a writer opened that the factory hasn't taken:
 // it has no label of the factory's, and neither its text nor a writer's
-// comment holds /invariant solve or /invariant plan. /act offers to plan it
-// (#201), and serves the list only behind Cloudflare Access, since a
-// private repository's issues are in it.
+// comment holds /invariant solve or /invariant plan. /act offers to hand
+// it to the factory (#201, #900), and serves the list only behind
+// Cloudflare Access, since a private repository's issues are in it.
 type Untaken struct {
 	Repo   string    `json:"repo"`
 	Number int       `json:"number"`
 	Title  string    `json:"title"`
 	Opened time.Time `json:"opened"`
 	URL    string    `json:"url"`
+	// Hand is the command that hands it over: solve for an issue whose
+	// text names one change, in a Kind:, Project: or Code: line, and plan
+	// for one that names none, which the factory reads as a PRD. Planning
+	// an issue that is one change spends a draft and a ratification to
+	// restate it as a step (#900).
+	Hand string `json:"hand"`
+	// Waits is why it isn't ready for the factory, from its Waits: line.
+	// The page shows the reason and offers no command, and /act posts
+	// none, until the line is taken out of the issue.
+	Waits string `json:"waits,omitempty"`
+}
+
+// waitsLine reads why an issue isn't ready for the factory, from a line
+// such as "Waits: for #884, which changes the same check." outside any
+// fenced block.
+func waitsLine(body string) string {
+	fenced := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") {
+			fenced = !fenced
+			continue
+		}
+		if fenced {
+			continue
+		}
+		if name, why, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(name), "waits") {
+			return strings.TrimSpace(why)
+		}
+	}
+	return ""
+}
+
+// untakenOf is what /act offers for an issue the factory hasn't taken.
+func untakenOf(repo string, is github.Issue) Untaken {
+	opened, _ := time.Parse(time.RFC3339, is.CreatedAt)
+	u := Untaken{Repo: repo, Number: is.Number, Title: is.Title, Opened: opened, URL: is.URL, Hand: "plan", Waits: waitsLine(is.Body)}
+	if factory.Ordinary(is.Body) {
+		u.Hand = "solve"
+	}
+	return u
 }
 
 // writer says whether GitHub's author association is one that can write to
@@ -270,16 +311,28 @@ var (
 
 // check says whether a command is one the issue is waiting for: answers to
 // its open questions, a ratification of its proposal, or a retry or a
-// revise where the factory takes one (#218); or /invariant plan, on an issue
-// the factory hasn't taken (#201). The page offers only those.
+// revise where the factory takes one (#218); or, on an issue the factory
+// hasn't taken, the one command that hands it over: /invariant solve for
+// one change, /invariant plan for a PRD, and neither while the issue says
+// it waits (#201, #900). The page offers only those.
 func (c act) check(issues []Issue, untaken []Untaken) error {
-	if strings.TrimSpace(c.Body) == "/invariant plan" {
+	if verb := strings.TrimSpace(c.Body); verb == "/invariant plan" || verb == "/invariant solve" {
+		doing := map[string]string{"/invariant plan": "planned", "/invariant solve": "handed over"}[verb]
 		for _, u := range untaken {
-			if u.Repo == c.Repo && u.Number == c.Issue {
-				return nil
+			if u.Repo != c.Repo || u.Number != c.Issue {
+				continue
 			}
+			switch {
+			case u.Waits != "":
+				return fmt.Errorf("#%d says it waits, so it can't be %s from here: %s", c.Issue, doing, u.Waits)
+			case verb == "/invariant plan" && u.Hand != "plan":
+				return fmt.Errorf("#%d is one change, not a PRD, so it's handed over with /invariant solve and can't be planned from here", c.Issue)
+			case verb == "/invariant solve" && u.Hand != "solve":
+				return fmt.Errorf("#%d names no Kind, Project or Code, so it's planned as a PRD and can't be handed over as one change from here", c.Issue)
+			}
+			return nil
 		}
-		return fmt.Errorf("#%d isn't an open issue of a writer's that the factory hasn't taken, so it can't be planned from here", c.Issue)
+		return fmt.Errorf("#%d isn't an open issue of a writer's that the factory hasn't taken, so it can't be %s from here", c.Issue, doing)
 	}
 	var is *Issue
 	for i := range issues {
@@ -584,10 +637,11 @@ func (s *Server) post(w http.ResponseWriter, r *http.Request, who, note string) 
 	json.NewEncoder(w).Encode(map[string]string{"url": url})
 }
 
-// plan drops an issue that was just planned from what /act offers to plan,
-// and keeps it out until a refresh has had time to read its comment.
+// plan drops an issue that was just handed to the factory from what /act
+// offers to hand over, and keeps it out until a refresh has had time to
+// read its comment.
 func (s *Server) plan(c act) {
-	if strings.TrimSpace(c.Body) != "/invariant plan" {
+	if verb := strings.TrimSpace(c.Body); verb != "/invariant plan" && verb != "/invariant solve" {
 		return
 	}
 	s.mu.Lock()
@@ -599,7 +653,8 @@ func (s *Server) plan(c act) {
 	s.untaken = slices.DeleteFunc(slices.Clone(s.untaken), func(u Untaken) bool { return u.Repo == c.Repo && u.Number == c.Issue })
 }
 
-// serveUntaken answers /act/api/untaken.json: the issues /act offers to plan.
+// serveUntaken answers /act/api/untaken.json: the issues /act offers to
+// hand to the factory, and those that say they wait.
 func (s *Server) serveUntaken(w http.ResponseWriter) {
 	s.mu.RLock()
 	untaken := s.untaken

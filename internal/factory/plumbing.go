@@ -49,6 +49,16 @@ func trustedProject(dir string) bool {
 	return dir != "" && !isPlan(dir) && plumbing.Trusted(dir+"/")
 }
 
+// Ordinary says whether an issue's text names one change for the factory
+// to make, in a Kind:, Project: or Code: line. A writer's /invariant solve
+// has the factory draft that change, and the planner proposes a plan of
+// issues itself if it can't fit one pull request. Text with none of those
+// lines is a request to formalize from scratch, or a PRD for /invariant
+// plan (#900).
+func Ordinary(body string) bool {
+	return kindLine(body) != "" || projectLine(body) != "" || len(codeLines(body)) > 0
+}
+
 // kindLine reads an issue's Kind: line, such as Kind: plumbing.
 func kindLine(body string) string {
 	fenced := false
