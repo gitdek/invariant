@@ -45,6 +45,11 @@ type CheckContext struct {
 	Planning         string                         `json:"planning,omitempty"`
 	Choices          map[string]string              `json:"choices,omitempty"`
 	Revisions        []Revision                     `json:"revisions,omitempty"`
+	// Amended is the statements of the lock an amendment replaces, from
+	// the project as the caller captured it. A draft may keep one of its
+	// unclassified bugs as it is (#857). It isn't saved: a proposal that
+	// has been made an amendment carries its baseline itself.
+	Amended []project.Statement `json:"-"`
 }
 
 var checkContexts sync.Map
@@ -61,8 +66,11 @@ func (r Request) CheckContext() CheckContext {
 		c.Choices[a.Fork] = a.Option
 	}
 	c.Baseline = r.comparisonBaseline()
-	if current := r.CapturedCurrent(); current != nil && current.View != "" {
-		c.BaselineViewPath = filepath.ToSlash(filepath.Join(current.Dir, ".invariant/view.json"))
+	if current := r.CapturedCurrent(); current != nil {
+		c.Amended = slices.Clone(current.Lock.Statements)
+		if current.View != "" {
+			c.BaselineViewPath = filepath.ToSlash(filepath.Join(current.Dir, ".invariant/view.json"))
+		}
 	}
 	if c.Baseline != nil {
 		// Only sources are authority. Derived evidence stays session-local.
@@ -241,7 +249,7 @@ func (p *Proposal) checkPreviews(ctx context.Context, tc toolchain.Toolchain, c 
 				err = previewInput(f, o, choices)
 			}
 			if err == nil {
-				err = v.check(ctx, tc)
+				err = v.check(ctx, tc, c.Amended)
 			}
 			if err != nil {
 				err = fmt.Errorf("fork %s option %s: %w", f.ID, o.ID, err)
@@ -258,9 +266,9 @@ func (p *Proposal) checkPreviews(ctx context.Context, tc toolchain.Toolchain, c 
 	return errors.Join(failures...)
 }
 
-func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain) error {
+func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []project.Statement) error {
 	m := v.Model
-	if err := m.Pin(); err != nil {
+	if err := m.PinAmending(amended); err != nil {
 		return err
 	}
 	dir, err := os.MkdirTemp("", "invariant-option-")
