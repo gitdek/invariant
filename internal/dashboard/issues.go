@@ -11,6 +11,7 @@ import (
 	"github.com/gitdek/invariant/internal/formalize"
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
+	"github.com/gitdek/invariant/internal/project"
 )
 
 // Stages an issue moves through, as the page draws them.
@@ -89,6 +90,11 @@ type Waiting struct {
 	Hash       string              `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
 	Statements []Said              `json:"statements,omitempty"` // what the proposal says
 	Amends     string              `json:"amends,omitempty"`     // what an amendment replaces
+	// Relaxed names the bugs the lock being amended calls current that this
+	// proposal classifies otherwise, or leaves out (#857). The gate has to
+	// replay a current bug against the code, and ratifying the amendment
+	// ends that for each of these, so the card says so before it's opened.
+	Relaxed []string `json:"relaxed,omitempty"`
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
 	Unchanged bool `json:"unchanged,omitempty"`
@@ -204,6 +210,36 @@ type Said struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
 	Says string `json:"says"`
+	// Behavior is what a bug's statement says of the code (#857): current
+	// when the code has the bug today, hypothetical when nothing says it
+	// does, and "not classified" for a bug an older lock left without
+	// either. No other kind of statement has one.
+	Behavior string `json:"behavior,omitempty"`
+	// Was is what the lock being amended says of the same bug, when that's
+	// something else. Ratifying the amendment changes it.
+	Was string `json:"was,omitempty"`
+}
+
+// behaviorOf is what a bug's statement says of the code, in the words the
+// gate's receipt uses.
+func behaviorOf(s project.Statement) string {
+	if s.CodeBehavior == "" {
+		return "not classified"
+	}
+	return s.CodeBehavior
+}
+
+// amendedStatements is the statements of the lock a proposal amends, when
+// the proposal carries them: with its target, or with its chart's
+// comparison.
+func amendedStatements(p *formalize.Proposal) []project.Statement {
+	if p.Target != nil && p.Target.Baseline != nil {
+		return p.Target.Baseline.Lock.Statements
+	}
+	if p.Reader != nil && p.Reader.Comparison != nil {
+		return p.Reader.Comparison.Baseline.Lock.Statements
+	}
+	return nil
 }
 
 // Event is one thing that happened: a factory post, a person's command, a
@@ -501,8 +537,28 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 		if len(w.Hash) > 12 {
 			w.Hash = w.Hash[:12]
 		}
+		was, kept := map[string]string{}, map[string]bool{}
+		amended := amendedStatements(p)
+		for _, s := range amended {
+			if s.Kind == project.Bug {
+				was[s.Name] = behaviorOf(s)
+			}
+		}
 		for _, s := range p.Statements {
-			w.Statements = append(w.Statements, Said{Name: s.Name, Kind: s.Kind, Says: s.Says})
+			said := Said{Name: s.Name, Kind: s.Kind, Says: s.Says}
+			if s.Kind == project.Bug {
+				said.Behavior = behaviorOf(s)
+				if old, ok := was[s.Name]; ok && old != said.Behavior {
+					said.Was = old
+				}
+				kept[s.Name] = s.CodeBehavior == "current"
+			}
+			w.Statements = append(w.Statements, said)
+		}
+		for _, s := range amended {
+			if s.Kind == project.Bug && s.CodeBehavior == "current" && !kept[s.Name] {
+				w.Relaxed = append(w.Relaxed, s.Name)
+			}
 		}
 		if pl := p.Plan; pl != nil {
 			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted, Tests: pl.Tests, Execution: pl.Execution, SourceHash: p.Hash}
