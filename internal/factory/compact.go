@@ -14,6 +14,14 @@ import (
 
 var errCompactSize = errors.New("The indispensable decision text and complete charts still exceed the comment or expanded marker size limit. Nothing actionable was published; the full saved record is retained.")
 
+// errLegacyDraft is a completed record that was saved without its
+// publication, as records were before a draft's run kept it. A reference
+// holds a saved record to the check context saved with it, which that record
+// lacks, so it can't be published by reference: its caller refuses the
+// overflow as it does with no dashboard, and a revision drafts a record that
+// can.
+var errLegacyDraft = errors.New("the completed draft was saved without its publication, so no reference can name it")
+
 func completeComment(body string, m Marker) bool {
 	_, ok := DecodeMarker(m.encode())
 	return ok && len(body) <= maxComment
@@ -49,6 +57,9 @@ func (f *Factory) compactDraft(ctx context.Context, issue int, step string, m Ma
 		if err != nil {
 			return Marker{}, "", err
 		}
+		if fields, err := draftObject(payload); err == nil && (fields["publication"] == nil || string(fields["publication"]) == "null") {
+			return Marker{}, "", errLegacyDraft
+		}
 		ref = DraftReference{Version: 1, Repository: f.Repository, Issue: issue, Step: step,
 			Commit: commit, SHA256: draftDigest(payload), ProposalHash: m.Proposal.Hash}
 		m.ProposalRef, err = json.Marshal(ref)
@@ -66,16 +77,29 @@ func (f *Factory) compactDraft(ctx context.Context, issue int, step string, m Ma
 	if err != nil {
 		return Marker{}, "", err
 	}
-	evidence := "\n\n[Complete saved draft and evidence](" + link + "). The exact saved record retains full sources, occurrence tables, full comparison evidence, hidden steps and provenance.\n"
+	// An amendment shows what changes in TLA+ itself. A proposal, or a
+	// question whose alternatives have statements, leaves their TLA+ to the
+	// record and says so beside the link, so a compact comment never leaves
+	// out unsaid what a person ratifies or chooses.
+	evidence := func(statements string) string {
+		return "\n\n[Complete saved draft and evidence](" + link + ")." + statements +
+			" The exact saved record retains full sources, occurrence tables, full comparison evidence, hidden steps and provenance.\n"
+	}
 	var body string
 	switch p := result.Proposal; {
 	case m.Kind == KindForks:
-		body = compactForksComment(m.Forks, m, evidence)
+		statements := ""
+		if slices.ContainsFunc(m.Forks, func(f formalize.Fork) bool {
+			return slices.ContainsFunc(f.Options, func(o formalize.Option) bool { return o.Preview != nil })
+		}) {
+			statements = " Each alternative's statements are in that record in TLA+, not in this comment."
+		}
+		body = compactForksComment(m.Forks, m, evidence(statements))
 	case p.Target != nil:
 		changes := formalize.Diff(p.Target.Baseline, p)
-		body = amendmentCommentWithEvidence(p, result.Report, changes, m, evidence)
+		body = amendmentCommentWithEvidence(p, result.Report, changes, m, evidence(""))
 	default:
-		body = proposalCommentWithEvidence(p, result.Report, m, evidence)
+		body = proposalCommentWithEvidence(p, result.Report, m, evidence(" The statements' TLA+ is in that record, not in this comment."))
 	}
 	if !completeComment(body, m) {
 		return Marker{}, "", errCompactSize
@@ -83,15 +107,18 @@ func (f *Factory) compactDraft(ctx context.Context, issue int, step string, m Ma
 	return m, body, nil
 }
 
+// compactStatements lists a model's statements as a proposal's own table
+// does. A name is written in a code span, which shows its text as it is: an
+// entity there would be read as the name's own characters.
 func compactStatements(p *formalize.Proposal) string {
 	var b strings.Builder
 	b.WriteString("| Statement | Kind | Says |\n| :-- | :-- | :-- |\n")
 	for _, s := range p.Statements {
 		says := tableLiteral(s.Says)
 		if s.Expect != "" {
-			says += fmt.Sprintf(" It must break `%s`.", tableLiteral(s.Expect))
+			says += fmt.Sprintf(" It must break `%s`.", s.Expect)
 		}
-		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", tableLiteral(s.Name), tableLiteral(s.Kind), says)
+		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", s.Name, tableLiteral(s.Kind), says)
 	}
 	return b.String()
 }

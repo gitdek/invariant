@@ -1204,17 +1204,19 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 			inline.ProposalRef = nil
 		}
 		if problem == "" && (!completeComment(forksComment(remaining, inline), inline) || m.ProposalRef != nil && f.DashboardURL != "") {
+			problem = "The complete remaining alternatives exceed the comment or expanded marker size limit. Revise and check the options again."
 			if f.DashboardURL != "" {
+				// A question whose record no reference can name keeps the
+				// refusal it has with no dashboard.
 				_, compactBody, err := f.compactDraft(ctx, t.Issue.Number, questionDraftStep(t, m.Proposal), m)
-				if err == nil {
+				switch {
+				case err == nil:
 					return f.say(ctx, t.Issue.Number, compactBody, LabelAsking)
-				}
-				if !errors.Is(err, errCompactSize) {
+				case errors.Is(err, errCompactSize):
+					problem = err.Error()
+				case !errors.Is(err, errLegacyDraft):
 					return err
 				}
-				problem = err.Error()
-			} else {
-				problem = "The complete remaining alternatives exceed the comment or expanded marker size limit. Revise and check the options again."
 			}
 		}
 		if problem != "" {
@@ -1539,7 +1541,7 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 		// draft after it compares with, so any of them can outgrow a post.
 		if !completeComment(body, m) {
 			problem := "The complete question, with its alternative previews and the baseline it carries, exceeds the comment or expanded marker size limit. Revise the presentation and check every option again before publication."
-			if f.DashboardURL != "" && checkContext.Planning == "" {
+			if f.DashboardURL != "" && !res.legacy && checkContext.Planning == "" {
 				if err := validateDraftResult(&res.Result); err != nil {
 					problem = err.Error()
 				} else {
@@ -1587,7 +1589,7 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 			if _, ok := DecodeMarker(m.encode()); !ok {
 				problem = "The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification."
 			}
-			if f.DashboardURL != "" {
+			if f.DashboardURL != "" && !res.legacy {
 				if err := validateDraftResult(&res.Result); err != nil {
 					problem = err.Error()
 				} else {

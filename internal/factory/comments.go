@@ -287,19 +287,31 @@ func amendmentCommentWithEvidence(p *formalize.Proposal, r *verify.Report, ch *f
 			assumed = append(assumed, c)
 		}
 	}
+	// A callout sends its reader to the old and new TLA+ further down. A
+	// compact comment keeps that section, and points at the complete record
+	// instead for a statement the section has nothing to show for: one whose
+	// pin changed while neither its own text nor a definition under it did.
+	where := func(cs []formalize.Change) string {
+		for _, c := range cs {
+			if evidence != "" && c.OwnTextSame() && len(c.Through) == 0 {
+				return "in the complete record"
+			}
+		}
+		return "below"
+	}
 	switch len(loosened) {
 	case 0:
 	case 1:
-		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text below.\n\n", names(loosened))
+		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text %s.\n\n", names(loosened), where(loosened))
 	default:
-		fmt.Fprintf(&b, "**This changes the invariants %s.** A changed invariant can promise less than before, so compare their old and new text below.\n\n", names(loosened))
+		fmt.Fprintf(&b, "**This changes the invariants %s.** A changed invariant can promise less than before, so compare their old and new text %s.\n\n", names(loosened), where(loosened))
 	}
 	switch len(properties) {
 	case 0:
 	case 1:
-		fmt.Fprintf(&b, "**This changes the property %s.** A changed property can promise less than before, so compare its old and new text below.\n\n", names(properties))
+		fmt.Fprintf(&b, "**This changes the property %s.** A changed property can promise less than before, so compare its old and new text %s.\n\n", names(properties), where(properties))
 	default:
-		fmt.Fprintf(&b, "**This changes the properties %s.** A changed property can promise less than before, so compare their old and new text below.\n\n", names(properties))
+		fmt.Fprintf(&b, "**This changes the properties %s.** A changed property can promise less than before, so compare their old and new text %s.\n\n", names(properties), where(properties))
 	}
 	if len(assumed) > 0 {
 		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
@@ -407,7 +419,9 @@ func amendmentCommentWithEvidence(p *formalize.Proposal, r *verify.Report, ch *f
 	for _, d := range ch.Definitions {
 		fmt.Fprintf(&tla, "**`%s`**, which statements above depend on, before:\n\n```tla\n%s\n```\n\nafter:\n\n```tla\n%s\n```\n\n", d.Name, d.OldText, d.NewText)
 	}
-	if evidence == "" && tla.Len() > 0 {
+	// What changes is what a person approves, so a compact comment keeps
+	// its TLA+ too: it counts toward the size a compact comment must fit.
+	if tla.Len() > 0 {
 		fmt.Fprintf(&b, "\n<details>\n<summary>What changes, in TLA+</summary>\n\n%s</details>\n", tla.String())
 	}
 	b.WriteString(evidence)
