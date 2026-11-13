@@ -94,8 +94,28 @@ func TestAnAmendmentKeepsALegacyBugAsItIs857(t *testing.T) {
 		t.Errorf("an amendment pinned again: %v, hash %s, was %s", err, p.Hash, hash)
 	}
 	// The check the drafting agent runs is given the lock by its caller.
-	if got := (Request{Repo: "o/r", Issue: 5, Title: "t", Current: c}).CheckContext().Amended; !reflect.DeepEqual(got, lock) {
+	authority := (Request{Repo: "o/r", Issue: 5, Title: "t", Current: c}).CheckContext()
+	if got := authority.Amended; !reflect.DeepEqual(got, lock) {
 		t.Errorf("the check is given %+v, want the lock's statements", got)
+	}
+	// The agent's checker is another process: it fetches the context the
+	// caller captured, and holds the same draft to the same rule.
+	capture, release, err := stageCheckContext(t.TempDir(), authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	reference, closeContext, err := serveCheckContext(t.Context(), capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeContext()
+	fetched, err := LoadCheckContext(t.Context(), reference, 0)
+	if err != nil || !reflect.DeepEqual(fetched.Amended, lock) {
+		t.Fatalf("the agent's checker is given %+v, %v; want the lock's statements", fetched.Amended, err)
+	}
+	if _, err := ReadAmending(ws, fetched.Amended); err != nil {
+		t.Errorf("the agent's checker refuses the factory's seed of a lock ratified before the rule: %v", err)
 	}
 	if got := (Request{Repo: "o/r", Issue: 5, Title: "t"}).CheckContext().Amended; got != nil {
 		t.Errorf("a new project's check is given %+v", got)

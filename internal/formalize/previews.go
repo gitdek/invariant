@@ -47,9 +47,10 @@ type CheckContext struct {
 	Revisions        []Revision                     `json:"revisions,omitempty"`
 	// Amended is the statements of the lock an amendment replaces, from
 	// the project as the caller captured it. A draft may keep one of its
-	// unclassified bugs as it is (#857). It isn't saved: a proposal that
-	// has been made an amendment carries its baseline itself.
-	Amended []project.Statement `json:"-"`
+	// unclassified bugs as it is (#857). It travels with the rest of the
+	// context, so the check the drafting agent runs holds a draft to what
+	// the caller's own check will.
+	Amended []project.Statement `json:"amended,omitempty"`
 }
 
 var checkContexts sync.Map
