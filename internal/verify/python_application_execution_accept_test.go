@@ -96,8 +96,8 @@ package verify
 // 'unittest', then one or more dotted Python module/class/method names, in
 // order. No discovery/options/startup flags/shell string/implicit selection.
 // Conformance argv starts with a script resolved relative to working_dir;
-// it must be contained, regular and identical to BOTH manifest project-relative
-// driver and selected conformance source. Remaining args are literal, including
+// it must be contained, regular and identical to the selected conformance
+// source (#884). Remaining args are literal, including
 // whitespace and metacharacters. Conformance runs the script and requires
 // bound sampled observations under #318's interface. Proof rejected.
 // Tests have no declared sampling and effective runs=1; conformance supports
