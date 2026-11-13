@@ -123,11 +123,12 @@ func TestPythonApplicationExecutionModuleGILDeadline(t *testing.T) {
     finish(key, status)
 def busy():
     print('gil-work-start', flush=True)
-    sum(range(2000000000))
+    sum(range(200000000000))
 ` + entry
 				// The watchdog's own startup comes out of the budget, about
 				// 0.1s in emulated Docker. Half a second still has the busy
-				// loop holding the GIL far past the deadline.
+				// loop holding the GIL far past the deadline: the loop is
+				// one call that takes over twenty minutes on a fast machine.
 				_, p := pa321Fixture(t, source, strings.Replace(pa321Deadline, "timeout=2", "timeout=0.5", 1))
 				opts := pa318Options(t, real, new(int))
 				execute := opts.Execute
@@ -137,9 +138,16 @@ def busy():
 				opts.Execute = func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
 					start := time.Now()
 					r, err := execute(ctx, c)
-					limit := 2 * time.Second
+					// What's told apart is a deadline that waits for the loop,
+					// which takes minutes, from one that doesn't. The bound
+					// was two seconds, and five with Docker's startup and
+					// removal, which a busy machine doesn't meet: a sandbox
+					// at its four CPUs with every other test running took
+					// longer to start Python, and failed a working build's
+					// check (#894).
+					limit := 20 * time.Second
 					if real {
-						limit = 5 * time.Second // Includes Docker startup and removal.
+						limit = 30 * time.Second
 					}
 					if time.Since(start) > limit {
 						t.Fatal("deadline waited for the application GIL")
