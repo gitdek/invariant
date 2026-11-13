@@ -229,7 +229,8 @@ func (s *Snapshot) ReadFileContext(ctx context.Context, name string) ([]byte, er
 }
 
 // validatePath checks repository-relative slash syntax. Only a part directory
-// may be '.', and only a selector may end in a slash.
+// may be '.', and only a selector may end in a slash. Brackets are literal
+// in ordinary paths, but remain forbidden in selectors.
 func validatePath(name string, allowRoot, selector bool) error {
 	if name == "." && allowRoot {
 		return nil
@@ -242,7 +243,7 @@ func validatePath(name string, allowRoot, selector bool) error {
 			return fmt.Errorf("repository path %q contains a control character", name)
 		}
 	}
-	if strings.ContainsAny(name, `\*?[]`) {
+	if strings.ContainsAny(name, `\*?`) || selector && strings.ContainsAny(name, "[]") {
 		return fmt.Errorf("repository path %q contains a backslash or glob", name)
 	}
 	clean := name
