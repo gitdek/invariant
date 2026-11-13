@@ -69,7 +69,7 @@ type Server struct {
 	pending   chan graphJob
 	live      live
 	acted     acted     // the snapshot as last read, and the commands posted since, which it's served with
-	untaken   []Untaken // what /act offers to plan, as the latest refresh read it
+	untaken   []Untaken // what /act offers to hand to the factory, as the latest refresh read it
 	// planned is each issue /act planned, by repo#n, and when: a refresh
 	// that read GitHub before the post leaves it out for a while (#201).
 	planned map[string]time.Time
@@ -572,8 +572,7 @@ func (s *Server) refresh(ctx context.Context) error {
 	var untaken []Untaken
 	for _, r := range s.Repos {
 		for _, is := range r.src.untaken {
-			opened, _ := time.Parse(time.RFC3339, is.CreatedAt)
-			untaken = append(untaken, Untaken{Repo: r.Name, Number: is.Number, Title: is.Title, Opened: opened, URL: is.URL})
+			untaken = append(untaken, untakenOf(r.Name, is))
 		}
 	}
 	s.mu.Lock()
