@@ -675,7 +675,8 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 // It ends with the first three only for a specification it couldn't evaluate
 // or parse: a step, an invariant, a module. Its general status is shared: its
 // system, memory and command-line errors end with it, as a number it can't
-// hold does.
+// hold does, and as an evaluation error raised inside a standard operator
+// does. That last one is still taken for an operational end (#928).
 const (
 	tlcExitSpecEval     = 75
 	tlcExitSafetyEval   = 76
