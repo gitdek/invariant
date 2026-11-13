@@ -1741,7 +1741,37 @@ func destination(p *formalize.Proposal) error {
 		// A new project's slug also names its directory, as a draft's must.
 		return fmt.Errorf("proposal slug %q must be kebab case", p.Slug)
 	}
-	return p.ValidateDestinations()
+	// A draft's module is named this way as it's made, and the name is the
+	// model's file under the project. An amendment keeps its project's
+	// manifest, whose module path is where the amended model is written, and
+	// beside which other model files are removed.
+	if !moduleName.MatchString(p.Module) {
+		return fmt.Errorf("module %q must be a CamelCase TLA+ module name", p.Module)
+	}
+	if p.Target != nil {
+		if m := p.Target.Manifest.Module; !insideProject(m) || path.Ext(m) != ".tla" {
+			return fmt.Errorf("the amended project's module %q must be a .tla file inside the project", m)
+		}
+	}
+	return nil
+}
+
+// moduleName is what formalize requires of a draft's module.
+var moduleName = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+
+// insideProject says whether a path a proposal carries stays inside its
+// project once it's joined to the project's directory: relative, clean,
+// and made of plain names.
+func insideProject(name string) bool {
+	if name == "" || name == "." || path.IsAbs(name) || path.Clean(name) != name || strings.Contains(name, `\`) || strings.ContainsFunc(name, unicode.IsControl) {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." || strings.HasPrefix(part, "-") {
+			return false
+		}
+	}
+	return true
 }
 
 // current reads the project in dir as it stands on the base branch, or

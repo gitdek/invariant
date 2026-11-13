@@ -338,7 +338,7 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 	if err != nil {
 		return "", "", nil, nil, err
 	}
-	if why, err := f.supersededAfterBuild(ctx, n, ratified); err != nil {
+	if why, err := f.superseded(ctx, n, ratified); err != nil {
 		return "", "", nil, nil, err
 	} else if why != current {
 		return "", "", nil, nil, f.finishSuperseded(ctx, n, why, step, result)

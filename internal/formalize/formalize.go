@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -210,42 +209,6 @@ func validateForks(forks []Fork) error {
 	return nil
 }
 
-// insideProject says whether a path a proposal carries stays inside its
-// project once it's joined to the project's directory: relative, clean,
-// and made of plain names.
-func insideProject(name string) bool {
-	if name == "" || name == "." || path.IsAbs(name) || path.Clean(name) != name || strings.ContainsAny(name, "\\\x00\r\n") {
-		return false
-	}
-	for _, part := range strings.Split(name, "/") {
-		if part == ".." || strings.HasPrefix(part, "-") {
-			return false
-		}
-	}
-	return true
-}
-
-// ValidateDestinations holds what a proposal says about where its files go
-// to staying inside its project. A draft's names are checked as it's made,
-// but a proposal is also read back from a comment or a saved record, and
-// what's read there decides where ratification writes and, for an
-// amendment, which model files it removes beside the module (#790). So
-// Write checks it too, whoever calls it.
-func (p *Proposal) ValidateDestinations() error {
-	if p.Plan != nil || p.IssuePlan != nil {
-		return nil
-	}
-	if !moduleRE.MatchString(p.Module) {
-		return fmt.Errorf("module %q must be a CamelCase TLA+ module name", p.Module)
-	}
-	if p.Target != nil {
-		if m := p.Target.Manifest.Module; !insideProject(m) || path.Ext(m) != ".tla" {
-			return fmt.Errorf("the amended project's module %q must be a .tla file inside the project", m)
-		}
-	}
-	return nil
-}
-
 func (d Draft) validateNames() error {
 	switch {
 	case strings.TrimSpace(d.Name) == "":
@@ -333,9 +296,6 @@ func (p *Proposal) Write(dir, request string, ratified *project.Ratification) er
 		}
 	}
 	if err := validateIncludes(p.Includes, p.Module); err != nil {
-		return err
-	}
-	if err := p.ValidateDestinations(); err != nil {
 		return err
 	}
 	m := p.Manifest()

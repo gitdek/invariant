@@ -145,10 +145,22 @@ func TestDraftReferenceRejectsFieldAliases(t *testing.T) {
 
 // Extend the existing checking fixture only for the required witness and bug
 // outcomes. The real checker still constructs every report, pin and reader.
-func init() {
-	if os.Getenv("INVARIANT_DRAFT_RECEIPT_DOCKER") == "1" {
-		os.Exit(draftReceiptDocker(os.Args[1:]))
+// The stand-in for Docker is this test binary, run for this one test with
+// Docker's arguments after "--". A test file a build adds may not run code
+// as the binary starts (#869), so nothing here does: without the variable
+// the stand-in sets, this test does nothing.
+func TestDraftReceiptDockerStandIn(t *testing.T) {
+	if os.Getenv("INVARIANT_DRAFT_RECEIPT_DOCKER") != "1" {
+		return
 	}
+	args := os.Args[1:]
+	for i, arg := range args {
+		if arg == "--" {
+			args = args[i+1:]
+			break
+		}
+	}
+	os.Exit(draftReceiptDocker(args))
 }
 
 func draftReceiptDocker(args []string) int {
@@ -191,7 +203,7 @@ func TestDraftReferenceRequiresAllModelOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nexport INVARIANT_DRAFT_RECEIPT_DOCKER=1\nexec '" + strings.ReplaceAll(exe, "'", "'\"'\"'") + "' \"$@\"\n"
+	script := "#!/bin/sh\nexport INVARIANT_DRAFT_RECEIPT_DOCKER=1\nexec '" + strings.ReplaceAll(exe, "'", "'\"'\"'") + "' -test.run='^TestDraftReceiptDockerStandIn$' -- \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
