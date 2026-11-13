@@ -1,15 +1,14 @@
 ---
-id: D-0457
+id: D-0461
 title: Retire the decision follow-up machinery
 date: 2026-11-13
 door: one-way
-status: ratified
-ratified_by: "@gitdek"
+status: proposed
 proposed_by: agent
-source: "#810, filed on 2026-11-11 once D-0421 made a ratified plan its own decision record. @gitdek on 2026-11-13: \"ratify 810\"."
+source: "#810, filed on 2026-11-11 once D-0421 made a ratified plan its own decision record. @gitdek said \"ratify 810\" on 2026-11-13, on the belief #810 gave him that it would shorten CI. It doesn't, so it waits for his word again."
 ---
 
-# D-0457 · Retire the decision follow-up machinery
+# D-0461 · Retire the decision follow-up machinery
 
 **Goal.** Nothing in the repository is proved, checked and paid for in every CI run that nothing uses. `factory/protocol` goes back to the statements D-0209 ratifies, and `factory/decision-followup` is removed.
 
@@ -27,22 +26,31 @@ The watcher never took a follow-up step: the wiring was in the steps that were p
 
 D-0421, by @gitdek's call on 2026-11-11, makes a ratified plan its own decision record. Its file in `.invariant/plans` holds what a person ratified, and CI checks that ratification on every change. So no merged plan owes a decision, and there is nothing for a follow-up to record.
 
-What keeping it cost:
+What keeping it costs:
 
-- The amendment made `factory/protocol` CI's longest job: 6.9 minutes on the commit before #439, 20.1 on #439's merge and 22.1 on 2026-11-11. It set the wall clock of every pull request's CI, where the next longest job took 13 minutes.
-- `factory/decision-followup` had a job of its own, about 6 minutes in every run.
-- Every reader of the protocol's model read 32 statements about a step nothing takes.
+- `factory/decision-followup` has a job of its own in every CI run, 5.5 minutes on 2026-11-12.
+- Every reader of the protocol's model reads 32 statements about a step nothing takes.
+- Every change to the gate has two more cores to keep passing.
+
+## What it doesn't change
+
+CI's wall clock. #810 was filed believing that #428's amendment had made the protocol's gate CI's longest job, from two readings: 6.9 minutes on the commit before #439 and 20.1 on its merge. Measured on 2026-11-13:
+
+- On one machine the restored core's gate takes 6 minutes 37 seconds and the amended one's 6 minutes 13.
+- In this change's own CI run the restored core's gate took 22.4 minutes. The amended one's took 13.6 to 22.1 over eighteen runs on main that week.
+- The restored core's conformance tries 3,150,750 steps where the amended one's tries 1,503,852.
+
+So the job's time isn't in the follow-up's statements, and the job stays CI's longest.
 
 ## Options considered
 
 - **A. Restore and remove (chosen).** `factory/protocol`'s model, lock, core, explorer, tests and request go back to the proposal D-0209 ratifies, `sha256:7a940fa942df2918af704e9c28d94506ad372aca53072029a85d97f517b45786`, and `followup.go` and its test are removed. Nothing else had changed in the project since #439. `factory/decision-followup` is removed. Nothing is formalized anew: the lock is one a person already ratified, for exactly that proposal.
-- **B. Keep both, unused.** It costs about 20 minutes of every pull request's CI and keeps a model that says more than the factory does.
+- **B. Keep both, unused.** It costs decision-followup's job in every CI run and keeps a model that says more than the factory does.
 - **C. Keep the proved core, restore only the protocol.** The core would be proved and checked with nothing to authorize its steps.
-- **D. Skip the protocol's gate in CI when nothing in it changed.** It hides the cost and leaves the model larger than the factory.
 
 ## What changes
 
-- `factory/protocol`: 38 statements, as D-0209 ratifies them. On the restored core the gate passes in about six and a half minutes: 38 of 38 pins match, TLC checks 25,206 states and 632,656 one size larger, Gobra proves 22 of 22 functions, and conformance reaches all 25,206 states in 3,150,750 steps. The watcher's adapter is unchanged: it didn't change in #439 either.
+- `factory/protocol`: 38 statements, as D-0209 ratifies them. On the restored core the gate passes: 38 of 38 pins match, TLC checks 25,206 states and 632,656 one size larger, Gobra proves 22 of 22 functions, and conformance reaches all 25,206 states in 3,150,750 steps. The watcher's adapter is unchanged: it didn't change in #439 either.
 - In all, 2,617 lines of Go and 1,774 of TLA+ are removed.
 - `factory/decision-followup` is gone, with its CI job.
 - D-0288 and D-0293 are superseded by this decision.
