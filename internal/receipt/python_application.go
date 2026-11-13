@@ -164,10 +164,12 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 	for _, l := range a.Larger {
 		if len(l.Skipped) == 0 && l.Execution != nil && l.Result.Required && !l.Result.Passed {
 			execution("Python execution one size larger", *l.Execution)
-			if l.Conformance != nil {
-				out = append(out, fmt.Sprintf("Python conformance one size larger, target %s, check %s, invocation %s: %s",
-					componentLiteral(l.Key.Target), componentLiteral(l.Key.Check), componentLiteral(l.Key.ID), componentLiteral(l.Result.Message)))
-			}
+		}
+		if pythonApplicationLargerAttemptsFailed(l) {
+			// The gate's message names the invocation as this line does.
+			said := strings.TrimPrefix(l.Result.Message, fmt.Sprintf("target %s, check %s, invocation %s: ", l.Key.Target, l.Key.Check, l.Key.ID))
+			out = append(out, fmt.Sprintf("Python conformance one size larger, target %s, check %s, invocation %s: %s",
+				componentLiteral(l.Key.Target), componentLiteral(l.Key.Check), componentLiteral(l.Key.ID), componentLiteral(said)))
 		}
 	}
 	for _, c := range a.Conformance {
@@ -182,6 +184,20 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 		}
 	}
 	return out
+}
+
+// pythonApplicationLargerAttemptsFailed reports whether an invocation's run
+// one size larger had its attempts checked, not only its counts, and failed,
+// which pythonApplicationFailures names (#881).
+func pythonApplicationLargerAttemptsFailed(l verify.PythonApplicationLarger) bool {
+	return len(l.Skipped) == 0 && l.Execution != nil && l.Conformance != nil && l.Result.Required && !l.Result.Passed
+}
+
+// pythonApplicationLargerFailed reports whether the application's failures
+// name what failed one size larger, so the receipt's own line for that check
+// would say it twice.
+func pythonApplicationLargerFailed(a *verify.PythonApplicationReport) bool {
+	return a != nil && slices.ContainsFunc(a.Larger, pythonApplicationLargerAttemptsFailed)
 }
 
 // pythonApplicationLarger says what the check one size larger did for an

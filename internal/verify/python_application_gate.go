@@ -613,17 +613,25 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 				c.Result.Message = strings.ReplaceAll(checkErr.Error(), work, "/application")
 			}
 			record.Conformance = &c
+			reason, unreadable := pythonApplicationUnreadableEvidence(c)
 			switch {
-			case lctx.Err() != nil || c.OperationalError:
+			case lctx.Err() != nil || (c.OperationalError && !unreadable):
 				// A completed count disagreement still stands. Otherwise an
 				// unavailable check claims nothing, including no agreement.
 				if l.Passed {
 					l.Required, l.Passed = false, false
-					l.Message = "conformance one size larger was unavailable: " + c.Result.Message
+					l.Message = "conformance one size larger was unavailable: " + pythonApplicationConformanceReason(c)
 					if lctx.Err() != nil {
 						l.Message = fmt.Sprintf("conformance one size larger didn't finish within the shared %s allowance", timeouts.explore)
 					}
 				}
+			case unreadable:
+				// TLC ran and couldn't read what the run recorded. That's
+				// invalid execution evidence, which fails here as it does at
+				// the ratified bounds, and nothing operational.
+				c.OperationalError = false
+				l.Required, l.Passed = true, false
+				l.Message = "conformance one size larger: TLC can't check what the run recorded: " + reason
 			case !c.passed():
 				l.Required, l.Passed = true, false
 				l.Message = pythonApplicationLargerFailure(c, *x, modelVariables(src, includes))
@@ -661,6 +669,81 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		}
 	}
 	return nil
+}
+
+// TLC's own exit statuses, tlc2.output.EC.ExitStatus in the pinned release.
+// It ends with the first three only for a specification it couldn't evaluate
+// or parse: a step, an invariant, a module. Its general status is shared: its
+// system, memory and command-line errors end with it, as a number it can't
+// hold does.
+const (
+	tlcExitSpecEval     = 75
+	tlcExitSafetyEval   = 76
+	tlcExitSpecParse    = 150
+	tlcExitGeneralError = 255
+)
+
+// tlcIntegerTooBig is how TLC's message for a number past its 32 bits starts.
+// It exits with its general status, as its system errors do, so only these
+// words tell the two apart.
+const tlcIntegerTooBig = "TLC can't handle a number this big."
+
+// pythonApplicationUnreadableEvidence says whether a conformance check ended
+// because TLC couldn't read what the run recorded, with TLC's reason in one
+// line. The model and its constants have just passed TLC at this size, and
+// these checking modules at the ratified bounds, so what TLC can't parse or
+// evaluate is the recorded states: a number the model's modules can't write,
+// a value of another type, a number past its range. The every-step module
+// also holds the attempts' arguments and the model at the next environment
+// bounds, and TLC ending it this way fails too, as at the ratified bounds. A
+// check that never ran or was cut off carries the runner's own error. One
+// that stalled, ran out of memory or was killed has the runner's result,
+// which holds no TLC version. Neither is evidence, and neither takes anything
+// from a check TLC did end this way: as a completed count disagreement does,
+// the first such check stands whatever became of the others. No words of
+// TLC's make an end operational, since a recorded value can put any words in
+// its message.
+func pythonApplicationUnreadableEvidence(c PythonApplicationConformance) (reason string, unreadable bool) {
+	for _, check := range c.Checks {
+		r := check.Result
+		if check.Error != "" || r.Version == "" {
+			continue
+		}
+		switch {
+		case r.ExitCode == tlcExitSpecParse, r.ExitCode == tlcExitSpecEval, r.ExitCode == tlcExitSafetyEval,
+			r.ExitCode == tlcExitGeneralError && strings.HasPrefix(r.Message, tlcIntegerTooBig):
+			return pythonApplicationOneLine(r.Message), true
+		}
+	}
+	return "", false
+}
+
+// pythonApplicationConformanceReason is why a conformance check didn't pass,
+// in one line. An every-step check's reason is its own (#881).
+func pythonApplicationConformanceReason(c PythonApplicationConformance) string {
+	reason := c.Result.Message
+	if reason == "" && c.Result.Tried != nil {
+		reason = c.Result.Tried.Message
+	}
+	if reason = pythonApplicationOneLine(reason); reason == "" {
+		return "no reason was recorded"
+	}
+	return reason
+}
+
+// pythonApplicationOneLine is a tool's message on one line, short enough for
+// a receipt's row. The check's evidence keeps the whole of it.
+func pythonApplicationOneLine(message string) string {
+	const limit = 400
+	line := strings.Join(strings.Fields(message), " ")
+	if len(line) <= limit {
+		return line
+	}
+	cut := strings.LastIndexByte(line[:limit], ' ')
+	if cut <= 0 {
+		cut = limit
+	}
+	return strings.ToValidUTF8(line[:cut], "") + " ..."
 }
 
 // Next counterexamples name state pairs. Recover the action from the retained
