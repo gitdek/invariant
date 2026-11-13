@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -581,7 +580,7 @@ func (r Runner) CheckReplayAlternative(ctx context.Context, dir string, p Replay
 	if model != p.ModelSHA256 || !maps.Equal(includes, p.IncludesSHA256) || s.tool != p.Tool {
 		return fmt.Errorf("replay-stale-input: model, includes or tool changed")
 	}
-	if refused && !reflect.DeepEqual(before, after) {
+	if refused && !before.Equal(after) {
 		return fmt.Errorf("replay-invalid-refusal: state changed")
 	}
 	vars := s.model.Variables()

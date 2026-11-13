@@ -12,6 +12,7 @@ import (
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/verify"
 )
 
 // Stages an issue moves through, as the page draws them.
@@ -99,6 +100,10 @@ type Waiting struct {
 	// would have to replay against the code and can't yet (#857): a build
 	// of it stops at the gate, so the card says so beside its ratify button.
 	Unreplayed []string `json:"unreplayed,omitempty"`
+	// Replays says the gate replays a current bug against this project's
+	// code: a driver checks it. In Go it doesn't, and the card says nothing
+	// of a replay.
+	Replays bool `json:"replays,omitempty"`
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
 	Unchanged bool `json:"unchanged,omitempty"`
@@ -233,11 +238,16 @@ func behaviorOf(s project.Statement) string {
 	return s.CodeBehavior
 }
 
-// amendedStatements is the statements of the lock a proposal amends, when
-// the proposal carries them: with its target, or with its chart's
-// comparison.
+// amendedStatements is the statements of the lock an amendment replaces,
+// when the proposal carries them: with its target, or with its chart's
+// comparison. A proposal that amends nothing has none: a new project's
+// revised draft is compared with the draft before it, which nobody
+// ratified.
 func amendedStatements(p *formalize.Proposal) []project.Statement {
-	if p.Target != nil && p.Target.Baseline != nil {
+	if p.Target == nil {
+		return nil
+	}
+	if p.Target.Baseline != nil {
 		return p.Target.Baseline.Lock.Statements
 	}
 	if p.Reader != nil && p.Reader.Comparison != nil {
@@ -565,6 +575,7 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 			}
 		}
 		w.Unreplayed = factory.Unreplayed(p)
+		w.Replays = verify.ReplaysBugs(p.Manifest().Language)
 		if pl := p.Plan; pl != nil {
 			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted, Tests: pl.Tests, Execution: pl.Execution, SourceHash: p.Hash}
 			for _, t := range pl.Tests {

@@ -52,6 +52,8 @@ func TestTheRatifyCardShowsEachBugsClassification857(t *testing.T) {
 	}
 	snap.Issues[0].Waiting.Unreplayed = []string{"Kept", "<Classified>"}
 	snap.Issues[3].Waiting.Unreplayed = []string{"Raised"}
+	// Cards 1 and 4 are of projects a driver checks. Card 3's is in Go.
+	snap.Issues[0].Waiting.Replays, snap.Issues[3].Waiting.Replays = true, true
 	fixture, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +122,8 @@ const bugBehaviorBrowserCheck = `
     assert(shown(relaxed) && !card(1).querySelector(".stmts").open, "card 1 doesn't say which bugs it lowers before its statements are opened");
     assert(text(relaxed) === "2 bugs are no longer called current. What #12 ratified says the code has Lowered, <Gone> today, and the gate has to show that by replaying each against the code. This amendment doesn't say so.", "card 1 says: " + text(relaxed));
     assert(!relaxed.querySelector("gone") && relaxed.querySelectorAll("strong").length === 2, "a bug's name reached the page as markup");
-    assert(text(card(3).querySelector(".ask.relaxed")) === "One bug is no longer called current. What #12 ratified says the code has Only today, and the gate has to show that by replaying it against the code. This amendment doesn't say so.", "card 3 says: " + text(card(3).querySelector(".ask.relaxed")));
+    // In Go the gate replays nothing, so the card says only what the amendment stops saying.
+    assert(text(card(3).querySelector(".ask.relaxed")) === "One bug is no longer called current. What #12 ratified says the code has Only today. This amendment doesn't say so.", "card 3 says: " + text(card(3).querySelector(".ask.relaxed")));
     // A new proposal, and an amendment that only raises a bug, say none of it.
     assert(!card(2).querySelector(".ask.relaxed") && !card(4).querySelector(".ask.relaxed"), "a card that lowers no bug says it does");
     // A proposal the gate can't yet replay says so, above what it lowers.
@@ -145,6 +148,10 @@ const bugBehaviorBrowserCheck = `
     assert(shown(kept) && kept.getBoundingClientRect().top >= row(1, "Kept").querySelector("b").getBoundingClientRect().bottom - 1, "the classification isn't under the statement's words");
     assert(lowered.classList.contains("changed") && !kept.classList.contains("changed") && getComputedStyle(lowered).color !== getComputedStyle(kept).color, "a changed classification looks like a kept one");
     assert(kept.title.includes("replay") && lowered.title.includes("Nothing says the code has it"), "a classification doesn't explain itself: " + kept.title + " / " + lowered.title);
+    card(4).querySelector(".stmts summary").click();
+    card(3).querySelector(".stmts summary").click();
+    await until(() => card(3).querySelector(".stmts").open && card(4).querySelector(".stmts").open, "cards 3 and 4's statements open");
+    assert(row(4, "Raised").querySelector(".cb").title === "The code has this bug today, so the gate has to replay it against the code.", "a current bug where a driver checks the code explains itself as: " + row(4, "Raised").querySelector(".cb").title);
     // No other kind of statement says anything of the code.
     assert(!row(1, "Spec").querySelector(".cb") && !row(1, "Safe").querySelector(".cb"), "a rule that isn't a bug has a classification");
   }

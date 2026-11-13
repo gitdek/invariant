@@ -1,6 +1,8 @@
 package formalize
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/toolchain"
 )
 
 // legacy857 is a project ratified before bugs were classified: the shared
@@ -147,6 +150,9 @@ func TestAnAmendmentKeepsALegacyBugAsItIs857(t *testing.T) {
 		{"the carried bug with other words", map[string]func(string) string{"proposal.json": func(s string) string {
 			return strings.Replace(s, "A producer adds a message to a full buffer.", "A producer overfills the buffer.", 1)
 		}}, "PutWhenFull", nil},
+		{"the carried bug breaking another rule", map[string]func(string) string{"proposal.json": func(s string) string {
+			return strings.Replace(s, `"expect": "WithinCap"`, `"expect": "TypeOK"`, 1)
+		}}, "PutWhenFull", nil},
 		{"the carried bug with another definition", map[string]func(string) string{"BoundedBuffer.tla": func(s string) string {
 			return strings.Replace(s, "PutWhenFull == \\E m \\in Msgs : buf' = Append(buf, m)", "PutWhenFull == \\E m \\in Msgs : buf' = Append(Append(buf, m), m)", 1)
 		}}, "PutWhenFull", nil},
@@ -172,5 +178,41 @@ func TestAnAmendmentKeepsALegacyBugAsItIs857(t *testing.T) {
 	}
 	if text := Prompt(Request{Repo: "o/r", Issue: 5, Title: "t", Current: c}, 4); !strings.Contains(text, "leave such a bug exactly as the draft you were given has it") || !strings.Contains(text, "Classify every bug you add or change") {
 		t.Error("the prompt doesn't say what an amendment does with a bug its lock doesn't classify")
+	}
+}
+
+// An option's preview is a model a person may choose, so it's held to the
+// same rule as a draft, through the same lock. As a new proposal's option a
+// model with an unclassified bug is refused before any tool runs. As an
+// option of an amendment whose lock has that bug unclassified, the rule is
+// satisfied, and what stops the check here is only that it has no tools.
+func TestAPreviewIsHeldToTheClassificationRule857(t *testing.T) {
+	c := legacy857(t)
+	lock := c.Lock.Statements
+	fork := Fork{ID: "F1", Question: "Which wording?"}
+	for _, id := range []string{"A", "B"} {
+		m, err := ReadAmending(seeded857(t, c, nil), lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Statements[1].Says = "Candidate " + id + " says it its own way."
+		fork.Options = append(fork.Options, Option{ID: id, Says: "Say it as option " + id + " does.", Preview: &Preview{Fork: fork.ID, Option: id, Model: m}})
+	}
+	ws := t.TempDir()
+	b, err := json.Marshal(Draft{Forks: []Fork{fork}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "proposal.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = CheckWithContext(context.Background(), ws, toolchain.Toolchain{}, CheckContext{})
+	if err == nil || !strings.Contains(err.Error(), "fork F1 option A: statement PutWhenFull: a new proposal must classify each bug") ||
+		!strings.Contains(err.Error(), "fork F1 option B: statement PutWhenFull: a new proposal must classify each bug") {
+		t.Fatalf("a new proposal's options with an unclassified bug: %v", err)
+	}
+	_, _, err = CheckWithContext(context.Background(), ws, toolchain.Toolchain{}, CheckContext{Amended: lock})
+	if err == nil || strings.Contains(err.Error(), "classify") {
+		t.Fatalf("an amendment's options that keep the lock's unclassified bug are stopped by the rule, or by nothing: %v", err)
 	}
 }

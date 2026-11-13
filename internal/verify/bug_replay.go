@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -186,14 +185,7 @@ func CheckBugReplay(ctx context.Context, runner tlc.Runner, dir string, q BugRep
 // compared by the values they hold. Comparing their spelling would refuse
 // a faithful replay, or miss a reproduced bug whose forbidden state lists
 // a set in another order. A malformed value equals nothing.
-func sameReplayValue(a, b tlc.ReplayValue) bool {
-	x, err := a.Canonical()
-	if err != nil {
-		return false
-	}
-	y, err := b.Canonical()
-	return err == nil && reflect.DeepEqual(x, y)
-}
+func sameReplayValue(a, b tlc.ReplayValue) bool { return a.Equal(b) }
 
 func sameReplayValues(a, b []tlc.ReplayValue) bool {
 	if len(a) != len(b) {
@@ -207,18 +199,7 @@ func sameReplayValues(a, b []tlc.ReplayValue) bool {
 	return true
 }
 
-func sameReplayState(a, b tlc.ReplayState) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for name, value := range a {
-		other, ok := b[name]
-		if !ok || !sameReplayValue(value, other) {
-			return false
-		}
-	}
-	return true
-}
+func sameReplayState(a, b tlc.ReplayState) bool { return a.Equal(b) }
 
 func sameReplayCalls(a, b []BugReplayCall) bool {
 	if len(a) != len(b) {
@@ -262,7 +243,13 @@ func driverBugReplay(p *project.Project, b project.Statement) bool {
 // names against the code of a project in language: a current bug, where a
 // driver checks the code. Go keeps its proof, agreement and exploration.
 func RequiresBugReplay(language string, s project.Statement) bool {
-	return s.Kind == project.Bug && s.CodeBehavior == "current" && (language == "typescript" || language == "python")
+	return s.Kind == project.Bug && s.CodeBehavior == "current" && ReplaysBugs(language)
+}
+
+// ReplaysBugs says whether the gate replays a current bug against code in
+// language: where a driver checks the code, and not in Go.
+func ReplaysBugs(language string) bool {
+	return language == "typescript" || language == "python"
 }
 
 // BugReplayExecutes says whether a gate can carry out a replay it requires.
@@ -300,18 +287,20 @@ func prepareBugReplay(ctx context.Context, out *Bug, b project.Statement, p *pro
 	}
 }
 
-var replayPath = regexp.MustCompile(`(?:/[A-Za-z0-9._@+-]+){2,}`)
+// An absolute path, where one starts: not the tail of a URL, and not a
+// path under the model's own directory, which is already named.
+var replayPath = regexp.MustCompile(`(^|[\s"'(=,;])(?:/[A-Za-z0-9._@+-]+){2,}`)
 
 // replayMessage is why a path couldn't be prepared, as a receipt keeps it:
 // the refusal's first line, with no directory of the machine that ran it,
 // and short enough to read in a table. TLC's whole output isn't evidence
 // here. The retained counterexample is.
 func replayMessage(err error, dir string) string {
-	s := strings.ReplaceAll(err.Error(), dir, "<model>")
+	s := strings.TrimSpace(strings.ReplaceAll(err.Error(), dir, "<model>"))
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
 	}
-	s = strings.TrimSpace(replayPath.ReplaceAllString(s, "<path>"))
+	s = strings.TrimSpace(replayPath.ReplaceAllString(s, "${1}<path>"))
 	const most = 400
 	if len(s) > most {
 		cut := most

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"reflect"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -337,6 +338,32 @@ func (v ReplayValue) canonical(depth int) (ReplayValue, error) {
 // own order. A malformed value has none.
 func (v ReplayValue) Canonical() (ReplayValue, error) {
 	return v.canonical(0)
+}
+
+// Equal says whether two values are the same value, however each is
+// spelled: a set in any order, an integer however it's padded. A malformed
+// value equals nothing, itself included.
+func (v ReplayValue) Equal(o ReplayValue) bool {
+	x, err := v.canonical(0)
+	if err != nil {
+		return false
+	}
+	y, err := o.canonical(0)
+	return err == nil && reflect.DeepEqual(x, y)
+}
+
+// Equal says whether two states give the same variables the same values.
+func (s ReplayState) Equal(o ReplayState) bool {
+	if len(s) != len(o) {
+		return false
+	}
+	for name, value := range s {
+		other, ok := o[name]
+		if !ok || !value.Equal(other) {
+			return false
+		}
+	}
+	return true
 }
 
 // TLA accepts only validated data, never an arbitrary expression from a result.

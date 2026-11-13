@@ -1908,7 +1908,7 @@
       const titles = w.issuePlan.issues || [];
       return `<p class="ask">A plan for ${name}: <strong>${titles.length}</strong> issue${titles.length === 1 ? "" : "s"}, in order. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.issuePlan.summary)}</p><ol class="planned">${titles.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>`;
     }
-    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
+    if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>${unreplayedText(w)}`;
     return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>${unreplayedText(w)}${relaxedText(w, repo)}`;
   }
   // A bug a proposal calls current is one the gate has to replay against
@@ -1928,18 +1928,20 @@
     const names = w.relaxed || [];
     if (!names.length) return "";
     const list = names.map((name) => `<strong>${esc(name)}</strong>`).join(", ");
-    return `<p class="ask relaxed"><b class="same">${names.length === 1 ? "One bug is" : `${names.length} bugs are`} no longer called current.</b> What ${esc(amendsRef(repo, w.amends))} ratified says the code has ${list} today, and the gate has to show that by replaying ${names.length === 1 ? "it" : "each"} against the code. This amendment doesn't say so.</p>`;
+    const replayed = w.replays ? `, and the gate has to show that by replaying ${names.length === 1 ? "it" : "each"} against the code` : "";
+    return `<p class="ask relaxed"><b class="same">${names.length === 1 ? "One bug is" : `${names.length} bugs are`} no longer called current.</b> What ${esc(amendsRef(repo, w.amends))} ratified says the code has ${list} today${replayed}. This amendment doesn't say so.</p>`;
   }
   // behaviorText is what a bug's statement says of the code (#857), in the
   // words the proposal's comment and the receipt use, and what the lock
   // being amended said when that's something else.
+  // The gate replays a current bug only where a driver checks the code.
   const BEHAVIOR = {
-    current: "The code has this bug today, so the gate has to replay it against the code.",
-    hypothetical: "A mistake the model has to catch. Nothing says the code has it.",
-    "not classified": "A lock from before bugs were classified. It's caught in the model, and not replayed against the code.",
+    current: (w) => (w.replays ? "The code has this bug today, so the gate has to replay it against the code." : "The code has this bug today."),
+    hypothetical: () => "A mistake the model has to catch. Nothing says the code has it.",
+    "not classified": () => "A lock from before bugs were classified. It's caught in the model, and not replayed against the code.",
   };
-  const behaviorText = (st) => (st.behavior
-    ? `<span class="cb${st.was ? " changed" : ""}" title="${esc(BEHAVIOR[st.behavior] || "")}">Code behavior: ${esc(st.behavior)}${st.was ? ` <em>(was ${esc(st.was)})</em>` : ""}</span>`
+  const behaviorText = (st, w) => (st.behavior
+    ? `<span class="cb${st.was ? " changed" : ""}" title="${esc(BEHAVIOR[st.behavior]?.(w) || "")}">Code behavior: ${esc(st.behavior)}${st.was ? ` <em>(was ${esc(st.was)})</em>` : ""}</span>`
     : "");
   // The same disclosure serves both pages. Keep the node on ordinary inbox
   // refreshes, including its open files, loading state and explicit retry.
@@ -2103,7 +2105,7 @@
   // said is what a proposal's statements, or a plan's tests, say. A plan of
   // issues has none: its card lists the issues.
   const said = (w) => (w.statements || []).length
-    ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}${behaviorText(st)}</span></li>`).join("")}</ul></details>`
+    ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}${behaviorText(st, w)}</span></li>`).join("")}</ul></details>`
     : "";
   function needCard(is) {
     if (ACT) return actCard(is);

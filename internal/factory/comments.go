@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -152,9 +153,31 @@ func unbuildable(p *formalize.Proposal) string {
 	if len(names) == 1 {
 		it, bug, them = "it", "that bug", "it"
 	}
-	return fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and the gate can't run a replay yet. "+
-		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with %s as hypothetical if nothing shows the code has %s.",
-		list(names), it, bug, them)
+	note := fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and the gate can't run a replay yet. "+
+		"A build would stop there, at `replay-unavailable`.", list(names), it)
+	// A bug that must break a property has a counterexample that never
+	// ends, which no replay can run: waiting for replays doesn't help it.
+	kinds := map[string]string{}
+	for _, s := range p.Statements {
+		kinds[s.Name] = s.Kind
+	}
+	var endless []string
+	for _, s := range p.Statements {
+		if slices.Contains(names, s.Name) && kinds[s.Expect] == project.Property {
+			endless = append(endless, s.Name)
+		}
+	}
+	if len(endless) < len(names) {
+		note += fmt.Sprintf(" Ratify it once replays run, or have it drafted again with %s as hypothetical if nothing shows the code has %s.", bug, them)
+	}
+	if len(endless) > 0 {
+		must := "must each break a property"
+		if len(endless) == 1 {
+			must = "must break a property"
+		}
+		note += fmt.Sprintf(" %s %s, and a counterexample that never ends isn't one a replay can run, now or once replays run.", list(endless), must)
+	}
+	return note
 }
 
 func bugClassification(s project.Statement) string {
@@ -270,20 +293,25 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if len(assumed) > 0 {
 		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
 	}
-	// A bug the ratified lock calls current is one the gate has to replay
-	// against the code. Calling it anything else ends that (#857).
+	// A bug the ratified lock calls current is one the code is said to
+	// have today, and where a driver checks the code the gate has to replay
+	// it. Calling it anything else ends both (#857).
 	var lowered []formalize.Change
 	for _, c := range ch.Of(formalize.Changed) {
 		if c.Old.Kind == project.Bug && c.Old.CodeBehavior == "current" && c.New.CodeBehavior != "current" {
 			lowered = append(lowered, c)
 		}
 	}
-	switch len(lowered) {
-	case 0:
-	case 1:
-		fmt.Fprintf(&b, "**This stops calling %s current.** The gate has to replay a current bug against the code, and it would no longer replay that one.\n\n", names(lowered))
-	default:
-		fmt.Fprintf(&b, "**This stops calling %s current.** The gate has to replay a current bug against the code, and it would no longer replay those.\n\n", names(lowered))
+	if len(lowered) > 0 {
+		that, one := "those bugs", "those"
+		if len(lowered) == 1 {
+			that, one = "that bug", "that one"
+		}
+		if verify.ReplaysBugs(p.Manifest().Language) {
+			fmt.Fprintf(&b, "**This stops calling %s current.** The gate has to replay a current bug against the code, and it would no longer replay %s.\n\n", names(lowered), one)
+		} else {
+			fmt.Fprintf(&b, "**This stops calling %s current.** Nothing would say any more that the code has %s today.\n\n", names(lowered), that)
+		}
 	}
 	if note := unbuildable(p); note != "" {
 		b.WriteString(note + "\n\n")

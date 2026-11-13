@@ -94,6 +94,29 @@ func TestTheRatifyCardSaysWhatEachBugSaysOfTheCode857(t *testing.T) {
 		t.Errorf("a proposal written in TypeScript can't be built for %v; want its three current bugs", w.Unreplayed)
 	}
 	p.Language = ""
+	// A new project's revised draft is compared, in its chart, with the
+	// draft before it. Nobody ratified that draft, so nothing "was", and
+	// nothing is said to be lowered from it.
+	revised, earlier := amendment857()
+	revised.Reader = &formalize.Reader{Version: 1, Comparison: &statechart.Comparison{Baseline: statechart.ComparisonSnapshot{Lock: project.Lock{Statements: earlier}}}}
+	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: revised}, time.Now()); len(w.Relaxed) != 0 || w.Amends != "" {
+		t.Errorf("a new project's revised draft stops calling %v current, amending %q", w.Relaxed, w.Amends)
+	} else {
+		for _, s := range w.Statements {
+			if s.Was != "" {
+				t.Errorf("a new project's revised draft says %s was %q", s.Name, s.Was)
+			}
+		}
+	}
+	// The card is told whether the gate replays a current bug in this
+	// project's language, so it speaks of a replay only where there is one.
+	for language, replays := range map[string]bool{"typescript": true, "python": true, "go": false, "": false} {
+		q, _ := amendment857()
+		q.Language = language
+		if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: q}, time.Now()); w.Replays != replays {
+			t.Errorf("a proposal in %q: the gate replays its current bugs: %v; want %v", language, w.Replays, replays)
+		}
+	}
 	// An amendment that carries no lock says nothing of what was.
 	p.Target = &formalize.Target{Previous: "#12", Amends: "sha256:old"}
 	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: p}, time.Now()); len(w.Relaxed) != 0 || w.Statements[3].Was != "" {

@@ -68,13 +68,14 @@ func TestReplayRecordsAreComparedByValue857(t *testing.T) {
 		t.Error("a call with no arguments and a set in another order isn't the call the path names")
 	}
 	for name, change := range map[string]func(*BugReplayCall){
-		"another action":      func(c *BugReplayCall) { c.Action = "Clear" },
-		"another index":       func(c *BugReplayCall) { c.Index = 1 },
-		"an argument":         func(c *BugReplayCall) { c.Args = []tlc.ReplayValue{a} },
-		"another state after": func(c *BugReplayCall) { c.After = tlc.ReplayState{"held": of("set", a)} },
-		"no dispatch":         func(c *BugReplayCall) { c.Dispatched = false },
-		"another outcome":     func(c *BugReplayCall) { c.Outcome = "refused" },
-		"an error":            func(c *BugReplayCall) { c.Error = "boom" },
+		"another action":       func(c *BugReplayCall) { c.Action = "Clear" },
+		"another index":        func(c *BugReplayCall) { c.Index = 1 },
+		"an argument":          func(c *BugReplayCall) { c.Args = []tlc.ReplayValue{a} },
+		"another state after":  func(c *BugReplayCall) { c.After = tlc.ReplayState{"held": of("set", a)} },
+		"another state before": func(c *BugReplayCall) { c.Before = tlc.ReplayState{"held": of("set", a)} },
+		"no dispatch":          func(c *BugReplayCall) { c.Dispatched = false },
+		"another outcome":      func(c *BugReplayCall) { c.Outcome = "refused" },
+		"an error":             func(c *BugReplayCall) { c.Error = "boom" },
 	} {
 		other := wire
 		change(&other)

@@ -183,6 +183,20 @@ Bad == \E p \in People : Early(p)
 			}
 		})
 	}
+	// What a receipt keeps of a refusal is one line. TLC's first line is
+	// often only a heading, so the line holds the whole of what TLC said:
+	// here, the name the generated check and the model both declare.
+	t.Run("a refusal's message names what TLC objected to", func(t *testing.T) {
+		clash := strings.Replace(honest, "CONSTANT People", "CONSTANT People, Len", 1)
+		_, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": clash}, map[string]string{"People": "{p1, p2}", "Len": "2"}, "Safe")
+		if err == nil {
+			t.Fatal("a model whose constant is named like an operator the check extends got a path")
+		}
+		kept := replayMessage(err, "/nowhere")
+		if !strings.Contains(kept, "Len") || strings.HasSuffix(kept, ":") || strings.ContainsAny(kept, "\r\n") || strings.Contains(kept, "/private/") || strings.Contains(kept, "/tmp/") {
+			t.Fatalf("the receipt would keep %q", kept)
+		}
+	})
 	// A bug's operation that takes a step an action of Next takes too
 	// gives that step two readings, and TLC can't say which one took it.
 	t.Run("a bug's operation that takes a normal step too", func(t *testing.T) {
