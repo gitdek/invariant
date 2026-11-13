@@ -315,16 +315,10 @@ Starve == /\ n > 0 /\ n' = n - 1
 					if len(broken.Proposal.Forks) > 0 {
 						f := broken.Proposal.Forks[0]
 						o := f.Options[0]
-						v := *o.Preview
-						v.Fingerprint = ""
-						o.Preview.Fingerprint = saved790Digest(reader603JSON(t, struct {
-							Fork     string            `json:"fork"`
-							Kind     string            `json:"kind,omitempty"`
-							Question string            `json:"question"`
-							Option   string            `json:"option"`
-							Says     string            `json:"says"`
-							Preview  formalize.Preview `json:"preview"`
-						}{f.ID, f.Kind, f.Question, o.ID, o.Says, v}))
+						var err error
+						if o.Preview.Fingerprint, err = f.PreviewFingerprint(o); err != nil {
+							t.Fatal(err)
+						}
 						if err := broken.Proposal.ValidatePreviewContext(*broken.CheckContext); err != nil {
 							t.Fatalf("fixture changed unrelated preview evidence: %v", err)
 						}

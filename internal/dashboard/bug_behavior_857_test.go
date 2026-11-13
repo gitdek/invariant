@@ -83,6 +83,16 @@ func TestTheRatifyCardSaysWhatEachBugSaysOfTheCode857(t *testing.T) {
 	if len(w.Relaxed) != 0 {
 		t.Errorf("a new proposal stops calling %v current", w.Relaxed)
 	}
+	// The card names the bugs the gate would have to replay and can't yet:
+	// those it calls current, in a project whose code a driver checks.
+	if len(w.Unreplayed) != 0 {
+		t.Errorf("a proposal written in Go can't be built for %v", w.Unreplayed)
+	}
+	p.Language = "typescript"
+	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: p}, time.Now()); !reflect.DeepEqual(w.Unreplayed, []string{"Kept", "Raised", "Classified"}) {
+		t.Errorf("a proposal written in TypeScript can't be built for %v; want its three current bugs", w.Unreplayed)
+	}
+	p.Language = ""
 	// An amendment that carries no lock says nothing of what was.
 	p.Target = &formalize.Target{Previous: "#12", Amends: "sha256:old"}
 	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: p}, time.Now()); len(w.Relaxed) != 0 || w.Statements[3].Was != "" {

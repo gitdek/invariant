@@ -126,6 +126,37 @@ func thenWhat(p *formalize.Proposal, verb string) string {
 	return "I'll " + verb + " " + formalize.Languages[p.Manifest().Language]
 }
 
+// Unreplayed names the bugs a proposal calls current that the gate would
+// have to replay against the code and can't yet (#857). A build of such a
+// proposal stops at the gate, so the person ratifying it is told first.
+func Unreplayed(p *formalize.Proposal) []string {
+	if verify.BugReplayExecutes {
+		return nil
+	}
+	var names []string
+	language := p.Manifest().Language
+	for _, s := range p.Statements {
+		if verify.RequiresBugReplay(language, s) {
+			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
+func unbuildable(p *formalize.Proposal) string {
+	names := Unreplayed(p)
+	if len(names) == 0 {
+		return ""
+	}
+	it, bug, them := "each", "those bugs", "them"
+	if len(names) == 1 {
+		it, bug, them = "it", "that bug", "it"
+	}
+	return fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and the gate can't run a replay yet. "+
+		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with %s as hypothetical if nothing shows the code has %s.",
+		list(names), it, bug, them)
+}
+
 func bugClassification(s project.Statement) string {
 	if s.Kind != project.Bug {
 		return ""
@@ -151,6 +182,9 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	}
 	if r != nil {
 		fmt.Fprintf(&b, "\n**Already checked** against a draft model, within %s: %s\n", bounds(p.Bounds), checked(r))
+	}
+	if note := unbuildable(p); note != "" {
+		b.WriteString("\n" + note + "\n")
 	}
 	b.WriteString(readerComment(p))
 	if p.Reader != nil && p.Reader.Comparison != nil {
@@ -235,6 +269,24 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	}
 	if len(assumed) > 0 {
 		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
+	}
+	// A bug the ratified lock calls current is one the gate has to replay
+	// against the code. Calling it anything else ends that (#857).
+	var lowered []formalize.Change
+	for _, c := range ch.Of(formalize.Changed) {
+		if c.Old.Kind == project.Bug && c.Old.CodeBehavior == "current" && c.New.CodeBehavior != "current" {
+			lowered = append(lowered, c)
+		}
+	}
+	switch len(lowered) {
+	case 0:
+	case 1:
+		fmt.Fprintf(&b, "**This stops calling %s current.** The gate has to replay a current bug against the code, and it would no longer replay that one.\n\n", names(lowered))
+	default:
+		fmt.Fprintf(&b, "**This stops calling %s current.** The gate has to replay a current bug against the code, and it would no longer replay those.\n\n", names(lowered))
+	}
+	if note := unbuildable(p); note != "" {
+		b.WriteString(note + "\n\n")
 	}
 	changed := len(ch.Of(formalize.Added)) + len(ch.Of(formalize.Changed)) + len(ch.Of(formalize.Removed))
 	if changed == 0 {

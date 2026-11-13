@@ -1909,7 +1909,16 @@
       return `<p class="ask">A plan for ${name}: <strong>${titles.length}</strong> issue${titles.length === 1 ? "" : "s"}, in order. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.issuePlan.summary)}</p><ol class="planned">${titles.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>`;
     }
     if (w.unchanged) return `<p class="ask"><b class="same">No statement changes.</b> All <strong>${n}</strong> statements for ${name} stay exactly as ${esc(amendsRef(repo, w.amends))} ratified them, and only the code changes.</p>`;
-    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>${relaxedText(w, repo)}`;
+    return `<p class="ask">${w.amends ? `An amendment to what ${esc(amendsRef(repo, w.amends))} ratified: ` : ""}<strong>${n}</strong> statements for ${name}, already checked by TLC, and waiting for ${who} to ratify them.</p>${unreplayedText(w)}${relaxedText(w, repo)}`;
+  }
+  // A bug a proposal calls current is one the gate has to replay against
+  // the code. Until the gate can run a replay, a build of such a proposal
+  // stops there, and a person should know before ratifying it (#857).
+  function unreplayedText(w) {
+    const names = w.unreplayed || [];
+    if (!names.length) return "";
+    const one = names.length === 1;
+    return `<p class="ask unreplayed"><b class="same">This can't be built yet.</b> It calls ${names.map((name) => `<strong>${esc(name)}</strong>`).join(", ")} current, so the gate has to replay ${one ? "it" : "each"} against the code, and the gate can't run a replay yet. A build would stop there.</p>`;
   }
   // A bug the lock being amended calls current is one the gate has to show
   // in the code, by replaying it. An amendment that calls it something

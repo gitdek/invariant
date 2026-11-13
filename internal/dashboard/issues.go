@@ -95,6 +95,10 @@ type Waiting struct {
 	// replay a current bug against the code, and ratifying the amendment
 	// ends that for each of these, so the card says so before it's opened.
 	Relaxed []string `json:"relaxed,omitempty"`
+	// Unreplayed names the bugs this proposal calls current that the gate
+	// would have to replay against the code and can't yet (#857): a build
+	// of it stops at the gate, so the card says so beside its ratify button.
+	Unreplayed []string `json:"unreplayed,omitempty"`
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
 	Unchanged bool `json:"unchanged,omitempty"`
@@ -560,6 +564,7 @@ func waitingFor(m factory.Marker, at time.Time) *Waiting {
 				w.Relaxed = append(w.Relaxed, s.Name)
 			}
 		}
+		w.Unreplayed = factory.Unreplayed(p)
 		if pl := p.Plan; pl != nil {
 			w.Plan = &PlanView{Summary: pl.Summary, Files: pl.Files, Trusted: pl.Trusted, Tests: pl.Tests, Execution: pl.Execution, SourceHash: p.Hash}
 			for _, t := range pl.Tests {

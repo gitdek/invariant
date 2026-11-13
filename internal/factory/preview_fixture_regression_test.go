@@ -57,14 +57,10 @@ func checkedForks(t *testing.T, forks []formalize.Fork, choices map[string]strin
 			r.Fingerprint = verify.Fingerprint(*r)
 			v := &formalize.Preview{Fork: f.ID, Option: o.ID, Choices: choices, Model: m, Receipt: r}
 			o.Preview = v
-			v.Fingerprint = hash(struct {
-				Fork     string            `json:"fork"`
-				Kind     string            `json:"kind,omitempty"`
-				Question string            `json:"question"`
-				Option   string            `json:"option"`
-				Says     string            `json:"says"`
-				Preview  formalize.Preview `json:"preview"`
-			}{f.ID, f.Kind, f.Question, o.ID, o.Says, *v})
+			var err error
+			if v.Fingerprint, err = f.PreviewFingerprint(*o); err != nil {
+				t.Fatal(err)
+			}
 			if err := f.ValidatePreview(*o); err != nil {
 				t.Fatal(err)
 			}

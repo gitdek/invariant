@@ -354,6 +354,15 @@ func previewFingerprint(f Fork, o Option) (string, error) {
 	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem}})
 }
 
+// PreviewFingerprint is the fingerprint ValidatePreview holds an option's
+// preview to, for a caller that builds or repairs one, as a fixture does.
+func (f Fork) PreviewFingerprint(o Option) (string, error) {
+	if o.Preview == nil {
+		return "", fmt.Errorf("fork %s option %s: missing preview evidence", f.ID, o.ID)
+	}
+	return previewFingerprint(f, o)
+}
+
 // previewIdentity is Preview's fields in Preview's order, less the
 // fingerprint, with the receipt already encoded.
 type previewIdentity struct {

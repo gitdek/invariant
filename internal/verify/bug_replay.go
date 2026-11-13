@@ -199,8 +199,23 @@ func replayRecordValues(record BugReplayObservation) error {
 }
 
 func driverBugReplay(p *project.Project, b project.Statement) bool {
-	return b.CodeBehavior == "current" && (p.Manifest.Language == "typescript" || p.Manifest.Language == "python")
+	return RequiresBugReplay(p.Manifest.Language, b)
 }
+
+// RequiresBugReplay says whether the gate has to replay the bug a statement
+// names against the code of a project in language: a current bug, where a
+// driver checks the code. Go keeps its proof, agreement and exploration.
+func RequiresBugReplay(language string, s project.Statement) bool {
+	return s.Kind == project.Bug && s.CodeBehavior == "current" && (language == "typescript" || language == "python")
+}
+
+// BugReplayExecutes says whether a gate can carry out a replay it requires.
+// It can't yet: #857 delivers the obligation, TLC's path and the contract a
+// replay answers to, and the adapters that execute one follow it. Until
+// they do, a required replay ends replay-unavailable and the gate doesn't
+// pass. What tells a person whether a proposal can be built reads this, so
+// the gate and what's said of it change together.
+const BugReplayExecutes = false
 
 func prepareBugReplay(ctx context.Context, out *Bug, b project.Statement, p *project.Project, dir string, runner tlc.Runner, cfg tlc.Config, res tlc.Result, kind string) {
 	if b.CodeBehavior != "current" {
@@ -238,7 +253,7 @@ func activateBugReplays(r *Report) bool {
 		if e == nil || !e.Required {
 			continue
 		}
-		if e.Status == "pending" {
+		if e.Status == "pending" && !BugReplayExecutes {
 			e.Status, e.Message = "replay-unavailable", "No execution adapter is available for the mandatory current-bug replay."
 		}
 		ok = false

@@ -884,7 +884,7 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .stmts li .cb { display: block; margin-top: 2px; font: 500 11.5px/1.6 var(--mono); color: var(--ink3); }
 .stmts li .cb.changed { color: var(--people-ink); }
 .stmts li .cb em { font-style: normal; font-weight: 600; }
-.need .ask.relaxed b.same, .batch .ask.relaxed b.same { color: var(--people-ink); }
+.need .ask.relaxed b.same, .batch .ask.relaxed b.same, .need .ask.unreplayed b.same, .batch .ask.unreplayed b.same { color: var(--people-ink); }
 
 /* ---------- The fleet ---------- */
 .fleet { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }

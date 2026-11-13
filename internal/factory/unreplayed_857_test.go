@@ -1,0 +1,115 @@
+package factory
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/gitdek/invariant/internal/formalize"
+	"github.com/gitdek/invariant/internal/project"
+)
+
+// A proposal that calls a bug current, for code a driver checks, can't be
+// built yet: the gate has to replay that bug against the code, and nothing
+// executes a replay until the adapters that follow #857 exist. A person
+// ratifies from the proposal's comment, so it says so, by name. One that
+// calls no bug current, or whose code Go's own checks cover, says nothing.
+func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
+	const note = "**This can't be built yet.** It calls `PutWhenFull` current, so the gate has to replay it against the code, and the gate can't run a replay yet. " +
+		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with that bug as hypothetical if nothing shows the code has it."
+	for _, tc := range []struct {
+		name     string
+		behavior string
+		shape    func(*formalize.Proposal)
+		want     []string
+	}{
+		{"a current bug in TypeScript", "current", func(p *formalize.Proposal) { p.Language = "typescript" }, []string{"PutWhenFull"}},
+		{"a current bug in Python", "current", func(p *formalize.Proposal) { p.Language = "python" }, []string{"PutWhenFull"}},
+		{"a current bug in code checked as it is", "current", func(p *formalize.Proposal) { p.Existing = []string{"hooks/use-buffer.ts"} }, []string{"PutWhenFull"}},
+		{"a current bug in Go", "current", func(*formalize.Proposal) {}, nil},
+		{"a hypothetical bug", "hypothetical", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
+		{"a bug an older lock left unclassified", "", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
+	} {
+		p := bufferProposal(t)
+		classify857(t, p, tc.behavior)
+		tc.shape(p)
+		if got := Unreplayed(p); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: the gate can't yet replay %v; want %v", tc.name, got, tc.want)
+		}
+		body := proposalComment(p, nil, Marker{Kind: KindProposal, Proposal: p})
+		if said := strings.Contains(body, "\n"+note+"\n"); said != (tc.want != nil) || strings.Contains(body, "can't be built yet") != (tc.want != nil) {
+			t.Errorf("%s: the proposal's comment says it can't be built: %v; want %v\n%s", tc.name, said, tc.want != nil, body)
+		}
+	}
+
+	// An amendment says it too, of the project as it's built today, and
+	// counts in its own words when there's more than one.
+	p := bufferProposal(t)
+	classify857(t, p, "current")
+	second := p.Statements[len(p.Statements)-1]
+	second.Name = "DropWhenFull"
+	p.Statements = append(p.Statements, second)
+	c := &formalize.Current{ModuleText: p.ModuleText, Includes: p.Includes, Lock: project.Lock{Bounds: p.Bounds, Statements: append([]project.Statement(nil), p.Statements...)}}
+	p.Target = &formalize.Target{Dir: "examples/buffer", Previous: "#1", Amends: p.Hash, Manifest: project.Manifest{Language: "python"}}
+	body := amendmentComment(p, nil, formalize.Diff(c, p), Marker{Kind: KindProposal, Proposal: p})
+	const both = "**This can't be built yet.** It calls `PutWhenFull` and `DropWhenFull` current, so the gate has to replay each against the code, and the gate can't run a replay yet. " +
+		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with those bugs as hypothetical if nothing shows the code has them."
+	if !strings.Contains(body, both+"\n\n") {
+		t.Errorf("an amendment with two current bugs doesn't say it can't be built:\n%s", body)
+	}
+	if strings.Contains(body, "stops calling") {
+		t.Errorf("an amendment that lowers no bug says it does:\n%s", body)
+	}
+}
+
+// An amendment that stops calling a bug current says so above its table. The
+// gate replays only a current bug against the code, so the amendment ends
+// that for the bug while every word of the statement stays as it was.
+func TestAnAmendmentSaysWhichBugsItStopsCallingCurrent857(t *testing.T) {
+	old := bufferProposal(t)
+	classify857(t, old, "current")
+	second := old.Statements[len(old.Statements)-1]
+	second.Name = "DropWhenFull"
+	old.Statements = append(old.Statements, second)
+	c := &formalize.Current{ModuleText: old.ModuleText, Includes: old.Includes, Lock: project.Lock{Bounds: old.Bounds, Statements: append([]project.Statement(nil), old.Statements...)}}
+	amend := func(behavior map[string]string) string {
+		p := bufferProposal(t)
+		p.Statements = append([]project.Statement(nil), old.Statements...)
+		for i := range p.Statements {
+			if b, ok := behavior[p.Statements[i].Name]; ok {
+				p.Statements[i].CodeBehavior = b
+			}
+		}
+		p.Hash = project.ProposalHash(p.Bounds, p.Statements)
+		p.Target = &formalize.Target{Dir: "examples/buffer", Previous: "#1", Amends: old.Hash}
+		return amendmentComment(p, nil, formalize.Diff(c, p), Marker{Kind: KindProposal, Proposal: p})
+	}
+	one := "**This stops calling `PutWhenFull` current.** The gate has to replay a current bug against the code, and it would no longer replay that one.\n\n"
+	if body := amend(map[string]string{"PutWhenFull": "hypothetical"}); !strings.Contains(body, one) || strings.Index(body, one) > strings.Index(body, "| Statement |") {
+		t.Errorf("an amendment that makes a current bug hypothetical doesn't say so above its table:\n%s", body)
+	}
+	if body := amend(map[string]string{"PutWhenFull": ""}); !strings.Contains(body, one) {
+		t.Errorf("an amendment that takes a current bug's classification away doesn't say so:\n%s", body)
+	}
+	two := "**This stops calling `PutWhenFull` and `DropWhenFull` current.** The gate has to replay a current bug against the code, and it would no longer replay those.\n\n"
+	if body := amend(map[string]string{"PutWhenFull": "hypothetical", "DropWhenFull": "hypothetical"}); !strings.Contains(body, two) {
+		t.Errorf("an amendment that makes two current bugs hypothetical doesn't name both:\n%s", body)
+	}
+	if body := amend(nil); strings.Contains(body, "stops calling") {
+		t.Errorf("an amendment that keeps its bugs current says it lowers one:\n%s", body)
+	}
+	// A current bug whose words change, and that stays current, isn't lowered.
+	reworded := bufferProposal(t)
+	reworded.Statements = append([]project.Statement(nil), old.Statements...)
+	for i := range reworded.Statements {
+		if reworded.Statements[i].Name == "PutWhenFull" {
+			reworded.Statements[i].Says = "A producer overfills the buffer."
+		}
+	}
+	reworded.Hash = project.ProposalHash(reworded.Bounds, reworded.Statements)
+	reworded.Target = &formalize.Target{Dir: "examples/buffer", Previous: "#1", Amends: old.Hash}
+	body := amendmentComment(reworded, nil, formalize.Diff(c, reworded), Marker{Kind: KindProposal, Proposal: reworded})
+	if !strings.Contains(body, "| `PutWhenFull` | changed bug |") || strings.Contains(body, "stops calling") {
+		t.Errorf("an amendment that rewords a bug it keeps current says it lowers it, or doesn't list the change:\n%s", body)
+	}
+}

@@ -16,7 +16,8 @@ import (
 // statement says of the code and what an amendment changes that from, and
 // says before its statements are opened which bugs the amendment stops
 // calling current (#857). A proposal that amends nothing, and an amendment
-// that lowers no bug, say nothing of the kind.
+// that lowers no bug, say nothing of the kind. A proposal the gate can't
+// yet replay says it can't be built, by the bugs' names.
 func TestTheRatifyCardShowsEachBugsClassification857(t *testing.T) {
 	browser := os.Getenv("INVARIANT_DASHBOARD_BROWSER")
 	if browser == "" {
@@ -49,6 +50,8 @@ func TestTheRatifyCardShowsEachBugsClassification857(t *testing.T) {
 		card(3, "#12", []string{"Only"}, bug("Only", "hypothetical", "current")),
 		card(4, "#12", nil, bug("Raised", "current", "hypothetical")),
 	}
+	snap.Issues[0].Waiting.Unreplayed = []string{"Kept", "<Classified>"}
+	snap.Issues[3].Waiting.Unreplayed = []string{"Raised"}
 	fixture, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +123,14 @@ const bugBehaviorBrowserCheck = `
     assert(text(card(3).querySelector(".ask.relaxed")) === "One bug is no longer called current. What #12 ratified says the code has Only today, and the gate has to show that by replaying it against the code. This amendment doesn't say so.", "card 3 says: " + text(card(3).querySelector(".ask.relaxed")));
     // A new proposal, and an amendment that only raises a bug, say none of it.
     assert(!card(2).querySelector(".ask.relaxed") && !card(4).querySelector(".ask.relaxed"), "a card that lowers no bug says it does");
+    // A proposal the gate can't yet replay says so, above what it lowers.
+    const unbuilt = (n) => text(card(n).querySelector(".ask.unreplayed"));
+    assert(unbuilt(1) === "This can't be built yet. It calls Kept, <Classified> current, so the gate has to replay each against the code, and the gate can't run a replay yet. A build would stop there.", "card 1 says: " + unbuilt(1));
+    assert(unbuilt(4) === "This can't be built yet. It calls Raised current, so the gate has to replay it against the code, and the gate can't run a replay yet. A build would stop there.", "card 4 says: " + unbuilt(4));
+    assert(!card(1).querySelector(".ask.unreplayed classified") && shown(card(1).querySelector(".ask.unreplayed")), "a bug's name reached the page as markup, or the note is hidden");
+    assert(card(1).querySelector(".ask.unreplayed").compareDocumentPosition(relaxed) & Node.DOCUMENT_POSITION_FOLLOWING, "what can't be built isn't said first");
+    assert(!card(2).querySelector(".ask.unreplayed") && !card(3).querySelector(".ask.unreplayed"), "a card the gate can replay says it can't be built");
+    assert(getComputedStyle(card(1).querySelector(".ask.unreplayed b")).color === getComputedStyle(relaxed.querySelector("b")).color && getComputedStyle(relaxed.querySelector("b")).color !== getComputedStyle(card(2).querySelector(".ask strong")).color, "the note's lead isn't in the color of what waits on a person");
     // Opened, each bug says what it says of the code, and what it was.
     card(1).querySelector(".stmts summary").click();
     await until(() => card(1).querySelector(".stmts").open, "card 1's statements open");
