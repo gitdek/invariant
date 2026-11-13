@@ -56,20 +56,21 @@ type Server struct {
 	Post   func(ctx context.Context, repo string, issue int, body string) (url string, err error)
 	Open   func(ctx context.Context, repo string, is github.NewIssue) (number int, url string, err error)
 
-	mu        sync.RWMutex
-	state     []byte            // the latest snapshot, as every page reads it, gzipped JSON
-	stateTag  string            // its entity tag, which a read that already has it names (#854)
-	issues    []Issue           // the latest snapshot's issues, which say what each is waiting for
-	holders   map[string]string // each repository's lease holder, as last read, whose watcher the page follows
-	graphs    map[string][]byte
-	readers   map[string]readerPage
-	proposals proposalCache
-	drawing   map[string]bool
-	failed    map[string]time.Time // graphs TLC couldn't draw, and when
-	pending   chan graphJob
-	live      live
-	acted     acted     // the snapshot as last read, and the commands posted since, which it's served with
-	untaken   []Untaken // what /act offers to hand to the factory, as the latest refresh read it
+	mu            sync.RWMutex
+	state         []byte            // the latest snapshot, as every page reads it, gzipped JSON
+	stateTag      string            // its entity tag, which a read that already has it names (#854)
+	issues        []Issue           // the latest snapshot's issues, which say what each is waiting for
+	holders       map[string]string // each repository's lease holder, as last read, whose watcher the page follows
+	graphs        map[string][]byte
+	readers       map[string]readerPage
+	savedLocators map[string]savedLocator
+	proposals     proposalCache
+	drawing       map[string]bool
+	failed        map[string]time.Time // graphs TLC couldn't draw, and when
+	pending       chan graphJob
+	live          live
+	acted         acted     // the snapshot as last read, and the commands posted since, which it's served with
+	untaken       []Untaken // what /act offers to hand to the factory, as the latest refresh read it
 	// planned is each issue /act planned, by repo#n, and when: a refresh
 	// that read GitHub before the post leaves it out for a while (#201).
 	planned map[string]time.Time
@@ -478,6 +479,7 @@ func (s *Server) prepare() {
 	s.pending = make(chan graphJob, 64)
 	s.loadSources()
 	s.loadPlanSources()
+	s.loadSavedDrafts()
 	s.loadSnapshot()
 }
 
@@ -518,6 +520,7 @@ func (s *Server) refresh(ctx context.Context) error {
 				}
 			}
 		}
+		s.readSavedDrafts(ctx, r)
 		// Only Invariant's own commits are shown. Another repository's
 		// commits are its own business.
 		if i == 0 {
@@ -655,6 +658,7 @@ func (s *Server) loadSnapshot() {
 	}
 	s.restorePreviews(&snap)
 	s.restoreComparisons(&snap)
+	s.restoreSavedDrafts(&snap)
 	js, err = json.Marshal(snap)
 	if err != nil {
 		return
@@ -1208,7 +1212,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 
 		login := s.factoryOf(r)
 		for _, is := range r.src.issues {
-			l := factoryLane(is, r.src.comments[is.Number].comments, login, now)
+			l := s.savedLane(is, r, login, now)
 			l.Repo = r.Name
 			s.presentPlanSources(&l, r.src.comments[is.Number].comments, login)
 			s.presentPreviews(&l)

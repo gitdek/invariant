@@ -106,9 +106,11 @@ func (e readerEvidence) MarshalJSON() ([]byte, error) {
 
 type readerPage struct {
 	repo                     string
+	factory                  string // retained saved evidence requires this configured account
 	presentation             ReaderPresentation
 	posters                  *PosterLinks
 	html, svg, poster, still []byte
+	download                 []byte
 }
 
 func readerHash(b []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(b)) }
@@ -536,7 +538,7 @@ func readerPolicy(contentType string) string {
 
 // readerPath reads a reader URL's key and kind. A page's link may carry its
 // own hash as a query, which only versions it for caches (#786).
-var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|svg|poster\.svg|still\.svg)(?:\?h=[0-9a-f]{16})?$`)
+var readerPath = regexp.MustCompile(`^/reader/([0-9a-f]{64})\.(html|json|svg|poster\.svg|still\.svg)(?:\?h=[0-9a-f]{16})?$`)
 
 // posters draws a checked chart's animated and still posters, or neither.
 func (e readerEvidence) posters(status string) (string, string) {
@@ -647,12 +649,15 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	p, ok := s.readers[parts[1]]
 	s.mu.RUnlock()
-	if !ok || !s.readerRepo(p.repo) {
-		http.NotFound(w, r)
+	if !ok || !s.readerRepo(p.repo) || p.factory != "" && !s.savedFactory(p.repo, p.factory) {
+		savedDraftError(w, r, "Reader evidence is missing or invalid.", http.StatusNotFound)
 		return
 	}
 	body, ct := p.html, "text/html; charset=utf-8"
 	switch parts[2] {
+	case "json":
+		body, ct = p.download, "application/json"
+		w.Header().Set("Content-Disposition", `attachment; filename="result.json"`)
 	case "svg":
 		body, ct = p.svg, "image/svg+xml; charset=utf-8"
 	case "poster.svg":
@@ -661,7 +666,7 @@ func (s *Server) serveReader(w http.ResponseWriter, r *http.Request) {
 		body, ct = p.still, "image/svg+xml; charset=utf-8"
 	}
 	if len(body) == 0 {
-		http.NotFound(w, r)
+		savedDraftError(w, r, "This evidence has no requested representation.", http.StatusNotFound)
 		return
 	}
 	h := w.Header()

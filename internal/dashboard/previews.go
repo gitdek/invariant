@@ -167,7 +167,7 @@ func (s *Server) restorePreviews(snap *Snapshot) {
 		if identity.Repo == "" {
 			identity.Repo = snap.Repo
 		}
-		if is.Waiting == nil || !s.readerRepo(identity.Repo) {
+		if is.Waiting == nil || is.Waiting.SavedDraft != nil || !s.readerRepo(identity.Repo) {
 			continue
 		}
 		for j := range is.Waiting.Forks {

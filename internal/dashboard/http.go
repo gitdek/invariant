@@ -115,6 +115,10 @@ func (s *Server) Handler() http.Handler {
 			serveGzip(w, r, "application/json", body)
 		case readerPath.MatchString(p):
 			s.serveReader(w, r)
+		case strings.HasPrefix(p, "/draft/"):
+			s.serveSavedDraft(w, r)
+		case strings.HasPrefix(p, "/reader/"):
+			savedDraftError(w, r, "Invalid reader evidence address.", http.StatusNotFound)
 		case p == "/" || p == "/index.html":
 			page := pageFor(len(s.Repos))
 			h.Set("Cache-Control", "no-cache")
