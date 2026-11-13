@@ -156,7 +156,7 @@ func (s *Server) restoreComparisons(snap *Snapshot) {
 			repo = snap.Repo
 		}
 		w := is.Waiting
-		if w == nil || !s.readerRepo(repo) {
+		if w == nil || w.SavedDraft != nil || !s.readerRepo(repo) {
 			continue
 		}
 		// A saved link without the proposal it shows could never be served

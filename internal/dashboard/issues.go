@@ -79,16 +79,18 @@ type Issue struct {
 
 // Waiting is what an open issue needs from a person.
 type Waiting struct {
-	Proposal   *formalize.Proposal `json:"proposal,omitempty"`
-	Reader     *ReaderPresentation `json:"reader,omitempty"`
-	Posters    *PosterLinks        `json:"posters,omitempty"`    // its chart for people to read, in place of the evidence image (#784)
-	Kind       string              `json:"kind"`                 // forks, proposal or failed
-	Failure    string              `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
-	Forks      []Question          `json:"forks,omitempty"`      // the questions to answer
-	Name       string              `json:"name,omitempty"`       // the proposal's project
-	Hash       string              `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
-	Statements []Said              `json:"statements,omitempty"` // what the proposal says
-	Amends     string              `json:"amends,omitempty"`     // what an amendment replaces
+	SavedDraft *SavedDraftPresentation `json:"savedDraft,omitempty"`
+	Answers    []formalize.Answer      `json:"answers,omitempty"`
+	Proposal   *formalize.Proposal     `json:"proposal,omitempty"`
+	Reader     *ReaderPresentation     `json:"reader,omitempty"`
+	Posters    *PosterLinks            `json:"posters,omitempty"`    // its chart for people to read, in place of the evidence image (#784)
+	Kind       string                  `json:"kind"`                 // forks, proposal or failed
+	Failure    string                  `json:"failure,omitempty"`    // why it failed: stopped, limit, gate, ci, unmergeable, trusted, merge, unready or draft
+	Forks      []Question              `json:"forks,omitempty"`      // the questions to answer
+	Name       string                  `json:"name,omitempty"`       // the proposal's project
+	Hash       string                  `json:"hash,omitempty"`       // the proposal to ratify, as its short hash
+	Statements []Said                  `json:"statements,omitempty"` // what the proposal says
+	Amends     string                  `json:"amends,omitempty"`     // what an amendment replaces
 	// Unchanged is an amendment whose statements and bounds are exactly
 	// those of the lock it amends, so only the code changes.
 	Unchanged bool `json:"unchanged,omitempty"`
@@ -247,6 +249,10 @@ func factoryLane(issue github.Issue, comments []github.Comment, login string, no
 // factory's bot login; empty means its posts are told apart by their
 // markers alone, as they were before it had an App (D-0041).
 func Lane(issue github.Issue, comments []github.Comment, self string, now time.Time) Issue {
+	return lane(issue, comments, self, now, nil)
+}
+
+func lane(issue github.Issue, comments []github.Comment, self string, now time.Time, resolve func(github.Comment, factory.Marker) factory.Marker) Issue {
 	opened := parseTime(issue.CreatedAt)
 	// Lists, never null: a closed issue with one event has no span, and the
 	// page reads both of every issue (#430).
@@ -272,6 +278,9 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	for _, c := range comments {
 		at := parseTime(c.CreatedAt)
 		if m, ok := factory.DecodeMarker(c.Body); ok && (self == "" || c.User.Login == self) {
+			if resolve != nil {
+				m = resolve(c, m)
+			}
 			if m.Kind != factory.KindNote {
 				mm := m
 				latest, latestAt = &mm, at
@@ -456,6 +465,16 @@ func answered(w *Waiting, cmds []factory.Command) bool {
 // anything.
 func waitingFor(m factory.Marker, at time.Time) *Waiting {
 	w := &Waiting{Kind: m.Kind, Since: at}
+	if m.ProposalRef != nil && (m.Kind == factory.KindProposal || m.Kind == factory.KindForks) {
+		w.SavedDraft = draftPresentation(m)
+		w.Answers = m.Answers
+		if m.Proposal == nil {
+			w.SavedDraft.Problem = "Saved draft evidence is unavailable; retry after restoring the saved record."
+			w.Takes = []string{factory.Revise}
+			return w
+		}
+		w.Proposal = m.Proposal
+	}
 	switch m.Kind {
 	case factory.KindForks:
 		for _, f := range m.Forks {
