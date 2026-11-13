@@ -13,6 +13,10 @@ type Step struct {
 	Name    string
 	Args    []string // the arguments Next passes it, as TLA+ expressions
 	Binders []Binder // the \E it sits under, outermost first
+	// Hidden says the operation's own body chooses part of its next state
+	// where no argument names the choice, as ReplayActions finds it. A
+	// replayed path can't take such a step (#857).
+	Hidden bool
 }
 
 // A Binder is one variable an \E binds, and the set it ranges over.

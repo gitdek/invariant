@@ -224,6 +224,14 @@ func (r Runner) ExtractReplay(ctx context.Context, dir string, spec ReplaySpec, 
 	if err = s.model.ReplaySpecification(spec.Config.Specification); err != nil {
 		return p, err
 	}
+	// The check below reads its answer through these operators of the
+	// standard modules. A model that defines one of its own would have TLC
+	// evaluate the model's, and could make the check say anything.
+	for _, name := range replayStandard {
+		if _, err := s.model.Definition(name); err == nil {
+			return p, fmt.Errorf("replay-unsupported-model: the model defines %s, which the path's check takes from the standard modules", name)
+		}
+	}
 	normal, buggy, err := s.model.ReplayActions(spec.Bug)
 	if err != nil {
 		return p, err
@@ -263,6 +271,17 @@ func (r Runner) ExtractReplay(ctx context.Context, dir string, spec ReplaySpec, 
 	header, constants, err := replayHeader(spec.Module, p.Bounds, p.States)
 	if err != nil {
 		return ReplayPath{}, err
+	}
+	// The check declares each model value as a constant, so a step that
+	// binds a variable of the same name can't be written in it.
+	for _, group := range [][]tla.Step{normal, buggy} {
+		for _, step := range group {
+			for _, b := range step.Binders {
+				if _, taken := constants[b.Var]; taken {
+					return ReplayPath{}, fmt.Errorf("replay-unsupported-action: %s binds %s, which is also a constant or a model value; rename one", step.Name, b.Var)
+				}
+			}
+		}
 	}
 	states, err := replayStatesText(p.States, vars)
 	if err != nil {
@@ -319,8 +338,16 @@ func (s *replaySnapshot) check(ctx context.Context, module, body string, cfg Con
 	return res, nil
 }
 
+// replayStandard are the standard modules' operators the path's check is
+// written with.
+var replayStandard = []string{"Cardinality", "Len", "PrintT"}
+
 var replayRow = regexp.MustCompile(`(?m)^[\t ]*<<\s*"invariant-replay-v1"\s*,`)
 
+// replayEdges reads the one row the check prints for each edge. A model
+// can print rows of its own, through another name for PrintT, but the
+// check's row for an edge is printed whenever the check passes, so a row
+// from anywhere else is a second one for its edge, and is refused.
 func replayEdges(printed []string, count int, normal, buggy []tla.Step) ([]ReplayStep, error) {
 	steps := make([]ReplayStep, count)
 	seen := make([]bool, count)
@@ -369,6 +396,9 @@ func replayEdges(printed []string, count int, normal, buggy []tla.Step) ([]Repla
 			found := false
 			for _, action := range allowed {
 				if action.Name == step.Action && len(action.Args) == len(step.Args) {
+					if action.Hidden {
+						return nil, fmt.Errorf("replay-unsupported-action: edge %d takes %s, whose body chooses part of its next state where no argument names the choice", i, step.Action)
+					}
 					found = true
 				}
 			}
@@ -484,7 +514,8 @@ func replayHeader(module string, bounds map[string]string, states []ReplayState)
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	header := "EXTENDS " + module + ", TLC, Sequences, FiniteSets\n"
+	// The check counts with .., + and -, whatever the model extends.
+	header := "EXTENDS " + module + ", Naturals, TLC, Sequences, FiniteSets\n"
 	if len(names) > 0 {
 		header += "CONSTANTS " + strings.Join(names, ", ") + "\n"
 	}
