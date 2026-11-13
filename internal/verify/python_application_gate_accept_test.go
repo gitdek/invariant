@@ -6,7 +6,7 @@ package verify_test
 // preparation before verification tools, image acquisition or installations.
 // Only existing Python sampled application execution is newly admitted.
 // Explicit tests use literal python -m unittest and explicit dotted selections;
-// conformance uses the manifest's contained script and selected lexical driver,
+// conformance uses its selected source's contained script and lexical driver,
 // with literal ordered arguments/cwd/env and declared versus effective sampling.
 // Keep reserved env checks, 1000/40/1 sampling defaults and existing maxima.
 // Missing executable invocations for selected tests/conformance, proof selections
@@ -224,6 +224,13 @@ func TestPythonApplicationGateAdmission(t *testing.T) {
 			}
 		}
 	}
+	t.Run("different manifest driver", func(t *testing.T) {
+		f := pa327New(t, true, false)
+		pa327Write(t, f.p.Dir, "other.py", pa327Driver)
+		f.p.Manifest.Conformance = "other.py"
+		pa327Save(t, f)
+		pa327Admit(t, f)
+	})
 	cases := []struct {
 		name   string
 		change func(pa327Fixture)
@@ -250,9 +257,9 @@ func TestPythonApplicationGateAdmission(t *testing.T) {
 		{"reserved environment", func(f pa327Fixture) {
 			f.p.Manifest.Components.Checks[0].Invocations[1].Env = map[string]string{"PYTHONPATH": "."}
 		}},
-		{"different manifest driver", func(f pa327Fixture) {
+		{"different selected driver", func(f pa327Fixture) {
 			pa327Write(t, f.p.Dir, "other.py", pa327Driver)
-			f.p.Manifest.Conformance = "other.py"
+			f.p.Manifest.Components.Checks[0].Invocations[1].Args[0] = "other.py"
 		}},
 		{"target outside existing selection", func(f pa327Fixture) { f.p.Manifest.Existing = []string{"tasks/neighbor.py"} }},
 		{"bad explicit scope", func(f pa327Fixture) { f.p.Manifest.Components.Scope = nil }},
