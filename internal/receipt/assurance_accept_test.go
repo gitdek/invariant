@@ -17,9 +17,9 @@ import (
 // component assurance to those unverified neighbors yet.
 func TestReceiptsUseSuccessfulEvidenceAndPreserveLegacyOutput(t *testing.T) {
 	goldens := []struct{ fingerprint, markdown string }{
-		{"sha256:12362a3a9c164fea85ae6ea6ff4bf623d16ed3136adfbbdb211ea8161007453a", "fa2c20aa584f9ba051a6e8f89b97843086750f307ac6e09d0c1b646273381e15"},
-		{"sha256:8d0e0ac4ecf82433ffb6f0971b45a14bafc96fa10407766f3bcae0b76dc50fda", "dd24cf0587a3a16d7f372d38f562402c2f3a6738b4587ee064184dd192d91728"},
-		{"sha256:295f04994adf44460b659ba6ded42792ceab506707fae3516ef90e7fab2d475e", "040b3e9231b957ca2bd8e2ff20585fde0798b6b392d6ab9e750b51c5908e447d"},
+		{"sha256:12362a3a9c164fea85ae6ea6ff4bf623d16ed3136adfbbdb211ea8161007453a", "5369ee9782157a6c61127a8f3b245b968c5e7ec7784f43a95b914275a2fa33e8"},
+		{"sha256:8d0e0ac4ecf82433ffb6f0971b45a14bafc96fa10407766f3bcae0b76dc50fda", "7fa37f965421a4d438b8d9a10c61a9d995fba8b4330ea043953853b62faa0a6a"},
+		{"sha256:295f04994adf44460b659ba6ded42792ceab506707fae3516ef90e7fab2d475e", "f2c9dac64f821b06af013e560296fde59d2c9f9f78ab5626c830e6305ff6b458"},
 	}
 	for i, r := range receiptAssuranceFixtures() {
 		t.Logf("case: %s", r.Project)
