@@ -17,14 +17,18 @@ import (
 type proposalCache struct {
 	mu                                             sync.Mutex
 	entries                                        map[string]*proposalEntry
+	drafts                                         map[string]*savedDraftEntry
+	resolved                                       map[string]savedDraftResolution
+	retryDrafts                                    map[string]savedDraftEvidence
 	comparisonBuilds, previewBuilds, writeAttempts uint64
 }
 
 type proposalEntry struct {
-	directory string
-	record    []byte
-	page      readerPage
-	saved     string // successful destination; an empty or failed save stays retryable
+	directory  string
+	storageKey string // retained sources can outlive their generated presentations
+	record     []byte
+	page       readerPage
+	saved      string // successful destination; an empty or failed save stays retryable
 }
 
 type proposalKind[T any] struct {
@@ -70,14 +74,17 @@ func (s *Server) installProposal(input string, entry *proposalEntry) {
 	s.mu.Unlock()
 }
 
-func (s *Server) saveProposal(entry *proposalEntry) {
+func (s *Server) saveProposal(entry *proposalEntry) error {
 	if s.Cache == "" {
-		return
+		return nil
 	}
 	key := strings.TrimPrefix(entry.page.presentation.Fingerprint, "sha256:")
+	if entry.storageKey != "" {
+		key = entry.storageKey
+	}
 	file := filepath.Join(s.Cache, entry.directory, key+".json")
 	if entry.saved == file {
-		return
+		return nil
 	}
 	s.proposals.writeAttempts++
 	err := os.MkdirAll(filepath.Dir(file), 0o755)
@@ -90,9 +97,10 @@ func (s *Server) saveProposal(entry *proposalEntry) {
 	}
 	if err != nil {
 		s.logf("keeping %s evidence: %v", entry.directory, err)
-		return
+		return err
 	}
 	entry.saved = file
+	return nil
 }
 
 func (c proposalKind[T]) keepLocked(s *Server, e T) (*proposalEntry, error) {
@@ -190,6 +198,15 @@ func (s *Server) ensureProposals(snap Snapshot) error {
 		if w == nil || !s.readerRepo(is.Repo) {
 			continue
 		}
+		if w.SavedDraft != nil && w.SavedDraft.Problem == "" {
+			entry := s.proposals.drafts[w.SavedDraft.Locator]
+			if entry == nil || !sameReaderJSON(entry.presentation, w.SavedDraft) {
+				return fmt.Errorf("saved draft differs from its authenticated record")
+			}
+			if err := s.saveProposal(entry.storage); err != nil {
+				return err
+			}
+		}
 		if err := comparisonCache.ensure(s, comparisonEvidence{Format: comparisonFormat, Repo: is.Repo, Issue: is.Number, Proposal: w.Proposal}, w.Reader); err != nil {
 			return err
 		}
@@ -231,6 +248,13 @@ func proposalReferences(snap Snapshot) map[string]bool {
 // sources have their own recovery policy and are never removed here.
 func (s *Server) pruneProposals(snap Snapshot) {
 	live := proposalReferences(snap)
+	// Saved records retain every original alternative, even after its card
+	// has been answered or replaced. Inline evidence keeps its old lifetime.
+	for _, entry := range s.proposals.drafts {
+		for _, p := range entry.pages {
+			live[strings.TrimPrefix(p.Fingerprint, "sha256:")] = true
+		}
+	}
 	s.mu.Lock()
 	for input, entry := range s.proposals.entries {
 		if !live[strings.TrimPrefix(entry.page.presentation.Fingerprint, "sha256:")] {

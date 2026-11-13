@@ -2066,6 +2066,8 @@
   const said = (w) => (w.statements || []).length
     ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}</span></li>`).join("")}</ul></details>`
     : "";
+  const savedDraftLink = (w) => w.savedDraft && !w.savedDraft.problem
+    ? `<p class="reader-note"><a href="${esc(w.savedDraft.locator)}">Complete saved draft and exact result.json</a></p>` : "";
   function needCard(is) {
     if (ACT) return actCard(is);
     const w = is.waiting, repo = is.repo, n = is.number;
@@ -2078,7 +2080,9 @@
     // A labeled command shows what it does beside what it copies.
     const cmd = (c, primary, label) => `<button class="cmd${primary ? " primary" : ""}" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy. Shift-click copies it as a gh command.">${label ? `${esc(label)} · ` : ""}${esc(c)}<span class="cp">copy</span></button>`;
     let body = "", cls = "";
-    if (w.kind === "forks") {
+    if (w.savedDraft?.problem) {
+      body = `<p class="reader-note">${esc(w.savedDraft.problem)}</p><div class="cmds">${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
+    } else if (w.kind === "forks") {
       body = (w.forks || []).map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const c = `/invariant choose ${q.id} ${o.id}`;
         return `<div class="alternative"><button class="opt" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy ${esc(c)}. Shift-click copies it as a gh command."><span class="id">${esc(o.id)}</span><span>${esc(o.says)}</span><span class="cp">copy</span></button>${o.reader ? readerEvidence({reader: o.reader, name: `${q.id}/${o.id}`, posters: o.posters}) : ""}</div>`;
@@ -2095,7 +2099,7 @@
         <div class="cmds">${review(w, repo)}${fixes(w).map(([label, c], i) => cmd(c, i === 0 && retryLeads(w), c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
     }
     return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)} data-issue="${esc(issueKey(is))}"><div>${needGlyph(w.kind)}</div><div>
-      <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}</div></article>`;
+      <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${savedDraftLink(w)}${body}</div></article>`;
   }
   document.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-cmd]");
@@ -2120,13 +2124,19 @@
   const batch = { shown: [], confirm: null, busy: false, error: "" };
   function batchBanner(items) {
     if (!ACT) return "";
-    const all = (batch.shown = items.filter((i) => i.waiting.kind === "proposal" && i.waiting.together && !actOf(`${i.repo}#${i.number}`).posted));
+    const all = (batch.shown = items.filter((i) => i.waiting.kind === "proposal" && i.waiting.together && !i.waiting.savedDraft?.problem && !actOf(`${i.repo}#${i.number}`).posted));
+    // A refresh can leave saved evidence unresolved. Ask again if any
+    // selected proposal is no longer eligible at the hash shown.
+    if (batch.confirm && batch.confirm.some((p) => !all.some((i) => i.repo === p.repo && i.number === p.issue && i.waiting.hash === p.hash))) {
+      batch.confirm = null;
+      batch.error = "The proposals available to ratify changed. Review them and ask again.";
+    }
     const err = batch.error ? `<p class="acterr">${esc(batch.error)}</p>` : "";
     if (all.length < 2 && !batch.confirm) return err && `<div class="batch">${err}</div>`;
     const list = batch.confirm || [], off = batch.busy ? " disabled" : "";
     const row = batch.confirm
       ? `<div class="confirm"><span>Ratify all ${list.length} as you? Each posts its own ratify, on its own issue:</span><ul class="batchlist">${list.map((i) => `<li><span class="ref">${esc(ref(i.repo, i.issue))}</span><b>${esc(i.name)}</b><code>${esc(i.hash)}</code></li>`).join("")}</ul><button class="cmd act primary" type="button" data-batch="post"${off}>Yes, ratify all ${list.length}</button><button class="cmd" type="button" data-batch="cancel"${off}>Cancel</button></div>`
-      : `<div class="cmds"><button class="cmd act primary" type="button" data-batch="ask">Ratify all ${all.length}</button></div>`;
+      : `<div class="cmds"><button class="cmd act primary" type="button" data-batch="ask"${off}>Ratify all ${all.length}</button></div>`;
     const refs = all.map((i) => esc(ref(i.repo, i.number))).join(", ");
     return `<div class="batch"><p class="ask"><b class="same">${all.length === 1 ? "1 proposal changes" : `${all.length} proposals change`} no statement:</b> ${refs}. Each is a plan, or a rebuild whose statements stay as they were ratified, so they can be ratified together.</p>${row}${err}</div>`;
   }
@@ -2167,7 +2177,10 @@
     const post = (label, body, primary) => `<button class="cmd act${primary ? " primary" : ""}" type="button" data-act-key="${esc(key)}" data-act-body="${esc(body)}"${a.busy ? " disabled" : ""}>${esc(label)}</button>`;
     const ask = (label, body, primary) => `<button class="cmd act${primary ? " primary" : ""}" type="button" data-act-key="${esc(key)}" data-act-confirm="${esc(body)}"${a.busy ? " disabled" : ""}>${esc(label)}</button>`;
     let body = "", cls = "", actions = "";
-    if (w.kind === "forks") {
+    if (w.savedDraft?.problem) {
+      body = `<p class="reader-note">${esc(w.savedDraft.problem)}</p>`;
+      actions = takes(w, "revise") ? ask("Draft again", "/invariant revise") : "";
+    } else if (w.kind === "forks") {
       const forks = w.forks || [];
       body = forks.map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
         const on = a.chosen[q.id] === o.id;
@@ -2192,7 +2205,7 @@
       actions = review(w, repo) + fixes(w).map(([label, c], i) => ask(label, c, i === 0 && retryLeads(w))).join("");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;
-    if (a.confirm) {
+    if (a.confirm && (!w.savedDraft?.problem || a.confirm === "/invariant revise")) {
       const pins = w.plan ? "this plan and its acceptance tests, and the factory starts building" : w.issuePlan ? "this plan, and the factory opens its issues one at a time" : "these statements, and the factory starts building";
       const what = a.confirm.startsWith("/invariant ratify") ? `Ratify <b>${esc(w.hash)}</b> as you? It pins ${pins}.`
         : a.confirm === "/invariant retry" ? esc(w.retry?.confirmation || "Have the factory try again, as you?")
@@ -2204,7 +2217,7 @@
     if (a.posted) row = `${a.sent === "/invariant retry" && w.retry ? `<p class="ask">${esc(w.retry.posted)}</p>` : ""}<p class="posted">✓ Posted <a href="${esc(a.posted)}" target="_blank" rel="noopener">on GitHub</a> as you. The factory picks it up within 30 seconds.</p>`;
     if (a.error) row += `<p class="acterr">${esc(a.error)}</p>`;
     return `<article class="need ${cls}${key === OPEN ? " opened" : ""}${quiet(repo)}" ${tag(repo)} data-issue="${esc(key)}"><div>${needGlyph(w.kind)}</div><div>
-      <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${body}${row}</div></article>`;
+      <div class="need-top"><span class="ref">${esc(ref(repo, n))}</span><span class="title">${esc(is.title)}</span><span class="since">waiting <span data-since="${esc(w.since)}"></span></span></div>${savedDraftLink(w)}${body}${row}</div></article>`;
   }
   if (ACT) {
     document.addEventListener("click", async (e) => {

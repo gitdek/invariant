@@ -344,6 +344,13 @@ func (c act) check(issues []Issue, untaken []Untaken) error {
 		return errors.New("that issue isn't waiting on anyone")
 	}
 	w := is.Waiting
+	if w.SavedDraft != nil && w.SavedDraft.Problem != "" {
+		for _, cmd := range factory.ParseCommands(c.Body) {
+			if cmd.Verb == factory.Choose || cmd.Verb == factory.Ratify {
+				return errors.New("saved draft evidence is unresolved; restore the saved record first")
+			}
+		}
+	}
 	lines := strings.Split(strings.TrimSpace(c.Body), "\n")
 	if len(lines) == 0 || len(lines) > len(w.Forks)+1 {
 		return errors.New("that's more commands than the issue is waiting for")
