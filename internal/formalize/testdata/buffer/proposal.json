@@ -9,7 +9,7 @@
     {"name": "WithinCap", "kind": "invariant", "says": "The buffer never holds more than its capacity."},
     {"name": "TypeOK", "kind": "invariant", "says": "The buffer always holds a sequence of messages."},
     {"name": "CanFill", "kind": "witness", "says": "The buffer can fill up."},
-    {"name": "PutWhenFull", "kind": "bug", "says": "A producer adds a message to a full buffer.", "expect": "WithinCap"}
+    {"name": "PutWhenFull", "kind": "bug", "says": "A producer adds a message to a full buffer.", "expect": "WithinCap", "code_behavior": "hypothetical"}
   ],
   "forks": []
 }

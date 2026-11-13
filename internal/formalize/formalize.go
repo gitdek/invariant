@@ -264,6 +264,11 @@ func (d Draft) validateNames() error {
 // Pin validates the proposal's statements against its module, records each
 // one's pin, and hashes the whole proposal.
 func (p *Proposal) Pin() error {
+	for _, s := range p.Statements {
+		if s.Kind == project.Bug && s.CodeBehavior == "" {
+			return fmt.Errorf("statement %s: a new proposal must classify each bug with code_behavior current or hypothetical", s.Name)
+		}
+	}
 	if name, err := tla.ModuleName(p.ModuleText); err != nil || name != p.Module {
 		if err != nil && !strings.Contains(err.Error(), "no MODULE header") {
 			return fmt.Errorf("%s.tla: %w", p.Module, err)

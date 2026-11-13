@@ -123,6 +123,7 @@ type evidenceGroup struct {
 
 type evidenceRule struct {
 	Name, Kind, Says, Found, Pin string
+	CodeBehavior                 string
 	Missed                       bool
 }
 
@@ -271,7 +272,14 @@ func rulesOf(statements []project.Statement, r *verify.Report) []evidenceGroup {
 		{Title: "How it runs", Note: "The model's behavior, and the steps it must eventually take."},
 	}
 	for _, s := range statements {
-		rule := evidenceRule{Name: s.Name, Kind: s.Kind, Says: s.Says, Pin: strings.TrimPrefix(s.SHA256, "sha256:")}
+		rule := evidenceRule{Name: s.Name, Kind: s.Kind, Says: s.Says, Pin: strings.TrimPrefix(s.SHA256, "sha256:"), CodeBehavior: s.CodeBehavior}
+		if s.Kind == project.Bug {
+			classification := s.CodeBehavior
+			if classification == "" {
+				classification = "not classified"
+			}
+			rule.Found = "Code behavior: " + classification
+		}
 		g := 3
 		switch s.Kind {
 		case project.Invariant, project.Property:
@@ -334,9 +342,10 @@ func foundFor(s project.Statement, r *verify.Report) (string, bool) {
 					if b.Steps > 0 {
 						found += " in " + counted(int64(b.Steps), "step")
 					}
-					return found, false
+					status := b.ReplayStatus()
+					return found + "; " + status.Label, status.Required && !status.Replayed
 				}
-				return "Not caught", true
+				return "Not caught; " + b.ReplayStatus().Label, true
 			}
 		}
 	}

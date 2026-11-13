@@ -126,6 +126,16 @@ func thenWhat(p *formalize.Proposal, verb string) string {
 	return "I'll " + verb + " " + formalize.Languages[p.Manifest().Language]
 }
 
+func bugClassification(s project.Statement) string {
+	if s.Kind != project.Bug {
+		return ""
+	}
+	if s.CodeBehavior == "" {
+		return " Code behavior: not classified."
+	}
+	return " Code behavior: " + tableLiteral(s.CodeBehavior) + "."
+}
+
 func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's what I propose must always be true for **%s**. Once you ratify it, these statements are pinned by hash, and I can't change them. "+
@@ -136,6 +146,7 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 		if s.Expect != "" {
 			says += fmt.Sprintf(" It must break `%s`.", s.Expect)
 		}
+		says += bugClassification(s)
 		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", s.Name, s.Kind, says)
 	}
 	if r != nil {
@@ -238,9 +249,13 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	for _, c := range ch.Statements {
 		switch c.How {
 		case formalize.Added:
-			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, tableLiteral(c.New.Says))
+			fmt.Fprintf(&b, "| `%s` | added %s | %s |\n", c.Name, c.New.Kind, tableLiteral(c.New.Says)+bugClassification(*c.New))
 		case formalize.Changed:
 			says := tableLiteral(c.New.Says)
+			says += bugClassification(*c.New)
+			if c.Old.CodeBehavior != c.New.CodeBehavior {
+				says += " *(was:" + bugClassification(*c.Old) + ")*"
+			}
 			if c.Old.Says != c.New.Says {
 				says += " *(was: " + tableLiteral(c.Old.Says) + ")*"
 			}
@@ -250,7 +265,7 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s |\n", c.Name, how, says)
 		case formalize.Removed:
-			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, tableLiteral(c.Old.Says))
+			fmt.Fprintf(&b, "| `%s` | **removed** %s | %s |\n", c.Name, c.Old.Kind, tableLiteral(c.Old.Says)+bugClassification(*c.Old))
 		}
 	}
 	if same := ch.Of(formalize.Unchanged); len(same) > 0 {

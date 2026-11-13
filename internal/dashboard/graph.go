@@ -28,6 +28,7 @@ type Graph struct {
 
 // BugPath is a known bug's counterexample, drawn on the graph: the states
 // the correct model shares with it, then the step that breaks an invariant.
+// Code replay evidence belongs to each project's receipt, not this shared graph.
 type BugPath struct {
 	Name     string `json:"name"`
 	Label    string `json:"label"`

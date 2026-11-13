@@ -323,6 +323,8 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	ratification(ctx, r, dir, lock)
 	r.Passed = r.Passed && r.RatificationMatches()
 	r.ModelOnly = false
+	replaysOK := activateBugReplays(r)
+	r.Passed = r.Passed && replaysOK
 	r.Application = &PythonApplicationReport{}
 	if err != nil {
 		r.Application.ModelError = strings.ReplaceAll(err.Error(), work, "/application")

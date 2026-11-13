@@ -230,12 +230,24 @@ func (r Report) EvidenceJSON() ([]byte, error) {
 	return json.Marshal(evidence(r))
 }
 
-// MarshalJSON adds the coverage view to the report's evidence, derived from
-// the evidence as it stands.
+// MarshalJSON adds coverage and bug replay status views, derived from the
+// evidence as it stands and excluded from its fingerprint.
 func (r Report) MarshalJSON() ([]byte, error) {
 	type evidence Report
+	type bugView struct {
+		Bug
+		ReplayStatus BugReplayStatus `json:"replay_status"`
+	}
+	var bugs []bugView
+	if r.Bugs != nil {
+		bugs = make([]bugView, len(r.Bugs))
+		for i, b := range r.Bugs {
+			bugs[i] = bugView{b, b.ReplayStatus()}
+		}
+	}
 	return json.Marshal(struct {
 		evidence
 		Coverage []Coverage `json:"coverage"`
-	}{evidence(r), r.Coverage()})
+		Bugs     []bugView  `json:"bugs"`
+	}{evidence(r), r.Coverage(), bugs})
 }

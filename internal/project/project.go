@@ -129,11 +129,12 @@ var Model = map[string]bool{"Init": true, "Next": true}
 
 // Statement is one ratified formal statement.
 type Statement struct {
-	Name   string `json:"name"`
-	Kind   string `json:"kind"`
-	Says   string `json:"says"`             // the plain-language meaning a person ratified
-	Expect string `json:"expect,omitempty"` // for a bug: the invariant or property it must violate
-	SHA256 string `json:"sha256"`           // the pin: tla.PinHash of the statement
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Says         string `json:"says"`                    // the plain-language meaning a person ratified
+	Expect       string `json:"expect,omitempty"`        // for a bug: the invariant or property it must violate
+	SHA256       string `json:"sha256"`                  // the pin: tla.PinHash of the statement
+	CodeBehavior string `json:"code_behavior,omitempty"` // bugs only: current or hypothetical; omission preserves legacy locks
 }
 
 // Project is a loaded project.
@@ -197,6 +198,9 @@ func (p *Project) validate() error {
 	kinds := map[string]int{}
 	invariants, properties := map[string]bool{}, map[string]bool{}
 	for _, s := range l.Statements {
+		if s.CodeBehavior != "" && (s.Kind != Bug || (s.CodeBehavior != "current" && s.CodeBehavior != "hypothetical")) {
+			return fmt.Errorf("%s: statement %s: code_behavior is only current or hypothetical on a bug", lockFile, s.Name)
+		}
 		switch s.Kind {
 		case Spec, Witness, Bug, Fairness:
 		case Invariant:
