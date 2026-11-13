@@ -1,14 +1,18 @@
 package formalize
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // The draft an amendment starts from passes the name rules as it stands,
 // wherever its project keeps its code (#916). A project that checks code as
 // it is keeps it at ".", and its seed said "package": ".", which the
 // draft's own check refused before it read anything else: the drafting
 // agent had to change a field the amendment never uses, with nothing to say
-// the factory wrote it. The amendment still keeps its project's manifest as
-// it is, and a proposal saved from it carries a name a revision can copy.
+// the factory wrote it. Only the seed carries the names made for it: once
+// checked, the amendment has its directory's own name, which a saved
+// amendment is found by (#799), and its project's manifest as it is.
 func TestAnAmendmentsSeedPassesTheNameRules916(t *testing.T) {
 	for _, tc := range []struct{ dir, code, want, slug string }{
 		{"examples/03-bounded-buffer", "buffer", "buffer", "bounded-buffer"},
@@ -39,8 +43,8 @@ func TestAnAmendmentsSeedPassesTheNameRules916(t *testing.T) {
 			continue
 		}
 		manifest := c.Manifest
-		if err := p.Amend(c); err != nil || p.Package != tc.want || p.Slug != tc.slug || p.Target.Dir != tc.dir {
-			t.Errorf("the amendment of a project at %s carries the package %q and the slug %q, for %s, %v; want %q and %q, for its own directory", tc.dir, p.Package, p.Slug, p.Target.Dir, err, tc.want, tc.slug)
+		if err := p.Amend(c); err != nil || p.Slug != slugOf(tc.dir) || p.Package != filepath.Base(tc.code) || p.Target.Dir != tc.dir {
+			t.Errorf("the amendment of a project at %s is called %q, with the package %q, for %s, %v; want its directory's own name and its code's last part, as before", tc.dir, p.Slug, p.Package, p.Target.Dir, err)
 		}
 		if got := p.Manifest(); got.Code != manifest.Code || got.Language != manifest.Language || len(got.Existing) != len(manifest.Existing) {
 			t.Errorf("the amendment's manifest is %+v; want its project's, %+v", got, manifest)

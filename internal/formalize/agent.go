@@ -380,7 +380,7 @@ func readRuns(path string) ([]synth.GateRun, error) {
 // name, module, package and language, and records which lock it replaces.
 func (p *Proposal) Amend(c *Current) error {
 	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous(), Baseline: detachCurrent(c)}
-	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, seedSlug(c), seedPackage(c), c.Manifest.Language
+	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), filepath.Base(c.Manifest.Code), c.Manifest.Language
 	if p.Ratifiable() && p.Module != c.ModuleName() {
 		return fmt.Errorf("an amendment keeps its module: %s, not %s", c.ModuleName(), p.Module)
 	}
@@ -397,11 +397,13 @@ func slugOf(dir string) string {
 	return base
 }
 
-// seedSlug is a directory name the name rules take, for an amendment's
-// draft: the project's own, when that is kebab case, and otherwise the same
-// name in kebab case. An issue's Project: line may name a directory the
-// rules for a new project's wouldn't, with capitals or a dot in it, and the
-// amendment stays where its project is whatever the draft calls it.
+// seedSlug is a directory name the name rules take, for the draft an
+// amendment starts from: the project's own, when that is kebab case, and
+// otherwise the same name in kebab case. An issue's Project: line may name
+// a directory the rules for a new project's wouldn't, with capitals or an
+// underscore in it. Only the seed carries this name: Amend gives the
+// checked draft its directory's own, which a saved amendment is found and
+// ratified by (#799).
 func seedSlug(c *Current) string {
 	slug := slugOf(c.Dir)
 	if slugRE.MatchString(slug) {
@@ -422,13 +424,13 @@ func seedSlug(c *Current) string {
 	return slug
 }
 
-// seedPackage is a package name the name rules take, for an amendment's
-// draft: the last part of where the project's code is, when that is one,
-// and otherwise a name made from the project's directory. A project that
-// checks code as it is keeps its code at ".", which no draft's check takes
-// (#916). An amendment keeps its project's manifest as it is (D-0046), so
-// the name changes nothing in what's built: it lets the check read the rest
-// of the draft, in this one and in a revision copied from it.
+// seedPackage is a package name the name rules take, for the draft an
+// amendment starts from: the last part of where the project's code is,
+// when that is one, and otherwise a name made from the project's directory.
+// A project that checks code as it is keeps its code at ".", which no
+// draft's check takes (#916). An amendment keeps its project's manifest as
+// it is (D-0046), so the name changes nothing in what's built: it lets the
+// check read the rest of the draft.
 func seedPackage(c *Current) string {
 	if base := filepath.Base(c.Manifest.Code); packageRE.MatchString(base) {
 		return base
