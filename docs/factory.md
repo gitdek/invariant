@@ -199,6 +199,31 @@ Time that command externally and preserve its response and log; an MCP error is 
 
 The real-image orphan-reaping check passed on the candidate, `dac27a8`, on 2026-11-05. Its real `docker run` carried `--cpus 4` by default and `--cpus 2.5` with the setting at `2.5`. The paired measurements remain merger work. Affected real Python and TLAPS suites remain required PR CI checks under [D-0291](../decisions/journal/D-0291.jsonl).
 
+## Founding a new project
+
+`invariant new OWNER/NAME [-dir DIR] [-public] [-language go] [-spec FILE] [-invariant COMMIT]` starts a project the factory can plan, in one command ([#919](https://github.com/gitdek/invariant/issues/919)). Founding one by hand took a person about ten steps, and some couldn't be finished from what [the README](../README.md#use-it-on-your-repository) says. The command runs `gh` and `git` as whoever they're set up for, and reads and prints no credential.
+
+It names the repository and the directory first, and creates nothing before that. Then, in order:
+
+1. **The repository** on GitHub, private unless `-public`.
+2. **The checkout,** cloned into `-dir`. Its default is `NAME` beside the checkout the current directory is in, or `NAME` in the current directory when that's in none.
+3. **A starter.** Only Go has one, and any other `-language` is refused. It is `go.mod` for the module `github.com/OWNER/NAME`, `doc.go` with the package comment, `tools/check-format`, `.gitignore`, `README.md`, `SPEC.md` and `AGENTS.md`. The file `-spec` names is copied to `docs/PRD.md`, and the starter's documents point at it.
+4. **The gate and the checks.** `.github/workflows/gate.yml` builds Invariant at the commit `-invariant` names, the CLI's own by default. `.invariant/repository.json` is the [draft](#drafting-repository-checks) `init` makes from the checkout, with the three things a person completed by hand: Go's `format` check is `./tools/check-format`, which fails when `gofmt -l .` lists a file, `current_state` holds `SPEC.md`, `README.md` and the spec when there is one, and `tools/` is trusted. It has no `unresolved` entry.
+5. **One commit on `main`,** of those files and any other the checks name, and nothing else that's staged. The command reads the commit back through the [loader](#repository-check-contract) CI uses, and pushes only checks that load.
+6. **The repository's settings:** it allows merge commits and requires `invariant/gate` on `main`, with the call `init` prints.
+
+**What it adopts.** An empty directory. The repository's own checkout, one whose `origin` is that repository on GitHub, with its commits on `main`. A repository that holds no commit; one with commits is taken only through its own checkout, and without it the command stops and says to clone the repository, or to run `init` in one that has no gate yet. A file that's already there with the contents the command would write is kept. A file with other contents stops it before it creates anything, and the message names the file: it never overwrites one. A directory that holds anything else, or a checkout of another repository, is refused. A repository it adopts keeps its visibility.
+
+**What stops it.** A checkout with no `user.name` or `user.email` can't commit, so the command stops before it writes a file and says how to set one. A checkout that holds more than the starter can leave the draft with requirements the command doesn't know how to settle: it writes no checks file and lists them, for a person to complete with `init`. Every stop can be run again. Each step looks for its own result first, so the next run carries on in the repository and checkout the first one made, and pushes a commit whose push failed.
+
+**Where GitHub refuses the requirement.** A private repository on a plan that doesn't protect its branches gets a 403 saying to upgrade or make the repository public. The command says so, and what it means: the factory still merges only once the gate passes, and a merge made by hand can skip it. To have GitHub refuse those too, make the repository public or change the plan, then run the command again. It carries on either way. Any other failure of that call is an error. A branch that already requires `invariant/gate` is left as it is, with whatever else a person set there.
+
+**What it leaves for a person,** printed last, as commands and links: give the factory's App [access to the repository](factory-app.md#install-it), when it acts as one installed on selected repositories; start a [watcher](#running-the-factory); add the repository to the [dashboard](dashboard.md), whose public page shows a repository's issue titles; and open the first issue, from the spec with `/invariant plan` when there is one. None of these can be read with `gh`'s own login, so every run prints them.
+
+**Run a second time,** it changes nothing and says the project is already founded. A project is founded once its checkout's commit holds the gate workflow and checks that load, so a second run only reads, whatever its flags say and however far the project has moved on.
+
+`internal/found` holds the logic, and every `gh` and `git` command goes through one runner, which tests replace: no test creates a repository, clones one or pushes. TypeScript and Python starters, a watcher and the dashboard's own configuration aren't part of it.
+
 ## Configured issue intake
 
 External `Kind: plumbing` issues are enabled under [#742's ratified plan](../.invariant/plans/issue-742.json) after a person reviews and commits both `.invariant/repository.json` and a capable `invariant/gate` workflow on the authoritative base. Setup on a candidate branch or only in a worktree cannot enable intake. A missing contract receives an unsupported human handoff with setup guidance, without an agent run, branch or proposal, including on revision and repeated polls. Malformed configuration and missing or obsolete gates get specific failures. Modeled issues retain their existing flow; without the contract, `check-repository` keeps modeled-only behavior without Docker. Invariant's own unconfigured plumbing keeps its built-in Go runner.
