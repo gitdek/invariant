@@ -4,6 +4,9 @@ package formalize
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,5 +82,52 @@ func TestADraftsCheckPreparesACurrentBugsReplay910(t *testing.T) {
 	}
 	if label := r.Bugs[0].ReplayStatus().Label; label != "current; pending" {
 		t.Errorf("the receipt reads %q", label)
+	}
+}
+
+// An option's preview is held to the same rule as a draft: of two options,
+// the one whose current bug hides its choice is refused with TLC's reason,
+// and the one that names and guards its operation is checked as before.
+func TestAnOptionsPreviewPreparesACurrentBugsReplay910(t *testing.T) {
+	tc, err := toolchain.Ensure(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := replace(`"code_behavior": "hypothetical"`, `"code_behavior": "current"`)
+	named := replace("PutWhenFull == \\E m \\in Msgs : buf' = Append(buf, m)", "PutAnyway(m) == Len(buf) >= Cap /\\ buf' = Append(buf, m)\n\nPutWhenFull == \\E m \\in Msgs : PutAnyway(m)")
+	fork := Fork{ID: "F1", Question: "How is the overfilling put written?"}
+	for id, edits := range map[string]map[string]func(string) string{
+		"A": {"proposal.json": current},
+		"B": {"proposal.json": current, "BoundedBuffer.tla": named},
+	} {
+		m, err := ReadAmending(workspace(t, edits), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Statements[1].Says = "Candidate " + id + " keeps its own capacity."
+		fork.Options = append(fork.Options, Option{ID: id, Says: "Write it as option " + id + " does.", Preview: &Preview{Fork: fork.ID, Option: id, Model: m}})
+	}
+	if fork.Options[0].ID != "A" {
+		fork.Options[0], fork.Options[1] = fork.Options[1], fork.Options[0]
+	}
+	ws := t.TempDir()
+	b, err := json.Marshal(Draft{Forks: []Fork{fork}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "proposal.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := CheckWithContext(t.Context(), ws, tc, CheckContext{Language: "typescript"})
+	if err == nil || !strings.Contains(err.Error(), "fork F1 option A: bug PutWhenFull is current") || !strings.Contains(err.Error(), "replay-unsupported-action") || strings.Contains(err.Error(), "option B") {
+		t.Fatalf("a preview whose current bug hides its choice: %v", err)
+	}
+	a, good := p.Forks[0].Options[0].Preview, p.Forks[0].Options[1].Preview
+	if a.Problem == "" || good.Problem != "" || good.Receipt == nil || good.Receipt.Bugs[0].Replay == nil || good.Receipt.Bugs[0].Replay.Request == nil {
+		t.Fatalf("option A's problem is %q, option B's %q, and B's replay %+v", a.Problem, good.Problem, good.Receipt)
+	}
+	// In Go neither is replayed, and both stand.
+	if _, _, err := CheckWithContext(t.Context(), ws, tc, CheckContext{Language: "go"}); err != nil {
+		t.Fatalf("the same options in Go: %v", err)
 	}
 }
