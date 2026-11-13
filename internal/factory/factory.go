@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -1772,18 +1773,15 @@ func destination(p *formalize.Proposal) error {
 		// A new project's slug also names its directory, as a draft's must.
 		return fmt.Errorf("proposal slug %q must be kebab case", p.Slug)
 	}
-	// A draft's module is named this way as it's made, and the name is the
-	// model's file under the project. An amendment keeps its project's
-	// manifest, whose module path is where the amended model is written, and
-	// beside which other model files are removed.
-	if !moduleName.MatchString(p.Module) {
-		return fmt.Errorf("module %q must be a CamelCase TLA+ module name", p.Module)
+	// A draft's module is named as it's made, and the name is the model's
+	// file under the project. An amendment keeps its project's manifest,
+	// whose module path is where the amended model is written, and beside
+	// which other model files are removed. Those are what Write writes, so
+	// the rule is Write's own, and it refuses them whoever calls it (#895).
+	if err := p.ValidateDestinations(); err != nil {
+		return err
 	}
-	if p.Target != nil {
-		if m := p.Target.Manifest.Module; !insideProject(m) || path.Ext(m) != ".tla" {
-			return fmt.Errorf("the amended project's module %q must be a .tla file inside the project", m)
-		}
-	} else if !packageName.MatchString(p.Package) {
+	if p.Target == nil && !packageName.MatchString(p.Package) {
 		// A new project's package is its manifest's code directory, which
 		// the build makes in its agent's workspace.
 		return fmt.Errorf("package %q must be a short lowercase package name", p.Package)
@@ -1814,27 +1812,77 @@ func planDestination(p *formalize.Proposal) error {
 
 // refusedDestination is a proposal ratification won't write: what it says
 // about where its files go breaks a rule, or a plan fails its lock's check.
-type refusedDestination struct{ err error }
+// What a person does next is to draft again, unless next says otherwise.
+type refusedDestination struct {
+	err  error
+	next string
+}
 
 func (r refusedDestination) Error() string { return r.err.Error() }
 func (r refusedDestination) Unwrap() error { return r.err }
 
-// moduleName is what formalize requires of a draft's module.
-var moduleName = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
-
-// insideProject says whether a path a proposal carries stays inside its
-// project once it's joined to the project's directory: relative, clean,
-// and made of plain names.
-func insideProject(name string) bool {
-	if name == "" || name == "." || path.IsAbs(name) || path.Clean(name) != name || strings.Contains(name, `\`) || strings.ContainsFunc(name, unicode.IsControl) {
-		return false
+// inCheckout says that a project's directory is reached from its worktree
+// without leaving it, and holds no link that leads out of it. The rules for
+// a directory judge the text of its path, so a link a person committed on
+// the base branch was followed where it led: the second review of #799 had
+// a whole project written into a link's target outside the worktree
+// (#895). The worktree's own root follows no link out of it, so it's asked,
+// for the directory, or as much of the way to it as exists, and for every
+// link inside it.
+func inCheckout(wt, dir string) error {
+	root, err := os.OpenRoot(wt)
+	if err != nil {
+		return err
 	}
-	for _, part := range strings.Split(name, "/") {
-		if part == ".." || strings.HasPrefix(part, "-") {
-			return false
+	defer root.Close()
+	at := filepath.FromSlash(dir)
+	for ; at != "."; at = filepath.Dir(at) {
+		_, err := root.Stat(at)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("a link on the way to `%s` leads out of the repository", dir)
 		}
 	}
-	return true
+	if at != filepath.FromSlash(dir) {
+		return nil
+	}
+	return fs.WalkDir(root.FS(), dir, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		if _, err := root.Stat(filepath.FromSlash(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("`%s` is a link that leads out of the repository", name)
+		}
+		return nil
+	})
+}
+
+// buildDestination holds a ratified post's own branch and project to what
+// ratification writes there: one of its issue's branches, and a project's
+// directory an issue could name, or the issue's own plan. A build checks
+// out the branch and works under the project, removing and copying files,
+// and both come from the post's marker, which destination doesn't cover
+// (#895).
+func buildDestination(issue int, m Marker) error {
+	prefix := fmt.Sprintf("invariant/issue-%d-", issue)
+	if !strings.HasPrefix(m.Branch, prefix) || !branchable(strings.TrimPrefix(m.Branch, prefix)) {
+		return fmt.Errorf("its branch, `%s`, isn't one of #%d's", m.Branch, issue)
+	}
+	if isPlan(m.Project) {
+		if m.Project != plumbing.LockPath(issue) {
+			return fmt.Errorf("its plan, `%s`, isn't #%d's", m.Project, issue)
+		}
+		return nil
+	}
+	if problem := badDir(m.Project); problem != "" {
+		return fmt.Errorf("its project directory, `%s`: %s", m.Project, problem)
+	}
+	return nil
 }
 
 // current reads the project in dir as it stands on the base branch, or
@@ -1996,8 +2044,11 @@ func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) e
 	var refused refusedDestination
 	if errors.As(err, &refused) {
 		f.logf("#%d: not ratified: %v", t.Issue.Number, refused)
-		return f.note(ctx, t, c, "I can't ratify this proposal as it stands, so I haven't written anything: "+refused.Error()+".",
-			" Comment `/invariant revise` and I'll draft it again.")
+		next := refused.next
+		if next == "" {
+			next = " Comment `/invariant revise` and I'll draft it again."
+		}
+		return f.note(ctx, t, c, "I can't ratify this proposal as it stands, so I haven't written anything: "+refused.Error()+".", next)
 	}
 	if err != nil {
 		return err
@@ -2019,7 +2070,7 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 		check = planDestination
 	}
 	if err := check(p); err != nil {
-		return Post{}, refusedDestination{err}
+		return Post{}, refusedDestination{err: err}
 	}
 	f.logf("#%d: ratified by @%s", n, c.By)
 	if err := f.Repo.Fetch(ctx); err != nil {
@@ -2072,6 +2123,11 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	}
 	req := f.request(t, state.Marker.Answers, nil)
 	root := filepath.Join(wt, filepath.FromSlash(dir))
+	// Nothing is written through a link that leaves the worktree. Only a
+	// person can have committed one, and drafting again wouldn't remove it.
+	if err := inCheckout(wt, dir); err != nil {
+		return Post{}, refusedDestination{err, " Once the link is gone from `" + f.Base + "`, ratify the proposal again."}
+	}
 	if err := p.Write(root, req.Markdown(), rat); err != nil {
 		return Post{}, err
 	}
@@ -2253,6 +2309,13 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		}
 		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the watcher running it stopped or lost the repository's lease"), withFailure(next, FailStopped)))
 	case RunNone:
+		// A build works on the branch and under the project its ratified
+		// post names, so they're held to what ratification writes there
+		// before anything is checked out or an agent runs.
+		if err := buildDestination(n, m); err != nil {
+			return failed(FailStopped, post("needs a person", "I haven't started this build. The post that says the proposal was ratified no longer says where ratification put it: "+err.Error()+".",
+				withFailure(next, FailStopped), "\n\nA person needs to look at this. Restore that comment, or comment `/invariant revise` to draft again."))
+		}
 		// Each build costs an agent run, so after two stop, a writer decides
 		// whether to try again.
 		if stops >= maxStops {
