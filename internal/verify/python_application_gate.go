@@ -500,27 +500,30 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 var pythonApplicationLargerTimeouts = struct{ model, explore time.Duration }{largerTimeout, countTimeout}
 
 // runPythonApplicationLarger checks an exhaustive application one size past
-// the ratified bounds when its driver names every bound with a next size, as
-// every exhaustive driver is checked (D-0068, D-0076). Each invocation needs
+// the ratified bounds when an invocation's driver names every bound with a
+// next size, as every exhaustive driver is checked (D-0068, D-0076). It needs
 // passing base execution and conformance first (#849). TLC runs only when
 // one qualifies; once it finishes there, eligible invocations run again with
 // the same snapshot and image, their driver copy supplying the larger bounds.
 func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession, r *Report, p *project.Project, work, src string, runner tlc.Runner) error {
 	larger, sizes := largerBounds(p.Lock.Bounds)
-	driver, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(s.driver)))
-	if err != nil {
-		return err
-	}
-	if !declaresBounds(driver, sizes) {
-		return nil
-	}
-	original := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(driver)}
 	var eligible []PythonApplicationInvocation
+	originals := map[PythonApplicationInvocationKey]project.ComponentFile{}
 	order := map[PythonApplicationInvocationKey]int{}
 	for i, v := range s.Invocations() {
 		if !v.Explored {
 			continue
 		}
+		name := s.driverPath(v.Key)
+		driver, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(name)))
+		if err != nil {
+			return err
+		}
+		if !declaresBounds(driver, sizes) {
+			continue
+		}
+		original := project.ComponentFile{Path: name, SHA256: pythonApplicationHash(driver)}
+		originals[v.Key] = original
 		order[v.Key] = i
 		if why := pythonApplicationLargerPrerequisites(r.Application, v.Key); len(why) > 0 {
 			r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{
@@ -580,7 +583,7 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 			e = Exploration{OK: true, States: int64(x.Exploration.States), Depth: x.Exploration.Depth}
 		}
 		l := compareLarger(larger, &res, &e, "")
-		r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{Key: v.Key, Bounds: maps.Clone(larger), Driver: file, Original: original, Execution: x, Result: *l})
+		r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{Key: v.Key, Bounds: maps.Clone(larger), Driver: file, Original: originals[v.Key], Execution: x, Result: *l})
 	}
 	slices.SortFunc(r.Application.Larger, func(a, b PythonApplicationLarger) int { return order[a.Key] - order[b.Key] })
 	// The report claims the weakest result: any disagreement, else any run

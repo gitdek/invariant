@@ -252,7 +252,21 @@ func (s *PythonApplicationSession) RunLarger(ctx context.Context, key PythonAppl
 	if s.closed {
 		return nil, project.ComponentFile{}, fmt.Errorf("Python application session is closed")
 	}
-	original, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(s.driver)))
+	if err := ctx.Err(); err != nil {
+		return nil, project.ComponentFile{}, err
+	}
+	i := slices.IndexFunc(s.invocations, func(v PythonApplicationInvocation) bool { return v.Key == key })
+	if i < 0 {
+		return nil, project.ComponentFile{}, fmt.Errorf("unknown Python application invocation")
+	}
+	if !s.invocations[i].Explored {
+		return nil, project.ComponentFile{}, fmt.Errorf("only an explored invocation runs one size larger")
+	}
+	if err := s.fresh(); err != nil {
+		return nil, project.ComponentFile{}, err
+	}
+	driver := s.driverPath(key)
+	original, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(driver)))
 	if err != nil {
 		return nil, project.ComponentFile{}, err
 	}
@@ -265,11 +279,11 @@ func (s *PythonApplicationSession) RunLarger(ctx context.Context, key PythonAppl
 		return nil, project.ComponentFile{}, err
 	}
 	defer os.RemoveAll(dir)
-	host := filepath.Join(dir, path.Base(s.driver))
+	host := filepath.Join(dir, path.Base(driver))
 	if err := os.WriteFile(host, b, 0o444); err != nil {
 		return nil, project.ComponentFile{}, err
 	}
-	file := project.ComponentFile{Path: s.driver, SHA256: pythonApplicationHash(b)}
+	file := project.ComponentFile{Path: driver, SHA256: pythonApplicationHash(b)}
 	r, err := s.run(ctx, key, &pythonApplicationDriverCopy{file: file, host: host})
 	return r, file, err
 }
@@ -294,17 +308,18 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	}
 	// The driver this execution runs, and the declarations bound to it: a
 	// larger run's copy keeps the driver's identity with its own hash.
+	driver := s.driverPath(key)
 	check, drivers := s.declarations[key.Check], s.drivers
 	if s.legacy {
 		check = s.drivers[0]
 	}
 	if larger != nil {
-		if check.Source == s.driver {
+		if check.Source == driver {
 			check.SourceSHA256 = larger.file.SHA256
 		}
 		drivers = slices.Clone(s.drivers)
 		for i := range drivers {
-			if drivers[i].Source == s.driver {
+			if drivers[i].Source == driver {
 				drivers[i].SourceSHA256 = larger.file.SHA256
 			}
 		}
@@ -345,7 +360,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	c.Args = append([]string{"-S", "-s", "-P", "-B", c.Launcher, "/runtime/request.json"}, v.Args...)
 	req := pythonApplicationRequest{Key: key, SnapshotSHA256: c.SnapshotSHA256, RunnerSHA256: c.RunnerSHA256,
 		Legacy: s.legacy, Targets: s.targets, Drivers: drivers, Delegates: s.delegates[key.Target],
-		Check: check, Root: "/src", Driver: s.driver, Output: "/output/events.jsonl", Libraries: toolchain.PythonLibrary,
+		Check: check, Root: "/src", Driver: driver, Output: "/output/events.jsonl", Libraries: toolchain.PythonLibrary,
 		Target: s.declarations[key.Target], Sampling: maps.Clone(c.Sampling), Execution: rand.Text()}
 	if invocation.Explored {
 		c.Mode, req.Mode = "explored", "explored"
@@ -358,7 +373,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	}
 	var overlays []PythonApplicationOverlayFile
 	if larger != nil {
-		c.Overlays = []PythonApplicationOverlay{{Host: larger.host, Guest: path.Join("/src", s.driver)}}
+		c.Overlays = []PythonApplicationOverlay{{Host: larger.host, Guest: path.Join("/src", driver)}}
 		overlays = []PythonApplicationOverlayFile{{Path: larger.file.Path, SHA256: larger.file.SHA256}}
 	}
 	if contract, ok := s.contracts[key.Target]; ok {
