@@ -111,3 +111,21 @@ func TestADraftWithAnUnpreparedReplayIsRefused910(t *testing.T) {
 		}
 	}
 }
+
+// The prompt tells the drafter how to write a current bug that can be
+// replayed, since a draft that can't be is refused: each choice a named
+// parameter, and the bug's operation enabled only where no action of Next
+// takes the same step.
+func TestThePromptSaysHowToWriteABugThatCanBeReplayed910(t *testing.T) {
+	text := Prompt(Request{Repo: "o/r", Issue: 5, Title: "t"}, 4)
+	for _, want := range []string{
+		`as in Bug == \E x \in S : BugStep(x), never as an \E inside an action's body`,
+		"give no bound variable the name of a constant or a model value",
+		"guard a current bug's operation to be enabled only where no action of Next takes the same step",
+		`PutWhenFull(m) == Len(buf) >= Cap /\ buf' = Append(buf, m)`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the prompt doesn't say %q", want)
+		}
+	}
+}
