@@ -489,13 +489,16 @@ func goFiles(ctx context.Context, original, src string, plan *Plan) ([]string, e
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		matches, _ := filepath.Glob(filepath.Join(src, filepath.FromSlash(pkg), "*_test.go"))
-		for _, name := range matches {
-			info, err := os.Lstat(name)
-			if err != nil || !info.Mode().IsRegular() {
+		dir := filepath.Join(src, filepath.FromSlash(pkg))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), "_test.go") || !entry.Type().IsRegular() {
 				continue
 			}
-			rel, _ := filepath.Rel(src, name)
+			rel, _ := filepath.Rel(src, filepath.Join(dir, entry.Name()))
 			add(filepath.ToSlash(rel))
 		}
 	}

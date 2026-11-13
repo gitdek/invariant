@@ -81,7 +81,7 @@ func (c Clone) Dirs(ctx context.Context, ref, dir string) ([]string, error) {
 		// git fails the same way whether ref or dir isn't there, but
 		// looking for dir in ref's tree finds nothing only when ref is there
 		// and dir isn't.
-		if found, err2 := c.git(ctx, "ls-tree", "--name-only", ref, "--", dir); err2 == nil && found == "" {
+		if found, err2 := c.git(ctx, "--literal-pathspecs", "ls-tree", "--name-only", ref, "--", dir); err2 == nil && found == "" {
 			return nil, nil
 		}
 		return nil, err
@@ -154,16 +154,16 @@ func (c Clone) ClearWorktrees(ctx context.Context) error {
 // branch without one of them isn't what was built (#840).
 func (c Clone) Commit(ctx context.Context, worktree, dir, message string, written ...string) (string, error) {
 	defer c.lock()()
-	if _, err := run(ctx, worktree, "git", "add", "--all", "--", dir); err != nil {
+	if _, err := run(ctx, worktree, "git", "--literal-pathspecs", "add", "--all", "--", dir); err != nil {
 		return "", err
 	}
-	forced := []string{"add", "--force", "--"}
+	forced := []string{"--literal-pathspecs", "add", "--force", "--"}
 	for _, file := range written {
 		if _, err := os.Lstat(filepath.Join(worktree, filepath.FromSlash(file))); err == nil {
 			forced = append(forced, file)
 		}
 	}
-	if len(forced) > 3 {
+	if len(forced) > 4 {
 		if _, err := run(ctx, worktree, "git", forced...); err != nil {
 			return "", err
 		}
@@ -233,7 +233,7 @@ func (c Clone) Workflows(ctx context.Context, ref string) (map[string]string, er
 	if err != nil {
 		return nil, err
 	}
-	listing, err := c.git(ctx, "ls-tree", "-r", "-z", strings.TrimSpace(commit), "--", ".github/workflows/")
+	listing, err := c.git(ctx, "--literal-pathspecs", "ls-tree", "-r", "-z", strings.TrimSpace(commit), "--", ".github/workflows/")
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (c Clone) Export(ctx context.Context, ref string, paths []string, dst strin
 
 // export is Export, for a call that holds the clone's lock.
 func (c Clone) export(ctx context.Context, ref string, paths []string, dst string) error {
-	cmd := exec.CommandContext(ctx, "git", slices.Concat(noDetach, []string{"archive", "--format=tar", ref, "--"}, paths)...)
+	cmd := exec.CommandContext(ctx, "git", slices.Concat(noDetach, []string{"--literal-pathspecs", "archive", "--format=tar", ref, "--"}, paths)...)
 	cmd.Dir, cmd.Env = c.Dir, append(os.Environ(), noLFS)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
