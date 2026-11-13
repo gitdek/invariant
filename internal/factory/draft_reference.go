@@ -240,18 +240,12 @@ func validateDraftResult(r *formalize.Result) error {
 		return fmt.Errorf("saved draft references require modeled evidence")
 	}
 	// Ratification writes where the proposal says, and a payload whose digest
-	// matches can still say anything there. Hold a saved directory, and a
-	// selected proposal's slug below, to the rules they meet when an issue
-	// names one or a draft is made.
-	if p.Dir != "" {
-		if problem := badDir(p.Dir); problem != "" {
-			return fmt.Errorf("saved project directory %q: %s", p.Dir, problem)
-		}
+	// matches can still say anything there. Hold a saved directory, module
+	// and slug to the rules any proposal meets before it's ratified.
+	if err := destination(p); err != nil {
+		return fmt.Errorf("saved %w", err)
 	}
 	if target := p.Target; target != nil {
-		if problem := badDir(target.Dir); problem != "" {
-			return fmt.Errorf("saved amendment directory %q: %s", target.Dir, problem)
-		}
 		c := target.Baseline
 		if c == nil || target.Dir != c.Dir || !draftEqual(target.Manifest, c.Manifest) ||
 			target.Amends != project.ProposalHash(c.Lock.Bounds, c.Lock.Statements) || target.Previous != c.Previous() {
@@ -286,9 +280,6 @@ func validateDraftResult(r *formalize.Result) error {
 			}
 		}
 		return nil
-	}
-	if !savedSlug.MatchString(p.Slug) {
-		return fmt.Errorf("saved proposal slug %q must be kebab case", p.Slug)
 	}
 	if err := p.ValidateReader(); err != nil {
 		return err
@@ -338,7 +329,9 @@ func validateDraftReceipt(p *formalize.Proposal, r *verify.Report, scope statech
 	cfg := tlc.Config{Constants: p.Bounds}
 	for i, st := range p.Statements {
 		pin := r.Pins[i]
-		got, err := tla.PinHash(p.ModuleText, st.Name, project.Model)
+		// As the gate pins it: with the modules beside the model, which a
+		// statement that reaches into one is read through (#829).
+		got, err := tla.PinHashWith(p.ModuleText, p.Includes, st.Name, project.Model)
 		if err != nil || got != st.SHA256 || !pin.Match || pin.Got != got || pin.Want != got ||
 			pin.Name != st.Name || pin.Kind != st.Kind || pin.Says != st.Says {
 			return fmt.Errorf("saved receipt pins disagree with the model")
@@ -436,21 +429,42 @@ func validateDraftOutcomes(p *formalize.Proposal, r *verify.Report) error {
 	return nil
 }
 
-func (f *Factory) draftPost(ctx context.Context, issue int, c github.Comment) (Post, bool, error) {
+// markPost reads a comment as one of the factory's posts by its marker
+// alone: what kind of post it is and what it answers. A post that names a
+// saved record keeps the name and has no proposal yet. It reads nothing but
+// the comment, so it can't fail for a moment's trouble reaching a record.
+func (f *Factory) markPost(c github.Comment) (Post, bool, error) {
 	if f.Self != "" && c.User.Login != f.Self {
 		return Post{}, false, nil
 	}
 	m, ok := DecodeMarker(c.Body)
 	if !ok {
+		// The factory's own comment, known by its login, with a marker that
+		// no longer reads. Taken as no post, an earlier proposal would
+		// answer a pending ratification in its place. A person can restore
+		// the comment, or delete it to fall back on purpose.
+		if f.Self != "" && damagedMarker(c.Body) {
+			return Post{}, false, fmt.Errorf("comment %d: the factory's marker is cut short or damaged; restore the comment, or delete it to fall back to the post before it", c.ID)
+		}
 		return Post{}, false, nil
 	}
-	if m.ProposalRef == nil {
-		return Post{Comment: c, Marker: m}, true, nil
+	if m.referenceProblem != "" {
+		return Post{}, false, fmt.Errorf("comment %d: draft reference: malformed marker: %s; restore the comment", c.ID, m.referenceProblem)
+	}
+	return Post{Comment: c, Marker: m}, true, nil
+}
+
+// draftPost is markPost with a saved record's proposal read back and
+// checked, for a reader that acts on the proposal.
+func (f *Factory) draftPost(ctx context.Context, issue int, c github.Comment) (Post, bool, error) {
+	post, ok, err := f.markPost(c)
+	if err != nil || !ok || post.Marker.ProposalRef == nil {
+		return post, ok, err
 	}
 	if f.Repo == nil {
 		return Post{}, false, fmt.Errorf("draft reference reader is unavailable")
 	}
-	m, _, err := m.ResolveDraft(ctx, f.Repository, issue, f.Repo.Run, f.Repo.Show)
+	m, _, err := post.Marker.ResolveDraft(ctx, f.Repository, issue, f.Repo.Run, f.Repo.Show)
 	if err != nil {
 		return Post{}, false, fmt.Errorf("comment %d: %w", c.ID, err)
 	}

@@ -250,6 +250,23 @@ func (m Marker) failure() string {
 // comment. Markers from before that are read as they are.
 var markerRE = regexp.MustCompile(`<!-- invariant:(z:)?([A-Za-z0-9+/=]+) -->`)
 
+// markerStart is how every marker begins.
+const markerStart = "<!-- invariant:"
+
+// damagedMarker says whether a comment holds the start of a marker and no
+// marker that reads: one cut short, in its JSON, its gzip or its base64, or
+// changed on the way. DecodeMarker reads such a comment as holding none,
+// which is right for a stranger's. In a comment of the factory's own it
+// means the thread's newest state can't be read, and the post before it
+// must not stand in for it (#790).
+func damagedMarker(body string) bool {
+	if !strings.Contains(body, markerStart) {
+		return false
+	}
+	_, ok := DecodeMarker(body)
+	return !ok
+}
+
 // maxMarker is the most a marker may unzip to. Anyone can post one, so a
 // small one can't make the factory unzip a huge one.
 const maxMarker = 4 << 20

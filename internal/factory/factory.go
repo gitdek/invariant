@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gitdek/invariant/factory/protocol/protocol"
 	"github.com/gitdek/invariant/factory/recovery/recovery"
@@ -1436,10 +1437,14 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 	}
 	// A failed native revision keeps the original execution base, so the
 	// next revision cannot recapture changed guidance or gate authority.
+	// A draft that came back with a problem is what the next revision starts
+	// from, as it was before saved records: the person revising sees what
+	// failed, and the agent mends it. Only a draft that returned nothing
+	// falls back to the proposal before it.
 	failed := res.Proposal
 	if authority != nil {
 		failed = authority
-	} else if failed == nil || res.Problem != "" && previous != nil {
+	} else if failed == nil {
 		failed = previous
 	}
 	// The post names the agent that drafted it, beside what it spent (#179).
@@ -1675,17 +1680,68 @@ func codeLines(body string) []string {
 	return paths
 }
 
-// badDir says what's wrong with a project directory an issue names.
+// badDir says what's wrong with a project directory an issue names, or a
+// proposal carries.
 func badDir(dir string) string {
+	top, _, _ := strings.Cut(dir, "/")
 	switch {
-	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || dir == ".." || strings.HasPrefix(dir, "../"):
+	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || dir == ".." || strings.HasPrefix(dir, "../") || strings.Contains(dir, `\`):
 		return "that isn't a clean path inside the repository"
-	case dir == ".github" || strings.HasPrefix(dir, ".github/"):
+	case strings.EqualFold(top, ".github"):
+		// Any spelling: a checkout that folds case reads .GitHub as .github.
 		return "the factory never touches CI configuration"
+	case strings.EqualFold(top, ".git") || strings.EqualFold(top, ".invariant") || strings.EqualFold(top, "decisions"):
+		return "that's where the repository keeps its own records"
 	case strings.ContainsAny(dir, " \t"):
 		return "a project's directory can't contain spaces"
+	case strings.ContainsFunc(dir, unicode.IsControl):
+		return "a project's directory can't contain control characters"
+	}
+	for _, part := range strings.Split(dir, "/") {
+		if strings.HasPrefix(part, "-") {
+			return "a name in it starts with a dash, which a command would read as an option"
+		}
 	}
 	return ""
+}
+
+// branchPart is what a proposal's slug must be to name its branch: one
+// plain name.
+var branchPart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// destination holds everything a proposal says about where ratification
+// writes to the rules an issue's own Project line meets. A proposal is read
+// from the comment that carries it or from a saved record a comment names,
+// and either one's bytes can say anything: ratification joins its directory
+// and its module to the worktree, removes model files beside the module of
+// an amendment, and names a branch after its slug (#790). So it's checked
+// on any proposal about to be ratified, however it was read.
+func destination(p *formalize.Proposal) error {
+	if p == nil || p.Plan != nil || p.IssuePlan != nil {
+		return nil
+	}
+	if p.Dir != "" {
+		if problem := badDir(p.Dir); problem != "" {
+			return fmt.Errorf("project directory %q: %s", p.Dir, problem)
+		}
+	}
+	if p.Target != nil {
+		if problem := badDir(p.Target.Dir); problem != "" {
+			return fmt.Errorf("amendment directory %q: %s", p.Target.Dir, problem)
+		}
+	}
+	if len(p.Forks) > 0 {
+		// A question's carrier is never written: only a selected proposal is.
+		return nil
+	}
+	switch {
+	case !branchPart.MatchString(p.Slug) || strings.Contains(p.Slug, "..") || strings.HasSuffix(p.Slug, ".") || strings.HasSuffix(p.Slug, ".lock"):
+		return fmt.Errorf("proposal slug %q must be one plain name, as a branch's is", p.Slug)
+	case p.Target == nil && !savedSlug.MatchString(p.Slug):
+		// A new project's slug also names its directory, as a draft's must.
+		return fmt.Errorf("proposal slug %q must be kebab case", p.Slug)
+	}
+	return p.ValidateDestinations()
 }
 
 // current reads the project in dir as it stands on the base branch, or
@@ -1861,6 +1917,10 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if p.Plan != nil {
 		posted, err := f.commitPlan(ctx, t, state, c)
 		return posted, f.effectResult(ctx, n, "post the plan's ratification", err)
+	}
+	// Whatever carried the proposal here, it writes only inside its project.
+	if err := destination(p); err != nil {
+		return Post{}, fmt.Errorf("#%d's proposal can't be ratified: %w", n, err)
 	}
 	if p.Target != nil {
 		cur, err := f.current(ctx, p.Target.Dir)
@@ -2387,7 +2447,7 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if err != nil {
 		return "", "", nil, nil, err
 	}
-	if why, err := f.superseded(ctx, n, ratified); err != nil {
+	if why, err := f.supersededAfterBuild(ctx, n, ratified); err != nil {
 		return "", "", nil, nil, err
 	} else if why != current {
 		return "", "", nil, nil, f.finishSuperseded(ctx, n, why, step, result)
