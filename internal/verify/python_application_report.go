@@ -47,16 +47,17 @@ type PythonApplicationConformance struct {
 
 // PythonApplicationLarger is an explored invocation's run one size larger:
 // the bounds it ran at, the driver copy that supplied them, beside the
-// staged driver it replaced, what the run did and how its count compares
-// with TLC's there (D-0068, D-0076).
+// staged driver it replaced, what the run did, and its count and attempt
+// checks against TLC there (D-0068, D-0076, #881).
 type PythonApplicationLarger struct {
-	Key       PythonApplicationInvocationKey    `json:"key"`
-	Bounds    map[string]string                 `json:"bounds"`
-	Driver    project.ComponentFile             `json:"driver"`
-	Original  project.ComponentFile             `json:"original"`
-	Execution *PythonApplicationExecutionResult `json:"execution,omitempty"`
-	Result    Larger                            `json:"result"`
-	Skipped   []string                          `json:"skipped,omitempty"`
+	Key         PythonApplicationInvocationKey    `json:"key"`
+	Bounds      map[string]string                 `json:"bounds"`
+	Driver      project.ComponentFile             `json:"driver"`
+	Original    project.ComponentFile             `json:"original"`
+	Execution   *PythonApplicationExecutionResult `json:"execution,omitempty"`
+	Conformance *PythonApplicationConformance     `json:"conformance,omitempty"`
+	Result      Larger                            `json:"result"`
+	Skipped     []string                          `json:"skipped,omitempty"`
 }
 
 // passed is a check's verdict for the gate. An explored check's
@@ -145,6 +146,9 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 			x.Actual.Image = ""
 			x.Fingerprint, x.Provenance.Fingerprint = "", ""
 		}
+		if c := out.Larger[i].Conformance; c != nil {
+			portablePythonApplicationConformance(c)
+		}
 	}
 	// A proof's local image and the command naming it differ by machine, and
 	// Nagini's output carries its timing: the recipe, the input and the
@@ -157,17 +161,21 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 	// logical inputs, configurations and verdicts instead. Older reports still
 	// bind their existing evidence. Scheduling paths remain receipt-only.
 	for i := range out.Conformance {
-		if len(out.Conformance[i].LogicalChecks) > 0 {
-			out.Conformance[i].Checks = nil
-			for j := range out.Conformance[i].LogicalChecks {
-				out.Conformance[i].LogicalChecks[j].Batch = ""
-			}
-		}
-		for j := range out.Conformance[i].Checks {
-			out.Conformance[i].Checks[j].Batch = ""
-		}
+		portablePythonApplicationConformance(&out.Conformance[i])
 	}
 	return &out
+}
+
+func portablePythonApplicationConformance(c *PythonApplicationConformance) {
+	if len(c.LogicalChecks) > 0 {
+		c.Checks = nil
+		for i := range c.LogicalChecks {
+			c.LogicalChecks[i].Batch = ""
+		}
+	}
+	for i := range c.Checks {
+		c.Checks[i].Batch = ""
+	}
 }
 
 func pythonApplicationExecutionFingerprint(x PythonApplicationExecutionResult) string {

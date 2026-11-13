@@ -73,8 +73,13 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 	}
 	// In words, what a component receipt's table says of the check one size
 	// larger, ahead of each invocation's record of it (#880).
-	if len(reports) == 1 && hasComponentEvidence(reports[0]) {
-		if ok, result, evidence, shown := pythonApplicationLarger(a, larger); shown {
+	checkedLarger := slices.ContainsFunc(a.Larger, func(l verify.PythonApplicationLarger) bool { return l.Conformance != nil })
+	if len(reports) == 1 && (hasComponentEvidence(reports[0]) || checkedLarger) {
+		overall := larger
+		if checkedLarger {
+			overall = reports[0].Larger
+		}
+		if ok, result, evidence, shown := pythonApplicationLarger(a, overall); shown {
 			verdict := "➖ " + result
 			if ok != nil {
 				verdict = mark(*ok) + " " + result
@@ -159,6 +164,10 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 	for _, l := range a.Larger {
 		if len(l.Skipped) == 0 && l.Execution != nil && l.Result.Required && !l.Result.Passed {
 			execution("Python execution one size larger", *l.Execution)
+			if l.Conformance != nil {
+				out = append(out, fmt.Sprintf("Python conformance one size larger, target %s, check %s, invocation %s: %s",
+					componentLiteral(l.Key.Target), componentLiteral(l.Key.Check), componentLiteral(l.Key.ID), componentLiteral(l.Result.Message)))
+			}
 		}
 	}
 	for _, c := range a.Conformance {
@@ -185,9 +194,17 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 func pythonApplicationLarger(a *verify.PythonApplicationReport, overall *verify.Larger) (ok *bool, result, evidence string, shown bool) {
 	explored := slices.ContainsFunc(a.Conformance, func(c verify.PythonApplicationConformance) bool { return c.Mode == "bounded-exhaustive" })
 	var skipped []string
+	checked, countOnly := false, false
+	var failures []string
 	for _, l := range a.Larger {
 		if len(l.Skipped) > 0 {
 			skipped = append(skipped, componentLiteral(l.Key.ID)+": "+componentStrings(l.Skipped))
+			continue
+		}
+		checked = checked || l.Conformance != nil
+		countOnly = countOnly || l.Conformance == nil
+		if l.Conformance != nil && l.Result.Required && !l.Result.Passed {
+			failures = append(failures, componentLiteral(l.Key.ID)+": "+componentText(firstLine(l.Result.Message)))
 		}
 	}
 	within := func(l *verify.Larger) string { return (renderer{explicit: true}).bounds(l.Bounds) }
@@ -197,6 +214,11 @@ func pythonApplicationLarger(a *verify.PythonApplicationReport, overall *verify.
 	}
 	yes, no := true, false
 	switch l := overall; {
+	case l != nil && l.Passed && checked && !countOnly:
+		return &yes, "the attempts conform and every step was tried, with matching state count and depth",
+			fmt.Sprintf("%s states, depth %d, within %s%s", thousands(l.States), l.Depth, within(l), also), true
+	case l != nil && l.Required && !l.Passed && len(failures) > 0:
+		return &no, "code and model disagree one size larger", strings.Join(failures, "; ") + also, true
 	case l != nil && l.Passed:
 		// Counts are what the check compares, so counts are what it says.
 		return &yes, "the code reaches as many states as the model, as deep",

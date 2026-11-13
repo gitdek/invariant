@@ -119,7 +119,7 @@ The factory owns both the model and the code, and each Go method's contract rest
 | Liveness | TLA+ · TLC | A ratified property, such as "every command is eventually answered", doesn't hold under the ratified fairness, or a fairness statement isn't about a step the model takes |
 | Known bugs | TLA+ · TLC | A ratified bug, added to the model as an extra action, slips past the invariants |
 | Agreement | Invariant | Go: the code, explored from its initial state, doesn't reach exactly the states TLC found in the model |
-| One size larger | Invariant · TLC | One size past the ratified bounds, the code doesn't reach exactly the states TLC finds there, so it carries a bound |
+| One size larger | Invariant · TLC | State count or depth differs from TLC one size past the bounds; an explored Python application's recorded attempts also fail if they disagree with the model there |
 | Conformance | Invariant · TLC | Go, TypeScript and Python: the real code, driven through its operations, takes a step the model doesn't allow. Passing partial or unknown state coverage is labeled [sampled](docs/gate.md#sampled-state-coverage) |
 | Every step tried | Invariant · TLC | A driver, or a Go explorer that records its attempts, never tried a step in a state it reached, except where only the environment's bounds rule it out |
 | Code | Gobra · Nagini | A function doesn't verify against its contract, an index or integer operation could fail, or a Python core holds arithmetic the pinned Nagini models apart from Python, which the gate refuses before Nagini runs |
@@ -128,6 +128,8 @@ The factory owns both the model and the code, and each Go method's contract rest
 | Ratification | Invariant · GitHub | A project's lock or a plan isn't exactly the proposal a person with write access ratified on its issue, or, for a lock ratified by hand, the one a person's ratification in the journal names |
 
 Every pull request whose gate runs carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
+
+One size larger compares counts and depth for Go explorers and count-only drivers. [Explored Python applications](docs/python.md#exploring-every-state) also check their authenticated starts, transitions, declared outcomes and every step tried at the larger constants. After TLC's three-minute model check, each invocation shares six minutes across exploration, recording conversion and conformance. An unfinished or unavailable check claims nothing; completed disagreements fail. Receipts keep larger conformance evidence apart from base coverage and name the failing invocation and state or step.
 
 The receipt also says how far the code's evidence goes: **proved**, **tested against the model** or **unchecked**, and **proved at every size** only with a check one size larger. Passing conformance with incomplete or unknown state coverage says **sampled**, with each check's fraction and percentage or **coverage unknown**; even a full state sample grants no proof or exhaustive claim. [The gate's page](docs/gate.md#sampled-state-coverage) gives the coverage rules and explains each claim and TLAPS model proofs. [The Python page](docs/python.md) covers checking an existing Python application as it is: adopting it, exploring every state, its dependencies, the evidence for each component, trusted contracts for what it calls, proving a function in place, and checking its callers against its contract.
 
