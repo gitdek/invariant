@@ -3,6 +3,7 @@ package found
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,7 +65,7 @@ func TestNewFoundsAProjectFromNothing919(t *testing.T) {
 
 	// The starter, as committed.
 	files := w.tree(dir)
-	if got, want := slices.Sorted(maps(files)), strings.Fields(founded); !slices.Equal(got, slices.Sorted(slices.Values(want))) {
+	if got, want := slices.Sorted(maps.Keys(files)), strings.Fields(founded); !slices.Equal(got, slices.Sorted(slices.Values(want))) {
 		t.Errorf("the checkout holds %q, want %q", got, want)
 	}
 	for name, wants := range map[string][]string{
@@ -146,17 +147,6 @@ func TestNewFoundsAProjectFromNothing919(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the founding didn't say %q:\n%s", want, out)
-		}
-	}
-}
-
-// maps is the names of a tree's files.
-func maps(files map[string]string) func(yield func(string) bool) {
-	return func(yield func(string) bool) {
-		for name := range files {
-			if !yield(name) {
-				return
-			}
 		}
 	}
 }
@@ -377,7 +367,7 @@ func TestNewNeverOverwritesAFileAndNamesIt919(t *testing.T) {
 				t.Errorf("new's refusal doesn't name %s: %v", filepath.Join(dir, c.names), err)
 			}
 			if after := w.tree(w.root); !reflect.DeepEqual(after, before) {
-				t.Errorf("new changed files before it refused: %q, were %q", slices.Sorted(maps(after)), slices.Sorted(maps(before)))
+				t.Errorf("new changed files before it refused: %q, were %q", slices.Sorted(maps.Keys(after)), slices.Sorted(maps.Keys(before)))
 			}
 			if w.exists || w.ran("gh repo create") || w.ran("git add") || w.ran("git commit") || w.ran("git push") {
 				t.Errorf("new created something before it refused:\n%s", strings.Join(w.calls, "\n"))
@@ -555,7 +545,7 @@ func TestNewStopsBeforeItsFirstCommitWithoutAGitIdentity919(t *testing.T) {
 		t.Errorf("new went on past the missing identity:\n%s", strings.Join(w.calls, "\n"))
 	}
 	if files := w.tree(dir); len(files) != 0 {
-		t.Errorf("new wrote %q before it stopped for an identity", slices.Sorted(maps(files)))
+		t.Errorf("new wrote %q before it stopped for an identity", slices.Sorted(maps.Keys(files)))
 	}
 	if _, err := w.git(dir, "rev-parse", "--verify", "--quiet", "HEAD"); err == nil {
 		t.Error("new committed with no git identity")
@@ -580,6 +570,29 @@ func TestNewStopsBeforeItsFirstCommitWithoutAGitIdentity919(t *testing.T) {
 		t.Errorf("new didn't finish the founding:\n%s", out)
 	}
 	w.contract(dir)
+}
+
+// The commands new prints for a person can be pasted as they are: a
+// directory with a space or a quote in its name is one word of each.
+func TestTheCommandsNewPrintsQuoteTheirDirectory919(t *testing.T) {
+	for dir, want := range map[string]string{
+		"/home/someone/widgets":       "/home/someone/widgets",
+		"/home/someone/my projects/w": "'/home/someone/my projects/w'",
+		"/home/someone/it's/w":        `'/home/someone/it'\''s/w'`,
+		"/home/someone/$HOME/w":       "'/home/someone/$HOME/w'",
+		"":                            "''",
+	} {
+		if got := shell(dir); got != want {
+			t.Errorf("%q as a word of a command is %s, want %s", dir, got, want)
+		}
+	}
+	w := newWorld(t)
+	w.identity = false
+	dir := filepath.Join(w.root, "my projects", "widgets")
+	_, err := w.found(Options{Dir: dir})
+	if err == nil || !strings.Contains(err.Error(), "git -C '"+dir+"' config user.name ") {
+		t.Errorf("the command to set an identity doesn't quote %s: %v", dir, err)
+	}
 }
 
 // Only Go has a starter. Any other language is refused in a sentence that
@@ -628,6 +641,10 @@ func TestNewRefusesAMalformedRepositoryOrPin919(t *testing.T) {
 		if len(w.calls) != 0 || out != "" {
 			t.Errorf("new did something with the pin %q: %q, said %q", ref, w.calls, out)
 		}
+	}
+	// It never falls back to a runner of its own: without one it stops.
+	if err := Project(context.Background(), Options{Repo: "acme/widgets", Language: "go", Invariant: pin, Dir: filepath.Join(t.TempDir(), "widgets")}); err == nil || !strings.Contains(err.Error(), "needs a runner") {
+		t.Errorf("a founding with no runner returned %v", err)
 	}
 	// A name with a dot, a dash and capitals is one.
 	w := newWorld(t)
@@ -928,6 +945,84 @@ func TestNewPushesAFoundingThatNeverReachedARepositoryWithCommits919(t *testing.
 	}
 }
 
+// A repository that's empty gets the founding's commit whatever the
+// checkout remembers of a push: one deleted and made again holds nothing.
+func TestNewPushesToARepositoryThatIsEmptyAgain919(t *testing.T) {
+	w := newWorld(t)
+	dir := filepath.Join(w.root, "widgets")
+	if out, err := w.found(Options{}); err != nil {
+		t.Fatalf("the founding failed: %v\n%s", err, out)
+	}
+	head := w.mustGit(dir, "rev-parse", "HEAD")
+	w.calls, w.pushed, w.empty, w.required = nil, nil, true, false
+	out, err := w.found(Options{})
+	if err != nil {
+		t.Fatalf("the run on the emptied repository failed: %v\n%s", err, out)
+	}
+	if !slices.Equal(w.pushed, []string{head}) || w.ran("git commit") || !w.required || !strings.Contains(out, "acme/widgets is founded.") {
+		t.Errorf("new pushed %q to the emptied repository, want the founding's commit %s:\n%s", w.pushed, head, out)
+	}
+}
+
+// A commit new has just made is pushed, even into a checkout that has seen
+// a founded main on GitHub it never merged: git then says the two have
+// parted, where skipping the push would call a project founded whose
+// commit never left the machine.
+func TestNewPushesTheCommitItMakesWhateverTheCheckoutRemembers919(t *testing.T) {
+	w := newWorld(t)
+	dir := filepath.Join(w.root, "widgets")
+	w.exists, w.empty, w.mergeCommits, w.visibility = true, false, true, "private"
+	w.checkout(dir, "https://github.com/acme/widgets.git")
+	w.mustGit(dir, "symbolic-ref", "HEAD", "refs/heads/main")
+	w.write(filepath.Join(dir, "LICENSE"), "A license.\n")
+	w.mustGit(dir, "add", "LICENSE")
+	w.mustGit(dir, "commit", "--quiet", "-m", "A license")
+	// What GitHub's main holds, fetched and never merged: a founding made
+	// somewhere else.
+	w.write(filepath.Join(dir, ".github", "workflows", "gate.yml"), "name: gate\n")
+	w.write(filepath.Join(dir, ".invariant", "repository.json"), "{}\n")
+	w.mustGit(dir, "add", ".github", ".invariant")
+	theirs := w.mustGit(dir, "commit-tree", "-m", "Founded elsewhere", w.mustGit(dir, "write-tree"))
+	w.mustGit(dir, "update-ref", "refs/remotes/origin/main", theirs)
+	w.mustGit(dir, "rm", "--quiet", "-r", "-f", ".github", ".invariant")
+	out, err := w.found(Options{})
+	if err != nil {
+		t.Fatalf("the founding failed: %v\n%s", err, out)
+	}
+	if head := w.mustGit(dir, "rev-parse", "HEAD"); !w.ran("git commit") || !slices.Equal(w.pushed, []string{head}) {
+		t.Errorf("new pushed %q, want the commit it made, %s:\n%s", w.pushed, head, strings.Join(w.calls, "\n"))
+	}
+}
+
+// A branch that already requires invariant/gate is left as it is, however
+// GitHub lists the check and whatever else a person requires there. One
+// that's protected without the gate gets the requirement.
+func TestNewLeavesABranchThatAlreadyRequiresTheGate919(t *testing.T) {
+	for _, c := range []struct {
+		name, protection string
+		required         bool
+	}{
+		{"as a check of GitHub Actions", `{"required_status_checks":{"strict":true,"contexts":[],"checks":[{"context":"lint","app_id":15368},{"context":"invariant/gate","app_id":15368}]},"required_pull_request_reviews":{"required_approving_review_count":2}}`, true},
+		{"as a context", `{"required_status_checks":{"strict":false,"contexts":["invariant/gate"]}}`, true},
+		{"another check only", `{"required_status_checks":{"strict":false,"contexts":["lint"],"checks":[{"context":"lint","app_id":15368}]}}`, false},
+		{"no required checks", `{"enforce_admins":{"enabled":true}}`, false},
+		{"an answer that isn't GitHub's", `<html>Unicorn</html>`, false},
+	} {
+		w := newWorld(t)
+		w.protection = c.protection
+		out, err := w.found(Options{})
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", c.name, err, out)
+		}
+		if set := w.body != ""; set == c.required {
+			t.Errorf("%s: new set the branch's protection = %t:\n%s", c.name, set, out)
+		}
+		if said := strings.Contains(out, "Required invariant/gate on main"); said == c.required {
+			t.Errorf("%s: new said it required the gate = %t:\n%s", c.name, said, out)
+		}
+	}
+}
+
 // new commits its own files and nothing else: what a person had staged in
 // the checkout it adopts stays staged.
 func TestNewCommitsOnlyItsOwnFiles919(t *testing.T) {
@@ -1024,6 +1119,45 @@ func TestNewStopsOnChecksItCantComplete919(t *testing.T) {
 	}
 }
 
+// A project is founded once its commit holds both the gate and the checks.
+// One with the gate alone, as a repository set up before there were checks,
+// gets the starter and the checks. One that lost its gate gets it back.
+func TestAProjectIsFoundedOnlyWithBothItsGateAndItsChecks919(t *testing.T) {
+	w := newWorld(t)
+	dir := filepath.Join(w.root, "widgets")
+	w.exists, w.empty, w.mergeCommits, w.visibility = true, false, true, "private"
+	w.checkout(dir, "https://github.com/acme/widgets.git")
+	w.mustGit(dir, "symbolic-ref", "HEAD", "refs/heads/main")
+	workflow, err := setup.Workflow(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.write(filepath.Join(dir, ".github", "workflows", "gate.yml"), workflow)
+	w.mustGit(dir, "add", ".github")
+	w.mustGit(dir, "commit", "--quiet", "-m", "The gate")
+	w.mustGit(dir, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+	out, err := w.found(Options{})
+	if err != nil {
+		t.Fatalf("with the gate alone, the founding failed: %v\n%s", err, out)
+	}
+	if !w.ran("git commit") || len(w.pushed) != 1 || !strings.Contains(out, "acme/widgets is founded.") {
+		t.Errorf("new took a checkout with the gate alone for a founded project:\n%s", out)
+	}
+	w.contract(dir)
+
+	w.mustGit(dir, "rm", "--quiet", ".github/workflows/gate.yml")
+	w.mustGit(dir, "commit", "--quiet", "-m", "Remove the gate")
+	w.mustGit(dir, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
+	w.calls, w.pushed = nil, nil
+	out, err = w.found(Options{})
+	if err != nil {
+		t.Fatalf("with the checks alone, the founding failed: %v\n%s", err, out)
+	}
+	if held := w.mustGit(dir, "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(held, ".github/workflows/gate.yml") || len(w.pushed) != 1 || strings.Contains(out, "already founded") {
+		t.Errorf("new took a checkout with the checks alone for a founded project:\n%s\n%s", out, held)
+	}
+}
+
 // A checkout whose commit holds a gate and a checks file the loader
 // refuses, as a draft committed with its unresolved entries, isn't founded,
 // and new doesn't say it is: it names the file, pushes nothing and sets
@@ -1077,7 +1211,7 @@ func TestNewCreatesNothingOutsideItsDirectoryAndRepository919(t *testing.T) {
 	if out, err := w.found(Options{Spec: spec}); err != nil {
 		t.Fatalf("the founding failed: %v\n%s", err, out)
 	}
-	if got := slices.Sorted(maps(w.tree(w.root))); !slices.Equal(got, slices.Sorted(slices.Values(append(prefixed("widgets/", strings.Fields(founded)), "widgets/docs/PRD.md", "spec.md")))) {
+	if got := slices.Sorted(maps.Keys(w.tree(w.root))); !slices.Equal(got, slices.Sorted(slices.Values(append(prefixed("widgets/", strings.Fields(founded)), "widgets/docs/PRD.md", "spec.md")))) {
 		t.Errorf("after the founding the world holds %q", got)
 	}
 

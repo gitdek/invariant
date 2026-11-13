@@ -31,9 +31,10 @@ type world struct {
 	// The repository as GitHub would show it.
 	exists, empty, mergeCommits bool
 	visibility                  string
-	required                    bool  // main requires invariant/gate
-	refusal                     error // what GitHub answers the requirement with
-	pushFails                   error // what the next push answers with
+	required                    bool   // main requires invariant/gate
+	protection                  string // main's protection as GitHub shows it, when a test sets one
+	refusal                     error  // what GitHub answers the requirement with
+	pushFails                   error  // what the next push answers with
 
 	calls  []string      // every command, in order, with the root as ROOT
 	body   string        // what the requirement was sent
@@ -145,6 +146,9 @@ func (w *world) gh(c Command, args string) ([]byte, error) {
 		w.mergeCommits = true
 		return []byte("{}"), nil
 	case args == "api "+protection:
+		if w.protection != "" {
+			return []byte(w.protection), nil
+		}
 		if !w.required {
 			return nil, errors.New("gh: Branch not protected (HTTP 404)")
 		}
