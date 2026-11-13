@@ -56,8 +56,9 @@ func TestThePageIsNeverWiderThanItsWindow888(t *testing.T) {
 	}))
 	defer server.Close()
 	// A laptop's window, where a row has room, the widths where it hadn't,
-	// and a phone's.
-	for _, width := range []int{1440, 1000, 874, 768, 390} {
+	// and the narrowest a browser run's window gets, where the page lays
+	// out as on a phone.
+	for _, width := range []int{1440, 1000, 874, 768, 500} {
 		t.Run(fmt.Sprintf("%d wide", width), func(t *testing.T) {
 			out, err := browserDOM(t, browser, server.URL+"/", 20000, fmt.Sprintf("--window-size=%d,900", width))
 			if err != nil || !strings.Contains(string(out), `data-page-width="passed"`) {
