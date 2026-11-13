@@ -143,13 +143,53 @@ Bad == \E p \in People : Early(p)
 	})
 
 	// A step whose body chooses part of its next state names no argument
-	// for the choice, so a path through it can't be handed to the code.
-	t.Run("a path through a step that hides a choice", func(t *testing.T) {
-		hidden := strings.Replace(honest, `Put(p) == n < 1 /\ n' = n + 1 /\ who' = who \cup {p}`, `Put == n < 1 /\ \E p \in People : n' = n + 1 /\ who' = who \cup {p}`, 1)
-		hidden = strings.Replace(hidden, `Next == (\E p \in People : Put(p)) \/ Done`, `Next == Put \/ Done`, 1)
-		path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": hidden}, people, "Safe")
-		if err == nil || !strings.Contains(err.Error(), "replay-unsupported-action: edge 0 takes Put, whose body chooses part of its next state") {
-			t.Fatalf("want the path refused, got %+v, %v", path.Steps, err)
+	// for the choice, so a path through it can't be handed to the code. TLC
+	// decides it at the step's own state, whatever the body's text looks
+	// like: with the step's arguments fixed, could it have gone elsewhere?
+	put := `Put(p) == n < 1 /\ n' = n + 1 /\ who' = who \cup {p}`
+	next := `Next == (\E p \in People : Put(p)) \/ Done`
+	bare := func(body string) string {
+		return strings.Replace(strings.Replace(honest, put, body, 1), next, `Next == Put \/ Done`, 1)
+	}
+	for name, model := range map[string]string{
+		"an \\E over the update":         bare(`Put == n < 1 /\ \E p \in People : n' = n + 1 /\ who' = who \cup {p}`),
+		"\\exists, spelled out":          bare(`Put == n < 1 /\ \exists p \in People : n' = n + 1 /\ who' = who \cup {p}`),
+		"a disjunction of updates":       bare(`Put == /\ n < 1 /\ n' = n + 1 /\ (\/ who' = who \cup {P1} \/ who' = who \cup {P2})`),
+		"a choice behind another name":   bare("Pick == \\E p \\in People : who' = who \\cup {p}\nPut == n < 1 /\\ n' = n + 1 /\\ Pick"),
+		"a primed variable from a set":   bare(`Put == n < 1 /\ n' = n + 1 /\ (who') \in {{P1}, {P2}}`),
+		"a choice beside its argument's": strings.Replace(honest, put, `Put(p) == n < 1 /\ \E q \in People : n' = n + 1 /\ who' = who \cup {p, q}`, 1),
+	} {
+		t.Run("a path through a step that hides a choice: "+name, func(t *testing.T) {
+			path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": model}, people, "Safe")
+			// With a choice beside an argument, the step TLC took can also
+			// be one two arguments explain. Either way it names no step.
+			if err == nil || !strings.Contains(err.Error(), "step 1 of the counterexample, from its state 1 to its state 2,") ||
+				!(strings.Contains(err.Error(), "replay-unsupported-action:") && strings.Contains(err.Error(), "could have reached another state with the same arguments") ||
+					strings.Contains(name, "beside") && strings.Contains(err.Error(), "replay-ambiguous-edge:")) {
+				t.Fatalf("want the path refused at its first step, got %+v, %v", path.Steps, err)
+			}
+		})
+	}
+	// An \E that only guards, and a primed variable that's only tested,
+	// choose nothing: the step has one successor, and its path is taken.
+	for name, body := range map[string]string{
+		"an \\E that only guards":         `Put(p) == n < 1 /\ (\E q \in People : q \notin who) /\ n' = n + 1 /\ who' = who \cup {p}`,
+		"a primed variable that's tested": `Put(p) == n < 1 /\ n' = n + 1 /\ n' \in Nat /\ who' = who \cup {p}`,
+	} {
+		t.Run("a path through a step with "+name, func(t *testing.T) {
+			path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": strings.Replace(honest, put, body, 1)}, people, "Safe")
+			if err != nil || len(path.Steps) != 2 || path.Steps[0].Action != "Put" || len(path.Steps[0].Args) != 1 || path.Steps[1].Action != "Break" || !path.Steps[1].Bug {
+				t.Fatalf("want the path, got %+v, %v", path.Steps, err)
+			}
+		})
+	}
+	// A bug's operation that takes a step an action of Next takes too
+	// gives that step two readings, and TLC can't say which one took it.
+	t.Run("a bug's operation that takes a normal step too", func(t *testing.T) {
+		overlapping := strings.Replace(honest, `Break(p) == n = 1 /\ n' = 2 /\ who' = who \cup {p}`, `Break(p) == n' = n + 1 /\ who' = who \cup {p}`, 1)
+		path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": overlapping}, people, "Safe")
+		if err == nil || !strings.Contains(err.Error(), "replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, has no single operation that takes it") {
+			t.Fatalf("want the path refused at its first step, got %+v, %v", path.Steps, err)
 		}
 	})
 }

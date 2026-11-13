@@ -36,7 +36,7 @@ func (m *Model) ReplayActions(bug string) (normal, faulty []Step, err error) {
 			if len(body) == 0 || body[0].text == `\E` {
 				return nil, fmt.Errorf("replay-unsupported-action: %s must name its parameterized operations", name)
 			}
-			return []Step{{Name: name, Binders: binders, Hidden: hidesChoice(body)}}, nil
+			return []Step{{Name: name, Binders: binders}}, nil
 		}
 		var out []Step
 		for _, part := range parts {
@@ -80,27 +80,6 @@ func (m *Model) ReplayActions(bug string) (normal, faulty []Step, err error) {
 	return normal, faulty, err
 }
 
-// hidesChoice says whether an operation's body chooses part of its next
-// state where a replay can't see it: an \E with a primed variable somewhere
-// after it, or a primed variable taken from a set with \in. A replay names
-// each step's operation and arguments, and a choice inside the body is
-// neither, so the code under replay couldn't be told which one the path
-// took. It errs toward yes: an \E that only guards, ahead of an unrelated
-// update, counts too.
-func hidesChoice(body []token) bool {
-	chosen := false
-	for i, t := range body {
-		switch {
-		case t.text == `\E`:
-			chosen = true
-		case t.text != "'":
-		case chosen || i+1 < len(body) && body[i+1].text == `\in`:
-			return true
-		}
-	}
-	return false
-}
-
 // ReplayCandidates returns the set TLC evaluates at an exact source state.
 // ENABLED binds all primed variables to the requested target; the remaining
 // expressions and arguments come only from the model the gate just read.
@@ -116,6 +95,34 @@ func ReplayCandidates(steps []Step, bug bool, target string) string {
 			call += "(" + strings.Join(s.Args, ", ") + ")"
 		}
 		x := fmt.Sprintf("IF ENABLED ((%s) /\\ (%s)) THEN {<<%q, <<%s>>, %s>>} ELSE {}", call, target, s.Name, strings.Join(s.Args, ", "), flag)
+		for i := len(s.Binders) - 1; i >= 0; i-- {
+			b := s.Binders[i]
+			x = "UNION {(" + x + ") : " + b.Var + " \\in " + b.Domain + "}"
+		}
+		parts = append(parts, "("+x+")")
+	}
+	if len(parts) == 0 {
+		return "{}"
+	}
+	return strings.Join(parts, " \\cup ")
+}
+
+// ReplayLoose returns the set of operations that take a step to its target
+// and, with the same arguments, could have gone somewhere else: the
+// operation's body chooses part of its next state, and no argument names
+// the choice. A replay names each step's operation and arguments and
+// nothing more, so code under replay couldn't be told which way such a step
+// went. TLC decides it at the exact source state, whatever the body's text
+// looks like: a choice the text hides behind an alias, a disjunction or a
+// set is found, and an \E that only guards isn't.
+func ReplayLoose(steps []Step, target string) string {
+	var parts []string
+	for _, s := range steps {
+		call := s.Name
+		if len(s.Args) > 0 {
+			call += "(" + strings.Join(s.Args, ", ") + ")"
+		}
+		x := fmt.Sprintf("IF ENABLED ((%s) /\\ (%s)) /\\ ENABLED ((%s) /\\ ~(%s)) THEN {%q} ELSE {}", call, target, call, target, s.Name)
 		for i := len(s.Binders) - 1; i >= 0; i-- {
 			b := s.Binders[i]
 			x = "UNION {(" + x + ") : " + b.Var + " \\in " + b.Domain + "}"
