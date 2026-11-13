@@ -15,14 +15,25 @@ import (
 )
 
 // noGitHub is a runner that runs nothing: it notes each command a founding
-// asks for and answers that GitHub has no such repository, then refuses to
-// create one. No test here reaches gh, git or GitHub.
-type noGitHub struct{ calls []string }
+// asks for and answers that the owner is a person with no such repository,
+// then refuses to create one. A checkout it's told of has the repository
+// for its origin and no commit. No test here reaches gh, git or GitHub.
+type noGitHub struct {
+	calls    []string
+	checkout string // a directory that is the repository's checkout
+}
 
 func (n *noGitHub) Run(_ context.Context, c found.Command) ([]byte, error) {
 	n.calls = append(n.calls, c.String())
-	if len(c.Args) > 1 && c.Args[1] == "view" {
+	switch args := strings.Join(c.Args, " "); {
+	case c.Name == "gh" && args == "api users/acme --jq .type":
+		return []byte("User\n"), nil
+	case c.Name == "gh" && c.Args[1] == "view":
 		return nil, errors.New("GraphQL: Could not resolve to a Repository with the name 'acme/widgets'. (repository)")
+	case c.Name == "git" && c.Dir == n.checkout && args == "remote get-url origin":
+		return []byte("https://github.com/acme/widgets.git\n"), nil
+	case c.Name == "git" && c.Dir == n.checkout && args == "symbolic-ref --short HEAD":
+		return []byte("main\n"), nil
 	}
 	return nil, errors.New("this test creates nothing")
 }
@@ -47,7 +58,7 @@ func TestNewReadsItsFlagsAfterTheRepository919(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		runner := &noGitHub{}
 		code := foundNew(context.Background(), c.args, runner, &stdout, &stderr)
-		want := []string{"gh repo view acme/widgets --json isEmpty,mergeCommitAllowed,visibility", "gh repo create acme/widgets " + c.visibility}
+		want := []string{"gh api users/acme --jq .type", "gh repo view acme/widgets --json isEmpty,mergeCommitAllowed,visibility", "gh repo create acme/widgets " + c.visibility}
 		if !slices.Equal(runner.calls, want) {
 			t.Errorf("new %s ran %q, want %q", strings.Join(c.args, " "), runner.calls, want)
 		}
@@ -60,6 +71,88 @@ func TestNewReadsItsFlagsAfterTheRepository919(t *testing.T) {
 		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("new made %s though the repository couldn't be created: %v", dir, err)
 		}
+	}
+}
+
+// words splits a command as a shell would, for the quoting new prints: a
+// word in single quotes is one word, and '\” inside it is a quote.
+func words(t *testing.T, line string) []string {
+	t.Helper()
+	var out []string
+	word, quoted, open := "", false, false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '\'' && quoted && strings.HasPrefix(line[i:], `'\''`):
+			word, i = word+"'", i+3
+		case c == '\'':
+			quoted, open = !quoted, true
+		case c == ' ' && !quoted:
+			if word != "" || open {
+				out = append(out, word)
+			}
+			word, open = "", false
+		default:
+			word += string(c)
+		}
+	}
+	if quoted {
+		t.Fatalf("an open quote in %s", line)
+	}
+	if word != "" || open {
+		out = append(out, word)
+	}
+	return out
+}
+
+// Where new stops, it gives the command to run again, with every flag that
+// decides what it does. Pasted, that command is the same founding: it reads
+// the same repository, directory, visibility, spec and pin, from wherever
+// it's run.
+func TestNewTakesTheCommandItGivesForRunningAgain919(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "the project's", "widgets")
+	spec := filepath.Join(root, "the spec.md")
+	if err := os.WriteFile(spec, []byte("# The spec\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The repository's checkout, with a README of the person's own, which
+	// stops new before it creates anything.
+	for name, text := range map[string]string{".git/HEAD": "ref: refs/heads/main\n", "README.md": "# Mine\n"} {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(args []string) (string, []string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		runner := &noGitHub{checkout: dir}
+		if code := foundNew(context.Background(), args, runner, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), filepath.Join(dir, "README.md")+" is already there") {
+			t.Fatalf("new %s exited %d and said:\n%s", strings.Join(args, " "), code, stderr.String())
+		}
+		for _, call := range runner.calls {
+			if strings.Contains(call, "create") || strings.Contains(call, "clone") || strings.Contains(call, "push") {
+				t.Errorf("new %s ran %q before it stopped", strings.Join(args, " "), call)
+			}
+		}
+		return stderr.String(), runner.calls
+	}
+	said, calls := run([]string{"acme/widgets", "-public", "-dir", dir, "-spec", spec, "-invariant", initPin})
+	lines := strings.Split(strings.TrimRight(said, "\n"), "\n")
+	again := words(t, lines[len(lines)-1])
+	want := []string{"invariant", "new", "acme/widgets", "-dir", dir, "-public", "-spec", spec, "-invariant", initPin}
+	if !slices.Equal(again, want) {
+		t.Fatalf("the command to run again reads as %q, want %q:\n%s", again, want, said)
+	}
+	// From another directory, it stops at the same file, having asked the
+	// same things.
+	t.Chdir(t.TempDir())
+	saidAgain, callsAgain := run(again[2:])
+	if saidAgain != said || !slices.Equal(callsAgain, calls) {
+		t.Errorf("pasted, the command said:\n%s\nand ran %q; the first run said:\n%s\nand ran %q", saidAgain, callsAgain, said, calls)
 	}
 }
 

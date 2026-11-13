@@ -28,19 +28,23 @@ type world struct {
 	// identity says whether git has a user.name and user.email.
 	identity bool
 
-	// The repository as GitHub would show it.
+	// The repository as GitHub would show it, and its owner.
 	exists, empty, mergeCommits bool
 	visibility                  string
+	organization                bool   // the owner is an organization
+	mergeless                   bool   // a repository it creates doesn't allow merge commits yet
 	required                    bool   // main requires invariant/gate
 	protection                  string // main's protection as GitHub shows it, when a test sets one
+	unread                      error  // what GitHub answers a read of main's protection with
 	refusal                     error  // what GitHub answers the requirement with
 	pushFails                   error  // what the next push answers with
 
-	calls  []string      // every command, in order, with the root as ROOT
-	body   string        // what the requirement was sent
-	pushed []string      // each commit pushed to main
-	before func(Command) // called before each command runs
-	said   bytes.Buffer  // what the founding printed
+	calls  []string            // every command, in order, with the root as ROOT
+	body   string              // what the requirement was sent
+	pushed []string            // each commit pushed to main
+	before func(Command)       // called before each command runs
+	fails  func(Command) error // what a command fails with, for the ones a test picks
+	said   bytes.Buffer        // what the founding printed
 }
 
 // newWorld is a world with no repository yet, where git has an identity.
@@ -69,7 +73,10 @@ func (w *world) found(o Options) (string, error) {
 	if o.Dir == "" {
 		o.Dir = filepath.Join(w.root, "widgets")
 	}
-	o.WorkDir, o.Runner, o.Out = w.root, w, &w.said
+	if o.WorkDir == "" {
+		o.WorkDir = w.root
+	}
+	o.Runner, o.Out = w, &w.said
 	w.said.Reset()
 	err := Project(context.Background(), o)
 	return w.said.String(), err
@@ -81,6 +88,11 @@ func (w *world) Run(_ context.Context, c Command) ([]byte, error) {
 		w.before(c)
 	}
 	w.calls = append(w.calls, strings.ReplaceAll(c.String(), w.root, "ROOT"))
+	if w.fails != nil {
+		if err := w.fails(c); err != nil {
+			return nil, err
+		}
+	}
 	args := strings.Join(c.Args, " ")
 	switch c.Name {
 	case "gh":
@@ -107,7 +119,7 @@ func (w *world) Run(_ context.Context, c Command) ([]byte, error) {
 			w.pushed, w.empty = append(w.pushed, strings.TrimSpace(string(head))), false
 			// A push that lands moves the checkout's record of the remote.
 			return w.git(c.Dir, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
-		case "remote", "ls-tree", "symbolic-ref", "config", "add", "commit":
+		case "remote", "ls-tree", "show", "rev-parse", "symbolic-ref", "config", "status", "add", "commit":
 			return w.git(c.Dir, c.Args...)
 		}
 	}
@@ -119,7 +131,13 @@ func (w *world) Run(_ context.Context, c Command) ([]byte, error) {
 func (w *world) gh(c Command, args string) ([]byte, error) {
 	w.t.Helper()
 	protection := "repos/" + w.repo + "/branches/main/protection"
+	owner, _, _ := strings.Cut(w.repo, "/")
 	switch {
+	case args == "api users/"+owner+" --jq .type":
+		if w.organization {
+			return []byte("Organization\n"), nil
+		}
+		return []byte("User\n"), nil
 	case args == "repo view "+w.repo+" --json isEmpty,mergeCommitAllowed,visibility":
 		if !w.exists {
 			return nil, fmt.Errorf("GraphQL: Could not resolve to a Repository with the name '%s'. (repository)", w.repo)
@@ -129,8 +147,9 @@ func (w *world) gh(c Command, args string) ([]byte, error) {
 		if w.exists {
 			return nil, errors.New("GraphQL: Name already exists on this account (createRepository)")
 		}
-		// GitHub allows merge commits in a repository it creates.
-		w.exists, w.empty, w.mergeCommits, w.visibility = true, true, true, strings.TrimPrefix(c.Args[3], "--")
+		// GitHub allows merge commits in a repository it creates, unless
+		// a test says otherwise.
+		w.exists, w.empty, w.mergeCommits, w.visibility = true, true, !w.mergeless, strings.TrimPrefix(c.Args[3], "--")
 		return []byte("https://github.com/" + w.repo + "\n"), nil
 	case strings.HasPrefix(args, "repo clone "+w.repo+" ") && len(c.Args) == 4:
 		if !w.exists || !w.empty {
@@ -146,6 +165,9 @@ func (w *world) gh(c Command, args string) ([]byte, error) {
 		w.mergeCommits = true
 		return []byte("{}"), nil
 	case args == "api "+protection:
+		if w.unread != nil {
+			return nil, w.unread
+		}
 		if w.protection != "" {
 			return []byte(w.protection), nil
 		}
@@ -235,7 +257,8 @@ func (w *world) write(path, text string) {
 	}
 }
 
-// tree is every file under dir but git's own, by path, with its contents.
+// tree is every file under dir but git's own, by path, with its contents. A
+// link is there as where it leads, and never followed.
 func (w *world) tree(dir string) map[string]string {
 	w.t.Helper()
 	files := map[string]string{}
@@ -249,11 +272,16 @@ func (w *world) tree(dir string) map[string]string {
 			}
 			return nil
 		}
-		b, err := os.ReadFile(path)
+		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(dir, path)
+		if d.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			files[filepath.ToSlash(rel)] = "-> " + target
+			return err
+		}
+		b, err := os.ReadFile(path)
 		files[filepath.ToSlash(rel)] = string(b)
 		return err
 	})
@@ -261,6 +289,82 @@ func (w *world) tree(dir string) map[string]string {
 		w.t.Fatal(err)
 	}
 	return files
+}
+
+// commit commits paths in dir as they stand, for a person.
+func (w *world) commit(dir, message string, paths ...string) {
+	w.t.Helper()
+	w.mustGit(dir, append([]string{"add", "--"}, paths...)...)
+	w.mustGit(dir, append([]string{"commit", "--quiet", "-m", message, "--"}, paths...)...)
+}
+
+// again is the command a founding in dir prints for running it again, with
+// any flags between its directory and its pin.
+func (w *world) again(dir string, flags ...string) string {
+	words := append([]string{"invariant new", w.repo, "-dir", dir}, flags...)
+	return strings.Join(append(words, "-invariant", pin), " ")
+}
+
+// pasted is the options of the command a founding printed for running it
+// again: the last such line of text, split into words as a shell would.
+func (w *world) pasted(text string) Options {
+	w.t.Helper()
+	line := ""
+	for _, l := range strings.Split(text, "\n") {
+		if strings.HasPrefix(l, "invariant new ") {
+			line = l
+		}
+	}
+	if line == "" {
+		w.t.Fatalf("no command to run again in:\n%s", text)
+	}
+	var words []string
+	word, quoted, open := "", false, false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '\'' && quoted && strings.HasPrefix(line[i:], `'\''`):
+			word, i = word+"'", i+3
+		case c == '\'':
+			quoted, open = !quoted, true
+		case c == ' ' && !quoted:
+			if word != "" || open {
+				words = append(words, word)
+			}
+			word, open = "", false
+		default:
+			word += string(c)
+		}
+	}
+	if word != "" || open {
+		words = append(words, word)
+	}
+	var o Options
+	for i := 2; i < len(words); i++ {
+		switch flag := words[i]; {
+		case flag == "-public":
+			o.Public = true
+		case flag == "-dir" && i+1 < len(words):
+			i++
+			o.Dir = words[i]
+		case flag == "-spec" && i+1 < len(words):
+			i++
+			o.Spec = words[i]
+		case flag == "-invariant" && i+1 < len(words):
+			i++
+			o.Invariant = words[i]
+		case !strings.HasPrefix(flag, "-") && o.Repo == "":
+			o.Repo = flag
+		default:
+			w.t.Fatalf("the command to run again has %q, which invariant new doesn't take: %s", flag, line)
+		}
+	}
+	return o
+}
+
+// founds says whether what a founding printed calls the project founded,
+// now or already.
+func founds(out string) bool {
+	return strings.Contains(out, " is founded.") || strings.Contains(out, " is already founded")
 }
 
 // ran says whether any command so far starts with prefix.
