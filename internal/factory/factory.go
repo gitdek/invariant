@@ -1688,8 +1688,8 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	// paths on this machine as localPaths does, whether it's the formalizer's
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
-	res.CheckContext = &authority
 	complete := &savedDraftResult{Result: *res, Publication: &publication}
+	complete.CheckContext = &authority
 	applyDraftPublication(complete)
 	saved, err := f.saveResult(ctx, complete, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
