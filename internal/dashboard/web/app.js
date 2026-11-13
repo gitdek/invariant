@@ -1873,6 +1873,10 @@
   // proposalText says what a proposal asks a person to ratify. A rebuild
   // that changes no statement says so first, since that's all there is to
   // check.
+  // A plan's summary comes as one paragraph, a dozen sentences long, and a
+  // person ratifies from it. Each sentence gets a line of its own. The
+  // words and the spaces between them stay as they came.
+  const sentences = (text) => String(text || "").replace(/([.!?])\s+(?=[A-Z\[`"“(])/g, "$1\n").split("\n").filter(Boolean);
   function proposalText(w, repo, who) {
     const n = (w.statements || []).length, name = `<strong>${esc(w.name)}</strong>`;
     // A plumbing plan is tested, not proved (D-0105).
@@ -1883,7 +1887,7 @@
       const tests = (w.plan.tests || []).filter((t) => t.framework).map((t) => `<li><strong>${esc(t.name)}</strong> · part <code>${esc(t.part)}</code> · ${esc(t.framework)} · <code>${esc(t.file)}</code> · selector <code>${esc(t.selector)}</code></li>`).join("");
       const sources = `<details data-plan-sources="${esc(w.plan.sourceHash)}" data-source-url="${esc(w.plan.sourceURL)}"><summary>Read acceptance sources</summary><div data-source-content aria-live="polite">Open to load the exact acceptance files.</div></details>`;
       const execution = w.plan.execution ? `<p>Captured execution: <code>${esc(w.plan.execution.digest)}</code><br>Base provenance: <code>${esc(w.plan.execution.base)}</code></p>` : "";
-      return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask">${esc(w.plan.summary)}</p>${tests ? `<ul>${tests}</ul>` : ""}${execution}${sources}`;
+      return `<p class="ask">A plan for ${name}: it changes <strong>${files}</strong> file${files === 1 ? "" : "s"}, and its <strong>${n}</strong> acceptance test${n === 1 ? "" : "s"} fail until it's built. It's tested, not proved${trusted ? ", and it changes the trusted base, so a person merges it" : ""}. Waiting for ${who} to ratify it.</p><p class="ask says">${sentences(w.plan.summary).map((part) => `<span>${esc(part)} </span>`).join("")}</p>${tests ? `<ul>${tests}</ul>` : ""}${execution}${sources}`;
     }
     // A plan of issues pins no statement: it's the issues, in order.
     if (w.issuePlan) {
@@ -2017,7 +2021,11 @@
     if (p.state === "merged") return `<p class="now good">Now: ${pullLink(w, repo)} has merged. The factory records that on its next poll.</p>`;
     if (p.state === "closed") return `<p class="now">Now: ${pullLink(w, repo)} is closed, and didn't merge.</p>`;
     const gate = { passed: "CI's gate passed on its head", failed: "CI's gate failed on its head", running: "CI's gate is running on its head" }[p.gate] || "CI's gate hasn't run on its head";
-    const parts = [p.draft ? "is a draft" : "is ready for review", gate, p.conflicts ? "it conflicts with its base" : p.unsettled ? "" : "it can merge"].filter(Boolean);
+    // "It can merge" is said only of one a person can merge as it stands.
+    // Said of every pull request GitHub found no conflict in, a draft's
+    // card and a failed gate's read "and it can merge" (#889).
+    const fits = p.conflicts ? "it conflicts with its base" : p.unsettled ? "" : pullGood(w) ? "it can merge" : "it doesn't conflict with its base";
+    const parts = [p.draft ? "is a draft" : "is ready for review", gate, fits].filter(Boolean);
     const tone = pullGood(w) ? " good" : p.conflicts || p.gate === "failed" ? " bad" : "";
     return `<p class="now${tone}">Now: ${pullLink(w, repo)} ${parts.slice(0, -1).join(", ")}, and ${parts.at(-1)}.</p>`;
   }
