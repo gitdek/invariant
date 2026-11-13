@@ -1,5 +1,16 @@
 // Package pythongatetest shares the serial Python application gate suites and
 // their fixtures between the ordinary package run and the real-tool opt-in.
+//
+// What a test here costs is its gate runs (#893). Each Run starts the Docker
+// double about thirty times, and the double is a Python program, so a run
+// takes over a second alone on a host and ten or more in a build's sandbox,
+// where eight tests share four CPUs. Staging a fixture and reading its
+// sources cost next to nothing beside that: a source's syntax is read once
+// while the test's process lives. So a plan's acceptance test should make
+// its assertions on as few reports as it can: check everything one run can
+// show on that run's report, give a refusal that admission makes to Admit,
+// which runs no gate, and run the gate again only for a case that needs
+// another application or another failure.
 package pythongatetest
 
 import (
