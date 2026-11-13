@@ -1449,6 +1449,23 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 	}
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
+	// stuck composes the post about a draft that came back with a problem.
+	// A post leaves out a failed draft it can't hold, and with it the saved
+	// record the thread's state names, which no other post would then
+	// carry. So when the failed draft doesn't fit, the post keeps the
+	// proposal before it, with its record: the next revision still has a
+	// draft and the baseline it compares with (#790).
+	stuck := func(comment func(Marker) string) (Marker, string) {
+		m.Kind, m.Proposal = KindStuck, failed
+		m = retainedDraft(t, m)
+		body := comment(m)
+		if kept, _ := DecodeMarker(body); authority == nil && previous != nil && failed != previous && kept.Proposal == nil && kept.ProposalRef == nil {
+			m.Proposal = previous
+			m = retainedDraft(t, m)
+			body = comment(m)
+		}
+		return m, body
+	}
 	switch p := res.Proposal; {
 	case res.Problem != "" && synth.ProviderUnavailable(errors.New(res.Problem)):
 		// A draft its agent's provider never let finish needs only drafting
@@ -1460,13 +1477,11 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 		case checkContext.Planning == "plumbing":
 			what = "plan"
 		}
-		m.Kind, m.Proposal = KindStuck, failed
-		m = retainedDraft(t, m)
-		return f.drafted(ctx, t, cause, base, m, providerStuckComment(res.Problem, what, m), LabelHumanReview)
+		m, body := stuck(func(m Marker) string { return providerStuckComment(res.Problem, what, m) })
+		return f.drafted(ctx, t, cause, base, m, body, LabelHumanReview)
 	case res.Problem != "":
-		m.Kind, m.Proposal = KindStuck, failed
-		m = retainedDraft(t, m)
-		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
+		m, body := stuck(func(m Marker) string { return stuckComment(res.Problem, m) })
+		return f.drafted(ctx, t, cause, base, m, body, LabelHumanReview)
 	case p.Unsupported != "":
 		m.Kind, m.Proposal = KindUnsupported, previous
 		m = retainedDraft(t, m)
@@ -1705,17 +1720,33 @@ func badDir(dir string) string {
 	return ""
 }
 
-// branchPart is what a proposal's slug must be to name its branch: one
-// plain name.
-var branchPart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+// branchable says whether a proposal's slug can end its branch's name: one
+// name, that git takes there. An amendment's slug is its project's
+// directory's name, which an issue's Project line may spell any way badDir
+// takes, so the rule is git's and no narrower.
+func branchable(slug string) bool {
+	switch {
+	case slug == "" || strings.ContainsAny(slug, " ~^:?*[\\/") || strings.ContainsFunc(slug, unicode.IsControl):
+		return false
+	case strings.Contains(slug, "..") || strings.Contains(slug, "@{") || strings.HasSuffix(slug, ".") || strings.HasSuffix(slug, ".lock"):
+		return false
+	}
+	return true
+}
+
+// packageName is what formalize requires of a draft's package.
+var packageName = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
 
 // destination holds everything a proposal says about where ratification
 // writes to the rules an issue's own Project line meets. A proposal is read
 // from the comment that carries it or from a saved record a comment names,
 // and either one's bytes can say anything: ratification joins its directory
 // and its module to the worktree, removes model files beside the module of
-// an amendment, and names a branch after its slug (#790). So it's checked
-// on any proposal about to be ratified, however it was read.
+// an amendment, and names a branch after its slug, and the build that
+// follows makes a new project's package its code's directory (#790). So
+// it's checked on any proposal about to be ratified, however it was read.
+// A plan has its own check, planDestination, and an amendment's manifest is
+// held to its project's where the project is read.
 func destination(p *formalize.Proposal) error {
 	if p == nil || p.Plan != nil || p.IssuePlan != nil {
 		return nil
@@ -1735,8 +1766,8 @@ func destination(p *formalize.Proposal) error {
 		return nil
 	}
 	switch {
-	case !branchPart.MatchString(p.Slug) || strings.Contains(p.Slug, "..") || strings.HasSuffix(p.Slug, ".") || strings.HasSuffix(p.Slug, ".lock"):
-		return fmt.Errorf("proposal slug %q must be one plain name, as a branch's is", p.Slug)
+	case !branchable(p.Slug):
+		return fmt.Errorf("proposal slug %q can't name a branch", p.Slug)
 	case p.Target == nil && !savedSlug.MatchString(p.Slug):
 		// A new project's slug also names its directory, as a draft's must.
 		return fmt.Errorf("proposal slug %q must be kebab case", p.Slug)
@@ -1752,9 +1783,41 @@ func destination(p *formalize.Proposal) error {
 		if m := p.Target.Manifest.Module; !insideProject(m) || path.Ext(m) != ".tla" {
 			return fmt.Errorf("the amended project's module %q must be a .tla file inside the project", m)
 		}
+	} else if !packageName.MatchString(p.Package) {
+		// A new project's package is its manifest's code directory, which
+		// the build makes in its agent's workspace.
+		return fmt.Errorf("package %q must be a short lowercase package name", p.Package)
 	}
 	return nil
 }
+
+// planDestination holds a plan to its lock's own check before any of it is
+// written. A lock is written by joining each acceptance test file's path to
+// the worktree, and the check that refuses a path outside it, with whatever
+// else a ratified plan must hold, is made when the lock is read back. A
+// plan carried in a comment can name any path, so the same check is made
+// first, on the bytes the lock would hold (#790). A plan that ratifies
+// passes it either way. A configured repository's plan already meets it
+// before its lock is written, and one that fails is held for a person by
+// its repository's own rules, so it's left to them.
+func planDestination(p *formalize.Proposal) error {
+	if p.Plan.Native() {
+		return nil
+	}
+	b, err := json.Marshal(plumbing.Lock{Ratified: plumbing.Ratification{Proposal: p.Hash}, Plan: *p.Plan})
+	if err != nil {
+		return err
+	}
+	_, err = plumbing.ReadLock(b)
+	return err
+}
+
+// refusedDestination is a proposal ratification won't write: what it says
+// about where its files go breaks a rule, or a plan fails its lock's check.
+type refusedDestination struct{ err error }
+
+func (r refusedDestination) Error() string { return r.err.Error() }
+func (r refusedDestination) Unwrap() error { return r.err }
 
 // moduleName is what formalize requires of a draft's module.
 var moduleName = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
@@ -1927,6 +1990,15 @@ func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) e
 		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything.",
 			" Comment `/invariant revise` and I'll draft it again from the project as it is now.")
 	}
+	// A proposal that would write somewhere it mustn't is refused where the
+	// person who ratified it reads the answer, once, not in the log at
+	// every poll.
+	var refused refusedDestination
+	if errors.As(err, &refused) {
+		f.logf("#%d: not ratified: %v", t.Issue.Number, refused)
+		return f.note(ctx, t, c, "I can't ratify this proposal as it stands, so I haven't written anything: "+refused.Error()+".",
+			" Comment `/invariant revise` and I'll draft it again.")
+	}
 	if err != nil {
 		return err
 	}
@@ -1940,6 +2012,15 @@ var errStale = errors.New("the project changed since the amendment was drafted")
 // issue.
 func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, c Command) (Post, error) {
 	n, p := t.Issue.Number, state.Marker.Proposal
+	// Whatever carried the proposal here, it's held to where it may write
+	// before anything is fetched, written or said to be ratified.
+	check := destination
+	if p.Plan != nil {
+		check = planDestination
+	}
+	if err := check(p); err != nil {
+		return Post{}, refusedDestination{err}
+	}
 	f.logf("#%d: ratified by @%s", n, c.By)
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return Post{}, err
@@ -1948,16 +2029,19 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 		posted, err := f.commitPlan(ctx, t, state, c)
 		return posted, f.effectResult(ctx, n, "post the plan's ratification", err)
 	}
-	// Whatever carried the proposal here, it writes only inside its project.
-	if err := destination(p); err != nil {
-		return Post{}, fmt.Errorf("#%d's proposal can't be ratified: %w", n, err)
-	}
 	if p.Target != nil {
 		cur, err := f.current(ctx, p.Target.Dir)
 		if err != nil {
 			return Post{}, err
 		}
 		if cur == nil || project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements) != p.Target.Amends {
+			return Post{}, errStale
+		}
+		// An amendment keeps its project's manifest, and writes the one it
+		// carries. Held to the project's own as it stands on the base, it
+		// can't send the build's code or its conformance driver somewhere
+		// else, or put back what the project has changed since the draft.
+		if !draftEqual(p.Target.Manifest, cur.Manifest) {
 			return Post{}, errStale
 		}
 	}

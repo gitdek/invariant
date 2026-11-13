@@ -253,18 +253,21 @@ var markerRE = regexp.MustCompile(`<!-- invariant:(z:)?([A-Za-z0-9+/=]+) -->`)
 // markerStart is how every marker begins.
 const markerStart = "<!-- invariant:"
 
-// damagedMarker says whether a comment holds the start of a marker and no
-// marker that reads: one cut short, in its JSON, its gzip or its base64, or
-// changed on the way. DecodeMarker reads such a comment as holding none,
-// which is right for a stranger's. In a comment of the factory's own it
-// means the thread's newest state can't be read, and the post before it
-// must not stand in for it (#790).
-func damagedMarker(body string) bool {
-	if !strings.Contains(body, markerStart) {
-		return false
+// endMarker reads the marker a comment ends with, as every post of the
+// factory's is written. A comment that ends with anything else was cut or
+// changed: in its marker's JSON, gzip or base64, before its marker, or
+// after it. DecodeMarker reads such a comment as holding no marker, or as
+// holding one its text shows, which is right for a stranger's. In a comment
+// of the factory's own it means the thread's newest state can't be read,
+// and neither the post before it nor a marker in its text may stand in for
+// it (#790).
+func endMarker(body string) (Marker, bool) {
+	body = strings.TrimRight(body, " \t\r\n")
+	all := markerRE.FindAllStringIndex(body, -1)
+	if all == nil || all[len(all)-1][1] != len(body) {
+		return Marker{}, false
 	}
-	_, ok := DecodeMarker(body)
-	return !ok
+	return DecodeMarker(body)
 }
 
 // maxMarker is the most a marker may unzip to. Anyone can post one, so a
@@ -280,12 +283,16 @@ func (m Marker) encode() string {
 	return "<!-- invariant:z:" + base64.StdEncoding.EncodeToString(z.Bytes()) + " -->"
 }
 
-// DecodeMarker reads the marker in a comment, if it has one.
+// DecodeMarker reads the marker in a comment, if it has one. A post is
+// written with its marker last, so the last one is read: a post that shows
+// a marker in its text, as a plan's does when an acceptance test's source
+// holds one, still reads as itself (#790).
 func DecodeMarker(body string) (Marker, bool) {
-	match := markerRE.FindStringSubmatch(body)
-	if match == nil {
+	all := markerRE.FindAllStringSubmatch(body, -1)
+	if all == nil {
 		return Marker{}, false
 	}
+	match := all[len(all)-1]
 	b, err := base64.StdEncoding.DecodeString(match[2])
 	if err == nil && match[1] == "z:" {
 		b, err = unzip(b)

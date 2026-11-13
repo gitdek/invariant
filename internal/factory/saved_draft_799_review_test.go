@@ -234,10 +234,32 @@ func TestSavedDraft799AmendmentKeepsItsDirectorysName(t *testing.T) {
 	}
 }
 
+// review799Refused says a ratification was answered with why nothing was
+// ratified, once: nothing was built or opened, and the next poll has
+// nothing more to say.
+func review799Refused(t *testing.T, r *rig, hash, problem string) {
+	t.Helper()
+	r.gh.say(790, "gitdek", "/invariant ratify "+hash)
+	before := len(r.gh.comments[790])
+	r.poll()
+	note := r.gh.last(790)
+	if note.Marker.Kind != KindNote || !strings.Contains(note.Comment.Body, problem) || !strings.Contains(note.Comment.Body, "haven't written anything") {
+		t.Fatalf("the ratification wasn't answered with %q:\n%s", problem, note.Comment.Body)
+	}
+	r.poll()
+	if len(r.gh.comments[790]) != before+1 || len(r.build.built) != 0 || len(r.gh.prs) != 0 {
+		t.Fatalf("an unsafe proposal was answered %d times, started a build or opened a pull request", len(r.gh.comments[790])-before)
+	}
+}
+
 // A proposal carried in its comment met none of these checks: its directory,
-// module and slug went to ratification as they were. The probe's inline
-// proposal with a directory beside the worktree wrote a ratified.lock there.
-func TestInlineProposal799UnsafeDestinationsStayPending(t *testing.T) {
+// module, slug and package went to ratification as they were. The probes'
+// inline proposal with a directory beside the worktree wrote a
+// ratified.lock there, and one with a package beside the agent's workspace
+// had the build make a directory there. Each is refused before anything is
+// written, in a note the person who ratified it reads, not at every poll in
+// the watcher's log.
+func TestInlineProposal799UnsafeDestinationsAreRefused(t *testing.T) {
 	for _, c := range []struct {
 		name, problem string
 		edit          func(t *testing.T, result *formalize.Result, outside string)
@@ -249,6 +271,9 @@ func TestInlineProposal799UnsafeDestinationsStayPending(t *testing.T) {
 		{"slug", "proposal slug", func(t *testing.T, result *formalize.Result, outside string) {
 			result.Proposal.Slug = "a/../../" + outside
 		}},
+		{"package", "package", func(t *testing.T, result *formalize.Result, outside string) {
+			result.Proposal.Package = "../" + outside + "/pkg"
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			name, outside, victim := review799Outside(t)
@@ -257,7 +282,7 @@ func TestInlineProposal799UnsafeDestinationsStayPending(t *testing.T) {
 			r := newRig(t)
 			saved790Open(t, r)
 			r.gh.say(790, r.gh.me, (Marker{Kind: KindProposal, Proposal: result.Proposal, ReplyTo: []int64{0}}).encode())
-			review799Pending(t, r, result.Proposal.Hash, c.problem)
+			review799Refused(t, r, result.Proposal.Hash, c.problem)
 			review799Untouched(t, outside, victim)
 		})
 	}
@@ -365,7 +390,7 @@ func TestSavedDraft799DamagedMarkersStayPending(t *testing.T) {
 	if r.f.Self == "" {
 		t.Fatal("the fixture reads as no App, where any commenter's marker counts")
 	}
-	r.gh.say(790, r.gh.me, (Marker{Kind: KindProposal, Proposal: result.Proposal, ReplyTo: []int64{0}}).encode())
+	earlier := r.gh.say(790, r.gh.me, (Marker{Kind: KindProposal, Proposal: result.Proposal, ReplyTo: []int64{0}}).encode())
 	ref := saved790Save(t, r, result, "draft-issue")
 	posted := saved790Post(t, r, ref, result.Proposal)
 	index := len(r.gh.comments[790]) - 1
@@ -387,7 +412,17 @@ func TestSavedDraft799DamagedMarkersStayPending(t *testing.T) {
 	}
 	inline := (Marker{Kind: KindProposal, Proposal: result.Proposal, ReplyTo: []int64{0}}).encode()
 	head := "◉ **Invariant** · saved draft\n\n"
+	whole := markerStart + "z:" + encoded + " -->"
 	for _, c := range []struct{ name, body string }{
+		// What the second review found still fell back: a cut that leaves
+		// nothing of the marker, which is where a cut at a random place in
+		// a long post lands, and the edit a person makes, which removes the
+		// hidden block whole. And a marker that no longer ends its comment.
+		{"cut inside its visible text", head + "Here's what I propose must always be tr"},
+		{"cut inside its marker's opening", head + "Here's what I propose.\n\n<!-- invar"},
+		{"its marker removed", head + "Here's what I propose."},
+		{"words after its marker", head + whole + "\n\nedited: see the other issue\n"},
+		{"its opening words removed and its marker cut short", markerStart + "z:" + encoded[:len(encoded)/2]},
 		{"JSON cut before the reference", head + markerStart + base64.StdEncoding.EncodeToString(envelope[:at]) + " -->"},
 		{"gzipped JSON cut before the reference", head + markerStart + "z:" + review799Gzip(t, envelope[:at]) + " -->"},
 		{"base64 cut short, closing kept", head + markerStart + "z:" + encoded[:len(encoded)-8] + " -->"},
@@ -396,8 +431,8 @@ func TestSavedDraft799DamagedMarkersStayPending(t *testing.T) {
 		{"an inline proposal cut short", head + inline[:len(inline)/2]},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if !damagedMarker(c.body) {
-				t.Fatal("the fixture isn't a damaged marker")
+			if _, ok := endMarker(c.body); ok {
+				t.Fatal("the fixture ends with a marker that reads")
 			}
 			r.gh.comments[790][index].Body = c.body
 			before := len(r.gh.comments[790])
@@ -414,6 +449,18 @@ func TestSavedDraft799DamagedMarkersStayPending(t *testing.T) {
 				t.Fatal("a damaged marker consumed the pending ratification or started work")
 			}
 		})
+	}
+	// A comment with nothing left that says it was a post is one a person
+	// emptied, which is how the diagnostic says to fall back on purpose.
+	for _, body := range []string{"", "(removed)"} {
+		r.gh.comments[790][index].Body = body
+		thread, err := r.f.read(t.Context(), *r.gh.issues[790])
+		if err != nil {
+			t.Fatalf("an emptied comment (%q) stops the issue: %v", body, err)
+		}
+		if state, ok := thread.State(); !ok || state.Comment.ID != earlier.ID {
+			t.Fatalf("an emptied comment (%q) didn't fall back to the post before it", body)
+		}
 	}
 	// A stranger's comment with the same damage is nobody's post.
 	stranger := r.gh.say(790, "stranger", head+markerStart+"z:"+encoded[:len(encoded)/2])
