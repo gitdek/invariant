@@ -1817,8 +1817,13 @@
   // What has waited on a person for more than two days isn't today's work.
   // Needs you folds it under a line of its own, and the headline and the
   // Show choices count what's new.
+  // A card's wait counts from the factory's post, or from when its pull
+  // request last changed if that's later. A gate that has passed since, a
+  // push, or a conflict that's gone is news however old the post is: a card
+  // that became ready to merge once sat in the fold for half a day (#902).
   const STALLED_AFTER = 2 * 24 * 3600 * 1000;
-  const stalled = (i) => Date.now() - new Date(i.waiting.since).getTime() > STALLED_AFTER;
+  const waitingSince = (i) => Math.max(new Date(i.waiting.since).getTime(), i.waiting.now?.changed ? new Date(i.waiting.now.changed).getTime() : 0);
+  const stalled = (i) => Date.now() - waitingSince(i) > STALLED_AFTER;
   let stalledOpen = false;
   // The lede names the repositories in view: every one, or the one chosen
   // (#848). /act has words of its own.
@@ -2024,6 +2029,13 @@
   // pullGood is a pull request a person can merge as it stands: open, ready
   // for review, mergeable, and past CI's gate on its head.
   const pullGood = (w) => !!w.now && w.now.state === "open" && !w.now.draft && !w.now.conflicts && !w.now.unsettled && w.now.gate === "passed";
+  // pullPassed is a pull request nothing keeps from merging but a retry:
+  // open, mergeable and past CI's gate on its head, a draft or not, since
+  // the factory marks a draft ready when a retry has it watch one.
+  const pullPassed = (w) => !!w.now && w.now.state === "open" && !w.now.conflicts && !w.now.unsettled && w.now.gate === "passed";
+  // stoppedThen dates what the rest of a card says, where a line above it
+  // says what the pull request is now: the two can disagree, and did (#902).
+  const stoppedThen = (w) => (w.now && w.pr ? `When the factory stopped, <span data-since="${esc(w.since)}"></span> ago: ` : "");
   function nowText(w, repo) {
     const p = w.now;
     if (!p || !w.pr) return "";
@@ -2051,7 +2063,7 @@
   // make, offers: a retry, a draft again, or both, the main one first. A
   // retry's label says what it does, as the server says it (#263).
   const fixes = (w) => (w.takes || []).filter((v) => v === "retry" || v === "revise")
-    .map((v) => (v === "retry" ? [w.retry?.label || "Retry", "/invariant retry"] : ["Draft again", "/invariant revise"]));
+    .map((v) => (v === "retry" ? [(pullPassed(w) && w.retry?.labelPassed) || w.retry?.label || "Retry", "/invariant retry"] : ["Draft again", "/invariant revise"]));
   // retryText is what the retry a card offers leads to: building the
   // ratified proposal again, building a plan's failed draft again in a new
   // pull request that replaces it (#271), or watching its pull request again
@@ -2088,7 +2100,7 @@
         <div class="cmds">${takes(w, "revise") ? cmd("/invariant revise", true) : ""}${open}</div>`;
     } else {
       cls = "failed";
-      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}
+      body = `${nowText(w, repo)}<p class="ask">${stoppedThen(w)}${why(w, repo)}</p>${retryText(w)}
         <div class="cmds">${review(w, repo)}${fixes(w).map(([label, c], i) => cmd(c, i === 0 && retryLeads(w), c === "/invariant retry" && w.retry ? label : "")).join("")}${open}</div>`;
     }
     return `<article class="need ${cls}${quiet(repo)}" ${tag(repo)} data-issue="${esc(issueKey(is))}"><div>${needGlyph(w.kind)}</div><div>
@@ -2185,7 +2197,7 @@
       actions = takes(w, "revise") ? ask("Draft again", "/invariant revise", true) : "";
     } else {
       cls = "failed";
-      body = `${nowText(w, repo)}<p class="ask">${why(w, repo)}</p>${retryText(w)}`;
+      body = `${nowText(w, repo)}<p class="ask">${stoppedThen(w)}${why(w, repo)}</p>${retryText(w)}`;
       actions = review(w, repo) + fixes(w).map(([label, c], i) => ask(label, c, i === 0 && retryLeads(w))).join("");
     }
     let row = `<div class="cmds">${actions}${open}</div>`;

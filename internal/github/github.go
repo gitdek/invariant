@@ -110,6 +110,7 @@ type PullRequest struct {
 	MergedAt       string `json:"merged_at,omitempty"`
 	MergedBy       *User  `json:"merged_by,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
 	// Mergeable says whether GitHub can merge it, as when it doesn't
 	// conflict with its base. It's nil until GitHub has worked that out,
 	// which it starts once asked for this one pull request, and it's always
@@ -133,6 +134,10 @@ type CheckRun struct {
 	Conclusion string `json:"conclusion"` // success, failure, ... once completed
 	URL        string `json:"html_url"`
 	HeadSHA    string `json:"head_sha"`
+	// StartedAt and CompletedAt are when the run began and ended, as GitHub
+	// writes them. CompletedAt is empty until it has ended.
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
 }
 
 // ErrNotFound is what a request for something that doesn't exist returns.
