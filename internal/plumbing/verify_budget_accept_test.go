@@ -121,15 +121,15 @@ func TestVerifyCheckSelectsLongerBudgetsPrecisely(t *testing.T) {
 		wantTests  time.Duration
 		wantPkg    string
 	}{
-		{name: "verify", files: []string{"internal/verify/code.go"}, wantRun: 25 * time.Minute, wantTests: 20 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "embedded_asset", files: []string{"internal/verify/assets/driver.py"}, wantRun: 25 * time.Minute, wantTests: 20 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "acceptance_owns_verify", files: []string{"SPEC.md"}, acceptance: true, wantRun: 25 * time.Minute, wantTests: 20 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "mixed", files: []string{"internal/plumbing/code.go", "internal/verify/code.go"}, wantRun: 25 * time.Minute, wantTests: 20 * time.Minute, wantPkg: "./internal/verify"},
+		{name: "verify", files: []string{"internal/verify/code.go"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
+		{name: "embedded_asset", files: []string{"internal/verify/assets/driver.py"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
+		{name: "acceptance_owns_verify", files: []string{"SPEC.md"}, acceptance: true, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
+		{name: "mixed", files: []string{"internal/plumbing/code.go", "internal/verify/code.go"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
 		{name: "other_package", files: []string{"internal/plumbing/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/plumbing"},
 		{name: "prefix_is_not_package", files: []string{"internal/verifyish/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/verifyish"},
 		{name: "separate_child_package", files: []string{"internal/verify/pythongate/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/verify/pythongate"},
 		{name: "shorter_overrides", files: []string{"internal/verify/code.go"}, overall: 24 * time.Minute, phase: 19 * time.Minute, wantRun: 24 * time.Minute, wantTests: 19 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "cannot_extend_verify", files: []string{"internal/verify/code.go"}, overall: time.Hour, phase: time.Hour, wantRun: 25 * time.Minute, wantTests: 20 * time.Minute, wantPkg: "./internal/verify"},
+		{name: "cannot_extend_verify", files: []string{"internal/verify/code.go"}, overall: 2 * time.Hour, phase: 2 * time.Hour, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
 		{name: "cannot_extend_other", files: []string{"internal/plumbing/code.go"}, overall: time.Hour, phase: time.Hour, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/plumbing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,15 +161,19 @@ func TestVerifyCheckSelectsLongerBudgetsPrecisely(t *testing.T) {
 			t.Fatalf("parent-bounded check: %+v, %v", r, err)
 		}
 		all := v498Read(t, record)
-		v498Budgets(t, all[len(all)-1], started, 18*time.Minute, 20*time.Minute)
+		v498Budgets(t, all[len(all)-1], started, 18*time.Minute, 55*time.Minute)
 	})
 }
 
-// Scale the configured test-phase budget by 60 only at the Docker boundary:
-// one second of fixture execution represents one minute. Preparation retains
-// its normal time; the production Go deadline is observed before any scaling.
-// This exercises the actual runner's queue, subprocess timeout, records and
-// Go Result parsing without adding a production clock or sleeping 21 minutes.
+// Scale the configured test-phase budget only at the Docker boundary, so that
+// internal/verify's 55 minutes are twenty seconds of fixture execution and
+// the ordinary ten minutes under four: a fixture test of eleven seconds
+// finishes only under the longer budget, and eight of twenty-one outlast
+// it. Preparation retains its normal time; the production Go deadline is
+// observed before any scaling. This exercises the actual runner's queue,
+// subprocess timeout, records and Go Result parsing without adding a
+// production clock or sleeping for an hour. The tests keep the names #498
+// gave them, when the budget was twenty minutes and a second stood for one.
 func v498TimedRun(t *testing.T, slow bool) (Result, v498Observation, time.Time) {
 	t.Helper()
 	f := s397New(t)
@@ -203,7 +207,7 @@ with open(configs[0]) as source:
 config["observed_at"] = time.time()
 with open(%q, "a") as out:
     out.write(json.dumps(config) + "\n")
-config["shard_timeout"] /= 60
+config["shard_timeout"] /= 165
 with open(configs[0], "w") as out:
     json.dump(config, out)
 `, record)
@@ -226,7 +230,7 @@ with open(configs[0], "w") as out:
 
 func TestVerifyCheckAllowsElevenMinutes(t *testing.T) {
 	r, observed, started := v498TimedRun(t, false)
-	v498Budgets(t, observed, started, 25*time.Minute, 20*time.Minute)
+	v498Budgets(t, observed, started, 60*time.Minute, 55*time.Minute)
 	if !r.Passed() {
 		t.Fatalf("eleven-minute equivalent check was cut off: %s\n%s", r.Summary(), r.Output)
 	}
@@ -240,7 +244,7 @@ func TestVerifyCheckAllowsElevenMinutes(t *testing.T) {
 
 func TestVerifyCheckCutsOffTwentyOneMinutesWithNames(t *testing.T) {
 	r, observed, started := v498TimedRun(t, true)
-	v498Budgets(t, observed, started, 25*time.Minute, 20*time.Minute)
+	v498Budgets(t, observed, started, 60*time.Minute, 55*time.Minute)
 	if r.Passed() || !r.TimedOut || r.DeadlineExceeded || r.Interrupted {
 		t.Fatalf("want shared test-phase timeout before whole-run deadline: %+v\n%s", r, r.Output)
 	}
@@ -345,11 +349,11 @@ func TestVerifyBuildSharesBudgetsWithoutRenewingExecutionTime(t *testing.T) {
 		queued bool
 		budget time.Duration
 	}{
-		{"direct_verify", "internal/verify", false, 45 * time.Minute},
-		{"queued_verify", "internal/verify", true, 45 * time.Minute},
+		{"direct_verify", "internal/verify", false, 90 * time.Minute},
+		{"queued_verify", "internal/verify", true, 90 * time.Minute},
 		{"direct_uncut_verify", "internal/verify", false, 0},
 		{"queued_uncut_verify", "internal/verify", true, 0},
-		{"ordinary_direct", "internal/plumbing", false, 45 * time.Minute},
+		{"ordinary_direct", "internal/plumbing", false, 90 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var q *CheckQueue
@@ -368,7 +372,7 @@ func TestVerifyBuildSharesBudgetsWithoutRenewingExecutionTime(t *testing.T) {
 			if len(observations) != 2 || len(a.jobs) != 1 || len(a.results) != 1 || !a.results[0].Passed() {
 				t.Fatalf("want one agent test call and one final check: observations=%+v, jobs=%d, results=%+v", observations, len(a.jobs), a.results)
 			}
-			run, phase := 25*time.Minute, 20*time.Minute
+			run, phase := 60*time.Minute, 55*time.Minute
 			if tc.dir == "internal/plumbing" {
 				run, phase = 12*time.Minute, 10*time.Minute
 			}

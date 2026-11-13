@@ -418,7 +418,12 @@ type Ratification struct {
 }
 
 // Write records the ratified plan in a checkout at root: its record, and
-// each acceptance test file at its path.
+// each acceptance test file at its path. It writes nothing outside the
+// checkout, whoever calls it and whatever the plan's form: a path that
+// climbs out is refused before anything is written, and a file is written
+// through the checkout's own root, which follows no link out of it (#895).
+// A plan carried in a comment can name any path, and a lock that isn't a
+// configured repository's is checked only when it's read back.
 func (l Lock) Write(root string) error {
 	if l.Plan.Native() {
 		if err := l.Verify(); err != nil {
@@ -431,8 +436,16 @@ func (l Lock) Write(root string) error {
 	}
 	files := map[string]string{LockPath(l.Ratified.Issue): string(b) + "\n"}
 	for f, src := range l.Plan.Sources {
+		if !filepath.IsLocal(filepath.FromSlash(f)) {
+			return fmt.Errorf("%q isn't a path inside the repository", f)
+		}
 		files[f] = src
 	}
+	checkout, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer checkout.Close()
 	for f, text := range files {
 		// A ratified source is created exclusively. The record itself is
 		// rewritten when the same plan is ratified again.
@@ -442,12 +455,14 @@ func (l Lock) Write(root string) error {
 			}
 			continue
 		}
-		p := filepath.Join(root, filepath.FromSlash(f))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
+		name := filepath.FromSlash(f)
+		if dir := filepath.Dir(name); dir != "." {
+			if err := checkout.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("%s: %w", f, err)
+			}
 		}
-		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
-			return err
+		if err := checkout.WriteFile(name, []byte(text), 0o644); err != nil {
+			return fmt.Errorf("%s: %w", f, err)
 		}
 	}
 	return nil

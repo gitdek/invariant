@@ -310,6 +310,7 @@ func s700Observer(t *testing.T, mode string) s700ObserverFixture {
 	s700Write(t, filepath.Join(root, "work.py"), s700ResourceWork, 0o600)
 	t.Setenv("S397_REAL_DOCKER", filepath.Join(root, "docker"))
 	t.Setenv("S397_RESOURCE_DIR", root)
+	t.Setenv("S397_OBSERVER_SECONDS", sandboxBudgetObserverSeconds())
 	t.Setenv("S700_ROOT", root)
 	t.Setenv("S700_MODE", mode)
 	t.Setenv("INVARIANT_CONTAINER_CPUS", "")

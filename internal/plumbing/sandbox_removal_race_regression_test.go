@@ -43,6 +43,7 @@ func TestSandboxRemovalCompletionRace(t *testing.T) {
 			}
 			t.Setenv("S397_REAL_DOCKER", "fixture-docker")
 			t.Setenv("S397_RESOURCE_DIR", root)
+			t.Setenv("S397_OBSERVER_SECONDS", sandboxBudgetObserverSeconds())
 			t.Setenv("S700_REMOVAL_RACE", mode)
 			script := strings.ReplaceAll(prefix, "/sys/fs/cgroup", root) +
 				"\nremoval_dispatch = " + strconv.Quote(dispatchStart+dispatch) + "\n" + sandboxRemovalRace

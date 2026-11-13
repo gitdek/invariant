@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gitdek/invariant/factory/protocol/protocol"
 	"github.com/gitdek/invariant/factory/recovery/recovery"
@@ -781,8 +783,12 @@ func (f *Factory) read(ctx context.Context, issue github.Issue) (Thread, error) 
 		return t, err
 	}
 	for _, c := range comments {
-		if m, ok := DecodeMarker(c.Body); ok && (f.Self == "" || c.User.Login == f.Self) {
-			t.Posts = append(t.Posts, Post{Comment: c, Marker: m})
+		p, ok, err := f.draftPost(ctx, issue.Number, c)
+		if err != nil {
+			return t, err
+		}
+		if ok {
+			t.Posts = append(t.Posts, p)
 		}
 	}
 	// A writer's issue that opens with /invariant plan is a PRD, as one a
@@ -1201,10 +1207,25 @@ func findChoice(forks []formalize.Fork, args []string) (formalize.Fork, formaliz
 // command that asked for the draft.
 func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answers []formalize.Answer, previous *formalize.Proposal, replyTo []int64) error {
 	n := t.Issue.Number
+	// New completed records already contain publication authority. Recover
+	// before consulting editable issue text or preparing another agent run.
+	state, commit, err := f.Repo.Run(ctx, n, draftStepName(cause))
+	if err != nil {
+		return err
+	}
+	if state == RunDone {
+		res, err := f.loadDraft(ctx, commit)
+		if err != nil {
+			return err
+		}
+		if res.Publication != nil {
+			return f.publishDraft(ctx, t, cause, replyTo, res)
+		}
+	}
 	// base is the project's lock on the base branch, which a draft amends.
 	var base string
 	stuck := func(problem string) error {
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous}
+		m := retainedDraft(t, Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous})
 		return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 	}
 	f.logf("#%d: formalizing", n)
@@ -1353,13 +1374,15 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	agent := f.agentOf(line, named)
 	run, ok := f.runners(agent)
 	if !ok || run.Formalizer == nil {
-		m := Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers, Proposal: previous}
+		m := retainedDraft(t, Marker{Kind: KindUnsupported, ReplyTo: replyTo, Answers: answers, Proposal: previous})
 		return f.drafted(ctx, t, cause, base, m, unrunnableComment(agent, f.runnable(), m), LabelHumanReview)
 	}
 	// The draft's agent run is recorded before it starts, where every
 	// watcher sees it (D-0069). One recorded and never finished stopped
 	// partway, and only a writer's command starts another.
-	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req)
+	publication := draftPublication{Agent: agent, Dir: newDir, ProposalAgent: line, Base: base,
+		Answers: answers, Previous: previous, Authority: authority}
+	res, err := f.draft(ctx, n, draftStepName(cause), agent, run.Formalizer, req, publication)
 	if errors.Is(err, errResumed) {
 		return nil
 	}
@@ -1372,10 +1395,36 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		// The issue's agent ran the draft that stopped, so its post names it
 		// (#179).
-		m := Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous, Agent: agent}
+		m := retainedDraft(t, Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous, Agent: agent})
 		return f.drafted(ctx, t, cause, base, m, stuckComment("The draft's agent run stopped partway, when the watcher running it stopped or lost the repository's lease.", m,
 			" Comment `/invariant revise` to draft again."), LabelHumanReview)
 	}
+	if res.Publication == nil {
+		// Legacy completed records predate effective publication metadata.
+		res.Publication = &publication
+		applyDraftPublication(res)
+		if res.CheckContext == nil {
+			c := req.CheckContext()
+			res.CheckContext = &c
+		}
+	}
+	return f.publishDraft(ctx, t, cause, replyTo, res)
+}
+
+func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, replyTo []int64, res *savedDraftResult) error {
+	n := t.Issue.Number
+	publication := res.Publication
+	if publication == nil || res.CheckContext == nil {
+		return fmt.Errorf("completed draft is missing its publication context")
+	}
+	if res.Proposal == nil && res.Problem == "" {
+		return fmt.Errorf("completed draft is missing its outcome")
+	}
+	base, agent := publication.Base, publication.Agent
+	previous, authority := publication.Previous, publication.Authority
+	answers := publication.Answers
+	checkContext := *res.CheckContext
+	parent, prd := checkContext.ParentPlan, checkContext.Planning == "prd"
 	if err := f.recovers(ctx, n, "post the draft", f.canPost(drafting(RunDone), recovery.Solve)); err != nil {
 		return err
 	}
@@ -1384,27 +1433,40 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 	if parent != 0 && res.Proposal != nil && res.Proposal.IssuePlan != nil {
 		res.Problem, res.Proposal = formalize.StepPlanProblem(parent), nil
 	}
-	if res.Proposal != nil && newDir != "" {
-		res.Proposal.Dir = newDir
-	}
-	// The proposal settles the agent its issue's line picked, so its build
-	// runs the agent that drafted it, however the issue reads by then, and a
-	// new project's manifest records it (#173). An amendment keeps its
-	// project's manifest as it is (D-0046).
-	if res.Proposal != nil {
-		res.Proposal.Agent = line
-	}
 	if res.Proposal != nil {
 		answers = revise(t, answers, res.Proposal.Revised)
 	}
 	// A failed native revision keeps the original execution base, so the
 	// next revision cannot recapture changed guidance or gate authority.
+	// A draft that came back with a problem is what the next revision starts
+	// from, as it was before saved records: the person revising sees what
+	// failed, and the agent mends it. Only a draft that returned nothing
+	// falls back to the proposal before it.
 	failed := res.Proposal
 	if authority != nil {
 		failed = authority
+	} else if failed == nil {
+		failed = previous
 	}
 	// The post names the agent that drafted it, beside what it spent (#179).
 	m := Marker{ReplyTo: replyTo, Answers: answers, Spend: res.Usage.CostUSD, Agent: agent}
+	// stuck composes the post about a draft that came back with a problem.
+	// A post leaves out a failed draft it can't hold, and with it the saved
+	// record the thread's state names, which no other post would then
+	// carry. So when the failed draft doesn't fit, the post keeps the
+	// proposal before it, with its record: the next revision still has a
+	// draft and the baseline it compares with (#790).
+	stuck := func(comment func(Marker) string) (Marker, string) {
+		m.Kind, m.Proposal = KindStuck, failed
+		m = retainedDraft(t, m)
+		body := comment(m)
+		if kept, _ := DecodeMarker(body); authority == nil && previous != nil && failed != previous && kept.Proposal == nil && kept.ProposalRef == nil {
+			m.Proposal = previous
+			m = retainedDraft(t, m)
+			body = comment(m)
+		}
+		return m, body
+	}
 	switch p := res.Proposal; {
 	case res.Problem != "" && synth.ProviderUnavailable(errors.New(res.Problem)):
 		// A draft its agent's provider never let finish needs only drafting
@@ -1413,21 +1475,23 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		switch {
 		case prd:
 			what = "plan of issues"
-		case req.Plumbing != "":
+		case checkContext.Planning == "plumbing":
 			what = "plan"
 		}
-		m.Kind, m.Proposal = KindStuck, failed
-		return f.drafted(ctx, t, cause, base, m, providerStuckComment(res.Problem, what, m), LabelHumanReview)
+		m, body := stuck(func(m Marker) string { return providerStuckComment(res.Problem, what, m) })
+		return f.drafted(ctx, t, cause, base, m, body, LabelHumanReview)
 	case res.Problem != "":
-		m.Kind, m.Proposal = KindStuck, failed
-		return f.drafted(ctx, t, cause, base, m, stuckComment(res.Problem, m), LabelHumanReview)
+		m, body := stuck(func(m Marker) string { return stuckComment(res.Problem, m) })
+		return f.drafted(ctx, t, cause, base, m, body, LabelHumanReview)
 	case p.Unsupported != "":
 		m.Kind, m.Proposal = KindUnsupported, previous
+		m = retainedDraft(t, m)
 		return f.drafted(ctx, t, cause, base, m, unsupportedComment(p.Unsupported, m), "")
 	case len(p.Forks) > 0:
-		if req.Plumbing == "" && req.PRD == "" || p.HasPreviews() {
-			if err := p.ValidatePreviewContext(req.CheckContext()); err != nil {
+		if checkContext.Planning == "" || p.HasPreviews() {
+			if err := p.ValidatePreviewContext(checkContext); err != nil {
 				m.Kind, m.Proposal = KindStuck, previous
+				m = retainedDraft(t, m)
 				return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 			}
 		}
@@ -1437,6 +1501,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// draft after it compares with, so any of them can outgrow a post.
 		if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
 			m.Kind, m.Forks, m.Proposal = KindStuck, nil, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete question, with its alternative previews and the baseline it carries, exceeds the comment or expanded marker size limit. Revise the presentation and check every option again before publication.", m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelAsking)
@@ -1451,14 +1516,12 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// previous one, and with it the baseline a revision compares with.
 		if err := p.ValidateReader(); err != nil {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
-		authority := req.CheckContext()
-		if res.CheckContext != nil {
-			authority = *res.CheckContext
-		}
-		if err := p.ValidateComparisonContext(authority); err != nil {
+		if err := p.ValidateComparisonContext(checkContext); err != nil {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
 		m.Kind, m.Proposal = KindProposal, p
@@ -1466,6 +1529,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		// expanded size limit, leaving nothing recoverable or ratifiable.
 		if _, ok := DecodeMarker(m.encode()); !ok {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification.", m), LabelHumanReview)
 		}
 		body := proposalComment(p, res.Report, m)
@@ -1474,6 +1538,7 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		}
 		if len(body) > maxComment {
 			m.Kind, m.Proposal = KindStuck, previous
+			m = retainedDraft(t, m)
 			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal and its reader evidence exceed the comment size limit; it cannot be published for ratification. Revise the presentation before publishing again.", m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelProposal)
@@ -1493,8 +1558,19 @@ func draftStepName(cause Command) string {
 // recorded, or reading what a finished run left, whichever watcher ran it.
 // It returns nil for a run recorded and never finished. The run's record
 // and its result name the agent (#179).
-func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request) (*formalize.Result, error) {
+func (f *Factory) draft(ctx context.Context, n int, step, agent string, form Formalizer, req formalize.Request, publication draftPublication) (*savedDraftResult, error) {
 	authority := req.CheckContext()
+	// The formalizer receives the request, not ownership of the publication
+	// metadata and previous proposal retained for recovery.
+	b, err := json.Marshal(publication)
+	if err != nil {
+		return nil, err
+	}
+	var captured draftPublication
+	if err := json.Unmarshal(b, &captured); err != nil {
+		return nil, err
+	}
+	publication = captured
 	state, result, err := f.Repo.Run(ctx, n, step)
 	switch {
 	case err != nil:
@@ -1502,8 +1578,7 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	case state == RunRecorded:
 		return nil, nil
 	case state == RunDone:
-		var res formalize.Result
-		return &res, f.loadResult(ctx, result, &res)
+		return f.loadDraft(ctx, result)
 	}
 	release, err := f.agentSlot(ctx, n)
 	if err != nil {
@@ -1540,6 +1615,8 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 			spent = res.Usage
 		}
 		res = &formalize.Result{Problem: "the formalizer couldn't run: " + runErr.Error(), Usage: spent}
+	case res == nil:
+		res = &formalize.Result{Problem: "the formalizer left no draft"}
 	case res.Proposal == nil && res.Problem == "":
 		res.Problem = "the formalizer left no draft"
 	}
@@ -1548,7 +1625,9 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
 	res.CheckContext = &authority
-	saved, err := f.saveResult(ctx, res, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
+	complete := &savedDraftResult{Result: *res, Publication: &publication}
+	applyDraftPublication(complete)
+	saved, err := f.saveResult(ctx, complete, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
 		return nil, err
 	}
@@ -1561,7 +1640,7 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	if resumed {
 		return nil, errResumed
 	}
-	return res, nil
+	return complete, nil
 }
 
 // drafted posts what the formalizer made of an issue, once the protocol
@@ -1617,17 +1696,193 @@ func codeLines(body string) []string {
 	return paths
 }
 
-// badDir says what's wrong with a project directory an issue names.
+// badDir says what's wrong with a project directory an issue names, or a
+// proposal carries.
 func badDir(dir string) string {
+	top, _, _ := strings.Cut(dir, "/")
 	switch {
-	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || strings.HasPrefix(dir, "../"):
+	case path.IsAbs(dir) || path.Clean(dir) != dir || dir == "." || dir == ".." || strings.HasPrefix(dir, "../") || strings.Contains(dir, `\`):
 		return "that isn't a clean path inside the repository"
-	case dir == ".github" || strings.HasPrefix(dir, ".github/"):
+	case strings.EqualFold(top, ".github"):
+		// Any spelling: a checkout that folds case reads .GitHub as .github.
 		return "the factory never touches CI configuration"
+	case strings.EqualFold(top, ".git") || strings.EqualFold(top, ".invariant") || strings.EqualFold(top, "decisions"):
+		return "that's where the repository keeps its own records"
 	case strings.ContainsAny(dir, " \t"):
 		return "a project's directory can't contain spaces"
+	case strings.ContainsFunc(dir, unicode.IsControl):
+		return "a project's directory can't contain control characters"
+	}
+	for _, part := range strings.Split(dir, "/") {
+		if strings.HasPrefix(part, "-") {
+			return "a name in it starts with a dash, which a command would read as an option"
+		}
 	}
 	return ""
+}
+
+// branchable says whether a proposal's slug can end its branch's name: one
+// name, that git takes there. An amendment's slug is its project's
+// directory's name, which an issue's Project line may spell any way badDir
+// takes, so the rule is git's and no narrower.
+func branchable(slug string) bool {
+	switch {
+	case slug == "" || strings.ContainsAny(slug, " ~^:?*[\\/") || strings.ContainsFunc(slug, unicode.IsControl):
+		return false
+	case strings.Contains(slug, "..") || strings.Contains(slug, "@{") || strings.HasSuffix(slug, ".") || strings.HasSuffix(slug, ".lock"):
+		return false
+	}
+	return true
+}
+
+// packageName is what formalize requires of a draft's package.
+var packageName = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
+
+// destination holds everything a proposal says about where ratification
+// writes to the rules an issue's own Project line meets. A proposal is read
+// from the comment that carries it or from a saved record a comment names,
+// and either one's bytes can say anything: ratification joins its directory
+// and its module to the worktree, removes model files beside the module of
+// an amendment, and names a branch after its slug, and the build that
+// follows makes a new project's package its code's directory (#790). So
+// it's checked on any proposal about to be ratified, however it was read.
+// A plan has its own check, planDestination, and an amendment's manifest is
+// held to its project's where the project is read.
+func destination(p *formalize.Proposal) error {
+	if p == nil || p.Plan != nil || p.IssuePlan != nil {
+		return nil
+	}
+	if p.Dir != "" {
+		if problem := badDir(p.Dir); problem != "" {
+			return fmt.Errorf("project directory %q: %s", p.Dir, problem)
+		}
+	}
+	if p.Target != nil {
+		if problem := badDir(p.Target.Dir); problem != "" {
+			return fmt.Errorf("amendment directory %q: %s", p.Target.Dir, problem)
+		}
+	}
+	if len(p.Forks) > 0 {
+		// A question's carrier is never written: only a selected proposal is.
+		return nil
+	}
+	switch {
+	case !branchable(p.Slug):
+		return fmt.Errorf("proposal slug %q can't name a branch", p.Slug)
+	case p.Target == nil && !savedSlug.MatchString(p.Slug):
+		// A new project's slug also names its directory, as a draft's must.
+		return fmt.Errorf("proposal slug %q must be kebab case", p.Slug)
+	}
+	// A draft's module is named as it's made, and the name is the model's
+	// file under the project. An amendment keeps its project's manifest,
+	// whose module path is where the amended model is written, and beside
+	// which other model files are removed. Those are what Write writes, so
+	// the rule is Write's own, and it refuses them whoever calls it (#895).
+	if err := p.ValidateDestinations(); err != nil {
+		return err
+	}
+	if p.Target == nil && !packageName.MatchString(p.Package) {
+		// A new project's package is its manifest's code directory, which
+		// the build makes in its agent's workspace.
+		return fmt.Errorf("package %q must be a short lowercase package name", p.Package)
+	}
+	return nil
+}
+
+// planDestination holds a plan to its lock's own check before any of it is
+// written. A lock is written by joining each acceptance test file's path to
+// the worktree, and the check that refuses a path outside it, with whatever
+// else a ratified plan must hold, is made when the lock is read back. A
+// plan carried in a comment can name any path, so the same check is made
+// first, on the bytes the lock would hold (#790). A plan that ratifies
+// passes it either way. A configured repository's plan already meets it
+// before its lock is written, and one that fails is held for a person by
+// its repository's own rules, so it's left to them.
+func planDestination(p *formalize.Proposal) error {
+	if p.Plan.Native() {
+		return nil
+	}
+	b, err := json.Marshal(plumbing.Lock{Ratified: plumbing.Ratification{Proposal: p.Hash}, Plan: *p.Plan})
+	if err != nil {
+		return err
+	}
+	_, err = plumbing.ReadLock(b)
+	return err
+}
+
+// refusedDestination is a proposal ratification won't write: what it says
+// about where its files go breaks a rule, or a plan fails its lock's check.
+// What a person does next is to draft again, unless next says otherwise.
+type refusedDestination struct {
+	err  error
+	next string
+}
+
+func (r refusedDestination) Error() string { return r.err.Error() }
+func (r refusedDestination) Unwrap() error { return r.err }
+
+// inCheckout says that a project's directory is reached from its worktree
+// without leaving it, and holds no link that leads out of it. The rules for
+// a directory judge the text of its path, so a link a person committed on
+// the base branch was followed where it led: the second review of #799 had
+// a whole project written into a link's target outside the worktree
+// (#895). The worktree's own root follows no link out of it, so it's asked,
+// for the directory, or as much of the way to it as exists, and for every
+// link inside it.
+func inCheckout(wt, dir string) error {
+	root, err := os.OpenRoot(wt)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	at := filepath.FromSlash(dir)
+	for ; at != "."; at = filepath.Dir(at) {
+		_, err := root.Stat(at)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("a link on the way to `%s` leads out of the repository", dir)
+		}
+	}
+	if at != filepath.FromSlash(dir) {
+		return nil
+	}
+	return fs.WalkDir(root.FS(), dir, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		if _, err := root.Stat(filepath.FromSlash(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("`%s` is a link that leads out of the repository", name)
+		}
+		return nil
+	})
+}
+
+// buildDestination holds a ratified post's own branch and project to what
+// ratification writes there: one of its issue's branches, and a project's
+// directory an issue could name, or the issue's own plan. A build checks
+// out the branch and works under the project, removing and copying files,
+// and both come from the post's marker, which destination doesn't cover
+// (#895).
+func buildDestination(issue int, m Marker) error {
+	prefix := fmt.Sprintf("invariant/issue-%d-", issue)
+	if !strings.HasPrefix(m.Branch, prefix) || !branchable(strings.TrimPrefix(m.Branch, prefix)) {
+		return fmt.Errorf("its branch, `%s`, isn't one of #%d's", m.Branch, issue)
+	}
+	if isPlan(m.Project) {
+		if m.Project != plumbing.LockPath(issue) {
+			return fmt.Errorf("its plan, `%s`, isn't #%d's", m.Project, issue)
+		}
+		return nil
+	}
+	if problem := badDir(m.Project); problem != "" {
+		return fmt.Errorf("its project directory, `%s`: %s", m.Project, problem)
+	}
+	return nil
 }
 
 // current reads the project in dir as it stands on the base branch, or
@@ -1783,6 +2038,18 @@ func (f *Factory) ratify(ctx context.Context, t Thread, state Post, c Command) e
 		return f.note(ctx, t, c, "The project changed after I drafted this amendment, so I haven't ratified anything.",
 			" Comment `/invariant revise` and I'll draft it again from the project as it is now.")
 	}
+	// A proposal that would write somewhere it mustn't is refused where the
+	// person who ratified it reads the answer, once, not in the log at
+	// every poll.
+	var refused refusedDestination
+	if errors.As(err, &refused) {
+		f.logf("#%d: not ratified: %v", t.Issue.Number, refused)
+		next := refused.next
+		if next == "" {
+			next = " Comment `/invariant revise` and I'll draft it again."
+		}
+		return f.note(ctx, t, c, "I can't ratify this proposal as it stands, so I haven't written anything: "+refused.Error()+".", next)
+	}
 	if err != nil {
 		return err
 	}
@@ -1796,6 +2063,15 @@ var errStale = errors.New("the project changed since the amendment was drafted")
 // issue.
 func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, c Command) (Post, error) {
 	n, p := t.Issue.Number, state.Marker.Proposal
+	// Whatever carried the proposal here, it's held to where it may write
+	// before anything is fetched, written or said to be ratified.
+	check := destination
+	if p.Plan != nil {
+		check = planDestination
+	}
+	if err := check(p); err != nil {
+		return Post{}, refusedDestination{err: err}
+	}
 	f.logf("#%d: ratified by @%s", n, c.By)
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return Post{}, err
@@ -1810,6 +2086,13 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 			return Post{}, err
 		}
 		if cur == nil || project.ProposalHash(cur.Lock.Bounds, cur.Lock.Statements) != p.Target.Amends {
+			return Post{}, errStale
+		}
+		// An amendment keeps its project's manifest, and writes the one it
+		// carries. Held to the project's own as it stands on the base, it
+		// can't send the build's code or its conformance driver somewhere
+		// else, or put back what the project has changed since the draft.
+		if !draftEqual(p.Target.Manifest, cur.Manifest) {
 			return Post{}, errStale
 		}
 	}
@@ -1840,6 +2123,11 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	}
 	req := f.request(t, state.Marker.Answers, nil)
 	root := filepath.Join(wt, filepath.FromSlash(dir))
+	// Nothing is written through a link that leaves the worktree. Only a
+	// person can have committed one, and drafting again wouldn't remove it.
+	if err := inCheckout(wt, dir); err != nil {
+		return Post{}, refusedDestination{err, " Once the link is gone from `" + f.Base + "`, ratify the proposal again."}
+	}
 	if err := p.Write(root, req.Markdown(), rat); err != nil {
 		return Post{}, err
 	}
@@ -1883,7 +2171,7 @@ func (f *Factory) commitRatification(ctx context.Context, t Thread, state Post, 
 	if err := f.recovers(ctx, n, "say it's ratified", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
 		return Post{}, err
 	}
-	m := Marker{Kind: KindRatified, ReplyTo: []int64{c.Comment}, Answers: state.Marker.Answers, Proposal: p, Project: dir, Branch: branch, Hash: p.Hash}
+	m := Marker{Kind: KindRatified, ReplyTo: []int64{c.Comment}, Answers: state.Marker.Answers, Proposal: p, ProposalRef: state.Marker.ProposalRef, Project: dir, Branch: branch, Hash: p.Hash}
 	body := ratifiedComment(c.By, dir, branch, p.Hash, len(p.Statements), m)
 	posted, err := f.GitHub.PostComment(ctx, n, body)
 	if err != nil {
@@ -1984,7 +2272,7 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
 	f.logf("#%d: building %s", n, m.Project)
 	f.doing(n, "building")
-	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
+	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, ProposalRef: m.ProposalRef, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
 		Replaces: m.Replaces, From: m.From}
 	stops := t.Stops()
 	// failed posts that the build failed before it made a pull request: it
@@ -2021,6 +2309,13 @@ func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 		}
 		return failed(FailStopped, buildFailedComment(nil, nil, errors.New("the build's agent run stopped partway, when the watcher running it stopped or lost the repository's lease"), withFailure(next, FailStopped)))
 	case RunNone:
+		// A build works on the branch and under the project its ratified
+		// post names, so they're held to what ratification writes there
+		// before anything is checked out or an agent runs.
+		if err := buildDestination(n, m); err != nil {
+			return failed(FailStopped, post("needs a person", "I haven't started this build. The post that says the proposal was ratified no longer says where ratification put it: "+err.Error()+".",
+				withFailure(next, FailStopped), "\n\nA person needs to look at this. Restore that comment, or comment `/invariant revise` to draft again."))
+		}
 		// Each build costs an agent run, so after two stop, a writer decides
 		// whether to try again.
 		if stops >= maxStops {
@@ -2329,7 +2624,7 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 	if err != nil {
 		return "", "", nil, nil, err
 	}
-	if why, err := f.superseded(ctx, n, ratified); err != nil {
+	if why, err := f.supersededAfterBuild(ctx, n, ratified); err != nil {
 		return "", "", nil, nil, err
 	} else if why != current {
 		return "", "", nil, nil, f.finishSuperseded(ctx, n, why, step, result)
