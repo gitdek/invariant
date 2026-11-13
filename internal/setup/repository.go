@@ -17,11 +17,27 @@ import (
 // files. The unresolved field deliberately makes incomplete drafts invalid to
 // the enabled-configuration loader; that loader's schema remains unchanged.
 func DraftRepository(dir string) ([]byte, []string, error) {
-	d, err := discoverRepository(dir)
-	if err != nil {
+	return DraftRepositoryWith(dir, nil)
+}
+
+// DraftRepositoryWith drafts the checks of the checkout in dir as it would
+// be once files were added to it, without writing them: what DraftRepository
+// returns afterwards. A file is named by its path from the checkout's root,
+// with slashes. An empty dir stands for a checkout that isn't there yet.
+// invariant new uses it to know a project's checks before it creates
+// anything (#919).
+func DraftRepositoryWith(dir string, files map[string][]byte) ([]byte, []string, error) {
+	d := &repositoryDraft{files: map[string]bool{}, contents: map[string][]byte{}, directories: []string{"."}}
+	if dir != "" {
+		var err error
+		if d, err = discoverRepository(dir); err != nil {
+			return nil, nil, err
+		}
+		defer d.root.Close()
+	}
+	if err := d.add(files); err != nil {
 		return nil, nil, err
 	}
-	defer d.root.Close()
 	if err := d.draft(); err != nil {
 		return nil, nil, err
 	}
