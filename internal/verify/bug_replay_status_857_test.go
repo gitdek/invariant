@@ -56,6 +56,7 @@ func TestAReplayRefusalsMessageIsFitToPublish857(t *testing.T) {
 		{"a message that starts on its second line", "\n  replay-check-failed: Replay_Bug: error", "replay-check-failed: Replay_Bug: error"},
 		{"a URL", "replay-check-failed: see https://example.com/tlaplus/issues for /opt/tlc/lib/x.jar", "replay-check-failed: see https://example.com/tlaplus/issues for <path>"},
 		{"a path in parentheses", "replay-check-failed: Starting... (/tmp/x/y)", "replay-check-failed: Starting... (<path>)"},
+		{"a path after a colon or a bracket", "replay-check-failed: denied:/Users/someone/y [/opt/tlc/x.jar]", "replay-check-failed: denied:<path> [<path>]"},
 		{"TLA+ in the message", `replay-invalid-counterexample: expected a complete Safe violation of x' = x + 1 /\ y \in S`, `replay-invalid-counterexample: expected a complete Safe violation of x' = x + 1 /\ y \in S`},
 	} {
 		if got := replayMessage(errors.New(tc.in), dir); got != tc.want {

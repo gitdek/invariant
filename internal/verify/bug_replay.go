@@ -289,7 +289,7 @@ func prepareBugReplay(ctx context.Context, out *Bug, b project.Statement, p *pro
 
 // An absolute path, where one starts: not the tail of a URL, and not a
 // path under the model's own directory, which is already named.
-var replayPath = regexp.MustCompile(`(^|[\s"'(=,;])(?:/[A-Za-z0-9._@+-]+){2,}`)
+var replayPath = regexp.MustCompile(`(^|[\s"'(\[=,;:])(?:/[A-Za-z0-9._@+-]+){2,}`)
 
 // replayMessage is why a path couldn't be prepared, as a receipt keeps it:
 // the refusal's first line, with no directory of the machine that ran it,

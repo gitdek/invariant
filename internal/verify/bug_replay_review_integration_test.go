@@ -202,8 +202,54 @@ Bad == \E p \in People : Early(p)
 	t.Run("a bug's operation that takes a normal step too", func(t *testing.T) {
 		overlapping := strings.Replace(honest, `Break(p) == n = 1 /\ n' = 2 /\ who' = who \cup {p}`, `Break(p) == n' = n + 1 /\ who' = who \cup {p}`, 1)
 		path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": overlapping}, people, "Safe")
-		if err == nil || !strings.Contains(err.Error(), "replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, has no single operation that takes it") {
-			t.Fatalf("want the path refused at its first step, got %+v, %v", path.Steps, err)
+		if err == nil || !strings.Contains(err.Error(), "replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, can be taken 2 ways, ") ||
+			!strings.Contains(err.Error(), "Put(p1)") || !strings.Contains(err.Error(), "Break(p1)") || !strings.Contains(err.Error(), "guard it so it's enabled only where no action of Next takes the same step") {
+			t.Fatalf("want the path refused at its first step, with both readings, got %+v, %v", path.Steps, err)
+		}
+	})
+	// Two arguments of one operation can take a step too, with no bug's
+	// operation near it. The refusal lists what TLC found, whatever it is.
+	t.Run("an operation that takes a step with either argument", func(t *testing.T) {
+		either := strings.Replace(honest, put, `Put(p) == n < 1 /\ n' = n + 1 /\ UNCHANGED who`, 1)
+		path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": either}, people, "Safe")
+		if err == nil || !strings.Contains(err.Error(), "replay-ambiguous-edge: step 1 of the counterexample, from its state 1 to its state 2, can be taken 2 ways, Put(p1) and Put(p2),") {
+			t.Fatalf("want the path refused at its first step, with both readings, got %+v, %v", path.Steps, err)
+		}
+	})
+	// TLC orders model values as its configuration introduces them, and
+	// CHOOSE follows that order. The check declares each model value
+	// itself, and writes the ratified bounds first, so it reads a CHOOSE as
+	// the run that made the trace did, whatever order a bound lists its
+	// values in.
+	for _, order := range []string{"{A, B}", "{B, A}"} {
+		t.Run("a model that chooses among model values listed as "+order, func(t *testing.T) {
+			chosen := strings.Replace(strings.Replace(honest, put, "PutFirst == n < 1 /\\ n' = n + 1 /\\ who' = who \\cup {P1}\nPutSecond == n < 1 /\\ n' = n + 1 /\\ who' = who \\cup {P2}", 1),
+				next, `Next == PutFirst \/ PutSecond \/ Done`, 1)
+			path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": chosen}, map[string]string{"People": order}, "Safe")
+			if err != nil || len(path.Steps) != 2 || path.Steps[0].Action != "PutFirst" {
+				t.Fatalf("want the step TLC took first, PutFirst, got %+v, %v", path.Steps, err)
+			}
+			started := capModel("Naturals", `Init == n = 0 /\ who = {CHOOSE p \in People : TRUE}`)
+			if path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": started}, map[string]string{"People": order}, "Safe"); err != nil || len(path.Steps) != 2 {
+				t.Fatalf("a model that starts from a CHOOSE: %+v, %v", path.Steps, err)
+			}
+		})
+	}
+	// An operator that answers differently each time can't be asked twice,
+	// and the check asks about each step more than once.
+	t.Run("a model that draws at random", func(t *testing.T) {
+		random := bare(`Put == n < 1 /\ n' = n + 1 /\ who' = who \cup {RandomElement(People)}`)
+		random = strings.Replace(random, "EXTENDS Naturals", "EXTENDS Naturals, TLC", 1)
+		for i := 0; i < 4; i++ {
+			path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": random}, people, "Safe")
+			if err == nil || !strings.Contains(err.Error(), "replay-unsupported-model: the model uses RandomElement, which doesn't give the same answer twice") {
+				t.Fatalf("want the model refused, got %+v, %v", path.Steps, err)
+			}
+		}
+		// The word in a comment is only a word.
+		noted := strings.Replace(honest, "Done == ", "\\* Unlike RandomElement, this (* or TLCGet *) chooses nothing.\nDone == ", 1)
+		if path, err := replayReviewExtract(t, ctx, runner, "Cap", map[string]string{"Cap.tla": noted}, people, "Safe"); err != nil || len(path.Steps) != 2 {
+			t.Fatalf("a model that only mentions the operator in a comment: %+v, %v", path.Steps, err)
 		}
 	})
 }

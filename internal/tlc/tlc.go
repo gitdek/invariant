@@ -39,6 +39,11 @@ type Config struct {
 	Constants     map[string]string
 	Invariants    []string
 	Properties    []string // temporal properties, checked under the specification's fairness
+	// Later are constants written after Constants. TLC orders model values
+	// as its configuration introduces them, and CHOOSE follows that order,
+	// so a check that declares a model's values itself writes the ratified
+	// bounds first, as the run it's checking did.
+	Later map[string]string
 }
 
 func (c Config) render() string {
@@ -51,6 +56,14 @@ func (c Config) render() string {
 	sort.Strings(names)
 	for _, name := range names {
 		fmt.Fprintf(&b, "CONSTANT %s = %s\n", name, c.Constants[name])
+	}
+	later := make([]string, 0, len(c.Later))
+	for name := range c.Later {
+		later = append(later, name)
+	}
+	sort.Strings(later)
+	for _, name := range later {
+		fmt.Fprintf(&b, "CONSTANT %s = %s\n", name, c.Later[name])
 	}
 	for _, inv := range c.Invariants {
 		fmt.Fprintf(&b, "INVARIANT %s\n", inv)

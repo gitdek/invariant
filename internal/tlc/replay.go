@@ -232,6 +232,18 @@ func (r Runner) ExtractReplay(ctx context.Context, dir string, spec ReplaySpec, 
 			return p, fmt.Errorf("replay-unsupported-model: the model defines %s, which the path's check takes from the standard modules", name)
 		}
 	}
+	// The check asks TLC about each step more than once, and a replay asks
+	// the code to take it again. An operator that answers differently each
+	// time makes every one of those a different question.
+	texts := []string{s.source}
+	for _, body := range s.includes {
+		texts = append(texts, body)
+	}
+	for _, text := range texts {
+		if name := replayUnstable.FindString(replayComments.ReplaceAllString(text, " ")); name != "" {
+			return p, fmt.Errorf("replay-unsupported-model: the model uses %s, which doesn't give the same answer twice", name)
+		}
+	}
 	normal, buggy, err := s.model.ReplayActions(spec.Bug)
 	if err != nil {
 		return p, err
@@ -268,7 +280,7 @@ func (r Runner) ExtractReplay(ctx context.Context, dir string, spec ReplaySpec, 
 	if err != nil {
 		return ReplayPath{}, err
 	}
-	header, constants, err := replayHeader(spec.Module, p.Bounds, p.States)
+	header, constants, values, err := replayHeader(spec.Module, p.Bounds, p.States)
 	if err != nil {
 		return ReplayPath{}, err
 	}
@@ -277,7 +289,8 @@ func (r Runner) ExtractReplay(ctx context.Context, dir string, spec ReplaySpec, 
 	for _, group := range [][]tla.Step{normal, buggy} {
 		for _, step := range group {
 			for _, b := range step.Binders {
-				if _, taken := constants[b.Var]; taken {
+				_, bound := constants[b.Var]
+				if _, taken := values[b.Var]; taken || bound {
 					return ReplayPath{}, fmt.Errorf("replay-unsupported-action: %s binds %s, which is also a constant or a model value; rename one", step.Name, b.Var)
 				}
 			}
@@ -302,24 +315,33 @@ func (r Runner) ExtractReplay(ctx context.Context, dir string, spec ReplaySpec, 
 		"  /\\ IF invariant_replay_i = Len(Invariant_ReplayStates) THEN ~(" + spec.Expect + ")\n" +
 		"     ELSE /\\ " + spec.Expect + "\n" +
 		"          /\\ ENABLED ((Next \\/ " + spec.Bug + ") /\\ (" + target + "))\n" +
-		"          /\\ Cardinality(Invariant_ReplayCandidates) = 1\n" +
 		"          /\\ PrintT(<<\"invariant-replay-v1\", invariant_replay_i - 1, Invariant_ReplayCandidates>>)\n" +
+		"          /\\ Cardinality(Invariant_ReplayCandidates) = 1\n" +
 		"Invariant_ReplayFixed == invariant_replay_i = Len(Invariant_ReplayStates) \\/ (" + loose + ") = {}\n====\n"
-	res, err := s.check(ctx, "Invariant_ReplayPath", body, Config{Specification: "Invariant_ReplaySpec", Constants: constants,
+	res, err := s.check(ctx, "Invariant_ReplayPath", body, Config{Specification: "Invariant_ReplaySpec", Constants: constants, Later: values,
 		Invariants: []string{"Invariant_ReplayChecked", "Invariant_ReplayFixed"}})
 	if err != nil {
-		// The trace is TLC's own, so its states and its last violation
-		// stand. What can fail is naming each step: no single operation
-		// takes it, or the one that does could have gone elsewhere.
+		// A step that fails its check is named, with what the check found
+		// there: the operations that take it when there isn't exactly one,
+		// or that the one that does could have gone elsewhere.
 		var failed *replayCheckError
 		if errors.As(err, &failed) {
 			if i := failed.step(); i >= 1 && i < len(p.States) {
+				where := fmt.Sprintf("step %d of the counterexample, from its state %d to its state %d,", i, i, i+1)
 				if failed.res.Invariant == "Invariant_ReplayFixed" {
-					return ReplayPath{}, fmt.Errorf("replay-unsupported-action: step %d of the counterexample, from its state %d to its state %d, is taken by an operation that could have reached another state with the same arguments: "+
-						"its body chooses part of its next state where no argument names the choice (%w)", i, i, i+1, err)
+					return ReplayPath{}, fmt.Errorf("replay-unsupported-action: %s is taken by an operation that could have reached another state with the same arguments: "+
+						"its body chooses part of its next state where no argument names the choice (%w)", where, err)
 				}
-				return ReplayPath{}, fmt.Errorf("replay-ambiguous-edge: step %d of the counterexample, from its state %d to its state %d, has no single operation that takes it: "+
-					"a bug's operation has to be enabled only where no action of Next takes the same step (%w)", i, i, i+1, err)
+				switch readings, printed := replayReadings(failed.res.Printed, i-1); {
+				case !printed:
+					return ReplayPath{}, fmt.Errorf("replay-check-failed: %s fails the path's check before any operation is named: "+
+						"the model as the check reads it doesn't start in, hold in, or leave that state as the counterexample does (%w)", where, err)
+				case len(readings) == 0:
+					return ReplayPath{}, fmt.Errorf("replay-ambiguous-edge: %s is taken by none of the operations Next and the bug name (%w)", where, err)
+				default:
+					return ReplayPath{}, fmt.Errorf("replay-ambiguous-edge: %s can be taken %d ways, %s, and TLC can't say which one took it: "+
+						"if one is the bug's operation, guard it so it's enabled only where no action of Next takes the same step (%w)", where, len(readings), strings.Join(readings, " and "), err)
+				}
 			}
 		}
 		return ReplayPath{}, err
@@ -363,7 +385,51 @@ type replayCheckError struct {
 }
 
 func (e *replayCheckError) Error() string {
-	return strings.Join(strings.Fields(fmt.Sprintf("replay-check-failed: %s: %s %s", e.module, e.res.Outcome, e.res.Message)), " ")
+	message := replayMarkers.ReplaceAllString(e.res.Message, " ")
+	return strings.Join(strings.Fields(fmt.Sprintf("replay-check-failed: %s: %s %s", e.module, e.res.Outcome, message)), " ")
+}
+
+// replayMarkers are the frames TLC's tool mode puts around each message.
+var replayMarkers = regexp.MustCompile(`@!@!@(?:START|END)MSG [0-9:]+ @!@!@`)
+
+// replayReadings is what the check printed for one step: each operation
+// that takes it, with its arguments. printed is false when the check never
+// got as far as printing that step's row.
+func replayReadings(blocks []string, index int) (readings []string, printed bool) {
+	for _, block := range blocks {
+		p := replayValueParser{valueParser: valueParser{s: block}}
+		for {
+			loc := replayRow.FindStringIndex(p.s[p.i:])
+			if loc == nil {
+				break
+			}
+			p.i += loc[0]
+			start := p.i
+			v, err := p.value(0)
+			if err != nil || p.i == start {
+				return nil, false
+			}
+			if v.Kind != "sequence" || len(v.Elements) != 3 || v.Elements[1].Kind != "integer" || v.Elements[1].Atom != strconv.Itoa(index) || v.Elements[2].Kind != "set" {
+				continue
+			}
+			for _, x := range v.Elements[2].Elements {
+				if x.Kind != "sequence" || len(x.Elements) != 3 || x.Elements[0].Kind != "string" || x.Elements[1].Kind != "sequence" {
+					return nil, false
+				}
+				var args []string
+				for _, a := range x.Elements[1].Elements {
+					text, err := a.TLA()
+					if err != nil {
+						return nil, false
+					}
+					args = append(args, text)
+				}
+				readings = append(readings, x.Elements[0].Atom+"("+strings.Join(args, ", ")+")")
+			}
+			return readings, true
+		}
+	}
+	return nil, false
 }
 
 // step is the step of the path at which its check's invariant was violated,
@@ -385,6 +451,13 @@ func (e *replayCheckError) step() int {
 // replayStandard are the standard modules' operators the path's check is
 // written with.
 var replayStandard = []string{"Cardinality", "Len", "PrintT"}
+
+// replayUnstable are the TLC module's operators whose value depends on when
+// they're evaluated, outside comments.
+var (
+	replayUnstable = regexp.MustCompile(`\b(RandomElement|JavaTime|TLCGet|TLCSet)\b`)
+	replayComments = regexp.MustCompile(`(?s)\(\*.*?\*\)|\\\*[^\n]*`)
+)
 
 var replayRow = regexp.MustCompile(`(?m)^[\t ]*<<\s*"invariant-replay-v1"\s*,`)
 
@@ -509,10 +582,16 @@ func replayIs(record string, vars []string, primed bool) string {
 	return strings.Join(x, " /\\ ")
 }
 
-func replayHeader(module string, bounds map[string]string, states []ReplayState) (string, map[string]string, error) {
+// replayHeader is the generated check's first lines and its constants: the
+// ratified bounds, and after them each model value, which the check
+// declares so it can write the path's states. They're kept apart because
+// TLC orders model values as its configuration introduces them, and CHOOSE
+// follows that order: with the values written ahead of the bounds, the
+// check read a model's CHOOSE another way than the run that made the trace.
+func replayHeader(module string, bounds map[string]string, states []ReplayState) (string, map[string]string, map[string]string, error) {
 	constants := maps.Clone(bounds)
 	if constants == nil {
-		return "", nil, fmt.Errorf("replay has no ratified bounds")
+		return "", nil, nil, fmt.Errorf("replay has no ratified bounds")
 	}
 	values := map[string]bool{}
 	var visit func(ReplayValue)
@@ -530,11 +609,11 @@ func replayHeader(module string, bounds map[string]string, states []ReplayState)
 	}
 	for name, text := range bounds {
 		if !isIdent(name) {
-			return "", nil, fmt.Errorf("invalid replay bound %q", name)
+			return "", nil, nil, fmt.Errorf("invalid replay bound %q", name)
 		}
 		v, err := ParseReplayValue(text)
 		if err != nil {
-			return "", nil, fmt.Errorf("replay bound %s: %w", name, err)
+			return "", nil, nil, fmt.Errorf("replay bound %s: %w", name, err)
 		}
 		visit(v)
 	}
@@ -543,15 +622,15 @@ func replayHeader(module string, bounds map[string]string, states []ReplayState)
 			visit(v)
 		}
 	}
-	names := []string{}
+	names, later := []string{}, map[string]string{}
 	for name := range values {
 		if bound, exists := constants[name]; exists {
 			if bound != name {
-				return "", nil, fmt.Errorf("model value collides with bound %s", name)
+				return "", nil, nil, fmt.Errorf("model value collides with bound %s", name)
 			}
 			continue
 		}
-		constants[name] = name
+		later[name] = name
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -560,7 +639,7 @@ func replayHeader(module string, bounds map[string]string, states []ReplayState)
 	if len(names) > 0 {
 		header += "CONSTANTS " + strings.Join(names, ", ") + "\n"
 	}
-	return header, constants, nil
+	return header, constants, later, nil
 }
 
 // CheckReplayAlternative checks a normally completed operation against the
@@ -590,7 +669,7 @@ func (r Runner) CheckReplayAlternative(ctx context.Context, dir string, p Replay
 	if err != nil {
 		return err
 	}
-	header, constants, err := replayHeader(p.Module, p.Bounds, states)
+	header, constants, values, err := replayHeader(p.Module, p.Bounds, states)
 	if err != nil {
 		return err
 	}
@@ -600,6 +679,6 @@ func (r Runner) CheckReplayAlternative(ctx context.Context, dir string, p Replay
 		"Invariant_ReplayInit == \\E invariant_replay_j \\in 1..2 : invariant_replay_i = invariant_replay_j /\\ " + replayIs("Invariant_ReplayStates[invariant_replay_j]", vars, false) + "\n" +
 		"Invariant_ReplaySpec == Invariant_ReplayInit /\\ [][UNCHANGED " + all + "]_" + all + "\n" +
 		"Invariant_ReplayAllowed == " + p.Expect + " /\\ (invariant_replay_i = 1 => ENABLED ((Next \\/ UNCHANGED <<" + strings.Join(vars, ", ") + ">>) /\\ " + replayIs("Invariant_ReplayStates[2]", vars, true) + "))\n====\n"
-	_, err = s.check(ctx, "Invariant_ReplayResult", body, Config{Specification: "Invariant_ReplaySpec", Constants: constants, Invariants: []string{"Invariant_ReplayAllowed"}})
+	_, err = s.check(ctx, "Invariant_ReplayResult", body, Config{Specification: "Invariant_ReplaySpec", Constants: constants, Later: values, Invariants: []string{"Invariant_ReplayAllowed"}})
 	return err
 }
