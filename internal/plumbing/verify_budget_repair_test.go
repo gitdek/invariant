@@ -61,7 +61,7 @@ func TestVerifyDiscoveryPreservesEntryTime(t *testing.T) {
 	if len(observed) != 1 {
 		t.Fatalf("got %d checks, want one", len(observed))
 	}
-	v498Budgets(t, observed[0], started, 25*time.Minute, 20*time.Minute)
+	v498Budgets(t, observed[0], started, 60*time.Minute, 55*time.Minute)
 }
 
 type v498DeletingAgent struct {
@@ -136,7 +136,7 @@ func TestVerifyBuildAllowsDeletingChildPackage(t *testing.T) {
 			run, phase := 12*time.Minute, 10*time.Minute
 			wantTool := time.Duration(0)
 			if tc.verify {
-				run, phase = 25*time.Minute, 20*time.Minute
+				run, phase = 60*time.Minute, 55*time.Minute
 				wantTool = run + SandboxStartupAllowance + SandboxCleanupAllowance
 			}
 			if a.job.ToolTimeout != wantTool {

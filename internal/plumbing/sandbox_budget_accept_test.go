@@ -22,16 +22,18 @@ import (
 )
 
 // TestSandboxBudgetAndRealCheckout pins the ordinary ten/twelve-minute limits
-// and #498's twenty/twenty-five-minute exception for internal/verify, with eight
-// global queue workers. The whole run includes preparation and acceptance.
+// and the exception for internal/verify, #498's, which #883 made fifty-five
+// minutes of tests inside an hour, with eight global queue workers. The whole run includes preparation and acceptance.
 // Overrides only shorten the selected limits. A separate minute for startup
 // and fifteen seconds for cleanup fit within the selected backend tool timer.
 //
 // The merger runs the full checkout in two waves: two simultaneous cold-cache
-// runs must pass, then three simultaneous fresh-cache runs must return results
-// within the budget, with partial results allowed. Both waves measure peaks:
+// runs must pass, each with at least a tenth of its hour to spare, and say
+// how much they had; then three simultaneous fresh-cache runs must return
+// results within the budget, with partial results allowed. Both waves measure
+// peaks. Each wave may take its whole budget, so the command allows for two:
 //
-//	INVARIANT_PLUMBING_REAL=1 go test ./internal/plumbing -run '^TestSandboxBudgetAndRealCheckout$' -count=1 -timeout 70m
+//	INVARIANT_PLUMBING_REAL=1 go test ./internal/plumbing -run '^TestSandboxBudgetAndRealCheckout$' -count=1 -timeout 135m
 //
 // Image acquisition is outside the timed runs, as it is when the watcher starts.
 // Only this subtest's plan touches internal/verify: this acceptance file belongs
@@ -50,8 +52,8 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 	}{
 		{"whole run", plumbing.SandboxTimeout, 12 * time.Minute},
 		{"touched-test phase", plumbing.SandboxShardTimeout, 10 * time.Minute},
-		{"verify whole run", plumbing.SandboxVerifyTimeout, 25 * time.Minute},
-		{"verify touched-test phase", plumbing.SandboxVerifyShardTimeout, 20 * time.Minute},
+		{"verify whole run", plumbing.SandboxVerifyTimeout, 60 * time.Minute},
+		{"verify touched-test phase", plumbing.SandboxVerifyShardTimeout, 55 * time.Minute},
 		{"startup reserve", plumbing.SandboxStartupAllowance, time.Minute},
 		{"cleanup reserve", plumbing.SandboxCleanupAllowance, 15 * time.Second},
 	} {
@@ -206,6 +208,14 @@ func TestSandboxBudgetAndRealCheckout(t *testing.T) {
 					}
 					if out.elapsed >= plumbing.SandboxVerifyTimeout {
 						t.Errorf("%d-run wave: real sandbox %d took %s, want less than its %s deadline", wave.runs, out.i+1, out.elapsed, plumbing.SandboxVerifyTimeout)
+					}
+					// A run that only just fits fails the next plan that adds a
+					// test, so it says what it had left, and that must be a
+					// tenth of its hour (#883).
+					spare := plumbing.SandboxVerifyTimeout - out.elapsed
+					t.Logf("%d-run wave: real sandbox %d had %s to spare of its %s", wave.runs, out.i+1, spare.Round(time.Second), plumbing.SandboxVerifyTimeout)
+					if spare < plumbing.SandboxVerifyTimeout/10 {
+						t.Errorf("%d-run wave: real sandbox %d had %s to spare, want at least %s", wave.runs, out.i+1, spare.Round(time.Second), plumbing.SandboxVerifyTimeout/10)
 					}
 					if !out.result.Accepted[acceptanceFile+":TestSandboxBudgetAndRealCheckout"] {
 						t.Errorf("%d-run wave: real sandbox %d did not pass the pinned acceptance test in internal/plumbing", wave.runs, out.i+1)

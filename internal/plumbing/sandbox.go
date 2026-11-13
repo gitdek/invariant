@@ -22,11 +22,18 @@ import (
 )
 
 const (
-	SandboxShards             = 8
-	SandboxTimeout            = 12 * time.Minute
-	SandboxShardTimeout       = 10 * time.Minute
-	SandboxVerifyTimeout      = 25 * time.Minute
-	SandboxVerifyShardTimeout = 20 * time.Minute
+	SandboxShards       = 8
+	SandboxTimeout      = 12 * time.Minute
+	SandboxShardTimeout = 10 * time.Minute
+	// A check that owns internal/verify gets an hour, 55 minutes of it for
+	// the tests (#883). The package's tests are the acceptance tests of every
+	// Python plan so far, and at the sandbox's four CPUs a run of them took
+	// 17 minutes alone on 2026-11-13, 21 with internal/plumbing's and 24
+	// with the eight other packages one plan touched, against the 25 a run
+	// had. A limit is there to end a run that hangs, not to fail one that's
+	// working.
+	SandboxVerifyTimeout      = 60 * time.Minute
+	SandboxVerifyShardTimeout = 55 * time.Minute
 	SandboxStartupAllowance   = time.Minute
 	SandboxCleanupAllowance   = 15 * time.Second
 )
