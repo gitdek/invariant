@@ -108,6 +108,7 @@ for name, broken in (("memory.stat", "anon 1\n"), ("memory.stat", "anon 1\nshmem
 `
 	t.Setenv("S397_REAL_DOCKER", "unused")
 	t.Setenv("S397_RESOURCE_DIR", root)
+	t.Setenv("S397_OBSERVER_SECONDS", sandboxBudgetObserverSeconds())
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "python3", "-c", strings.ReplaceAll(prefix, "/sys/fs/cgroup", root)+exercise).CombinedOutput()

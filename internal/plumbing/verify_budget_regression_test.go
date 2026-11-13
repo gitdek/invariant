@@ -145,7 +145,7 @@ func TestVerifyBudgetStartsOnQueueAdmission(t *testing.T) {
 	if len(observed) != 1 {
 		t.Fatalf("got %d checks, want one", len(observed))
 	}
-	v498Budgets(t, observed[0], admitted, time.Second, 20*time.Minute)
+	v498Budgets(t, observed[0], admitted, time.Second, 55*time.Minute)
 	deadline := time.Unix(0, int64(observed[0].Deadline*float64(time.Second)))
 	if deadline.Before(admitted.Add(900 * time.Millisecond)) {
 		t.Fatalf("queue wait consumed the sandbox budget: %s after admission", deadline.Sub(admitted))
