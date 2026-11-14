@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -47,8 +48,8 @@ type BugReplayResult struct {
 }
 
 // BugReplayObservation is factory-owned actual-call evidence. It cannot be
-// taken from flags in a driver's result. This step supplies no execution
-// adapter, and no Run option accepts these records as successful gate evidence.
+// taken from flags in a driver's result. No Run option accepts these records
+// as successful gate evidence; command harnesses observe the calls themselves.
 type BugReplayObservation struct {
 	RequestID    string          `json:"request_id"`
 	InvocationID string          `json:"invocation_id"`
@@ -166,7 +167,17 @@ func CheckBugReplay(ctx context.Context, runner tlc.Runner, dir string, q BugRep
 	last := result.Calls[q.Path.Offending]
 	forbidden := q.Path.States[q.Path.Steps[q.Path.Offending].To]
 	if result.Outcome == "reproduced" || sameReplayState(last.After, forbidden) {
-		e.Status, e.Message = "reproduced", "The offending operation reproduced the forbidden successor."
+		var args, state []string
+		for _, v := range last.Args {
+			s, _ := v.TLA()
+			args = append(args, s)
+		}
+		for k, v := range last.After {
+			s, _ := v.TLA()
+			state = append(state, k+" = "+s)
+		}
+		sort.Strings(state)
+		e.Status, e.Message = "reproduced", fmt.Sprintf("%s: step %d %s(%s) reproduced the forbidden state: %s", q.Bug.Name, last.Index, last.Action, strings.Join(args, ", "), strings.Join(state, ", "))
 		return e, nil
 	}
 	if result.Outcome == "failed" || (result.Outcome == "refused") != (last.Outcome == "refused") {
@@ -252,13 +263,11 @@ func ReplaysBugs(language string) bool {
 	return language == "typescript" || language == "python"
 }
 
-// BugReplayExecutes says whether a gate can carry out a replay it requires.
-// It can't yet: #857 delivers the obligation, TLC's path and the contract a
-// replay answers to, and the adapters that execute one follow it. Until
-// they do, a required replay ends replay-unavailable and the gate doesn't
-// pass. What tells a person whether a proposal can be built reads this, so
-// the gate and what's said of it change together.
-const BugReplayExecutes = false
+// CommandReplayAvailable describes the implemented finite command adapters.
+// Existing Python needs its own authenticated application adapter.
+func CommandReplayAvailable(m project.Manifest) bool {
+	return m.Language == "typescript" || m.Language == "python" && len(m.Existing) == 0
+}
 
 func prepareBugReplay(ctx context.Context, out *Bug, b project.Statement, p *project.Project, dir string, runner tlc.Runner, cfg tlc.Config, res tlc.Result, kind string) {
 	if b.CodeBehavior != "current" {
@@ -313,7 +322,7 @@ func replayMessage(err error, dir string) string {
 }
 
 // activateBugReplays is independent of conformance options, budgets and the
-// driver's exhaustive declaration. There is no production adapter yet.
+// driver's exhaustive declaration. Unexecuted obligations still fail closed.
 func activateBugReplays(r *Report) bool {
 	ok := true
 	for i := range r.Bugs {
@@ -321,10 +330,10 @@ func activateBugReplays(r *Report) bool {
 		if e == nil || !e.Required {
 			continue
 		}
-		if e.Status == "pending" && !BugReplayExecutes {
+		if e.Status == "pending" {
 			e.Status, e.Message = "replay-unavailable", "No execution adapter is available for the mandatory current-bug replay."
 		}
-		ok = false
+		ok = ok && e.Passed && r.Bugs[i].ReplayStatus().Replayed
 	}
 	return ok
 }

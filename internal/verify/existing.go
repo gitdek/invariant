@@ -34,7 +34,7 @@ func (t ExistingTypeScript) Check(ctx context.Context, p *project.Project) (Buil
 	return recordingBytes(t.checkRecording(ctx, p))
 }
 
-func (ExistingTypeScript) checkRecording(ctx context.Context, p *project.Project) (Build, recordedEvidence, error) {
+func (ExistingTypeScript) checkRecording(ctx context.Context, p *project.Project) (build Build, evidence recordedEvidence, err error) {
 	root, rel, err := PackageRoot(p.Dir)
 	if err != nil {
 		return Build{}, recordedEvidence{}, err
@@ -47,7 +47,14 @@ func (ExistingTypeScript) checkRecording(ctx context.Context, p *project.Project
 	if err != nil {
 		return Build{}, recordedEvidence{}, err
 	}
-	defer os.RemoveAll(work)
+	var replay *commandReplaySource
+	defer func() {
+		err = errors.Join(err, os.RemoveAll(work))
+		evidence.replay = replay
+		if err != nil {
+			err = errors.Join(err, evidence.recording.close())
+		}
+	}()
 	src, out := filepath.Join(work, "src"), filepath.Join(work, "out")
 	if err := StagePackage(root, p.Manifest.Existing, src); err != nil {
 		return Build{}, recordedEvidence{}, err
@@ -85,7 +92,14 @@ func (ExistingTypeScript) checkRecording(ctx context.Context, p *project.Project
 		b.Output = "The conformance driver doesn't import " + strings.Join(missing, ", ") + ", so its runs say nothing about that code."
 		return b, recordedEvidence{Evidence: Evidence{Message: "the driver doesn't run all the code it checks"}}, nil
 	}
+	name, harness := ReplayHarness("typescript")
+	if err := os.WriteFile(filepath.Join(src, filepath.Dir(driver), name), harness, 0644); err != nil {
+		return b, recordedEvidence{}, err
+	}
 
+	if replay, err = keepCommandReplay(p, src, image, driver); err != nil {
+		return b, recordedEvidence{}, err
+	}
 	var buf bytes.Buffer
 	cmd := toolchain.Docker(ctx, "run", "--rm", "--network", "none", "--memory", "2g", "--pids-limit", "512",
 		"-e", "HOME=/tmp", "-e", "DRIVER="+driver, "-e", "INVARIANT_TRACES=/out/traces.json",

@@ -345,6 +345,9 @@ func foundFor(s project.Statement, r *verify.Report) (string, bool) {
 					// A check of the model alone runs no code, so a replay
 					// it has only prepared isn't one it missed.
 					status := b.ReplayStatus()
+					if b.Replay != nil && b.Replay.Message != "" {
+						found += "; " + b.Replay.Message
+					}
 					return found + "; " + status.Label, status.Required && !status.Replayed && !r.ModelOnly
 				}
 				return "Not caught; " + b.ReplayStatus().Label, true

@@ -90,8 +90,8 @@ func TestTheRatifyCardSaysWhatEachBugSaysOfTheCode857(t *testing.T) {
 		t.Errorf("a proposal written in Go can't be built for %v", w.Unreplayed)
 	}
 	p.Language = "typescript"
-	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: p}, time.Now()); !reflect.DeepEqual(w.Unreplayed, []string{"Kept", "Raised", "Classified"}) {
-		t.Errorf("a proposal written in TypeScript can't be built for %v; want its three current bugs", w.Unreplayed)
+	if w := waitingFor(factory.Marker{Kind: factory.KindProposal, Proposal: p}, time.Now()); len(w.Unreplayed) != 0 {
+		t.Errorf("TypeScript command replays are available: %v", w.Unreplayed)
 	}
 	p.Language = ""
 	// A new project's revised draft is compared, in its chart, with the

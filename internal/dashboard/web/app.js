@@ -730,7 +730,7 @@
       const card = $("#bugcard");
       const projects = state ? models(state).find((m) => m.key === this.key)?.projects || [] : [];
       const replay = projects.flatMap((p) => p.bugs.filter((bug) => bug.name === b.name)
-        .map((bug) => `${p.repo ? p.repo + " · " : ""}${p.language} · ${p.dir}: ${bug.replay_status?.label || "not replayed: not classified"}`));
+        .map((bug) => `${p.repo ? p.repo + " · " : ""}${p.language} · ${p.dir}: ${bug.replay_status?.label || "not replayed: not classified"}${bug.replay_message ? ": " + bug.replay_message : ""}`));
       card.innerHTML = `<div class="k">Model bug · caught</div><div class="t">${esc(b.label)}</div><div class="d">${esc(b.says)}</div>
         <div class="c">After ${b.steps} steps, <code>${esc(b.action)}</code> breaks <b>${esc(b.violated)}</b> in the model.</div>
         <div class="c">${replay.length ? replay.map(esc).join("<br>") : "No code replay evidence is available."}</div>`;
@@ -1112,7 +1112,7 @@
   // a proved project's doesn't: then it's said beside the result.
   const sampledBeside = (p) => !/sampled/.test(p.assurance || "") && !!p.coverage?.some((c) => c.checked && c.sampled);
   function bugReplayLabel(p) {
-    return [...new Set(p.bugs.map((b) => b.replay_status?.label || "not replayed: not classified"))].join("; ");
+    return p.bugs.map((b) => `${b.name}: ${b.replay_status?.label || "not replayed: not classified"}${b.replay_message ? ": " + b.replay_message : ""}`).join("; ");
   }
 
   function codeEvidence(p) {
@@ -1918,7 +1918,7 @@
     const names = w.unreplayed || [];
     if (!names.length) return "";
     const one = names.length === 1;
-    return `<p class="ask unreplayed"><b class="same">This can't be built yet.</b> It calls ${names.map((name) => `<strong>${esc(name)}</strong>`).join(", ")} current, so the gate has to replay ${one ? "it" : "each"} against the code, and the gate can't run a replay yet. A build would stop there.</p>`;
+    return `<p class="ask unreplayed"><b class="same">This can't be built yet.</b> It calls ${names.map((name) => `<strong>${esc(name)}</strong>`).join(", ")} current, so the gate has to replay ${one ? "it" : "each"} against the code, and this route cannot execute the required replay. A build would stop there.</p>`;
   }
   // A bug the lock being amended calls current is one the gate has to show
   // in the code, by replaying it. An amendment that calls it something

@@ -54,6 +54,14 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 	}); err != nil {
 		return nil, err
 	}
+	if p.Manifest.Language == "typescript" && len(p.Manifest.Existing) > 0 {
+		if err := os.RemoveAll(filepath.Join(ws, "existing")); err != nil {
+			return nil, err
+		}
+		if err := seedExisting(p, ws); err != nil {
+			return nil, err
+		}
+	}
 	// Invariant's harness, as the gate supplies it, for the reviewer to read.
 	if name, source := verify.Harness(p.Manifest.Language); name != "" && len(p.Manifest.Existing) == 0 {
 		dir := ws
@@ -61,6 +69,11 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 			dir = filepath.Join(ws, filepath.Dir(p.Manifest.Conformance))
 		}
 		if err := writeFile(filepath.Join(dir, name), string(source)); err != nil {
+			return nil, err
+		}
+	}
+	if name, source := verify.ReplayHarness(p.Manifest.Language); name != "" {
+		if err := writeFile(filepath.Join(ws, name), string(source)); err != nil {
 			return nil, err
 		}
 	}
@@ -92,6 +105,11 @@ func driverFile(p *project.Project) string {
 }
 
 func reviewPrompt(p *project.Project) string {
+	replay := replayGuidance(p)
+	if replay != "" {
+		replay = strings.Replace(replay, "Export ", "Inspect ", 1)
+		replay += "\nInspect the real operation bindings and read-back against the imported application, including the exact replay prefix and each forbidden operation. Change nothing.\n"
+	}
 	params := "none"
 	if len(p.Manifest.Parameters) > 0 {
 		params = "`" + strings.Join(p.Manifest.Parameters, "`, `") + "`"
@@ -100,6 +118,9 @@ func reviewPrompt(p *project.Project) string {
 	how := "It explores every state the code can reach, trying every step the model's Next names with Invariant's harness, and the gate checks that no step went untried except where the environment's bounds rule it out. So look hardest at what the gate can't see: states the driver writes from what it expected instead of reading them back from the code, and sizes the code takes that the manifest doesn't name as parameters, which would let the driver stop at a limit the code must enforce."
 	if !verify.Explores(p) {
 		how = "It samples runs at random, so no check can say it tried every step in every state, and your review is the check of its steps. Look hardest at how it chooses a step: it must choose from every step the model's Next names, never only from those the state allows."
+	}
+	if p.Manifest.Language == "typescript" && len(p.Manifest.Existing) > 0 {
+		how += " The selected application source is staged under existing/ at its package-relative paths. Trace each driver import and operation binding into those files."
 	}
 	bounds := "The driver's bounds are constants at its top, named after the model's constants. The gate makes each one size larger and runs the driver again, which ties the driver's sizes to the ones TLC checks."
 	done := "A step of the environment alone that can't happen yet, such as a Done before the end, returns the node it was given."
@@ -132,7 +153,7 @@ Look for:
 4. A size the code takes, such as a capacity it's made with, that's missing from the parameters, or a parameter that's really the environment's bound.
 
 Reply with a short review in Markdown, with no heading. Say first, in one sentence, whether you found a problem. For each problem, name the file and line, what's wrong, and why it matters. If you found none, say what you checked. Claim nothing you didn't read.`,
-		noun, what, p.Manifest.Module, p.Manifest.Code, name, driverFile(p), params, strings.ToUpper(noun[:1])+noun[1:], how, bounds, name, done, harnessNote(p), name, name, name)
+		noun, what, p.Manifest.Module, p.Manifest.Code, name, driverFile(p), params, strings.ToUpper(noun[:1])+noun[1:], how, bounds, name, done, harnessNote(p), name, name, name) + replay
 }
 
 // harnessNote tells the reviewer where Invariant's harness is, for a driver

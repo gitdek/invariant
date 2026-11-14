@@ -95,6 +95,13 @@ const bugBehaviorBrowserCheck = `
   localStorage.clear();
   fixture.decisions.latest ||= [];
   fixture.slices ||= [];
+  const replayDiagnosis = 'ReplayTask(1, job) observed deliveries = 2, <delivery-state>';
+  if (fixture.projects?.length) {
+    fixture.projects[0].bugs = [
+      {name: '<ReplayCompletedTask>', caught: true, code_behavior: 'current', replay_status: {label: 'current; reproduced'}, replay_message: replayDiagnosis},
+      {name: 'ReuseRecoveredName', caught: true, code_behavior: 'current', replay_status: {label: 'current; refused'}}
+    ];
+  }
   const json = (v) => new Response(JSON.stringify(v), {headers: {"Content-Type": "application/json"}});
   window.fetch = (url) => {
     if (String(url).includes("/api/state.json")) return Promise.resolve(json(structuredClone(fixture)));
@@ -116,6 +123,9 @@ const bugBehaviorBrowserCheck = `
   const says = (n, name) => text(row(n, name).querySelector(".cb"));
   async function check() {
     await until(() => document.querySelectorAll("#inbox .need").length === 4, "four cards");
+    await until(() => text(document.body).includes(replayDiagnosis), "command replay diagnosis");
+    assert(text(document.body).includes('<ReplayCompletedTask>') && text(document.body).includes('ReuseRecoveredName: current; refused'), "independent bug replay status missing");
+    assert(!document.querySelector('delivery-state, replaycompletedtask'), "replay diagnostic was rendered as markup");
     // Before the statements are opened, the card names the bugs the
     // amendment stops calling current, with the count in its own words.
     const relaxed = card(1).querySelector(".ask.relaxed");
@@ -128,8 +138,8 @@ const bugBehaviorBrowserCheck = `
     assert(!card(2).querySelector(".ask.relaxed") && !card(4).querySelector(".ask.relaxed"), "a card that lowers no bug says it does");
     // A proposal the gate can't yet replay says so, above what it lowers.
     const unbuilt = (n) => text(card(n).querySelector(".ask.unreplayed"));
-    assert(unbuilt(1) === "This can't be built yet. It calls Kept, <Classified> current, so the gate has to replay each against the code, and the gate can't run a replay yet. A build would stop there.", "card 1 says: " + unbuilt(1));
-    assert(unbuilt(4) === "This can't be built yet. It calls Raised current, so the gate has to replay it against the code, and the gate can't run a replay yet. A build would stop there.", "card 4 says: " + unbuilt(4));
+    assert(unbuilt(1) === "This can't be built yet. It calls Kept, <Classified> current, so the gate has to replay each against the code, and this route cannot execute the required replay. A build would stop there.", "card 1 says: " + unbuilt(1));
+    assert(unbuilt(4) === "This can't be built yet. It calls Raised current, so the gate has to replay it against the code, and this route cannot execute the required replay. A build would stop there.", "card 4 says: " + unbuilt(4));
     assert(!card(1).querySelector(".ask.unreplayed classified") && shown(card(1).querySelector(".ask.unreplayed")), "a bug's name reached the page as markup, or the note is hidden");
     assert(card(1).querySelector(".ask.unreplayed").compareDocumentPosition(relaxed) & Node.DOCUMENT_POSITION_FOLLOWING, "what can't be built isn't said first");
     assert(!card(2).querySelector(".ask.unreplayed") && !card(3).querySelector(".ask.unreplayed"), "a card the gate can replay says it can't be built");

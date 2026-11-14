@@ -636,6 +636,8 @@ elif mode == "driver":
     driver = os.path.join("/src", os.environ["DRIVER"])
     sys.argv = [driver]
     runpy.run_path(driver, run_name="__main__")
+elif mode == "replay":
+    runpy.run_path("/runtime/invariant_replay.py", run_name="__main__")
 else:
     raise ValueError("unknown Python check mode")
 `
@@ -651,12 +653,19 @@ func runConformance(ctx context.Context, image string, p *project.Project, steps
 	return recordingBytes(runConformanceRecording(ctx, image, p, steps, script))
 }
 
-func runConformanceRecording(ctx context.Context, image string, p *project.Project, steps []string, script string) (Build, recordedEvidence, error) {
+func runConformanceRecording(ctx context.Context, image string, p *project.Project, steps []string, script string) (build Build, evidence recordedEvidence, err error) {
 	work, err := os.MkdirTemp("", "invariant-run-")
 	if err != nil {
 		return Build{}, recordedEvidence{}, err
 	}
-	defer os.RemoveAll(work)
+	var replay *commandReplaySource
+	defer func() {
+		err = errors.Join(err, os.RemoveAll(work))
+		evidence.replay = replay
+		if err != nil {
+			err = errors.Join(err, evidence.recording.close())
+		}
+	}()
 	src, out, runtime := filepath.Join(work, "src"), filepath.Join(work, "out"), filepath.Join(work, "runtime")
 	if err := copyTree(p.Dir, src); err != nil {
 		return Build{}, recordedEvidence{}, err
@@ -676,6 +685,9 @@ func runConformanceRecording(ctx context.Context, image string, p *project.Proje
 		return Build{}, recordedEvidence{}, err
 	}
 	if err := pulled(ctx, image); err != nil {
+		return Build{}, recordedEvidence{}, err
+	}
+	if replay, err = keepCommandReplay(p, src, image, filepath.ToSlash(p.Manifest.Conformance)); err != nil {
 		return Build{}, recordedEvidence{}, err
 	}
 	var buf bytes.Buffer

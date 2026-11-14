@@ -384,14 +384,15 @@ type Witness struct {
 }
 
 type Bug struct {
-	Name         string                 `json:"name"`
-	Label        string                 `json:"label"`
-	Says         string                 `json:"says"`
-	Violated     string                 `json:"violated,omitempty"`
-	Steps        int                    `json:"steps,omitempty"`
-	Caught       bool                   `json:"caught"`
-	CodeBehavior string                 `json:"code_behavior,omitempty"`
-	ReplayStatus verify.BugReplayStatus `json:"replay_status"`
+	Name          string                 `json:"name"`
+	Label         string                 `json:"label"`
+	Says          string                 `json:"says"`
+	Violated      string                 `json:"violated,omitempty"`
+	Steps         int                    `json:"steps,omitempty"`
+	Caught        bool                   `json:"caught"`
+	CodeBehavior  string                 `json:"code_behavior,omitempty"`
+	ReplayStatus  verify.BugReplayStatus `json:"replay_status"`
+	ReplayMessage string                 `json:"replay_message,omitempty"`
 }
 
 type Provenance struct {
@@ -1643,7 +1644,11 @@ func projectOf(ps projectSource, r *verify.Report) Project {
 		p.Witnesses = append(p.Witnesses, Witness{Name: w.Name, Says: w.Says, Reached: w.Reached, Steps: w.Steps})
 	}
 	for _, b := range r.Bugs {
-		p.Bugs = append(p.Bugs, Bug{Name: b.Name, Label: b.Label, Says: b.Says, Violated: b.Violated, Steps: b.Steps, Caught: b.Caught, CodeBehavior: b.CodeBehavior, ReplayStatus: b.ReplayStatus()})
+		message := ""
+		if b.Replay != nil {
+			message = b.Replay.Message
+		}
+		p.Bugs = append(p.Bugs, Bug{Name: b.Name, Label: b.Label, Says: b.Says, Violated: b.Violated, Steps: b.Steps, Caught: b.Caught, CodeBehavior: b.CodeBehavior, ReplayStatus: b.ReplayStatus(), ReplayMessage: message})
 	}
 	p.Assurance = r.CodeAssurance()
 	p.Coverage = r.Coverage()

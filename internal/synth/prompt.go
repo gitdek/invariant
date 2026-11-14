@@ -109,7 +109,34 @@ TLC checks everything with these constants: %s.
 `+"```tla"+`
 %s`+"```"+`
 `, intro, strings.TrimSpace(request), amendment, p.Manifest.Module, lang.protected, statements.String(), kinds.String(), strings.Join(bounds, ", "),
-		p.Manifest.Module, modelTask, lang.task(p, gateRuns), WriteAsYouGo(lang.order, "gate runs"), lang.checks, lang.primer, moduleHeading, p.Manifest.Module, skeleton)
+		p.Manifest.Module, modelTask, lang.task(p, gateRuns)+replayGuidance(p), WriteAsYouGo(lang.order, "gate runs"), lang.checks, lang.primer, moduleHeading, p.Manifest.Module, skeleton)
+}
+
+func replayGuidance(p *project.Project) string {
+	var bugs []string
+	for _, b := range p.Of(project.Bug) {
+		if verify.RequiresBugReplay(p.Manifest.Language, b) {
+			bugs = append(bugs, b.Name)
+		}
+	}
+	if len(bugs) == 0 {
+		return ""
+	}
+	if !verify.CommandReplayAvailable(p.Manifest) {
+		return "\nCurrent bugs " + strings.Join(bugs, ", ") + ": replay-unavailable. Existing Python applications require an authenticated adapter; ordinary command replay does not support them.\n"
+	}
+	name, _ := verify.ReplayHarness(p.Manifest.Language)
+	factory := "invariantReplay"
+	if p.Manifest.Language == "python" {
+		factory = "invariant_replay"
+	}
+	return fmt.Sprintf(`
+Current bugs %s require a separate replay interface, independently of normal sampling. Read the gate-owned %s supplied here. Export %s(initial) from the driver. It initializes fresh real application code and returns read(), bind(action, typedArgs), close() (a dict or object in Python). Typed states and arguments use lossless ReplayValue objects; integer atoms remain exact decimal strings until deliberately converted to the application's exact representation. Callbacks and application methods may be asynchronous.
+
+bind returns {target, method, args, refusal?: {equals: literal}}. It only binds a concrete action and typed argument list to an actual method on the imported application; it must never invoke it, mutate state or invent a refusal callback. The gate invokes the method itself and reads state through read(), including initial state and every prefix successor. Bind bug operations to the same real application methods capable of the bug, even when the model rules them out. No synthetic bug mutation, application change or successful driver-authored observation can stand in for execution. read must read back the application's state, not expected model values. close must release resources; every exception, including during close, fails replay. Refusal may match only a declared primitive normal return value, never an exception.
+
+The gate owns ordering from Init through the offending operation, fresh sessions and completion records for each bug. Guard the sampling entry point with INVARIANT_REPLAY_REQUEST so importing the driver for replay doesn't sample. Leave ordinary sampling commands and defaults intact; replay adds no sampled states or exhaustive-coverage claim. Temporal counterexamples remain unsupported. Inspect the exact prefix and real bindings during review.
+`, strings.Join(bugs, ", "), name, factory)
 }
 
 // WriteAsYouGo tells an agent that writes files how its replies work, and to

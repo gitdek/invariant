@@ -677,9 +677,14 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 	}
 
 	wg.Wait()
-	defer func() { err = errors.Join(err, evidence.recording.close()) }()
+	defer func() { err = errors.Join(err, evidence.recording.close(), evidence.replay.close()) }()
 	if ctx.Err() != nil {
 		return r, ctx.Err()
+	}
+	if !model {
+		if err := executeCommandReplays(ctx, r, evidence.replay, runner, modelDir); err != nil {
+			return r, err
+		}
 	}
 	if firstErr != nil {
 		return r, firstErr

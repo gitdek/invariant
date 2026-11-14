@@ -131,13 +131,14 @@ func thenWhat(p *formalize.Proposal, verb string) string {
 // have to replay against the code and can't yet (#857). A build of such a
 // proposal stops at the gate, so the person ratifying it is told first.
 func Unreplayed(p *formalize.Proposal) []string {
-	if verify.BugReplayExecutes {
-		return nil
-	}
 	var names []string
-	language := p.Manifest().Language
+	m := p.Manifest()
+	kinds := map[string]string{}
 	for _, s := range p.Statements {
-		if verify.RequiresBugReplay(language, s) {
+		kinds[s.Name] = s.Kind
+	}
+	for _, s := range p.Statements {
+		if verify.RequiresBugReplay(m.Language, s) && (!verify.CommandReplayAvailable(m) || kinds[s.Expect] == project.Property) {
 			names = append(names, s.Name)
 		}
 	}
@@ -149,11 +150,11 @@ func unbuildable(p *formalize.Proposal) string {
 	if len(names) == 0 {
 		return ""
 	}
-	it, bug, them := "each", "those bugs", "them"
+	it := "each"
 	if len(names) == 1 {
-		it, bug, them = "it", "that bug", "it"
+		it = "it"
 	}
-	note := fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and the gate can't run a replay yet. "+
+	note := fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and this route cannot execute the required replay. "+
 		"A build would stop there, at `replay-unavailable`.", list(names), it)
 	// A bug that must break a property has a counterexample that never
 	// ends, which no replay can run: waiting for replays doesn't help it.
@@ -168,7 +169,7 @@ func unbuildable(p *formalize.Proposal) string {
 		}
 	}
 	if len(endless) < len(names) {
-		note += fmt.Sprintf(" Ratify it once replays run, or have it drafted again with %s as hypothetical if nothing shows the code has %s.", bug, them)
+		note += " Existing Python applications need an authenticated replay adapter."
 	}
 	if len(endless) > 0 {
 		must := "must each break a property"
