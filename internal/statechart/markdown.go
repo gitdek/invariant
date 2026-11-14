@@ -50,6 +50,10 @@ func BoundsMarkdown(bounds map[string]string) string {
 // aliases and styles are generated; source labels pass through the same literal
 // encoder as ordinary charts. Removed arrows retain their direction, dashed.
 func (c *Comparison) changeMermaid() string {
+	return c.changeMermaidWithInitials(false)
+}
+
+func (c *Comparison) changeMermaidWithInitials(initials bool) string {
 	var b strings.Builder
 	b.WriteString("Added and removed annotations (green solid additions; red dashed removals):\n\n```mermaid\nflowchart LR\n")
 	edge := 0
@@ -89,6 +93,12 @@ func (c *Comparison) changeMermaid() string {
 				fmt.Fprintf(&b, "        class %s %s\n", alias, states[x.ID])
 			}
 		}
+		if initials {
+			for i, id := range s.Chart.Initial {
+				fmt.Fprintf(&b, "        c%d_i%d((\"initial\")) --> %s\n", side, i, aliases[id])
+				edge++
+			}
+		}
 		for _, a := range s.Chart.Arrows {
 			label := a.Label
 			change := arrows[arrowID(a)]
@@ -118,6 +128,16 @@ func (c *Comparison) changeMermaid() string {
 
 // Markdown renders only the supplied chart and report, without changing them.
 func (c *Result) Markdown() string {
+	return c.markdown(false)
+}
+
+// CompactMarkdown keeps every state, initial and labeled arrow. The caller
+// links the complete saved record for occurrence evidence and provenance.
+func (c *Result) CompactMarkdown() string {
+	return c.markdown(true)
+}
+
+func (c *Result) markdown(compact bool) string {
 	var b strings.Builder
 	if !c.Preview.IsZero() {
 		b.WriteString(TableLiteral(c.Preview.Description()) + "\n\n")
@@ -133,6 +153,18 @@ func (c *Result) Markdown() string {
 	}
 	for _, arrow := range c.Arrows {
 		fmt.Fprintf(&b, "    %s --> %s: %s\n", aliases[arrow.From], aliases[arrow.To], mermaidLiteral(arrow.Label))
+	}
+	if compact {
+		b.WriteString("```\n\n")
+		fmt.Fprintf(&b, "%d chart states, %d initials, %d visible arrows; %d TLC states, %d TLC steps (%d shown, %d hidden). This explains the bounded model; it adds no proof claim.\n",
+			len(c.States), len(c.Initial), len(c.Arrows), c.Report.Counts["tlc_states"], c.Report.Counts["tlc_steps"], c.Report.Counts["shown_steps"], c.Report.Counts["hidden_steps"])
+		if c.Report.OverArrowTarget {
+			fmt.Fprintf(&b, "\nThe chart exceeds the advisory target of %d visible arrows; every arrow is retained.\n", c.Report.ArrowTarget)
+		}
+		for _, fork := range slices.Sorted(maps.Keys(c.Preview.Choices)) {
+			fmt.Fprintf(&b, "\nPreviously authorized choice: %s = %s.\n", tableLiteral(fork), tableLiteral(c.Preview.Choices[fork]))
+		}
+		return b.String()
 	}
 	b.WriteString("```\n\n| State | Unavailable model actions | Violated invariants |\n| :-- | :-- | :-- |\n")
 	for _, state := range c.States {

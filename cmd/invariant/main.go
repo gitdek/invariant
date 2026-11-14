@@ -830,6 +830,12 @@ func formalizeCmd(ctx context.Context, args []string) int {
 }
 
 func watchCmd(ctx context.Context, args []string) int {
+	return watchWithFactory(ctx, args, nil)
+}
+
+// watchWithFactory shares flag validation with an injected startup, before
+// credentials, tools or the repository are opened.
+func watchWithFactory(ctx context.Context, args []string, start func(context.Context, *factory.Factory) int) int {
 	// Keep the same factory from startup onward, so a signal during setup
 	// closes admission before any work can start.
 	f := &factory.Factory{}
@@ -856,6 +862,7 @@ func watchCmd(ctx context.Context, args []string) int {
 	}()
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	repo := fs.String("repo", "", "the repository to watch, as owner/name")
+	fs.StringVar(&f.DashboardURL, "dashboard-url", "", "HTTP(S) base of a dashboard serving this repository; enables compact modeled comments")
 	every := fs.Duration("every", time.Minute, "how often to poll GitHub")
 	once := fs.Bool("once", false, "poll once and exit")
 	base := fs.String("base", "main", "the branch pull requests merge into")
@@ -882,6 +889,10 @@ func watchCmd(ctx context.Context, args []string) int {
 	parallel := fs.Int("parallel", 3, "agent slots for drafts and builds, including reviews and repairs; commands and polling continue while full, even with 1")
 	checkParallel := fs.Int("check-parallel", 1, "how many plumbing build sandbox checks may run at once, independently of -parallel and agents")
 	fs.Parse(args)
+	if err := factory.ValidateDashboardURL(f.DashboardURL); err != nil {
+		fmt.Fprintf(os.Stderr, "invariant: %v\n", err)
+		return 2
+	}
 	if !validAgent(*agent) {
 		fmt.Fprintf(os.Stderr, "invariant: -agent is codex or claude-code, the coding agents Invariant can run, not %q\n", *agent)
 		return 2
@@ -910,6 +921,12 @@ func watchCmd(ctx context.Context, args []string) int {
 	if *checkParallel < 1 {
 		fmt.Fprintln(os.Stderr, "invariant: -check-parallel must be positive")
 		return 2
+	}
+	f.Repository, f.Base, f.Projects, f.Language = *repo, *base, *projects, *language
+	f.Work, f.Log = filepath.Join(*work, filepath.FromSlash(*repo), "issues"), logger.Printf
+	f.Agent, f.LeaseFor, f.Parallel = *agent, *leaseFor, *parallel
+	if start != nil {
+		return start(ctx, f)
 	}
 	fail := func(err error) int { logger.Print(err); return 2 }
 	checkQueue, err := plumbing.NewCheckQueue(*checkParallel)
