@@ -368,71 +368,9 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 			r.Build.Passed = r.Build.Passed && x.Success
 			continue
 		}
-		c := PythonApplicationConformance{Key: x.Key, Invocation: x.Declared, Bounds: p.Lock.Bounds,
-			Result: conformance.Result{ModelStates: r.Design.DistinctStates}}
-		rel, _ := filepath.Rel(s.root, p.ModulePath())
-		c.Model.Module = filepath.ToSlash(rel)
-		lock, _ := filepath.Rel(s.root, filepath.Join(p.Dir, ".invariant", "ratified.lock"))
-		for _, f := range s.Provenance().Files {
-			if f.Path == filepath.ToSlash(lock) {
-				c.BoundsSources = append(c.BoundsSources, f)
-			}
-			if path.Dir(f.Path) == path.Dir(c.Model.Module) && strings.HasSuffix(f.Path, ".tla") {
-				c.Model.Inputs = append(c.Model.Inputs, f)
-			}
-		}
-		recording, traceErr := pythonApplicationRecording(ctx, *x, v.Explored)
-		var model *conformance.Model
-		if v.Explored {
-			// An explored driver's attempts are checked as every exhaustive
-			// driver's are: against the model's named steps, with the
-			// environment's bounds one larger (D-0082, D-0085, #342).
-			c.Mode = "bounded-exhaustive"
-			c.Result.Exhaustive = true
-			model = &conformance.Model{Larger: environmentLarger(p.Lock.Bounds, p.Manifest.Parameters)}
-			if steps, err := modelSteps(string(raw), includes); err != nil {
-				model.Problem = err.Error()
-			} else {
-				model.Steps = steps
-			}
-		}
-		if traceErr == nil {
-			d, e := stage(work, fmt.Sprintf("conformance-%d", i), p, string(raw), "")
-			if e != nil {
-				return nil, errors.Join(e, recording.close())
-			}
-			checks := &pythonApplicationModelRunner{runner: runner, root: d}
-			c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), p.Lock.Bounds, modelVariables(string(raw), includes), r.Design.DistinctStates, model)
-			if v.Explored {
-				// Attempts carry no runs; the exploration's are its replays.
-				c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs
-				// It claims every state the code can reach, so it must reach
-				// every state the model does; its checked steps still stand.
-				if c.Result.Passed && int64(c.Result.States) != c.Result.ModelStates {
-					c.Result.Message = fmt.Sprintf("the driver explores every state the code can reach, and it reached %d of the model's %d", c.Result.States, c.Result.ModelStates)
-				}
-			}
-			c.Checks = checks.results
-			c.LogicalChecks = checks.logical
-			slices.SortFunc(c.Checks, func(a, b PythonApplicationModelCheck) int {
-				return strings.Compare(a.Batch+"/"+a.Module, b.Batch+"/"+b.Module)
-			})
-			if len(c.Checks) > 0 {
-				c.Tool = &ComponentProofTool{Name: "TLC", Version: c.Checks[0].Result.Version, Pins: map[string]string{"release": toolchain.TLCRelease, "jar_sha256": toolchain.TLCJarSHA256, "java_image": tc.JavaImage}}
-			}
-			for _, check := range c.Checks {
-				c.OperationalError = c.OperationalError || check.Error != "" || check.Result.Outcome == tlc.Failed
-			}
-			if e != nil {
-				c.Result.Passed = false
-				c.Result.Message = e.Error()
-				c.OperationalError = true
-			}
-		} else {
-			c.Result.Message = traceErr.Error()
-			if x.HarnessError != "" {
-				c.Result.Message += ": " + x.HarnessError
-			}
+		c, e := checkPythonApplicationConformance(ctx, s, x, v.Explored, work, fmt.Sprintf("conformance-%d", i), string(raw), includes, p.Lock.Bounds, r.Design.DistinctStates, runner)
+		if e != nil {
+			return nil, e
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -496,8 +434,85 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	return r, nil
 }
 
+// Both sizes check the same authenticated recording, including declared outcomes
+// and omissions evaluated at the next environment bounds from this size.
+func checkPythonApplicationConformance(ctx context.Context, s *PythonApplicationSession, x *PythonApplicationExecutionResult, explored bool, work, name, src string, includes map[string]string, bounds map[string]string, modelStates int64, runner tlc.Runner) (PythonApplicationConformance, error) {
+	p := s.project
+	c := PythonApplicationConformance{Key: x.Key, Invocation: x.Declared, Bounds: maps.Clone(bounds),
+		Result: conformance.Result{ModelStates: modelStates}}
+	rel, _ := filepath.Rel(s.root, p.ModulePath())
+	c.Model.Module = filepath.ToSlash(rel)
+	lock, _ := filepath.Rel(s.root, filepath.Join(p.Dir, ".invariant", "ratified.lock"))
+	for _, f := range s.Provenance().Files {
+		if f.Path == filepath.ToSlash(lock) {
+			c.BoundsSources = append(c.BoundsSources, f)
+		}
+		if path.Dir(f.Path) == path.Dir(c.Model.Module) && strings.HasSuffix(f.Path, ".tla") {
+			c.Model.Inputs = append(c.Model.Inputs, f)
+		}
+	}
+	recording, traceErr := pythonApplicationRecording(ctx, *x, explored)
+	var model *conformance.Model
+	if explored {
+		// An explored driver's attempts are checked as every exhaustive
+		// driver's are: against the model's named steps, with the
+		// environment's bounds one larger (D-0082, D-0085, #342).
+		c.Mode = "bounded-exhaustive"
+		c.Result.Exhaustive = true
+		model = &conformance.Model{Larger: environmentLarger(bounds, p.Manifest.Parameters)}
+		if steps, err := modelSteps(src, includes); err != nil {
+			model.Problem = err.Error()
+		} else {
+			model.Steps = steps
+		}
+	}
+	if traceErr == nil {
+		d, e := stage(work, name, p, src, "")
+		if e != nil {
+			return c, errors.Join(e, recording.close())
+		}
+		defer os.RemoveAll(d)
+		checks := &pythonApplicationModelRunner{runner: runner, root: d}
+		c.Result, e = recording.check(ctx, checks, d, p.ModuleName(), bounds, modelVariables(src, includes), modelStates, model)
+		if explored {
+			// Attempts carry no runs; the exploration's are its replays.
+			c.Result.Exhaustive, c.Result.Runs = true, x.Exploration.Runs
+			// It claims every state the code can reach, so it must reach
+			// every state the model does; its checked steps still stand.
+			if c.Result.Passed && int64(c.Result.States) != c.Result.ModelStates {
+				c.Result.Message = fmt.Sprintf("the driver explores every state the code can reach, and it reached %d of the model's %d", c.Result.States, c.Result.ModelStates)
+			}
+		}
+		c.Checks = checks.results
+		c.LogicalChecks = checks.logical
+		slices.SortFunc(c.Checks, func(a, b PythonApplicationModelCheck) int {
+			return strings.Compare(a.Batch+"/"+a.Module, b.Batch+"/"+b.Module)
+		})
+		if len(c.Checks) > 0 {
+			c.Tool = &ComponentProofTool{Name: "TLC", Version: c.Checks[0].Result.Version, Pins: map[string]string{"release": toolchain.TLCRelease, "jar_sha256": toolchain.TLCJarSHA256, "java_image": runner.Image}}
+		}
+		for _, check := range c.Checks {
+			c.OperationalError = c.OperationalError || check.Error != "" || check.Result.Outcome == tlc.Failed
+		}
+		if e != nil {
+			c.Result.Passed = false
+			c.Result.Message = e.Error()
+			c.OperationalError = true
+		}
+	} else {
+		c.Result.Message = traceErr.Error()
+		var pathError *os.PathError
+		c.OperationalError = ctx.Err() != nil || errors.As(traceErr, &pathError)
+		if x.HarnessError != "" {
+			c.Result.Message += ": " + x.HarnessError
+		}
+	}
+	return c, nil
+}
+
 // pythonApplicationLargerTimeouts are the allowances a larger run has: TLC's
-// is every language's, and an exploration's is a driver count's, twice it.
+// is every language's; exploration, recording conversion and conformance
+// share a driver count's allowance, twice it (#881).
 // Tests shorten them.
 var pythonApplicationLargerTimeouts = struct{ model, explore time.Duration }{largerTimeout, countTimeout}
 
@@ -555,12 +570,16 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		r.Larger = compareLarger(larger, &res, nil, "")
 		return nil
 	}
+	includes, err := tla.Siblings(filepath.Dir(p.ModulePath()), filepath.Base(p.ModulePath()))
+	if err != nil {
+		return err
+	}
 	for _, v := range eligible {
 		lctx, cancel := context.WithTimeout(ctx, timeouts.explore)
 		x, file, err := s.RunLarger(lctx, v.Key, sizes)
 		unfinished := lctx.Err() != nil
-		cancel()
 		if ctx.Err() != nil {
+			cancel()
 			return ctx.Err()
 		}
 		var e Exploration
@@ -570,8 +589,9 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 			// nothing and fails nothing.
 			e = Exploration{Unfinished: true, Message: fmt.Sprintf("the driver didn't finish exploring one size larger within %s", timeouts.explore)}
 		case x == nil:
+			cancel()
 			return err
-		case !x.Success || x.Exploration == nil:
+		case !x.Success || !x.Complete || x.Exploration == nil:
 			e = Exploration{Message: x.HarnessError}
 			if e.Message == "" && err != nil && len(x.Diagnostics) > 0 {
 				// The session appends its normalized execution/protocol error
@@ -585,7 +605,47 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 			e = Exploration{OK: true, States: int64(x.Exploration.States), Depth: x.Exploration.Depth}
 		}
 		l := compareLarger(larger, &res, &e, "")
-		r.Application.Larger = append(r.Application.Larger, PythonApplicationLarger{Key: v.Key, Bounds: maps.Clone(larger), Driver: file, Original: originals[v.Key], Execution: x, Result: *l})
+		record := PythonApplicationLarger{Key: v.Key, Bounds: maps.Clone(larger), Driver: file, Original: originals[v.Key], Execution: x}
+		if e.OK {
+			c, checkErr := checkPythonApplicationConformance(lctx, s, x, true, work, fmt.Sprintf("larger-conformance-%d", order[v.Key]), src, includes, larger, res.DistinctStates, runner)
+			if checkErr != nil {
+				c.OperationalError = true
+				c.Result.Message = strings.ReplaceAll(checkErr.Error(), work, "/application")
+			}
+			record.Conformance = &c
+			reason, unreadable := pythonApplicationUnreadableEvidence(c)
+			switch {
+			case lctx.Err() != nil || (c.OperationalError && !unreadable):
+				// A completed count disagreement still stands. Otherwise an
+				// unavailable check claims nothing, including no agreement.
+				if l.Passed {
+					l.Required, l.Passed = false, false
+					l.Message = "conformance one size larger was unavailable: " + pythonApplicationConformanceReason(c)
+					if lctx.Err() != nil {
+						l.Message = fmt.Sprintf("conformance one size larger didn't finish within the shared %s allowance", timeouts.explore)
+					}
+				}
+			case unreadable:
+				// TLC ran and couldn't read what the run recorded. That's
+				// invalid execution evidence, which fails here as it does at
+				// the ratified bounds, and nothing operational.
+				c.OperationalError = false
+				l.Required, l.Passed = true, false
+				l.Message = "conformance one size larger: TLC can't check what the run recorded: " + reason
+			case !c.passed():
+				l.Required, l.Passed = true, false
+				l.Message = pythonApplicationLargerFailure(c, *x, modelVariables(src, includes))
+			}
+		}
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if l.Message != "" {
+			l.Message = fmt.Sprintf("target %s, check %s, invocation %s: %s", v.Key.Target, v.Key.Check, v.Key.ID, l.Message)
+		}
+		record.Result = *l
+		r.Application.Larger = append(r.Application.Larger, record)
 	}
 	slices.SortFunc(r.Application.Larger, func(a, b PythonApplicationLarger) int { return order[a.Key] - order[b.Key] })
 	// The report claims the weakest result: any disagreement, else any run
@@ -609,6 +669,132 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 		}
 	}
 	return nil
+}
+
+// TLC's own exit statuses, tlc2.output.EC.ExitStatus in the pinned release.
+// It ends with the first three only for a specification it couldn't evaluate
+// or parse: a step, an invariant, a module. Its general status is shared: its
+// system, memory and command-line errors end with it, as a number it can't
+// hold does, and as an evaluation error raised inside a standard operator
+// does. That last one is still taken for an operational end (#928).
+const (
+	tlcExitSpecEval     = 75
+	tlcExitSafetyEval   = 76
+	tlcExitSpecParse    = 150
+	tlcExitGeneralError = 255
+)
+
+// tlcIntegerTooBig is how TLC's message for a number past its 32 bits starts.
+// It exits with its general status, as its system errors do, so only these
+// words tell the two apart.
+const tlcIntegerTooBig = "TLC can't handle a number this big."
+
+// pythonApplicationUnreadableEvidence says whether a conformance check ended
+// because TLC couldn't read what the run recorded, with TLC's reason in one
+// line. The model and its constants have just passed TLC at this size, and
+// these checking modules at the ratified bounds, so what TLC can't parse or
+// evaluate is the recorded states: a number the model's modules can't write,
+// a value of another type, a number past its range. The every-step module
+// also holds the attempts' arguments and the model at the next environment
+// bounds, and TLC ending it this way fails too, as at the ratified bounds. A
+// check that never ran or was cut off carries the runner's own error. One
+// that stalled, ran out of memory or was killed has the runner's result,
+// which holds no TLC version. Neither is evidence, and neither takes anything
+// from a check TLC did end this way: as a completed count disagreement does,
+// the first such check stands whatever became of the others. No words of
+// TLC's make an end operational, since a recorded value can put any words in
+// its message.
+func pythonApplicationUnreadableEvidence(c PythonApplicationConformance) (reason string, unreadable bool) {
+	for _, check := range c.Checks {
+		r := check.Result
+		if check.Error != "" || r.Version == "" {
+			continue
+		}
+		switch {
+		case r.ExitCode == tlcExitSpecParse, r.ExitCode == tlcExitSpecEval, r.ExitCode == tlcExitSafetyEval,
+			r.ExitCode == tlcExitGeneralError && strings.HasPrefix(r.Message, tlcIntegerTooBig):
+			return pythonApplicationOneLine(r.Message), true
+		}
+	}
+	return "", false
+}
+
+// pythonApplicationConformanceReason is why a conformance check didn't pass,
+// in one line. An every-step check's reason is its own (#881).
+func pythonApplicationConformanceReason(c PythonApplicationConformance) string {
+	reason := c.Result.Message
+	if reason == "" && c.Result.Tried != nil {
+		reason = c.Result.Tried.Message
+	}
+	if reason = pythonApplicationOneLine(reason); reason == "" {
+		return "no reason was recorded"
+	}
+	return reason
+}
+
+// pythonApplicationOneLine is a tool's message on one line, short enough for
+// a receipt's row. The check's evidence keeps the whole of it.
+func pythonApplicationOneLine(message string) string {
+	const limit = 400
+	line := strings.Join(strings.Fields(message), " ")
+	if len(line) <= limit {
+		return line
+	}
+	cut := strings.LastIndexByte(line[:limit], ' ')
+	if cut <= 0 {
+		cut = limit
+	}
+	return strings.ToValidUTF8(line[:cut], "") + " ..."
+}
+
+// Next counterexamples name state pairs. Recover the action from the retained
+// authenticated attempts, with the same encoding the recording used.
+func pythonApplicationLargerFailure(c PythonApplicationConformance, x PythonApplicationExecutionResult, vars []string) string {
+	r := c.Result
+	message := "conformance one size larger: " + r.Message
+	if r.BadStart != "" {
+		return message + ": " + r.BadStart
+	}
+	if bad := r.BadStep; bad != nil {
+		// The declared-outcome checker already names the exact action.
+		// Another attempt can share its endpoints without being that action.
+		for _, check := range c.LogicalChecks {
+			if check.Module == "Invariant_StrictAttempts" && check.Outcome == tlc.Deadlock {
+				return message
+			}
+		}
+		state := func(row PythonApplicationObservation, values map[string]any) string {
+			fields, err := pythonApplicationComponentState(values, row.Form == "module")
+			if err != nil {
+				return ""
+			}
+			parts := make([]string, len(vars))
+			for i, name := range vars {
+				parts[i] = name + " = " + fields[name]
+			}
+			return strings.Join(parts, ", ")
+		}
+		for _, row := range x.Observations {
+			if row.Kind != "transition" || row.Replay == nil || *row.Replay || state(row, row.Before) != bad.From || state(row, row.After) != bad.To {
+				continue
+			}
+			action := row.Step
+			var args []string
+			for _, arg := range row.Args {
+				value, _ := conformance.Encode(arg)
+				args = append(args, value)
+			}
+			if len(args) > 0 {
+				action += "(" + strings.Join(args, ", ") + ")"
+			}
+			return fmt.Sprintf("%s; %s from %s to %s", message, action, bad.From, bad.To)
+		}
+		return fmt.Sprintf("%s; from %s to %s", message, bad.From, bad.To)
+	}
+	if tried := r.Tried; tried != nil && !tried.Passed {
+		return fmt.Sprintf("conformance one size larger: %s; %s in %s", tried.Message, tried.Untried, tried.In)
+	}
+	return message
 }
 
 // A larger exploration depends on its own completed execution and all three
