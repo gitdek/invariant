@@ -613,6 +613,40 @@ func TestNewRefusesACheckoutThatFetchesOrPushesElsewhere919(t *testing.T) {
 	w.untouched(before, false)
 }
 
+// A -dir that's a link is refused, wherever it leads: new reads the
+// directory it's given, and follows no link to another. Nothing is made
+// where the link leads, and nothing on GitHub.
+func TestNewRefusesALinkForItsDirectory919(t *testing.T) {
+	t.Parallel()
+	for name, target := range map[string]func(w *world) string{
+		"an empty directory": func(w *world) string { return filepath.Join(w.root, "elsewhere") },
+		"the repository's own checkout": func(w *world) string {
+			checkout := filepath.Join(w.root, "elsewhere")
+			w.checkout(checkout, "https://github.com/acme/widgets.git")
+			return checkout
+		},
+	} {
+		w := newWorld(t)
+		elsewhere := target(w)
+		if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(w.root, "widgets")
+		if err := os.Symlink(elsewhere, dir); err != nil {
+			t.Fatal(err)
+		}
+		before := w.tree(w.root)
+		_, err := w.found(Options{})
+		w.untouched(before, false)
+		if want := dir + " is there already, and isn't a directory"; err.Error() != want {
+			t.Errorf("with a link to %s for -dir, new's refusal is %v, want %s", name, err, want)
+		}
+		if w.ran("git ") || w.ran("gh ") {
+			t.Errorf("with a link to %s for -dir, new ran:\n%s", name, strings.Join(w.calls, "\n"))
+		}
+	}
+}
+
 // The clone new makes is held to what a checkout that was there is. One
 // that comes back with something in it, or from another repository, as a
 // repository that was renamed can, gets nothing written to it.
