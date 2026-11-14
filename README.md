@@ -256,7 +256,7 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
    git clone https://github.com/gitdek/invariant && cd invariant && go build -o ~/.local/bin/invariant ./cmd/invariant
    ```
 
-   **For a new project,** `invariant new OWNER/NAME -spec FILE` takes steps 2 and 3 in one command. It founds empty projects only: a repository that already has files or commits is `init`'s, in step 2. It creates the repository, private unless `-public`, and its checkout, writes a Go starter with complete checks and the pinned gate, pushes `main`, allows merge commits and requires the gate. It ends with what's left for you: the App's access, a watcher, the dashboard and the first issue. [Founding a new project](docs/factory.md#founding-a-new-project) says what it creates, what counts as empty, and what it leaves.
+   **For a new project,** `invariant new OWNER/NAME -spec FILE` takes steps 2 and 3 in one command. It founds empty projects only: a repository that already has files or commits is `init`'s, in step 2. It creates the repository, private unless `-public`, and its checkout, writes a Go starter with complete checks and the pinned gate, pushes `main`, allows merge commits and, where the account's plan lets GitHub protect `main`, requires the gate. It ends with what's left for you: the App's access, a watcher, the dashboard and the first issue. [Founding a new project](docs/factory.md#founding-a-new-project) says what it creates, what counts as empty, and what it leaves.
 
 2. **Add the gate and draft repository checks.** The workflow builds Invariant at your CLI's commit and runs configured repository checks and modeled verification on pull requests and pushes to main:
 
