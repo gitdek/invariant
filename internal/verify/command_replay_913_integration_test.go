@@ -138,6 +138,18 @@ if (!process.env.INVARIANT_REPLAY_REQUEST) {
 }
 `
 
+// An ordinary Python gate runs the project's unittest suite before its
+// driver, and unittest fails when it finds no test, so the fixture has one.
+// It touches nothing any mode changes.
+const testPY913 = `import unittest
+from core.delivery import DeliveryStore
+class DeliveryTest(unittest.TestCase):
+    def test_a_first_delivery_counts_once(self):
+        store = DeliveryStore()
+        self.assertTrue(store.deliver(1, 'job'))
+        self.assertEqual(store.read(), dict(phase=1, deliveries=1, reused=False))
+`
+
 const driverPY913 = `import json, os
 from core.delivery import DeliveryStore
 def typed(state):
@@ -231,6 +243,7 @@ func fixture913(t *testing.T, route, mode string) string {
 		write913(t, dir, "core/__init__.py", "")
 		write913(t, dir, "core/delivery.py", source)
 		write913(t, dir, driver, driverPY913)
+		write913(t, dir, "test_delivery.py", testPY913)
 	}
 	if mode == "missing-interface" {
 		b, err := os.ReadFile(filepath.Join(dir, driver))
