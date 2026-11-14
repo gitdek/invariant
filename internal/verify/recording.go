@@ -22,6 +22,7 @@ type recording struct {
 type recordedEvidence struct {
 	Evidence
 	recording *recording
+	replay    *commandReplaySource
 }
 
 type recordingLanguage interface {
@@ -114,7 +115,7 @@ func recordingBytes(b Build, e recordedEvidence, err error) (Build, Evidence, er
 		}
 		err = errors.Join(err, e.recording.close())
 	}
-	return b, e.Evidence, err
+	return b, e.Evidence, errors.Join(err, e.replay.close())
 }
 
 type recordingWriter struct {

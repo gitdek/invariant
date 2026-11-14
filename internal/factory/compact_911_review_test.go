@@ -507,11 +507,12 @@ func TestCompact911ReviewPlanOfIssuesWithADashboard(t *testing.T) {
 // A compact comment keeps what the complete one says of its statements: what
 // a known bug must break, what each bug says of the code and what the gate
 // can't yet do about it (#857), and the decisions made on the issue before
-// the draft.
+// the draft. Since #913 the gate replays a TypeScript bug, so the bug here is
+// an existing Python application's, which it still can't.
 func TestCompact911ReviewCompactCommentKeepsWhatItsStatementsSay(t *testing.T) {
 	p := bufferProposal(t)
 	classify857(t, p, "current")
-	p.Language = "typescript"
+	p.Target = &formalize.Target{Manifest: project.Manifest{Language: "python", Existing: []string{"app.py"}}}
 	m := Marker{Kind: KindProposal, Proposal: p, ProposalRef: review911Reference, Answers: []formalize.Answer{
 		{Fork: "F1", Question: "When the buffer is full, what should a producer do?", Option: "B", Says: "Get an <error> right away.", By: "gitdek"}}}
 	proposal := reader603Visible(proposalCommentWithEvidence(p, nil, m, review911Evidence))

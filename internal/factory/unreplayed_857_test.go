@@ -9,23 +9,26 @@ import (
 	"github.com/gitdek/invariant/internal/project"
 )
 
-// A proposal that calls a bug current, for code a driver checks, can't be
-// built yet: the gate has to replay that bug against the code, and nothing
-// executes a replay until the adapters that follow #857 exist. A person
+// A proposal with an unsupported replay can't be built yet. The command
+// adapters cover ordinary TypeScript/Python and existing TypeScript; existing
+// Python still needs its authenticated adapter. A person
 // ratifies from the proposal's comment, so it says so, by name. One that
 // calls no bug current, or whose code Go's own checks cover, says nothing.
 func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
-	const note = "**This can't be built yet.** It calls `PutWhenFull` current, so the gate has to replay it against the code, and the gate can't run a replay yet. " +
-		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with that bug as hypothetical if nothing shows the code has it."
+	const note = "**This can't be built yet.** It calls `PutWhenFull` current, so the gate has to replay it against the code, and this route cannot execute the required replay. " +
+		"A build would stop there, at `replay-unavailable`. Existing Python applications need an authenticated replay adapter."
 	for _, tc := range []struct {
 		name     string
 		behavior string
 		shape    func(*formalize.Proposal)
 		want     []string
 	}{
-		{"a current bug in TypeScript", "current", func(p *formalize.Proposal) { p.Language = "typescript" }, []string{"PutWhenFull"}},
-		{"a current bug in Python", "current", func(p *formalize.Proposal) { p.Language = "python" }, []string{"PutWhenFull"}},
-		{"a current bug in code checked as it is", "current", func(p *formalize.Proposal) { p.Existing = []string{"hooks/use-buffer.ts"} }, []string{"PutWhenFull"}},
+		{"a current bug in TypeScript", "current", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
+		{"a current bug in Python", "current", func(p *formalize.Proposal) { p.Language = "python" }, nil},
+		{"a current bug in code checked as it is", "current", func(p *formalize.Proposal) { p.Existing = []string{"hooks/use-buffer.ts"} }, nil},
+		{"existing Python", "current", func(p *formalize.Proposal) {
+			p.Target = &formalize.Target{Manifest: project.Manifest{Language: "python", Existing: []string{"app.py"}}}
+		}, []string{"PutWhenFull"}},
 		{"a current bug in Go", "current", func(*formalize.Proposal) {}, nil},
 		{"a hypothetical bug", "hypothetical", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
 		{"a bug an older lock left unclassified", "", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
@@ -50,10 +53,10 @@ func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
 	second.Name = "DropWhenFull"
 	p.Statements = append(p.Statements, second)
 	c := &formalize.Current{ModuleText: p.ModuleText, Includes: p.Includes, Lock: project.Lock{Bounds: p.Bounds, Statements: append([]project.Statement(nil), p.Statements...)}}
-	p.Target = &formalize.Target{Dir: "examples/buffer", Previous: "#1", Amends: p.Hash, Manifest: project.Manifest{Language: "python"}}
+	p.Target = &formalize.Target{Dir: "examples/buffer", Previous: "#1", Amends: p.Hash, Manifest: project.Manifest{Language: "python", Existing: []string{"app.py"}}}
 	body := amendmentComment(p, nil, formalize.Diff(c, p), Marker{Kind: KindProposal, Proposal: p})
-	const both = "**This can't be built yet.** It calls `PutWhenFull` and `DropWhenFull` current, so the gate has to replay each against the code, and the gate can't run a replay yet. " +
-		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with those bugs as hypothetical if nothing shows the code has them."
+	const both = "**This can't be built yet.** It calls `PutWhenFull` and `DropWhenFull` current, so the gate has to replay each against the code, and this route cannot execute the required replay. " +
+		"A build would stop there, at `replay-unavailable`. Existing Python applications need an authenticated replay adapter."
 	if !strings.Contains(body, both+"\n\n") {
 		t.Errorf("an amendment with two current bugs doesn't say it can't be built:\n%s", body)
 	}
@@ -140,9 +143,8 @@ func TestAProposalSaysWhichCurrentBugsCanNeverBeReplayed857(t *testing.T) {
 	p.Statements = append(p.Statements, project.Statement{Name: "Drains", Kind: project.Property, Says: "The buffer eventually empties."},
 		project.Statement{Name: "NeverTakes", Kind: project.Bug, Says: "Nothing is ever taken.", Expect: "Drains", CodeBehavior: "current"})
 	body := proposalComment(p, nil, Marker{Kind: KindProposal, Proposal: p})
-	const both = "**This can't be built yet.** It calls `PutWhenFull` and `NeverTakes` current, so the gate has to replay each against the code, and the gate can't run a replay yet. " +
-		"A build would stop there, at `replay-unavailable`. Ratify it once replays run, or have it drafted again with those bugs as hypothetical if nothing shows the code has them. " +
-		"`NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, now or once replays run."
+	const both = "**This can't be built yet.** It calls `NeverTakes` current, so the gate has to replay it against the code, and this route cannot execute the required replay. " +
+		"`NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, so a build would stop there at `replay-unsupported-temporal`."
 	if !strings.Contains(body, "\n"+both+"\n") {
 		t.Errorf("a proposal with a bug that breaks an invariant and one that breaks a property:\n%s", body)
 	}
@@ -153,8 +155,8 @@ func TestAProposalSaysWhichCurrentBugsCanNeverBeReplayed857(t *testing.T) {
 		}
 	}
 	body = proposalComment(p, nil, Marker{Kind: KindProposal, Proposal: p})
-	const only = "**This can't be built yet.** It calls `NeverTakes` current, so the gate has to replay it against the code, and the gate can't run a replay yet. " +
-		"A build would stop there, at `replay-unavailable`. `NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, now or once replays run."
+	const only = "**This can't be built yet.** It calls `NeverTakes` current, so the gate has to replay it against the code, and this route cannot execute the required replay. " +
+		"`NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, so a build would stop there at `replay-unsupported-temporal`."
 	if !strings.Contains(body, "\n"+only+"\n") || strings.Contains(body, "Ratify it once replays run") {
 		t.Errorf("a proposal whose only current bug breaks a property:\n%s", body)
 	}

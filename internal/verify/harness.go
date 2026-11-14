@@ -15,7 +15,7 @@ import (
 // gate writes it in before a driver runs, over any copy the project holds,
 // so the harness that records attempts is always Invariant's own.
 //
-//go:embed harness/invariant-explore.ts harness/invariant_explore.py
+//go:embed harness/invariant-explore.ts harness/invariant_explore.py harness/invariant-replay.ts harness/invariant_replay.py
 var harness embed.FS
 
 // The harness's file for each language: a TypeScript driver imports it from
@@ -24,6 +24,21 @@ const (
 	HarnessTypeScript = "invariant-explore.ts"
 	HarnessPython     = "invariant_explore.py"
 )
+
+// ReplayHarness is separate from exploration: importing it says nothing
+// about sampled coverage. Only the gate runs it, with one checked request.
+func ReplayHarness(language string) (name string, source []byte) {
+	switch language {
+	case "typescript":
+		name = "invariant-replay.ts"
+	case "python":
+		name = "invariant_replay.py"
+	default:
+		return "", nil
+	}
+	source, _ = harness.ReadFile("harness/" + name)
+	return name, source
+}
 
 // Harness is the harness's source for a language, and the name a driver
 // imports it by, or empty for a language whose drivers don't use it.
@@ -49,8 +64,17 @@ func writeHarness(src, runtime string, p *project.Project) error {
 			return err
 		}
 	}
+	if name, source := ReplayHarness("python"); name != "" {
+		if err := os.WriteFile(filepath.Join(runtime, name), source, 0o644); err != nil {
+			return err
+		}
+	}
 	if p.Manifest.Language == "typescript" && p.Manifest.Conformance != "" {
 		name, source := Harness("typescript")
+		if err := os.WriteFile(filepath.Join(src, filepath.Dir(p.Manifest.Conformance), name), source, 0o644); err != nil {
+			return err
+		}
+		name, source = ReplayHarness("typescript")
 		if err := os.WriteFile(filepath.Join(src, filepath.Dir(p.Manifest.Conformance), name), source, 0o644); err != nil {
 			return err
 		}

@@ -596,6 +596,9 @@ func copyOwned(p *project.Project, ws string) error {
 }
 
 func owned(m project.Manifest, rel string) bool {
+	if name, _ := verify.ReplayHarness(m.Language); name != "" && path.Base(rel) == name {
+		return false
+	}
 	if readerInput(m, rel) || rel == ".invariant/reader.json" || rel == ".invariant/reader.svg" || rel == "reader.json" || rel == "reader.svg" {
 		return false
 	}
@@ -633,13 +636,23 @@ func owned(m project.Manifest, rel string) bool {
 // Prepare fills the agent's workspace: copies of the protected files, the
 // skeleton in place of the module, and an empty package directory.
 func Prepare(p *project.Project, skeleton, ws string) error {
+	if name, source := verify.ReplayHarness(p.Manifest.Language); name != "" {
+		if err := writeFile(filepath.Join(ws, name), string(source)); err != nil {
+			return err
+		}
+	}
 	for _, rel := range protected(p.Manifest.Language) {
 		if err := copyFile(filepath.Join(p.Dir, rel), filepath.Join(ws, rel)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
 	if err := copyReaderInputs(p, ws); err != nil {
-		return err
+		// A new skeleton need not have a model directory to copy yet.
+		// Missing or unreadable individual reader inputs still fail.
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || !os.IsNotExist(err) || filepath.Clean(pathErr.Path) != filepath.Dir(p.ModulePath()) {
+			return err
+		}
 	}
 	if err := writeFile(filepath.Join(ws, p.Manifest.Module), skeleton); err != nil {
 		return err
