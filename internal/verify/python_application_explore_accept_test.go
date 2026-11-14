@@ -188,8 +188,8 @@ func pa342New(t *testing.T, explicit, wheel bool) pa342Fixture {
 }
 
 // pa342Docker replaces Docker transport. TLC answers are emulated from the
-// counter model at the configured Limit, the attempt check included: Done
-// must be tried in every state, and Inc wherever the ratified Limit allows
+// counter model at the configured Limit, Init, Next and attempts included:
+// Done must be tried in every state, and Inc wherever that Limit allows
 // it. Application runs execute the actual staged runner and collector with
 // local Python, honoring read-only overlays as Docker's nested mounts do.
 const pa342Docker = `import os,sys,json,subprocess,pathlib,re,shutil,tempfile
@@ -228,17 +228,29 @@ if 'tlc2.TLC' in args:
         msg(2110,'Invariant Invariant_Never_Full is violated.'); msg(2217,'1: <Initial predicate>\n/\\ count = 2'); sys.exit(12)
     if module.startswith('Bug_'):
         msg(2110,'Invariant Safe is violated.'); msg(2217,'1: <Initial predicate>\n/\\ count = 3'); sys.exit(12)
+    if module=='Invariant_ConformanceInit':
+        starts=[int(v) for v in re.findall(r'count \|-> (-?\d+)',body.split('Invariant_IInit ==')[0])]
+        model=pathlib.Path(work,'Counter.tla').read_text()
+        allowed={0,1} if 'Init == count \\in {0, 1}' in model else {0}
+        for value in starts:
+            if value not in allowed:
+                msg(2110,'Invariant Init is violated.'); msg(2217,'1: <Initial predicate>\n/\\ count = %d'%value); sys.exit(12)
     if module=='Invariant_Conformance':
         values=[int(v) for v in re.findall(r'count \|-> (-?\d+)',body.split('Invariant_Steps ==')[0])]
-        if any(v<0 or v>limit for v in values):
-            msg(2114,'Deadlock reached.'); msg(2217,'1: <Initial predicate>\n/\\ count = 0\n/\\ invariant_source = 1\n/\\ invariant_target = 2'); sys.exit(11)
+        pairs=re.findall(r'<<(\d+), (\d+)>>',body.split('Invariant_Steps == {')[1].split('}',1)[0])
+        for source,target in pairs:
+            before,after=values[int(source)-1],values[int(target)-1]
+            if not (before<limit and after==before+1 or before==limit and after==before):
+                msg(2114,'Deadlock reached.'); msg(2217,'1: <Initial predicate>\n/\\ count = %d\n/\\ invariant_source = %s\n/\\ invariant_target = %s'%(before,source,target)); sys.exit(11)
     if module=='Invariant_Tried':
         states=re.findall(r'\[count \|-> (-?\d+)\]',body.split('Invariant_States ==')[1].split('Invariant_Tried ==')[0])
         sets=re.findall(r'\{([^{}]*)\}',body.split('Invariant_Tried ==')[1].split('Invariant_TInit')[0])
+        enlarged=re.search(r'INSTANCE Counter WITH Limit <- (\d+)',body)
+        environment=int(enlarged.group(1)) if enlarged else limit
         for i,(c,s) in enumerate(zip(states,sets)):
             untried=[]
             if '<<"Done">>' not in s: untried.append('<<"Done">>')
-            if int(c)<limit and '<<"Inc">>' not in s: untried.append('<<"Inc">>')
+            if '<<"Inc">>' not in s and not (limit<=int(c)<environment): untried.append('<<"Inc">>')
             if untried:
                 msg(2110,'Invariant Invariant_EveryStepTried is violated.')
                 msg(2217,'1: <Initial predicate>\n/\\ count = %s\n/\\ invariant_i = %d'%(c,i+1))
@@ -254,7 +266,7 @@ if '/usr/local/bin/python' in args:
     overlays={g:h for g,h in mounts.items() if g.startswith('/src/')}
     root=src
     if overlays:
-        root=os.path.join(tempfile.mkdtemp(),'src'); shutil.copytree(src,root)
+        root=os.path.join(mounts['/output'],'overlay','src'); shutil.copytree(src,root)
         for g,h in overlays.items(): shutil.copyfile(h,os.path.join(root,g[len('/src/'):]))
     def mapped(s):
         if s=='/src' or s.startswith('/src/'): return root+s[len('/src'):]
