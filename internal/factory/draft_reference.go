@@ -497,6 +497,13 @@ func retainedDraft(t Thread, m Marker) Marker {
 type savedDraftResult struct {
 	formalize.Result
 	Publication *draftPublication `json:"publication,omitempty"`
+	// legacy is a record read back without its publication, as records were
+	// saved before a draft's run kept it. Its check context was never saved
+	// with it, and a reference holds a record to the context saved with it,
+	// so no reference can name one: it's published inline, or its overflow
+	// is refused as it is with no dashboard, and a revision drafts a record
+	// a reference can name.
+	legacy bool
 }
 
 type draftPublication struct {
@@ -527,5 +534,6 @@ func (f *Factory) loadDraft(ctx context.Context, commit string) (*savedDraftResu
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("read completed draft result: %w", err)
 	}
+	r.legacy = r.Publication == nil
 	return &r, nil
 }

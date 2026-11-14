@@ -512,6 +512,12 @@ func (s *Server) refresh(ctx context.Context) error {
 					fail(fmt.Sprintf("comments on #%d", is.Number), err)
 					continue
 				}
+				// Start makes this cache before its first refresh. A server a
+				// test built by hand and didn't prepare gets it here, as file,
+				// gateIn and graph make theirs.
+				if r.src.comments == nil {
+					r.src.comments = map[int]cachedComments{}
+				}
 				r.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
 				r.src.changed = true
 			}
