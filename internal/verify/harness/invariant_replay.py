@@ -41,6 +41,11 @@ def canonical(value):
 async def replay():
     # Consume the private bootstrap pipe before importing application code.
     # Seal the harness's own bytes, never records read from driver files.
+    # The seal defends against records written or replayed outside this
+    # harness. The driver runs in this process, so it can always reach the
+    # seal, the channel and these records, which no in-process harness can
+    # rule out: a driver that does is tampering with the gate, and review of
+    # the driver is the check against it.
     with os.fdopen(0, 'rb') as bootstrap:
         key = bootstrap.read()
     if len(key) != 32:
@@ -77,7 +82,9 @@ async def replay():
                 if canonical(before) != canonical(request['path']['states'][step['from']]):
                     raise ValueError('replay prefix diverged before dispatch')
                 binding = await awaited(member(session, 'bind')(step['action'], copy.deepcopy(step['args'] or [])))
-                if not isinstance(binding, dict) or not isinstance(binding.get('method'), str) or not isinstance(binding.get('args'), list):
+                # None has methods of its own, and calling its class returns
+                # None: a binding needs an application object to call.
+                if not isinstance(binding, dict) or binding.get('target') is None or not isinstance(binding.get('method'), str) or not isinstance(binding.get('args'), list):
                     raise ValueError('bind must name a real application method and argument list')
                 operation = getattr(binding.get('target'), binding['method'])
                 if not callable(operation):

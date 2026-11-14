@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/tlc"
@@ -199,7 +201,7 @@ func (s *commandReplaySource) run(ctx context.Context, q BugReplayRequest) (resu
 		if s.language == "python" {
 			factory = "invariant_replay"
 		}
-		err = fmt.Errorf("replay process or completion failed (%s(initial) with read, bind and close is required): %v; %s", factory, errors.Join(processErr, markerErr), lastLines(string(output), 20))
+		err = replayCommandError(factory, string(output), processErr, markerErr)
 		if markerErr != nil || len(marks) != 1 || marks[0][1] != "replay" {
 			err = errors.Join(err, errReplayCompletion)
 		}
@@ -218,6 +220,32 @@ func (s *commandReplaySource) run(ctx context.Context, q BugReplayRequest) (resu
 	}
 	observed.ExitCode = cmd.ProcessState.ExitCode()
 	return
+}
+
+// replayCommandError says on one line why a replay's command failed, since
+// a replay's message keeps only its first: the process's and the marker's
+// errors, then the last lines the driver and the harness printed. The
+// frames of a Python traceback or a Node stack are indented, and the cause
+// is the line after them, so they're left out, as is the marker.
+func replayCommandError(factory, output string, errs ...error) error {
+	var reasons []string
+	for _, err := range errs {
+		if err != nil {
+			first, _, _ := strings.Cut(err.Error(), "\n")
+			reasons = append(reasons, strings.TrimSuffix(strings.TrimSpace(first), ":"))
+		}
+	}
+	var printed []string
+	for _, line := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		text := strings.TrimSpace(line)
+		if text != "" && text == strings.TrimRightFunc(line, unicode.IsSpace) && text != "Traceback (most recent call last):" && !marker.MatchString(text) {
+			printed = append(printed, text)
+		}
+	}
+	if len(printed) > 4 {
+		printed = printed[len(printed)-4:]
+	}
+	return fmt.Errorf("replay process or completion failed (%s(initial) with read, bind and close is required): %s", factory, strings.Join(append(reasons, printed...), "; "))
 }
 
 func readReplayRecord(dir, name string, dst any) (err error) {
