@@ -144,7 +144,7 @@ func TestAProposalSaysWhichCurrentBugsCanNeverBeReplayed857(t *testing.T) {
 		project.Statement{Name: "NeverTakes", Kind: project.Bug, Says: "Nothing is ever taken.", Expect: "Drains", CodeBehavior: "current"})
 	body := proposalComment(p, nil, Marker{Kind: KindProposal, Proposal: p})
 	const both = "**This can't be built yet.** It calls `NeverTakes` current, so the gate has to replay it against the code, and this route cannot execute the required replay. " +
-		"A build would stop there, at `replay-unavailable`. `NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, now or once replays run."
+		"`NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, so a build would stop there at `replay-unsupported-temporal`."
 	if !strings.Contains(body, "\n"+both+"\n") {
 		t.Errorf("a proposal with a bug that breaks an invariant and one that breaks a property:\n%s", body)
 	}
@@ -156,7 +156,7 @@ func TestAProposalSaysWhichCurrentBugsCanNeverBeReplayed857(t *testing.T) {
 	}
 	body = proposalComment(p, nil, Marker{Kind: KindProposal, Proposal: p})
 	const only = "**This can't be built yet.** It calls `NeverTakes` current, so the gate has to replay it against the code, and this route cannot execute the required replay. " +
-		"A build would stop there, at `replay-unavailable`. `NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, now or once replays run."
+		"`NeverTakes` must break a property, and a counterexample that never ends isn't one a replay can run, so a build would stop there at `replay-unsupported-temporal`."
 	if !strings.Contains(body, "\n"+only+"\n") || strings.Contains(body, "Ratify it once replays run") {
 		t.Errorf("a proposal whose only current bug breaks a property:\n%s", body)
 	}

@@ -128,8 +128,10 @@ func thenWhat(p *formalize.Proposal, verb string) string {
 }
 
 // Unreplayed names the bugs a proposal calls current that the gate would
-// have to replay against the code and can't yet (#857). A build of such a
-// proposal stops at the gate, so the person ratifying it is told first.
+// have to replay against the code and can't (#857): an existing Python
+// application's, which has no replay adapter yet, and one that must break a
+// property, whose counterexample no replay can run (#913). A build of such
+// a proposal stops at the gate, so the person ratifying it is told first.
 func Unreplayed(p *formalize.Proposal) []string {
 	var names []string
 	m := p.Manifest()
@@ -154,10 +156,11 @@ func unbuildable(p *formalize.Proposal) string {
 	if len(names) == 1 {
 		it = "it"
 	}
-	note := fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and this route cannot execute the required replay. "+
-		"A build would stop there, at `replay-unavailable`.", list(names), it)
+	note := fmt.Sprintf("**This can't be built yet.** It calls %s current, so the gate has to replay %s against the code, and this route cannot execute the required replay.", list(names), it)
 	// A bug that must break a property has a counterexample that never
-	// ends, which no replay can run: waiting for replays doesn't help it.
+	// ends, which no replay can run, and the gate says so with its own
+	// status. Any other bug named here is an existing Python application's,
+	// which has no replay adapter.
 	kinds := map[string]string{}
 	for _, s := range p.Statements {
 		kinds[s.Name] = s.Kind
@@ -169,14 +172,17 @@ func unbuildable(p *formalize.Proposal) string {
 		}
 	}
 	if len(endless) < len(names) {
-		note += " Existing Python applications need an authenticated replay adapter."
+		note += " A build would stop there, at `replay-unavailable`. Existing Python applications need an authenticated replay adapter."
 	}
 	if len(endless) > 0 {
-		must := "must each break a property"
+		must, stop := "must each break a property", "their replays stop"
 		if len(endless) == 1 {
-			must = "must break a property"
+			must, stop = "must break a property", "its replay stops"
 		}
-		note += fmt.Sprintf(" %s %s, and a counterexample that never ends isn't one a replay can run, now or once replays run.", list(endless), must)
+		if len(endless) == len(names) {
+			stop = "a build would stop there"
+		}
+		note += fmt.Sprintf(" %s %s, and a counterexample that never ends isn't one a replay can run, so %s at `replay-unsupported-temporal`.", list(endless), must, stop)
 	}
 	return note
 }
