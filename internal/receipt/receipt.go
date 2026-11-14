@@ -79,6 +79,12 @@ func Markdown(r *verify.Report) string {
 		// failure when it doesn't hold.
 		if l.Passed {
 			writeRow("One size larger", true, "code reaches the model's states", fmt.Sprintf("%s states, depth %d, within %s", thousands(l.States), l.Depth, render.bounds(l.Bounds)))
+		} else if l.Required && l.States == l.WantStates && l.Depth == l.WantDepth && pythonApplicationLargerFailed(r.Application) {
+			// Counts that agree aren't what failed. The application's
+			// attempts were checked there too, so the row says what the gate
+			// said of them, where a receipt without that evidence keeps its
+			// counts (#881).
+			writeRow("One size larger", false, "code and model disagree one size larger", render.text(firstLine(l.Message)))
 		} else if l.Required {
 			writeRow("One size larger", false, "code and model differ, so the code carries a bound", fmt.Sprintf("%s states, depth %d, where the model has %s, depth %d, within %s", thousands(l.States), l.Depth, thousands(l.WantStates), l.WantDepth, render.bounds(l.Bounds)))
 		} else {
@@ -752,7 +758,9 @@ func (render renderer) failures(r *verify.Report) []string {
 			out = append(out, fmt.Sprintf("Bug replay %s: %s. %s", render.literal(g.Name), EscapeText(g.Replay.Status), EscapeText(g.Replay.Message)))
 		}
 	}
-	if l := r.Larger; l != nil && l.Required && !l.Passed {
+	// An application's checked attempts say what failed one size larger
+	// themselves, by invocation, so it's said once (#881).
+	if l := r.Larger; l != nil && l.Required && !l.Passed && !pythonApplicationLargerFailed(r.Application) {
 		message := "One size larger: " + render.text(l.Message)
 		if !hasComponentEvidence(r) {
 			message += ". The explorer names its bounds, so the code must hold at every size, and something in it stops at the bounds."
