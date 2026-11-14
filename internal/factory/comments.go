@@ -62,10 +62,10 @@ func clippedPost(title, body string, m Marker, closing ...string) string {
 	out := compose(strings.TrimSpace(body + end))
 	// A new modeled proposal is an indivisible checked artifact. The caller
 	// refuses publication if the complete comment cannot fit.
-	if m.Kind == KindProposal && m.Proposal != nil && m.Proposal.Reader != nil {
+	if m.Kind == KindProposal && (m.ProposalRef != nil || m.Proposal != nil && m.Proposal.Reader != nil) {
 		return out
 	}
-	if m.Kind == KindForks && m.Proposal.HasPreviews() {
+	if m.Kind == KindForks && (m.Proposal.HasPreviews() || m.ProposalRef != nil) {
 		return out
 	}
 	if len(out) <= maxComment {
@@ -191,6 +191,10 @@ func bugClassification(s project.Statement) string {
 }
 
 func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
+	return proposalCommentWithEvidence(p, r, m, "")
+}
+
+func proposalCommentWithEvidence(p *formalize.Proposal, r *verify.Report, m Marker, evidence string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Here's what I propose must always be true for **%s**. Once you ratify it, these statements are pinned by hash, and I can't change them. "+
 		"Then %s.\n\n", p.Name, thenWhat(p, "write the code"))
@@ -209,7 +213,7 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 	if note := unbuildable(p); note != "" {
 		b.WriteString("\n" + note + "\n")
 	}
-	b.WriteString(readerComment(p))
+	b.WriteString(readerCommentWithEvidence(p, evidence))
 	if p.Reader != nil && p.Reader.Comparison != nil {
 		old := p.Reader.Comparison.Baseline
 		changes := formalize.Diff(&formalize.Current{ModuleText: old.Model, Lock: old.Lock}, p)
@@ -224,15 +228,18 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 			}
 		}
 	}
-	if len(m.Answers) > 0 {
+	if evidence != "" {
+		b.WriteString(compactAnswers(m.Answers))
+	} else if len(m.Answers) > 0 {
 		b.WriteString("\n**Decided on this issue:**\n\n")
 		for _, a := range m.Answers {
 			fmt.Fprintf(&b, "- %s. %s **%s.** %s (@%s)\n", a.Fork, a.Question, a.Option, a.Says, a.By)
 		}
 	}
-	if pinned, err := p.Pinned(); err == nil {
+	if pinned, err := p.Pinned(); evidence == "" && err == nil {
 		fmt.Fprintf(&b, "\n<details>\n<summary>The statements in TLA+</summary>\n\n```tla\n%s```\n\n</details>\n", pinned)
 	}
+	b.WriteString(evidence)
 	closing := fmt.Sprintf("\n\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
 	return post("proposal for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)
@@ -242,6 +249,10 @@ func proposalComment(p *formalize.Proposal, r *verify.Report, m Marker) string {
 // ratified now, what changes, and a callout for anything removed or any
 // invariant changed, since that can loosen what was promised (D-0045).
 func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Changes, m Marker) string {
+	return amendmentCommentWithEvidence(p, r, ch, m, "")
+}
+
+func amendmentCommentWithEvidence(p *formalize.Proposal, r *verify.Report, ch *formalize.Changes, m Marker, evidence string) string {
 	var b strings.Builder
 	t := p.Target
 	fmt.Fprintf(&b, "Here's how I propose to change **%s**, in `%s`. It amends the statements ratified in %s (proposal `%s`). "+
@@ -276,19 +287,31 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 			assumed = append(assumed, c)
 		}
 	}
+	// A callout sends its reader to the old and new TLA+ further down. A
+	// compact comment keeps that section, and points at the complete record
+	// instead for a statement the section has nothing to show for: one whose
+	// pin changed while neither its own text nor a definition under it did.
+	where := func(cs []formalize.Change) string {
+		for _, c := range cs {
+			if evidence != "" && c.OwnTextSame() && len(c.Through) == 0 {
+				return "in the complete record"
+			}
+		}
+		return "below"
+	}
 	switch len(loosened) {
 	case 0:
 	case 1:
-		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text below.\n\n", names(loosened))
+		fmt.Fprintf(&b, "**This changes the invariant %s.** A changed invariant can promise less than before, so compare its old and new text %s.\n\n", names(loosened), where(loosened))
 	default:
-		fmt.Fprintf(&b, "**This changes the invariants %s.** A changed invariant can promise less than before, so compare their old and new text below.\n\n", names(loosened))
+		fmt.Fprintf(&b, "**This changes the invariants %s.** A changed invariant can promise less than before, so compare their old and new text %s.\n\n", names(loosened), where(loosened))
 	}
 	switch len(properties) {
 	case 0:
 	case 1:
-		fmt.Fprintf(&b, "**This changes the property %s.** A changed property can promise less than before, so compare its old and new text below.\n\n", names(properties))
+		fmt.Fprintf(&b, "**This changes the property %s.** A changed property can promise less than before, so compare its old and new text %s.\n\n", names(properties), where(properties))
 	default:
-		fmt.Fprintf(&b, "**This changes the properties %s.** A changed property can promise less than before, so compare their old and new text below.\n\n", names(properties))
+		fmt.Fprintf(&b, "**This changes the properties %s.** A changed property can promise less than before, so compare their old and new text %s.\n\n", names(properties), where(properties))
 	}
 	if len(assumed) > 0 {
 		fmt.Fprintf(&b, "**This changes what the properties assume: %s.** Fairness is an assumption, and a property can hold only because it assumes more, so read what each one says below.\n\n", names(assumed))
@@ -367,8 +390,13 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	if r != nil {
 		fmt.Fprintf(&b, "\n**Already checked** against the amended model, within %s: %s\n", bounds(p.Bounds), checked(r))
 	}
-	b.WriteString(readerComment(p))
-	if len(m.Answers) > 0 {
+	if evidence != "" {
+		b.WriteString("\n**Complete candidate statements:**\n\n" + compactStatements(p))
+	}
+	b.WriteString(readerCommentWithEvidence(p, evidence))
+	if evidence != "" {
+		b.WriteString(compactAnswers(m.Answers))
+	} else if len(m.Answers) > 0 {
 		b.WriteString("\n**Decided on this issue:**\n\n")
 		for _, a := range m.Answers {
 			fmt.Fprintf(&b, "- %s. %s **%s.** %s (@%s)\n", a.Fork, a.Question, a.Option, a.Says, a.By)
@@ -391,9 +419,12 @@ func amendmentComment(p *formalize.Proposal, r *verify.Report, ch *formalize.Cha
 	for _, d := range ch.Definitions {
 		fmt.Fprintf(&tla, "**`%s`**, which statements above depend on, before:\n\n```tla\n%s\n```\n\nafter:\n\n```tla\n%s\n```\n\n", d.Name, d.OldText, d.NewText)
 	}
+	// What changes is what a person approves, so a compact comment keeps
+	// its TLA+ too: it counts toward the size a compact comment must fit.
 	if tla.Len() > 0 {
 		fmt.Fprintf(&b, "\n<details>\n<summary>What changes, in TLA+</summary>\n\n%s</details>\n", tla.String())
 	}
+	b.WriteString(evidence)
 	closing := fmt.Sprintf("\n\nTo ratify exactly this, comment `/invariant ratify %s`. "+
 		"To change anything, say what in a comment, then comment `/invariant revise`.", strings.TrimPrefix(p.Hash, "sha256:")[:hashChars])
 	return post("amendment for ratification", strings.TrimSuffix(b.String(), "\n"), m, closing)

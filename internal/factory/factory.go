@@ -137,6 +137,9 @@ type Factory struct {
 	Check      string      // the CI check that gates a merge: invariant/gate
 	Language   string      // the code's language when an issue has no language label (D-0040)
 
+	// DashboardURL is the optional HTTP(S) base of a dashboard serving this repository.
+	DashboardURL string
+
 	// RepositoryDependencies is the host's default for configured requests.
 	// Unconfigured and modeled runners do not opt into repository execution.
 	RepositoryDependencies plumbing.DependencyPreparer
@@ -237,6 +240,9 @@ var activeLabels = []string{LabelAsking, LabelProposal, LabelBuilding, LabelPR, 
 
 // Prepare creates the labels the factory uses.
 func (f *Factory) Prepare(ctx context.Context) error {
+	if err := ValidateDashboardURL(f.DashboardURL); err != nil {
+		return err
+	}
 	for _, l := range labels {
 		if err := f.GitHub.EnsureLabel(ctx, l.name, l.color, l.description); err != nil {
 			return fmt.Errorf("label %s: %w", l.name, err)
@@ -346,6 +352,9 @@ func (f *Factory) Watch(ctx context.Context, every time.Duration) (err error) {
 // are full (D-0113, #455). Otherwise Poll takes one step at a time, and
 // returns their errors once they've ended.
 func (f *Factory) Poll(ctx context.Context) error {
+	if err := ValidateDashboardURL(f.DashboardURL); err != nil {
+		return err
+	}
 	defer func() {
 		// Activity hears every poll, including a failed discovery.
 		f.running.mu.Lock()
@@ -1035,7 +1044,19 @@ func (f *Factory) step(ctx context.Context, issue github.Issue) error {
 			if err := f.recovers(ctx, t.Issue.Number, "answer the retry", f.canPost(ratifying(true), recovery.Ratify)); err != nil {
 				return err
 			}
-			return f.say(ctx, t.Issue.Number, post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m), LabelBuilding)
+			body := post("building again", fmt.Sprintf("Building the proposal @%s ratified again, in `%s`.", c.By, m.Project), m)
+			if m.ProposalRef == nil {
+				return f.say(ctx, t.Issue.Number, body, LabelBuilding)
+			}
+			// Resume the validated saved selection after recording the retry,
+			// as an initial ratification does. Its post names the new build run.
+			comment, err := f.sayPost(ctx, t.Issue.Number, body, LabelBuilding)
+			if err != nil {
+				return err
+			}
+			posted := Post{Comment: comment, Marker: m}
+			t.Posts = append(t.Posts, posted)
+			return f.build(ctx, t, posted)
 		}
 		// A plan's build that failed in the factory's own run is built
 		// again, replacing its draft (#271).
@@ -1171,13 +1192,32 @@ func (f *Factory) choose(ctx context.Context, t Thread, state Post, pending []Co
 		return err
 	}
 	body := forksComment(remaining, m)
-	if m.Proposal.HasPreviews() {
+	if m.Proposal.HasPreviews() || m.ProposalRef != nil {
 		problem := ""
 		if err := m.Proposal.ValidatePreviews(); err != nil {
 			problem = err.Error()
 		}
-		if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
+		// Measure the complete inline evidence even when the preceding post
+		// used a reference. Answers never rewrite that original saved record.
+		inline := m
+		if f.DashboardURL != "" {
+			inline.ProposalRef = nil
+		}
+		if problem == "" && (!completeComment(forksComment(remaining, inline), inline) || m.ProposalRef != nil && f.DashboardURL != "") {
 			problem = "The complete remaining alternatives exceed the comment or expanded marker size limit. Revise and check the options again."
+			if f.DashboardURL != "" {
+				// A question whose record no reference can name keeps the
+				// refusal it has with no dashboard.
+				_, compactBody, err := f.compactDraft(ctx, t.Issue.Number, questionDraftStep(t, m.Proposal), m)
+				switch {
+				case err == nil:
+					return f.say(ctx, t.Issue.Number, compactBody, LabelAsking)
+				case errors.Is(err, errCompactSize):
+					problem = err.Error()
+				case !errors.Is(err, errLegacyDraft):
+					return err
+				}
+			}
 		}
 		if problem != "" {
 			m.Kind, m.Forks, m.Proposal = KindStuck, nil, nil
@@ -1499,10 +1539,25 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 		body := forksComment(p.Forks, m)
 		// A question carries its previews, and the baseline and target the
 		// draft after it compares with, so any of them can outgrow a post.
-		if _, ok := DecodeMarker(m.encode()); !ok || len(body) > maxComment {
+		if !completeComment(body, m) {
+			problem := "The complete question, with its alternative previews and the baseline it carries, exceeds the comment or expanded marker size limit. Revise the presentation and check every option again before publication."
+			if f.DashboardURL != "" && !res.legacy && checkContext.Planning == "" {
+				if err := validateDraftResult(&res.Result); err != nil {
+					problem = err.Error()
+				} else {
+					compact, body, err := f.compactDraft(ctx, n, draftStepName(cause), m)
+					if err == nil {
+						return f.drafted(ctx, t, cause, base, compact, body, LabelAsking)
+					}
+					if !errors.Is(err, errCompactSize) {
+						return err
+					}
+					problem = err.Error()
+				}
+			}
 			m.Kind, m.Forks, m.Proposal = KindStuck, nil, previous
 			m = retainedDraft(t, m)
-			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete question, with its alternative previews and the baseline it carries, exceeds the comment or expanded marker size limit. Revise the presentation and check every option again before publication.", m), LabelHumanReview)
+			return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelAsking)
 	case p.IssuePlan != nil:
@@ -1525,21 +1580,32 @@ func (f *Factory) publishDraft(ctx context.Context, t Thread, cause Command, rep
 			return f.drafted(ctx, t, cause, base, m, stuckComment(err.Error(), m), LabelHumanReview)
 		}
 		m.Kind, m.Proposal = KindProposal, p
-		// A compressed marker can fit the comment but exceed the reader's
-		// expanded size limit, leaving nothing recoverable or ratifiable.
-		if _, ok := DecodeMarker(m.encode()); !ok {
-			m.Kind, m.Proposal = KindStuck, previous
-			m = retainedDraft(t, m)
-			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification.", m), LabelHumanReview)
-		}
 		body := proposalComment(p, res.Report, m)
 		if p.Target != nil {
 			body = amendmentComment(p, res.Report, res.Changes, m)
 		}
-		if len(body) > maxComment {
+		if !completeComment(body, m) {
+			problem := "The complete modeled proposal and its reader evidence exceed the comment size limit; it cannot be published for ratification. Revise the presentation before publishing again."
+			if _, ok := DecodeMarker(m.encode()); !ok {
+				problem = "The complete modeled proposal cannot be read back from its saved marker, which has a 4 MiB expanded size limit. Reduce the saved payload and check the draft again before publishing for ratification."
+			}
+			if f.DashboardURL != "" && !res.legacy {
+				if err := validateDraftResult(&res.Result); err != nil {
+					problem = err.Error()
+				} else {
+					compact, body, err := f.compactDraft(ctx, n, draftStepName(cause), m)
+					if err == nil {
+						return f.drafted(ctx, t, cause, base, compact, body, LabelProposal)
+					}
+					if !errors.Is(err, errCompactSize) {
+						return err
+					}
+					problem = err.Error()
+				}
+			}
 			m.Kind, m.Proposal = KindStuck, previous
 			m = retainedDraft(t, m)
-			return f.drafted(ctx, t, cause, base, m, stuckComment("The complete modeled proposal and its reader evidence exceed the comment size limit; it cannot be published for ratification. Revise the presentation before publishing again.", m), LabelHumanReview)
+			return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 		}
 		return f.drafted(ctx, t, cause, base, m, body, LabelProposal)
 	}
@@ -1624,8 +1690,8 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 	// paths on this machine as localPaths does, whether it's the formalizer's
 	// own or its run's error.
 	res.Problem = localPaths(res.Problem, f.Work)
-	res.CheckContext = &authority
 	complete := &savedDraftResult{Result: *res, Publication: &publication}
+	complete.CheckContext = &authority
 	applyDraftPublication(complete)
 	saved, err := f.saveResult(ctx, complete, fmt.Sprintf("invariant: the result of a draft for #%d by %s", n, agent), "")
 	if err != nil {
@@ -3451,13 +3517,19 @@ func (f *Factory) note(ctx context.Context, t Thread, c Command, text string, cl
 // say posts a comment and sets the issue's status label. An empty label
 // clears it.
 func (f *Factory) say(ctx context.Context, issue int, body, label string) error {
+	_, err := f.sayPost(ctx, issue, body, label)
+	return err
+}
+
+func (f *Factory) sayPost(ctx context.Context, issue int, body, label string) (github.Comment, error) {
 	if err := f.mayAct(ctx); err != nil {
-		return err
+		return github.Comment{}, err
 	}
-	if _, err := f.GitHub.PostComment(ctx, issue, body); err != nil {
-		return f.effect(ctx, issue, "post the issue's update", err, nil)
+	comment, err := f.GitHub.PostComment(ctx, issue, body)
+	if err != nil {
+		return github.Comment{}, f.effect(ctx, issue, "post the issue's update", err, nil)
 	}
-	return f.status(ctx, issue, label)
+	return comment, f.status(ctx, issue, label)
 }
 
 func (f *Factory) status(ctx context.Context, issue int, label string) error {
