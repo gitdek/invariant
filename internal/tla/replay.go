@@ -34,7 +34,7 @@ func (m *Model) ReplayActions(bug string) (normal, faulty []Step, err error) {
 		if err := disjuncts(toks[eq+1:], binders, &parts); err != nil {
 			body := unwrap(toks[eq+1:])
 			if len(body) == 0 || body[0].text == `\E` {
-				return nil, fmt.Errorf("replay-unsupported-action: %s must name its parameterized operations", name)
+				return nil, fmt.Errorf("replay-unsupported-action: %s must name its parameterized operations: %v", name, err)
 			}
 			return []Step{{Name: name, Binders: binders}}, nil
 		}

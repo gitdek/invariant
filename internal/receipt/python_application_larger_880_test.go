@@ -86,3 +86,35 @@ func TestComponentReceiptSaysWhatTheLargerCheckDid880(t *testing.T) {
 		t.Errorf("a legacy receipt's account of the check changed:\n%s", legacy)
 	}
 }
+
+func TestPythonLargerConformanceReceipt881(t *testing.T) {
+	key := verify.PythonApplicationInvocationKey{Target: "counter", Check: "driver", Kind: "conformance", ID: "explore"}
+	bounds := map[string]string{"Limit": "3"}
+	for _, explicit := range []bool{false, true} {
+		for _, failure := range []string{"", "Inc from count = 2 to count = 4", "Init doesn't allow count = -1", "Done was not tried in count = 3"} {
+			passed := failure == ""
+			l := verify.Larger{Passed: passed, Required: true, Bounds: bounds, States: 4, Depth: 4, WantStates: 4, WantDepth: 4}
+			if !passed {
+				l.Message = "conformance one size larger: " + failure
+			}
+			c := &verify.PythonApplicationConformance{Key: key, Bounds: bounds, Mode: "bounded-exhaustive", Result: conformance.Result{Passed: passed, States: 4, ModelStates: 4}}
+			r := &verify.Report{Project: "counter", Passed: passed, Larger: &l, Application: &verify.PythonApplicationReport{
+				Larger: []verify.PythonApplicationLarger{{Key: key, Bounds: bounds, Result: l, Conformance: c, Execution: &verify.PythonApplicationExecutionResult{Key: key, Success: true, Complete: true}}}}}
+			if explicit {
+				r.Components = &verify.ComponentEvidence{Inventory: project.ComponentInventory{Mode: "explicit"}}
+			}
+			md := Markdown(r)
+			if passed {
+				if !strings.Contains(md, "the attempts conform and every step was tried, with matching state count and depth") {
+					t.Fatalf("new evidence has only count wording: %s", md)
+				}
+				continue
+			}
+			_, failed, ok := strings.Cut(md, "**What failed**")
+			failed = strings.SplitN(failed, "\n##", 2)[0]
+			if !ok || !strings.Contains(failed, componentText(failure)) || !strings.Contains(failed, "explore") || !strings.Contains(failed, "larger") {
+				t.Fatalf("failure left to JSON: %s", md)
+			}
+		}
+	}
+}

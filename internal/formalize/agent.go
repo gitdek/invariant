@@ -254,7 +254,10 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 		p.Baseline = detachedSnapshot(authority.Baseline)
 	}
 	if p != nil {
-		p.Language = req.Language
+		// The issue decides a draft's language and the code it checks as
+		// it is, never proposal.json, which the check read neither from
+		// (#910).
+		p.Language, p.Existing = req.Language, nil
 		if e := req.Existing; e != nil {
 			p.Existing, p.Language = e.Paths, "typescript"
 		}
@@ -377,7 +380,7 @@ func readRuns(path string) ([]synth.GateRun, error) {
 // name, module, package and language, and records which lock it replaces.
 func (p *Proposal) Amend(c *Current) error {
 	p.Target = &Target{Dir: c.Dir, Manifest: c.Manifest, Amends: project.ProposalHash(c.Lock.Bounds, c.Lock.Statements), Previous: c.Previous(), Baseline: detachCurrent(c)}
-	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), filepath.Base(c.Manifest.Code), c.Manifest.Language
+	p.Name, p.Slug, p.Package, p.Language = c.Manifest.Name, slugOf(c.Dir), seedPackage(c), c.Manifest.Language
 	if p.Ratifiable() && p.Module != c.ModuleName() {
 		return fmt.Errorf("an amendment keeps its module: %s, not %s", c.ModuleName(), p.Module)
 	}
@@ -394,10 +397,61 @@ func slugOf(dir string) string {
 	return base
 }
 
+// seedSlug is a directory name the name rules take, for the draft an
+// amendment starts from: the project's own, when that is kebab case, and
+// otherwise the same name in kebab case. An issue's Project: line may name
+// a directory the rules for a new project's wouldn't, with capitals or an
+// underscore in it. Only the seed carries this name: Amend gives the
+// checked draft its directory's own, which a saved amendment is found and
+// ratified by (#799). The package is the seed's in both, so a revision
+// copied from an amendment's saved proposal passes the rules too.
+func seedSlug(c *Current) string {
+	slug := slugOf(c.Dir)
+	if slugRE.MatchString(slug) {
+		return slug
+	}
+	var name strings.Builder
+	for _, r := range strings.ToLower(slug) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			name.WriteRune(r)
+		case name.Len() > 0 && !strings.HasSuffix(name.String(), "-"):
+			name.WriteByte('-')
+		}
+	}
+	if slug = strings.Trim(name.String(), "-"); slug == "" {
+		return "project"
+	}
+	return slug
+}
+
+// seedPackage is a package name the name rules take, for the draft an
+// amendment starts from: the last part of where the project's code is,
+// when that is one, and otherwise a name made from the project's directory.
+// A project that checks code as it is keeps its code at ".", which no
+// draft's check takes (#916). An amendment keeps its project's manifest as
+// it is (D-0046), so the name changes nothing in what's built: it lets the
+// check read the rest of the draft.
+func seedPackage(c *Current) string {
+	if base := filepath.Base(c.Manifest.Code); packageRE.MatchString(base) {
+		return base
+	}
+	var name strings.Builder
+	for _, r := range strings.ToLower(slugOf(c.Dir)) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' && name.Len() > 0 {
+			name.WriteRune(r)
+		}
+	}
+	if name.Len() == 0 {
+		return "project"
+	}
+	return name.String()
+}
+
 // seedAmendment starts an amendment's workspace from the project as it is:
 // its module, and its ratified statements as a draft for the agent to edit.
 func seedAmendment(ws string, c *Current) error {
-	d := Draft{Name: c.Manifest.Name, Slug: slugOf(c.Dir), Module: c.ModuleName(), Package: filepath.Base(c.Manifest.Code),
+	d := Draft{Name: c.Manifest.Name, Slug: seedSlug(c), Module: c.ModuleName(), Package: seedPackage(c),
 		Bounds: c.Lock.Bounds, Language: c.Manifest.Language}
 	for _, s := range c.Lock.Statements {
 		s.SHA256 = ""

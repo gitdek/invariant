@@ -120,7 +120,7 @@ The factory owns both the model and the code, and each Go method's contract rest
 | Known bugs | TLA+ · TLC | A ratified bug, added to the model as an extra action, slips past the invariants |
 | Current bug replay | Invariant · TLC | A required exact bug path reproduces in code, or replay is incomplete or unavailable |
 | Agreement | Invariant | Go: the code, explored from its initial state, doesn't reach exactly the states TLC found in the model |
-| One size larger | Invariant · TLC | One size past the ratified bounds, the code doesn't reach exactly the states TLC finds there, so it carries a bound |
+| One size larger | Invariant · TLC | State count or depth differs from TLC one size past the bounds; an explored Python application's recorded attempts also fail if they disagree with the model there |
 | Conformance | Invariant · TLC | Go, TypeScript and Python: the real code, driven through its operations, takes a step the model doesn't allow. Passing partial or unknown state coverage is labeled [sampled](docs/gate.md#sampled-state-coverage) |
 | Every step tried | Invariant · TLC | A driver, or a Go explorer that records its attempts, never tried a step in a state it reached, except where only the environment's bounds rule it out |
 | Code | Gobra · Nagini | A function doesn't verify against its contract, an index or integer operation could fail, or a Python core holds arithmetic the pinned Nagini models apart from Python, which the gate refuses before Nagini runs |
@@ -129,6 +129,8 @@ The factory owns both the model and the code, and each Go method's contract rest
 | Ratification | Invariant · GitHub | A project's lock or a plan isn't exactly the proposal a person with write access ratified on its issue, or, for a lock ratified by hand, the one a person's ratification in the journal names |
 
 Every pull request whose gate runs carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
+
+One size larger compares counts and depth for Go explorers and count-only drivers. [Explored Python applications](docs/python.md#exploring-every-state) also check their authenticated starts, transitions, declared outcomes and every step tried at the larger constants. After TLC's three-minute model check, each invocation shares six minutes across exploration, recording conversion and conformance. An unfinished or unavailable check claims nothing; completed disagreements fail, and so does a recorded state TLC can't parse or evaluate against the model. Receipts keep larger conformance evidence apart from base coverage and name the failing invocation and state or step, or give TLC's reason.
 
 New proposals classify bugs as **current** or **hypothetical**. Catching one in the model is separate from replaying it against code. Ordinary TypeScript, existing TypeScript and ordinary Python gates execute each current bug’s exact path independently of sampling; existing Python applications still refuse replay. Model-only checks prepare paths without executing code. Legacy bugs keep their checks and say **not replayed: not classified**. [The replay contract](docs/gate.md#current-bug-replay) describes the interface and limitations.
 
