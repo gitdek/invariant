@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 	"text/template"
@@ -110,93 +109,71 @@ func device(name string) string {
 	return ""
 }
 
-// blocked is the first of the files that can't go where it's meant to: one
-// that's there already with other contents, or a path with something other
-// than a directory on the way to it. A file that's there with the same
-// contents is kept, so a founding that stopped can be run again.
-func blocked(dir string, files []file, again string) error {
+// foreign is every entry of the directory that isn't the founding's own,
+// by its path, a directory with a slash after it. The founding's own are
+// its files, each at its path with the bytes it would write now, the
+// directories on the way to them, and the checkout's .git. Everything else
+// is foreign, whatever git makes of it: a file with other contents, a file
+// git ignores, a directory whose name differs only by case, a repository
+// inside this one, a link. It's decided by reading the directory, and no
+// link is followed. A directory that isn't the founding's is named and not
+// entered.
+func foreign(dir string, files []file) ([]string, error) {
 	root, err := os.OpenRoot(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer root.Close()
+	own, through := map[string]file{}, map[string]bool{}
 	for _, f := range files {
-		if _, err := present(root, dir, f, again); err != nil {
-			return err
+		own[f.path] = f
+		for d := path.Dir(f.path); d != "."; d = path.Dir(d) {
+			through[d] = true
 		}
 	}
-	return nil
-}
-
-// clear refuses a path with something other than a directory on the way to
-// it, whatever the file that goes there will hold.
-func clear(dir, name, again string) error {
-	root, err := os.OpenRoot(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	return way(root, dir, name, again)
-}
-
-// way is the error of a path whose way isn't clear: one of the directories
-// it goes through is there as a file or a link.
-func way(root *os.Root, dir, name, again string) error {
-	parts := strings.Split(name, "/")
-	for i := range parts[:len(parts)-1] {
-		through := path.Join(parts[:i+1]...)
-		info, err := root.Lstat(through)
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
+	var found []string
+	var read func(in string) error
+	read = func(in string) error {
+		entries, err := fs.ReadDir(root.FS(), in)
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
-			return fmt.Errorf("%s is in the way of %s: invariant new needs a directory there, and never replaces what it finds. Move it aside, then run it again:\n\n%s", filepath.Join(dir, filepath.FromSlash(through)), name, again)
+		for _, entry := range entries {
+			name := path.Join(in, entry.Name())
+			f, mine := own[name]
+			switch {
+			case name == ".git":
+			case entry.IsDir() && through[name]:
+				if err := read(name); err != nil {
+					return err
+				}
+			case entry.IsDir():
+				found = append(found, name+"/")
+			case !mine || !entry.Type().IsRegular():
+				found = append(found, name)
+			default:
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				data, err := root.ReadFile(name)
+				if err != nil {
+					return err
+				}
+				if !bytes.Equal(data, f.data) || f.mode&0o111 != 0 && info.Mode()&0o111 == 0 {
+					found = append(found, name)
+				}
+			}
 		}
+		return nil
 	}
-	return nil
+	return found, read(".")
 }
 
-// present says whether the file is in the checkout already, with the same
-// contents. Its error names what's there in its place, and the command to
-// run once that's out of the way.
-func present(root *os.Root, dir string, f file, again string) (bool, error) {
-	if err := way(root, dir, f.path, again); err != nil {
-		return false, err
-	}
-	info, err := root.Lstat(f.path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	differs := fmt.Errorf("%s is already there, and isn't the file invariant new would write. It never overwrites a file: move this one aside, then run it again:\n\n%s", filepath.Join(dir, filepath.FromSlash(f.path)), again)
-	if !info.Mode().IsRegular() || f.mode&0o111 != 0 && info.Mode()&0o111 == 0 {
-		return false, differs
-	}
-	old, err := root.ReadFile(f.path)
-	if err != nil {
-		return false, err
-	}
-	if !bytes.Equal(old, f.data) {
-		return false, differs
-	}
-	return true, nil
-}
-
-// place writes each file that isn't in the checkout yet, and returns the
-// ones it wrote. It replaces nothing: a file is created only where none is,
-// and only inside the checkout.
-func place(dir string, files []file, again string) ([]string, error) {
+// place writes each of the founding's files that isn't in the checkout yet,
+// and returns the ones it wrote. It replaces nothing: a file is created only
+// where none is, and only inside the checkout.
+func place(dir string, files []file) ([]string, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
@@ -204,11 +181,7 @@ func place(dir string, files []file, again string) ([]string, error) {
 	defer root.Close()
 	var wrote []string
 	for _, f := range files {
-		there, err := present(root, dir, f, again)
-		if err != nil {
-			return wrote, err
-		}
-		if there {
+		if _, err := root.Lstat(f.path); err == nil {
 			continue
 		}
 		if parent := path.Dir(f.path); parent != "." {
@@ -229,35 +202,31 @@ func place(dir string, files []file, again string) ([]string, error) {
 	return wrote, nil
 }
 
-// checks is the checks file of a checkout as it would be with the founding's
-// files in it, complete: what init would draft there, with the three things
-// a person completed by hand. Go's format check is the starter's script,
-// since gofmt -l doesn't fail on differences. The current state is the
-// starter's documents, which the draft finds only where a rule names them.
-// And tools/, which holds the format check, is trusted.
+// checks is the checks file of a project that holds the founding's files
+// and nothing else, complete: what init would draft of them, with the three
+// things a person completed by hand. Go's format check is the starter's
+// script, since gofmt -l doesn't fail on differences. The current state is
+// the starter's documents, which the draft finds only where a rule names
+// them. And tools/, which holds the format check, is trusted.
 //
 // Nothing is written to find out, so a founding knows its checks before it
-// creates anything. base is the checkout as it is, or "" when there's none
-// yet. left is what the draft leaves unresolved besides: a person's to
-// settle, so a founding stops on it. named is every file the checks name:
-// the agent rules, the current-state documents and each part's dependency
-// inputs and lockfiles. The loader refuses checks that name a file their
-// commit doesn't hold.
-func checks(base string, files []file) (contract []byte, named, left []string, err error) {
-	added := map[string][]byte{}
+// creates anything. A draft that leaves anything else unresolved is an
+// error: a starter is complete, or it isn't written.
+func checks(files []file) ([]byte, error) {
+	held := map[string][]byte{}
 	for _, f := range files {
-		added[f.path] = f.data
+		held[f.path] = f.data
 	}
-	draft, _, err := setup.DraftRepositoryWith(base, added)
+	draft, _, err := setup.DraftRepositoryOf(held)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	var c struct {
 		repository.Config
 		Unresolved []string `json:"unresolved"`
 	}
 	if err := json.Unmarshal(draft, &c); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	// Only the root's Go part is the starter's. settled is how the draft
 	// words the one requirement this completes, for that part.
@@ -270,7 +239,7 @@ func checks(base string, files []file) (contract []byte, named, left []string, e
 	}
 	documents := []string{}
 	for _, name := range []string{"SPEC.md", "README.md", specPath} {
-		if _, adding := added[name]; adding || base != "" && regular(filepath.Join(base, filepath.FromSlash(name))) {
+		if _, there := held[name]; there {
 			documents = append(documents, name)
 		}
 	}
@@ -283,19 +252,12 @@ func checks(base string, files []file) (contract []byte, named, left []string, e
 	if trusted := path.Dir(formatCheck) + "/"; !slices.Contains(c.TrustedPaths, trusted) {
 		c.TrustedPaths = append(c.TrustedPaths, trusted)
 	}
-	left = slices.DeleteFunc(c.Unresolved, func(issue string) bool {
+	left := slices.DeleteFunc(c.Unresolved, func(issue string) bool {
 		return settled != "" && strings.HasPrefix(issue, settled)
 	})
-	named = slices.Concat(c.AgentRules, c.CurrentState)
-	for _, p := range c.Parts {
-		named = slices.Concat(named, p.Inputs, p.Lockfiles)
+	if len(left) > 0 {
+		return nil, fmt.Errorf("the starter's own checks leave requirements unresolved, so nothing was created:\n- %s", strings.Join(left, "\n- "))
 	}
-	contract, err = json.MarshalIndent(c.Config, "", "  ")
-	return append(contract, '\n'), named, left, err
-}
-
-// regular says whether name is a regular file.
-func regular(name string) bool {
-	info, err := os.Lstat(name)
-	return err == nil && info.Mode().IsRegular()
+	contract, err := json.MarshalIndent(c.Config, "", "  ")
+	return append(contract, '\n'), err
 }

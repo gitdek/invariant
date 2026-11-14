@@ -16,8 +16,9 @@ import (
 
 // noGitHub is a runner that runs nothing: it notes each command a founding
 // asks for and answers that the owner is a person with no such repository,
-// then refuses to create one. A checkout it's told of has the repository
-// for its origin and no commit. No test here reaches gh, git or GitHub.
+// then refuses to create one. A checkout it's told of is a fresh clone of
+// the repository, with no commit and no git identity. No test here reaches
+// gh, git or GitHub.
 type noGitHub struct {
 	calls    []string
 	checkout string // a directory that is the repository's checkout
@@ -30,10 +31,10 @@ func (n *noGitHub) Run(_ context.Context, c found.Command) ([]byte, error) {
 		return []byte("User\n"), nil
 	case c.Name == "gh" && c.Args[1] == "view":
 		return nil, errors.New("GraphQL: Could not resolve to a Repository with the name 'acme/widgets'. (repository)")
-	case c.Name == "git" && c.Dir == n.checkout && args == "remote get-url origin":
+	case c.Name == "git" && c.Dir == n.checkout && (args == "remote get-url --all origin" || args == "remote get-url --push --all origin"):
 		return []byte("https://github.com/acme/widgets.git\n"), nil
-	case c.Name == "git" && c.Dir == n.checkout && args == "symbolic-ref --short HEAD":
-		return []byte("main\n"), nil
+	case c.Name == "git" && c.Dir == n.checkout && args == "for-each-ref --count=1":
+		return nil, nil
 	}
 	return nil, errors.New("this test creates nothing")
 }
@@ -104,10 +105,10 @@ func words(t *testing.T, line string) []string {
 	return out
 }
 
-// Where new stops, it gives the command to run again, with every flag that
-// decides what it does. Pasted, that command is the same founding: it reads
-// the same repository, directory, visibility, spec and pin, from wherever
-// it's run.
+// Where new stops for something a person can put right, it gives the
+// command to run again, with every flag that decides what it does. Pasted,
+// that command is the same founding: it reads the same repository,
+// directory, visibility, spec and pin, from wherever it's run.
 func TestNewTakesTheCommandItGivesForRunningAgain919(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "the project's", "widgets")
@@ -115,26 +116,20 @@ func TestNewTakesTheCommandItGivesForRunningAgain919(t *testing.T) {
 	if err := os.WriteFile(spec, []byte("# The spec\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The repository's checkout, with a README of the person's own, which
-	// stops new before it creates anything.
-	for name, text := range map[string]string{".git/HEAD": "ref: refs/heads/main\n", "README.md": "# Mine\n"} {
-		path := filepath.Join(dir, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	// A fresh clone of the repository, with no git identity, which stops
+	// new before it creates anything.
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	run := func(args []string) (string, []string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
 		runner := &noGitHub{checkout: dir}
-		if code := foundNew(context.Background(), args, runner, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), filepath.Join(dir, "README.md")+" is already there") {
+		if code := foundNew(context.Background(), args, runner, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), dir+" has no git identity") {
 			t.Fatalf("new %s exited %d and said:\n%s", strings.Join(args, " "), code, stderr.String())
 		}
 		for _, call := range runner.calls {
-			if strings.Contains(call, "create") || strings.Contains(call, "clone") || strings.Contains(call, "push") {
+			if strings.Contains(call, "create") || strings.Contains(call, "clone") || strings.Contains(call, "push") && !strings.Contains(call, "get-url") {
 				t.Errorf("new %s ran %q before it stopped", strings.Join(args, " "), call)
 			}
 		}
@@ -147,7 +142,7 @@ func TestNewTakesTheCommandItGivesForRunningAgain919(t *testing.T) {
 	if !slices.Equal(again, want) {
 		t.Fatalf("the command to run again reads as %q, want %q:\n%s", again, want, said)
 	}
-	// From another directory, it stops at the same file, having asked the
+	// From another directory, it stops at the same place, having asked the
 	// same things.
 	t.Chdir(t.TempDir())
 	saidAgain, callsAgain := run(again[2:])

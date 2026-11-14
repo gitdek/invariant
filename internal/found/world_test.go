@@ -45,6 +45,7 @@ type world struct {
 	before func(Command)       // called before each command runs
 	fails  func(Command) error // what a command fails with, for the ones a test picks
 	said   bytes.Buffer        // what the founding printed
+	err    error               // what the last founding returned
 }
 
 // newWorld is a world with no repository yet, where git has an identity.
@@ -78,8 +79,8 @@ func (w *world) found(o Options) (string, error) {
 	}
 	o.Runner, o.Out = w, &w.said
 	w.said.Reset()
-	err := Project(context.Background(), o)
-	return w.said.String(), err
+	w.err = Project(context.Background(), o)
+	return w.said.String(), w.err
 }
 
 func (w *world) Run(_ context.Context, c Command) ([]byte, error) {
@@ -119,7 +120,7 @@ func (w *world) Run(_ context.Context, c Command) ([]byte, error) {
 			w.pushed, w.empty = append(w.pushed, strings.TrimSpace(string(head))), false
 			// A push that lands moves the checkout's record of the remote.
 			return w.git(c.Dir, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
-		case "remote", "ls-tree", "show", "rev-parse", "symbolic-ref", "config", "status", "add", "commit":
+		case "remote", "ls-tree", "show", "for-each-ref", "symbolic-ref", "config", "add", "commit":
 			return w.git(c.Dir, c.Args...)
 		}
 	}
@@ -301,7 +302,7 @@ func (w *world) commit(dir, message string, paths ...string) {
 // again is the command a founding in dir prints for running it again, with
 // any flags between its directory and its pin.
 func (w *world) again(dir string, flags ...string) string {
-	words := append([]string{"invariant new", w.repo, "-dir", dir}, flags...)
+	words := append([]string{"invariant new", w.repo, "-dir", shell(dir)}, flags...)
 	return strings.Join(append(words, "-invariant", pin), " ")
 }
 

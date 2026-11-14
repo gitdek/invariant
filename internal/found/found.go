@@ -3,15 +3,18 @@
 // gate. A person took about ten steps to do that by hand. Project takes
 // them in one command, and ends by printing the ones only a person can take.
 //
-// It adopts what exists, an empty directory, the repository's own checkout
-// or an empty repository, and never overwrites a file. Everything that can
-// refuse a founding is read first, from the directory and the repository as
-// they are, so a refusal leaves nothing behind. Each step then looks for
-// its own result, so a founding that stopped can be run again, and a second
-// run of a finished one changes nothing.
+// It founds empty projects only: a repository that exists is invariant
+// init's to set up. A directory is the project's when it's empty, or holds
+// a founding that stopped part way, nothing but files the founding writes,
+// each with the bytes it would write now, or holds a project that is
+// founded already. Anything else in it is refused before the first thing is
+// created. Each step looks for its own result, so a founding that stopped
+// is finished by running it again, and a second run of a finished one
+// changes nothing.
 package found
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,8 +75,7 @@ type founding struct {
 // checkout is what a founding finds where the project's checkout goes.
 type checkout struct {
 	exists  bool   // the directory is the repository's checkout already
-	born    bool   // it has a commit
-	founded bool   // and that commit holds the checks and a capable gate
+	founded bool   // its commit holds the checks and a capable gate
 	pin     string // the commit of Invariant that gate builds, where it says
 }
 
@@ -127,13 +129,29 @@ func Project(ctx context.Context, o Options) error {
 			return fmt.Errorf("reading the spec: %w", err)
 		}
 	}
+	// Every file of the founding, the checks included, is known before
+	// anything is read or made: the spec is the one thing of a person's
+	// that goes in.
+	files, err := starter(owner, name, spec != nil)
+	if err != nil {
+		return err
+	}
+	if spec != nil {
+		files = append(files, file{specPath, spec, 0o644})
+	}
+	files = append(files, file{setup.WorkflowPath, []byte(workflow), 0o644})
+	contract, err := checks(files)
+	if err != nil {
+		return err
+	}
+	files = append(files, file{repository.Path, contract, 0o644})
 	f.say("Repository: https://github.com/%s", o.Repo)
 	f.say("Directory:  %s\n", f.dir)
 
-	// Everything that can refuse the founding is read here, from the
-	// directory and the repository as they are, before the first thing is
-	// created, cloned or written.
-	local, err := f.local(ctx)
+	// What the directory and the repository hold is read here, before the
+	// first thing is created, so a project that isn't empty is refused
+	// with nothing made.
+	local, err := f.local(ctx, files)
 	if err != nil {
 		return err
 	}
@@ -146,18 +164,18 @@ func Project(ctx context.Context, o Options) error {
 		return err
 	}
 	switch {
-	case remote.exists && !remote.empty && !local.exists:
-		return fmt.Errorf("%s already holds commits, so there's no project to start, and %s isn't its checkout. To work on it, clone it. To set up a repository that has no gate yet, run invariant init in its checkout", o.Repo, f.dir)
-	case remote.exists && !remote.empty && !local.born:
-		return fmt.Errorf("%s already holds commits, and its checkout in %s has none of them, so a commit made there couldn't be pushed. Pull them first, with git -C %s pull origin main, then run it again:\n\n%s", o.Repo, f.dir, shell(f.dir), f.again())
-	}
-	var files []file
-	if local.founded {
+	case remote.exists && !remote.empty && !(local.founded && f.reached(ctx)):
+		// A repository with commits is this project's only when its
+		// founding is what the checkout has seen there.
+		return f.existing(o.Repo+" already holds commits on GitHub", "path/to/your-repo")
+	case local.founded:
 		if err := f.loads(ctx); err != nil {
 			return err
 		}
-	} else if files, err = f.plan(ctx, local, spec, workflow); err != nil {
-		return err
+	case local.exists:
+		if err := f.identity(ctx); err != nil {
+			return err
+		}
 	}
 
 	private := !o.Public
@@ -183,15 +201,29 @@ func Project(ctx context.Context, o Options) error {
 			return err
 		}
 		f.did("Cloned it into %s.", f.dir)
+		// The clone is held to what a checkout that was there is: the
+		// repository's own, with nothing in it. It couldn't be asked for
+		// an identity any sooner.
+		if err := f.origin(ctx); err != nil {
+			return err
+		}
+		if err := f.pristine(ctx, files, false); err != nil {
+			return err
+		}
+		if err := f.identity(ctx); err != nil {
+			return err
+		}
 	}
 
-	committed := false
 	if local.founded {
 		if local.pin != "" && local.pin != o.Invariant {
 			f.say("Its gate builds Invariant at %s, not at %s, the commit -invariant names. invariant new leaves a founded project's gate as it is.", local.pin[:12], o.Invariant[:12])
 		}
+		if spec != nil && !f.same(specPath, spec) {
+			f.say("-spec wasn't used: the project is founded already, and its %s is its own to change.", specPath)
+		}
 	} else {
-		if err := f.start(ctx, local, files); err != nil {
+		if err := f.start(ctx, files); err != nil {
 			return err
 		}
 		// The founding's own commit is read as CI will read it, before
@@ -199,9 +231,10 @@ func Project(ctx context.Context, o Options) error {
 		if err := f.loads(ctx); err != nil {
 			return err
 		}
-		committed = true
 	}
-	if committed || remote.empty || !f.pushed(ctx) {
+	// A repository with nothing in it hasn't had the founding's push, this
+	// run's or an earlier one's that failed.
+	if remote.empty {
 		if _, err := f.git(ctx, "push", "-u", "origin", "main"); err != nil {
 			return err
 		}
@@ -240,22 +273,31 @@ func (f *founding) again() string {
 	return strings.Join(append(words, "-invariant", f.Invariant), " ")
 }
 
+// existing is the refusal of a project that isn't empty, for the reason
+// given: invariant init sets up a repository that exists, run in its
+// checkout, as the README has it.
+func (f *founding) existing(reason, checkout string) error {
+	return fmt.Errorf(`%s, so this isn't an empty project, and invariant new founds empty projects only. A repository that exists is invariant init's to set up, in its checkout:
+
+cd %s && invariant init -repo %s
+
+https://github.com/gitdek/invariant#use-it-on-your-repository says what follows`, reason, checkout, f.Repo)
+}
+
 // loads reads the checkout's committed checks with the loader CI and the
 // factory use. Checks it refuses are never pushed as a founding's, and
 // their project is never called founded.
 func (f *founding) loads(ctx context.Context) error {
 	if _, err := repository.Load(ctx, f.dir, "HEAD"); err != nil {
-		return fmt.Errorf("the checks committed in %s don't load, so the project isn't founded: %w. Complete %s by hand, as https://github.com/gitdek/invariant/blob/main/docs/factory.md#drafting-repository-checks says, commit it, then run it again:\n\n%s", f.dir, err, repository.Path, f.again())
+		return fmt.Errorf("the checks committed in %s don't load, so the project isn't founded: %w. https://github.com/gitdek/invariant/blob/main/docs/factory.md#drafting-repository-checks says how a person completes %s", f.dir, err, repository.Path)
 	}
 	return nil
 }
 
-// pushed says whether the founding has reached GitHub, as far as the
-// checkout knows: whether main as it last saw it there is founded. A push
-// that failed leaves it behind, so the next run pushes, and a project that
-// has moved on since stays founded, so a later run doesn't push whatever
-// else the checkout holds.
-func (f *founding) pushed(ctx context.Context) bool {
+// reached says whether the founding has reached GitHub, as far as the
+// checkout knows: whether main as it last saw it there is founded. A
+// project that has moved on since stays founded.
+func (f *founding) reached(ctx context.Context) bool {
 	_, founded, _ := f.read(ctx, "refs/remotes/origin/main")
 	return founded
 }
@@ -299,9 +341,16 @@ func (f *founding) read(ctx context.Context, rev string) (commit, founded bool, 
 	return true, capable && slices.Contains(names, repository.Path), pin
 }
 
-// has says whether the checkout holds a file at name.
+// has says whether the checkout holds a file at name, and same whether that
+// file holds exactly data.
 func (f *founding) has(name string) bool {
-	return regular(filepath.Join(f.dir, filepath.FromSlash(name)))
+	info, err := os.Lstat(filepath.Join(f.dir, filepath.FromSlash(name)))
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (f *founding) same(name string, data []byte) bool {
+	held, err := os.ReadFile(filepath.Join(f.dir, filepath.FromSlash(name)))
+	return f.has(name) && err == nil && bytes.Equal(held, data)
 }
 
 // say tells the person one thing, and did tells them one thing this run
@@ -358,10 +407,10 @@ func directory(work, dir, name string) string {
 
 // local reads what's where the checkout goes. A directory that isn't
 // there, or is empty, is free to clone into. One that holds the
-// repository's checkout is adopted, on main: main is the branch a founding
-// commits to and pushes. Anything else is refused: it isn't the project's,
-// and a founding writes nowhere else.
-func (f *founding) local(ctx context.Context) (checkout, error) {
+// repository's checkout is the project's when the project is founded
+// already, or when the checkout holds nothing but a founding that stopped.
+// Anything else is refused: it isn't an empty project.
+func (f *founding) local(ctx context.Context, files []file) (checkout, error) {
 	info, err := os.Lstat(f.dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return checkout{}, nil
@@ -379,37 +428,70 @@ func (f *founding) local(ctx context.Context) (checkout, error) {
 	if len(entries) == 0 {
 		return checkout{}, nil
 	}
-	const takes = "invariant new starts in an empty directory or in the repository's own checkout"
-	if _, err := os.Lstat(filepath.Join(f.dir, ".git")); err != nil {
-		return checkout{}, fmt.Errorf("%s isn't empty, and isn't a checkout of %s: it holds %s. %s", f.dir, f.Repo, entries[0].Name(), takes)
+	if !slices.ContainsFunc(entries, func(entry fs.DirEntry) bool { return entry.Name() == ".git" }) {
+		// No checkout, so nothing in it is a founding's.
+		found, err := foreign(f.dir, nil)
+		if err != nil {
+			return checkout{}, err
+		}
+		return checkout{}, f.holds(found)
 	}
-	// The origin's address is compared and never printed: one can carry a
-	// token.
-	origin, err := f.git(ctx, "remote", "get-url", "origin")
-	if err != nil || !strings.EqualFold(setup.GitHubRepo(strings.TrimSpace(origin)), f.Repo) {
-		return checkout{}, fmt.Errorf("%s is a git checkout whose origin isn't %s on GitHub. %s", f.dir, f.Repo, takes)
+	if err := f.origin(ctx); err != nil {
+		return checkout{}, err
 	}
 	c := checkout{exists: true}
-	// A detached HEAD is on no branch, and a clone of an empty repository
-	// has a branch with no commit yet.
-	branch, err := f.git(ctx, "symbolic-ref", "--short", "HEAD")
-	if branch = strings.TrimSpace(branch); err != nil {
-		branch = "no branch"
+	var commit bool
+	if commit, c.founded, c.pin = f.read(ctx, "HEAD"); !c.founded {
+		return c, f.pristine(ctx, files, commit)
 	}
-	c.born, c.founded, c.pin = f.read(ctx, "HEAD")
-	if branch != "main" {
-		// A branch with no commit yet is moved to main, unless main has
-		// commits of its own for the founding to land on.
-		elsewhere := c.born
-		if !c.born {
-			_, err := f.git(ctx, "rev-parse", "--verify", "--quiet", "refs/heads/main")
-			elsewhere = err == nil
-		}
-		if elsewhere {
-			return c, fmt.Errorf("%s is on %s, not on main, the branch invariant new commits to and pushes. Switch it to main, then run it again:\n\n%s", f.dir, branch, f.again())
-		}
+	// A founded project's main is what a founding pushes.
+	if branch, err := f.git(ctx, "symbolic-ref", "--short", "HEAD"); err != nil || strings.TrimSpace(branch) != "main" {
+		return c, fmt.Errorf("%s isn't on main, the branch invariant new pushes. Switch it to main, then run it again:\n\n%s", f.dir, f.again())
 	}
 	return c, nil
+}
+
+// origin refuses a checkout that doesn't fetch from the repository, or
+// doesn't push to it, at every address it has for each. The addresses are
+// compared and never printed: one can carry a token.
+func (f *founding) origin(ctx context.Context) error {
+	for _, addresses := range [][]string{{"remote", "get-url", "--all", "origin"}, {"remote", "get-url", "--push", "--all", "origin"}} {
+		listed, err := f.git(ctx, addresses...)
+		urls := strings.Split(strings.TrimSpace(listed), "\n")
+		if err != nil || slices.ContainsFunc(urls, func(url string) bool { return !strings.EqualFold(setup.GitHubRepo(url), f.Repo) }) {
+			return fmt.Errorf("%s is a git checkout whose origin isn't %s on GitHub, to fetch from and to push to. invariant new starts in an empty directory or in a fresh clone of the repository", f.dir, f.Repo)
+		}
+	}
+	return nil
+}
+
+// pristine refuses a checkout that holds anything but a founding that
+// stopped part way: an entry that isn't the founding's own, or a commit,
+// at HEAD or under any name.
+func (f *founding) pristine(ctx context.Context, files []file, commit bool) error {
+	found, err := foreign(f.dir, files)
+	if err != nil {
+		return err
+	}
+	if len(found) > 0 {
+		return f.holds(found)
+	}
+	if refs, err := f.git(ctx, "for-each-ref", "--count=1"); commit || err != nil || strings.TrimSpace(refs) != "" {
+		return f.existing(f.dir+" already has commits, and they don't make a founded project", shell(f.dir))
+	}
+	return nil
+}
+
+// holds is the refusal of a directory with entries that aren't a
+// founding's own: a handful of them are named. A founding that stopped
+// with other flags leaves files that aren't this one's either, so it says
+// how that's finished.
+func (f *founding) holds(entries []string) error {
+	named := strings.Join(entries[:min(len(entries), 5)], ", ")
+	if more := len(entries) - 5; more > 0 {
+		named += fmt.Sprintf(" and %d more", more)
+	}
+	return fmt.Errorf("%w. A founding that stopped part way is finished by running it again with the -spec and -invariant it was started with", f.existing(f.dir+" holds what a founding doesn't write: "+named, shell(f.dir)))
 }
 
 // organization reads who the repository's owner is on GitHub: a person's
@@ -449,137 +531,6 @@ func (f *founding) hosted(ctx context.Context) (hosted, error) {
 	return hosted{exists: true, empty: v.IsEmpty, mergeCommits: v.MergeCommitAllowed, visibility: strings.ToLower(v.Visibility)}, nil
 }
 
-// plan is the files a founding puts in the checkout: the starter, the spec,
-// the gate and the checks. It refuses, before anything is created or
-// written, whatever would stop them going in: a file with other contents, a
-// draft with requirements a person has to settle, changes of the checkout's
-// own that the founding's commit would sweep in or leave out, and a
-// checkout that can't commit.
-func (f *founding) plan(ctx context.Context, local checkout, spec []byte, workflow string) ([]file, error) {
-	files, err := starter(f.owner, f.name, spec != nil || f.has(specPath))
-	if err != nil {
-		return nil, err
-	}
-	if spec != nil {
-		files = append(files, file{specPath, spec, 0o644})
-	}
-	files = append(files, file{setup.WorkflowPath, []byte(workflow), 0o644})
-	if err := blocked(f.dir, files, f.again()); err != nil {
-		return nil, err
-	}
-	if err := clear(f.dir, repository.Path, f.again()); err != nil {
-		return nil, err
-	}
-	base := ""
-	if local.exists {
-		base = f.dir
-	}
-	contract, named, unsettled, err := checks(base, files)
-	if err != nil {
-		return nil, err
-	}
-	if len(unsettled) > 0 {
-		return nil, fmt.Errorf(`the checks drafted for %[1]s leave requirements invariant new can't settle, so it created and wrote nothing:
-- %[2]s
-Set this project up by hand instead. Run invariant init -repo %[3]s -invariant %[4]s %[5]s, complete %[6]s, and commit it on main with %[7]s and every file the checks name. Then run it again, to push main and finish the founding:
-
-%[8]s`, f.dir, strings.Join(unsettled, "\n- "), f.Repo, f.Invariant, shell(f.dir), repository.Path, setup.WorkflowPath, f.again())
-	}
-	files = append(files, file{repository.Path, contract, 0o644})
-	if err := blocked(f.dir, files[len(files)-1:], f.again()); err != nil {
-		return nil, err
-	}
-	if local.exists {
-		if err := f.clean(ctx, files, named); err != nil {
-			return nil, err
-		}
-		if err := f.identity(ctx); err != nil {
-			return nil, err
-		}
-	}
-	return files, nil
-}
-
-// clean refuses a checkout whose own changes the founding's commit would
-// touch. The commit holds the founding's files and nothing else, so changes
-// a person has staged stay out of it, and it isn't made around them. And
-// the checks name files beyond the founding's, as an agent's rules or a
-// lockfile the checkout holds: one that isn't committed as it stands would
-// be named by checks whose commit lacks it, and it's never the founding's
-// to add.
-func (f *founding) clean(ctx context.Context, files []file, named []string) error {
-	own := map[string]bool{}
-	for _, file := range files {
-		own[file.path] = true
-	}
-	changed, err := f.git(ctx, "status", "--porcelain=v1", "-z", "--untracked-files=no")
-	if err != nil {
-		return err
-	}
-	var staged []string
-	for _, entry := range status(changed) {
-		if entry.state[0] != ' ' && !own[entry.path] {
-			staged = append(staged, entry.path)
-		}
-	}
-	if len(staged) > 0 {
-		return fmt.Errorf("%s has changes of its own staged: %s. invariant new commits the files it writes and nothing else, and doesn't commit around what's staged. Commit or unstage them, then run it again:\n\n%s", f.dir, strings.Join(staged, ", "), f.again())
-	}
-	var others []string
-	for _, name := range named {
-		if !own[name] && !slices.Contains(others, name) {
-			others = append(others, name)
-		}
-	}
-	if len(others) == 0 {
-		return nil
-	}
-	args := []string{"status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=all", "--"}
-	for _, name := range others {
-		args = append(args, ":(literal)"+name)
-	}
-	listed, err := f.git(ctx, args...)
-	if err != nil {
-		return err
-	}
-	var loose []string
-	for _, entry := range status(listed) {
-		how := "changed"
-		switch entry.state {
-		case "??":
-			how = "untracked"
-		case "!!":
-			how = "ignored"
-		}
-		loose = append(loose, fmt.Sprintf("%s (%s)", entry.path, how))
-	}
-	if len(loose) > 0 {
-		return fmt.Errorf("the checks for %s would name files it holds that aren't committed as they stand: %s. invariant new commits the files it writes and nothing else, so it never adds them. Commit or remove each, then run it again:\n\n%s", f.dir, strings.Join(loose, ", "), f.again())
-	}
-	return nil
-}
-
-// change is one path git status lists, with its two-letter state.
-type change struct{ state, path string }
-
-// status reads git status --porcelain=v1 -z. A rename or a copy is followed
-// by the path it came from, which isn't an entry of its own.
-func status(listed string) []change {
-	var changes []change
-	fields := strings.Split(listed, "\x00")
-	for i := 0; i < len(fields); i++ {
-		if len(fields[i]) < 4 {
-			continue
-		}
-		c := change{fields[i][:2], fields[i][3:]}
-		if c.state[0] == 'R' || c.state[0] == 'C' {
-			i++
-		}
-		changes = append(changes, c)
-	}
-	return changes
-}
-
 // identity refuses a checkout that can't commit: one with no user.name or
 // no user.email. It says how to set them.
 func (f *founding) identity(ctx context.Context) error {
@@ -592,7 +543,7 @@ func (f *founding) identity(ctx context.Context) error {
 	if len(unset) == 0 {
 		return nil
 	}
-	return fmt.Errorf(`%[1]s has no git identity, so nothing can be committed there: %[2]s. Set one for this checkout:
+	return fmt.Errorf(`%[1]s has no git identity, so the founding can't make its commit there: %[2]s. Set one for this checkout:
 
 git -C %[3]s config user.name "Your Name"
 git -C %[3]s config user.email "you@example.com"
@@ -603,22 +554,15 @@ or for every checkout, with git config --global. Then run it again, and it carri
 }
 
 // start writes the founding's files into the checkout and commits them, and
-// nothing else, on main.
-func (f *founding) start(ctx context.Context, local checkout, files []file) error {
-	if !local.born {
-		// A clone of an empty repository is on whatever branch git's own
-		// configuration names.
-		if _, err := f.git(ctx, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
-			return err
-		}
+// nothing else, on main. The files are its own, so they're added whatever
+// a person's ignore rules say of their names.
+func (f *founding) start(ctx context.Context, files []file) error {
+	// A clone of an empty repository is on whatever branch git's own
+	// configuration names.
+	if _, err := f.git(ctx, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
+		return err
 	}
-	if !local.exists {
-		// A checkout this run cloned couldn't be asked any sooner.
-		if err := f.identity(ctx); err != nil {
-			return err
-		}
-	}
-	wrote, err := place(f.dir, files, f.again())
+	wrote, err := place(f.dir, files)
 	if err != nil {
 		return err
 	}
@@ -633,7 +577,7 @@ func (f *founding) start(ctx context.Context, local checkout, files []file) erro
 	for i, file := range files {
 		paths[i] = file.path
 	}
-	if _, err := f.git(ctx, append([]string{"add", "--"}, paths...)...); err != nil {
+	if _, err := f.git(ctx, append([]string{"add", "-f", "--"}, paths...)...); err != nil {
 		return err
 	}
 	message := "Start " + f.name + ": a Go module, its checks and Invariant's gate"
@@ -649,55 +593,66 @@ func (f *founding) start(ctx context.Context, local checkout, files []file) erro
 // organization's.
 var planRefusal = regexp.MustCompile(`Upgrade to GitHub \w+ or make this repository public`)
 
-// protection is main's protection as GitHub shows it: the checks it
-// requires, each with the App that must report it, when it names one.
-type protection struct {
-	Required *struct {
-		Strict   bool     `json:"strict"`
-		Contexts []string `json:"contexts"`
-		Checks   []struct {
-			Context string `json:"context"`
-			App     *int64 `json:"app_id"`
-		} `json:"checks"`
-	} `json:"required_status_checks"`
-}
-
 // requireGate has GitHub refuse any merge to main that invariant/gate
 // didn't pass, with the call init prints for a person. It makes that call
 // only where GitHub says plainly that main isn't protected, since the call
 // replaces whatever protection is there. A branch that requires the gate
 // already is left as it is. One that's protected without it is left too,
-// with the command that adds the gate and keeps the rest. Where the
-// account's plan refuses protection, the founding says what that means and
-// carries on. A read that fails any other way stops it: nothing says what
-// the call would replace.
+// with what a person adds to it. Where the account's plan refuses
+// protection, the founding says what that means and carries on. A read that
+// fails any other way stops it: nothing says what the call would replace.
 func (f *founding) requireGate(ctx context.Context) error {
-	path := "repos/" + f.Repo + "/branches/main/protection"
+	protection := "repos/" + f.Repo + "/branches/main/protection"
+	const skipped = "The factory still merges only once the gate passes. A merge made by hand can skip it."
 	refused := func() {
 		f.say(`GitHub won't require invariant/gate on main: this account's plan doesn't protect the branches of a private repository.
-The factory still merges only once the gate passes. A merge made by hand can skip it.
+%s
 To have GitHub refuse those too, make the repository public, at https://github.com/%s/settings, or change the account's plan. Then run it again:
 
-%s`, f.Repo, f.again())
+%s`, skipped, f.Repo, f.again())
 	}
 	byPlan := func(err error) bool {
 		return strings.Contains(err.Error(), "(HTTP 403)") && planRefusal.MatchString(err.Error())
 	}
-	out, err := f.gh(ctx, "api", path)
+	out, err := f.gh(ctx, "api", protection)
 	switch {
 	case err == nil:
-		var p protection
+		var p struct {
+			Required struct {
+				Contexts []string `json:"contexts"`
+				Checks   []struct {
+					Context string `json:"context"`
+				} `json:"checks"`
+			} `json:"required_status_checks"`
+		}
 		if err := json.Unmarshal([]byte(out), &p); err != nil {
 			return fmt.Errorf("GitHub's answer about main's protection can't be read, so nothing there was changed: %w. Run it again:\n\n%s", err, f.again())
 		}
-		return f.protected(p)
+		requires := slices.Clone(p.Required.Contexts)
+		for _, check := range p.Required.Checks {
+			if !slices.Contains(requires, check.Context) {
+				requires = append(requires, check.Context)
+			}
+		}
+		if slices.Contains(requires, "invariant/gate") {
+			return nil
+		}
+		// The protection is a person's, and so is the change to it.
+		what := "no status check"
+		if len(requires) > 0 {
+			what = strings.Join(requires, ", ")
+		}
+		f.say(`main is protected already, and requires %s: invariant/gate isn't among its checks. invariant new doesn't replace a protection it didn't set.
+%s
+To have GitHub refuse those too, add the status check invariant/gate, from GitHub Actions, to the checks main requires: https://github.com/%s/settings/branches`, what, skipped, f.Repo)
+		return nil
 	case byPlan(err):
 		refused()
 		return nil
 	case !strings.Contains(err.Error(), "(HTTP 404)") || !strings.Contains(err.Error(), "Branch not protected"):
 		return fmt.Errorf("reading main's protection, so nothing there was changed: %w. Run it again:\n\n%s", err, f.again())
 	}
-	_, err = f.run(ctx, Command{Name: "gh", Args: []string{"api", "-X", "PUT", path, "--input", "-"}, Stdin: setup.Protection})
+	_, err = f.run(ctx, Command{Name: "gh", Args: []string{"api", "-X", "PUT", protection, "--input", "-"}, Stdin: setup.Protection})
 	switch {
 	case err == nil:
 		f.did("Required invariant/gate on main: GitHub now refuses any merge the gate didn't pass.")
@@ -706,59 +661,6 @@ To have GitHub refuse those too, make the repository public, at https://github.c
 	default:
 		return fmt.Errorf("requiring invariant/gate on main: %w", err)
 	}
-	return nil
-}
-
-// protected answers a main that is protected already. Requiring the gate
-// there is a person's change to make: it's their protection.
-func (f *founding) protected(p protection) error {
-	type check struct {
-		Context string `json:"context"`
-		App     int64  `json:"app_id"`
-	}
-	body := struct {
-		Strict bool    `json:"strict"`
-		Checks []check `json:"checks"`
-	}{Checks: []check{}}
-	var requires []string
-	if p.Required != nil {
-		body.Strict = p.Required.Strict
-		for _, c := range p.Required.Checks {
-			// No App named is any App, which the call that sets checks
-			// writes as -1.
-			app := int64(-1)
-			if c.App != nil {
-				app = *c.App
-			}
-			body.Checks = append(body.Checks, check{c.Context, app})
-			requires = append(requires, c.Context)
-		}
-		for _, context := range p.Required.Contexts {
-			if !slices.Contains(requires, context) {
-				body.Checks = append(body.Checks, check{context, -1})
-				requires = append(requires, context)
-			}
-		}
-	}
-	if slices.Contains(requires, "invariant/gate") {
-		return nil
-	}
-	body.Checks = append(body.Checks, check{"invariant/gate", 15368})
-	b, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	what := "no check"
-	if len(requires) > 0 {
-		what = strings.Join(requires, ", ")
-	}
-	f.say(`main is protected already, and requires %[1]s: invariant/gate isn't among its checks. invariant new doesn't replace a protection it didn't set.
-The factory still merges only once the gate passes. A merge made by hand can skip it.
-To require the gate and keep everything else there, run:
-
-gh api -X PATCH repos/%[2]s/branches/main/protection/required_status_checks --input - <<'EOF'
-%[3]s
-EOF`, what, f.Repo, b)
 	return nil
 }
 

@@ -17,27 +17,33 @@ import (
 // files. The unresolved field deliberately makes incomplete drafts invalid to
 // the enabled-configuration loader; that loader's schema remains unchanged.
 func DraftRepository(dir string) ([]byte, []string, error) {
-	return DraftRepositoryWith(dir, nil)
-}
-
-// DraftRepositoryWith drafts the checks of the checkout in dir as it would
-// be once files were added to it, without writing them: what DraftRepository
-// returns afterwards. A file is named by its path from the checkout's root,
-// with slashes. An empty dir stands for a checkout that isn't there yet.
-// invariant new uses it to know a project's checks before it creates
-// anything (#919).
-func DraftRepositoryWith(dir string, files map[string][]byte) ([]byte, []string, error) {
-	d := &repositoryDraft{files: map[string]bool{}, contents: map[string][]byte{}, directories: []string{"."}}
-	if dir != "" {
-		var err error
-		if d, err = discoverRepository(dir); err != nil {
-			return nil, nil, err
-		}
-		defer d.root.Close()
-	}
-	if err := d.add(files); err != nil {
+	d, err := discoverRepository(dir)
+	if err != nil {
 		return nil, nil, err
 	}
+	defer d.root.Close()
+	return d.drafted()
+}
+
+// DraftRepositoryOf drafts the checks of a checkout that would hold these
+// files and no others, without writing them: what DraftRepository returns
+// for a directory that holds exactly them. A file is named by its path from
+// the checkout's root, with slashes. invariant new uses it to know an empty
+// project's checks before it creates anything (#919).
+func DraftRepositoryOf(files map[string][]byte) ([]byte, []string, error) {
+	d := &repositoryDraft{files: map[string]bool{}, contents: map[string][]byte{}, directories: []string{"."}}
+	for name, data := range files {
+		if err := d.hold(name, data); err != nil {
+			return nil, nil, err
+		}
+	}
+	// As a walk of the checkout would have met them.
+	slices.SortFunc(d.names, walkOrder)
+	slices.SortFunc(d.directories, walkOrder)
+	return d.drafted()
+}
+
+func (d *repositoryDraft) drafted() ([]byte, []string, error) {
 	if err := d.draft(); err != nil {
 		return nil, nil, err
 	}
