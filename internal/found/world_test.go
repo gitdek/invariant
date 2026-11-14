@@ -120,8 +120,10 @@ func (w *world) Run(_ context.Context, c Command) ([]byte, error) {
 			w.pushed, w.empty = append(w.pushed, strings.TrimSpace(string(head))), false
 			// A push that lands moves the checkout's record of the remote.
 			return w.git(c.Dir, "update-ref", "refs/remotes/origin/main", "refs/heads/main")
-		case "remote", "ls-tree", "show", "for-each-ref", "symbolic-ref", "config", "add", "commit":
+		case "remote", "ls-tree", "show", "for-each-ref", "symbolic-ref", "config", "add", "commit", "rev-list":
 			return w.git(c.Dir, c.Args...)
+		case "hash-object":
+			return w.gitReading(c.Dir, c.Stdin, c.Args...)
 		}
 	}
 	w.t.Fatalf("a founding ran %q, which no test expects", c)
@@ -202,9 +204,16 @@ func (w *world) inside(dir string) {
 // the world says so.
 func (w *world) git(dir string, args ...string) ([]byte, error) {
 	w.t.Helper()
+	return w.gitReading(dir, "", args...)
+}
+
+// gitReading is git, handed stdin to read.
+func (w *world) gitReading(dir, stdin string, args ...string) ([]byte, error) {
+	w.t.Helper()
 	w.inside(dir)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(stdin)
 	for _, v := range os.Environ() {
 		if !strings.HasPrefix(v, "GIT_") {
 			cmd.Env = append(cmd.Env, v)

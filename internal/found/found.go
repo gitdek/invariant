@@ -10,15 +10,20 @@
 // founded already. Anything else in it is refused before the first thing is
 // created. Each step looks for its own result, so a founding that stopped
 // is finished by running it again, and a second run of a finished one
-// changes nothing.
+// changes nothing. The one commit a founding pushes is its own: one commit,
+// of its files and nothing else.
 package found
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"maps"
@@ -125,8 +130,8 @@ func Project(ctx context.Context, o Options) error {
 		if f.spec = o.Spec; !filepath.IsAbs(f.spec) {
 			f.spec = filepath.Join(work, f.spec)
 		}
-		if spec, err = os.ReadFile(f.spec); err != nil {
-			return fmt.Errorf("reading the spec: %w", err)
+		if spec, err = readSpec(f.spec); err != nil {
+			return err
 		}
 	}
 	// Every file of the founding, the checks included, is known before
@@ -171,6 +176,13 @@ func Project(ctx context.Context, o Options) error {
 	case local.founded:
 		if err := f.loads(ctx); err != nil {
 			return err
+		}
+		// Its push is still to be made, and what's pushed is main: it has
+		// to be the founding's own commit, as a push that failed left it.
+		if !remote.exists || remote.empty {
+			if err := f.own(ctx, files); err != nil {
+				return err
+			}
 		}
 	case local.exists:
 		if err := f.identity(ctx); err != nil {
@@ -227,8 +239,12 @@ func Project(ctx context.Context, o Options) error {
 			return err
 		}
 		// The founding's own commit is read as CI will read it, before
-		// it's pushed.
+		// it's pushed, and read back for what it holds, since a hook can
+		// change a commit as it's made.
 		if err := f.loads(ctx); err != nil {
+			return err
+		}
+		if err := f.own(ctx, files); err != nil {
 			return err
 		}
 	}
@@ -428,13 +444,20 @@ func (f *founding) local(ctx context.Context, files []file) (checkout, error) {
 	if len(entries) == 0 {
 		return checkout{}, nil
 	}
-	if !slices.ContainsFunc(entries, func(entry fs.DirEntry) bool { return entry.Name() == ".git" }) {
+	i := slices.IndexFunc(entries, func(entry fs.DirEntry) bool { return entry.Name() == ".git" })
+	if i < 0 {
 		// No checkout, so nothing in it is a founding's.
 		found, err := foreign(f.dir, nil)
 		if err != nil {
 			return checkout{}, err
 		}
 		return checkout{}, f.holds(found)
+	}
+	// A clone's .git is a directory. A link, or a file that leads to a
+	// repository elsewhere, would have git commit there, outside the
+	// directory, and push from there.
+	if !entries[i].IsDir() {
+		return checkout{}, fmt.Errorf("%s is a git checkout whose .git isn't a directory but a link, or a file that leads to a repository elsewhere, as a worktree's or a submodule's does. invariant new starts in an empty directory or in a fresh clone of the repository", f.dir)
 	}
 	if err := f.origin(ctx); err != nil {
 		return checkout{}, err
@@ -480,6 +503,112 @@ func (f *founding) pristine(ctx context.Context, files []file, commit bool) erro
 		return f.existing(f.dir+" already has commits, and they don't make a founded project", shell(f.dir))
 	}
 	return nil
+}
+
+// own refuses main unless it's the founding's own commit: one commit, with
+// none before it, that holds the founding's files and nothing else, each at
+// its mode and stored as git stores the bytes the founding writes now. A
+// founding pushes main, so it never pushes a person's commit, a file it
+// didn't write, or a change to one it did.
+func (f *founding) own(ctx context.Context, files []file) error {
+	commits, err := f.git(ctx, "rev-list", "--parents", "--max-count=1", "HEAD")
+	if err != nil {
+		return err
+	}
+	if len(strings.Fields(commits)) != 1 {
+		return f.existing(f.dir+" has commits on main besides a founding's", shell(f.dir))
+	}
+	listed, err := f.git(ctx, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+	if err != nil {
+		return err
+	}
+	missing := map[string]file{}
+	for _, file := range files {
+		missing[file.path] = file
+	}
+	var differ []string
+	for _, entry := range strings.Split(listed, "\x00") {
+		if entry == "" {
+			continue
+		}
+		about, name, _ := strings.Cut(entry, "\t")
+		fields := strings.Fields(about) // mode, type, object
+		file, mine := missing[name]
+		delete(missing, name)
+		mode := "100644"
+		if file.mode&0o111 != 0 {
+			mode = "100755"
+		}
+		if !mine || len(fields) != 3 || fields[0] != mode || !f.stores(ctx, file, fields[2]) {
+			differ = append(differ, name)
+		}
+	}
+	differ = slices.Sorted(slices.Values(append(differ, slices.Collect(maps.Keys(missing))...)))
+	if len(differ) == 0 {
+		return nil
+	}
+	named := strings.Join(differ[:min(len(differ), 5)], ", ")
+	if more := len(differ) - 5; more > 0 {
+		named += fmt.Sprintf(" and %d more", more)
+	}
+	return fmt.Errorf("%w. A founding that stopped part way is finished by running it again with the -spec and -invariant it was started with", f.existing(f.dir+" has a commit on main that isn't a founding's: it differs from one at "+named, shell(f.dir)))
+}
+
+// stores says whether object is what git stores file as: its bytes as a
+// blob, or, where git's own settings convert a file as it's committed, as
+// a line-ending setting does, what git makes of them at its path.
+func (f *founding) stores(ctx context.Context, file file, object string) bool {
+	if blob(file.data, len(object)) == object {
+		return true
+	}
+	stored, err := f.run(ctx, Command{Dir: f.dir, Name: "git", Args: []string{"hash-object", "--path=" + file.path, "--stdin"}, Stdin: string(file.data)})
+	return err == nil && strings.TrimSpace(stored) == object
+}
+
+// blob is git's name for data stored as a blob, in a repository whose names
+// are n hex digits: SHA-1's 40, or SHA-256's 64.
+func blob(data []byte, n int) string {
+	var h hash.Hash
+	switch n {
+	case 2 * sha1.Size:
+		h = sha1.New()
+	case 2 * sha256.Size:
+		h = sha256.New()
+	default:
+		return ""
+	}
+	fmt.Fprintf(h, "blob %d\x00", len(data))
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// largest is the largest file GitHub takes in a push.
+const largest = 100 << 20
+
+// readSpec reads the spec: a file, wherever a link to it leads, that GitHub
+// would take in a push. Anything else is refused before it's read, so a
+// device that never ends, or a spec no push could carry, stops the founding
+// before it starts.
+func readSpec(name string) ([]byte, error) {
+	tooLarge := fmt.Errorf("the spec, %s, is larger than the 100 MiB GitHub takes in a push", name)
+	info, err := os.Stat(name)
+	if err != nil {
+		return nil, fmt.Errorf("reading the spec: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("reading the spec: %s isn't a file", name)
+	}
+	if info.Size() > largest {
+		return nil, tooLarge
+	}
+	data, err := os.ReadFile(name)
+	if err != nil {
+		return nil, fmt.Errorf("reading the spec: %w", err)
+	}
+	if len(data) > largest {
+		return nil, tooLarge
+	}
+	return data, nil
 }
 
 // holds is the refusal of a directory with entries that aren't a

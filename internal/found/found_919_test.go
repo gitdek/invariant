@@ -3,6 +3,7 @@ package found
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -66,9 +67,9 @@ func (w *world) existing(dir string) string {
 }
 
 // From nothing, new creates the repository, private, and its checkout,
-// writes the Go starter, the gate and complete checks, commits them, pushes
-// main, allows merge commits and requires the gate: these commands, in this
-// order, and no others.
+// writes the Go starter, the gate and complete checks, commits them, reads
+// its commit back, pushes main, allows merge commits and requires the gate:
+// these commands, in this order, and no others.
 func TestNewFoundsAProjectFromNothing919(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
@@ -90,6 +91,8 @@ func TestNewFoundsAProjectFromNothing919(t *testing.T) {
 		"git symbolic-ref HEAD refs/heads/main",
 		"git add -f -- " + founded,
 		"git commit --quiet -m Start widgets: a Go module, its checks and Invariant's gate -- " + founded,
+		"git rev-list --parents --max-count=1 HEAD",
+		"git ls-tree -r -z --full-tree HEAD",
 		"git push -u origin main",
 		"gh api -X PATCH repos/acme/widgets -F allow_merge_commit=true",
 		"gh api repos/acme/widgets/branches/main/protection",
@@ -1580,6 +1583,190 @@ func TestNewPushesToARepositoryThatIsEmptyAgain919(t *testing.T) {
 	}
 }
 
+// The push a founding still has to make is of its own commit and nothing
+// else: main as the founding made it, one commit that holds the files it
+// writes, with their bytes and modes. A run that finds a person's commit
+// there, on top of the founding's or in its place, refuses before anything
+// is created, a repository that's gone included, and pushes nothing: what
+// a person commits is theirs to publish.
+func TestNewPushesNothingButItsOwnCommit919(t *testing.T) {
+	t.Parallel()
+	amend := func(w *world, dir string, args ...string) {
+		w.mustGit(dir, args...)
+		w.mustGit(dir, "commit", "--quiet", "--amend", "--no-edit")
+	}
+	const differs = " has a commit on main that isn't a founding's: it differs from one at "
+	for _, c := range []struct {
+		name, says string
+		change     func(w *world, dir string)
+	}{
+		{"a person's commit on top of it", " has commits on main besides a founding's", func(w *world, dir string) {
+			w.write(filepath.Join(dir, "notes.txt"), "not the founding's\n")
+			w.commit(dir, "Notes", "notes.txt")
+		}},
+		{"a person's file amended into it", differs + "notes.txt", func(w *world, dir string) {
+			w.write(filepath.Join(dir, "notes.txt"), "not the founding's\n")
+			amend(w, dir, "add", "notes.txt")
+		}},
+		{"other words amended into a file of its own", differs + "README.md", func(w *world, dir string) {
+			w.write(filepath.Join(dir, "README.md"), "# widgets\n\nA person's words.\n")
+			amend(w, dir, "add", "README.md")
+		}},
+		{"a file of its own amended out", differs + "doc.go", func(w *world, dir string) {
+			amend(w, dir, "rm", "--quiet", "--cached", "doc.go")
+		}},
+		{"its format check amended into one that can't run", differs + "tools/check-format", func(w *world, dir string) {
+			amend(w, dir, "update-index", "--chmod=-x", "tools/check-format")
+		}},
+	} {
+		for _, gone := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, the repository gone %t", c.name, gone), func(t *testing.T) {
+				w := newWorld(t)
+				w.t = t
+				dir := filepath.Join(w.root, "widgets")
+				w.pushFails = errors.New("fatal: unable to access 'https://github.com/acme/widgets.git/': Could not resolve host: github.com")
+				if out, err := w.found(Options{}); err == nil {
+					t.Fatalf("the push didn't fail:\n%s", out)
+				}
+				c.change(w, dir)
+				w.calls = nil
+				if gone {
+					w.exists, w.empty = false, false
+				}
+				before := w.tree(w.root)
+				_, err := w.found(Options{})
+				w.untouched(before, !gone)
+				if !strings.Contains(err.Error(), dir+c.says+", so this isn't an empty project") {
+					t.Errorf("new's refusal is\n%v\nwant one that says %q", err, dir+c.says)
+				}
+			})
+		}
+	}
+}
+
+// The founding reads its commit back before it pushes it. One that a hook
+// changed as it was made, with a file of the hook's or other words in one
+// of the founding's, isn't the founding's commit, and isn't pushed.
+func TestNewPushesItsCommitOnlyAsItMadeIt919(t *testing.T) {
+	t.Parallel()
+	for differs, hook := range map[string]string{
+		"notes.txt": `echo "a hook's" > notes.txt && git add notes.txt`,
+		"README.md": `printf '# widgets\n\nA hook was here.\n' > README.md && git add README.md`,
+	} {
+		w := newWorld(t)
+		dir := filepath.Join(w.root, "widgets")
+		w.before = func(c Command) {
+			if c.Name == "git" && c.Args[0] == "commit" {
+				hooks := filepath.Join(dir, ".git", "hooks", "pre-commit")
+				w.write(hooks, "#!/bin/sh\n"+hook+"\n")
+				if err := os.Chmod(hooks, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		out, err := w.found(Options{})
+		if err == nil || !strings.Contains(err.Error(), dir+" has a commit on main that isn't a founding's: it differs from one at "+differs+",") {
+			t.Errorf("with a hook that commits %s, new says: %v\n%s", differs, err, out)
+		}
+		if len(w.pushed) != 0 || w.ran("git push") || w.ran("gh api -X") || founds(out) {
+			t.Errorf("with a hook that commits %s, new pushed or went on:\n%s", differs, strings.Join(w.calls, "\n"))
+		}
+	}
+}
+
+// git can store a file other than byte for byte, as a line-ending setting
+// stores a spec written with CRLF line endings. That's what git makes of
+// the founding's own file, so the commit is still the founding's, and it's
+// pushed.
+func TestNewPushesItsCommitAsGitStoresIt919(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	dir := filepath.Join(w.root, "widgets")
+	w.checkout(dir, "https://github.com/acme/widgets.git")
+	w.mustGit(dir, "config", "core.autocrlf", "input")
+	spec := filepath.Join(w.root, "spec.md")
+	w.write(spec, "# The spec\r\n\r\nWritten with CRLF line endings.\r\n")
+	out, err := w.found(Options{Spec: spec})
+	if err != nil || len(w.pushed) != 1 || !founds(out) {
+		t.Fatalf("with git converting the spec's line endings, new: %v, %d pushes\n%s", err, len(w.pushed), out)
+	}
+	if stored := w.mustGit(dir, "cat-file", "blob", "HEAD:docs/PRD.md"); strings.Contains(stored, "\r") {
+		t.Errorf("git stored the spec byte for byte, so this tests nothing:\n%q", stored)
+	}
+	if !w.ran("git hash-object --path=docs/PRD.md --stdin") || w.ran("git hash-object --path=README.md") {
+		t.Errorf("new didn't ask git how it stores the spec, and only the spec:\n%s", strings.Join(w.calls, "\n"))
+	}
+}
+
+// A checkout's .git is a directory, as a clone makes it. One that's a link,
+// or a file that leads to a repository elsewhere, as a linked worktree's or
+// a submodule's does, would have git commit to that repository, outside the
+// directory new was given, and push from it. It's refused before anything
+// is created, and nothing is written there.
+func TestNewRefusesACheckoutWhoseRepositoryIsElsewhere919(t *testing.T) {
+	t.Parallel()
+	for name, make := range map[string]func(w *world, dir string) string{
+		"a file that leads elsewhere": func(w *world, dir string) string {
+			elsewhere := filepath.Join(w.root, "elsewhere.git")
+			w.mustGit(w.root, "init", "--quiet", "--separate-git-dir", elsewhere, dir)
+			w.mustGit(dir, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+			return elsewhere
+		},
+		"a link": func(w *world, dir string) string {
+			other := filepath.Join(w.root, "other")
+			w.checkout(other, "https://github.com/acme/widgets.git")
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				w.t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(other, ".git"), filepath.Join(dir, ".git")); err != nil {
+				w.t.Fatal(err)
+			}
+			return filepath.Join(other, ".git")
+		},
+	} {
+		w := newWorld(t)
+		dir := filepath.Join(w.root, "widgets")
+		elsewhere := make(w, dir)
+		before := w.tree(w.root)
+		_, err := w.found(Options{})
+		w.untouched(before, false)
+		if want := dir + " is a git checkout whose .git isn't a directory but a link, or a file that leads to a repository elsewhere, as a worktree's or a submodule's does. invariant new starts in an empty directory or in a fresh clone of the repository"; err.Error() != want {
+			t.Errorf("with %s for .git, new's refusal is\n%v\nwant\n%s", name, err, want)
+		}
+		if refs := w.mustGit(w.root, "--git-dir", elsewhere, "for-each-ref"); refs != "" {
+			t.Errorf("with %s for .git, new wrote to the repository it leads to:\n%s", name, refs)
+		}
+	}
+}
+
+// The spec is a file, and one GitHub takes in a push: it holds files up to
+// 100 MiB. Anything else is refused before anything is read into the
+// founding, said or done: a device, which can be endless, and a file too
+// large to push.
+func TestNewRefusesASpecItCouldNeverPush919(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	large := filepath.Join(w.root, "large.md")
+	f, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse: it takes no room on the disk.
+	if err := errors.Join(f.Truncate(100<<20+1), f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	for spec, want := range map[string]string{
+		os.DevNull: "reading the spec: " + os.DevNull + " isn't a file",
+		large:      "the spec, " + large + ", is larger than the 100 MiB GitHub takes in a push",
+	} {
+		w := newWorld(t)
+		out, err := w.found(Options{Spec: spec})
+		if err == nil || !strings.Contains(err.Error(), want) || len(w.calls) != 0 || out != "" {
+			t.Errorf("with %s for a spec, new said %q, ran %q and returned %v", spec, out, w.calls, err)
+		}
+	}
+}
+
 // The checks new commits are the ones the starter passes: run as they're
 // committed, format, vet, build and test all succeed, and the format check
 // fails once a Go file isn't formatted, where gofmt -l alone wouldn't.
@@ -1925,5 +2112,53 @@ func TestExecReturnsWhatACommandPrintedAndWhyItFailed919(t *testing.T) {
 	}
 	if got := (Command{Name: "gh", Args: []string{"repo", "view", "acme/widgets"}}).String(); got != "gh repo view acme/widgets" {
 		t.Errorf("the command reads %q", got)
+	}
+}
+
+// Exec runs git on the checkout it's given, and gh on github.com, whatever
+// the environment it runs in says. A hook or an alias can leave GIT_DIR and
+// its like set, which point git at another repository, so Exec clears the
+// ones git itself clears when it works in another repository. GH_HOST
+// points gh at another server, and so does a login to one other server, so
+// Exec names github.com. It runs real git here, in two directories of the
+// test's own, and nothing reaches a remote.
+func TestExecRunsGitInItsCheckoutAndGhOnGitHub919(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	var dirs [2]string
+	for i := range dirs {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "init", "--quiet", dir).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		dirs[i] = dir
+	}
+	checkout, other := dirs[0], dirs[1]
+	local, err := exec.Command("git", "rev-parse", "--local-env-vars").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared := strings.Fields(string(local))
+	for _, name := range cleared {
+		t.Setenv(name, "set by whoever ran it")
+	}
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	t.Setenv("GH_HOST", "github.example.com")
+	out, err := Exec{}.Run(ctx, Command{Dir: checkout, Name: "git", Args: []string{"rev-parse", "--absolute-git-dir", "--show-toplevel"}})
+	if want := filepath.Join(checkout, ".git") + "\n" + checkout + "\n"; err != nil || string(out) != want {
+		t.Errorf("git in %s worked on %q, %v; want %q", checkout, out, err, want)
+	}
+	// The command names the variables it was handed of those, and says
+	// GH_HOST and one variable git keeps. It never prints the environment:
+	// a test's output can be public, and the environment holds secrets.
+	script := `for name in "$@"; do eval "test -n \"\${$name+set}\"" && echo "handed $name"; done; echo "GH_HOST=$GH_HOST"; echo "GIT_CONFIG_GLOBAL=$GIT_CONFIG_GLOBAL"`
+	out, err = Exec{}.Run(ctx, Command{Name: "sh", Args: append([]string{"-c", script, "sh"}, cleared...)})
+	if want := "GH_HOST=github.com\nGIT_CONFIG_GLOBAL=" + os.DevNull + "\n"; err != nil || string(out) != want {
+		t.Errorf("Exec handed a command what git clears, or another GH_HOST, or cleared what git keeps: %v\n%s", err, out)
 	}
 }
