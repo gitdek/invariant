@@ -108,7 +108,9 @@ func reviewPrompt(p *project.Project) string {
 	replay := replayGuidance(p)
 	if replay != "" {
 		replay = strings.Replace(replay, "Export ", "Inspect ", 1)
-		replay += "\nInspect the real operation bindings and read-back against the imported application, including the exact replay prefix and each forbidden operation. Change nothing.\n"
+		replay += "\nInspect the real operation bindings and read-back against the imported application, including the exact replay prefix and each forbidden operation. " +
+			"Report as a problem any driver code that reaches into the replay harness, its frames, objects or closures, what it calls, its descriptors or output files, or the process's exit: " +
+			"the driver runs in the harness's own process, so the gate can't tell such tampering from a real replay, and your review is the check against it. Change nothing.\n"
 	}
 	params := "none"
 	if len(p.Manifest.Parameters) > 0 {

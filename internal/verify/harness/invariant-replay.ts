@@ -32,6 +32,11 @@ function canonical(v: any): string {
 async function replay() {
   // Consume the private bootstrap pipe before importing application code.
   // Seal the harness's own bytes, never records read from driver files.
+  // The seal defends against records written or replayed outside this
+  // harness. The driver runs in this process, so it can always reach the
+  // seal, the channel and these records, as by patching what the harness
+  // calls, which no in-process harness can rule out: a driver that does is
+  // tampering with the gate, and review of the driver is the check against it.
   const key = readFileSync(0);
   if (key.length !== 32) throw new Error('missing replay authentication');
   const authentication = createHmac('sha256', key);

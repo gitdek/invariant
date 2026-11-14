@@ -16,6 +16,10 @@ import (
 
 // These drivers manufacture a complete, matching pair of records without
 // dispatch or cleanup, then terminate successfully inside the real harness.
+// They write the records themselves, or seal them with a key of their own,
+// which the seal defends against. A driver that takes the harness's own seal
+// from inside the process they share is tampering with the gate, which no
+// in-process harness can rule out (docs/gate.md, Command driver interface).
 const forgeReplayTS913 = `import {readFileSync} from 'node:fs';
 import {createHmac} from 'node:crypto';
 function forge() {
