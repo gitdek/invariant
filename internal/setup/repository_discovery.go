@@ -81,6 +81,45 @@ func discoverRepository(dir string) (*repositoryDraft, error) {
 	return d, nil
 }
 
+// hold puts a file among the evidence of a checkout that isn't written yet,
+// with the directories on the way to it. A path a walk of the checkout
+// couldn't have met a file at is refused rather than guessed at.
+func (d *repositoryDraft) hold(name string, data []byte) error {
+	if !repositoryPath(name) {
+		return fmt.Errorf("%q isn't a path a checkout can hold", name)
+	}
+	if slices.Contains(d.directories, name) {
+		return fmt.Errorf("%s is a directory of the checkout, and can't be a file too", name)
+	}
+	components := strings.Split(name, "/")
+	for i, component := range components[:len(components)-1] {
+		ancestor := strings.Join(components[:i+1], "/")
+		if excludedDirectory(component) || d.files[ancestor] {
+			return fmt.Errorf("%s can't be held: discovery reads nothing under %s", name, ancestor)
+		}
+		if !slices.Contains(d.directories, ancestor) {
+			d.directories = append(d.directories, ancestor)
+		}
+	}
+	d.files[name], d.contents[name] = true, data
+	d.names = append(d.names, name)
+	return nil
+}
+
+// walkOrder is the order a walk of the checkout meets paths in: a directory
+// before what it holds, and the entries of each directory by name.
+func walkOrder(a, b string) int {
+	switch {
+	case a == b:
+		return 0
+	case a == ".":
+		return -1
+	case b == ".":
+		return 1
+	}
+	return slices.Compare(strings.Split(a, "/"), strings.Split(b, "/"))
+}
+
 func excludedDirectory(name string) bool {
 	switch strings.ToLower(name) {
 	case ".git", ".hg", ".svn", "node_modules", "vendor", ".venv", "venv", "env", ".env", "__pycache__", "__pypackages__", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "dist", "build", "coverage", ".next", ".nuxt", ".output", "out", "target", ".turbo", ".parcel-cache", ".yarn":

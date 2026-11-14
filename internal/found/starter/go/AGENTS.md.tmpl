@@ -1,0 +1,12 @@
+# Working in this repo
+
+These are the rules for any coding agent working here.
+
+- {{if .Spec}}`docs/PRD.md` is what {{.Name}} is meant to be, and `SPEC.md` is what is built so far.{{else}}`SPEC.md` is what is built so far.{{end}} Keeping `SPEC.md` and the README right is part of every change.
+- Don't weaken a rule or a test to make a check pass. Ask instead.
+- Dependencies are a person's to add. Don't change `go.mod` to bring one in.
+
+## Commands
+
+- `go vet ./...` and `go test ./...`: the checks, as CI runs them.
+- `tools/check-format`: fails when a Go file isn't formatted with gofmt.

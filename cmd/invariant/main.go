@@ -14,6 +14,7 @@
 //	invariant dashboard -repo OWNER/NAME serve a live view of the factory and its evidence
 //	invariant ledger -repo OWNER/NAME    what each of the factory's issues took
 //	invariant init [DIR]                 set up another repository's gate
+//	invariant new OWNER/NAME             found a new project: repository, checkout, checks and gate
 package main
 
 import (
@@ -31,7 +32,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"slices"
 	"sort"
@@ -81,6 +81,8 @@ Usage:
   invariant ledger -repo OWNER/NAME [-json]    what each of the factory's issues took: time, comments, spend
   invariant init [-repo OWNER/NAME] [-invariant COMMIT] [DIR]
                                                set up another repository's gate
+  invariant new OWNER/NAME [-dir DIR] [-public] [-language go] [-spec FILE] [-invariant COMMIT]
+                                               found a new project: its repository, checkout, starter, checks and gate
 `
 
 func main() {
@@ -116,6 +118,8 @@ func main() {
 		code = dashboardCmd(ctx, args)
 	case "init":
 		code = initCmd(args)
+	case "new":
+		code = newCmd(ctx, args)
 	case "ledger":
 		code = ledgerCmd(ctx, args)
 	case "decisions":
@@ -1358,9 +1362,7 @@ func initCmd(args []string) int {
 		return 2
 	}
 	if *ref == "" {
-		fmt.Fprintln(os.Stderr, "invariant: this binary doesn't know which commit of Invariant it was built from, so there's no commit to pin the gate to, and it wrote nothing. "+
-			"go run records none, and neither does a build from a checkout with changes. "+
-			"Build invariant from a clean checkout of a commit that's on GitHub, or pass -invariant with a full commit hash.")
+		fmt.Fprintln(os.Stderr, noCommitToPin)
 		return 2
 	}
 	if _, err := setup.Workflow(*ref); err != nil {
@@ -1422,7 +1424,7 @@ Next:
 2. Require invariant/gate on main, and allow merge commits. GitHub then refuses any merge the gate didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
 
 gh api -X PUT repos/%[3]s/branches/main/protection --input - <<'EOF'
-{"required_status_checks":{"strict":false,"checks":[{"context":"invariant/gate","app_id":15368}]},"enforce_admins":true,"required_pull_request_reviews":{"required_approving_review_count":0},"restrictions":null}
+%[5]s
 EOF
 gh api -X PATCH repos/%[3]s -F allow_merge_commit=true
 
@@ -1431,19 +1433,22 @@ gh api -X PATCH repos/%[3]s -F allow_merge_commit=true
 invariant watch -repo %[3]s -projects invariant%[4]s
 
 4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
-`, setup.WorkflowPath, (*ref)[:12], *repo, language)
+`, setup.WorkflowPath, (*ref)[:12], *repo, language, setup.Protection)
 	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; check-repository reads committed base evidence. The generated gate runs configured repository checks, scope, project and plan ratification, and modeled verification. External plumbing remains disabled until the reviewed contract and capable gate are committed on the authoritative base. Configured issues then use native Go, pytest, Vitest and Jest tests under captured repository rules; trusted changes stay drafts for a person. Without a committed contract, intake runs no agent and creates no branch. To upgrade an existing gate, generate this pinned template with invariant init in a separate directory, review and merge these steps with your custom workflow, and commit the result to the base branch; init never replaces a different workflow without -force.")
 	return 0
 }
+
+// noCommitToPin is what init and new say when -invariant has no default: the
+// binary records no commit of Invariant for the gate to build.
+const noCommitToPin = "invariant: this binary doesn't know which commit of Invariant it was built from, so there's no commit to pin the gate to, and it wrote nothing. " +
+	"go run records none, and neither does a build from a checkout with changes. " +
+	"Build invariant from a clean checkout of a commit that's on GitHub, or pass -invariant with a full commit hash."
 
 // projectFiles tell a repository's language by the file at its root. The
 // first one there decides.
 var projectFiles = []struct{ name, language string }{
 	{"go.mod", "go"}, {"package.json", "typescript"}, {"pyproject.toml", "python"},
 }
-
-// githubRemote is a GitHub repository's remote, over https or ssh.
-var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$`)
 
 // originRepo is the repository on GitHub that dir's origin remote names, as
 // owner/name, or "" when it names none there.
@@ -1452,11 +1457,7 @@ func originRepo(dir string) string {
 	if err != nil {
 		return ""
 	}
-	m := githubRemote.FindStringSubmatch(strings.TrimSpace(string(out)))
-	if m == nil {
-		return ""
-	}
-	return m[1]
+	return setup.GitHubRepo(strings.TrimSpace(string(out)))
 }
 
 // buildCommit is the commit this binary was built from, when go build
