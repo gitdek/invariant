@@ -32,6 +32,18 @@ func Workflow(ref string) (string, error) {
 	return strings.ReplaceAll(gate, "{{REF}}", ref), nil
 }
 
+var pinned = regexp.MustCompile(`(?m)^[ \t]*repository:[ \t]*gitdek/invariant[ \t]*\n[ \t]*ref:[ \t]*([0-9a-f]{40})[ \t]*$`)
+
+// Pinned is the commit of Invariant a gate workflow builds, where it checks
+// Invariant out as Workflow writes it, or "" when it does so another way.
+func Pinned(workflow string) string {
+	m := pinned.FindStringSubmatch(workflow)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
 // ErrExists is what Write returns when the repository already has a
 // different gate workflow.
 var ErrExists = errors.New("the repository already has a different gate workflow")
