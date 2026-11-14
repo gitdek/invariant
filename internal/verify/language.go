@@ -660,7 +660,10 @@ func runConformanceRecording(ctx context.Context, image string, p *project.Proje
 	}
 	var replay *commandReplaySource
 	defer func() {
-		err = errors.Join(err, os.RemoveAll(work))
+		// A container can leave files here that the gate's user can't
+		// remove, as root's __pycache__ on Linux. The workspace isn't
+		// evidence, so failing to remove it fails nothing.
+		os.RemoveAll(work)
 		evidence.replay = replay
 		if err != nil {
 			err = errors.Join(err, evidence.recording.close())

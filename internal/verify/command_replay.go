@@ -136,7 +136,10 @@ func (s *commandReplaySource) run(ctx context.Context, q BugReplayRequest) (resu
 	if err != nil {
 		return result, observed, err
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(work)) }()
+	// The workspace isn't evidence: what the container leaves in it, as the
+	// replay worker's __pycache__ on Linux, which the gate's user can't
+	// remove, fails nothing, as in runConformanceRecording.
+	defer os.RemoveAll(work)
 	src, out, runtime, request := filepath.Join(work, "src"), filepath.Join(work, "out"), filepath.Join(work, "runtime"), filepath.Join(work, "request")
 	if err = copyReplaySource(filepath.Join(s.dir, "src"), src); err != nil {
 		return

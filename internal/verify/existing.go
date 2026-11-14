@@ -49,7 +49,9 @@ func (ExistingTypeScript) checkRecording(ctx context.Context, p *project.Project
 	}
 	var replay *commandReplaySource
 	defer func() {
-		err = errors.Join(err, os.RemoveAll(work))
+		// What the container leaves here isn't evidence, so failing to
+		// remove it fails nothing, as in runConformanceRecording.
+		os.RemoveAll(work)
 		evidence.replay = replay
 		if err != nil {
 			err = errors.Join(err, evidence.recording.close())
