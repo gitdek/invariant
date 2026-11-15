@@ -1,16 +1,50 @@
 package verify
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strings"
 )
 
 var pythonApplicationGitRevision = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
+// standInRefusal refuses the stand-in an application ships. Its text names
+// the destination on the machine that ran verification, so the developer
+// there reads where the files go (#908); published names it relative to
+// the application's root (#922).
+type standInRefusal struct{ local, published string }
+
+func (e *standInRefusal) Error() string { return e.local }
+
+// Public is err as text anyone can read may quote it, a receipt's or a
+// factory post's. A refusal of the runtime stand-in is the one gate failure
+// that names a directory of the machine that ran verification, the
+// destination, and Public's text gives it relative to the application's
+// root, as other messages write /model and /application, so a published
+// failure can't name that machine's directories, an account's home among
+// them (#922). Public's error wraps err.
+func Public(err error) error {
+	var refusal *standInRefusal
+	if !errors.As(err, &refusal) {
+		return err
+	}
+	return &publicError{strings.Replace(err.Error(), refusal.local, refusal.published, 1), err}
+}
+
+type publicError struct {
+	text string
+	err  error
+}
+
+func (e *publicError) Error() string { return e.text }
+func (e *publicError) Unwrap() error { return e.err }
+
 // The remedy uses the running binary's identity and embedded bytes. A source
-// checkout need not exist on the machine running verification (#908).
+// checkout need not exist on the machine running verification (#908). With
+// no root, it gives the destination relative to the application's (#922).
 func pythonApplicationStandInRemedy(root string, hashes map[string]string) string {
 	info, _ := debug.ReadBuildInfo()
 	return pythonApplicationStandInInstructions(root, hashes, info)
@@ -34,7 +68,7 @@ Local verification must use the same Invariant revision pinned by the applicatio
 	text += fmt.Sprintf(`Source: https://github.com/gitdek/invariant/tree/%s/internal/verify/naginiruntime/nagini_contracts
 If this revision differs from the CI pin, build and run the CI-pinned revision first.
 Obtain an Invariant checkout yourself, for example by cloning https://github.com/gitdek/invariant.git into your chosen INVARIANT_CHECKOUT directory, then run git -C "$INVARIANT_CHECKOUT" checkout --detach %s.
-Set INVARIANT_CHECKOUT to that checkout and APPLICATION_ROOT to the original application's root shown above. With both directories explicitly supplied, run this offline recipe (requires git and python3). It checks the revision and both source hashes before creating the destination, and refuses any existing destination. Review and explicitly move or remove an existing package before replacing it during an upgrade.
+Set INVARIANT_CHECKOUT to that checkout and APPLICATION_ROOT to the original application's root, which holds the destination. With both directories explicitly supplied, run this offline recipe (requires git and python3). It checks the revision and both source hashes before creating the destination, and refuses any existing destination. Review and explicitly move or remove an existing package before replacing it during an upgrade.
 `, revision, revision)
 	text += "```sh\n" + fmt.Sprintf(`set -eu
 : "${INVARIANT_CHECKOUT:?Set INVARIANT_CHECKOUT to the pinned checkout}"

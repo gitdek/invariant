@@ -483,6 +483,9 @@ func mcpCmd(ctx context.Context, args []string) int {
 			}
 			r, err := verify.Run(ctx, proj, "", tc)
 			if err != nil {
+				// The agent works on its own copy, not the gate's, and the
+				// build's record, which keeps this log, is public (#922).
+				err = verify.Public(err)
 				if *logPath != "" {
 					synth.LogGateRun(*logPath, synth.GateRun{Run: runs, Failed: []string{"couldn't run: " + err.Error()}, At: time.Now().UTC().Format(time.RFC3339)})
 				}
