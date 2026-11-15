@@ -596,6 +596,9 @@ func copyOwned(p *project.Project, ws string) error {
 }
 
 func owned(m project.Manifest, rel string) bool {
+	if verify.PythonApplicationReplayAvailable(m) && path.Base(rel) == "invariant_observe.py" {
+		return false
+	}
 	if name, _ := verify.ReplayHarness(m.Language); name != "" && path.Base(rel) == name {
 		return false
 	}
@@ -636,7 +639,11 @@ func owned(m project.Manifest, rel string) bool {
 // Prepare fills the agent's workspace: copies of the protected files, the
 // skeleton in place of the module, and an empty package directory.
 func Prepare(p *project.Project, skeleton, ws string) error {
-	if name, source := verify.ReplayHarness(p.Manifest.Language); name != "" {
+	if verify.PythonApplicationReplayAvailable(p.Manifest) {
+		if err := writeFile(filepath.Join(ws, "invariant_observe.py"), string(verify.PythonApplicationObserver())); err != nil {
+			return err
+		}
+	} else if name, source := verify.ReplayHarness(p.Manifest.Language); name != "" {
 		if err := writeFile(filepath.Join(ws, name), string(source)); err != nil {
 			return err
 		}

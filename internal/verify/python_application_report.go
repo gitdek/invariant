@@ -15,9 +15,10 @@ import (
 // PythonApplicationReport records actual executions and their independent TLC
 // checks. A successful process is not itself conformance evidence.
 type PythonApplicationReport struct {
-	ModelError  string                             `json:"model_error,omitempty"`
-	Executions  []PythonApplicationExecutionResult `json:"executions"`
-	Conformance []PythonApplicationConformance     `json:"conformance"`
+	ModelError  string                               `json:"model_error,omitempty"`
+	Executions  []PythonApplicationExecutionResult   `json:"executions"`
+	Conformance []PythonApplicationConformance       `json:"conformance"`
+	BugReplays  []PythonApplicationBugReplayEvidence `json:"bug_replays,omitempty"`
 	// Larger is each explored invocation run again one size past the
 	// ratified bounds, apart from the ordinary results (#342).
 	Larger []PythonApplicationLarger `json:"larger,omitempty"`
@@ -140,6 +141,18 @@ func portablePythonApplication(a *PythonApplicationReport) *PythonApplicationRep
 		x := &out.Executions[i]
 		x.Actual.Image = ""
 		x.Fingerprint, x.Provenance.Fingerprint = "", ""
+		if b := x.BugReplay; b != nil {
+			b.Request.InvocationID = ""
+			if b.Result != nil {
+				b.Result.InvocationID = ""
+			}
+			if b.Observation != nil {
+				b.Observation.InvocationID = ""
+			}
+		}
+	}
+	for i := range out.BugReplays {
+		out.BugReplays[i].Evidence = *portableBugReplay(&out.BugReplays[i].Evidence)
 	}
 	for i := range out.Larger {
 		if x := out.Larger[i].Execution; x != nil {
@@ -214,6 +227,9 @@ func (r *Report) attributePythonApplication(inv *project.ComponentInventory) err
 	}
 	contracts := pythonApplicationContracts(inv)
 	for _, x := range r.Application.Executions {
+		if x.BugReplay != nil || x.ObservationMode == "bug-replay" {
+			continue
+		}
 		if _, ok := contracts[x.Key.Target]; ok {
 			continue
 		}

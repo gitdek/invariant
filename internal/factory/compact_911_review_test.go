@@ -507,10 +507,14 @@ func TestCompact911ReviewPlanOfIssuesWithADashboard(t *testing.T) {
 // A compact comment keeps what the complete one says of its statements: what
 // a known bug must break, what each bug says of the code and what the gate
 // can't yet do about it (#857), and the decisions made on the issue before
-// the draft. Since #913 the gate replays a TypeScript bug, so the bug here is
-// an existing Python application's, which it still can't.
+// the draft. Since #913 the gate replays a TypeScript bug, and since #935 an
+// existing Python application's safety bug, so the bug here it still can't
+// replay is one that must break a property, whose counterexample never ends.
 func TestCompact911ReviewCompactCommentKeepsWhatItsStatementsSay(t *testing.T) {
 	p := bufferProposal(t)
+	p.Statements = append(p.Statements,
+		project.Statement{Name: "Drains", Kind: project.Property, Says: "A full buffer is eventually drained."},
+		project.Statement{Name: "NeverDrains", Kind: project.Bug, Says: "No consumer ever takes from a full buffer.", Expect: "Drains"})
 	classify857(t, p, "current")
 	p.Target = &formalize.Target{Manifest: project.Manifest{Language: "python", Existing: []string{"app.py"}}}
 	m := Marker{Kind: KindProposal, Proposal: p, ProposalRef: review911Reference, Answers: []formalize.Answer{
@@ -518,7 +522,7 @@ func TestCompact911ReviewCompactCommentKeepsWhatItsStatementsSay(t *testing.T) {
 	proposal := reader603Visible(proposalCommentWithEvidence(p, nil, m, review911Evidence))
 	for _, want := range []string{
 		"| `PutWhenFull` | bug | A producer adds a message to a full buffer. It must break `WithinCap`. Code behavior: current. |\n",
-		"\n**This can't be built yet.** It calls `PutWhenFull` current, so the gate has to replay it against the code",
+		"\n**This can't be built yet.** It calls `NeverDrains` current, so the gate has to replay it against the code",
 		"\n**Decided on this issue:**\n\n- F1. When the buffer is full, what should a producer do? **B.** Get an &#60;error&#62; right away. (@gitdek)\n",
 	} {
 		if !strings.Contains(proposal, want) {

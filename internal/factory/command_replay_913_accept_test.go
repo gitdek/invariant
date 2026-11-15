@@ -23,7 +23,7 @@ func TestFactoryReplayAvailabilityMatchesAdapters913(t *testing.T) {
 		{"typescript", nil, false},
 		{"typescript", []string{"src/delivery.ts"}, false},
 		{"python", nil, false},
-		{"python", []string{"delivery.py"}, true},
+		{"python", []string{"delivery.py"}, false},
 		{"go", nil, false},
 	} {
 		for _, amendment := range []bool{false, true} {

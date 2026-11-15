@@ -67,9 +67,9 @@ func TestSynthesisAndReviewRequireRealReplayBindings913(t *testing.T) {
 			}
 		})
 	}
-	// Implemented adapters must never be advertised for existing Python.
+	// Existing Python uses its authenticated application adapter.
 	p := &project.Project{Manifest: project.Manifest{Language: "python", Existing: []string{"delivery.py"}, Conformance: "driver.py"}, Lock: project.Lock{Statements: []project.Statement{{Name: "ReplayCompletedTask", Kind: project.Bug, CodeBehavior: "current", Expect: "Safe"}}}}
-	if message := strings.ToLower(Prompt(p, "", "", 4, true, false)); !strings.Contains(message, "replay-unavailable") {
-		t.Error("existing Python limitation absent from synthesis instructions")
+	if message := strings.ToLower(Prompt(p, "", "", 4, true, false)); strings.Contains(message, "replay-unavailable") || !strings.Contains(message, "replay(start, steps)") {
+		t.Error("existing Python authenticated interface absent from synthesis instructions")
 	}
 }

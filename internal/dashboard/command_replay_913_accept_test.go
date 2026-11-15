@@ -36,7 +36,7 @@ func TestDashboardShowsCommandReplayDiagnostics913(t *testing.T) {
 		existing    []string
 		unavailable bool
 	}{
-		{"typescript", nil, false}, {"typescript", []string{"src/delivery.ts"}, false}, {"python", nil, false}, {"python", []string{"delivery.py"}, true},
+		{"typescript", nil, false}, {"typescript", []string{"src/delivery.ts"}, false}, {"python", nil, false}, {"python", []string{"delivery.py"}, false},
 	} {
 		proposal := &formalize.Proposal{Draft: formalize.Draft{Name: "delivery", Language: c.language, Existing: c.existing, Statements: []project.Statement{statement}}}
 		if c.language == "python" && len(c.existing) > 0 {

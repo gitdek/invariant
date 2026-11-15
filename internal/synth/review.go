@@ -45,7 +45,24 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 		return nil, err
 	}
 	defer os.RemoveAll(ws)
-	if err := filepath.WalkDir(dir, func(file string, d fs.DirEntry, err error) error {
+	prompt := reviewPrompt(p)
+	if verify.PythonApplicationReplayAvailable(p.Manifest) {
+		w, err := verify.StagePythonApplication(p, ws)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(ws, w.Project.Dir)
+		if err != nil {
+			return nil, err
+		}
+		prompt = strings.Replace(prompt, "The project is this directory.", "The workspace is the application root. The verification project is in `"+filepath.ToSlash(rel)+"`; the model, code and driver paths below are relative to that directory. Follow application imports at their original application-relative paths.", 1)
+		// Replace any project copy too, so no stale collector describes the API.
+		for _, base := range []string{ws, w.Project.Dir} {
+			if err := writeFile(filepath.Join(base, "invariant_observe.py"), string(verify.PythonApplicationObserver())); err != nil {
+				return nil, err
+			}
+		}
+	} else if err := filepath.WalkDir(dir, func(file string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
 			return err
 		}
@@ -72,7 +89,7 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 			return nil, err
 		}
 	}
-	if name, source := verify.ReplayHarness(p.Manifest.Language); name != "" {
+	if name, source := verify.ReplayHarness(p.Manifest.Language); name != "" && !verify.PythonApplicationReplayAvailable(p.Manifest) {
 		if err := writeFile(filepath.Join(ws, name), string(source)); err != nil {
 			return nil, err
 		}
@@ -82,7 +99,7 @@ func ReviewDriver(ctx context.Context, backend Backend, dir string, transcript s
 		return nil, err
 	}
 	defer f.Close()
-	u, err := backend.Run(ctx, Job{Workspace: ws, Prompt: reviewPrompt(p), ReadOnly: true, Transcript: f})
+	u, err := backend.Run(ctx, Job{Workspace: ws, Prompt: prompt, ReadOnly: true, Transcript: f})
 	of := "driver"
 	if l := p.Manifest.Language; l == "" || l == "go" {
 		of = "explorer"
@@ -111,6 +128,9 @@ func reviewPrompt(p *project.Project) string {
 		replay += "\nInspect the real operation bindings and read-back against the imported application, including the exact replay prefix and each forbidden operation. " +
 			"Report as a problem any driver code that reaches into the replay harness, its frames, objects or closures, what it calls, its descriptors or output files, or the process's exit: " +
 			"the driver runs in the harness's own process, so the gate can't tell such tampering from a real replay, and your review is the check against it. Change nothing.\n"
+		if verify.PythonApplicationReplayAvailable(p.Manifest) {
+			replay = strings.Replace(replay, "Report as a problem any driver code that reaches into the replay harness", "Report as a problem any driver code that reaches into invariant_observe", 1)
+		}
 	}
 	params := "none"
 	if len(p.Manifest.Parameters) > 0 {

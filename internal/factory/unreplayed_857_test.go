@@ -10,13 +10,10 @@ import (
 )
 
 // A proposal with an unsupported replay can't be built yet. The command
-// adapters cover ordinary TypeScript/Python and existing TypeScript; existing
-// Python still needs its authenticated adapter. A person
+// adapters and authenticated Python application adapter cover safety bugs. A person
 // ratifies from the proposal's comment, so it says so, by name. One that
 // calls no bug current, or whose code Go's own checks cover, says nothing.
 func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
-	const note = "**This can't be built yet.** It calls `PutWhenFull` current, so the gate has to replay it against the code, and this route cannot execute the required replay. " +
-		"A build would stop there, at `replay-unavailable`. Existing Python applications need an authenticated replay adapter."
 	for _, tc := range []struct {
 		name     string
 		behavior string
@@ -28,7 +25,7 @@ func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
 		{"a current bug in code checked as it is", "current", func(p *formalize.Proposal) { p.Existing = []string{"hooks/use-buffer.ts"} }, nil},
 		{"existing Python", "current", func(p *formalize.Proposal) {
 			p.Target = &formalize.Target{Manifest: project.Manifest{Language: "python", Existing: []string{"app.py"}}}
-		}, []string{"PutWhenFull"}},
+		}, nil},
 		{"a current bug in Go", "current", func(*formalize.Proposal) {}, nil},
 		{"a hypothetical bug", "hypothetical", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
 		{"a bug an older lock left unclassified", "", func(p *formalize.Proposal) { p.Language = "typescript" }, nil},
@@ -40,13 +37,12 @@ func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
 			t.Errorf("%s: the gate can't yet replay %v; want %v", tc.name, got, tc.want)
 		}
 		body := proposalComment(p, nil, Marker{Kind: KindProposal, Proposal: p})
-		if said := strings.Contains(body, "\n"+note+"\n"); said != (tc.want != nil) || strings.Contains(body, "can't be built yet") != (tc.want != nil) {
+		if said := strings.Contains(body, "can't be built yet"); said != (tc.want != nil) {
 			t.Errorf("%s: the proposal's comment says it can't be built: %v; want %v\n%s", tc.name, said, tc.want != nil, body)
 		}
 	}
 
-	// An amendment says it too, of the project as it's built today, and
-	// counts in its own words when there's more than one.
+	// An amendment with multiple supported obligations is buildable too.
 	p := bufferProposal(t)
 	classify857(t, p, "current")
 	second := p.Statements[len(p.Statements)-1]
@@ -55,10 +51,8 @@ func TestAProposalSaysItsCurrentBugsCantBeReplayedYet857(t *testing.T) {
 	c := &formalize.Current{ModuleText: p.ModuleText, Includes: p.Includes, Lock: project.Lock{Bounds: p.Bounds, Statements: append([]project.Statement(nil), p.Statements...)}}
 	p.Target = &formalize.Target{Dir: "examples/buffer", Previous: "#1", Amends: p.Hash, Manifest: project.Manifest{Language: "python", Existing: []string{"app.py"}}}
 	body := amendmentComment(p, nil, formalize.Diff(c, p), Marker{Kind: KindProposal, Proposal: p})
-	const both = "**This can't be built yet.** It calls `PutWhenFull` and `DropWhenFull` current, so the gate has to replay each against the code, and this route cannot execute the required replay. " +
-		"A build would stop there, at `replay-unavailable`. Existing Python applications need an authenticated replay adapter."
-	if !strings.Contains(body, both+"\n\n") {
-		t.Errorf("an amendment with two current bugs doesn't say it can't be built:\n%s", body)
+	if strings.Contains(body, "can't be built yet") || strings.Contains(body, "replay-unavailable") {
+		t.Errorf("an amendment with supported current bugs is blocked:\n%s", body)
 	}
 	if strings.Contains(body, "stops calling") {
 		t.Errorf("an amendment that lowers no bug says it does:\n%s", body)

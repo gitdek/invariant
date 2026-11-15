@@ -29,6 +29,10 @@ var pythonApplicationRunner []byte
 //go:embed python_application_observer.py
 var pythonApplicationObserver []byte
 
+// PythonApplicationObserver supplies the collector interface for writers and
+// reviewers to read. Execution always installs its own embedded copy.
+func PythonApplicationObserver() []byte { return slices.Clone(pythonApplicationObserver) }
+
 type PythonApplicationInvocationKey struct {
 	Target string `json:"target"`
 	Check  string `json:"check"`

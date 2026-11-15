@@ -31,8 +31,8 @@ type PythonApplicationCommand struct {
 	WorkingDir                   string
 	Env, Sampling                map[string]string
 	Root, RuntimeDir, OutputDir  string
-	// Mode is "explored" for a driver run through the exploration harness,
-	// and "sampled" otherwise (#342).
+	// Mode is "sampled", "explored", or "bug-replay" for an independently
+	// requested current-bug path (#935).
 	Mode string
 	// Overlays are files mounted read-only over staged ones, as a driver
 	// copy one size larger is over the staged driver (#342).
@@ -186,6 +186,7 @@ type PythonApplicationExecutionResult struct {
 	// Exploration is what an explored driver's harness declared and
 	// reached, counted from its authenticated observations (#342).
 	Exploration *PythonApplicationExploration `json:"exploration,omitempty"`
+	BugReplay   *PythonApplicationBugReplay   `json:"bug_replay,omitempty"`
 	Complete    bool                          `json:"complete"`
 	Success     bool                          `json:"success"`
 	ExitCode    int                           `json:"exit_code"`
@@ -218,6 +219,7 @@ type pythonApplicationRequest struct {
 	Sampling       map[string]string              `json:"sampling"`
 	Execution      string                         `json:"execution"`
 	Mode           string                         `json:"mode,omitempty"`
+	BugReplay      *BugReplayRequest              `json:"bug_replay,omitempty"`
 	// Boundary is set for a trusted contract's backing-test run alone.
 	Boundary *pythonApplicationContractRequest `json:"boundary,omitempty"`
 }
@@ -227,7 +229,7 @@ var pythonApplicationContainerName = regexp.MustCompile(`invariant-[0-9]+-[0-9]+
 func (s *PythonApplicationSession) Run(ctx context.Context, key PythonApplicationInvocationKey) (*PythonApplicationExecutionResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.run(ctx, key, nil)
+	return s.run(ctx, key, nil, nil)
 }
 
 // pythonApplicationLargerBudget is the runs and steps an exploration one
@@ -284,11 +286,11 @@ func (s *PythonApplicationSession) RunLarger(ctx context.Context, key PythonAppl
 		return nil, project.ComponentFile{}, err
 	}
 	file := project.ComponentFile{Path: driver, SHA256: pythonApplicationHash(b)}
-	r, err := s.run(ctx, key, &pythonApplicationDriverCopy{file: file, host: host})
+	r, err := s.run(ctx, key, &pythonApplicationDriverCopy{file: file, host: host}, nil)
 	return r, file, err
 }
 
-func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicationInvocationKey, larger *pythonApplicationDriverCopy) (*PythonApplicationExecutionResult, error) {
+func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicationInvocationKey, larger *pythonApplicationDriverCopy, replay *BugReplayRequest) (*PythonApplicationExecutionResult, error) {
 	if s.closed {
 		return nil, fmt.Errorf("Python application session is closed")
 	}
@@ -366,6 +368,11 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 		c.Mode, req.Mode = "explored", "explored"
 		req.Observe = s.observedDeclarations(key.Target)
 	}
+	if replay != nil {
+		c.Mode, req.Mode = "bug-replay", "bug-replay"
+		req.BugReplay = replay
+		req.Observe = nil
+	}
 	if key.Kind != "conformance" {
 		for _, target := range pythonApplicationProofTargets(s.inventory) {
 			req.Contracts = append(req.Contracts, s.declarations[target])
@@ -407,6 +414,10 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	r := &PythonApplicationExecutionResult{Key: key, Declared: v, Provenance: clonePythonApplicationProvenance(s.provenance),
 		Actual: PythonApplicationActual{Image: c.Image, Interpreter: c.Interpreter, Launcher: c.Launcher, LauncherSHA256: c.RunnerSHA256, Args: slices.Clone(c.Args),
 			WorkingDir: c.WorkingDir, Env: maps.Clone(c.Env), Sampling: maps.Clone(c.Sampling), Overlays: overlays}, Tests: []PythonApplicationTest{}}
+	if replay != nil {
+		r.BugReplay = &PythonApplicationBugReplay{Request: copyReplay(*replay)}
+		r.ObservationMode = "bug-replay"
+	}
 	// The executor owns its command view; mutations cannot alter validation.
 	command := c
 	command.Args, command.Env, command.Sampling = slices.Clone(c.Args), maps.Clone(c.Env), maps.Clone(c.Sampling)
@@ -415,7 +426,7 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	r.ExitCode = process.ExitCode
 	var protocolErr error
 	if key.Kind == "conformance" {
-		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r, check, drivers, invocation.Explored)
+		protocolErr = s.observeTransitions(c, req.Execution, authentication, process.Events, r, check, drivers, invocation.Explored && replay == nil)
 		// A runner that stopped partway, as a step's deadline stops one, never
 		// sealed its stream. That's the failure to report, not a forgery.
 		var unsealed pythonApplicationUnsealed
@@ -484,11 +495,17 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 			if invocation.Explored {
 				r.ObservationMode = "explored"
 			}
+			if replay != nil {
+				r.ObservationMode = "bug-replay"
+			}
 		} else {
 			r.HarnessError = pythonApplicationHarnessError(process.Stderr)
 			r.Complete = false
 			r.Observations = nil
 			r.Exploration = nil
+			if r.BugReplay != nil {
+				r.BugReplay.Result, r.BugReplay.Observation = nil, nil
+			}
 			if err == nil {
 				err = fmt.Errorf("Python application driver did not complete successfully")
 			}
