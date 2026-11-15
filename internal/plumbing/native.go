@@ -223,6 +223,11 @@ func (p *Plan) repositoryDigest(ctx context.Context, snapshot *repository.Snapsh
 		return "", errors.New("native acceptance needs the caller's captured repository snapshot")
 	}
 	config := snapshot.Config()
+	for _, test := range p.Tests {
+		if config.IsProjectPath(test.File) {
+			return "", fmt.Errorf("acceptance file %s is inside projects_directory %q, reserved for the gate", test.File, config.Projects())
+		}
+	}
 	paths := append(append([]string(nil), p.Files...), p.TestFiles()...)
 	if _, err := snapshot.PartsFor(paths); err != nil {
 		return "", err

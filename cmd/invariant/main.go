@@ -48,6 +48,7 @@ import (
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/receipt"
+	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/scope"
 	"github.com/gitdek/invariant/internal/setup"
 	"github.com/gitdek/invariant/internal/synth"
@@ -79,7 +80,7 @@ Usage:
   invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-work DIR]... [-addr HOST:PORT]
                                                serve a live view of the factory and its evidence
   invariant ledger -repo OWNER/NAME [-json]    what each of the factory's issues took: time, comments, spend
-  invariant init [-repo OWNER/NAME] [-invariant COMMIT] [DIR]
+  invariant init [-repo OWNER/NAME] [-invariant COMMIT] [-projects DIR] [DIR]
                                                set up another repository's gate
   invariant new OWNER/NAME [-dir DIR] [-public] [-language go] [-spec FILE] [-invariant COMMIT]
                                                found a new project: its repository, checkout, starter, checks and gate
@@ -1351,6 +1352,7 @@ func initCmd(args []string) int {
 	repo := fs.String("repo", "", "the repository, as owner/name, for the steps this prints (default: the one its origin remote names on GitHub)")
 	ref := fs.String("invariant", buildCommit(), "the full commit of Invariant the repository's gate builds")
 	force := fs.Bool("force", false, "replace a different gate workflow")
+	projects := fs.String("projects", repository.DefaultProjectsDirectory, "the repository-relative directory reserved for modeled projects")
 	fs.Parse(args)
 	dir := "."
 	switch fs.NArg() {
@@ -1373,6 +1375,11 @@ func initCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
+	selectedProjects, guidance, err := setup.InitProjects(dir, *projects)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
 	path, err := setup.Write(dir, *ref, *force)
 	if err != nil {
 		if errors.Is(err, setup.ErrExists) {
@@ -1384,7 +1391,7 @@ func initCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	kept, unresolved, err := setup.WriteRepository(dir)
+	kept, unresolved, err := setup.WriteRepositoryWithProjects(dir, selectedProjects)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant: .invariant/repository.json:", err)
 		return 2
@@ -1402,6 +1409,10 @@ func initCmd(args []string) int {
 	}
 	if *repo == "" {
 		*repo = originRepo(dir)
+	}
+	fmt.Printf("\nThe gate owns modeled projects in %q. Repository checks use private copies without this directory. Conformance drivers keep their .ts imports because the gate runs them with its TypeScript toolchain and Node's explicit file extensions. Application TypeScript and ESLint configuration is left untouched.\n", selectedProjects)
+	for _, advice := range guidance {
+		fmt.Println(advice)
 	}
 	if *repo == "" {
 		*repo = "OWNER/NAME"
@@ -1430,12 +1441,21 @@ gh api -X PATCH repos/%[3]s -F allow_merge_commit=true
 
 3. Run the factory. It acts as you, through gh:
 
-invariant watch -repo %[3]s -projects invariant%[4]s
+invariant watch -repo %[3]s -projects %[6]s%[4]s
 
 4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
-`, setup.WorkflowPath, (*ref)[:12], *repo, language, setup.Protection)
+`, setup.WorkflowPath, (*ref)[:12], *repo, language, setup.Protection, shellQuoteProjects(selectedProjects))
 	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; check-repository reads committed base evidence. The generated gate runs configured repository checks, scope, project and plan ratification, and modeled verification. External plumbing remains disabled until the reviewed contract and capable gate are committed on the authoritative base. Configured issues then use native Go, pytest, Vitest and Jest tests under captured repository rules; trusted changes stay drafts for a person. Without a committed contract, intake runs no agent and creates no branch. To upgrade an existing gate, generate this pinned template with invariant init in a separate directory, review and merge these steps with your custom workflow, and commit the result to the base branch; init never replaces a different workflow without -force.")
 	return 0
+}
+
+func shellQuoteProjects(dir string) string {
+	if strings.IndexFunc(dir, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_./-", r))
+	}) < 0 {
+		return dir
+	}
+	return "'" + strings.ReplaceAll(dir, "'", "'\"'\"'") + "'"
 }
 
 // noCommitToPin is what init and new say when -invariant has no default: the
