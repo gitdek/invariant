@@ -492,6 +492,8 @@ func Synthesize(ctx context.Context, o Options) (*Result, error) {
 	// result with no final report. Its receipt names the agent that wrote the
 	// code, which the fingerprint leaves out (#179).
 	report, gateErr := verify.Run(ctx, final, filepath.Join(out, "gate"), o.Toolchain)
+	// The factory posts and keeps this error where anyone can read it (#922).
+	gateErr = verify.Public(gateErr)
 	if gateErr == nil {
 		report.Agent = usage.Backend
 		r.Final = report
