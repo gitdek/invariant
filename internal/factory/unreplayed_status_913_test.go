@@ -8,11 +8,8 @@ import (
 	"github.com/gitdek/invariant/internal/project"
 )
 
-// Since command replays run, a proposal is unbuildable for two reasons, and
-// its notice names the status the gate would give each: an existing Python
-// application has no replay adapter (replay-unavailable), and a bug that
-// must break a property has a counterexample no replay can run
-// (replay-unsupported-temporal). Neither waits for replays to run.
+// Both adapters run safety replays. A bug that must break a property still
+// has a counterexample no finite replay can run, and the notice names it.
 func TestTheUnbuildableNoticeNamesTheReplayStatus913(t *testing.T) {
 	statements := []project.Statement{
 		{Name: "Safe", Kind: project.Invariant, Says: "Nothing is delivered twice."},
@@ -28,10 +25,13 @@ func TestTheUnbuildableNoticeNamesTheReplayStatus913(t *testing.T) {
 		project.Statement{Name: "TakesTwice", Kind: project.Bug, Says: "A task is taken twice.", Expect: "Safe", CodeBehavior: "current"})}}
 	existing.Target = &formalize.Target{Manifest: project.Manifest{Language: "python", Existing: []string{"queue.py"}}}
 	note = unbuildable(existing)
-	for _, want := range []string{"`TakesTwice`", "`NeverTakes`", "`replay-unavailable`", "`replay-unsupported-temporal`", "authenticated replay adapter"} {
+	for _, want := range []string{"`NeverTakes`", "`replay-unsupported-temporal`"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("an existing Python proposal with both kinds omits %q: %s", want, note)
 		}
+	}
+	if strings.Contains(note, "TakesTwice") || strings.Contains(note, "replay-unavailable") {
+		t.Errorf("supported Python safety replay was blocked: %s", note)
 	}
 	if strings.Contains(note, "once replays run") {
 		t.Errorf("a notice waits for replays that run: %s", note)

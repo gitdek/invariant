@@ -37,10 +37,10 @@ func TestReplayGuidanceNamesTheHarnessTrustBoundary913(t *testing.T) {
 			}
 		})
 	}
-	// Existing Python runs no command replay, so it has no harness to name.
+	// Existing Python names its collector, which shares the driver's process.
 	p := &project.Project{Manifest: project.Manifest{Language: "python", Existing: []string{"delivery.py"}, Conformance: "driver.py"},
 		Lock: project.Lock{Statements: []project.Statement{{Name: "ReplayCompletedTask", Kind: project.Bug, Expect: "Safe", CodeBehavior: "current"}}}}
-	if strings.Contains(strings.ToLower(Prompt(p, "", "", 4, true, false)), "never reach into the harness") {
-		t.Error("existing Python is told about a replay harness it doesn't run")
+	if !strings.Contains(strings.ToLower(Prompt(p, "", "", 4, true, false)), "never reach into invariant_observe") {
+		t.Error("existing Python writer is not warned against collector tampering")
 	}
 }

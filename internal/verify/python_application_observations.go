@@ -165,6 +165,7 @@ type pythonApplicationObservations struct {
 	runLimit        int
 	stepLimit       int
 	explorer        *pythonApplicationExplorer
+	replay          *pythonApplicationReplay
 	// application says whether a staged source is the application's own
 	// code, which every entry must be (#879). It's nil where a decoded
 	// receipt's rows are read again: they were held to it when collected.
@@ -188,7 +189,7 @@ func (v *pythonApplicationObservations) observe(row PythonApplicationObservation
 	if row.Form != "" && row.Form != "module" {
 		return fmt.Errorf("unknown observation form")
 	}
-	if row.Operation != "" && (v.explorer == nil || row.Kind != "transition" || row.Form != "module" || row.Operation != "hold" && row.Operation != "release") {
+	if row.Operation != "" && (v.explorer == nil && v.replay == nil || row.Kind != "transition" || row.Form != "module" || row.Operation != "hold" && row.Operation != "release") {
 		return fmt.Errorf("invalid held-call observation operation")
 	}
 	if err := pythonApplicationValidateCalls(row, v.observed, v.files, v.explorer != nil); err != nil {
@@ -282,6 +283,11 @@ func (v *pythonApplicationObservations) observe(row PythonApplicationObservation
 			return err
 		}
 	}
+	if v.replay != nil {
+		if err := v.replay.observe(row); err != nil {
+			return err
+		}
+	}
 	v.runs[row.Run] = row
 	return nil
 }
@@ -291,7 +297,7 @@ func (v *pythonApplicationObservations) finish() (*PythonApplicationExploration,
 		return nil, fmt.Errorf("missing or miscounted observations")
 	}
 	for _, row := range v.runs {
-		if row.Sequence == 0 && row.Kind != "omitted" {
+		if row.Sequence == 0 && row.Kind != "omitted" && v.replay == nil {
 			return nil, fmt.Errorf("empty lifecycle")
 		}
 	}
@@ -315,6 +321,9 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 	defer func() {
 		if err != nil {
 			r.Observations, r.Exploration, r.Complete = nil, nil, false
+			if r.BugReplay != nil {
+				r.BugReplay.Result, r.BugReplay.Observation = nil, nil
+			}
 		}
 	}()
 	if len(events) > pythonApplicationEventsLimit {
@@ -354,6 +363,20 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 		files[path] = file.hash
 	}
 	observations := newPythonApplicationObservations(c.Key, c.Sampling, files, s.observedDeclarations(c.Key.Target), explorer)
+	var replay *pythonApplicationReplay
+	if c.Mode == "bug-replay" {
+		if r.BugReplay == nil || explored {
+			return fmt.Errorf("replay-invalid-stream: missing request or mixed execution mode")
+		}
+		replay = &pythonApplicationReplay{request: r.BugReplay.Request}
+		if err := checkReplayJSONUnicode(events); err != nil {
+			return err
+		}
+		observations.replay = replay
+		observations.observed = nil
+		observations.runLimit = int(^uint(0) >> 1)
+		observations.stepLimit = replay.request.Path.Offending + 1
+	}
 	verification, err := filepath.Rel(s.root, s.project.Dir)
 	if err != nil {
 		return err
@@ -398,6 +421,13 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return fmt.Errorf("foreign, replayed or duplicate observation begin")
 			}
 			begun = true
+		case "bug_replay":
+			if !begun || replay == nil || replay.steps.declared || len(r.Observations) > 0 {
+				return fmt.Errorf("replay-invalid-stream: unexpected replay declaration")
+			}
+			if err := replay.declare(line); err != nil {
+				return err
+			}
 		case "exploration":
 			if !begun || explorer == nil || explorer.declared || len(r.Observations) > 0 {
 				return fmt.Errorf("exploration steps outside an explored invocation's start")
@@ -434,7 +464,7 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 			switch row.Kind {
 			case "initial":
 				required = append(required, "state")
-				if explored {
+				if explored || replay != nil {
 					required = append(required, "start")
 				}
 			case "transition":
@@ -442,6 +472,15 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				if explored {
 					required = append(required, "step", "args", "replay", "called")
 					if explorer.refusals[row.Step] != nil {
+						required = append(required, "outcome")
+						if row.Outcome == "refused" {
+							required = append(required, "refusal")
+						}
+					}
+				}
+				if replay != nil {
+					required = append(required, "step", "args", "called")
+					if replay.steps.refusals[row.Step] != nil {
 						required = append(required, "outcome")
 						if row.Outcome == "refused" {
 							required = append(required, "refusal")
@@ -510,6 +549,11 @@ func (s *PythonApplicationSession) observeTransitions(c PythonApplicationCommand
 				return err
 			}
 			r.Exploration = x
+			if replay != nil {
+				if err := replay.finish(r.BugReplay); err != nil {
+					return err
+				}
+			}
 			ended = true
 		default:
 			return fmt.Errorf("unknown Python application observation event")

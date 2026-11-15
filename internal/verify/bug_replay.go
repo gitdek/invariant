@@ -264,9 +264,15 @@ func ReplaysBugs(language string) bool {
 }
 
 // CommandReplayAvailable describes the implemented finite command adapters.
-// Existing Python needs its own authenticated application adapter.
+// Existing Python uses its own authenticated application adapter.
 func CommandReplayAvailable(m project.Manifest) bool {
 	return m.Language == "typescript" || m.Language == "python" && len(m.Existing) == 0
+}
+
+// PythonApplicationReplayAvailable describes the authenticated lifecycle
+// adapter. Temporal paths and unsupported bindings still fail closed.
+func PythonApplicationReplayAvailable(m project.Manifest) bool {
+	return m.Language == "python" && len(m.Existing) > 0
 }
 
 func prepareBugReplay(ctx context.Context, out *Bug, b project.Statement, p *project.Project, dir string, runner tlc.Runner, cfg tlc.Config, res tlc.Result, kind string) {

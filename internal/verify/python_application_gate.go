@@ -323,8 +323,6 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	ratification(ctx, r, dir, lock)
 	r.Passed = r.Passed && r.RatificationMatches()
 	r.ModelOnly = false
-	replaysOK := activateBugReplays(r)
-	r.Passed = r.Passed && replaysOK
 	r.Application = &PythonApplicationReport{}
 	if err != nil {
 		r.Application.ModelError = strings.ReplaceAll(err.Error(), work, "/application")
@@ -426,7 +424,11 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	// Every declared trusted contract's backing tests are required, whether
 	// or not a proof uses it yet, and every selected proof must qualify.
 	larger := r.Larger == nil || !r.Larger.Required || r.Larger.Passed
-	r.Passed = r.Passed && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested() &&
+	if err := runPythonApplicationBugReplays(ctx, s, r, runner); err != nil {
+		return nil, err
+	}
+	replaysOK := activateBugReplays(r)
+	r.Passed = r.Passed && replaysOK && all && larger && r.Build.Passed && len(r.Application.Conformance) > 0 && r.pythonApplicationContractsTested() &&
 		len(r.pythonApplicationProofProblems()) == 0
 	r.Assurance = r.CodeAssurance()
 	r.Fingerprint = Fingerprint(*r)

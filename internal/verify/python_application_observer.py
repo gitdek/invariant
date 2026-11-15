@@ -340,7 +340,9 @@ class Collector:
         self.writers = (_Lifecycle.__enter__.__wrapped__.__code__, _Lifecycle.step.__wrapped__.__code__, _ModuleLifecycle.perform.__code__, _Exploration.try_step.__code__)
         # An explored invocation drives the application only through
         # explore(), which runs once (#342).
-        self.exploring = request.get("mode") == "explored"
+        self.replaying = request.get("mode") == "bug-replay"
+        self.replayed = False
+        self.exploring = request.get("mode") in ("explored", "bug-replay")
         self.exploration = None
         self.explored = False
         # The run's one deadline watchdog and the socket to it, once a module
@@ -439,11 +441,15 @@ class Collector:
     def declare(self, steps):
         # The harness's own record of the steps it tries, before any run.
         caller = sys._getframe(1)
-        if caller.f_code is not explore.__wrapped__.__code__ or caller.f_globals is not globals():
+        if caller.f_code not in (explore.__wrapped__.__code__, replay.__wrapped__.__code__) or caller.f_globals is not globals():
             error = ValueError("exploration steps did not come from the harness")
             self.fail(error)
             raise error
-        self.emit(dict(type="exploration", steps=steps))
+        if self.replaying:
+            q = self.request["bug_replay"]
+            self.emit(dict(type="bug_replay", request_id=q["id"], invocation_id=q["invocation_id"], path_id=q["path"]["id"], steps=steps))
+        else:
+            self.emit(dict(type="exploration", steps=steps))
 
     def trace(self, frame, event, arg):
         current = threading.current_thread()
@@ -620,6 +626,8 @@ class _Lifecycle:
         if c.active is not None:
             raise ValueError("nested lifecycles during a step are unsupported")
         if c.exploring and (c.exploration is None or not c.exploration.starting):
+            if c.replaying:
+                raise ValueError("replay-incomplete: lifecycles must be made by replay()'s starts")
             raise ValueError("an explored invocation makes lifecycles only in explore()'s starts")
         self.form = form
         self.target = Binding(c, target, module=form == "module")
@@ -717,7 +725,7 @@ class _Lifecycle:
             raise ValueError("reused or nested lifecycle")
         if c.exploring and (c.exploration is None or c.exploration.entering is not self):
             raise ValueError("explore() enters an explored invocation's lifecycles")
-        if len(c.lives) >= int(c.request["sampling"]["runs"]):
+        if not c.replaying and len(c.lives) >= int(c.request["sampling"]["runs"]):
             raise ValueError("run sampling budget exceeded")
         self.entered = True
         self.run = len(c.lives) + 1
@@ -810,7 +818,7 @@ class _Lifecycle:
         c.driver()
         if not self.entered or self.closed or c.active is not None:
             raise ValueError("closed, unentered or nested lifecycle step")
-        if self.sequence >= int(c.request["sampling"]["steps"]):
+        if not c.replaying and self.sequence >= int(c.request["sampling"]["steps"]):
             raise ValueError("step sampling budget exceeded")
         if c.exploring:
             c.exploration.stepping(self)
@@ -1085,7 +1093,7 @@ except OSError:
             raise ValueError("hold and release require an explored module lifecycle")
         if not self.entered or (self.closed and not cleanup) or c.active is not None:
             raise ValueError("closed, unentered or nested lifecycle step")
-        if not cleanup and self.sequence >= int(c.request["sampling"]["steps"]):
+        if not cleanup and not c.replaying and self.sequence >= int(c.request["sampling"]["steps"]):
             raise ValueError("step sampling budget exceeded")
         if c.exploring and not cleanup:
             c.exploration.stepping(self)
@@ -1489,7 +1497,7 @@ def explore(start, steps):
     """
     c = _collector
     c.driver()
-    if not c.exploring:
+    if not c.exploring or c.replaying:
         raise ValueError("explore() needs an exhaustive manifest")
     if c.exploration is not None or c.explored or c.lives or c.active is not None:
         raise ValueError("explore() runs once, before any other lifecycle")
@@ -1532,6 +1540,142 @@ def explore(start, steps):
     c.explored = True
 
 
+def _replay_value(value, tagged=True):
+    kind = value["kind"]
+    if kind == "integer":
+        return int(value["atom"])
+    if kind == "bool":
+        return value["atom"] == "TRUE"
+    if kind == "string":
+        return value.get("atom", "")
+    if kind == "record":
+        return {e["key"]["atom"]: _replay_value(e["value"], tagged) for e in value.get("entries", [])}
+    if kind == "sequence":
+        items = [_replay_value(v, tagged) for v in value.get("elements", [])]
+        return {"$seq": items} if tagged else items
+    if tagged:
+        if kind == "model":
+            return {"$mv": value["atom"]}
+        if kind == "set":
+            return {"$set": [_replay_value(v) for v in value.get("elements", [])]}
+        if kind == "function":
+            return {"$fn": [[_replay_value(e["key"]), _replay_value(e["value"])] for e in value["entries"]]}
+    raise ValueError("replay-unsupported-binding: cannot read back " + kind)
+
+
+def _replay_state(state, record):
+    values = {k: _replay_value(v, False) for k, v in state.items()}
+    if record.form != "module":
+        for value in values.values():
+            scalar(value)
+    return values
+
+
+class _BugReplay(_Exploration):
+    """A required path, independent of exploration and sampling budgets."""
+
+    def fields(self, life, kind):
+        fields = super().fields(life, kind)
+        fields.pop("replay", None)
+        return fields
+
+    def run(self):
+        path = self.c.request["bug_replay"]["path"]
+        for r in range(len(self.starts)):
+            handle, record = self.make(r)
+            self.entering, self.start_index = record, r
+            try:
+                record.__enter__()
+            finally:
+                self.entering = None
+            matched = equal(record.state, _replay_state(path["states"][0], record))
+            if matched:
+                for i, step in enumerate(path["steps"][:path["offending"] + 1]):
+                    if not equal(record.state, _replay_state(path["states"][i], record)):
+                        raise ValueError("replay-invalid-prefix: state before call %d differs" % i)
+                    si = next(j for j, s in enumerate(self.steps) if s[0] == step["action"])
+                    args = [_replay_value(v) for v in (step.get("args") or [])]
+                    ai = next(j for j, a in enumerate(self.steps[si][2]) if equal(a, args))
+                    self.take(handle, record, si, ai, False)
+                    if not self.stepped:
+                        raise ValueError("replay-missing-dispatch: " + step["action"])
+                    if i < path["offending"] and (record.outcome == "refused" or not equal(record.state, _replay_state(path["states"][i + 1], record))):
+                        raise ValueError("replay-invalid-prefix: setup call %d diverged" % i)
+            else:
+                # A nonmatching start is still read back and closed. It
+                # contributes no call and cannot stand in for the path.
+                record.omitted = True
+            self.attempt = None
+            self.leaving = record
+            try:
+                record.__exit__(None, None, None)
+            finally:
+                self.leaving = None
+            if matched:
+                return
+        raise ValueError("replay-invalid-initial: no start matches the requested state")
+
+
+@guarded
+def replay(start, steps):
+    """Run the gate's required bug path, or return False in an ordinary run.
+
+    start returns a new unentered functional, instance or module lifecycle;
+    a list of starts selects by actual initial read-back. Step names include
+    bug-only actions. The collector passes the exact requested arguments to
+    take(life, state, *args), regardless of Step.args or sampling budgets.
+    Every take must dispatch one lifecycle operation. Refusal declarations
+    and held calls have the same rules as explore(). Completion returns True.
+    """
+    c = _collector
+    if not c.replaying:
+        return False
+    c.driver()
+    if c.exploration is not None or c.replayed or c.lives or c.active is not None:
+        raise ValueError("replay() runs once, before any other lifecycle")
+    starts = list(start) if type(start) in (list, tuple) else [start]
+    if not starts or any(not callable(s) for s in starts):
+        raise ValueError("replay() needs one or more start callables")
+    if type(steps) not in (list, tuple) or not steps:
+        raise ValueError("replay() needs a nonempty list of steps")
+    bindings = {}
+    for s in steps:
+        if type(s) is not Step or type(s.name) is not str or _step_name.fullmatch(s.name) is None or s.name in bindings or not callable(s.take):
+            raise ValueError("replay-unsupported-binding: distinct Step names and callable takes required")
+        refusal = s.refusal
+        if refusal is not None:
+            if type(refusal) is not Refusal or type(refusal.attributes) is not dict:
+                raise ValueError("a step's refusal must be a Refusal declaration")
+            refusal = Refusal(refusal.exception_type, **refusal.attributes)
+        bindings[s.name] = (s.name, s.take, [], refusal)
+    records = []
+    path = c.request["bug_replay"]["path"]
+    for step in path["steps"][:path["offending"] + 1]:
+        name = step["action"]
+        if name not in bindings:
+            raise ValueError("replay-unsupported-binding: no Step for " + name)
+        record = bindings[name]
+        args = [_replay_value(v) for v in (step.get("args") or [])]
+        if not record[2]:
+            records.append(record)
+        if not any(equal(args, old) for old in record[2]):
+            record[2].append(args)
+    declarations = []
+    for name, _, args, refusal in records:
+        declaration = dict(name=name, args=args)
+        if refusal is not None:
+            declaration["refusal"] = refusal.descriptor()
+        declarations.append(declaration)
+    c.declare(declarations)
+    c.exploration = _BugReplay(c, starts, records)
+    try:
+        c.exploration.run()
+    finally:
+        c.exploration = None
+    c.replayed = True
+    return True
+
+
 def run(request, emit, locations, codes, argv):
     # Docker starts the runner as namespace init, which cannot be killed by
     # a child in that namespace. Keep init as a supervisor and execute the
@@ -1571,9 +1715,11 @@ def run(request, emit, locations, codes, argv):
     threading.excepthook = thread_error
     try:
         exec(code, vars(module))
+        if c.replaying and not c.replayed:
+            raise ValueError("replay-incomplete: driver did not complete replay()")
         if c.failed or not c.lives or any(not life.closed or (life.sequence == 0 and not life.omitted) for life in c.lives) or sys.gettrace() != c.trace or sys.getprofile() != c.profile:
             raise ValueError("driver did not complete bound lifecycles")
-        if c.exploring and not c.explored:
+        if c.exploring and not c.replaying and not c.explored:
             raise ValueError("an explored invocation's driver did not complete explore()")
     except BaseException as error:
         c.fail(error)

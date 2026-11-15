@@ -730,7 +730,7 @@
       const card = $("#bugcard");
       const projects = state ? models(state).find((m) => m.key === this.key)?.projects || [] : [];
       const replay = projects.flatMap((p) => p.bugs.filter((bug) => bug.name === b.name)
-        .map((bug) => `${p.repo ? p.repo + " · " : ""}${p.language} · ${p.dir}: ${bug.replay_status?.label || "not replayed: not classified"}${bug.replay_message ? ": " + bug.replay_message : ""}`));
+        .map((bug) => `${p.repo ? p.repo + " · " : ""}${p.language} · ${p.dir}: ${bugReplayDetail(bug)}`));
       card.innerHTML = `<div class="k">Model bug · caught</div><div class="t">${esc(b.label)}</div><div class="d">${esc(b.says)}</div>
         <div class="c">After ${b.steps} steps, <code>${esc(b.action)}</code> breaks <b>${esc(b.violated)}</b> in the model.</div>
         <div class="c">${replay.length ? replay.map(esc).join("<br>") : "No code replay evidence is available."}</div>`;
@@ -1112,7 +1112,14 @@
   // a proved project's doesn't: then it's said beside the result.
   const sampledBeside = (p) => !/sampled/.test(p.assurance || "") && !!p.coverage?.some((c) => c.checked && c.sampled);
   function bugReplayLabel(p) {
-    return p.bugs.map((b) => `${b.name}: ${b.replay_status?.label || "not replayed: not classified"}${b.replay_message ? ": " + b.replay_message : ""}`).join("; ");
+    return p.bugs.map((b) => `${b.name}: ${bugReplayDetail(b)}`).join("; ");
+  }
+
+  function bugReplayDetail(b) {
+    const overall = `${b.replay_status?.label || "not replayed: not classified"}${b.replay_message ? ": " + b.replay_message : ""}`;
+    const invocations = (b.application_replays || []).map(({key, evidence}) =>
+      `application replay ${key.target} · ${key.check} · ${key.id}: ${evidence.status}${evidence.message ? ": " + evidence.message : ""}`);
+    return [overall, ...invocations].join("; ");
   }
 
   function codeEvidence(p) {

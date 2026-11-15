@@ -48,6 +48,21 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		raw, _ := json.MarshalIndent(x, "", "  ")
 		fmt.Fprintf(b, "%s\n", componentLiteral(string(raw)))
 	}
+	if len(a.BugReplays) > 0 {
+		b.WriteString("\n### Python application · current-bug replay\n\nEvery current bug requires a checked replay for each selected conformance invocation. Execution completion alone does not reject the bug. These deterministic calls add no sampled coverage, exploration prefixes or proof evidence.\n\n| Bug | Invocation | Checked replay | Diagnostic |\n| :-- | :-- | :-- | :-- |\n")
+		for _, replay := range a.BugReplays {
+			name := replay.Bug
+			if replay.Evidence.Request != nil {
+				name = replay.Evidence.Request.Bug.Name
+			}
+			key := replay.Key
+			fmt.Fprintf(b, "| %s | %s · %s · %s | %s %s | %s |\n", componentLiteral(name), componentLiteral(key.Target), componentLiteral(key.Check), componentLiteral(key.ID), mark(replay.Evidence.Passed), componentLiteral(replay.Evidence.Status), componentLiteral(replay.Evidence.Message))
+		}
+		for _, replay := range a.BugReplays {
+			raw, _ := json.MarshalIndent(replay, "", "  ")
+			fmt.Fprintf(b, "\nChecked application replay: %s\n", componentLiteral(string(raw)))
+		}
+	}
 	if len(a.Conformance) > 0 {
 		b.WriteString("\n| Conformance invocation | Result | Evidence |\n| :-- | :-- | :-- |\n")
 		for _, c := range a.Conformance {

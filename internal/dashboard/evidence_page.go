@@ -334,23 +334,33 @@ func foundFor(s project.Statement, r *verify.Report) (string, bool) {
 	case project.Bug:
 		for _, b := range r.Bugs {
 			if b.Name == s.Name {
+				found := "Not caught"
 				if b.Caught {
-					found := "Caught"
+					found = "Caught"
 					if b.Violated != "" {
 						found += ": breaks " + b.Violated
 					}
 					if b.Steps > 0 {
 						found += " in " + counted(int64(b.Steps), "step")
 					}
-					// A check of the model alone runs no code, so a replay
-					// it has only prepared isn't one it missed.
-					status := b.ReplayStatus()
-					if b.Replay != nil && b.Replay.Message != "" {
-						found += "; " + b.Replay.Message
-					}
-					return found + "; " + status.Label, status.Required && !status.Replayed && !r.ModelOnly
 				}
-				return "Not caught; " + b.ReplayStatus().Label, true
+				// A check of the model alone runs no code, so a replay
+				// it has only prepared isn't one it missed.
+				status := b.ReplayStatus()
+				if b.Replay != nil && b.Replay.Message != "" {
+					found += "; " + b.Replay.Message
+				}
+				if r.Application != nil {
+					for _, replay := range r.Application.BugReplays {
+						if replay.Bug == b.Name || replay.Evidence.Request != nil && replay.Evidence.Request.Bug.Name == b.Name {
+							found += fmt.Sprintf("; application replay %s · %s · %s: %s", replay.Key.Target, replay.Key.Check, replay.Key.ID, replay.Evidence.Status)
+							if replay.Evidence.Message != "" {
+								found += ": " + replay.Evidence.Message
+							}
+						}
+					}
+				}
+				return found + "; " + status.Label, !b.Caught || status.Required && !status.Replayed && !r.ModelOnly
 			}
 		}
 	}

@@ -122,8 +122,14 @@ func replayGuidance(p *project.Project) string {
 	if len(bugs) == 0 {
 		return ""
 	}
-	if !verify.CommandReplayAvailable(p.Manifest) {
-		return "\nCurrent bugs " + strings.Join(bugs, ", ") + ": replay-unavailable. Existing Python applications require an authenticated adapter; ordinary command replay does not support them.\n"
+	if verify.PythonApplicationReplayAvailable(p.Manifest) {
+		return fmt.Sprintf(`
+Current bugs %s require authenticated application replay for every selected conformance invocation, independently of sampled or exhaustive mode. Read the supplied invariant_observe.py. Call replay(start, steps) at the start of the selected driver and return when it returns True; False leaves the ordinary sample or explore path unchanged. start returns one unentered functional, instance or module lifecycle, or supply a list of starts for selection by actual initial read-back. Bind Step names, including bug-only actions, to real surrounding application entries through life.step(), life.hold() or life.release(). The collector passes the exact requested arguments to take(life, state, *args), regardless of enumeration or sampling limits. Each take must dispatch its operation, even when the model rules it out; never synthesize a bug mutation or a refusal.
+
+The collector owns ordering through the exact prefix and offending call, fresh identity, selected calls, read-back and completion. Refusal declares an exact application exception class and attributes, allowed only before a selected call or thread starts and with unchanged state. A declared normal read-only return remains accepted. Held calls retain their start/release ownership and cleanup rules. Missing dispatch, arbitrary exceptions, changed continuity or failed cleanup fail replay. The gate checks the actual result against the model and rejects reproduction; these executions add no sampled coverage, exploration prefixes or proof claims. Temporal counterexamples and unsupported bindings still fail.
+
+The driver runs in the harness's own process. Never reach into invariant_observe: not its frames, objects or closures, not what it calls, such as builtins or modules, not its descriptors or output files, and not the process's exit. Review treats any of that as tampering with the gate; authentication does not isolate hostile Python in the same process.
+`, strings.Join(bugs, ", "))
 	}
 	name, _ := verify.ReplayHarness(p.Manifest.Language)
 	factory := "invariantReplay"
