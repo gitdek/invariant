@@ -874,6 +874,366 @@ Each call that returns or raises inside an entry appears, in the order they end,
 
 The observed function qualifies only when the same complete, successful exploration invocation records it on both accepted and declared-refused non-replay attempts, against the proof's source bytes, beside passing transition, state and attempted-step conformance. An accepted attempt is the accepted outcome of a step that declares a refusal. Only calls the application's own code makes count: a call whose `caller` is one of the manifest's `existing` sources, or lies under one, and isn't the driver. A call that a driver, a helper outside those sources or a callback of theirs makes is recorded with its caller and counts for nothing, since it shows nothing about the application. A replay is compared with the attempt it repeats by the calls made, in any order, since calls on an entry's worker threads complete in an order that varies. A declaration alone, calls on only one outcome, replay-only calls, a sampled run or stale, incomplete or failed evidence skips Nagini if no other same-declaration conformance route qualifies, and the proof's skipped reasons say which of these it lacks ([#849's ratified plan](../.invariant/plans/issue-849.json)). Receipts retain the calls and declarations, bind them into fingerprints and check qualification again from the matching execution and conformance; missing coverage appears in the proof diagnostics.
 
+#### A complete decision on plain values
+
+This example separates a request handler's ordinary Python work from an undecorated, synchronous decision, as [#923's ratified plan](../.invariant/plans/issue-923.json) describes. The decision is behaviorally pure: it reads its arguments and returns a value, with no application effects. That does **not** mean adding Nagini's `@Pure` decorator. The gate refuses that decorator too, because its execution evidence binds undecorated functions.
+
+Create a fresh application with this layout. `counter/__init__.py` is empty; the two `nagini_contracts` files must come from the [exact-byte, revision-matched stand-in setup](#shipping-the-runtime-stand-in), not from PyPI or a hand-written replacement. No third-party requirements are needed.
+
+```text
+app/
+  counter/__init__.py
+  counter/admission.py
+  counter/core.py
+  nagini_contracts/__init__.py
+  nagini_contracts/contracts.py
+  verification/counter/
+    driver.py
+    .invariant/invariant.json
+    .invariant/ratified.lock
+    .invariant/specs/Counter.tla
+```
+
+`counter/admission.py` states the complete precedence: a present wrong site gives 403, even when the header is empty; otherwise a wrong engine gives 400; otherwise busy gives 409; otherwise admission succeeds with 0. Missing and empty headers are different, so the caller passes both presence and a string.
+
+<!-- plain-values: counter/admission.py -->
+```python
+from nagini_contracts.contracts import *
+
+def admission(has_site: bool, site: str, requested: str, busy: bool) -> int:
+    Ensures(Implies(has_site and site != 'statue', Result() == 403))
+    Ensures(Implies((not has_site or site == 'statue') and requested != 'engine', Result() == 400))
+    Ensures(Implies((not has_site or site == 'statue') and requested == 'engine' and busy, Result() == 409))
+    Ensures(Implies((not has_site or site == 'statue') and requested == 'engine' and not busy, Result() == 0))
+    if has_site and site != 'statue':
+        return 403
+    if requested != 'engine':
+        return 400
+    if busy:
+        return 409
+    return 0
+```
+
+`counter/core.py` is ordinary application code. The header mapping holds strings, so `get` returns `None` only for an absent header. The handler converts that optional value to `has_site` and `site`, reads the registry and engine object, and calls the decision exactly once before any refusal or selected operation. On acceptance it applies the effects, including the dictionary update using `setdefault`. The example admits one job after each reset; it has no completion operation.
+
+<!-- plain-values: counter/core.py -->
+```python
+from typing import Dict, Optional
+from .admission import admission
+
+class Request:
+    def __init__(self, headers: Dict[str, str], requested: str):
+        self.headers = headers
+        self.requested = requested
+
+class Refused(Exception):
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+class Engine:
+    def __init__(self):
+        self.active = 0
+
+registry = {'engine': Engine()}
+accepted = {}
+count = 0
+
+def reset():
+    global count
+    count = 0
+    registry['engine'].active = 0
+    accepted.clear()
+
+def increment(engine):
+    global count
+    engine.active += 1
+    count += 1
+
+def submit(request: Request):
+    header: Optional[str] = request.headers.get('Site')
+    has_site = header is not None
+    site = '' if header is None else header
+    requested = request.requested
+    engine = registry['engine']
+    busy = engine.active != 0
+    status = admission(has_site, site, requested, busy)
+    if status != 0:
+        raise Refused(status)
+    increment(engine)
+    accepted.setdefault(requested, 0)
+    accepted[requested] += 1
+
+def read():
+    return count
+```
+
+`verification/counter/driver.py` tries absent, correct, empty and wrong headers with both engine names in each reached state. It calls the handler, letting `Refused` escape to the harness before `increment` on rejection. `Refusal(app.Refused)` declares that exact exception class without fixing one status code, because all three refusals are valid. The decision's contract checks the recorded status. `Read` is a normal read-only entry with a refusal declaration, so it may return without the selected operation, leaving read-back unchanged.
+
+<!-- plain-values: verification/counter/driver.py -->
+```python
+from invariant_observe import Refusal, Step, explore, module
+from counter import core as app
+
+Limit = 2
+
+def start():
+    app.reset()
+    return module(app.increment, fields={'count': 'count'})
+
+def submit(life, state, has_site, site, requested):
+    headers = {'Site': site} if has_site else {}
+    life.step(app.submit, app.Request(headers, requested))
+
+def read(life, state):
+    life.step(app.read)
+
+ATTEMPTS = [
+    [has_site, site, requested]
+    for has_site, site in [(False, ''), (True, 'statue'),
+                           (True, ''), (True, 'elsewhere')]
+    for requested in ['engine', 'other']
+]
+
+def drive():
+    explore(start, [
+        Step('Submit', submit, ATTEMPTS, refusal=Refusal(app.Refused)),
+        Step('Read', read, refusal=Refusal(app.Refused)),
+    ])
+
+if __name__ == '__main__':
+    drive()
+```
+
+`verification/counter/.invariant/specs/Counter.tla` models admission and read-back. Its two states, idle and busy, do not depend on `Limit`; the driver declares that environment bound so the gate also checks one size larger. `Read` allows the application to remain busy. `Overflow` is a deliberately broken action for the model's bug check, outside `Next`.
+
+<!-- plain-values: verification/counter/.invariant/specs/Counter.tla -->
+```tla
+---- MODULE Counter ----
+EXTENDS Naturals
+CONSTANT Limit
+VARIABLE count
+vars == <<count>>
+Headers == {<<FALSE, "">>, <<TRUE, "statue">>,
+            <<TRUE, "">>, <<TRUE, "elsewhere">>}
+Engines == {"engine", "other"}
+Init == count = 0
+Submit(has_site, site, requested) ==
+    /\ (~has_site \/ site = "statue")
+    /\ requested = "engine"
+    /\ count = 0
+    /\ count' = 1
+Read == UNCHANGED count
+Next == (\E header \in Headers, requested \in Engines :
+            Submit(header[1], header[2], requested)) \/ Read
+Spec == Init /\ [][Next]_vars
+Safe == count \in 0..1 /\ Limit >= 1
+Full == count = 1
+Overflow == count' = 2
+====
+```
+
+`verification/counter/.invariant/invariant.json` selects conformance on the operation, observes the decision inside application entries, and selects the decision's proof separately. All `source` paths are application-relative; `module` and `conformance` are verification-project-relative. There is no proof invocation or invented conformance check on `admission`.
+
+<!-- plain-values: verification/counter/.invariant/invariant.json -->
+```json
+{
+  "name": "Plain-value admission",
+  "language": "python",
+  "code": ".",
+  "module": ".invariant/specs/Counter.tla",
+  "conformance": "driver.py",
+  "exhaustive": true,
+  "existing": ["counter/core.py", "counter/admission.py"],
+  "components": {
+    "scope": ["counter"],
+    "checks": [
+      {
+        "target": {"source": "counter/core.py", "symbol": "increment"},
+        "observe": [{"source": "counter/admission.py", "symbol": "admission"}],
+        "conformance": [{"source": "verification/counter/driver.py", "symbol": "drive"}],
+        "invocations": [{
+          "id": "explore",
+          "kind": "conformance",
+          "check": {"source": "verification/counter/driver.py", "symbol": "drive"},
+          "command": "python",
+          "args": ["driver.py"],
+          "working_dir": "verification/counter",
+          "sampling": {"runs": "200", "steps": "10", "seed": "1"},
+          "inputs": ["verification/counter/.invariant/specs/Counter.tla", "verification/counter/.invariant/ratified.lock"]
+        }]
+      },
+      {
+        "target": {"source": "counter/admission.py", "symbol": "admission"},
+        "proof": {"contracts": [{"source": "counter/admission.py", "symbol": "admission"}]}
+      }
+    ]
+  }
+}
+```
+
+Start a **new, unratified** `verification/counter/.invariant/ratified.lock` with this proposal, without borrowing any fixture identity or hashes:
+
+```json
+{
+  "bounds": {"Limit": "2"},
+  "statements": [
+    {"name": "Spec", "kind": "spec", "says": "Start idle, admit an allowed request once, and allow reads."},
+    {"name": "Safe", "kind": "invariant", "says": "The admitted count is zero or one, with a positive environment bound."},
+    {"name": "Full", "kind": "witness", "says": "An admitted request is reachable."},
+    {"name": "Overflow", "kind": "bug", "expect": "Safe", "says": "Setting the count to two breaks the invariant."}
+  ]
+}
+```
+
+Follow the [adoption and human ratification procedure](#manually-adopting-an-existing-python-application) for this new project: record its proposed decision, review the model, statements, bounds, application and driver, put the actual decision ID in the lock, and have the human pin `app/verification/counter` and ratify that proposal hash. This page supplies no ratification. Never repin an existing lock to try the example. After shipping the stand-in from the matching revision, run:
+
+```sh
+invariant verify -out receipt app/verification/counter
+```
+
+[D-0416](../decisions/journal/D-0416.jsonl) requires the decision's arguments and results on both accepted and declared-refused application entries in one completed session, bound to the same staged source as the proof, beside passing transition, exhaustive-state and attempted-step conformance. Here the handler in `counter/core.py` is the recorded caller; calling `admission` directly from the driver would not qualify it. Merely naming it in `observe` or `proof` earns nothing. Calling it only after rejection checks, so only accepted attempts reach it, also leaves its proof `unchecked` and skips Nagini, even if the operation's conformance passes.
+
+The qualified proof establishes this decision's guarantee for its typed inputs. Handler tests separately check header extraction, dictionary and object reads, exceptions and effects. The minimal manifest above selects exploration, not unit tests; it does not label those surrounding functions proved. [#838 and #841's caller checks](#callers-checked-against-the-contract) evaluate the contracts on recorded exploration and application-test calls, including parameter types and any `Requires`. They do not prove that every possible caller establishes every precondition. Neither the decision proof, the tests nor the observed-call qualification proves the whole application or behavior at every size.
+
+#### Rejected expressions and plain-value replacements
+
+These are complete, separate Python modules, each with an undecorated `decision` function. The rejected contract forms fail **admission before Nagini runs**. The working forms keep optional values, lookups and object access in the ordinary caller, as the handler above does. Admission is conservative: Python short-circuiting or a fact a verifier could prove does not widen the admitted contract language.
+
+For an optional string, `Implies` is a function call. Python evaluates `len(site)` even when `site is None`; the stand-in cannot prevent that `TypeError`:
+
+<!-- plain-values: optional-string-rejected -->
+```python
+from typing import Optional
+from nagini_contracts.contracts import *
+
+def decision(site: Optional[str]) -> bool:
+    Requires(Implies(site is not None, len(site) > 0))
+    return site is None or site == 'statue'
+```
+
+An arithmetic consequent is eager too. The gate refuses the read of `active`, an `Optional`, and `decision(None)` raises even with the stand-in:
+
+<!-- plain-values: optional-arithmetic-rejected -->
+```python
+from typing import Optional
+from nagini_contracts.contracts import *
+
+def decision(active: Optional[int]) -> bool:
+    Requires(Implies(active is not None, active + 1 > 0))
+    return active is None or active == 0
+```
+
+A `Union` read has the same admission restriction. Even this guarded comparison is refused: optional and union values may occur in contracts only in `is`, `is not` and `isinstance` tests.
+
+<!-- plain-values: union-rejected -->
+```python
+from typing import Union
+from nagini_contracts.contracts import *
+
+def decision(site: Union[str, int]) -> bool:
+    Requires(Implies(isinstance(site, str), site == 'statue'))
+    return site == 'statue'
+```
+
+For the string cases, normalize in the caller, preserving presence separately. This replacement admits an absent header and the correct header, but refuses a present empty header:
+
+<!-- plain-values: optional-working -->
+```python
+from nagini_contracts.contracts import *
+
+def decision(has_site: bool, site: str) -> bool:
+    Ensures(Result() == (not has_site or site == 'statue'))
+    return not has_site or site == 'statue'
+```
+
+For the optional arithmetic case, choose the application's missing-value policy in the caller, for example `active = 0 if maybe_active is None else maybe_active`, then pass the plain integer to the [integer replacement below](#setdefault-and-verifier-support). A union must likewise be validated or normalized by the caller; do not silently turn a wrong type into an absent header.
+
+Subscripts, attributes and methods are refused in contracts even when they would work in a particular runtime state. A dictionary subscript can be missing, an attribute can involve application code, and a method is not one of the contract language's supported calls. Each of these three rejected modules has the same plain-boolean replacement below.
+
+<!-- plain-values: subscript-rejected -->
+```python
+from typing import Dict
+from nagini_contracts.contracts import *
+
+def decision(state: Dict[str, bool]) -> bool:
+    Ensures(Result() == (not state['busy']))
+    return not state['busy']
+```
+
+<!-- plain-values: attribute-rejected -->
+```python
+from nagini_contracts.contracts import *
+
+class State:
+    def __init__(self, busy: bool):
+        self.busy = busy
+
+def decision(state: State) -> bool:
+    Ensures(Result() == (not state.busy))
+    return not state.busy
+```
+
+<!-- plain-values: method-rejected -->
+```python
+from typing import Dict
+from nagini_contracts.contracts import *
+
+def decision(state: Dict[str, bool]) -> bool:
+    Ensures(Result() == (not state.get('busy', False)))
+    return not state.get('busy', False)
+```
+
+Read `state['busy']`, `state.busy` or `state.get('busy', False)` in the ordinary caller, and pass that boolean:
+
+<!-- plain-values: lookup-working -->
+```python
+from nagini_contracts.contracts import *
+
+def decision(busy: bool) -> bool:
+    Ensures(Result() == (not busy))
+    return not busy
+```
+
+##### setdefault and verifier support
+
+Passing admission does not mean the pinned verifier supports every body. Nagini **1.3.1** cannot translate `dict.setdefault`. This module's contract passes admission, but Nagini exits non-zero with `Unsupported builtin function` at the `d.setdefault(k, 0)` statement's source line. Keep the statement form shown here: assigning the method's result instead triggers a translator crash in this version, which is not the diagnostic this example checks.
+
+<!-- plain-values: setdefault-rejected -->
+```python
+from typing import Dict
+from nagini_contracts.contracts import *
+
+def decision(d: Dict[str, int], k: str) -> bool:
+    Requires(Acc(dict_pred(d)))
+    Ensures(Acc(dict_pred(d)))
+    d.setdefault(k, 0)
+    return True
+```
+
+Keep `d.setdefault(k, 0)` and the subsequent `active = d[k]` in ordinary application code, outside the function selected for proof. Pass the integer to this working decision. Moving a dictionary operation out does not prove that operation; handler tests remain responsible for its behavior.
+
+<!-- plain-values: setdefault-working -->
+```python
+from nagini_contracts.contracts import *
+
+def decision(active: int) -> bool:
+    Ensures(Result() == (active == 0))
+    return active == 0
+```
+
+The acceptance tests copy these exact fences. They exercise refusal precedence, absent/present/empty headers, source-bound calls and receipt qualification, and show that missing and accepted-only calls keep independent operation conformance but do not qualify the decision proof. They also check every rejected/working pair and the eager `Implies` failures. Run them with Python 3.12 or newer on `PATH` (3.13 for the pinned-runtime checks):
+
+```sh
+go test ./internal/verify -run '^TestPythonApplication(GatePlainValues(923|Coverage923)|ProofPlainValueLimits923|PlainValueHandlerEffects923)$' -count=1 -timeout 20m
+```
+
+That command executes local Python with transport, TLC and verifier doubles; it does not establish a real Nagini proof. The existing opt-ins use Docker, the pinned Python image, TLC and Nagini for the full example, and pinned Nagini for the three replacements and the unsupported `setdefault` statement. The latter checks both the non-zero exit and `Unsupported builtin function` at that statement's exact source line:
+
+```sh
+INVARIANT_PYTHON_APPLICATION_GATE_REAL=1 go test ./internal/verify -run '^TestPythonApplicationGatePlainValues(923|Coverage923)$' -count=1 -timeout 60m
+INVARIANT_PYTHON_APPLICATION_PROOF_REAL=1 go test ./internal/verify -run '^TestPythonApplicationProofPlainValueLimits923$' -count=1 -timeout 60m
+```
+
 #### Callers checked against the contract
 
 Nagini proves the function's body against its contract, and nothing proves the code that calls it. Where the application runs, `Requires` and `Ensures` are the stand-in's no-ops. So the gate evaluates the contract itself on every call of the function it records, whoever made the call: inside an exploration's attempts, outside a replay ([#838](https://github.com/gitdek/invariant/issues/838), [D-0431](../decisions/journal/D-0431.jsonl)), and while the application's own tests run ([#841](https://github.com/gitdek/invariant/issues/841), [D-0433](../decisions/journal/D-0433.jsonl)):
@@ -993,6 +1353,8 @@ A proof blocked by a known prerequisite is skipped, unrun and `unchecked`: its r
 
 The module that holds a selected function imports `nagini_contracts` to state its contract, and the application has to provide it wherever it runs. Ship Invariant's runtime stand-in, the `nagini_contracts` package in [`internal/verify/naginiruntime`](../internal/verify/naginiruntime), at the application's root, exactly as it is, and no other `nagini_contracts` anywhere else in the application, which a change to the import path could load instead ([D-0260](../decisions/journal/D-0260.jsonl)). The gate checks that the package holds exactly the stand-in's `__init__.py` and `contracts.py`, byte for byte. An installed distribution doesn't count: the only one is Nagini itself, whose `Result()` returns `None`, so `Ensures(Result() >= admitted)` would raise at runtime. The bytes alone don't settle what the stand-in binds when the module runs: another module could add a `min` to it before the function's module star-imports it, or put another module in its place in `sys.modules`. So the scan for writes above protects the stand-in, and the builtins, as it does the module. The function may read only the Nagini names the stand-in exports, its `__all__`, a tuple.
 
+#### Shipping the runtime stand-in
+
 For initial copying, first check which full Invariant Git revision the application's CI pins, and use a local binary built from that same revision. Run verification with the proof selected. Every refusal for a missing, changed, extra-file or alternate package names the original application's `nagini_contracts` destination and the expected SHA-256 of each embedded file, even when Invariant runs as a packaged binary with no source checkout nearby ([#908's ratified plan](../.invariant/plans/issue-908.json)). The diagnostic does not inspect CI or establish that your local revision matches its pin; check that yourself.
 
 A clean Git build with a full revision links the package at that exact revision on GitHub and explains how to obtain a checkout detached at it with `git checkout --detach`. Obtain that checkout yourself, then explicitly supply its directory and the application's root:
@@ -1007,6 +1369,8 @@ Run the single fenced `sh` copy recipe printed by that binary. It needs Git and 
 Unknown, incomplete or modified Go build metadata is labeled explicitly. Such a binary still prints the actual hashes of its embedded files, but supplies no revision-specific source link or copy recipe. Build and run a clean checkout of the revision pinned by the application's CI before obtaining copy instructions. Keep the build output outside the checkout and preserve Go's VCS build metadata, for example with `go build -buildvcs=true -o /path/outside/checkout/invariant ./cmd/invariant` from that clean checkout.
 
 During upgrades, coordinate the CI revision pin, the local Invariant binary and the shipped package. Review both files at the new revision and any application changes to the old package. If the new binary refuses the existing package, explicitly move it outside the application or remove it after review, then use the new binary's recipe and verify both hashes again. Do not keep a backup `nagini_contracts` elsewhere inside the application: the alternate-package check refuses it too. The recipe never silently overwrites edits. If verification accepts the existing package, its two files already match the new binary's embedded hashes.
+
+#### Runtime contracts and arithmetic
 
 Python runs each contract statement where it stands, and evaluates its arguments then, whatever Nagini reads lazily: a postcondition runs on entry, though Nagini reads it at exit, and an `Implies`' consequent runs whether or not its antecedent holds. So the gate takes only contracts Python can evaluate without failing:
 
