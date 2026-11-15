@@ -28,12 +28,13 @@ var (
 // Config is version 1 of the repository contract. Paths are relative to the
 // repository root, including dependency inputs belonging to nested parts.
 type Config struct {
-	Version      int          `json:"version"`
-	Parts        []Part       `json:"parts"`
-	AgentRules   []string     `json:"agent_rules"`
-	CurrentState []string     `json:"current_state"`
-	TrustedPaths []string     `json:"trusted_paths"`
-	SharedPaths  []SharedPath `json:"shared_paths"`
+	Version           int          `json:"version"`
+	ProjectsDirectory string       `json:"projects_directory,omitempty"`
+	Parts             []Part       `json:"parts"`
+	AgentRules        []string     `json:"agent_rules"`
+	CurrentState      []string     `json:"current_state"`
+	TrustedPaths      []string     `json:"trusted_paths"`
+	SharedPaths       []SharedPath `json:"shared_paths"`
 }
 
 // Part declares the checks for one directory and its dependency inputs.
@@ -68,13 +69,19 @@ func decodeConfig(data []byte) (Config, error) {
 		return c, errors.New("configuration must be valid UTF-8")
 	}
 	var parts, shared []json.RawMessage
-	_, err := decodeObject(data, "configuration", map[string]any{
+	seen, err := decodeObject(data, "configuration", map[string]any{
 		"version": &c.Version, "parts": &parts,
-		"agent_rules": &c.AgentRules, "current_state": &c.CurrentState,
+		"projects_directory": &c.ProjectsDirectory,
+		"agent_rules":        &c.AgentRules, "current_state": &c.CurrentState,
 		"trusted_paths": &c.TrustedPaths, "shared_paths": &shared,
-	})
+	}, "projects_directory")
 	if err != nil {
 		return c, err
+	}
+	if seen["projects_directory"] {
+		if err := ValidateProjectsDirectory(c.ProjectsDirectory); err != nil {
+			return c, err
+		}
 	}
 	if parts == nil || shared == nil {
 		return c, errors.New("parts and shared_paths must be arrays, not null")
@@ -227,6 +234,12 @@ func decodeObject(data []byte, where string, fields map[string]any, optional ...
 
 func (s *Snapshot) validate() error {
 	c := s.config
+	if err := c.CheckProjects(); err != nil {
+		return err
+	}
+	if err := s.checkPath(c.Projects()+"/", false, true); err != nil {
+		return fmt.Errorf("projects_directory: %w", err)
+	}
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported version %d; want 1", c.Version)
 	}

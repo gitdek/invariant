@@ -352,6 +352,12 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		if err := verifyDependencyInputs(execution, q.SourceDir, q.Inputs); err != nil {
 			return err
 		}
+		// Safe staging has inspected the complete tree, including projects.
+		// Only this workload copy loses the captured gate-owned directory.
+		projects := s.Repository.Snapshot.Config().Projects()
+		if err := removeRepositoryTree(execution, filepath.Join(q.SourceDir, filepath.FromSlash(projects))); err != nil {
+			return fmt.Errorf("remove projects_directory from repository checks: %w", err)
+		}
 		q.Network, q.Pull, q.Argv = false, false, nil
 		q.Env = dependencyEnv(part.Language, false)
 		// Installed Node dependencies come only from the prepared image. A

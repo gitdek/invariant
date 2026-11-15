@@ -17,7 +17,15 @@ import (
 // files. The unresolved field deliberately makes incomplete drafts invalid to
 // the enabled-configuration loader; that loader's schema remains unchanged.
 func DraftRepository(dir string) ([]byte, []string, error) {
-	d, err := discoverRepository(dir)
+	return DraftRepositoryWithProjects(dir, repository.DefaultProjectsDirectory)
+}
+
+// DraftRepositoryWithProjects reserves the selected modeled-project directory.
+func DraftRepositoryWithProjects(dir, projects string) ([]byte, []string, error) {
+	if err := checkProjectsPath(dir, projects); err != nil {
+		return nil, nil, err
+	}
+	d, err := discoverRepository(dir, projects)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -31,7 +39,7 @@ func DraftRepository(dir string) ([]byte, []string, error) {
 // the checkout's root, with slashes. invariant new uses it to know an empty
 // project's checks before it creates anything (#919).
 func DraftRepositoryOf(files map[string][]byte) ([]byte, []string, error) {
-	d := &repositoryDraft{files: map[string]bool{}, contents: map[string][]byte{}, directories: []string{"."}}
+	d := &repositoryDraft{projects: repository.DefaultProjectsDirectory, files: map[string]bool{}, contents: map[string][]byte{}, directories: []string{"."}}
 	for name, data := range files {
 		if err := d.hold(name, data); err != nil {
 			return nil, nil, err
@@ -57,7 +65,7 @@ func (d *repositoryDraft) drafted() ([]byte, []string, error) {
 }
 
 func (d *repositoryDraft) draft() error {
-	d.config = repository.Config{Version: 1, Parts: []repository.Part{}, AgentRules: []string{}, CurrentState: []string{}, TrustedPaths: []string{}, SharedPaths: []repository.SharedPath{}}
+	d.config = repository.Config{Version: 1, ProjectsDirectory: d.projects, Parts: []repository.Part{}, AgentRules: []string{}, CurrentState: []string{}, TrustedPaths: []string{}, SharedPaths: []repository.SharedPath{}}
 	for _, dir := range d.directories {
 		for _, language := range []string{"go", "python", "typescript"} {
 			if !d.project(dir, language) {
@@ -219,6 +227,11 @@ func CheckInitPaths(dir string) error {
 // WriteRepository keeps any existing regular configuration byte for byte. It
 // has no force option: completing or replacing a draft is a person's work.
 func WriteRepository(dir string) (kept bool, unresolved []string, err error) {
+	return WriteRepositoryWithProjects(dir, repository.DefaultProjectsDirectory)
+}
+
+// WriteRepositoryWithProjects uses projects only when drafting a new contract.
+func WriteRepositoryWithProjects(dir, projects string) (kept bool, unresolved []string, err error) {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return false, nil, err
@@ -246,7 +259,7 @@ func WriteRepository(dir string) (kept bool, unresolved []string, err error) {
 			return true, nil, nil
 		}
 	}
-	b, unresolved, err := DraftRepository(dir)
+	b, unresolved, err := DraftRepositoryWithProjects(dir, projects)
 	if err != nil {
 		return false, nil, err
 	}

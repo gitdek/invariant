@@ -18,6 +18,7 @@ import (
 
 type repositoryDraft struct {
 	root        *os.Root
+	projects    string
 	files       map[string]bool
 	names       []string
 	directories []string
@@ -26,7 +27,7 @@ type repositoryDraft struct {
 	unresolved  []string
 }
 
-func discoverRepository(dir string) (*repositoryDraft, error) {
+func discoverRepository(dir, projects string) (*repositoryDraft, error) {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
@@ -38,7 +39,7 @@ func discoverRepository(dir string) (*repositoryDraft, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &repositoryDraft{root: root, files: map[string]bool{}, contents: map[string][]byte{}}
+	d := &repositoryDraft{root: root, projects: projects, files: map[string]bool{}, contents: map[string][]byte{}}
 	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -47,7 +48,7 @@ func discoverRepository(dir string) (*repositoryDraft, error) {
 			return nil
 		}
 		if entry.IsDir() {
-			if name != "." && excludedDirectory(entry.Name()) {
+			if name == projects || name != "." && excludedDirectory(entry.Name()) {
 				return fs.SkipDir
 			}
 			// Even a nonconventional environment name carries this marker.
@@ -87,6 +88,12 @@ func discoverRepository(dir string) (*repositoryDraft, error) {
 func (d *repositoryDraft) hold(name string, data []byte) error {
 	if !repositoryPath(name) {
 		return fmt.Errorf("%q isn't a path a checkout can hold", name)
+	}
+	if name == d.projects {
+		return fmt.Errorf("projects_directory %q must be a directory, not a file", name)
+	}
+	if strings.HasPrefix(name, d.projects+"/") {
+		return nil
 	}
 	if slices.Contains(d.directories, name) {
 		return fmt.Errorf("%s is a directory of the checkout, and can't be a file too", name)

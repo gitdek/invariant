@@ -25,6 +25,7 @@ type RegressionScope struct {
 	existing map[string]bool
 	packages map[string]bool
 	config   repository.Config
+	projects string
 	parts    map[string]*regressionDiscovery
 	read     func(string) ([]byte, error)
 }
@@ -59,6 +60,10 @@ func NewRegressionScope(plan *Plan, base []string, read func(string) ([]byte, er
 	if err := json.Unmarshal(data, &s.config); err != nil {
 		return nil, fmt.Errorf("captured regression policy: %w", err)
 	}
+	if err := s.config.CheckProjects(); err != nil {
+		return nil, fmt.Errorf("captured regression policy: %w", err)
+	}
+	s.projects = s.config.Projects()
 	selected := map[string]bool{}
 	for _, file := range append(slices.Clone(plan.Files), plan.TestFiles()...) {
 		if owner := s.owner(file); owner != nil {
@@ -106,7 +111,7 @@ func (s *RegressionScope) Files(candidates []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, file := range candidates {
-		if s.existing[file] || seen[file] || regressionPolicyFile(file) {
+		if s.existing[file] || seen[file] || regressionPolicyFile(file) || s.projects != "" && withinRegressionDir(file, s.projects) {
 			continue
 		}
 		if c, err := clean(file); err != nil || c != file || strings.ContainsAny(file, "\\\x00") || strings.HasPrefix(file, "decisions/") || strings.HasPrefix(file, ".invariant/") {
