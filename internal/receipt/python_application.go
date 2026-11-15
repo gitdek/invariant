@@ -41,7 +41,7 @@ func pythonApplication(b *strings.Builder, a *verify.PythonApplicationReport, la
 		fmt.Fprintf(b, "\nModel tool error: %s\n", componentLiteral(a.ModelError))
 	}
 	for _, x := range a.Executions {
-		fmt.Fprintf(b, "\nInvocation %s · %s; complete: %t; successful: %t; exit: %d.\n\n", componentLiteral(x.Key.ID), componentLiteral(x.Key.Kind), x.Complete, x.Success, x.ExitCode)
+		fmt.Fprintf(b, "\nInvocation %s · %s%s; complete: %t; successful: %t; exit: %d.\n\n", componentLiteral(x.Key.ID), componentLiteral(x.Key.Kind), pythonApplicationReplayOf(x), x.Complete, x.Success, x.ExitCode)
 		pythonApplicationFileSelection(b, x.Provenance.FileSelection)
 		// Render the complete record using the same literal rules as component
 		// evidence, including keys, diagnostics and arbitrary observation values.
@@ -158,6 +158,16 @@ func pythonApplicationFileSelection(b *strings.Builder, selection string) {
 	}
 }
 
+// pythonApplicationReplayOf names the bug a replay's execution replayed. It
+// shares its invocation's key with the ordinary run, and a replay that
+// reproduced its bug completes successfully too (#935).
+func pythonApplicationReplayOf(x verify.PythonApplicationExecutionResult) string {
+	if x.BugReplay == nil {
+		return ""
+	}
+	return " · bug replay of " + componentLiteral(x.BugReplay.Request.Bug.Name)
+}
+
 // pythonApplicationFailures names failed executions and explored claims,
 // which their JSON alone would leave to the reader.
 func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationReport) []string {
@@ -174,6 +184,10 @@ func (render renderer) pythonApplicationFailures(a *verify.PythonApplicationRepo
 			componentLiteral(x.Key.Target), componentLiteral(x.Key.Check), componentLiteral(x.Key.ID), componentLiteral(cause)))
 	}
 	for _, x := range a.Executions {
+		if x.BugReplay != nil {
+			execution("Python bug replay "+componentLiteral(x.BugReplay.Request.Bug.Name), x)
+			continue
+		}
 		execution("Python execution", x)
 	}
 	for _, l := range a.Larger {
