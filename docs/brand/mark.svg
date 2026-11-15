@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-27 -27 54 54" width="256" height="256" role="img" aria-label="Invariant">
-  <title>Invariant</title>
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M20.18,-5.82A21,21 0 1 1 5.82,-20.18" stroke="#0E1116" stroke-width="6"/>
-    <circle cx="14.85" cy="-14.85" r="5.6" fill="#0E1116"/>
-    <circle cx="0" cy="0" r="9.6" fill="#0CA678"/>
-  </g>
-</svg>
