@@ -23,14 +23,14 @@ import (
 // Reader is computed by the check, never read from an agent's derived files.
 // Its fingerprint binds explanatory evidence independently of ratification.
 type Reader struct {
-	Version       int                           `json:"version"`
-	Fingerprint   string                        `json:"fingerprint"`
-	Chart         *statechart.Result            `json:"chart,omitempty"`
-	Limitation    *ReaderLimitation             `json:"limitation,omitempty"`
-	Comparison    *statechart.Comparison        `json:"comparison,omitempty"`
-	ComparisonRef *statechart.EvidenceReference `json:"comparison_ref,omitempty"`
-	CandidateRef  *statechart.EvidenceReference `json:"candidate_ref,omitempty"`
-	CandidateSources bool                       `json:"candidate_sources,omitempty"`
+	Version          int                           `json:"version"`
+	Fingerprint      string                        `json:"fingerprint"`
+	Chart            *statechart.Result            `json:"chart,omitempty"`
+	Limitation       *ReaderLimitation             `json:"limitation,omitempty"`
+	Comparison       *statechart.Comparison        `json:"comparison,omitempty"`
+	ComparisonRef    *statechart.EvidenceReference `json:"comparison_ref,omitempty"`
+	CandidateRef     *statechart.EvidenceReference `json:"candidate_ref,omitempty"`
+	CandidateSources bool                          `json:"candidate_sources,omitempty"`
 }
 
 type ReaderLimitation = statechart.Limitation
@@ -86,9 +86,9 @@ func resolvePreviewEvidence(v *Preview, read func(string) ([]byte, error)) error
 // lock, view (including an absent legacy view) and all authority stay inline.
 type BaselineSources struct {
 	Reference *statechart.EvidenceReference `json:"reference"`
-	Context   bool                         `json:"context,omitempty"`
-	Proposal  bool                         `json:"proposal,omitempty"`
-	Target    bool                         `json:"target,omitempty"`
+	Context   bool                          `json:"context,omitempty"`
+	Proposal  bool                          `json:"proposal,omitempty"`
+	Target    bool                          `json:"target,omitempty"`
 }
 
 func (r *Result) boundBaselineSources(baseline *statechart.ComparisonSnapshot, l *statechart.Limitation, files map[string][]byte) error {
@@ -411,10 +411,10 @@ func (r *Result) EvidenceFiles(representation string, encode func(*Result) ([]by
 			return nil, nil, err
 		}
 	}
-	if len(data) > statechart.MaxEvidenceBytes {
-		if copyReader.Chart == nil {
-			return nil, nil, fmt.Errorf("complete saved limitation record exceeds its byte budget")
-		}
+	// Only a drawn candidate moves into reader-candidate.json, since its
+	// reference binds that chart. A limited candidate keeps its own outcome
+	// and sources inline; its repeated baseline copies still move below.
+	if len(data) > statechart.MaxEvidenceBytes && copyReader.Chart != nil {
 		if err := candidateEvidence(&copyProposal, l, files); err != nil {
 			return nil, nil, err
 		}
@@ -428,6 +428,9 @@ func (r *Result) EvidenceFiles(representation string, encode func(*Result) ([]by
 	}
 	if err == nil && len(data) > statechart.MaxEvidenceBytes {
 		err = fmt.Errorf("complete saved volume record exceeds its byte budget")
+		if copyReader.Chart == nil {
+			err = fmt.Errorf("complete saved limitation record exceeds its byte budget")
+		}
 	}
 	return data, files, err
 }
@@ -469,7 +472,7 @@ func (r *Result) ResolveEvidence(read func(string) ([]byte, error)) error {
 					if read == nil || !EvidenceCompanion(name) || strings.Contains(name, "/") {
 						return nil, fmt.Errorf("preview requires its fixed evidence companions")
 					}
-					return read("previews/"+f.ID+"/"+o.ID+"/"+name)
+					return read("previews/" + f.ID + "/" + o.ID + "/" + name)
 				}
 				if err := resolvePreviewEvidence(v, readOption); err != nil {
 					return err
