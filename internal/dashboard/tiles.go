@@ -22,6 +22,12 @@ type Tile struct {
 // calls, from who.
 func Tiles(t Totals, who Who) []Tile {
 	merged := "CI's gate passed on the exact head of all " + inFull(t.MergesChecked) + " pull requests the factory merged. "
+	if t.ByHand > 0 {
+		// A person finished some of what the factory built, and merged it
+		// through the gate, so not all of them are the factory's (#948).
+		merged = "CI's gate passed on the exact head of all " + inFull(t.MergesChecked) + " pull requests that merged the factory's issues, " +
+			inFull(t.ByHand) + " of them finished by hand. "
+	}
 	if t.BadMerges > 0 {
 		// The sentence under a count that isn't zero says which ones, and
 		// never that every gate passed.

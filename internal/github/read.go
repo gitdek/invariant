@@ -33,6 +33,24 @@ func (c Client) Issues(ctx context.Context, label string) ([]Issue, error) {
 	return issues, nil
 }
 
+// IssuesAndPulls lists every issue and every pull request, open and
+// closed, in the one read Issues makes: GitHub lists them together, and
+// each pull request comes with its text and when it merged (#948).
+func (c Client) IssuesAndPulls(ctx context.Context) (issues, pulls []Issue, err error) {
+	var all []Issue
+	if err := c.pages(ctx, c.path("issues?state=all&per_page=100"), &all); err != nil {
+		return nil, nil, err
+	}
+	for _, i := range all {
+		if i.PullRequest == nil {
+			issues = append(issues, i)
+		} else {
+			pulls = append(pulls, i)
+		}
+	}
+	return issues, pulls, nil
+}
+
 // ClosedIssues lists closed issues updated since the optional RFC3339
 // timestamp, with all labels for the caller to filter, excluding pull requests.
 func (c Client) ClosedIssues(ctx context.Context, since string) ([]Issue, error) {

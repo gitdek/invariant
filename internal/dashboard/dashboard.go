@@ -120,7 +120,10 @@ type sources struct {
 	merges   map[int]mergeCheck
 	// pulls is each waiting card's pull request as the latest refresh read
 	// it (#865). One it couldn't read is absent.
-	pulls   map[int]PullNow
+	pulls map[int]PullNow
+	// hand is the pull request that carried each closed issue's change that
+	// the factory built and a person finished and merged (#948).
+	hand    map[int]int
 	changed bool // comments or merges read since they were last kept (#674)
 	lease   *Lease
 	// gates says, for each finished gate run looked at, whether the gate
@@ -156,6 +159,7 @@ type cachedComments struct {
 type mergeCheck struct {
 	sha   string
 	green bool
+	base  string // the branch it merged into, once a read of it says (#948)
 }
 
 // journalFile is one of decisions/journal's files, and the blob it was read
@@ -272,6 +276,9 @@ type Watcher struct {
 	// Steps are every step it's running that's doing something,
 	// longest-running first (D-0113).
 	Steps []Step `json:"steps,omitempty"`
+	// Waiting are the issues of those steps whose Codex run waits for its
+	// turn, which another run holds (#948): they aren't running yet.
+	Waiting []int `json:"waiting,omitempty"`
 	// Runs are the checks the current step has run so far: TLC checks of a
 	// draft while formalizing, or gate runs while building. Keep an empty
 	// value explicit so successive snapshots clear the previous run's checks.
@@ -315,6 +322,7 @@ type Now struct {
 	WaitingOn string     `json:"waitingOn,omitempty"` // factory, people or ci
 	Since     *time.Time `json:"since,omitempty"`
 	Running   int        `json:"running,omitempty"` // the steps doing something, which the headline names
+	Waiting   int        `json:"waiting,omitempty"` // the steps whose Codex run waits for its turn (#948)
 }
 
 type MainState struct {
@@ -422,8 +430,9 @@ type Totals struct {
 	Bugs          int   `json:"bugs"`
 	BugsCaught    int   `json:"bugsCaught"`
 	Witnesses     int   `json:"witnesses"`
-	Proved        int   `json:"proved"` // functions Gobra or Nagini verified
-	Merged        int   `json:"merged"` // pull requests the factory merged
+	Proved        int   `json:"proved"`           // functions Gobra or Nagini verified
+	Merged        int   `json:"merged"`           // pull requests that merged the factory's issues: its own, and those a person finished
+	ByHand        int   `json:"byHand,omitempty"` // of them, those a person finished and merged (#948)
 	MergesChecked int   `json:"mergesChecked"`
 	BadMerges     int   `json:"badMerges"` // merged without CI's gate passing on the merged head
 	// BadMergeRefs names those pull requests as the page writes a
@@ -493,42 +502,7 @@ func (s *Server) refresh(ctx context.Context) error {
 			s.logf("%s: %s: %v", r.Name, what, err)
 			stale = append(stale, r.Short()+" "+what)
 		}
-		if all, err := r.GitHub.Issues(ctx, ""); err != nil {
-			fail("issues", err)
-		} else {
-			var issues, others []github.Issue
-			for _, is := range all {
-				if takes(is) {
-					issues = append(issues, is)
-				} else if is.State == "open" && writer(is.AuthorAssociation) {
-					others = append(others, is)
-				}
-			}
-			r.src.issues, r.src.untaken = issues, nil
-			for _, is := range append(issues, others...) {
-				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt {
-					continue
-				}
-				comments, err := r.GitHub.Comments(ctx, is.Number)
-				if err != nil {
-					fail(fmt.Sprintf("comments on #%d", is.Number), err)
-					continue
-				}
-				// Start makes this cache before its first refresh. A server a
-				// test built by hand and didn't prepare gets it here, as file,
-				// gateIn and graph make theirs.
-				if r.src.comments == nil {
-					r.src.comments = map[int]cachedComments{}
-				}
-				r.src.comments[is.Number] = cachedComments{updated: is.UpdatedAt, comments: comments}
-				r.src.changed = true
-			}
-			for _, is := range others {
-				if c, ok := r.src.comments[is.Number]; ok && c.updated == is.UpdatedAt && !commanded(c.comments) {
-					r.src.untaken = append(r.src.untaken, is)
-				}
-			}
-		}
+		s.readIssues(ctx, r, fail)
 		s.readSavedDrafts(ctx, r)
 		// Only Invariant's own commits are shown. Another repository's
 		// commits are its own business.
@@ -1104,6 +1078,7 @@ func (s *Server) checkMerges(ctx context.Context, r *Repo) {
 	login := s.factoryOf(r)
 	for _, is := range r.src.issues {
 		l := factoryLane(is, r.src.comments[is.Number].comments, login, time.Now())
+		s.handOver(r, &l)
 		if l.Stage != StageMerged || l.PR == 0 {
 			continue
 		}
@@ -1124,7 +1099,7 @@ func (s *Server) checkMerges(ctx context.Context, r *Repo) {
 				green = true
 			}
 		}
-		r.src.merges[l.PR] = mergeCheck{sha: pr.Head.SHA, green: green}
+		r.src.merges[l.PR] = mergeCheck{sha: pr.Head.SHA, green: green, base: pr.Base.Ref}
 		r.src.changed = true
 	}
 }
@@ -1228,6 +1203,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 	for i, r := range s.Repos {
 		rs := RepoState{Name: r.Name, Short: r.Short(), Primary: i == 0, Lease: r.src.lease}
 		repoPins, repoModels := map[string]bool{}, map[string]bool{}
+		waits := map[int]time.Time{}
 		if st, work := s.watcherOf(r); st.PID != 0 {
 			w := Watcher{Running: st.Running(), Issue: st.Issue, Doing: st.Doing, Since: st.Since}
 			started, beat := st.Started, st.Heartbeat
@@ -1241,15 +1217,33 @@ func (s *Server) assemble(now time.Time) Snapshot {
 				}
 			}
 			sort.SliceStable(w.Steps, func(i, j int) bool { return w.Steps[i].Since.Before(w.Steps[j].Since) })
+			for _, step := range w.Steps {
+				if since, ok := waitsForTurn(work, r.Name, step); ok {
+					w.Waiting, waits[step.Issue] = append(w.Waiting, step.Issue), since
+				}
+			}
 			w.Runs, w.RunsKind = runsOf(work, r.Name, w)
 			rs.Factory = w
 		}
 		watchers = append(watchers, namedWatcher{repo: r.Name, w: rs.Factory})
 
 		login := s.factoryOf(r)
+		first := len(snap.Issues)
 		for _, is := range r.src.issues {
 			l := s.savedLane(is, r, login, now)
+			s.handOver(r, &l)
 			l.Repo = r.Name
+			// What the factory is doing with it, while a step runs on it,
+			// before it has posted anything to say so (#948). A step whose
+			// agent hasn't started isn't doing it yet.
+			for _, step := range rs.Factory.Steps {
+				if l.Open && step.Issue == l.Number && !queued(step) {
+					l.Doing = step.Doing
+					if since, ok := waits[l.Number]; ok {
+						l.Waits = &since
+					}
+				}
+			}
 			s.presentPlanSources(&l, r.src.comments[is.Number].comments, login)
 			s.presentPreviews(&l)
 			s.presentComparison(&l)
@@ -1270,6 +1264,9 @@ func (s *Server) assemble(now time.Time) Snapshot {
 				m, checked := r.src.merges[l.PR]
 				for i, t := range []*Totals{&snap.Totals, &rs.Totals} {
 					t.Merged++
+					if l.ByHand {
+						t.ByHand++
+					}
 					if checked {
 						t.MergesChecked++
 						if !m.green {
@@ -1287,6 +1284,7 @@ func (s *Server) assemble(now time.Time) Snapshot {
 			}
 			snap.Issues = append(snap.Issues, l)
 		}
+		planSteps(snap.Issues[first:])
 		for _, run := range r.src.runs {
 			if run.Name == "gate" {
 				rs.Gate = r.runRef(run)
@@ -1617,6 +1615,26 @@ func stepsLine(steps []namedStep, primary string) string {
 	return strings.ToUpper(line[:1]) + line[1:]
 }
 
+// queued says a step's agent hasn't started: the watcher names a step's run
+// only once its agent's directory exists, just before the agent starts, so
+// an agent's step with no run waits for one of the factory's agent slots, or
+// for a moment before or after one. An issue's lane says so by its stage,
+// not by what the step will do (#948). The headline still counts such a
+// step as running, as #158's plan has it.
+func queued(step Step) bool {
+	prefix, _ := stepFiles(step.Doing)
+	return prefix != "" && step.Run == "" && step.Ended == nil
+}
+
+// issueRefs names the steps' issues, as a sentence lists them.
+func issueRefs(steps []namedStep, primary string) string {
+	refs := make([]string, len(steps))
+	for i, st := range steps {
+		refs[i] = issueRef(st.repo, primary, st.Issue)
+	}
+	return andList(refs)
+}
+
 // andList joins words as a sentence lists them: "a", "a and b", or "a, b
 // and c".
 func andList(words []string) string {
@@ -1783,19 +1801,30 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 	}
 	running := false
 	// Every step that's doing something, in every watcher here,
-	// longest-running first (D-0113).
-	var steps []namedStep
+	// longest-running first (D-0113), and apart from them, the steps whose
+	// Codex run waits for its turn, which aren't running yet (#948).
+	var steps, waiting []namedStep
 	for _, nw := range ws {
 		running = running || nw.w.Running
 		for _, step := range nw.w.doing() {
-			steps = append(steps, namedStep{repo: nw.repo, Step: step})
+			if slices.Contains(nw.w.Waiting, step.Issue) {
+				waiting = append(waiting, namedStep{repo: nw.repo, Step: step})
+			} else {
+				steps = append(steps, namedStep{repo: nw.repo, Step: step})
+			}
 		}
 	}
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].Since.Before(steps[j].Since) })
-	if len(steps) > 0 {
-		st := steps[0]
+	sort.SliceStable(waiting, func(i, j int) bool { return waiting[i].Since.Before(waiting[j].Since) })
+	if len(steps) > 0 || len(waiting) > 0 {
+		// The longest-running step leads, or else the longest-waiting.
+		lead := steps
+		if len(lead) == 0 {
+			lead = waiting
+		}
+		st := lead[0]
 		ref := issueRef(st.repo, primary, st.Issue)
-		n := Now{Issue: st.Issue, Repo: st.repo, WaitingOn: WhoFactory, Stage: StageBuilding, Running: len(steps)}
+		n := Now{Issue: st.Issue, Repo: st.repo, WaitingOn: WhoFactory, Stage: StageBuilding, Running: len(steps), Waiting: len(waiting)}
 		if !st.Since.IsZero() {
 			since := st.Since
 			n.Since = &since
@@ -1813,11 +1842,24 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 			n.Headline = "Writing the code for " + ref
 		}
 		// Several steps share the headline, and no one issue's title is
-		// the detail.
-		if len(steps) > 1 {
+		// the detail. Those that wait for Codex's turn say so.
+		switch {
+		case len(steps) == 0:
+			n.Headline = "Waiting for Codex's turn on " + issueRefs(waiting, primary)
+			if len(waiting) == 1 {
+				if is := find(st.repo, st.Issue); is != nil {
+					n.Detail = is.Title
+				}
+			}
+		case len(steps) > 1 || len(waiting) > 0:
 			n.Headline = stepsLine(steps, primary)
-		} else if is := find(st.repo, st.Issue); is != nil {
-			n.Detail = is.Title
+			if len(waiting) > 0 {
+				n.Headline += " · waiting for Codex's turn on " + issueRefs(waiting, primary)
+			}
+		default:
+			if is := find(st.repo, st.Issue); is != nil {
+				n.Detail = is.Title
+			}
 		}
 		return n
 	}
@@ -1827,7 +1869,9 @@ func nowLine(ws []namedWatcher, issues []Issue, primary string) Now {
 	order := []string{StageBuilding, StageGate, StageQueued}
 	for _, stage := range order {
 		for _, is := range issues {
-			if !is.Open || is.Stage != stage {
+			// A plan's issue waits on its step, and one the factory has
+			// stopped on waits on a person: neither is between steps.
+			if !is.Open || is.Stage != stage || is.Plan != nil || is.Waiting != nil && is.Waiting.Kind == KindStopped {
 				continue
 			}
 			ref := issueRef(is.Repo, primary, is.Number)

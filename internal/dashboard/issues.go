@@ -77,6 +77,50 @@ type Issue struct {
 	// door that GitHub took, and no read of GitHub has found yet (#175).
 	// Until one does, the issue waits on no one.
 	Acted *Acted `json:"acted,omitempty"`
+	// ByHand says a person finished what the factory built, and merged it
+	// in PR, a pull request the factory didn't merge itself (#948). Its gate
+	// is checked as the factory's own merges' are.
+	ByHand bool `json:"byHand,omitempty"`
+	// Plan is where the ratified plan of issues this issue holds stands: the
+	// step it opened last, and that step's state (#948).
+	Plan *PlanStep `json:"plan,omitempty"`
+	// Doing is what the watcher's step on this issue is doing, as its status
+	// says, while it runs one, and Waits since when that step's agent has
+	// waited for its turn (#948).
+	Doing string     `json:"doing,omitempty"`
+	Waits *time.Time `json:"waits,omitempty"`
+}
+
+// PlanStep is where a ratified plan of issues stands on its own issue: the
+// step the factory opened last, of how many, the issue it opened for it,
+// and how that issue stands, as its own lane says (#948).
+type PlanStep struct {
+	Step  int  `json:"step"`
+	Steps int  `json:"steps"`
+	Issue int  `json:"issue,omitempty"` // 0 before the factory opens the first
+	Done  bool `json:"done,omitempty"`  // every one of its issues has merged
+	// Stage and Waiting are the step's issue's stage and what it waits on a
+	// person for, its waiting kind, when the page knows that issue. Failure
+	// is why it failed, for a failed one.
+	Stage   string `json:"stage,omitempty"`
+	Waiting string `json:"waiting,omitempty"`
+	Failure string `json:"failure,omitempty"`
+}
+
+// KindStopped is the waiting kind of an issue the factory has stopped on
+// (#896), which no factory post records: one of its own comments can't be
+// read, so it acts on nothing on the issue until a person repairs it.
+const KindStopped = "stopped"
+
+// Stopped is which of the factory's comments it can't read, why, and what
+// a person does about it. The factory posts nothing then, so no command is
+// spent while the comment, or the saved record it names, is repaired.
+type Stopped struct {
+	Comment int64     `json:"comment"`
+	URL     string    `json:"url,omitempty"`
+	At      time.Time `json:"at"`
+	Why     string    `json:"why"`
+	Repair  string    `json:"repair"`
 }
 
 // Waiting is what an open issue needs from a person.
@@ -140,6 +184,9 @@ type Waiting struct {
 	// when the card names one and it could be read (#865). Everything else
 	// here says how it was when the factory stopped.
 	Now *PullNow `json:"now,omitempty"`
+	// Stopped is the comment the factory can't read, for an issue it has
+	// stopped on (KindStopped). Such an issue takes no command (#896).
+	Stopped *Stopped `json:"stopped,omitempty"`
 }
 
 // PullNow is a pull request as GitHub has it: whether it's open, and for an
@@ -313,7 +360,12 @@ func Lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	return lane(issue, comments, self, now, nil)
 }
 
-func lane(issue github.Issue, comments []github.Comment, self string, now time.Time, resolve func(github.Comment, factory.Marker) factory.Marker) Issue {
+// A resolver reads a post's saved reference back, as the factory does
+// (#897). stop is the factory stopping on the post's comment, for a saved
+// record it can't read (#896): the post then counts for nothing.
+type resolver func(c github.Comment, m factory.Marker) (resolved factory.Marker, stop *Stopped)
+
+func lane(issue github.Issue, comments []github.Comment, self string, now time.Time, resolve resolver) Issue {
 	opened := parseTime(issue.CreatedAt)
 	// Lists, never null: a closed issue with one event has no span, and the
 	// page reads both of every issue (#430).
@@ -336,11 +388,47 @@ func lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	var last factory.Marker
 	var latest *factory.Marker
 	var latestAt time.Time
+	// stopped is the first of the factory's comments it can't read, where it
+	// stops acting on the issue (#896), and plan is where the plan of issues
+	// it holds stands (#948).
+	var stopped *Stopped
+	var plan *PlanStep
 	for _, c := range comments {
 		at := parseTime(c.CreatedAt)
-		if m, ok := factory.DecodeMarker(c.Body); ok && (self == "" || c.User.Login == self) {
+		if m, ok, bad := factory.ReadPost(c.Body, self != ""); (self == "" || c.User.Login == self) && (ok || bad != nil) {
+			// The factory reads its own comments by the marker each ends
+			// with, and stops at the first it can't read, posting nothing,
+			// so that no command is spent while it's repaired.
+			if bad != nil {
+				if stopped == nil {
+					stopped = &Stopped{Comment: c.ID, URL: c.URL, At: at, Why: bad.Why, Repair: bad.Repair}
+				}
+				continue
+			}
 			if resolve != nil {
-				m = resolve(c, m)
+				var stop *Stopped
+				if m, stop = resolve(c, m); stop != nil {
+					if stopped == nil {
+						stop.Comment, stop.URL, stop.At = c.ID, c.URL, at
+						stopped = stop
+					}
+					continue
+				}
+			}
+			switch m.Kind {
+			case factory.KindRatified:
+				if p := m.Proposal; p != nil && p.IssuePlan != nil {
+					plan = &PlanStep{Steps: len(p.IssuePlan.Issues)}
+				}
+			case factory.KindPlanOpened:
+				if plan == nil {
+					plan = &PlanStep{}
+				}
+				plan.Step, plan.Issue, plan.Done = m.Step, m.Opened, false
+			case factory.KindPlanDone:
+				if plan != nil {
+					plan.Done = true
+				}
 			}
 			if m.Kind != factory.KindNote {
 				mm := m
@@ -406,7 +494,12 @@ func lane(issue github.Issue, comments []github.Comment, self string, now time.T
 	case l.Stage == "":
 		l.Stage = StageQueued
 	}
-	if l.Open && latest != nil {
+	l.Plan = plan
+	if l.Open && stopped != nil {
+		// Until a person repairs the comment, the factory takes no command
+		// here, and the post before it can't stand in for it.
+		l.Waiting = &Waiting{Kind: KindStopped, Since: stopped.At, Stopped: stopped, Takes: []string{}}
+	} else if l.Open && latest != nil {
 		l.Waiting = waitingFor(*latest, latestAt)
 		// Once people have given what the post asked for, the next move is
 		// the factory's.
@@ -443,6 +536,9 @@ func lane(issue github.Issue, comments []github.Comment, self string, now time.T
 			who = WhoPeople
 		case StageGate:
 			who = WhoCI
+		}
+		if l.Waiting != nil && l.Waiting.Kind == KindStopped {
+			who = WhoPeople
 		}
 		if now.After(end.At) {
 			l.add(Span{From: end.At, To: now, Who: who, Open: true})
@@ -763,6 +859,10 @@ func postText(m factory.Marker, previous factory.Marker) string {
 		return "can't take this issue"
 	case factory.KindNote:
 		return "answered a command"
+	case factory.KindPlanOpened:
+		return fmt.Sprintf("opened #%d for step %d of its plan", m.Opened, m.Step)
+	case factory.KindPlanDone:
+		return "recorded that every issue of its plan has merged"
 	}
 	return m.Kind
 }
@@ -799,6 +899,10 @@ func commandText(cmds []factory.Command, answered *factory.Marker) string {
 		return said
 	case factory.Solve:
 		return "asked the factory to take it"
+	case factory.Plan:
+		return "asked the factory to plan it"
+	case factory.Stop:
+		return "asked the factory to open no more of its plan"
 	default:
 		return verb
 	}

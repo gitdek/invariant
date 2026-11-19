@@ -1,5 +1,8 @@
 # Go
 /bin/
+# The binary `go build ./cmd/invariant` writes at the root. Anchored, so
+# cmd/invariant/ and every other path named invariant stay tracked (#955).
+/invariant
 *.test
 *.out
 # Coverage profiles, where go test writes them. Anchored, so a source file

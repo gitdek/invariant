@@ -303,7 +303,7 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
 `Kind: plumbing` issues also work in other repositories, once a reviewed `.invariant/repository.json` and a capable gate are committed on the base branch. Without them the factory answers with how to set them up, and runs no agent. [Configured issue intake](docs/factory.md#configured-issue-intake) and the [repository check contract](docs/factory.md#repository-check-contract) say what to commit. A plan there pins acceptance tests in the repository's own frameworks: [Go](docs/factory.md#configured-go-admission), [pytest](docs/factory.md#configured-pytest-admission), and [Vitest and Jest](docs/factory.md#configured-vitest-and-jest-admission). Each test must fail on the base for the change's own reason and pass freshly after the build, and any other framework is refused before work starts.
 
-The [live dashboard](https://invariant.puglisij.com/) gives each running step its own card, with its activity, tool calls and stretches of thinking. Its public view publishes counts, times and paths only, never commands, agent words, output or reasoning. [The dashboard's page](docs/dashboard.md) says what each card shows and keeps, and what the private `/act` page adds.
+The [live dashboard](https://invariant.puglisij.com/) gives each running step its own card, with its activity, tool calls and stretches of thinking, or, while its run waits for Codex's turn, what holds that turn. Its public view publishes counts, times and paths only, never commands, agent words, output or reasoning. [The dashboard's page](docs/dashboard.md) says what each card shows and keeps, and what the private `/act` page adds.
 
 ## Status
 
