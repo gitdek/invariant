@@ -82,6 +82,7 @@ type Refusal struct {
 	Steps         []tlc.GraphStep
 	Rules         []string
 	Actual, Limit int
+	Limitation    *Limitation
 }
 
 func (r *Refusal) Error() string {
@@ -114,6 +115,9 @@ func Compute(ctx context.Context, in Input, data []byte) (result *Result, err er
 	}
 	invariants, err := validateLock(in.Graph, in.Lock)
 	if err != nil {
+		return nil, err
+	}
+	if err := workLimit(in, data, invariants); err != nil {
 		return nil, err
 	}
 	if err := validateEvidence(in, states, invariants); err != nil {
@@ -235,9 +239,17 @@ func Compute(ctx context.Context, in Input, data []byte) (result *Result, err er
 	if err := validateHiding(result, hidden); err != nil {
 		return nil, err
 	}
+	if n := len(result.States); n > MaxStates {
+		return nil, sizeRefusal(graphSource(in.Graph), len(states), &n, "projected_states", "", "", "", "", n, MaxStates)
+	}
 	result.Report, err = makeReport(in, result, hidden)
 	if err != nil {
 		return nil, err
+	}
+	if l, err := result.EvidenceLimit("", "projection"); err != nil {
+		return nil, err
+	} else if l != nil {
+		return nil, &Refusal{Code: l.Code, Message: l.Description(), Actual: l.Actual, Limit: l.Limit, Limitation: l}
 	}
 	return result, nil
 }
@@ -246,9 +258,6 @@ var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var hash = regexp.MustCompile(`^(sha256:)?[0-9a-f]{64}$`)
 
 func validateGraph(ctx context.Context, g tlc.GraphResult) (map[string]tlc.GraphState, error) {
-	if len(g.Graph.States) > MaxStates {
-		return nil, &Refusal{Code: "too_large", Message: "reachable graph exceeds supported size", Actual: len(g.Graph.States), Limit: MaxStates}
-	}
 	bad := func(message string) (map[string]tlc.GraphState, error) { return nil, refuse("invalid_graph", message) }
 	if len(g.Graph.States) == 0 || g.StateCount != len(g.Graph.States) || g.StepCount != len(g.Graph.Steps) || g.Run.DistinctStates != int64(g.StateCount) {
 		return bad("graph state or step counts disagree")

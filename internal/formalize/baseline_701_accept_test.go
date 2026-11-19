@@ -94,10 +94,10 @@ func TestComparison701SessionReuseAndFreshFinal(t *testing.T) {
 		t.Run(limit, func(t *testing.T) {
 			tc, log := reader603Tools(t)
 			cur := baseline701Current(t, reader603View, limit)
-			per := baseline701Work{1, 1, 1}
 			if limit == "500" {
-				per.replay = 0
+				cur = baseline701Current(t, proposal944View(501), limit)
 			}
+			per := baseline701Work{1, 1, 1}
 			var last *formalize.Proposal
 			a := reader603Agent{run: func(ctx context.Context, j synth.Job) (synth.Usage, error) {
 				reader603Workspace(t, j.Workspace)

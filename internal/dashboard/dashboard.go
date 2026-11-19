@@ -178,18 +178,19 @@ type receiptSet struct {
 }
 
 type projectSource struct {
-	dir           string
-	manifest      project.Manifest
-	lock          project.Lock
-	key           string            // identifies the model: its module text, spec and bounds
-	files         map[string][]byte // the model's .tla files, for drawing its graph
-	module        string
-	view          []byte
-	comparison    []byte
-	lockBytes     []byte
-	manifestBytes []byte
-	code          map[string]string // existing code's paths in the repository (#786)
-	reader        *ReaderPresentation
+	dir                  string
+	manifest             project.Manifest
+	lock                 project.Lock
+	key                  string            // identifies the model: its module text, spec and bounds
+	files                map[string][]byte // the model's .tla files, for drawing its graph
+	module               string
+	view                 []byte
+	comparison           []byte
+	comparisonCompanions map[string][]byte
+	lockBytes            []byte
+	manifestBytes        []byte
+	code                 map[string]string // existing code's paths in the repository (#786)
+	reader               *ReaderPresentation
 }
 
 type graphJob struct {
@@ -731,7 +732,7 @@ func (s *Server) readReceipts(ctx context.Context, r *Repo) error {
 		name := path.Base(p.dir)
 		e := readerEvidence{Format: readerFormat, Repo: r.Name, Dir: p.dir, Commit: run.HeadSHA,
 			Manifest: p.manifest, Lock: p.lock, ManifestBytes: p.manifestBytes, LockBytes: p.lockBytes,
-			Files: p.files, View: p.view, Comparison: p.comparison, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name],
+			Files: p.files, View: p.view, Comparison: p.comparison, ComparisonCompanions: p.comparisonCompanions, Report: set.reports[name], Artifacts: set.readers[name], Traces: set.traces[name],
 			Code: p.code}
 		if missing != nil {
 			e.Problem = "missing_archive"
@@ -796,6 +797,16 @@ func readReceiptZip(raw []byte) (*receiptSet, error) {
 				a.SVG = b.Bytes()
 			}
 			set.readers[name] = a
+		case len(parts) == 2 && (parts[1] == "reader-comparison.json" || parts[1] == "reader-baseline.json" || parts[1] == "reader-candidate.json"):
+			if !f.Mode().IsRegular() || f.Name != name+"/"+parts[1] {
+				continue
+			}
+			a := set.readers[name]
+			if a.Companions == nil {
+				a.Companions = map[string][]byte{}
+			}
+			a.Companions[parts[1]] = b.Bytes()
+			set.readers[name] = a
 		case len(parts) == 3 && parts[1] == "traces" && strings.HasSuffix(parts[2], ".json"):
 			var t tlc.TraceFile
 			if err := json.Unmarshal(b.Bytes(), &t); err != nil {
@@ -809,6 +820,13 @@ func readReceiptZip(raw []byte) (*receiptSet, error) {
 	}
 	if len(set.reports) == 0 {
 		return nil, errNoReceiptJSON
+	}
+	for name, r := range set.reports {
+		if r.Reader != nil {
+			if err := r.Reader.ResolveComparison(set.readers[name].read); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return set, nil
 }
@@ -847,6 +865,16 @@ func (s *Server) readProjects(ctx context.Context, r *Repo, sha string) ([]proje
 		p.lockBytes = raw
 		p.code = existingCode(tree, dir, p.manifest)
 		for _, f := range tree {
+			if f.Type == "blob" && (f.Path == path.Join(dir, ".invariant/reader-baseline.json") || f.Path == path.Join(dir, ".invariant/reader-candidate.json")) {
+				data, err := s.file(ctx, r, sha, f.Path)
+				if err != nil {
+					return nil, err
+				}
+				if p.comparisonCompanions == nil {
+					p.comparisonCompanions = map[string][]byte{}
+				}
+				p.comparisonCompanions[path.Base(f.Path)] = data
+			}
 			if f.Type == "blob" && f.Path == path.Join(dir, ".invariant/comparison.json") {
 				p.comparison, err = s.file(ctx, r, sha, f.Path)
 				if err != nil {

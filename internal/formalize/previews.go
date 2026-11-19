@@ -33,6 +33,10 @@ type Preview struct {
 	Receipt     *verify.Report    `json:"receipt,omitempty"`
 	Problem     string            `json:"problem,omitempty"`
 	Fingerprint string            `json:"fingerprint,omitempty"`
+	// Bounded question records share the candidate outcome already bound by
+	// the preview fingerprint. Resolution restores the original receipt.
+	ReceiptFromModel bool              `json:"receipt_from_model,omitempty"`
+	EvidenceRef      *PreviewReference `json:"evidence_ref,omitempty"`
 }
 
 // CheckContext is supplied by the caller before drafting. Revisions lists
@@ -198,6 +202,9 @@ func previewInput(f Fork, o Option, choices map[string]string) error {
 	if v == nil || v.Model == nil {
 		return fmt.Errorf("missing preview model; check every modeled option")
 	}
+	if v.ReceiptFromModel || v.EvidenceRef != nil {
+		return fmt.Errorf("preview requires its fixed evidence companions")
+	}
 	if v.Fork != f.ID || v.Option != o.ID {
 		return fmt.Errorf("preview identity does not match %s/%s", f.ID, o.ID)
 	}
@@ -318,6 +325,13 @@ func (v *Preview) check(ctx context.Context, tc toolchain.Toolchain, amended []p
 	r.Reader.Preview = scope
 	if r.Reader.Chart != nil {
 		r.Reader.Chart.Preview = scope
+		l, err := r.Reader.Chart.EvidenceLimit(m.Name, "preview")
+		if err != nil {
+			return err
+		}
+		if l != nil {
+			r.Reader.Chart, r.Reader.Limitation = nil, l
+		}
 	}
 	lock := project.Lock{Bounds: m.Bounds, Statements: m.Statements}
 	r.Reader.Fingerprint = receiptReaderFingerprint(r.Reader, lock)
@@ -368,7 +382,7 @@ func previewFingerprint(f Fork, o Option) (string, error) {
 		Option   string          `json:"option"`
 		Says     string          `json:"says"`
 		Preview  previewIdentity `json:"preview"`
-	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem}})
+	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem, v.ReceiptFromModel, v.EvidenceRef}})
 }
 
 // PreviewFingerprint is the fingerprint ValidatePreview holds an option's
@@ -389,6 +403,11 @@ type previewIdentity struct {
 	Model   *Proposal         `json:"model"`
 	Receipt json.RawMessage   `json:"receipt,omitempty"`
 	Problem string            `json:"problem,omitempty"`
+	// A bounded question record's transport fields. ValidatePreview refuses
+	// them before fingerprinting, so a resolved preview omits both and its
+	// fingerprint is unchanged.
+	ReceiptFromModel bool              `json:"receipt_from_model,omitempty"`
+	EvidenceRef      *PreviewReference `json:"evidence_ref,omitempty"`
 }
 
 // ValidatePreview validates just this option, so a damaged dashboard sibling
@@ -459,6 +478,8 @@ func (f Fork) ValidatePreview(o Option) error {
 			c.Report.Counts["tlc_states"] != r.Design.DistinctStates || c.Report.Counts["tlc_generated_states"] != r.Design.StatesGenerated {
 			return fmt.Errorf("preview chart rules, bounds or counts disagree with its receipt")
 		}
+	} else if l := m.Reader.Limitation; int64(l.ConcreteCount()) != r.Design.DistinctStates {
+		return fmt.Errorf("preview limitation count disagrees with its receipt")
 	}
 	want, err := previewFingerprint(f, o)
 	if err != nil {
@@ -557,11 +578,22 @@ func (p *Proposal) WritePreviews(out string) error {
 			if err := receipt.Write(dir, o.Preview.Receipt); err != nil {
 				return err
 			}
-			b, err := json.MarshalIndent(o.Preview, "", "  ")
+			result := &Result{Proposal: o.Preview.Model, Report: o.Preview.Receipt}
+			b, files, err := result.EvidenceFiles("preview.json", func(r *Result) ([]byte, error) {
+				copy := *o.Preview
+				copy.Model, copy.Receipt = r.Proposal, r.Report
+				b, e := json.MarshalIndent(&copy, "", "  ")
+				return append(b, '\n'), e
+			})
 			if err != nil {
 				return err
 			}
-			if err := writeFile(filepath.Join(dir, "preview.json"), string(b)+"\n"); err != nil {
+			for name, data := range files {
+				if err := writeFile(filepath.Join(dir, name), string(data)); err != nil {
+					return err
+				}
+			}
+			if err := writeFile(filepath.Join(dir, "preview.json"), string(b)); err != nil {
 				return err
 			}
 		}
