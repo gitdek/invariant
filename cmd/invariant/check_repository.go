@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gitdek/invariant/internal/factory"
 	"github.com/gitdek/invariant/internal/github"
@@ -50,11 +51,13 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 		fmt.Fprintln(out, "usage: invariant check-repository [-C DIR] [-base REF] [-issue N -repo OWNER/NAME] [HEAD]")
 		return 2
 	}
+	start := time.Now()
 	limit := plumbing.SandboxTimeout
 	if sb.Timeout > 0 && sb.Timeout < limit {
 		limit = sb.Timeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, limit)
+	parent := ctx
+	ctx, cancel := context.WithDeadline(parent, start.Add(limit))
 	defer cancel()
 	fail := func(err error) int {
 		fmt.Fprintln(out, "invariant:", err)
@@ -217,6 +220,15 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 		if sb.Repository.Dependencies.Platform != "" {
 			dependencies.Platform = sb.Repository.Dependencies.Platform
 		}
+	}
+	// A part the contract gives a longer test budget lengthens the whole
+	// run, still counted from the command's start; the check's own budget,
+	// from the parts it selects, ends it (#487). A shorter injected limit
+	// still applies.
+	if run := plumbing.RepositoryRunBudget(snapshot); run > limit && sb.Timeout <= 0 {
+		var cancelRun context.CancelFunc
+		ctx, cancelRun = context.WithDeadline(parent, start.Add(run))
+		defer cancelRun()
 	}
 	sb = plumbing.Sandbox{Original: baseline, Timeout: sb.Timeout, ShardTimeout: sb.ShardTimeout,
 		Repository: &plumbing.RepositoryChecks{Snapshot: snapshot, Dependencies: dependencies}}

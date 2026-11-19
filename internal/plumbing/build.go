@@ -293,21 +293,22 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 }
 
 func buildSandboxTimeout(plan *Plan, names []string) time.Duration {
-	// A plan can delete a child's last Go file, leaving verify to own its
-	// paths. Size the tool for that candidate too, retaining any Go files
-	// the plan could keep or add in verify itself and all pinned tests.
+	// A plan can delete a child's last Go file, leaving a package with a
+	// longer budget, such as verify, to own its paths. Size the tool for
+	// that candidate too, retaining any Go files the plan could keep or add
+	// in such a package itself and all pinned tests.
 	writable := map[string]bool{}
 	for _, f := range plan.Files {
 		writable[f] = true
 	}
 	var possible []string
 	for _, f := range names {
-		if !writable[f] || path.Dir(f) == "internal/verify" {
+		if _, longer := builtinBudgets[path.Dir(f)]; !writable[f] || longer {
 			possible = append(possible, f)
 		}
 	}
 	for _, f := range plan.Files {
-		if path.Dir(f) == "internal/verify" {
+		if _, longer := builtinBudgets[path.Dir(f)]; longer {
 			possible = append(possible, f)
 		}
 	}

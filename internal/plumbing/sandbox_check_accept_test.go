@@ -108,9 +108,16 @@ func TestOrdinary(t *testing.T) {
 		ordinarySource = ""
 	}
 	f.pkg(t, "pending", ordinarySource)
+	// A plan's check runs only its acceptance tests of the packages the
+	// plan touches (#487), so the test phase stops in the acceptance test's
+	// first run there, before its replay.
 	acceptSource := fmt.Sprintf(`package pending
 import ("os"; "testing"; "time")
 func TestNeedsChange(t *testing.T) {
+  if %t {
+    if err := os.WriteFile(%q, []byte("test phase started"), 0600); err != nil { t.Fatal(err) }
+    time.Sleep(60*time.Second)
+  }
   if %t {
     prior, err := os.ReadFile(%q)
     if err != nil && !os.IsNotExist(err) { t.Fatal(err) }
@@ -125,7 +132,7 @@ func TestNeedsChange(t *testing.T) {
   }
   t.Fatal("the proposed behavior is missing")
 }
-`, phase == "acceptance", filepath.Join(f.observe, "first-execution"), started, filepath.Join(f.observe, "first-execution"), phase == "after_acceptance", filepath.Join(f.observe, "completed-failure"))
+`, phase == "test", started, phase == "acceptance", filepath.Join(f.observe, "first-execution"), started, filepath.Join(f.observe, "first-execution"), phase == "after_acceptance", filepath.Join(f.observe, "completed-failure"))
 	if phase == "after_acceptance" {
 		acceptSource += fmt.Sprintf(`
 func TestMain(m *testing.M) {
@@ -292,11 +299,14 @@ func TestNeedsChange(t *testing.T) { t.Fatal("the proposed behavior is missing")
 				t.Errorf("completed failure was misclassified: %+v", c.Run)
 			}
 			s397Status(t, c.Run, "pending", "TestNeedsChange", "accept", "failed")
-			want := "passed"
-			if ordinaryFails {
-				want = "failed"
+			// A plan's check runs only its acceptance tests of the packages
+			// the plan touches (#487): an existing test, failing or not,
+			// never runs there, and decides nothing.
+			for _, r := range c.Run.TestResults {
+				if r.Name == "TestOrdinary" {
+					t.Errorf("a plan's check ran an existing test it doesn't decide on: %+v", r)
+				}
 			}
-			s397Status(t, c.Run, "pending", "TestOrdinary", "test", want)
 		})
 	}
 	t.Run("new_api_does_not_build_yet", func(t *testing.T) {

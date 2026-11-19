@@ -90,6 +90,10 @@ func Check(ctx context.Context, ws, repo string, s Sandbox) (*Checked, error) {
 		return c, nil
 	}
 	// The copy isn't a checkout, so the sandbox lists its files by walking.
+	// Of the packages the plan touches, only the acceptance tests run: what
+	// this check decides never read the others, whose time-outs alone
+	// failed drafts before their acceptance tests had run (#487).
+	s.acceptanceOnly = true
 	c.Run, err = s.Run(ctx, dir, plan)
 	if err != nil {
 		// The built-in runner's failure is the factory's, not the plan's.

@@ -410,6 +410,15 @@ class Runner:
 
     def discover(self):
         tests = []
+        # A plan's check names no packages of its own, so it builds only the
+        # ones its acceptance tests are in, and its test phase runs only those
+        # tests: what it decides never read the others (#487).
+        pinned = None
+        if self.config.get("acceptance_only") is True:
+            pinned = {}
+            for item in self.acceptance:
+                pinned.setdefault(self.package_path(os.path.dirname(item["file"])), set()).add(item["name"])
+            self.diagnostic("A plan's check runs only its acceptance tests; the other tests of the packages it touches run in the build's checks.")
         for package in self.packages.values():
             if self.expired("discovery") or self.stop_signal:
                 self.tests_ok = False
@@ -439,6 +448,8 @@ class Runner:
                 self.problem("discovery", "Test discovery failed: " + package["ImportPath"], package=package["ImportPath"])
                 continue
             for name in sorted(names):
+                if pinned is not None and name not in pinned.get(package["path"], ()):
+                    continue
                 tests.append((package, name))
                 self.record(package, name, "test", "not_run")
         return tests

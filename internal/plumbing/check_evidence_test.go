@@ -2,6 +2,8 @@ package plumbing
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,22 +28,41 @@ func TestNeedsChange(t *testing.T) { t.Skip("the proposed behavior was not check
 	}
 }
 
+// A plan's check runs only its acceptance tests of the packages the plan
+// touches (#487), so a slow ordinary test there never runs. Its test phase
+// still has a budget: an acceptance test that outlasts it refuses the draft,
+// even when its replay then completes a failure, and the phase's timeout
+// stays distinct from the whole-run deadline.
 func TestSandboxCheckRejectsTimedOutOrdinaryPhase(t *testing.T) {
 	f := s397New(t)
-	f.pkg(t, "pending", `package pending
-import ("testing"; "time")
-func TestOrdinary(t *testing.T) { time.Sleep(60*time.Second) }
-`)
-	f.accept(t, "pending", "TestNeedsChange", `package pending
-import "testing"
-func TestNeedsChange(t *testing.T) { t.Fatal("the proposed behavior is missing") }
-`)
+	ordinary := filepath.Join(f.observe, "ordinary-ran")
+	first := filepath.Join(f.observe, "first-execution")
+	f.pkg(t, "pending", fmt.Sprintf(`package pending
+import ("os"; "testing"; "time")
+func TestOrdinary(t *testing.T) {
+  if err := os.WriteFile(%q, []byte("ran"), 0600); err != nil { t.Fatal(err) }
+  time.Sleep(60*time.Second)
+}
+`, ordinary))
+	f.accept(t, "pending", "TestNeedsChange", fmt.Sprintf(`package pending
+import ("os"; "testing"; "time")
+func TestNeedsChange(t *testing.T) {
+  if _, err := os.Stat(%[1]q); os.IsNotExist(err) {
+    if err := os.WriteFile(%[1]q, []byte("started"), 0600); err != nil { t.Fatal(err) }
+    time.Sleep(60*time.Second)
+  }
+  t.Fatal("the proposed behavior is missing")
+}
+`, first))
 	f.warm(t)
 	s := s397Checker(f, 30*time.Second)
 	s.ShardTimeout = time.Second
 	c, err := Check(context.Background(), s397Draft(t, f), f.root, s)
 	if err != nil || c == nil {
 		t.Fatalf("Check: result=%+v, error=%v", c, err)
+	}
+	if _, err := os.Stat(ordinary); !os.IsNotExist(err) {
+		t.Errorf("a plan's check ran an ordinary test it doesn't decide on: %v", err)
 	}
 	s397Status(t, c.Run, "pending", "TestNeedsChange", "accept", "failed")
 	if !c.Run.TimedOut || c.Run.DeadlineExceeded {
