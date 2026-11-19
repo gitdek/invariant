@@ -36,7 +36,7 @@ const (
 	// A check that owns internal/factory or internal/plumbing gets half an
 	// hour, 25 minutes of it for the tests (#487). In the sandbox, with no
 	// other running, a check of the three packages #947's draft touched
-	// took 3 minutes 16 seconds on 2026-11-19, internal/factory's 429 tests
+	// took 3 minutes 16 seconds on 2026-11-19, internal/factory's 428 tests
 	// 7.9 minutes of test time among them; beside three other sandboxes the
 	// same check didn't reach its acceptance tests in its twelve.
 	// internal/plumbing's tests took 58.5 minutes of test time on 11-13, at
