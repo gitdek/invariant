@@ -100,6 +100,20 @@ const reader963BrowserCheck = `
     for (let i = 0; i < 200; i++) { if (test()) return; await pause(); }
     throw new Error("unavailable evidence did not render");
   }
+  // A card can sit inside a closed fold: Needs you folds what has waited
+  // more than two days, as the saved question has since 2026-11-12. A person
+  // opens each closed ancestor by its own summary before reaching what is
+  // inside, so do that, and let its toggle settle before any redraw.
+  async function reveal(el) {
+    for (let fold; (fold = el.parentElement.closest("details:not([open])")); ) {
+      const summary = fold.querySelector(":scope > summary");
+      assert(summary, "a closed fold has no summary to open it by");
+      const toggled = new Promise((resolve) => fold.addEventListener("toggle", resolve, {once: true}));
+      summary.click();
+      assert(fold.open, "a closed fold did not open from its summary");
+      await toggled;
+    }
+  }
   async function unavailable(card, reader) {
     const box = card.querySelector(".reader-evidence");
     assert(box && !box.querySelector("img,picture,source"), "unavailable card exposed an image");
@@ -112,6 +126,7 @@ const reader963BrowserCheck = `
     assert(details.textContent.includes("sha256:") && details.textContent.includes("Limit"), "complete identities and bounds missing");
     assert(!details.querySelector("script,img,svg,iframe,object"), "retained evidence became active markup");
     const summary = details.querySelector("summary");
+    await reveal(details);
     summary.focus();
     assert(document.activeElement === summary, "summary is not keyboard focusable");
     summary.click();
@@ -142,6 +157,7 @@ const reader963BrowserCheck = `
           const option = w.forks[0].options[i];
           const control = findCard().querySelectorAll(".alternative")[i].querySelector("button.opt");
           assert(control && control.textContent.includes(option.says), "literal option wording lost");
+          await reveal(control);
           control.focus();
           assert(document.activeElement === control, "choice control cannot receive focus");
           if (privatePage) {
