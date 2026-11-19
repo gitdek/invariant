@@ -678,7 +678,7 @@ func runPythonApplicationLarger(ctx context.Context, s *PythonApplicationSession
 // or parse: a step, an invariant, a module. Its general status is shared: its
 // system, memory and command-line errors end with it, as a number it can't
 // hold does, and as an evaluation error raised inside a standard operator
-// does. That last one is still taken for an operational end (#928).
+// does.
 const (
 	tlcExitSpecEval     = 75
 	tlcExitSafetyEval   = 76
@@ -691,21 +691,60 @@ const (
 // words tell the two apart.
 const tlcIntegerTooBig = "TLC can't handle a number this big."
 
+// tlcStandardOperatorErrors are TLC's codes, tlc2.output.EC in the pinned
+// release, for an evaluation error raised inside a standard operator, such
+// as <=, Len or Head, given a value it can't take (#928): every TLC_MODULE_
+// error the pinned jar's standard modules, tlc2.module, raise. Each ends TLC
+// with its general status, and none is a system, memory or configuration
+// error's. Besides these, those modules raise TLC's general error, 1000,
+// which its system errors share, TLC!Assert's failure, 2132, which ends with
+// a status of its own, and an error registering their operators as TLC
+// loads them. TLC writes the code in its message's frame, ahead of the
+// message. A recorded value can't write a frame: only a string can hold a
+// frame's marks, and TLC prints a string in quotes, with its line breaks
+// escaped.
+var tlcStandardOperatorErrors = map[int]bool{
+	2145: true, // TLC_MODULE_TLCGET_UNDEFINED
+	2155: true, // TLC_MODULE_COMPARE_VALUE
+	2157: true, // TLC_MODULE_TRANSITIVE_CLOSURE
+	2158: true, // TLC_MODULE_CHECK_MEMBER_OF
+	2169: true, // TLC_MODULE_ARGUMENT_ERROR
+	2176: true, // TLC_MODULE_APPLYING_TO_WRONG_VALUE
+	2177: true, // TLC_MODULE_BAG_UNION1
+	2178: true, // TLC_MODULE_OVERFLOW
+	2179: true, // TLC_MODULE_DIVISION_BY_ZERO
+	2180: true, // TLC_MODULE_NULL_POWER_NULL
+	2181: true, // TLC_MODULE_COMPUTING_CARDINALITY
+	2182: true, // TLC_MODULE_EVALUATING
+	2183: true, // TLC_MODULE_ARGUMENT_NOT_IN_DOMAIN
+	2184: true, // TLC_MODULE_APPLY_EMPTY_SEQ
+	2266: true, // TLC_MODULE_ARGUMENT_ERROR_AN
+	2283: true, // TLC_MODULE_ONE_ARGUMENT_ERROR
+}
+
+// tlcStandardOperatorError says whether TLC ended a check because a standard
+// operator was given a value it can't take: its general status, with that
+// error's own code among its messages' codes.
+func tlcStandardOperatorError(r tlc.Result) bool {
+	return r.ExitCode == tlcExitGeneralError && slices.ContainsFunc(r.Codes, func(code int) bool { return tlcStandardOperatorErrors[code] })
+}
+
 // pythonApplicationUnreadableEvidence says whether a conformance check ended
 // because TLC couldn't read what the run recorded, with TLC's reason in one
 // line. The model and its constants have just passed TLC at this size, and
 // these checking modules at the ratified bounds, so what TLC can't parse or
 // evaluate is the recorded states: a number the model's modules can't write,
-// a value of another type, a number past its range. The every-step module
-// also holds the attempts' arguments and the model at the next environment
-// bounds, and TLC ending it this way fails too, as at the ratified bounds. A
-// check that never ran or was cut off carries the runner's own error. One
-// that stalled, ran out of memory or was killed has the runner's result,
-// which holds no TLC version. Neither is evidence, and neither takes anything
-// from a check TLC did end this way: as a completed count disagreement does,
-// the first such check stands whatever became of the others. No words of
-// TLC's make an end operational, since a recorded value can put any words in
-// its message.
+// a value of another type, a number past its range, a value a standard
+// operator can't take. The every-step module also holds the attempts'
+// arguments and the model at the next environment bounds, and the
+// declared-outcome module the attempts' arguments, and TLC ending either
+// this way fails too, as at the ratified bounds. A check that never ran or
+// was cut off carries the runner's own error. One that stalled, ran out of
+// memory or was killed has the runner's result, which holds no TLC version.
+// Neither is evidence, and neither takes anything from a check TLC did end
+// this way: as a completed count disagreement does, the first such check
+// stands whatever became of the others. No words of TLC's make an end
+// operational, since a recorded value can put any words in its message.
 func pythonApplicationUnreadableEvidence(c PythonApplicationConformance) (reason string, unreadable bool) {
 	for _, check := range c.Checks {
 		r := check.Result
@@ -714,7 +753,8 @@ func pythonApplicationUnreadableEvidence(c PythonApplicationConformance) (reason
 		}
 		switch {
 		case r.ExitCode == tlcExitSpecParse, r.ExitCode == tlcExitSpecEval, r.ExitCode == tlcExitSafetyEval,
-			r.ExitCode == tlcExitGeneralError && strings.HasPrefix(r.Message, tlcIntegerTooBig):
+			r.ExitCode == tlcExitGeneralError && strings.HasPrefix(r.Message, tlcIntegerTooBig),
+			tlcStandardOperatorError(r):
 			return pythonApplicationOneLine(r.Message), true
 		}
 	}

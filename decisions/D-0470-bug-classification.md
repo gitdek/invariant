@@ -3,7 +3,8 @@ id: D-0470
 title: What a bug's statement says of the code is part of what a person ratifies
 date: 2026-11-13
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: "#857's ratified plan, step 2 of #789, which asks whoever merges it to record the classification and compatibility decisions"
 ---
@@ -42,5 +43,7 @@ A gate from before this change reads a lock that classifies a bug without the cl
 - A project whose code is in more than one language, where a bug is current in one and not another.
 
 ## Questions for @gitdek, with a recommendation
+
+Ratified on 2026-11-19 as recommended, at @gitdek's request: A.
 
 1. **Keep A?** Recommend yes. It's what the plan ratified on #857 states and what's built. This record is here because a one-way door gets one, and it stays `proposed` until you ratify it.

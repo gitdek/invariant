@@ -3,7 +3,8 @@ id: D-0469
 title: A saved draft's address on the dashboard is permanent
 date: 2026-11-13
 door: one-way
-status: proposed
+status: ratified
+ratified_by: "@gitdek"
 proposed_by: agent
 source: "#897's ratified plan, step 2 of #783; its review asks whoever merges it to record the public locator contract"
 ---
@@ -39,5 +40,7 @@ The address is printed on the public page and on `/act`, beside each proposal a 
 - Serving a private repository, where a permanent public address is the wrong default.
 
 ## Questions for @gitdek, with a recommendation
+
+Ratified on 2026-11-19 as recommended, at @gitdek's request: A.
 
 1. **Keep A, with the address permanent?** Recommend yes. It's what the plan ratified on #897 states, and what's built and merged. This record is here because a one-way door gets one, and it stays `proposed` until you ratify it.
