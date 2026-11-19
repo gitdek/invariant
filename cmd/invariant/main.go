@@ -6,6 +6,7 @@
 //	invariant watch -repo OWNER/NAME     turn the repository's issues into merged pull requests
 //	invariant scope [-base REF] [HEAD]   check that a factory pull request stays in bounds
 //	invariant check-repository [HEAD]    run a repository's committed checks and native acceptance
+//	invariant check-macos [HEAD]         run the checks of a repository's parts that build on macOS, on macOS
 //	invariant ratification -repo R DIR   check a factory project's ratification on GitHub
 //	invariant pin DIR                    record the current statement text as ratified
 //	invariant trace FILE                 replay a counterexample trace
@@ -70,6 +71,8 @@ Usage:
                                                check that a factory pull request stays in bounds
   invariant check-repository [-C DIR] [-base REF] [-issue N -repo OWNER/NAME] [HEAD]
                                                run committed repository checks and native acceptance
+  invariant check-macos [-C DIR] [-base REF] [HEAD]
+                                               run the committed checks of the parts that build on macOS, on macOS
   invariant ratification -repo OWNER/NAME PROJECT|PLAN...
                                                check factory projects' and plans' ratifications on GitHub
   invariant decisions COMMAND ...              record decisions and ask what rests on them
@@ -111,6 +114,8 @@ func main() {
 		code = scopeCmd(ctx, args)
 	case "check-repository":
 		code = checkRepositoryCmd(ctx, args)
+	case "check-macos":
+		code = checkMacOSCmd(ctx, args)
 	case "ratification":
 		code = ratificationCmd(ctx, args)
 	case "mcp":
@@ -1388,10 +1393,20 @@ func initCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	path, err := setup.Write(dir, *ref, *force)
+	// The gate's macOS job is written only for a retained contract with a
+	// part that builds on macOS: a draft declares none (#929).
+	macos, err := setup.InitMacOS(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invariant:", err)
+		return 2
+	}
+	path, err := setup.WriteFor(dir, *ref, *force, len(macos) > 0)
 	if err != nil {
 		if errors.Is(err, setup.ErrExists) {
 			err = fmt.Errorf("%w; manually upgrade using invariant init -invariant %s in a separate directory, review and merge its check-repository, scope and project/plan ratification steps with your custom workflow, then commit it to the base branch", err, *ref)
+			if len(macos) > 0 {
+				err = fmt.Errorf("%w. Copy %s into that directory first, so init writes the %s job for the parts that build on macOS too", err, repository.Path, setup.MacOSCheck)
+			}
 		}
 		if path != "" {
 			err = fmt.Errorf("%s: %w", path, err)
@@ -1432,15 +1447,22 @@ func initCmd(args []string) int {
 			break
 		}
 	}
+	// A contract with a part that builds on macOS gets the gate's macOS job,
+	// and both jobs are required.
+	onMac, require := "", "Require invariant/gate on main, and allow merge commits. GitHub then refuses any merge the gate didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:"
+	if len(macos) > 0 {
+		onMac = fmt.Sprintf(" Its %s job builds, vets and tests the parts the contract says build on macOS (%s) on a hosted macOS runner, since Linux skips the files only macOS builds.", setup.MacOSCheck, strings.Join(macos, ", "))
+		require = "Require invariant/gate and " + setup.MacOSCheck + " on main, and allow merge commits. GitHub then refuses any merge either job didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own checks count. The factory merges with a merge commit once invariant/gate passes. Until " + setup.MacOSCheck + " has passed too, GitHub refuses that merge, and the factory leaves the pull request for a person:"
+	}
 	// The commands aren't indented, so the heredoc still ends when it's
 	// pasted.
-	fmt.Printf(`Wrote %s. CI will build Invariant at %s and run its gate on every pull request.
+	fmt.Printf(`Wrote %s. CI will build Invariant at %s and run its gate on every pull request.%[7]s
 
 Next:
 
 1. Commit the workflow and push it. The factory can't change CI, so a person does. The projects directory needn't exist: the factory makes it with the first project.
 
-2. Require invariant/gate on main, and allow merge commits. GitHub then refuses any merge the gate didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
+2. %[8]s
 
 gh api -X PUT repos/%[3]s/branches/main/protection --input - <<'EOF'
 %[5]s
@@ -1452,7 +1474,7 @@ gh api -X PATCH repos/%[3]s -F allow_merge_commit=true
 invariant watch -repo %[3]s -projects %[6]s%[4]s
 
 4. Optionally, have it act as its own bot, through a GitHub App: set one up as https://github.com/gitdek/invariant/blob/main/docs/factory-app.md says, add %[3]s to its installation, and add -app-id with the App's ID to the command above.
-`, setup.WorkflowPath, (*ref)[:12], *repo, language, setup.Protection, shellQuoteProjects(selectedProjects))
+`, setup.WorkflowPath, (*ref)[:12], *repo, language, setup.ProtectionFor(len(macos) > 0), shellQuoteProjects(selectedProjects), onMac, require)
 	fmt.Println("\nReview .invariant/repository.json and complete every unresolved requirement, including ownership, toolchains and all six check fields. Remove the draft-only unresolved field only after completing it. Commit the reviewed configuration to the base branch; check-repository reads committed base evidence. The generated gate runs configured repository checks, scope, project and plan ratification, and modeled verification. External plumbing remains disabled until the reviewed contract and capable gate are committed on the authoritative base. Configured issues then use native Go, pytest, Vitest and Jest tests under captured repository rules; trusted changes stay drafts for a person. Without a committed contract, intake runs no agent and creates no branch. To upgrade an existing gate, generate this pinned template with invariant init in a separate directory, review and merge these steps with your custom workflow, and commit the result to the base branch; init never replaces a different workflow without -force.")
 	return 0
 }

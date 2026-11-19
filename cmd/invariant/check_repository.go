@@ -222,6 +222,7 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 		Repository: &plumbing.RepositoryChecks{Snapshot: snapshot, Dependencies: dependencies}}
 	result, err := sb.Run(ctx, candidate, plan)
 	fmt.Fprint(out, result.Summary())
+	fmt.Fprint(out, macOSNotChecked(snapshot.Config()))
 	fmt.Fprint(out, result.Output)
 	if err != nil {
 		return fail(err)
@@ -230,6 +231,24 @@ func runRepositoryCheck(ctx context.Context, args []string, sb plumbing.Sandbox,
 		return 1
 	}
 	return 0
+}
+
+// macOSNotChecked names the parts this command never checks on macOS,
+// though it ran their Linux commands: Linux skips the files only macOS
+// builds. Only the gate's macOS job checks them (#929), and nothing here
+// can tell whether it ran, so a pass here is never read as theirs.
+func macOSNotChecked(c repository.Config) string {
+	var b strings.Builder
+	for _, part := range c.MacOSParts() {
+		var steps []string
+		for _, step := range part.MacOS.Steps() {
+			steps = append(steps, step.Name)
+		}
+		last := len(steps) - 1
+		fmt.Fprintf(&b, "%s on macOS: not checked here. check-repository runs a part's commands in Linux containers, which skip the files only macOS builds. Only the %s job runs its macOS %s and %s, on a hosted macOS runner, and check-repository can't tell whether that job ran.\n",
+			part.Name, setup.MacOSCheck, strings.Join(steps[:last], ", "), steps[last])
+	}
+	return b.String()
 }
 
 func cleanupRepositoryCI(dir string) error {

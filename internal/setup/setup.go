@@ -51,7 +51,14 @@ var ErrExists = errors.New("the repository already has a different gate workflow
 // Write writes the gate workflow into the repository in dir. It won't
 // replace a different workflow unless force is set.
 func Write(dir, ref string, force bool) (string, error) {
-	text, err := Workflow(ref)
+	return WriteFor(dir, ref, force, false)
+}
+
+// WriteFor writes WorkflowFor's workflow into the repository in dir: with
+// the macOS job when macos is set. It won't replace a different workflow
+// unless force is set.
+func WriteFor(dir, ref string, force, macos bool) (string, error) {
+	text, err := WorkflowFor(ref, macos)
 	if err != nil {
 		return "", err
 	}
