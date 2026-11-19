@@ -94,6 +94,11 @@ type PythonApplicationSession struct {
 	nagini        func(context.Context, PythonApplicationNaginiCommand) (PythonApplicationProcess, error)
 	distributions func(context.Context, string) (map[string][]string, error)
 	modules       map[string][]string
+
+	// Close can cancel a runner while mu serializes invocations and cleanup.
+	lifetimeMu sync.Mutex
+	closing    bool
+	cancel     context.CancelFunc
 }
 
 type pythonApplicationFile struct {
@@ -164,6 +169,12 @@ func (s *PythonApplicationSession) Provenance() PythonApplicationProvenance {
 }
 
 func (s *PythonApplicationSession) Close() error {
+	s.lifetimeMu.Lock()
+	s.closing = true
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.lifetimeMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
