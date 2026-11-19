@@ -265,7 +265,7 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 		if !r.Passed {
 			return r, nil
 		}
-		review, approved, reviewErr := b.review(ctx, root, staged, n, plan, r, out, round, repoContext)
+		review, verdict, reviewErr := b.review(ctx, root, staged, n, plan, r, out, round, repoContext)
 		if reviewErr != nil {
 			// A failed review must not erase the last unresolved findings.
 			if review != "" {
@@ -280,12 +280,8 @@ func (b Builder) Build(ctx context.Context, root string, n int, out string) (_ *
 			}
 			return r, reviewErr
 		}
-		r.Review, r.Approved = review, approved
-		if r.Approved {
-			return r, nil
-		}
-		m := verdictLine.FindStringSubmatch(review)
-		if m == nil || !strings.EqualFold(m[1], "changes needed") {
+		r.Review, r.Approved = review, verdict == "approve"
+		if verdict != "changes needed" {
 			return r, nil
 		}
 	}
@@ -337,34 +333,204 @@ func ReadLockFile(root string, n int) (*Lock, error) {
 	return ReadLock(b)
 }
 
-var verdictLine = regexp.MustCompile(`(?im)^\s*\**VERDICT:\**\s*(approve|changes needed)\b`)
+var verdictLine = regexp.MustCompile("(?i)^(?:[\\s>*_`~#+-]|[0-9]{1,9}[.)][ \\t]+)*VERDICT\\b")
+var reviewQuote = regexp.MustCompile("^(?:[ \\t]*(?:[-+*]|[0-9]{1,9}[.)])[ \\t]+)*[ \\t]*>")
+var reviewHeading = regexp.MustCompile("^ {0,3}#{1,6}(?:[ \\t]|$)")
+var reviewThematicBreak = regexp.MustCompile("^ {0,3}(?:\\*(?:[ \\t]*\\*){2,}|-(?:[ \\t]*-){2,}|_(?:[ \\t]*_){2,})[ \\t]*$")
+var reviewSetextHeading = regexp.MustCompile("^ {0,3}(?:=+|-+)[ \\t]*$")
+var reviewListStart = regexp.MustCompile("^ {0,3}(?:[-+*]|1[.)])[ \\t]+[^ \\t]")
+var reviewListItem = regexp.MustCompile("^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?: +|$)")
+
+type reviewFence struct {
+	mark  byte
+	width int
+}
+
+// consume reports whether the line opens, continues or closes this fence.
+func (f *reviewFence) consume(line string) bool {
+	plain := strings.TrimLeft(line, " ")
+	if len(line)-len(plain) > 3 || plain == "" || (plain[0] != '`' && plain[0] != '~') {
+		return f.mark != 0
+	}
+	n := 1
+	for n < len(plain) && plain[n] == plain[0] {
+		n++
+	}
+	if f.mark != 0 {
+		if f.mark == plain[0] && n >= f.width && strings.Trim(plain[n:], " \t") == "" {
+			*f = reviewFence{}
+		}
+		return true
+	}
+	if n >= 3 && (plain[0] != '`' || !strings.Contains(plain[n:], "`")) {
+		f.mark, f.width = plain[0], n
+		return true
+	}
+	return false
+}
+
+func reviewExpandTabs(line string) string {
+	if !strings.ContainsRune(line, '\t') {
+		return line
+	}
+	var out strings.Builder
+	column := 0
+	for _, ch := range line {
+		if ch == '\t' {
+			n := 4 - column%4
+			out.WriteString(strings.Repeat(" ", n))
+			column += n
+		} else {
+			out.WriteRune(ch)
+			column++
+		}
+	}
+	return out.String()
+}
+
+// reviewVerdict reads the raw reply, before trimming could turn an indented
+// verdict into a plain one. Quoted, fenced and malformed verdict lines count
+// against uniqueness, but only an exact final plain line can decide the build.
+func reviewVerdict(text string) string {
+	// Markdown recognizes LF, CRLF and lone CR as line endings.
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	var fence reviewFence
+	var quoteDepth, quoteIndent, count int
+	var paragraph bool
+	verdict := ""
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Trim(line, " \t") == "" {
+			if quoteDepth > 0 {
+				fence = reviewFence{}
+			}
+			quoteDepth, quoteIndent, paragraph = 0, 0, false
+			continue
+		}
+		verdict = ""
+		if verdictLine.MatchString(line) {
+			count++
+			if count > 1 {
+				return ""
+			}
+		}
+		if fence.mark != 0 && quoteDepth == 0 {
+			fence.consume(line)
+			continue
+		}
+		content, depth := reviewExpandTabs(line), 0
+		for fence.mark == 0 || depth < quoteDepth {
+			prefix := reviewQuote.FindStringIndex(content)
+			if prefix == nil {
+				break
+			}
+			if paragraph {
+				start := content
+				if depth > 0 && quoteIndent > 0 && strings.HasPrefix(start, strings.Repeat(" ", quoteIndent)) {
+					start = start[quoteIndent:]
+				}
+				// Indented markers and lists that cannot interrupt the
+				// paragraph remain its text, even when they contain >.
+				if strings.HasPrefix(start, "    ") || (!strings.HasPrefix(strings.TrimLeft(start, " "), ">") && !reviewListStart.MatchString(start)) {
+					break
+				}
+			}
+			content = content[prefix[1]:]
+			content = strings.TrimPrefix(content, " ")
+			depth++
+		}
+		// Fenced blocks cannot lazily continue a quote. A missing quote
+		// marker ends its fence; extra markers within it are literal text.
+		if depth != quoteDepth {
+			fence = reviewFence{}
+			quoteIndent = 0
+		}
+		quoteDepth = depth
+		if quoteIndent > 0 {
+			if strings.Trim(content, " ") == "" {
+				content = ""
+			} else if strings.HasPrefix(content, strings.Repeat(" ", quoteIndent)) {
+				content = content[quoteIndent:]
+			} else {
+				fence = reviewFence{}
+				quoteIndent = 0
+			}
+		}
+		if depth > 0 && fence.mark == 0 {
+			// A quoted list can contain a heading or fence too. Keep its
+			// indentation so the closing fence is read in the same block.
+			for !paragraph || reviewListStart.MatchString(content) {
+				prefix := reviewListItem.FindString(content)
+				if prefix == "" {
+					break
+				}
+				n := len(prefix)
+				marker := len(strings.TrimRight(prefix, " "))
+				if n-marker > 4 {
+					n = marker + 1
+				}
+				content = content[n:]
+				quoteIndent += n
+				paragraph = false
+			}
+		}
+		if fence.consume(content) {
+			paragraph = false
+			continue
+		}
+		block := reviewHeading.MatchString(content) || reviewThematicBreak.MatchString(content)
+		if depth > 0 {
+			if strings.Trim(content, " \t") == "" || block || (paragraph && reviewSetextHeading.MatchString(content)) {
+				paragraph = false
+			} else if !strings.HasPrefix(content, "    ") {
+				paragraph = true
+			}
+			continue
+		}
+		// Only a paragraph can lazily continue a quote without another >.
+		// Headings, fences and other blocks end that continuation.
+		if paragraph && !block && !reviewListStart.MatchString(line) {
+			continue
+		}
+		paragraph = false
+		switch line {
+		case "VERDICT: approve":
+			verdict = "approve"
+		case "VERDICT: changes needed":
+			verdict = "changes needed"
+		}
+	}
+	if count != 1 {
+		return ""
+	}
+	return verdict
+}
 
 // review has a second agent, which can only read, check the change against
 // the plan: that it does what the plan says, that its tests show it, and
 // that it does nothing else.
-func (b Builder) review(ctx context.Context, root, candidate string, n int, plan *Plan, r *BuildResult, out string, round int, repoContext *RepositoryContext) (string, bool, error) {
+func (b Builder) review(ctx context.Context, root, candidate string, n int, plan *Plan, r *BuildResult, out string, round int, repoContext *RepositoryContext) (string, string, error) {
 	ws, err := os.MkdirTemp("", "invariant-plumbing-review-")
 	if err != nil {
-		return "", false, err
+		return "", "", err
 	}
 	defer os.RemoveAll(ws)
 	guidance, releaseContext, err := repoContext.Stage(ws)
 	if err != nil {
-		return "", false, err
+		return "", "", err
 	}
 	defer releaseContext()
 	if err := CopyCheckout(ctx, candidate, filepath.Join(ws, "repo")); err != nil {
-		return "", false, err
+		return "", "", err
 	}
 	if err := CopyCheckout(ctx, root, filepath.Join(ws, "base")); err != nil {
-		return "", false, err
+		return "", "", err
 	}
 	// Compare the whole candidate to the original checkout on every review,
 	// including new tests and changes made before the most recent repair.
 	diff, err := exec.CommandContext(ctx, "git", "-C", ws, "diff", "--no-index", "--no-color", "--", "base", "repo").Output()
 	var exit *exec.ExitError
 	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
-		return "", false, fmt.Errorf("diffing the change: %w", err)
+		return "", "", fmt.Errorf("diffing the change: %w", err)
 	}
 	var news []string
 	for _, f := range r.Changes.Written {
@@ -375,12 +541,12 @@ func (b Builder) review(ctx context.Context, root, candidate string, n int, plan
 	planJSON, _ := json.MarshalIndent(plan, "", "  ")
 	for name, text := range map[string]string{"plan.json": string(planJSON) + "\n", "change.diff": string(diff), "new-files.txt": strings.Join(news, "\n"), "tests.txt": r.Summary + "\n" + r.Final.Tail(6000)} {
 		if err := os.WriteFile(filepath.Join(ws, name), []byte(text), 0o644); err != nil {
-			return "", false, err
+			return "", "", err
 		}
 	}
 	transcript, err := os.OpenFile(filepath.Join(out, "review-transcript.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return "", false, err
+		return "", "", err
 	}
 	defer transcript.Close()
 	usage, _, err := synth.RunAgent(ctx, b.Reviewer, synth.Job{Workspace: ws, Prompt: ReviewPrompt(plan, n) + guidance, ReadOnly: true, Transcript: transcript}, b.Timeout, "")
@@ -390,16 +556,12 @@ func (b Builder) review(ctx context.Context, root, candidate string, n int, plan
 	// A provider that stayed unavailable until the time ran out is still why
 	// the review didn't finish (#261).
 	if ctx.Err() != nil && !synth.ProviderUnavailable(err) {
-		return text, false, ctx.Err()
+		return text, "", ctx.Err()
 	}
 	if err != nil {
-		return text, false, err
+		return text, "", err
 	}
-	m := verdictLine.FindStringSubmatch(text)
-	if m == nil {
-		return text, false, nil
-	}
-	return text, strings.EqualFold(m[1], "approve"), nil
+	return text, reviewVerdict(usage.Summary), nil
 }
 
 func readRuns(path string) ([]synth.GateRun, error) {

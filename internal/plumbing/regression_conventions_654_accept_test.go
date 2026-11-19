@@ -216,7 +216,7 @@ func (a *agent654) Run(ctx context.Context, job synth.Job) (synth.Usage, error) 
 			}
 		}
 		if a.repair && a.reviews == 1 {
-			return synth.Usage{Summary: "VERDICT: changes needed\nCorrect the first added regression and remove the second."}, nil
+			return synth.Usage{Summary: "Correct the first added regression and remove the second.\nVERDICT: changes needed"}, nil
 		}
 		return synth.Usage{Summary: "VERDICT: approve"}, nil
 	}
