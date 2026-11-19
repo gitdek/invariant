@@ -693,13 +693,16 @@ const tlcIntegerTooBig = "TLC can't handle a number this big."
 
 // tlcStandardOperatorErrors are TLC's codes, tlc2.output.EC in the pinned
 // release, for an evaluation error raised inside a standard operator, such
-// as <=, Len or Head, given a value it can't take (#928). The pinned jar's
-// standard modules, tlc2.module, raise these and no others when they
-// evaluate, and each ends TLC with its general status. None is a system,
-// memory or configuration error's. TLC writes the code in its message's
-// frame, ahead of the message. A recorded value can't write a frame or take
-// this one's code away: only a string can hold a frame's marks, and TLC
-// prints a string in quotes, with its line breaks escaped.
+// as <=, Len or Head, given a value it can't take (#928): every TLC_MODULE_
+// error the pinned jar's standard modules, tlc2.module, raise. Each ends TLC
+// with its general status, and none is a system, memory or configuration
+// error's. Besides these, those modules raise TLC's general error, 1000,
+// which its system errors share, TLC!Assert's failure, 2132, which ends with
+// a status of its own, and an error registering their operators as TLC
+// loads them. TLC writes the code in its message's frame, ahead of the
+// message. A recorded value can't write a frame: only a string can hold a
+// frame's marks, and TLC prints a string in quotes, with its line breaks
+// escaped.
 var tlcStandardOperatorErrors = map[int]bool{
 	2145: true, // TLC_MODULE_TLCGET_UNDEFINED
 	2155: true, // TLC_MODULE_COMPARE_VALUE
