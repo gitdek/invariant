@@ -336,8 +336,8 @@ func TestPytestOfflineExactResults617(t *testing.T) {
 	})
 	base := check617(t, f, true)
 	for _, part := range []string{"worker", "other"} {
-		if status484(t, base.Run, part, "build") != "failed" || status484(t, base.Run, part, "test") != "failed" {
-			t.Fatal("ordinary base command failures did not permit independent acceptance")
+		if status484(t, base.Run, part, "build") != "skipped" || status484(t, base.Run, part, "test") != "skipped" {
+			t.Fatal("planning ran broad build or suite commands")
 		}
 	}
 	for _, v := range base.Run.TestResults {
