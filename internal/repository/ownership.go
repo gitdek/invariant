@@ -165,5 +165,16 @@ func clonePart(part Part) Part {
 		}
 		part.Commands = commands
 	}
+	if part.MacOS != nil {
+		macos := *part.MacOS
+		for _, c := range []*Command{&macos.Build, &macos.Vet, &macos.Test} {
+			c.Argv = slices.Clone(c.Argv)
+		}
+		macos.Checks = slices.Clone(macos.Checks)
+		for i := range macos.Checks {
+			macos.Checks[i].Argv = slices.Clone(macos.Checks[i].Argv)
+		}
+		part.MacOS = &macos
+	}
 	return part
 }

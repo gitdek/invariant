@@ -46,6 +46,56 @@ type Part struct {
 	Lockfiles []string           `json:"lockfiles"`
 	Inputs    []string           `json:"inputs"`
 	Commands  map[string]Command `json:"commands"`
+	// MacOS, when set, declares that the part builds on macOS too. Omitted,
+	// it stays omitted when the contract is serialized, so the execution
+	// digests of contracts without it don't change.
+	MacOS *MacOS `json:"macos,omitempty"`
+}
+
+// MacOS is the checks CI's gate runs for a Go part on a hosted macOS
+// runner, in the part's directory, as a job of its own (#929). Linux skips
+// the files only macOS builds, such as cgo with Objective-C, so the Linux
+// job never checks them. Each check is a plain argument array: no shell, no
+// placeholder, and no reason in place of a command.
+type MacOS struct {
+	Build Command `json:"build"`
+	Vet   Command `json:"vet"`
+	Test  Command `json:"test"`
+	// Checks run after the tests, in order, such as a self-test that needs
+	// no permission.
+	Checks []MacOSCheck `json:"checks,omitempty"`
+}
+
+// MacOSCheck is one check a part's macOS job runs, by its name.
+type MacOSCheck struct {
+	Name string   `json:"name"`
+	Argv []string `json:"argv"`
+}
+
+// Steps are the checks in the order the macOS job runs them: build, vet,
+// test, then each other check as declared.
+func (m MacOS) Steps() []MacOSCheck {
+	steps := []MacOSCheck{
+		{Name: "build", Argv: slices.Clone(m.Build.Argv)},
+		{Name: "vet", Argv: slices.Clone(m.Vet.Argv)},
+		{Name: "test", Argv: slices.Clone(m.Test.Argv)},
+	}
+	for _, c := range m.Checks {
+		steps = append(steps, MacOSCheck{Name: c.Name, Argv: slices.Clone(c.Argv)})
+	}
+	return steps
+}
+
+// MacOSParts are the parts that declare macOS checks, sorted by name.
+func (c Config) MacOSParts() []Part {
+	var parts []Part
+	for _, p := range c.Parts {
+		if p.MacOS != nil {
+			parts = append(parts, clonePart(p))
+		}
+	}
+	slices.SortFunc(parts, func(a, b Part) int { return strings.Compare(a.Name, b.Name) })
+	return parts
 }
 
 // Command is either an argument array or a reason the check does not apply.
@@ -90,17 +140,23 @@ func decodeConfig(data []byte) (Config, error) {
 	for i, raw := range parts {
 		p := &c.Parts[i]
 		where := fmt.Sprintf("parts[%d]", i)
-		var commands json.RawMessage
-		if _, err := decodeObject(raw, where, map[string]any{
+		var commands, macos json.RawMessage
+		seen, err := decodeObject(raw, where, map[string]any{
 			"name": &p.Name, "directory": &p.Directory, "language": &p.Language,
 			"image": &p.Image, "lockfiles": &p.Lockfiles, "inputs": &p.Inputs,
-			"commands": &commands,
-		}); err != nil {
+			"commands": &commands, "macos": &macos,
+		}, "macos")
+		if err != nil {
 			return c, err
 		}
 		p.Commands, err = decodeCommands(commands, where+".commands")
 		if err != nil {
 			return c, err
+		}
+		if seen["macos"] {
+			if p.MacOS, err = decodeMacOS(macos, where+".macos"); err != nil {
+				return c, err
+			}
 		}
 	}
 	c.SharedPaths = make([]SharedPath, len(shared))
@@ -160,6 +216,85 @@ func decodeCommands(data []byte, where string) (map[string]Command, error) {
 		commands[name] = c
 	}
 	return commands, nil
+}
+
+// macOSCheckName is a name for one of a part's other macOS checks, as the
+// job's output and a person read it.
+var macOSCheckName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// decodeMacOS reads a part's macOS checks. Each is a plain argument array:
+// unlike a Linux command, it can't give a reason in its place, and it holds
+// no {test} placeholder, since the job runs whole checks only.
+func decodeMacOS(data []byte, where string) (*MacOS, error) {
+	var build, vet, test json.RawMessage
+	var checks []json.RawMessage
+	if _, err := decodeObject(data, where, map[string]any{
+		"build": &build, "vet": &vet, "test": &test, "checks": &checks,
+	}, "checks"); err != nil {
+		return nil, err
+	}
+	m := &MacOS{}
+	for _, c := range []struct {
+		name string
+		raw  json.RawMessage
+		to   *Command
+	}{{"build", build, &m.Build}, {"vet", vet, &m.Vet}, {"test", test, &m.Test}} {
+		label := where + "." + c.name
+		var argv []string
+		var reason string
+		seen, err := decodeObject(c.raw, label, map[string]any{"argv": &argv, "not_applicable": &reason}, "argv", "not_applicable")
+		if err != nil {
+			return nil, err
+		}
+		if seen["not_applicable"] {
+			return nil, fmt.Errorf("%s needs an argv: a part that builds on macOS is built, vetted and tested there, so not_applicable doesn't apply", label)
+		}
+		if !seen["argv"] {
+			return nil, fmt.Errorf("%s: missing argv", label)
+		}
+		if err := plainArgv(argv, label+".argv"); err != nil {
+			return nil, err
+		}
+		c.to.Argv = argv
+	}
+	names := map[string]bool{"build": true, "vet": true, "test": true}
+	for i, raw := range checks {
+		label := fmt.Sprintf("%s.checks[%d]", where, i)
+		var c MacOSCheck
+		if _, err := decodeObject(raw, label, map[string]any{"name": &c.Name, "argv": &c.Argv}); err != nil {
+			return nil, err
+		}
+		if !macOSCheckName.MatchString(c.Name) {
+			return nil, fmt.Errorf("%s.name %q must be lowercase letters, digits and dashes, at most 64, starting with a letter or a digit", label, c.Name)
+		}
+		if names[c.Name] {
+			return nil, fmt.Errorf("%s.name %q names another of the part's macOS checks", label, c.Name)
+		}
+		names[c.Name] = true
+		if err := plainArgv(c.Argv, label+".argv"); err != nil {
+			return nil, err
+		}
+		m.Checks = append(m.Checks, c)
+	}
+	return m, nil
+}
+
+// plainArgv refuses anything but an argument array run as it is: an empty
+// array, a blank executable, a {test} placeholder, and a control character,
+// NUL and newline included, in any argument.
+func plainArgv(argv []string, label string) error {
+	if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" {
+		return fmt.Errorf("%s needs a nonempty argv with a nonblank executable", label)
+	}
+	for _, arg := range argv {
+		if strings.IndexFunc(arg, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+			return fmt.Errorf("%s holds a control character, and a plain argument array doesn't", label)
+		}
+		if strings.Contains(arg, "{test}") {
+			return fmt.Errorf("%s holds a {test} placeholder: the macOS job runs whole checks, and fills in nothing", label)
+		}
+	}
+	return nil
 }
 
 // decodeObject checks exact field names and their presence before interpreting
@@ -278,6 +413,9 @@ func (s *Snapshot) validate() error {
 		case "go", "python", "typescript":
 		default:
 			return fmt.Errorf("part %q has unsupported language %q", p.Name, p.Language)
+		}
+		if p.MacOS != nil && p.Language != "go" {
+			return fmt.Errorf("part %q declares macos checks, which only a Go part can: the macOS job sets up Go alone", p.Name)
 		}
 		if !imagePattern.MatchString(p.Image) {
 			return fmt.Errorf("part %q image must name an image pinned by @sha256 and 64 lowercase hex digits", p.Name)
