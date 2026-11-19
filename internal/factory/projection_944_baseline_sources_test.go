@@ -179,6 +179,43 @@ func TestProjection944QuestionsBoundCapturedBaseline(t *testing.T) {
 	if !bytes.Equal(original, after) {
 		t.Fatal("saving mutated the checked questions")
 	}
+	// A drawable record can't swap its chart binding for the transport-only
+	// form that a question set of limited alternatives uses. The re-encoded
+	// original still resolves, so only that guard refuses the rewrite.
+	resolveRewritten := func(edit func(*formalize.BaselineSources)) error {
+		var rewritten savedDraftResult
+		if err := json.Unmarshal(payload, &rewritten); err != nil {
+			t.Fatal(err)
+		}
+		edit(rewritten.BaselineSources)
+		data, err := json.Marshal(&rewritten)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(DraftReference{Version: 1, Repository: r.f.Repository, Issue: 944, Step: "draft-issue", Commit: commit, SHA256: draftDigest(data)})
+		m := Marker{Kind: KindForks, ProposalRef: b, Forks: []formalize.Fork{{ID: "F1"}}}
+		_, got, err := m.ResolveDraft(t.Context(), r.f.Repository, 944, run, func(ctx context.Context, sha, file string) ([]byte, error) {
+			if file == "result.json" {
+				return data, nil
+			}
+			return r.f.Repo.Show(ctx, sha, file)
+		})
+		if err == nil && !draftEqual(got, &result.Result) {
+			t.Fatal("rewritten record resolved to different questions")
+		}
+		return err
+	}
+	if err := resolveRewritten(func(*formalize.BaselineSources) {}); err != nil {
+		t.Fatal("re-encoded original did not resolve", err)
+	}
+	if err := resolveRewritten(func(s *formalize.BaselineSources) {
+		ref := s.Reference
+		s.Reference = nil
+		s.Volume = &formalize.PreviewReference{Version: 1, SHA256: ref.SHA256, Fingerprint: ref.Fingerprint,
+			Actual: ref.Limitation.Actual, Limit: statechart.MaxEvidenceBytes, Representation: ref.Limitation.Representation}
+	}); err == nil {
+		t.Fatal("a drawable record resolved through the chart-free baseline form")
+	}
 	for _, damage := range []string{"missing", "changed"} {
 		t.Run(damage, func(t *testing.T) {
 			_, bad, err := m.ResolveDraft(t.Context(), r.f.Repository, 944, run, func(ctx context.Context, sha, file string) ([]byte, error) {
@@ -188,6 +225,112 @@ func TestProjection944QuestionsBoundCapturedBaseline(t *testing.T) {
 						return nil, fmt.Errorf("missing companion")
 					}
 					data = append(data, ' ')
+				}
+				return data, err
+			})
+			if err == nil || bad != nil {
+				t.Fatal("a damaged baseline companion produced usable questions")
+			}
+		})
+	}
+}
+
+// When every alternative is limited, no drawn chart can bind the baseline
+// companion, yet the captured baseline's two copies still overflow the
+// record. The companion then records only the record's transport size, as a
+// limited alternative's preview does, and the saved draft recovers exactly.
+func TestProjection944LimitedQuestionsBoundCapturedBaseline(t *testing.T) {
+	tc, _ := reader603Tools(t)
+	include := strings.Replace(reader603Include, "====", "\\* "+strings.Repeat("x", 32<<20)+"\n====", 1)
+	ws := t.TempDir()
+	reader603Workspace(t, ws)
+	reader603Write(t, filepath.Join(ws, "Helper603.tla"), include)
+	base, _ := reader603Checked(t, ws, tc)
+	authority := (formalize.Request{Previous: base}).CheckContext()
+	draft := preview639Draft(t, 1, nil)
+	for j := range 2 {
+		model := preview639Input(draft, 0, j)["model"].(map[string]any)
+		model["bounds"] = map[string]string{"Limit": "500"}
+		model["view"] = reader944PartitionView(501)
+	}
+	preview639Write(t, ws, draft)
+	p, _, err := formalize.CheckWithContext(t.Context(), ws, tc, authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Forks) != 1 || p.Baseline == nil || p.Baseline.Includes["Helper603.tla"] != include {
+		t.Fatal("fixture needs a question set that carries the captured baseline")
+	}
+	for _, option := range p.Forks[0].Options {
+		if option.Preview == nil || option.Preview.Model == nil || option.Preview.Model.Reader == nil ||
+			option.Preview.Model.Reader.Chart != nil || option.Preview.Model.Reader.Limitation == nil {
+			t.Fatal("fixture needs limited alternatives")
+		}
+	}
+	res := &formalize.Result{Proposal: p, CheckContext: &authority}
+	original, err := json.Marshal(res)
+	if err != nil || len(original) <= statechart.MaxEvidenceBytes {
+		t.Fatal("complete question record must overflow", len(original), err)
+	}
+	r := newRig(t)
+	result := &savedDraftResult{Result: *res, Publication: &draftPublication{}}
+	completeBytes, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := r.f.saveResult(t.Context(), result, "invariant: the result of a draft for #944", "")
+	if err != nil {
+		t.Fatal("the complete question record could not be saved:", err)
+	}
+	payload, err := r.f.Repo.Show(t.Context(), commit, "result.json")
+	if err != nil || len(payload) > statechart.MaxEvidenceBytes {
+		t.Fatal("saved record exceeds its entry budget", len(payload), err)
+	}
+	var wire savedDraftResult
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	s := wire.BaselineSources
+	if s == nil || s.Reference != nil || s.Volume == nil || s.Volume.Actual != len(completeBytes) ||
+		s.Volume.Limit != statechart.MaxEvidenceBytes || s.Volume.Representation != "compact_json" ||
+		len(wire.CheckContext.Baseline.Includes) != 0 || len(wire.Proposal.Baseline.Includes) != 0 {
+		t.Fatal("the captured baseline's copies did not move under the exact transport size", s)
+	}
+	for _, name := range []string{"reader-baseline.json", "previews/F1/A/reader-candidate.json", "previews/F1/B/reader-candidate.json"} {
+		b, err := r.f.Repo.Show(t.Context(), commit, name)
+		if err != nil || len(b) == 0 || len(b) > statechart.MaxEvidenceBytes {
+			t.Fatalf("%s: missing or oversized companion: %v", name, err)
+		}
+	}
+	ref := DraftReference{Version: 1, Repository: r.f.Repository, Issue: 944, Step: "draft-issue", Commit: commit, SHA256: draftDigest(payload)}
+	b, _ := json.Marshal(ref)
+	m := Marker{Kind: KindForks, ProposalRef: b, Forks: []formalize.Fork{{ID: "F1"}}}
+	run := func(context.Context, int, string) (RunState, string, error) { return RunDone, commit, nil }
+	_, got, err := m.ResolveDraft(t.Context(), r.f.Repository, 944, run, r.f.Repo.Show)
+	if err != nil || !draftEqual(got, &result.Result) {
+		t.Fatal("published questions lost the captured baseline's sources", err)
+	}
+	loaded, err := r.f.loadDraft(t.Context(), commit)
+	if err != nil || !draftEqual(loaded.Result, result.Result) {
+		t.Fatal("factory recovery changed the saved questions", err)
+	}
+	after, _ := json.Marshal(res)
+	if !bytes.Equal(original, after) {
+		t.Fatal("saving mutated the checked questions")
+	}
+	for _, damage := range []string{"missing", "changed", "extended"} {
+		t.Run(damage, func(t *testing.T) {
+			_, bad, err := m.ResolveDraft(t.Context(), r.f.Repository, 944, run, func(ctx context.Context, sha, file string) ([]byte, error) {
+				data, err := r.f.Repo.Show(ctx, sha, file)
+				if file == "reader-baseline.json" {
+					switch damage {
+					case "missing":
+						return nil, fmt.Errorf("missing companion")
+					case "changed":
+						data = bytes.Replace(data, []byte("Zero == 0"), []byte("Zero == 1"), 1)
+					case "extended":
+						data = append(data, []byte("{}")...)
+					}
 				}
 				return data, err
 			})

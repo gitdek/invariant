@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -47,13 +48,19 @@ type PreviewReference struct {
 	Representation string `json:"representation"`
 }
 
+// transport reports a well-formed size record of a containing record that
+// overflowed. It binds no chart; its consumer checks the saved bytes.
+func (ref *PreviewReference) transport() bool {
+	return ref != nil && ref.Version == 1 && ref.Actual > statechart.MaxEvidenceBytes && ref.Limit == statechart.MaxEvidenceBytes &&
+		slices.Contains([]string{"compact_json", "result.json", "formalization.json", "preview.json"}, ref.Representation)
+}
+
 func resolvePreviewEvidence(v *Preview, read func(string) ([]byte, error)) error {
 	ref := v.EvidenceRef
 	if ref == nil {
 		return nil
 	}
-	if read == nil || ref.Version != 1 || ref.Actual <= statechart.MaxEvidenceBytes || ref.Limit != statechart.MaxEvidenceBytes ||
-		!slices.Contains([]string{"compact_json", "result.json", "formalization.json", "preview.json"}, ref.Representation) {
+	if read == nil || !ref.transport() {
 		return fmt.Errorf("invalid complete preview reference")
 	}
 	data, err := read("reader-candidate.json")
@@ -84,14 +91,20 @@ func resolvePreviewEvidence(v *Preview, read func(string) ([]byte, error)) error
 
 // BaselineSources removes only repeated model/include bytes. The captured
 // lock, view (including an absent legacy view) and all authority stay inline.
+// Reference binds a drawn chart in the same record. A question set whose
+// alternatives are all limited has none, so Volume records only the
+// containing record's transport size, as a limited alternative's preview does.
 type BaselineSources struct {
-	Reference *statechart.EvidenceReference `json:"reference"`
+	Reference *statechart.EvidenceReference `json:"reference,omitempty"`
+	Volume    *PreviewReference             `json:"volume,omitempty"`
 	Context   bool                          `json:"context,omitempty"`
 	Proposal  bool                          `json:"proposal,omitempty"`
 	Target    bool                          `json:"target,omitempty"`
 }
 
-func (r *Result) boundBaselineSources(baseline *statechart.ComparisonSnapshot, l *statechart.Limitation, files map[string][]byte) error {
+// boundBaselineSources binds the companion to l when the record draws a
+// chart, and otherwise to volume, which only a question set supplies.
+func (r *Result) boundBaselineSources(baseline *statechart.ComparisonSnapshot, l *statechart.Limitation, volume *PreviewReference, files map[string][]byte) error {
 	if baseline == nil {
 		return nil
 	}
@@ -112,8 +125,18 @@ func (r *Result) boundBaselineSources(baseline *statechart.ComparisonSnapshot, l
 		return err
 	}
 	canonical, _ := json.Marshal(saved)
-	ref := statechart.NewEvidenceReference("reader-baseline.json", b, fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)), l)
-	sources := &BaselineSources{Reference: ref}
+	fingerprint := fmt.Sprintf("sha256:%x", sha256.Sum256(canonical))
+	sources := &BaselineSources{}
+	switch {
+	case l != nil:
+		sources.Reference = statechart.NewEvidenceReference("reader-baseline.json", b, fingerprint, l)
+	case volume != nil && saved.Chart == nil && saved.Limitation == nil:
+		v := *volume
+		v.SHA256, v.Fingerprint = fmt.Sprintf("sha256:%x", sha256.Sum256(b)), fingerprint
+		sources.Volume = &v
+	default:
+		return fmt.Errorf("captured baseline sources have no reference to bind them")
+	}
 	strip := func(model *string, includes *map[string]string) error {
 		if *model != saved.Model || !maps.Equal(*includes, saved.Includes) {
 			return fmt.Errorf("captured baseline sources differ from their companion")
@@ -160,18 +183,22 @@ func (r *Result) resolveBaselineSources(read func(string) ([]byte, error)) error
 	if b == nil {
 		return nil
 	}
-	if read == nil || b.Reference == nil || (!b.Context && !b.Proposal && !b.Target) {
+	if read == nil || (b.Reference == nil) == (b.Volume == nil) || (!b.Context && !b.Proposal && !b.Target) {
 		return fmt.Errorf("captured baseline requires its fixed evidence companion")
 	}
 	data, err := read("reader-baseline.json")
 	if err != nil {
 		return err
 	}
-	snapshot, err := b.Reference.Snapshot("reader-baseline.json", data)
-	if err != nil {
-		return err
-	}
-	if err := b.Reference.ValidateChart(proposalEvidenceChart(r.Proposal)); err != nil {
+	var snapshot statechart.ComparisonSnapshot
+	if b.Reference != nil {
+		if snapshot, err = b.Reference.Snapshot("reader-baseline.json", data); err != nil {
+			return err
+		}
+		if err := b.Reference.ValidateChart(proposalEvidenceChart(r.Proposal)); err != nil {
+			return err
+		}
+	} else if snapshot, err = transportBaseline(r.Proposal, b.Volume, data); err != nil {
 		return err
 	}
 	restore := func(model *string, includes *map[string]string) error {
@@ -211,6 +238,36 @@ func (r *Result) resolveBaselineSources(read func(string) ([]byte, error)) error
 	}
 	r.BaselineSources = nil
 	return nil
+}
+
+// transportBaseline accepts the chart-free form only where no drawn chart
+// could bind the companion: a question set whose resolved alternatives are
+// all limited. The companion holds sources alone, decoded strictly and bound
+// by its exact digest and canonical fingerprint.
+func transportBaseline(p *Proposal, ref *PreviewReference, data []byte) (statechart.ComparisonSnapshot, error) {
+	var s statechart.ComparisonSnapshot
+	if p == nil || len(p.Forks) == 0 || proposalEvidenceChart(p) != nil || !ref.transport() ||
+		len(data) > statechart.MaxEvidenceBytes || ref.SHA256 != fmt.Sprintf("sha256:%x", sha256.Sum256(data)) {
+		return s, fmt.Errorf("missing, stale or invalid reader-baseline.json evidence companion")
+	}
+	type strict statechart.ComparisonSnapshot
+	var decoded strict
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	d.DisallowUnknownFields()
+	if err := d.Decode(&decoded); err != nil {
+		return s, err
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return s, fmt.Errorf("extra reader-baseline.json evidence")
+	}
+	s = statechart.ComparisonSnapshot(decoded)
+	canonical, _ := json.Marshal(s)
+	if s.Chart != nil || s.Limitation != nil || fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)) != ref.Fingerprint {
+		return s, fmt.Errorf("captured baseline companion identity differs")
+	}
+	return s, nil
 }
 
 func proposalEvidenceChart(p *Proposal) *statechart.Result {
@@ -352,12 +409,17 @@ func (r *Result) previewEvidenceFiles(representation string, original []byte, en
 	}
 	data, err := encode(&copyResult)
 	if err == nil && len(data) > statechart.MaxEvidenceBytes && r.CheckContext != nil {
+		// A drawn alternative binds the baseline companion. With every
+		// alternative limited, it records this record's transport size.
+		var l *statechart.Limitation
 		if chart := proposalEvidenceChart(r.Proposal); chart != nil {
-			if err := copyResult.boundBaselineSources(r.CheckContext.Baseline, chart.OutputLimit(representation, "preview", actual), files); err != nil {
-				return nil, nil, err
-			}
-			data, err = encode(&copyResult)
+			l = chart.OutputLimit(representation, "preview", actual)
 		}
+		volume := &PreviewReference{Version: 1, Actual: actual, Limit: statechart.MaxEvidenceBytes, Representation: representation}
+		if err := copyResult.boundBaselineSources(r.CheckContext.Baseline, l, volume, files); err != nil {
+			return nil, nil, err
+		}
+		data, err = encode(&copyResult)
 	}
 	if err == nil && len(data) > statechart.MaxEvidenceBytes {
 		err = fmt.Errorf("complete saved question record exceeds its byte budget")
@@ -421,7 +483,7 @@ func (r *Result) EvidenceFiles(representation string, encode func(*Result) ([]by
 		data, err = encode(&copyResult)
 	}
 	if err == nil && len(data) > statechart.MaxEvidenceBytes && r.Proposal.Reader.Comparison != nil {
-		if err := copyResult.boundBaselineSources(&r.Proposal.Reader.Comparison.Baseline, l, files); err != nil {
+		if err := copyResult.boundBaselineSources(&r.Proposal.Reader.Comparison.Baseline, l, nil, files); err != nil {
 			return nil, nil, err
 		}
 		data, err = encode(&copyResult)
