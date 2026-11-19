@@ -33,7 +33,8 @@ const (
 	// working.
 	SandboxVerifyTimeout      = 60 * time.Minute
 	SandboxVerifyShardTimeout = 55 * time.Minute
-	// A check that owns internal/factory or internal/plumbing gets half an
+	// A check that owns internal/factory, internal/plumbing or, since #968,
+	// internal/dashboard gets half an
 	// hour, 25 minutes of it for the tests (#487). In the sandbox, with no
 	// other running, a check of the three packages #947's draft touched
 	// took 3 minutes 16 seconds on 2026-11-19, internal/factory's 428 tests
@@ -58,6 +59,8 @@ var builtinBudgets = map[string]sandboxBudget{
 	"internal/verify":   {SandboxVerifyTimeout, SandboxVerifyShardTimeout},
 	"internal/factory":  {SandboxLongTimeout, SandboxLongShardTimeout},
 	"internal/plumbing": {SandboxLongTimeout, SandboxLongShardTimeout},
+	// Since #944 its suite takes more than ten minutes in the sandbox (#968).
+	"internal/dashboard": {SandboxLongTimeout, SandboxLongShardTimeout},
 }
 
 // PlanCheckToolTimeout is how long a planning agent's check tool may take
