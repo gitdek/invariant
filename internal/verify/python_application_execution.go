@@ -294,6 +294,11 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	if s.closed {
 		return nil, fmt.Errorf("Python application session is closed")
 	}
+	ctx, finish, err := s.invocationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	var invocation *PythonApplicationInvocation
 	for _, v := range s.invocations {
 		if v.Key == key {
@@ -422,7 +427,14 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	command := c
 	command.Args, command.Env, command.Sampling = slices.Clone(c.Args), maps.Clone(c.Env), maps.Clone(c.Sampling)
 	command.Overlays = slices.Clone(c.Overlays)
-	process, executionErr := s.execute(ctx, command)
+	executionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	life, err := startPythonApplicationLifetime(executionCtx, s.runtime, output, req.Execution, cancel)
+	if err != nil {
+		return nil, err
+	}
+	process, executionErr := s.execute(executionCtx, command)
+	cleanupErr := errors.Join(life.stop(), os.RemoveAll(output))
 	r.ExitCode = process.ExitCode
 	var protocolErr error
 	if key.Kind == "conformance" {
@@ -436,6 +448,9 @@ func (s *PythonApplicationSession) run(ctx context.Context, key PythonApplicatio
 	} else {
 		protocolErr = s.observe(c, req.Boundary, req.Contracts, process.Events, r)
 	}
+	// Cleanup still fails the invocation, but cannot relabel an unauthenticated
+	// stream from a process that returned normally as an interrupted runner.
+	executionErr = errors.Join(executionErr, cleanupErr)
 	freshErr := s.fresh()
 	freshErr = errors.Join(freshErr, s.freshObserver())
 	afterRunner, runnerErr := os.ReadFile(filepath.Join(s.runtime, "runner.py"))
