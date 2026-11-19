@@ -1,1 +1,0 @@
-{"at":"2026-09-25T00:00:00Z","by":"agent","op":"import","id":"D-0010","date":"2026-09-25","door":"one-way","status":"ratified","who":"@gitdek","text":"Drop Lean 4 for v1. TLA+ and TLC check designs; Gobra checks code.","record":"D-0010-role-of-lean.md","prev":"","hash":"sha256:053afda9ff469aeed73f51328eab4694fd341dcb3c5b30d29023b44a66797056"}
