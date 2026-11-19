@@ -41,12 +41,9 @@ func TestConfiguredAcceptanceSharesWholeRunAndPhaseDeadlines(t *testing.T) {
 			if strings.Contains(mode, "starts phase") {
 				f.sandbox.ShardTimeout = 700 * time.Millisecond
 			}
-			if mode == "acceptance starts phase" {
-				recapture515(t, f, func(c *repository.Config) {
-					for i := range c.Parts {
-						c.Parts[i].Commands["test"] = repository.Command{NotApplicable: "Only independent selectors in this fixture."}
-					}
-				})
+			status := "failed"
+			if mode == "suite starts phase" {
+				status = "passed"
 			}
 			start := time.Now()
 			wholeLimit := f.sandbox.Timeout
@@ -94,7 +91,7 @@ func TestConfiguredAcceptanceSharesWholeRunAndPhaseDeadlines(t *testing.T) {
 			}
 			f.runner.accept = func(ctx context.Context, _ DependencyRequest, in RepositoryAcceptanceInvocation) (RepositoryAcceptanceEvidence, []byte, error) {
 				observePhase(ctx)
-				return evidence515(in, "test", "failed", "completed before later timeout"), nil, nil
+				return evidence515(in, "test", status, "completed before later timeout"), nil, nil
 			}
 			f.runner.openHook = func(ctx context.Context, q DependencyRequest) error {
 				d := deadline515(t, ctx)
@@ -110,16 +107,25 @@ func TestConfiguredAcceptanceSharesWholeRunAndPhaseDeadlines(t *testing.T) {
 				<-ctx.Done()
 				return ctx.Err()
 			}
-			checked := base515(t, f, context.Background())
-			if checked.Problem == "" || (!checked.Run.TimedOut && !checked.Run.DeadlineExceeded) || checked.Run.Interrupted {
-				t.Fatalf("deadline did not veto base qualification: %+v", checked)
+			var result Result
+			if mode == "suite starts phase" {
+				result, _ = f.sandbox.Run(context.Background(), f.candidate, f.plan)
+			} else {
+				checked := base515(t, f, context.Background())
+				if checked.Problem == "" {
+					t.Fatal("deadline did not veto base qualification")
+				}
+				result = checked.Run
+			}
+			if result.Passed() || (!result.TimedOut && !result.DeadlineExceeded) || result.Interrupted {
+				t.Fatalf("deadline did not veto the check: %s", result.Summary())
 			}
 			if len(f.runner.invocations) != 2 || len(f.runner.closed) != 4 {
 				t.Fatal("later timeout lost earlier execution/cleanup or ran later selectors")
 			}
 			for _, test := range f.plan.Tests {
-				r := result515(t, checked.Run, test)
-				if test.Part == "api" && r.Status != "failed" || test.Part == "web" && r.Status != "not_run" {
+				r := result515(t, result, test)
+				if test.Part == "api" && r.Status != status || test.Part == "web" && r.Status != "not_run" {
 					t.Fatalf("timeout lost completed or unstarted work: %+v", r)
 				}
 				if r.Reason == "" {
@@ -158,10 +164,10 @@ func TestConfiguredAcceptanceSharesWholeRunAndPhaseDeadlines(t *testing.T) {
 		if suiteEnd.IsZero() || !deadline515(t, ctx).Equal(suiteEnd) {
 			t.Error("acceptance got a new allowance after suite tests")
 		}
-		return evidence515(in, "test", "failed", "ordinary failure"), nil, nil
+		return evidence515(in, "test", "passed", "completed assertion"), nil, nil
 	}
-	if checked := base515(t, f, context.Background()); checked.Problem != "" {
-		t.Fatal(checked.Problem)
+	if result, err := f.sandbox.Run(context.Background(), f.candidate, f.plan); err != nil || !result.Passed() {
+		t.Fatal(describe515(result, err))
 	}
 }
 

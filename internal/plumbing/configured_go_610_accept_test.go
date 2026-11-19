@@ -63,8 +63,8 @@ func TestConfiguredGoPublicPlanningAndCandidate610(t *testing.T) {
 	f := configured610(t, cache, []repositoryCase582{repositoryControl582()}, true)
 	c := eligible610(t, f)
 	repositoryResult582(t, c.Run, f.plan.Tests[0], "failed", "needs seven")
-	if status484(t, c.Run, "api", "test") != "failed" {
-		t.Fatal("ordinary base suite failure was hidden")
+	if status484(t, c.Run, "api", "build") != "skipped" || status484(t, c.Run, "api", "test") != "skipped" {
+		t.Fatal("planning ran broad build or suite commands")
 	}
 	f.candidateValue(7)
 	r, err := f.sandbox.Run(t.Context(), f.candidate, c.Plan)
@@ -206,13 +206,13 @@ func TestConfiguredGoPublicRefusalsAndVetoes610(t *testing.T) {
 			}
 		})
 	}
-	t.Run("ordinary command failures supply no evidence", func(t *testing.T) {
+	t.Run("omitted commands supply no evidence", func(t *testing.T) {
 		c := repositoryCase582{"api", "nested", "TestReady", repositorySource582(`t.Skip("no failure evidence")`, "")}
 		f := newRepositoryFixture582(t, cache, []repositoryCase582{c}, true, map[string]string{"api/unrelated/broken.go": "package unrelated\nvar Bad=Missing610\n"}, nil)
 		f.sandbox.Repository.Adapters = nil
 		checked, _ := check610(t, f)
-		if checked == nil || checked.Problem == "" || status484(t, checked.Run, "api", "build") != "failed" || status484(t, checked.Run, "api", "test") != "failed" {
-			t.Fatal("ordinary command failure qualified acceptance or blocked independent execution")
+		if checked == nil || checked.Problem == "" || status484(t, checked.Run, "api", "build") != "skipped" || status484(t, checked.Run, "api", "test") != "skipped" {
+			t.Fatal("omitted commands qualified acceptance or blocked independent execution")
 		}
 		repositoryResult582(t, checked.Run, f.plan.Tests[0], "skipped", "no failure evidence")
 	})

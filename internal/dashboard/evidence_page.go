@@ -82,7 +82,7 @@ h3.group{margin:24px 0 2px;font-size:16px;letter-spacing:-.01em}
 .bound{padding:8px 12px;border:1px solid var(--line2);border-radius:10px;background:var(--card-solid);font:13px/1.4 var(--mono);overflow-wrap:anywhere}
 .bound b{color:var(--ink);font-weight:600}
 .bound span{color:var(--ink2)}
-details{margin-top:40px;padding:12px 16px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+details{margin-top:12px;padding:12px 16px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
 summary{cursor:pointer;color:var(--ink2);font-weight:600}
 pre{margin:12px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink2);font:12px/1.5 var(--mono)}
 code{font-family:var(--mono);overflow-wrap:anywhere}
@@ -95,7 +95,8 @@ code{font-family:var(--mono);overflow-wrap:anywhere}
 // evidenceParts are the pieces every evidence page shares: its top bar, its
 // hero with links out, its rules and its bounds. Each page's template text
 // carries them, so its URL changes with them.
-const evidenceParts = `{{define "top"}}<header class="top"><a class="brand" href="{{.Back}}" aria-label="Invariant: {{.RepoShort}} on the dashboard"><svg viewBox="-30 -30 60 60" aria-hidden="true"><circle r="27" fill="#0E1116"/><path d="M19.78,-7.05A21,21 0 1 1 -3.78,-20.66" fill="none" stroke="#E6EDF3" stroke-width="5" stroke-linecap="round"/><circle cx="14.85" cy="-14.85" r="5" fill="#E6EDF3"/><circle r="8.8" fill="#38D9A9"/></svg>Invariant</a><span class="crumb">{{.RepoShort}} · {{.Kind}}</span><a class="back" href="{{.Back}}">Back to {{.RepoShort}} on the dashboard</a></header>{{end}}
+const evidenceParts = `{{define "reader-details"}}<details data-reader-details><summary>Complete sources and checked evidence</summary>{{range .Notes}}<div class="note">{{.}}</div>{{end}}<pre>{{.Record}}</pre></details>{{end}}
+{{define "top"}}<header class="top"><a class="brand" href="{{.Back}}" aria-label="Invariant: {{.RepoShort}} on the dashboard"><svg viewBox="-30 -30 60 60" aria-hidden="true"><circle r="27" fill="#0E1116"/><path d="M19.78,-7.05A21,21 0 1 1 -3.78,-20.66" fill="none" stroke="#E6EDF3" stroke-width="5" stroke-linecap="round"/><circle cx="14.85" cy="-14.85" r="5" fill="#E6EDF3"/><circle r="8.8" fill="#38D9A9"/></svg>Invariant</a><span class="crumb">{{.RepoShort}} · {{.Kind}}</span><a class="back" href="{{.Back}}">Back to {{.RepoShort}} on the dashboard</a></header>{{end}}
 {{define "hero"}}<p class="eyebrow">{{.Eyebrow}}</p><h1>{{.Title}}</h1>{{if .Chips}}<ul class="chips">{{range .Chips}}<li class="chip {{.Tone}}">{{.Text}}</li>{{end}}</ul>{{end}}{{end}}
 {{define "links"}}{{if .Links}}<ul class="links" aria-label="On GitHub">{{range .Links}}<li>{{if .Href}}<a class="link" href="{{.Href}}">{{icon .Kind}}<span><b>{{.Label}}</b>{{if .Detail}}<small>{{.Detail}}</small>{{end}}</span></a>{{else}}<span class="link text">{{icon .Kind}}<span><b>{{.Label}}</b>{{if .Detail}}<small>{{.Detail}}</small>{{end}}</span></span>{{end}}</li>{{end}}</ul>{{end}}{{end}}
 {{define "rules"}}{{range .Groups}}<h3 class="group">{{.Title}}</h3><p class="note">{{.Note}}</p><ul class="rules">{{range .Rules}}<li class="rule {{$.Tone .Kind}}"><h4>{{.Name}}<small>{{.Kind}}</small></h4><p>{{.Says}}</p>{{if .Found}}<div class="found{{if .Missed}} missed{{end}}">{{.Found}}</div>{{end}}{{if .Pin}}<div class="pin" title="sha256:{{.Pin}}">pin {{short .Pin}}</div>{{end}}</li>{{end}}</ul>{{end}}{{end}}
@@ -154,6 +155,7 @@ var evidenceIcons = map[string]string{
 }
 
 var evidenceFuncs = template.FuncMap{
+	"readerRecord": readerRecord,
 	// short is a pin's first twelve digits, as commands quote a hash.
 	"short": func(pin string) string { return pin[:min(len(pin), 12)] },
 	"icon": func(kind string) template.HTML {

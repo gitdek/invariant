@@ -16,8 +16,11 @@ func TestReaderComparisonFallbackChecksCompleteNativeFinalPanels(t *testing.T) {
 	e.Artifacts.JSON = reader631JSON(t, e.Report.Reader)
 	before := reader631JSON(t, e.Report)
 	status, message, svg := e.checked()
-	if status != "chart" || !strings.Contains(message, "comparison_evidence") {
+	if status != "chart" || !strings.HasPrefix(message, "Comparison unavailable:") {
 		t.Fatalf("comparison source damage displaced final chart: %s %s", status, message)
+	}
+	if !strings.Contains(readerFoldedComparison(t, makeReader(e).html), "comparison_evidence") {
+		t.Fatal("comparison source damage lost its separate diagnostic")
 	}
 	receipt723Topology(t, []byte(svg), f.Report.Reader.Chart)
 	if !bytes.Equal(before, reader631JSON(t, e.Report)) {
@@ -64,11 +67,30 @@ func TestReaderEmptyComparisonPresenceSurvivesEncoding(t *testing.T) {
 	if restored.Comparison == nil {
 		t.Fatal("an empty comparison became an absent file")
 	}
-	_, message, _ := restored.checked()
+	message := readerFoldedComparison(t, makeReader(restored).html)
 	if !strings.Contains(message, "EOF") {
 		t.Fatalf("empty file lost its parser diagnostic: %s", message)
 	}
 	if makeReader(e).presentation != makeReader(restored).presentation {
 		t.Fatal("empty comparison changed identity after encoding")
 	}
+}
+
+func readerFoldedEvidence(t *testing.T, page []byte, reason string) string {
+	t.Helper()
+	n := reader963HTML(t, page)
+	reader963Safe(t, n)
+	return reader963Fold(t, n, reason).words(true)
+}
+
+func readerFoldedComparison(t *testing.T, page []byte) string {
+	t.Helper()
+	n := reader963HTML(t, page)
+	for _, p := range n.all("p") {
+		if strings.HasPrefix(p.words(true), "Comparison unavailable:") {
+			return readerFoldedEvidence(t, page, p.words(true))
+		}
+	}
+	t.Fatal("missing separate comparison explanation")
+	return ""
 }

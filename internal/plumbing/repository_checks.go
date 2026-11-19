@@ -269,7 +269,9 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 		names = append(names, part.Name)
 		for _, phase := range repositoryPhases {
 			command := CommandResult{Part: part.Name, Phase: phase, Status: "not_run"}
-			if reason := part.Commands[phase].NotApplicable; reason != "" {
+			if base && (phase == "build" || phase == "test") {
+				command.Status, command.Reason = "skipped", "planning checks only pinned acceptance selections; part-wide build and test commands run during build checks"
+			} else if reason := part.Commands[phase].NotApplicable; reason != "" {
 				command.Status, command.Reason = "skipped", reason
 			}
 			result.CommandResults = append(result.CommandResults, command)
@@ -456,11 +458,6 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 				command.Status = "failed"
 				command.Reason = err.Error()
 				result.TimedOut = errors.Is(execution.Err(), context.DeadlineExceeded) && ctx.Err() == nil
-				if base && execution.Err() == nil && (phase == "build" || phase == "test") && repositoryCommandFailed(err) {
-					// Ordinary suite failures never substitute for individual
-					// evidence or prevent independent selectors from running.
-					continue
-				}
 				result.Problems = append(result.Problems, fmt.Sprintf("part %q %s: %v", part.Name, phase, err))
 				return result, nil
 			}

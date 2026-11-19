@@ -27,6 +27,8 @@ func TestReaderComparisonDiagnosticBrowser(t *testing.T) {
 		t.Skip("browser check unavailable: set INVARIANT_DASHBOARD_BROWSER to an installed Chromium executable")
 	}
 	f := receipt723Fixture(t)
+	f.Report.Reader.Comparison.Baseline.Lock.Statements[0].Name = "Missing<script>literal</script> & λ"
+	f.Files[".invariant/comparison.json"] = reader631JSON(t, f.Report.Reader.Comparison)
 	f.Report.Reader.Comparison = nil
 	f.bind(t)
 	s, _, _ := receipt723Load(t, f, nil)
@@ -38,7 +40,6 @@ func TestReaderComparisonDiagnosticBrowser(t *testing.T) {
 	healthy.Reader = &r
 	healthy.Name, healthy.Dir = "Healthy implementation", "examples/a"
 	affected.Name, affected.Dir = "Affected <implementation>", "examples/b"
-	affected.Reader.Message += ` <script>window.comparisonExecuted = true</script> & λ`
 	snap.Projects = append(snap.Projects[:0], healthy, affected)
 	team := newAccessTeam(t)
 	owner := team.token(t, team.key, "RS256", team.claims(nil))
@@ -81,7 +82,9 @@ const readerComparisonBrowserCheck = `
   fixture.decisions.latest ||= [];
   fixture.slices ||= [];
   const json = (v) => new Response(JSON.stringify(v), {headers: {"Content-Type": "application/json"}});
+  const evidenceFetch = window.fetch.bind(window);
   window.fetch = (url) => {
+    if (url.startsWith("/reader/")) return evidenceFetch(url);
     if (url === "/api/state.json") return Promise.resolve(json(fixture));
     if (url === "/act/api/untaken.json") return Promise.resolve(json([]));
     if (url.includes("/api/live.json")) return Promise.resolve(json({steps: []}));
@@ -93,10 +96,21 @@ const readerComparisonBrowserCheck = `
     for (let i = 0; i < 100; i++) { if (test()) return; await pause(); }
     throw new Error("projects did not render");
   }
-  function diagnostic(container) {
+  async function diagnostic(container) {
     const note = container.querySelector(".reader-note");
     assert(note && note.textContent === fixture.projects[1].name + " (" + fixture.projects[1].dir + "): " + fixture.projects[1].reader.message, "complete literal project diagnostic");
     assert(!note.querySelector("script,implementation") && !window.comparisonExecuted, "diagnostic became markup");
+    assert(!note.textContent.includes("comparison_evidence"), "technical diagnostic remains unfolded");
+    const details = note.nextElementSibling;
+    assert(details?.tagName === "DETAILS" && !details.open, "diagnostic evidence is not immediately folded");
+    await until(() => details.querySelector(".reader-record").textContent.includes("comparison_evidence"));
+    assert(details.textContent.includes("Missing<script>literal</script> & λ"), "literal complete diagnostic missing");
+    assert(!details.querySelector("script,implementation,img,svg"), "folded evidence became markup or an image");
+    const summary = details.querySelector("summary");
+    summary.focus();
+    assert(document.activeElement === summary, "native summary cannot receive keyboard focus");
+    summary.click();
+    assert(details.open, "native disclosure does not open");
   }
   async function run() {
     await until(() => document.querySelectorAll("#projects .impls li").length === 2);
@@ -104,13 +118,13 @@ const readerComparisonBrowserCheck = `
     assert(document.querySelectorAll("#projects article.model").length === 1, "grouped model row");
     const implementations = document.querySelectorAll("#projects .impls li");
     assert(!implementations[0].querySelector(".reader-note"), "diagnostic assigned to healthy implementation");
-    diagnostic(implementations[1]);
+    await diagnostic(implementations[1]);
     assert(document.querySelector("#projects .tile.chart img"), "final poster missing");
     document.querySelector('.viewtoggle button[data-view="table"]').click();
     await until(() => document.querySelectorAll("#projects tbody tr").length === 2);
     const rows = document.querySelectorAll("#projects tbody tr");
     assert(!rows[0].querySelector(".reader-note"), "table diagnostic assigned to healthy implementation");
-    diagnostic(rows[1]);
+    await diagnostic(rows[1]);
     document.body.dataset.comparisonCheck = "passed";
   }
   addEventListener("DOMContentLoaded", () => run().catch((error) => {

@@ -15,12 +15,13 @@ type acceptanceExitError515 int
 func (e acceptanceExitError515) Error() string { return fmt.Sprintf("exit status %d", e) }
 func (e acceptanceExitError515) ExitCode() int { return int(e) }
 
-func TestAcceptanceBaseRequiresEveryCommandErrorCauseToBeAnExit(t *testing.T) {
+func TestAcceptanceBaseContinuesOnlyAfterOrdinaryDiscoveryExits(t *testing.T) {
+	cache := t.TempDir()
 	exit := acceptanceExitError515(1)
 	for _, tc := range []struct {
 		name      string
 		err       error
-		qualifies bool
+		continues bool
 	}{
 		{"exit", exit, true},
 		{"wrapped exit", fmt.Errorf("command: %w", exit), true},
@@ -31,43 +32,46 @@ func TestAcceptanceBaseRequiresEveryCommandErrorCauseToBeAnExit(t *testing.T) {
 		{"wrapped joined transport", fmt.Errorf("command: %w", errors.Join(exit, fmt.Errorf("stream: %w", io.ErrUnexpectedEOF))), false},
 		{"exit and startup", errors.Join(exit, acceptanceExitError515(125)), false},
 	} {
-		for _, phase := range []string{"build", "test"} {
-			t.Run(tc.name+"/"+phase, func(t *testing.T) {
-				f := newFixture515(t, "api", "web")
-				allFail515(f.runner)
-				f.runner.hook = func(_ context.Context, q DependencyRequest, argv []string) ([]byte, error) {
-					if q.Directory == "web" && argv[1] == phase {
-						return []byte("ordinary suite diagnostic"), tc.err
-					}
-					return nil, nil
+		t.Run(tc.name, func(t *testing.T) {
+			first := repositoryControl582()
+			second, third := first, first
+			second.part, third.part = "web", "worker"
+			f := newRepositoryFixture582(t, cache, []repositoryCase582{first, second, third}, false, nil, nil)
+			f.runner.before = func(_ context.Context, stage, part string, _ []string) error {
+				if part == "web" && stage == "discovery" {
+					return tc.err
 				}
-				checked := base515(t, f, context.Background())
-				if (checked.Problem == "") != tc.qualifies || checked.Run.Passed() {
-					t.Fatalf("wrong qualification for command error %v: %+v", tc.err, checked)
+				return nil
+			}
+			result, problem, _ := f.run(t.Context(), true)
+			if problem == "" || result.Passed() || !strings.Contains(problem, tc.err.Error()) {
+				t.Fatalf("discovery error lost its refusal: %s\n%s", problem, result.Summary())
+			}
+			repositoryResult582(t, result, f.plan.Tests[0], "failed", "needs seven")
+			refused := result515(t, result, f.plan.Tests[1])
+			if refused.Kind != "setup" || refused.Status != "refused" || !strings.Contains(refused.Reason, tc.err.Error()) {
+				t.Fatalf("discovery error became test evidence: %+v", refused)
+			}
+			want, reason := "not_run", tc.err.Error()
+			if tc.continues {
+				want, reason = "failed", "needs seven"
+			}
+			repositoryResult582(t, result, f.plan.Tests[2], want, reason)
+			starts := 0
+			for _, observation := range f.runner.observed {
+				if observation.stage == "start" {
+					starts++
 				}
-				wantInvocations := len(f.plan.Tests)
-				if !tc.qualifies {
-					wantInvocations = 2
-					if !strings.Contains(checked.Problem, tc.err.Error()) {
-						t.Fatalf("infrastructure cause disappeared: %s", checked.Problem)
-					}
-				}
-				if len(f.runner.invocations) != wantInvocations {
-					t.Fatalf("ran %d selectors, want %d", len(f.runner.invocations), wantInvocations)
-				}
-				for _, test := range f.plan.Tests {
-					r := result515(t, checked.Run, test)
-					if test.Part == "api" || tc.qualifies {
-						if r.Kind != "test" || r.Status != "failed" || r.Reason != "assertion failed" {
-							t.Fatalf("lost independent completed failure: %+v", r)
-						}
-					} else if r.Status != "not_run" || !strings.Contains(r.Reason, tc.err.Error()) {
-						t.Fatalf("lost unfinished work or infrastructure reason: %+v", r)
-					}
-				}
-				closed484(t, f.runner.runner484)
-			})
-		}
+			}
+			wantStarts := 1
+			if tc.continues {
+				wantStarts++
+			}
+			if starts != wantStarts {
+				t.Fatalf("ran %d selectors, want %d", starts, wantStarts)
+			}
+			repositoryRoundTrip582(t, result)
+		})
 	}
 }
 

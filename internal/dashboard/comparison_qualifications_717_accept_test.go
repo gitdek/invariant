@@ -123,8 +123,15 @@ func TestComparison717QualificationsAcrossPublishers(t *testing.T) {
 			before := reader631JSON(t, c)
 			p := comparison717Proposal(t, c)
 			proposalPage := makeComparison(comparisonEvidence{Format: comparisonFormat, Repo: "o/r", Issue: 717, Proposal: p})
-			if proposalPage.presentation.Status != "chart" {
+			wantStatus := "chart"
+			if c.Unavailable != nil {
+				wantStatus = "too_large"
+			}
+			if proposalPage.presentation.Status != wantStatus {
 				t.Fatalf("proposal page refused: %+v", proposalPage.presentation)
+			}
+			if c.Unavailable != nil && (len(proposalPage.svg) != 0 || proposalPage.posters != nil) {
+				t.Fatal("unavailable comparison advertised an image")
 			}
 			// Receipts must keep the original proposal identities while naming
 			// the separately checked final sources, including include changes.
@@ -159,14 +166,14 @@ func TestComparison717QualificationsAcrossPublishers(t *testing.T) {
 				t.Fatal(err)
 			}
 			outputs := map[string]string{
-				"check feedback":             p.ReaderFeedback(),
-				"comparison Markdown":        html.UnescapeString(c.Markdown()),
-				"comparison SVG":             comparison717SVGText(t, svg),
-				"receipt notes":              strings.Join(r.Reader.ComparisonNotes(), " "),
-				"receipt Markdown":           html.UnescapeString(string(receiptMD)),
-				"receipt SVG":                comparison717SVGText(t, string(receiptSVG)),
-				"dashboard proposal message": proposalPage.presentation.Message,
-				"dashboard receipt message":  receiptPage.presentation.Message,
+				"check feedback":              p.ReaderFeedback(),
+				"comparison Markdown":         html.UnescapeString(c.Markdown()),
+				"comparison SVG":              comparison717SVGText(t, svg),
+				"receipt notes":               strings.Join(r.Reader.ComparisonNotes(), " "),
+				"receipt Markdown":            html.UnescapeString(string(receiptMD)),
+				"receipt SVG":                 comparison717SVGText(t, string(receiptSVG)),
+				"dashboard proposal evidence": readerFoldedEvidence(t, proposalPage.html, proposalPage.presentation.Message),
+				"dashboard receipt evidence":  readerFoldedEvidence(t, receiptPage.html, receiptPage.presentation.Message),
 			}
 			qualifications := []string{"Equal charts do not establish behavioral equivalence. This bounded, view-qualified comparison adds no proof claim."}
 			if c.ViewChanged {
@@ -204,7 +211,7 @@ func TestComparison717QualificationsAcrossPublishers(t *testing.T) {
 					t.Error("literal source became HTML")
 				}
 			}
-			for _, text := range []string{strings.Join(r.Reader.ComparisonNotes(), " "), receiptPage.presentation.Message} {
+			for _, text := range []string{strings.Join(r.Reader.ComparisonNotes(), " "), readerFoldedEvidence(t, receiptPage.html, receiptPage.presentation.Message)} {
 				if !strings.Contains(text, "Final source identities differ") || !strings.Contains(text, r.Reader.Inputs.Model) {
 					t.Error("final source distinction lost")
 				}

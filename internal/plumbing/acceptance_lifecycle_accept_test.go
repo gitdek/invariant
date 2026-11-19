@@ -43,7 +43,7 @@ package plumbing
 //
 // Sandbox.checkRepositoryBase(ctx, root, plan) (*Checked, error) is a distinct
 // internal base path: it stages a private copy and collects all independent
-// selectors after expected build/test failures while the environment is usable.
+// selectors after format/lint checks, omitting part-wide build/test commands.
 // Checked.Problem is empty only when every selector completed with attributable
 // failure and no infrastructure/allowance/cancellation/cleanup veto occurred.
 // Sandbox.Run is the candidate path for an explicitly host-configured adapter;
@@ -247,6 +247,18 @@ func TestConfiguredAcceptanceBaseCollectsIndependentFailures(t *testing.T) {
 			checked := base515(t, f, context.Background())
 			if checked.Problem != "" || checked.Run.Passed() || len(f.runner.invocations) != len(f.plan.Tests) {
 				t.Fatalf("independent base failures did not qualify: %s\n%s", checked.Problem, checked.Run.Summary())
+			}
+			for _, call := range f.runner.calls {
+				if call.argv[1] == "build" || call.argv[1] == "test" {
+					t.Fatal("planning ran a broad command")
+				}
+			}
+			for _, part := range []string{"api", "web"} {
+				for _, phase := range []string{"build", "test"} {
+					if status484(t, checked.Run, part, phase) != "skipped" {
+						t.Fatal("planning did not report an omitted command")
+					}
+				}
 			}
 			for _, test := range f.plan.Tests {
 				r := result515(t, checked.Run, test)
