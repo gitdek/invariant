@@ -128,7 +128,8 @@ const needsYouBrowserCheck = `
     elsewhere.remove();
     assert(box.querySelector('.need.aside[data-repo="gitdek/other"]'), "the other repository's cards aren't marked as another repository's");
     const chip = [...document.querySelectorAll("#nowmeta .chip")].map(text).find((c) => c.includes("need"));
-    assert(chip === "3 issues need you · 2 stalled", "the headline's count reads: " + chip);
+    // What waited over two days is said in words no one takes for a step that stalled (#948).
+    assert(chip === "3 issues need you · 2 more for over two days", "the headline's count reads: " + chip);
     const choices = [...document.querySelectorAll("#scope a")].map(text);
     assert(choices[0].endsWith("3 need you") && choices[1].endsWith("2 need you") && choices[2].endsWith("1 needs you"), "the Show choices read: " + choices.join(" / "));
     // What's established sits apart from what needs a person, so a phone
@@ -148,7 +149,7 @@ const needsYouBrowserCheck = `
     // The lede names the repository in view, and every repository with all shown.
     assert(text(document.querySelector("#needs-lede")).startsWith("What the factory is waiting for from a person, in other:"), "one repository's lede reads: " + text(document.querySelector("#needs-lede")));
     const own = [...document.querySelectorAll("#nowmeta .chip")].map(text).find((c) => c.includes("need"));
-    assert(own === "1 issue needs you · 1 stalled", "one repository's count reads: " + own);
+    assert(own === "1 issue needs you · 1 more for over two days", "one repository's count reads: " + own);
     document.body.dataset.needsCheck = "passed";
   }
   addEventListener("DOMContentLoaded", () => run().catch((error) => {

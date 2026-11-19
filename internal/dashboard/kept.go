@@ -35,6 +35,7 @@ type keptComments struct {
 type keptMerge struct {
 	SHA   string `json:"sha"`
 	Green bool   `json:"green"`
+	Base  string `json:"base,omitempty"` // kept from #948 on; older merges are the factory's own
 }
 
 // sourcesFile is where the kept reads are, beside the snapshot.
@@ -68,7 +69,7 @@ func (s *Server) loadSources() {
 		}
 		for n, m := range kr.Merges {
 			if m.SHA != "" {
-				r.src.merges[n] = mergeCheck{sha: m.SHA, green: m.Green}
+				r.src.merges[n] = mergeCheck{sha: m.SHA, green: m.Green, base: m.Base}
 			}
 		}
 	}
@@ -89,7 +90,7 @@ func (s *Server) saveSources() {
 			kr.Comments[n] = keptComments{Updated: c.updated, Comments: c.comments}
 		}
 		for n, m := range r.src.merges {
-			kr.Merges[n] = keptMerge{SHA: m.sha, Green: m.green}
+			kr.Merges[n] = keptMerge{SHA: m.sha, Green: m.green, Base: m.base}
 		}
 		k.Repos[r.Name] = kr
 	}

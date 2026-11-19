@@ -50,10 +50,19 @@ type Issue struct {
 	CreatedAt   string    `json:"created_at"`
 	UpdatedAt   string    `json:"updated_at"`
 	ClosedAt    string    `json:"closed_at,omitempty"`
-	PullRequest *struct{} `json:"pull_request,omitempty"` // set when the issue is a pull request
+	PullRequest *PullLink `json:"pull_request,omitempty"` // set when the issue is a pull request
+	// StateReason is why a closed issue closed, as GitHub says: completed
+	// or not_planned.
+	StateReason string `json:"state_reason,omitempty"`
 	// AuthorAssociation is who its author is to the repository, as GitHub
 	// says: OWNER, MEMBER, COLLABORATOR, or someone else.
 	AuthorAssociation string `json:"author_association,omitempty"`
+}
+
+// PullLink is what a list of issues says of one that's a pull request:
+// when it merged, if it did.
+type PullLink struct {
+	MergedAt string `json:"merged_at,omitempty"`
 }
 
 // HasLabel says whether the issue carries the label.
