@@ -178,7 +178,7 @@ func reader615Docker(args []string) int {
 		start = 1
 	}
 	n := limit + 1 - start
-	if n < 1 || n > 502 {
+	if n < 1 || n > 100001 {
 		return fail("unexpected fixture size")
 	}
 	record, _ := json.Marshal(map[string]string{"module": module, "config": string(config), "main": string(main), "include": string(helper), "dump": dump, "args": joined})
@@ -207,12 +207,24 @@ func reader615Docker(args []string) int {
 		b.WriteString("strict digraph DiskGraph {\nsubgraph cluster_graph {\n")
 		replay := module != "Reader615"
 		var idVar, rulesVar string
+		var replayIDs []int
 		if replay {
 			m := regexp.MustCompile(`(?m)^VARIABLES ([A-Za-z0-9_]+), ([A-Za-z0-9_]+)$`).FindStringSubmatch(string(src))
 			if len(m) != 3 {
 				return fail("missing rule replay variables")
 			}
 			idVar, rulesVar = m[1], m[2]
+			for _, match := range regexp.MustCompile(regexp.QuoteMeta(idVar)+` = "([0-9]+)"`).FindAllStringSubmatch(string(src), -1) {
+				id, _ := strconv.Atoi(match[1])
+				if id < 1 || id > n {
+					return fail("unknown replay identity")
+				}
+				replayIDs = append(replayIDs, id)
+			}
+			if len(replayIDs) == 0 {
+				return fail("missing replay snapshots")
+			}
+			n = len(replayIDs)
 			initial, steps = n, n
 			if !strings.Contains(string(src), "Safe |-> Safe") || !strings.Contains(string(src), "UNCHANGED") {
 				return fail("invariant replay does not evaluate Safe")
@@ -228,7 +240,7 @@ func reader615Docker(args []string) int {
 				style = ",style=filled"
 			}
 			if replay {
-				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", i+start, idVar, i+1, rulesVar)
+				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", replayIDs[i]-1+start, idVar, replayIDs[i], rulesVar)
 			}
 			fmt.Fprintf(&b, "%d [label=%s%s];\n", i+1, quote(label), style)
 		}

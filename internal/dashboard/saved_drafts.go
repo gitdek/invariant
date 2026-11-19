@@ -28,12 +28,13 @@ type SavedDraftPresentation struct {
 }
 
 type savedDraftEvidence struct {
-	Format  string
-	Repo    string
-	Issue   int
-	Comment github.Comment
-	Run     savedDraftRun
-	Payload []byte
+	Format     string
+	Repo       string
+	Issue      int
+	Comment    github.Comment
+	Run        savedDraftRun
+	Payload    []byte
+	Companions map[string][]byte `json:",omitempty"`
 }
 
 type savedDraftRun struct {
@@ -106,8 +107,18 @@ func (run savedDraftRun) read(_ context.Context, issue int, step string) (factor
 }
 
 func (e savedDraftEvidence) show(_ context.Context, commit, file string) ([]byte, error) {
-	if commit != e.Run.Commit || file != "result.json" {
+	if commit != e.Run.Commit {
 		return nil, fmt.Errorf("saved draft read is outside its immutable result")
+	}
+	if file != "result.json" {
+		if !formalize.EvidenceCompanion(file) {
+			return nil, fmt.Errorf("unexpected saved draft companion")
+		}
+		b, ok := e.Companions[file]
+		if !ok {
+			return nil, fmt.Errorf("missing %s", file)
+		}
+		return b, nil
 	}
 	return e.Payload, nil
 }
@@ -163,11 +174,18 @@ func (s *Server) resolveSavedComment(ctx context.Context, r *Repo, issue int, c 
 				return e.Run.read(ctx, n, step)
 			},
 			func(ctx context.Context, commit, file string) ([]byte, error) {
-				if commit != d.Reference.Commit || file != "result.json" {
+				if commit != d.Reference.Commit || (file != "result.json" && !formalize.EvidenceCompanion(file)) {
 					return nil, fmt.Errorf("unexpected saved draft read")
 				}
 				b, err := client.File(ctx, file, commit)
-				e.Payload = b
+				if file == "result.json" {
+					e.Payload = b
+				} else {
+					if e.Companions == nil {
+						e.Companions = map[string][]byte{}
+					}
+					e.Companions[file] = b
+				}
 				return b, err
 			})
 		stops = err != nil && !github.Transient(err)

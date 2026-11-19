@@ -2,6 +2,8 @@ package statechart
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -41,6 +43,9 @@ func EvaluateRules(ctx context.Context, runner GraphDumper, dir string, graph tl
 	}
 	invariants, err := validateLock(graph, lock)
 	if err != nil {
+		return nil, err
+	}
+	if err := workLimit(Input{Graph: graph, Lock: lock}, nil, invariants); err != nil {
 		return nil, err
 	}
 	src, err := os.ReadFile(filepath.Join(dir, graph.Module+".tla"))
@@ -94,8 +99,12 @@ func EvaluateRules(ctx context.Context, runner GraphDumper, dir string, graph tl
 	if runner == nil {
 		return nil, refuse("invalid_evidence", "invariant evaluation requires a TLC graph runner")
 	}
-	f, err := os.CreateTemp(dir, "InvariantReader*.tla")
+	f, err := replayFile(dir)
 	if err != nil {
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
 		return nil, err
 	}
 	defer func() {
@@ -142,81 +151,122 @@ func EvaluateRules(ctx context.Context, runner GraphDumper, dir string, graph tl
 	for i, name := range invariants {
 		fields[i] = name + " |-> " + name
 	}
-	var b strings.Builder
-	// TLC supplies :> and @@ in the syntax TLC uses to print finite functions.
-	fmt.Fprintf(&b, "---- MODULE %s ----\nEXTENDS %s, TLC\n", replay, graph.Module)
-	if len(aliases) > 0 {
-		fmt.Fprintf(&b, "CONSTANTS %s\n", strings.Join(aliases, ", "))
-	}
-	fmt.Fprintf(&b, "VARIABLES %s, %s\n%s ==\n", idVar, rulesVar, init)
-	for _, id := range slices.Sorted(maps.Keys(states)) {
-		b.WriteString("    \\/ /\\ " + idVar + " = " + strconv.Quote(id) + "\n")
-		for _, name := range variables {
-			value := oneLine(replaceModelValues(states[id].Values[name], func(name string) string { return modelValues[name] }))
-			fmt.Fprintf(&b, "       /\\ %s = (%s)\n", name, value)
+	generate := func(ids []string) string {
+		var b strings.Builder
+		// TLC supplies :> and @@ in the syntax TLC uses to print finite functions.
+		fmt.Fprintf(&b, "---- MODULE %s ----\nEXTENDS %s, TLC\n", replay, graph.Module)
+		if len(aliases) > 0 {
+			fmt.Fprintf(&b, "CONSTANTS %s\n", strings.Join(aliases, ", "))
 		}
-		fmt.Fprintf(&b, "       /\\ %s = [%s]\n", rulesVar, strings.Join(fields, ", "))
-	}
-	fmt.Fprintf(&b, "%s == UNCHANGED %s\n%s == %s /\\ [][%s]_%s\n====\n", stay, tuple, spec, init, stay, tuple)
-	_, writeErr := f.WriteString(b.String())
-	if err := errors.Join(writeErr, f.Close()); err != nil {
-		return nil, err
-	}
-	if err := context.Cause(ctx); err != nil {
-		return nil, err
-	}
-	got, err := runner.DumpGraph(ctx, dir, replay, cloneConfig(cfg))
-	if err != nil {
-		return nil, fmt.Errorf("statechart invariant replay: %w", err)
-	}
-	if err := context.Cause(ctx); err != nil {
-		return nil, err
-	}
-	if got == nil {
-		return nil, refuse("invalid_evidence", "TLC returned no invariant replay")
-	}
-	if _, err := validateGraph(ctx, *got); err != nil {
-		return nil, err
-	}
-	if got.Module != replay || got.Config.Specification != spec || !maps.Equal(got.Config.Constants, cfg.Constants) ||
-		len(got.Config.Invariants) != 0 || len(got.Config.Properties) != 0 || got.Tool != graph.Tool || got.Run.Version != graph.Run.Version {
-		return nil, refuse("invalid_evidence", "invariant replay configuration or tool provenance differs")
-	}
-	if got.StateCount != len(states) || len(got.Graph.Initial) != len(states) || got.StepCount != len(states) {
-		return nil, refuse("invalid_evidence", "invariant replay must contain exactly one initial snapshot and unchanged step per concrete state")
-	}
-	loops := map[string]bool{}
-	for _, step := range got.Graph.Steps {
-		if step.From != step.To || loops[step.From] {
-			return nil, refuse("invalid_evidence", "invariant replay has a changed or duplicate successor")
-		}
-		loops[step.From] = true
-	}
-	for _, s := range got.Graph.States {
-		id, err := strconv.Unquote(s.Values[idVar])
-		_, ok := states[id]
-		if err != nil || !ok || matrix[id] != nil || len(s.Values) != len(variables)+2 {
-			return nil, refuse("invalid_evidence", "missing, duplicate or unknown replay identity or variables")
-		}
-		for _, name := range variables {
-			value, exists := s.Values[name]
-			canonical, err := canonicalValue(value)
-			if !exists || err != nil || canonical != values[id][name] {
-				return nil, &Refusal{Code: "invalid_evidence", Message: "replay changed variable " + name, States: []string{id}}
+		fmt.Fprintf(&b, "VARIABLES %s, %s\n%s ==\n", idVar, rulesVar, init)
+		for _, id := range ids {
+			b.WriteString("    \\/ /\\ " + idVar + " = " + strconv.Quote(id) + "\n")
+			for _, name := range variables {
+				value := oneLine(replaceModelValues(states[id].Values[name], func(name string) string { return modelValues[name] }))
+				fmt.Fprintf(&b, "       /\\ %s = (%s)\n", name, value)
 			}
+			fmt.Fprintf(&b, "       /\\ %s = [%s]\n", rulesVar, strings.Join(fields, ", "))
 		}
-		row, err := booleanRecord(s.Values[rulesVar], invariants)
+		fmt.Fprintf(&b, "%s == UNCHANGED %s\n%s == %s /\\ [][%s]_%s\n====\n", stay, tuple, spec, init, stay, tuple)
+		return b.String()
+	}
+	// Keep TLC's parser and initial-state enumeration bounded. Count every
+	// complete module and configuration before starting any replay batch.
+	ids := slices.Sorted(maps.Keys(states))
+	const batchSize = 1000
+	configBytes := len("SPECIFICATION " + cfg.Specification + "\n")
+	for name, value := range cfg.Constants {
+		configBytes += len("CONSTANT " + name + " = " + value + "\n")
+	}
+	total := 0
+	for start := 0; start < len(ids); start += batchSize {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		total += len(generate(ids[start:min(start+batchSize, len(ids))])) + configBytes
+	}
+	if total > MaxReplayBytes {
+		return nil, sizeRefusal(graphSource(graph), len(states), nil, "evidence_volume", "replay_bytes", "replay_modules_and_configurations", "projection", "bytes", total, MaxReplayBytes)
+	}
+	for start := 0; start < len(ids); start += batchSize {
+		batch := ids[start:min(start+batchSize, len(ids))]
+		want := map[string]bool{}
+		for _, id := range batch {
+			want[id] = true
+		}
+		if err := os.WriteFile(f.Name(), []byte(generate(batch)), 0600); err != nil {
+			return nil, err
+		}
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		got, err := runner.DumpGraph(ctx, dir, replay, cloneConfig(cfg))
 		if err != nil {
-			return nil, &Refusal{Code: "invalid_evidence", Message: err.Error(), States: []string{id}}
+			return nil, fmt.Errorf("statechart invariant replay: %w", err)
 		}
-		for _, name := range graph.Config.Invariants {
-			if !row[name] {
-				return nil, &Refusal{Code: "invalid_evidence", Message: "replay contradicts successful invariant check " + name, States: []string{id}}
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		if got == nil {
+			return nil, refuse("invalid_evidence", "TLC returned no invariant replay")
+		}
+		if _, err := validateGraph(ctx, *got); err != nil {
+			return nil, err
+		}
+		if got.Module != replay || got.Config.Specification != spec || !maps.Equal(got.Config.Constants, cfg.Constants) ||
+			len(got.Config.Invariants) != 0 || len(got.Config.Properties) != 0 || got.Tool != graph.Tool || got.Run.Version != graph.Run.Version {
+			return nil, refuse("invalid_evidence", "invariant replay configuration or tool provenance differs")
+		}
+		if got.StateCount != len(batch) || len(got.Graph.Initial) != len(batch) || got.StepCount != len(batch) {
+			return nil, refuse("invalid_evidence", "invariant replay must contain exactly one initial snapshot and unchanged step per concrete state")
+		}
+		loops := map[string]bool{}
+		for _, step := range got.Graph.Steps {
+			if step.From != step.To || loops[step.From] {
+				return nil, refuse("invalid_evidence", "invariant replay has a changed or duplicate successor")
 			}
+			loops[step.From] = true
 		}
-		matrix[id] = row
+		for _, s := range got.Graph.States {
+			id, err := strconv.Unquote(s.Values[idVar])
+			ok := want[id]
+			if err != nil || !ok || matrix[id] != nil || len(s.Values) != len(variables)+2 {
+				return nil, refuse("invalid_evidence", "missing, duplicate or unknown replay identity or variables")
+			}
+			for _, name := range variables {
+				value, exists := s.Values[name]
+				canonical, err := canonicalValue(value)
+				if !exists || err != nil || canonical != values[id][name] {
+					return nil, &Refusal{Code: "invalid_evidence", Message: "replay changed variable " + name, States: []string{id}}
+				}
+			}
+			row, err := booleanRecord(s.Values[rulesVar], invariants)
+			if err != nil {
+				return nil, &Refusal{Code: "invalid_evidence", Message: err.Error(), States: []string{id}}
+			}
+			for _, name := range graph.Config.Invariants {
+				if !row[name] {
+					return nil, &Refusal{Code: "invalid_evidence", Message: "replay contradicts successful invariant check " + name, States: []string{id}}
+				}
+			}
+			matrix[id] = row
+		}
 	}
 	return matrix, nil
+}
+
+func replayFile(dir string) (*os.File, error) {
+	for {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, "InvariantReader"+hex.EncodeToString(nonce[:])+".tla"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if os.IsExist(err) {
+			continue
+		}
+		return f, err
+	}
 }
 
 var wrapped = regexp.MustCompile(`\s*\n\s*`)

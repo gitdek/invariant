@@ -66,6 +66,9 @@ func saved897Proposal(t *testing.T, large bool, limit int, previous *formalize.P
 	draft["bounds"] = map[string]string{"Limit": fmt.Sprint(limit)}
 	draft["name"] = "Saved lifecycle " + saved897Literal
 	preview639Write(t, ws, draft)
+	if limit > 500 {
+		reader603Write(t, filepath.Join(ws, "view.json"), reader944PartitionView(limit+1))
+	}
 	if large {
 		reader603Write(t, filepath.Join(ws, "Helper603.tla"), strings.Replace(reader603Include, "====", "\\* "+saved897Source+" "+strings.Repeat("x", (4<<20)+1024)+"\n====", 1))
 	}
@@ -99,13 +102,14 @@ func saved897Questions(t *testing.T, previous *formalize.Proposal) *formalize.Re
 }
 
 type saved897Fixture struct {
-	s       *Server
-	r       *Repo
-	ref     factory.DraftReference
-	result  *formalize.Result
-	payload []byte
-	marker  factory.Marker
-	issues  []github.Issue
+	s          *Server
+	r          *Repo
+	ref        factory.DraftReference
+	result     *formalize.Result
+	payload    []byte
+	companions map[string][]byte
+	marker     factory.Marker
+	issues     []github.Issue
 }
 
 func saved897Endpoint(t *testing.T, r *Repo, suffix string, body []byte) string {
@@ -131,12 +135,16 @@ func saved897FixtureFor(t *testing.T, result *formalize.Result) *saved897Fixture
 
 func (f *saved897Fixture) install(t *testing.T, result *formalize.Result, issue int, step, commit string) {
 	t.Helper()
-	b, err := json.MarshalIndent(result, "", "  ")
+	b, companions, err := result.EvidenceFiles("result.json", func(r *formalize.Result) ([]byte, error) {
+		b, e := json.MarshalIndent(r, "", "  ")
+		return append(append([]byte(" \n"), b...), '\n', '\t'), e
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Neither normalization nor remarshal may change a byte of the download.
-	f.payload = append(append([]byte(" \n"), b...), '\n', '\t')
+	f.payload = b
+	f.companions = companions
 	f.result = result
 	f.ref = factory.DraftReference{Version: 1, Repository: f.r.Name, Issue: issue, Step: step, Commit: commit,
 		SHA256: reader631Hash(f.payload), ProposalHash: result.Proposal.Hash}
@@ -167,8 +175,15 @@ func (f *saved897Fixture) install(t *testing.T, result *formalize.Result, issue 
 			return factory.RunDone, commit, nil
 		},
 		func(_ context.Context, sha, file string) ([]byte, error) {
-			if sha != commit || file != "result.json" {
+			if sha != commit {
 				return nil, fmt.Errorf("unexpected fixture read")
+			}
+			if file != "result.json" {
+				b, ok := f.companions[file]
+				if !ok {
+					return nil, fmt.Errorf("missing fixture companion")
+				}
+				return b, nil
 			}
 			return f.payload, nil
 		})
@@ -197,6 +212,9 @@ func (f *saved897Fixture) record(t *testing.T, message string) {
 	saved897Endpoint(t, f.r, fmt.Sprintf("git/ref/invariant/runs/%d/%s", f.ref.Issue, f.ref.Step), reader631JSON(t, map[string]any{"object": map[string]string{"sha": f.ref.Commit}}))
 	saved897Endpoint(t, f.r, "git/commits/"+f.ref.Commit, reader631JSON(t, map[string]string{"message": message}))
 	saved897Endpoint(t, f.r, "contents/result.json?ref="+f.ref.Commit, f.payload)
+	for name, data := range f.companions {
+		saved897Endpoint(t, f.r, "contents/"+name+"?ref="+f.ref.Commit, data)
+	}
 }
 
 func (f *saved897Fixture) refresh(t *testing.T) {
