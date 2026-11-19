@@ -195,6 +195,18 @@ sys.setswitchinterval(600)
 sum(range(1 << 62))
 `
 
+// The same block in a unittest method, for the unittest invocation.
+const pa934BlockingTest = `import os, signal, sys, unittest
+class TaskTests(unittest.TestCase):
+    def test_pass(self):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        output = os.path.dirname(sys.modules['__main__'].request['output'])
+        with open(os.path.join(output, 'ready'), 'w') as stream:
+            stream.write(str(os.getpid()))
+        sys.setswitchinterval(600)
+        sum(range(1 << 62))
+`
+
 func TestPythonApplicationExecutionLifetimeConcurrentClose(t *testing.T) {
 	for _, real := range []bool{false, true} {
 		if real && os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
@@ -333,7 +345,13 @@ time.sleep(600)
 func TestPythonApplicationExecutionLifetimeDockerOwnerDeath(t *testing.T) {
 	if dir := os.Getenv("PA934_DOCKER_OWNER"); dir != "" {
 		t.Setenv("TMPDIR", dir)
-		_, p := pa318Fixture(t, false, pa934Blocking+pa318Functional, false)
+		kind := os.Getenv("PA934_DOCKER_KIND")
+		root, p := pa318Fixture(t, false, pa934Blocking+pa318Functional, false)
+		if kind == "test" {
+			// The unittest invocation never runs the driver: its test
+			// method holds the GIL instead.
+			pa310Write(t, root, pa315TestSource, pa934BlockingTest)
+		}
 		opts := pa318Options(t, true, new(int))
 		opts.Execute = func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
 			c.Env["PA934_CONTAINER"] = filepath.Base(filepath.Dir(dir)) + "-" + filepath.Base(dir)
@@ -343,19 +361,29 @@ func TestPythonApplicationExecutionLifetimeDockerOwnerDeath(t *testing.T) {
 			return RunPythonApplicationCommand(ctx, c)
 		}
 		s := pa315Prepare(t, p, opts)
-		_, _ = s.Run(context.Background(), pa318Driver(t, s).Key)
+		for _, v := range s.Invocations() {
+			if v.Key.Kind == kind {
+				_, _ = s.Run(context.Background(), v.Key)
+			}
+		}
 		return
 	}
 	if os.Getenv("INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL") != "1" {
 		t.Skip("set INVARIANT_PYTHON_APPLICATION_EXECUTION_REAL=1 for Docker owner death")
 	}
+	for _, kind := range []string{"conformance", "test"} {
+		t.Run(kind, func(t *testing.T) { pa934DockerOwnerDeath(t, kind) })
+	}
+}
+
+func pa934DockerOwnerDeath(t *testing.T, kind string) {
 	dir := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(executable, "-test.run=^TestPythonApplicationExecutionLifetimeDockerOwnerDeath$", "-test.timeout=90s")
-	cmd.Env = append(os.Environ(), "PA934_DOCKER_OWNER="+dir)
+	cmd.Env = append(os.Environ(), "PA934_DOCKER_OWNER="+dir, "PA934_DOCKER_KIND="+kind)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	log, err := os.Create(filepath.Join(dir, "owner.log"))
 	if err != nil {
@@ -412,4 +440,41 @@ func TestPythonApplicationExecutionLifetimeDockerOwnerDeath(t *testing.T) {
 		b, err := toolchain.Docker(ctx, "ps", "-q", "--filter", "id="+container).Output()
 		return err == nil && strings.TrimSpace(string(b)) == ""
 	})
+}
+
+// A shared mount can briefly miss the renamed lease (OrbStack did under file
+// churn). The owner keeps renewing it, so a healthy run must not stop.
+func TestPythonApplicationExecutionLifetimeTransientLeaseAbsence(t *testing.T) {
+	root, p := pa318Fixture(t, false, pa318Functional, false)
+	pa310Write(t, root, pa315TestSource, "import time, unittest\nclass TaskTests(unittest.TestCase):\n    def test_pass(self):\n        time.sleep(4)\n")
+	opts := pa318Options(t, false, new(int))
+	execute := opts.Execute
+	opts.Execute = func(ctx context.Context, c PythonApplicationCommand) (PythonApplicationProcess, error) {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case <-time.After(300 * time.Millisecond):
+					// The next renewal restores it within 250 ms.
+					_ = os.Remove(filepath.Join(c.RuntimeDir, "lifetime"))
+				}
+			}
+		}()
+		return execute(ctx, c)
+	}
+	s := pa315Prepare(t, p, opts)
+	var unit PythonApplicationInvocationKey
+	for _, v := range s.Invocations() {
+		if v.Key.Kind == "test" {
+			unit = v.Key
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if r, err := s.Run(ctx, unit); err != nil || r == nil || !r.Success {
+		t.Fatalf("a briefly missing lease stopped a healthy run: %+v, %v", r, err)
+	}
 }

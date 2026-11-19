@@ -53,7 +53,8 @@ def watch_lifetime(configuration):
         elif not sys.platform.startswith("linux"):
             raise ValueError("Python application parent lifetime monitoring is unavailable")
         previous = configuration["initial"].encode("ascii")
-        changed = heard = time.monotonic()
+        changed = heard = sent = time.monotonic()
+        missing = None
         ready = finalizing = stopping = peer_stopping = False
         while True:
             if os.getppid() != runner:
@@ -72,17 +73,33 @@ def watch_lifetime(configuration):
                         state = stream.read().rsplit(") ", 1)[1].split()[0]
                     if state in ("Z", "X"):
                         raise ValueError("Python application runner's parent exited")
-                value = lifetime_lease()
+                try:
+                    value = lifetime_lease()
+                except (OSError, ValueError):
+                    # A shared mount can miss a renamed lease for a moment.
+                    # Only a lease gone for half a second is a withdrawal; a
+                    # silent owner still expires after three seconds.
+                    missing = now if missing is None else missing
+                    if now - missing >= 0.5:
+                        raise
+                    value = previous
+                else:
+                    missing = None
                 if value != previous:
                     previous, changed = value, now
-                    if not ready:
-                        control.sendall(b"R")
-                        ready = True
+                if not ready:
+                    control.sendall(b"R")
+                    ready = True
                 if now - changed >= 3:
                     raise ValueError("Python application session owner stopped renewing its lease")
             if now - heard >= 3:
                 raise ValueError("Python application lifetime watchdog stopped responding")
-            readable = select.select([control, peer, 0], [], [], 0.1)[0]
+            # Wake for messages at once, and otherwise when the next heartbeat
+            # is due. Once stopping, stdin stays readable at EOF: leave it out.
+            if stopping:
+                readable = select.select([control, peer], [], [], 0.1)[0]
+            else:
+                readable = select.select([control, peer, 0], [], [], max(0, sent + 0.1 - now))[0]
             if control in readable:
                 if control.recv(1) != b"F" or not ready or finalizing:
                     raise ValueError("Python application lifetime control failed")
@@ -111,9 +128,9 @@ def watch_lifetime(configuration):
                 os.pwrite(configuration["held"], b"1", configuration["index"] + 1)
                 clean = True
                 break
-            if not stopping:
+            if not stopping and time.monotonic() - sent >= 0.1:
                 peer.sendall(b"H")
-            time.sleep(max(0, now + 0.1 - time.monotonic()))
+                sent = time.monotonic()
     except BaseException:
         # Do not wait on application output pipes to stop a failed run.
         pass
@@ -151,7 +168,15 @@ def protect_lifetime():
         raise ValueError("Python application lifetime lock is not a regular file")
     fcntl.flock(held, fcntl.LOCK_SH | fcntl.LOCK_NB)
     os.write(held, b"S00")
-    initial = lifetime_lease()
+    for attempt in range(10):
+        try:
+            initial = lifetime_lease()
+            break
+        except (OSError, ValueError):
+            # The same brief miss can meet the first read.
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
     # Namespace init cannot be killed by a child. Keep it as a reaper for
     # every invocation, including unittest and imports before the collector.
     container = os.getpid() == 1
