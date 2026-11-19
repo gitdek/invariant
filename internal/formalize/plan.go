@@ -117,6 +117,11 @@ func (f Formalizer) Plan(ctx context.Context, req Request, repo, out string) (*R
 		if f.Timeout <= 0 {
 			job.ToolTimeout = -1
 		}
+	} else {
+		// The plan check selects the budget of the packages the plan
+		// touches, which may be longer than the backend's ordinary tool
+		// timer, and the plan doesn't exist yet (#487).
+		job.ToolTimeout = plumbing.PlanCheckToolTimeout()
 	}
 	usage, _, runErr := synth.RunAgent(ctx, f.Backend, job, f.Timeout, "")
 	usage.Backend = f.Backend.Name()

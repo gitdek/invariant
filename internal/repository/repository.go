@@ -50,7 +50,24 @@ type Part struct {
 	// it stays omitted when the contract is serialized, so the execution
 	// digests of contracts without it don't change.
 	MacOS *MacOS `json:"macos,omitempty"`
+	// TestMinutes, when set, is the part's test budget in the factory's
+	// checks: from DefaultTestMinutes to MaxTestMinutes (#487). Omitted, the
+	// part has the default, and the field stays omitted when the contract
+	// is serialized, as MacOS does.
+	TestMinutes int `json:"test_minutes,omitempty"`
 }
+
+const (
+	// DefaultTestMinutes is a part's test budget when it declares none: the
+	// ten minutes every check had before parts could declare one.
+	DefaultTestMinutes = 10
+	// MaxTestMinutes is the most a part can declare: the 55 minutes inside
+	// an hour that Invariant's own checks of internal/verify have (D-0460).
+	// Two such checks, the agent's last test run and the factory's own,
+	// fit inside a watcher's 150-minute run with time for the agent and its
+	// review.
+	MaxTestMinutes = 55
+)
 
 // MacOS is the checks CI's gate runs for a Go part on a hosted macOS
 // runner, in the part's directory, as a job of its own (#929). Linux skips
@@ -144,10 +161,13 @@ func decodeConfig(data []byte) (Config, error) {
 		seen, err := decodeObject(raw, where, map[string]any{
 			"name": &p.Name, "directory": &p.Directory, "language": &p.Language,
 			"image": &p.Image, "lockfiles": &p.Lockfiles, "inputs": &p.Inputs,
-			"commands": &commands, "macos": &macos,
-		}, "macos")
+			"commands": &commands, "macos": &macos, "test_minutes": &p.TestMinutes,
+		}, "macos", "test_minutes")
 		if err != nil {
 			return c, err
+		}
+		if seen["test_minutes"] && (p.TestMinutes < DefaultTestMinutes || p.TestMinutes > MaxTestMinutes) {
+			return c, fmt.Errorf("part %q declares test_minutes %d, but a part's test budget is from the default %d minutes to the most a check allows, %d", p.Name, p.TestMinutes, DefaultTestMinutes, MaxTestMinutes)
 		}
 		p.Commands, err = decodeCommands(commands, where+".commands")
 		if err != nil {

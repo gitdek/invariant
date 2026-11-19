@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,9 +33,44 @@ const (
 	// working.
 	SandboxVerifyTimeout      = 60 * time.Minute
 	SandboxVerifyShardTimeout = 55 * time.Minute
-	SandboxStartupAllowance   = time.Minute
-	SandboxCleanupAllowance   = 15 * time.Second
+	// A check that owns internal/factory or internal/plumbing gets half an
+	// hour, 25 minutes of it for the tests (#487). In the sandbox, with no
+	// other running, a check of the three packages #947's draft touched
+	// took 3 minutes 16 seconds on 2026-11-19, internal/factory's 429 tests
+	// 7.9 minutes of test time among them; beside three other sandboxes the
+	// same check didn't reach its acceptance tests in its twelve.
+	// internal/plumbing's tests took 58.5 minutes of test time on 11-13, at
+	// least 7.3 minutes at eight workers.
+	SandboxLongTimeout      = 30 * time.Minute
+	SandboxLongShardTimeout = 25 * time.Minute
+	SandboxStartupAllowance = time.Minute
+	SandboxCleanupAllowance = 15 * time.Second
 )
+
+// sandboxBudget is a check's whole-run and shared test-phase limits.
+type sandboxBudget struct{ run, tests time.Duration }
+
+// builtinBudgets is the test budget Invariant's built-in Go profile gives a
+// package of its own whose tests need more than the ordinary ten minutes, as
+// a part of another repository declares test_minutes (#487). A check gets
+// the longest budget among the packages it selects.
+var builtinBudgets = map[string]sandboxBudget{
+	"internal/verify":   {SandboxVerifyTimeout, SandboxVerifyShardTimeout},
+	"internal/factory":  {SandboxLongTimeout, SandboxLongShardTimeout},
+	"internal/plumbing": {SandboxLongTimeout, SandboxLongShardTimeout},
+}
+
+// PlanCheckToolTimeout is how long a planning agent's check tool may take
+// with Invariant's built-in profile: the longest built-in check, with its
+// startup and cleanup reserves. The plan, and so the budget its check
+// selects, isn't known when the agent starts.
+func PlanCheckToolTimeout() time.Duration {
+	longest := SandboxTimeout
+	for _, b := range builtinBudgets {
+		longest = max(longest, b.run)
+	}
+	return longest + SandboxStartupAllowance + SandboxCleanupAllowance
+}
 
 //go:embed sandbox_runner.py
 var sandboxRunner string
@@ -79,6 +113,12 @@ type Sandbox struct {
 	// These overrides may shorten the production budgets, never extend them.
 	Timeout      time.Duration
 	ShardTimeout time.Duration
+	// acceptanceOnly is set by Check alone: a plan's check compiles only the
+	// packages that hold its acceptance tests, and its test phase runs only
+	// those tests before their replay (#487). What it decides never read the
+	// other tests of the packages the plan touches, which a build's checks
+	// run.
+	acceptanceOnly bool
 }
 
 // TestResult identifies a test independently of other packages and phases.
@@ -122,6 +162,15 @@ type Result struct {
 	TestResults      []TestResult
 	CommandResults   []CommandResult // non-nil for captured repository checks
 	Problems         []string        // phase, build and worker failures retained in summaries
+	// RunBudget and TestBudget are the limits the check ran under: its
+	// whole run's and its shared test phase's, after any shorter override
+	// (#487). Zero where no check started.
+	RunBudget  time.Duration
+	TestBudget time.Duration
+	// AcceptanceOnly says the test phase ran only the plan's acceptance
+	// tests, as a plan's check runs it, not the other tests of the packages
+	// the plan touches (#487).
+	AcceptanceOnly bool
 }
 
 // Passed says whether everything passed.
@@ -277,13 +326,18 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 		return Result{}, err
 	}
 	timeout, shardTimeout := sandboxBudgets(dirs)
-	end = started.Add(sandboxLimit(s.Timeout, timeout))
+	budget := sandboxBudget{sandboxLimit(s.Timeout, timeout), sandboxLimit(s.ShardTimeout, shardTimeout)}
+	end = started.Add(budget.run)
 	if parentEnd, ok := parent.Deadline(); ok {
 		ownDeadline = !parentEnd.Before(end)
 	}
 	ctx, cancelRun := context.WithDeadline(parent, end)
 	cancel()
 	defer cancelRun()
+	// Deferred before report, so it runs after report has settled result.
+	defer func() {
+		result.RunBudget, result.TestBudget, result.AcceptanceOnly = budget.run, budget.tests, s.acceptanceOnly
+	}()
 	defer report()
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -305,9 +359,13 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 	if err != nil {
 		return Result{}, err
 	}
+	// A plan's check names no packages: the runner compiles the ones its
+	// acceptance tests are in, and its test phase runs only those tests.
 	var pkgs []string
-	for _, dir := range dirs {
-		pkgs = append(pkgs, "./"+dir)
+	if !s.acceptanceOnly {
+		for _, dir := range dirs {
+			pkgs = append(pkgs, "./"+dir)
+		}
 	}
 	// Stage the embedded runner separately from the checkout's code. The
 	// config uses arrays, not shell words, for all paths and test names.
@@ -323,14 +381,15 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 	}
 	deadline, _ := ctx.Deadline()
 	config := struct {
-		Packages     []string `json:"packages"`
-		Formatted    []string `json:"formatted"`
-		Added        []string `json:"added"`
-		Acceptance   []Test   `json:"acceptance"`
-		Deadline     float64  `json:"deadline"`
-		ShardTimeout float64  `json:"shard_timeout"`
-		Workers      int      `json:"workers"`
-	}{pkgs, formatted, added, plan.Tests, float64(deadline.UnixNano()) / 1e9, sandboxLimit(s.ShardTimeout, shardTimeout).Seconds(), SandboxShards}
+		Packages       []string `json:"packages"`
+		Formatted      []string `json:"formatted"`
+		Added          []string `json:"added"`
+		Acceptance     []Test   `json:"acceptance"`
+		Deadline       float64  `json:"deadline"`
+		ShardTimeout   float64  `json:"shard_timeout"`
+		Workers        int      `json:"workers"`
+		AcceptanceOnly bool     `json:"acceptance_only"`
+	}{pkgs, formatted, added, plan.Tests, float64(deadline.UnixNano()) / 1e9, budget.tests.Seconds(), SandboxShards, s.acceptanceOnly}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return Result{}, err
@@ -404,11 +463,17 @@ func (s Sandbox) run(ctx context.Context, root string, plan *Plan, started time.
 	return result, nil
 }
 
+// sandboxBudgets is the longest built-in budget among the packages a check
+// selects, each an exact package: a separate child package such as
+// internal/verify/pythongate doesn't select its parent's.
 func sandboxBudgets(dirs []string) (time.Duration, time.Duration) {
-	if slices.Contains(dirs, "internal/verify") {
-		return SandboxVerifyTimeout, SandboxVerifyShardTimeout
+	longest := sandboxBudget{SandboxTimeout, SandboxShardTimeout}
+	for _, dir := range dirs {
+		if b, ok := builtinBudgets[dir]; ok && b.tests > longest.tests {
+			longest = b
+		}
 	}
-	return SandboxTimeout, SandboxShardTimeout
+	return longest.run, longest.tests
 }
 
 func sandboxLimit(override, limit time.Duration) time.Duration {
@@ -663,6 +728,7 @@ func (r Result) Summary() string {
 	switch {
 	case r.Passed():
 		b.WriteString("Everything passed: gofmt, go vet, the tests of every package the change touches, and every acceptance test.\n")
+		b.WriteString(r.budgetLines())
 	default:
 		if r.DeadlineExceeded {
 			b.WriteString("The sandbox deadline expired; partial results follow.\n")
@@ -670,6 +736,7 @@ func (r Result) Summary() string {
 		if r.Interrupted {
 			b.WriteString("The sandbox was interrupted before all checks finished.\n")
 		}
+		b.WriteString(r.budgetLines())
 		if len(r.Gofmt) > 0 {
 			fmt.Fprintf(&b, "gofmt would change: %s\n", strings.Join(r.Gofmt, ", "))
 		}
@@ -731,6 +798,62 @@ func (r Result) Summary() string {
 		name(t)
 	}
 	return b.String()
+}
+
+// budgetLines says which budget a check ran under and, when the budget cut
+// it off, that it did (#487). A check that never started says nothing.
+func (r Result) budgetLines() string {
+	if r.RunBudget <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	if r.TestBudget > 0 {
+		fmt.Fprintf(&b, "The checks ran under a test budget of %s, inside a whole run of %s.\n", budgetWords(r.TestBudget), budgetWords(r.RunBudget))
+	} else {
+		fmt.Fprintf(&b, "The checks ran inside a whole run of %s.\n", budgetWords(r.RunBudget))
+	}
+	if r.AcceptanceOnly {
+		b.WriteString("Of the packages the plan touches, only its acceptance tests ran, as a plan's check runs them.\n")
+	}
+	if r.TimedOut && r.TestBudget > 0 && r.testsStarted() {
+		fmt.Fprintf(&b, "The test budget of %s ran out before the tests finished.\n", budgetWords(r.TestBudget))
+	}
+	if r.DeadlineExceeded {
+		fmt.Fprintf(&b, "The whole run's %s ran out before the checks finished.\n", budgetWords(r.RunBudget))
+	}
+	return b.String()
+}
+
+// testsStarted says whether a check's test phase began. Built-in runs time
+// out only in it. A configured check's shorter preparer allowance can run
+// out before it, when no suite test or acceptance invocation has started.
+func (r Result) testsStarted() bool {
+	if r.CommandResults == nil {
+		return true
+	}
+	for _, command := range r.CommandResults {
+		if command.Phase == "test" && command.Status != "not_run" && command.Status != "skipped" {
+			return true
+		}
+	}
+	for _, test := range r.TestResults {
+		if test.Phase == "accept" && test.Status != "not_run" {
+			return true
+		}
+	}
+	return false
+}
+
+// budgetWords is a budget as a person reads it: "25 minutes", or Go's
+// duration where it isn't a whole number of minutes.
+func budgetWords(d time.Duration) string {
+	if d%time.Minute == 0 {
+		if d == time.Minute {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", d/time.Minute)
+	}
+	return d.Round(time.Second).String()
 }
 
 // Tail is the end of a run's output, which is where failures show, at most

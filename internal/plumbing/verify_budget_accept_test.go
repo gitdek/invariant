@@ -104,7 +104,7 @@ func v498Budgets(t *testing.T, o v498Observation, started time.Time, run, tests 
 func TestVerifyCheckSelectsLongerBudgetsPrecisely(t *testing.T) {
 	record := v498Spy(t)
 	root := t.TempDir()
-	for _, dir := range []string{"internal/verify", "internal/verify/pythongate", "internal/verifyish", "internal/plumbing"} {
+	for _, dir := range []string{"internal/verify", "internal/verify/pythongate", "internal/verifyish", "internal/scope"} {
 		s397Write(t, filepath.Join(root, dir, "code.go"), "package fixture\n", 0o644)
 	}
 	s397Write(t, filepath.Join(root, "go.mod"), "module github.com/gitdek/invariant\n\ngo 1.27.1\n", 0o644)
@@ -124,13 +124,13 @@ func TestVerifyCheckSelectsLongerBudgetsPrecisely(t *testing.T) {
 		{name: "verify", files: []string{"internal/verify/code.go"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
 		{name: "embedded_asset", files: []string{"internal/verify/assets/driver.py"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
 		{name: "acceptance_owns_verify", files: []string{"SPEC.md"}, acceptance: true, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "mixed", files: []string{"internal/plumbing/code.go", "internal/verify/code.go"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "other_package", files: []string{"internal/plumbing/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/plumbing"},
+		{name: "mixed", files: []string{"internal/scope/code.go", "internal/verify/code.go"}, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
+		{name: "other_package", files: []string{"internal/scope/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/scope"},
 		{name: "prefix_is_not_package", files: []string{"internal/verifyish/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/verifyish"},
 		{name: "separate_child_package", files: []string{"internal/verify/pythongate/code.go"}, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/verify/pythongate"},
 		{name: "shorter_overrides", files: []string{"internal/verify/code.go"}, overall: 24 * time.Minute, phase: 19 * time.Minute, wantRun: 24 * time.Minute, wantTests: 19 * time.Minute, wantPkg: "./internal/verify"},
 		{name: "cannot_extend_verify", files: []string{"internal/verify/code.go"}, overall: 2 * time.Hour, phase: 2 * time.Hour, wantRun: 60 * time.Minute, wantTests: 55 * time.Minute, wantPkg: "./internal/verify"},
-		{name: "cannot_extend_other", files: []string{"internal/plumbing/code.go"}, overall: time.Hour, phase: time.Hour, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/plumbing"},
+		{name: "cannot_extend_other", files: []string{"internal/scope/code.go"}, overall: time.Hour, phase: time.Hour, wantRun: 12 * time.Minute, wantTests: 10 * time.Minute, wantPkg: "./internal/scope"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Plan{Files: tc.files}
@@ -353,7 +353,7 @@ func TestVerifyBuildSharesBudgetsWithoutRenewingExecutionTime(t *testing.T) {
 		{"queued_verify", "internal/verify", true, 90 * time.Minute},
 		{"direct_uncut_verify", "internal/verify", false, 0},
 		{"queued_uncut_verify", "internal/verify", true, 0},
-		{"ordinary_direct", "internal/plumbing", false, 90 * time.Minute},
+		{"ordinary_direct", "internal/scope", false, 90 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var q *CheckQueue
@@ -373,7 +373,7 @@ func TestVerifyBuildSharesBudgetsWithoutRenewingExecutionTime(t *testing.T) {
 				t.Fatalf("want one agent test call and one final check: observations=%+v, jobs=%d, results=%+v", observations, len(a.jobs), a.results)
 			}
 			run, phase := 60*time.Minute, 55*time.Minute
-			if tc.dir == "internal/plumbing" {
+			if tc.dir == "internal/scope" {
 				run, phase = 12*time.Minute, 10*time.Minute
 			}
 			for i, o := range observations {
@@ -393,7 +393,7 @@ func TestVerifyBuildSharesBudgetsWithoutRenewingExecutionTime(t *testing.T) {
 				if tool != want {
 					t.Errorf("queued tool timer = %s, want existing build allowance %s", tool, want)
 				}
-			} else if tc.dir == "internal/plumbing" {
+			} else if tc.dir == "internal/scope" {
 				if tool != 0 {
 					t.Errorf("ordinary direct build changed its default tool timer: %s", tool)
 				}

@@ -22,7 +22,7 @@ pathlib.Path(%q).write_text("completed")
 sys.exit(1)
 `, completed), 0o755)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, dir := range []string{"internal/plumbing", "internal/verify"} {
+	for _, dir := range []string{"internal/scope", "internal/verify"} {
 		t.Run(dir, func(t *testing.T) {
 			root := t.TempDir()
 			s397Write(t, filepath.Join(root, dir, "code.go"), "package fixture\n", 0o644)
@@ -96,9 +96,9 @@ func TestVerifyBuildAllowsDeletingChildPackage(t *testing.T) {
 		acceptance string
 		verify     bool
 	}{
-		{"last_child_file", "", "internal/plumbing", true},
-		{"child_keeps_go_file", "kept.go", "internal/plumbing", false},
-		{"child_keeps_test", "kept_test.go", "internal/plumbing", false},
+		{"last_child_file", "", "internal/scope", true},
+		{"child_keeps_go_file", "kept.go", "internal/scope", false},
+		{"child_keeps_test", "kept_test.go", "internal/scope", false},
 		{"child_keeps_acceptance", "", "internal/verify/pythongate", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

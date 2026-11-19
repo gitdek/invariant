@@ -77,11 +77,13 @@ func (s Sandbox) runRepositoryMode(ctx context.Context, root string, plan *Plan,
 		captured.Adapters = maps.Clone(captured.Adapters)
 		s.Repository = &captured
 	}
-	run := &repositoryCheck{sandbox: s, root: root, plan: plan, base: base, started: started, result: unstartedAcceptance(plan)}
+	budget := s.repositoryBudget(ctx, root, plan, started)
+	run := &repositoryCheck{sandbox: s, root: root, plan: plan, base: base, started: started, budget: budget, result: unstartedAcceptance(plan)}
+	run.result.RunBudget, run.result.TestBudget = budget.run, budget.tests
 	// The build's pausable execution budget has no fixed Deadline. RunAgent
 	// supplies its remaining allowance in Job.Timeout without pausing for this
 	// host operation. No agent is started, and no fallback can renew the run.
-	_, _, err := synth.RunAgent(ctx, run, synth.Job{}, sandboxLimit(s.Timeout, SandboxTimeout), "")
+	_, _, err := synth.RunAgent(ctx, run, synth.Job{}, budget.run, "")
 	// Once the checks ran, their own result already records their error.
 	if !run.ran {
 		run.result.Problems = append(run.result.Problems, fmt.Sprintf("repository checks could not start: %v", err))
@@ -98,15 +100,56 @@ type repositoryCheck struct {
 	root    string
 	plan    *Plan
 	started time.Time
+	budget  sandboxBudget
 	result  Result
 	ran     bool
 	base    bool
 }
 
+// RepositoryRunBudget is the longest whole run a configured check can get
+// from the test budgets snapshot's parts declare, for a caller that bounds
+// checks from outside, as check-repository does (#487). Each check's own
+// budget, from the parts it selects, still ends it.
+func RepositoryRunBudget(snapshot *repository.Snapshot) time.Duration {
+	tests := SandboxShardTimeout
+	if snapshot != nil {
+		for _, part := range snapshot.Config().Parts {
+			tests = max(tests, time.Duration(part.TestMinutes)*time.Minute)
+		}
+	}
+	return tests + SandboxTimeout - SandboxShardTimeout
+}
+
+// repositoryBudget is a configured check's whole-run and shared test-phase
+// limits (#487): the longest test budget among the parts the check selects,
+// the default ten minutes for a part that declares none, and the whole run
+// two minutes longer, as the default ten are inside twelve. Selection has
+// the ordinary deadline until it establishes a longer budget, as built-in
+// ownership discovery does, and the check selects again, as it always has.
+// Where selection fails, the default stands and the check fails on the
+// same refusal. Shorter overrides still apply.
+func (s Sandbox) repositoryBudget(ctx context.Context, root string, plan *Plan, started time.Time) sandboxBudget {
+	tests := SandboxShardTimeout
+	if s.Repository != nil && s.Repository.Snapshot != nil && plan != nil && s.Original != "" {
+		selection, cancel := context.WithDeadline(ctx, started.Add(sandboxLimit(s.Timeout, SandboxTimeout)))
+		parts, err := s.repositoryParts(selection, root, plan)
+		cancel()
+		if err == nil {
+			for _, part := range parts {
+				tests = max(tests, time.Duration(part.TestMinutes)*time.Minute)
+			}
+		}
+	}
+	return sandboxBudget{
+		run:   sandboxLimit(s.Timeout, tests+SandboxTimeout-SandboxShardTimeout),
+		tests: sandboxLimit(s.ShardTimeout, tests),
+	}
+}
+
 func (*repositoryCheck) Name() string { return "repository checks" }
 
 func (r *repositoryCheck) Run(ctx context.Context, job synth.Job) (synth.Usage, error) {
-	limit := sandboxLimit(r.sandbox.Timeout, SandboxTimeout)
+	limit := r.budget.run
 	if job.Timeout < limit {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, r.started.Add(job.Timeout))
@@ -114,11 +157,13 @@ func (r *repositoryCheck) Run(ctx context.Context, job synth.Job) (synth.Usage, 
 	}
 	var err error
 	r.ran = true
-	r.result, err = r.sandbox.checkRepository(ctx, r.root, r.plan, r.started, r.started.Add(limit), r.base)
+	r.result, err = r.sandbox.checkRepository(ctx, r.root, r.plan, r.started, r.budget, r.base)
+	r.result.RunBudget, r.result.TestBudget = r.budget.run, r.budget.tests
 	return synth.Usage{}, err
 }
 
-func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan, started, end time.Time, base bool) (result Result, runErr error) {
+func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan, started time.Time, budget sandboxBudget, base bool) (result Result, runErr error) {
+	end := started.Add(budget.run)
 	ownDeadline := true
 	if parentEnd, ok := parent.Deadline(); ok && !parentEnd.After(end) {
 		ownDeadline = false
@@ -126,9 +171,12 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	}
 	ctx, cancel := context.WithDeadline(parent, end)
 	defer cancel()
-	preparerLimit := SandboxTimeout
+	// A declared test budget lengthens the whole run, and so what
+	// preparation, commands and acceptance share; a preparer's own shorter
+	// limit still applies.
+	preparerLimit := budget.run
 	if s.Repository != nil {
-		preparerLimit = sandboxLimit(s.Repository.Dependencies.Timeout, SandboxTimeout)
+		preparerLimit = sandboxLimit(s.Repository.Dependencies.Timeout, budget.run)
 	}
 	execution, finish := context.WithDeadline(ctx, started.Add(preparerLimit))
 	defer finish()
@@ -330,7 +378,7 @@ func (s Sandbox) checkRepository(parent context.Context, root string, plan *Plan
 	testStarted := false
 	startTests := func() {
 		if !testStarted {
-			execution, stopTests = context.WithTimeout(execution, sandboxLimit(s.ShardTimeout, SandboxShardTimeout))
+			execution, stopTests = context.WithTimeout(execution, budget.tests)
 			executionEnd, _ = execution.Deadline()
 			testStarted = true
 		}
@@ -782,6 +830,7 @@ func (r Result) repositorySummary() string {
 	if r.TimedOut {
 		b.WriteString("The repository checks exhausted their shared phase allowance.\n")
 	}
+	b.WriteString(r.budgetLines())
 	for _, command := range r.CommandResults {
 		fmt.Fprintf(&b, "%s/%s: %s", command.Part, command.Phase, command.Status)
 		if command.Reason != "" {
