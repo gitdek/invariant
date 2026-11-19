@@ -37,7 +37,11 @@ func TestReaderOmittedComparisonKeepsArchivedFinalLimitation(t *testing.T) {
 			f.bind(t)
 			e := receipt723Evidence(t, f)
 			status, message, svg := e.checked()
-			if status != "chart" || svg == "" || strings.Contains(message, "comparison_evidence") || !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
+			wantSVG := ""
+			if f.Report.Reader.Comparison.Unavailable == nil {
+				wantSVG, _ = f.Report.Reader.Comparison.SVG()
+			}
+			if status != outcome || svg != wantSVG || strings.Contains(message, "comparison_evidence") {
 				t.Fatalf("invalid comparison and final limitation fixture: %s %s", status, message)
 			}
 			for _, damage := range []string{"none", "final text", "final wrapper", "unrelated SVG"} {
@@ -72,7 +76,8 @@ func TestReaderOmittedComparisonKeepsArchivedFinalLimitation(t *testing.T) {
 					for _, server := range []*Server{s, receipt723Restart(t, s, p, f)} {
 						reader631Diagnostic(t, server, p, want)
 						if damage == "none" {
-							if !strings.Contains(p.Message, "comparison_evidence") || !strings.Contains(p.Message, "receipt") {
+							fold := readerFoldedComparison(t, receipt723HTTP(t, server, p.Page))
+							if !strings.Contains(fold, "comparison_evidence") || !strings.Contains(fold, "receipt") {
 								t.Fatalf("final limitation lost the comparison omission diagnostic: %+v", p)
 							}
 							switch outcome {
