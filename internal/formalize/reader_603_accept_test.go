@@ -249,7 +249,7 @@ func reader603Docker(args []string) int {
 	}
 	limit, _ := strconv.Atoi(match[1])
 	n := limit + 1
-	if n < 1 || n > 502 {
+	if n < 1 || n > 100001 {
 		return fail("unexpected fixture size")
 	}
 	record, _ := json.Marshal(map[string]string{"module": module, "config": string(config), "main": string(main), "include": string(helper), "dump": dump, "args": joined})
@@ -262,12 +262,24 @@ func reader603Docker(args []string) int {
 		b.WriteString("strict digraph DiskGraph {\nsubgraph cluster_graph {\n")
 		replay := module != "Reader603"
 		var idVar, rulesVar string
+		var replayIDs []int
 		if replay {
 			m := regexp.MustCompile(`(?m)^VARIABLES ([A-Za-z0-9_]+), ([A-Za-z0-9_]+)$`).FindStringSubmatch(string(src))
 			if len(m) != 3 {
 				return fail("missing rule replay variables")
 			}
 			idVar, rulesVar = m[1], m[2]
+			for _, match := range regexp.MustCompile(regexp.QuoteMeta(idVar)+` = "([0-9]+)"`).FindAllStringSubmatch(string(src), -1) {
+				id, _ := strconv.Atoi(match[1])
+				if id < 1 || id > n {
+					return fail("unknown replay identity")
+				}
+				replayIDs = append(replayIDs, id)
+			}
+			if len(replayIDs) == 0 {
+				return fail("missing replay snapshots")
+			}
+			n = len(replayIDs)
 			initial, steps = n, n
 			if !strings.Contains(string(src), "Safe |-> Safe") || !strings.Contains(string(src), "UNCHANGED") {
 				return fail("invariant replay does not evaluate Safe")
@@ -283,7 +295,7 @@ func reader603Docker(args []string) int {
 				style = ",style=filled"
 			}
 			if replay {
-				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", i, idVar, i+1, rulesVar)
+				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", replayIDs[i]-1, idVar, replayIDs[i], rulesVar)
 			}
 			fmt.Fprintf(&b, "%d [label=%s%s];\n", i+1, quote(label), style)
 		}
@@ -435,7 +447,7 @@ func TestReader603Capacity(t *testing.T) {
 			reader603Workspace(t, ws)
 			reader603Write(t, filepath.Join(ws, "proposal.json"), strings.Replace(reader603Draft, `"Limit":"2"`, fmt.Sprintf(`"Limit":"%d"`, n-1), 1))
 			// No hiding; all concrete states remain accounted for even when labels merge.
-			reader603Write(t, filepath.Join(ws, "view.json"), strings.Replace(reader603View, `"hide":true`, `"hide":false`, 1))
+			reader603Write(t, filepath.Join(ws, "view.json"), proposal944View(n))
 			p, r, err := formalize.Check(t.Context(), ws, tc)
 			if err != nil || p == nil || r == nil || !r.Passed || !r.ModelOnly || r.Design.DistinctStates != int64(n) {
 				t.Fatalf("%d states should pass: %+v %+v %v", n, p, r, err)
@@ -463,10 +475,9 @@ func TestReader603Capacity(t *testing.T) {
 		{"duplicate key", strings.Replace(reader603View, `"version":1`, `"version":1,"version":1`, 1), "invalid_view"},
 		{"static type", strings.Replace(reader603View, `"0"`, `true`, 1), "invalid_view"},
 		{"foreign graph", strings.Replace(reader603View, `"version":1`, `"version":1,"graph":{}`, 1), "invalid_view"},
-		// These views are well-formed but would fail if evaluated on the graph.
-		{"lookup not evaluated", strings.ReplaceAll(reader603View, `"var":"n"`, `"var":"absent"`), ""},
-		{"totality not evaluated", strings.ReplaceAll(reader603View, `"when":true`, `"when":false`), ""},
-		{"hiding not evaluated", strings.Replace(reader603View, `"label":"Continue"`, `"label":"Continue","hide":true`, 1), ""},
+		{"lookup evaluated", strings.ReplaceAll(reader603View, `"var":"n"`, `"var":"absent"`), "evaluation"},
+		{"totality evaluated", strings.ReplaceAll(reader603View, `"when":true`, `"when":false`), "unmapped_state"},
+		{"hiding evaluated", strings.Replace(reader603View, `"label":"Continue"`, `"label":"Continue","hide":true`, 1), "unreachable_chart"},
 	} {
 		t.Run("large view/"+c.name, func(t *testing.T) {
 			ws := t.TempDir()
@@ -626,7 +637,7 @@ func reader603PersistenceAndStaging(t *testing.T, tc toolchain.Toolchain, p *for
 	if err := restored.Proposal.Write(dir, "request", rat); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]string{".invariant/view.json": reader603View, ".invariant/specs/Helper603.tla": reader603Include, ".invariant/specs/Reader603.tla": reader603Model} {
+	for name, want := range map[string]string{".invariant/view.json": p.View, ".invariant/specs/Helper603.tla": reader603Include, ".invariant/specs/Reader603.tla": reader603Model} {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil || string(b) != want {
 			t.Errorf("written %s=%q, %v", name, b, err)
@@ -652,7 +663,7 @@ func reader603PersistenceAndStaging(t *testing.T, tc toolchain.Toolchain, p *for
 	}
 	cur := &formalize.Current{Dir: "examples/reader-lifecycle", Manifest: p.Manifest(), Lock: loaded.Lock, ModuleText: p.ModuleText}
 	raw := reader603Object(t, cur)
-	raw["view"] = reader603View
+	raw["view"] = p.View
 	raw["includes"] = map[string]string{"Helper603.tla": reader603Include}
 	raw["reader"] = saved
 	if err := json.Unmarshal(reader603JSON(t, raw), cur); err != nil {
@@ -665,7 +676,7 @@ func reader603PersistenceAndStaging(t *testing.T, tc toolchain.Toolchain, p *for
 			if amend {
 				root = j.Workspace
 			}
-			for name, want := range map[string]string{"view.json": reader603View, "Helper603.tla": reader603Include, "Reader603.tla": reader603Model} {
+			for name, want := range map[string]string{"view.json": p.View, "Helper603.tla": reader603Include, "Reader603.tla": reader603Model} {
 				b, err := os.ReadFile(filepath.Join(root, name))
 				if err != nil || string(b) != want {
 					t.Fatalf("staged %s=%q, %v", name, b, err)
@@ -788,7 +799,7 @@ func TestReader603RegularInputsAndPrompt(t *testing.T) {
 		if !strings.Contains(prompt, "thousands of states, not millions") {
 			t.Error("prompt lost the existing bounds guidance")
 		}
-		if !strings.Contains(strings.ToLower(prompt), "charts are drawn for models of up to 500 states") {
+		if !strings.Contains(strings.ToLower(prompt), "500 projected states") {
 			t.Error("prompt must explain the chart capacity without requiring models to shrink")
 		}
 	}
@@ -830,6 +841,7 @@ func TestReader603LargePersistenceAndFinalCheck(t *testing.T) {
 			a := reader603Agent{run: func(ctx context.Context, job synth.Job) (synth.Usage, error) {
 				reader603Workspace(t, job.Workspace)
 				reader603Write(t, filepath.Join(job.Workspace, "proposal.json"), strings.Replace(reader603Draft, `"Limit":"2"`, `"Limit":"499"`, 1))
+				reader603Write(t, filepath.Join(job.Workspace, "view.json"), proposal944View(501))
 				p, _ := reader603Checked(t, job.Workspace, tc)
 				first = reader603Saved(t, p)
 				wire := reader603Object(t, p)
@@ -883,7 +895,7 @@ func TestReader603LargePersistenceAndFinalCheck(t *testing.T) {
 			if !reflect.DeepEqual(saved, reader603Limited(t, restored.Proposal, 501)) {
 				t.Fatal("formalization lost size limitation")
 			}
-			for name, want := range map[string]string{"view.json": reader603View, "Reader603.tla": reader603Model, "Helper603.tla": reader603Include} {
+			for name, want := range map[string]string{"view.json": proposal944View(501), "Reader603.tla": reader603Model, "Helper603.tla": reader603Include} {
 				b, err := os.ReadFile(filepath.Join(out, name))
 				if err != nil || string(b) != want {
 					t.Errorf("saved %s=%q, %v", name, b, err)
@@ -899,6 +911,7 @@ func TestReader603LargeChangedInputsInvalidate(t *testing.T) {
 	ws := t.TempDir()
 	reader603Workspace(t, ws)
 	const largeDraft = `"Limit":"500"`
+	reader603Write(t, filepath.Join(ws, "view.json"), proposal944View(502))
 	reader603Write(t, filepath.Join(ws, "proposal.json"), strings.Replace(reader603Draft, `"Limit":"2"`, largeDraft, 1))
 	p, _ := reader603Checked(t, ws, tc)
 	before := reader603Limited(t, p, 501)
@@ -935,13 +948,14 @@ func TestReader603LargeChangedInputsInvalidate(t *testing.T) {
 			fresh := t.TempDir()
 			reader603Workspace(t, fresh)
 			draft := strings.Replace(reader603Draft, `"Limit":"2"`, largeDraft, 1)
+			reader603Write(t, filepath.Join(fresh, "view.json"), proposal944View(502))
 			tools := tc
 			actual := 501
 			switch kind {
 			case "model":
 				reader603Write(t, filepath.Join(fresh, "Reader603.tla"), reader603Model+"\\* changed\n")
 			case "view":
-				reader603Write(t, filepath.Join(fresh, "view.json"), reader603View+" ")
+				reader603Write(t, filepath.Join(fresh, "view.json"), proposal944View(502)+" ")
 			case "include":
 				reader603Write(t, filepath.Join(fresh, "Helper603.tla"), reader603Include+"\\* changed\n")
 			case "include set":

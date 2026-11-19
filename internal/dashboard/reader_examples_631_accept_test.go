@@ -98,14 +98,13 @@ func TestReader631ExampleViews(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// At the documented size boundary Compute still validates the entire
-			// pure view grammar before reporting too_large, without inventing any
-			// state values or pretending a sample checks totality and hiding.
+			// The pure view grammar is checked before complete graph validation.
+			// An incomplete graph can never stand in for size evidence.
 			oversized := statechart.Input{}
 			oversized.Graph.Graph.States = make([]tlc.GraphState, 501)
 			chart, err := statechart.Compute(t.Context(), oversized, view)
 			var refusal *statechart.Refusal
-			if chart != nil || !errors.As(err, &refusal) || refusal.Code != "too_large" {
+			if chart != nil || !errors.As(err, &refusal) || refusal.Code != "invalid_graph" {
 				t.Fatalf("saved view is not accepted by the common pure-view parser: %v", err)
 			}
 			var labels struct{ State, Step []struct{ Label string } }

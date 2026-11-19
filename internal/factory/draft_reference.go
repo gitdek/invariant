@@ -176,6 +176,9 @@ func (m Marker) ResolveDraft(ctx context.Context, repository string, issue int,
 	if err := json.Unmarshal(b, &result); err != nil {
 		return fail(err)
 	}
+	if err := result.ResolveEvidence(func(name string) ([]byte, error) { return show(ctx, ref.Commit, name) }); err != nil {
+		return fail(err)
+	}
 	if err := validateDraftResult(&result); err != nil {
 		return fail(err)
 	}
@@ -372,8 +375,8 @@ func validateDraftReceipt(p *formalize.Proposal, r *verify.Report, scope statech
 			if _, err := c.SVG(); err != nil {
 				return err
 			}
-		} else if l := reader.Limitation; l.Code != "too_large" || l.Limit != statechart.MaxStates || l.Actual <= l.Limit ||
-			int64(l.Actual) != r.Design.DistinctStates || !draftEqual(l.Source, source) {
+		} else if l := reader.Limitation; l.Validate() != nil ||
+			int64(l.ConcreteCount()) != r.Design.DistinctStates || !draftEqual(l.Source, source) {
 			return fmt.Errorf("saved reader limitation disagrees with the model check")
 		}
 	}
@@ -523,6 +526,9 @@ func (f *Factory) loadDraft(ctx context.Context, commit string) (*savedDraftResu
 	var r savedDraftResult
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("read completed draft result: %w", err)
+	}
+	if err := r.Result.ResolveEvidence(func(name string) ([]byte, error) { return f.Repo.Show(ctx, commit, name) }); err != nil {
+		return nil, err
 	}
 	r.legacy = r.Publication == nil
 	return &r, nil

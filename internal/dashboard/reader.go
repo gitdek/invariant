@@ -50,8 +50,17 @@ type PosterLinks struct {
 }
 
 type readerArtifacts struct {
-	JSON []byte
-	SVG  []byte
+	JSON       []byte
+	SVG        []byte
+	Companions map[string][]byte `json:",omitempty"`
+}
+
+func (a readerArtifacts) read(name string) ([]byte, error) {
+	b, ok := a.Companions[name]
+	if !ok {
+		return nil, fmt.Errorf("missing %s", name)
+	}
+	return b, nil
 }
 
 // Keep the inputs, not just a rendered image, for validation after a restart.
@@ -63,6 +72,7 @@ type readerEvidence struct {
 	ManifestBytes, LockBytes  []byte
 	Files                     map[string][]byte
 	View                      []byte
+	ComparisonCompanions      map[string][]byte `json:",omitempty"`
 	// Omitted when absent, so evidence without a comparison keeps the
 	// identities and immutable URLs it had before comparisons existed.
 	Comparison []byte `json:",omitzero"`
@@ -94,6 +104,7 @@ func (e readerEvidence) MarshalJSON() ([]byte, error) {
 		ManifestBytes, LockBytes  []byte
 		Files                     map[string][]byte
 		View                      []byte
+		ComparisonCompanions      map[string][]byte `json:",omitempty"`
 		Comparison                []byte            `json:",omitzero"`
 		Code                      map[string]string `json:",omitzero"`
 		Report                    json.RawMessage
@@ -101,7 +112,7 @@ func (e readerEvidence) MarshalJSON() ([]byte, error) {
 		Traces                    map[string]tlc.TraceFile
 		Problem                   string
 	}{e.Format, e.Repo, e.Dir, e.Commit, e.Manifest, e.Lock, e.ManifestBytes, e.LockBytes, e.Files,
-		e.View, e.Comparison, e.Code, report, e.Artifacts, e.Traces, e.Problem})
+		e.View, e.ComparisonCompanions, e.Comparison, e.Code, report, e.Artifacts, e.Traces, e.Problem})
 }
 
 type readerPage struct {
@@ -158,7 +169,13 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	if e.Comparison == nil {
 		comparisonErr = os.ErrNotExist
 	}
-	captured, diagnostic := verify.CapturedComparison(e.Comparison, comparisonErr, e.Lock)
+	captured, diagnostic := verify.CapturedComparison(e.Comparison, comparisonErr, e.Lock, func(name string) ([]byte, error) {
+		b, ok := e.ComparisonCompanions[name]
+		if !ok {
+			return nil, fmt.Errorf("missing %s", name)
+		}
+		return b, nil
+	})
 	if !sameReaderJSON(captured, rr.Comparison) || !sameReaderJSON(diagnostic, rr.ComparisonDiagnostic) {
 		message := "The receipt's proposal comparison or diagnostic differs from the captured comparison at this receipt commit. Verify again using the original project evidence."
 		if diagnostic != nil {
@@ -173,8 +190,18 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("missing_artifacts", "The receipt archive is missing reader.json or reader.svg. Verify again to publish the complete evidence.")
 	}
 	var companion verify.Reader
-	if decodeReaderJSON(e.Artifacts.JSON, &companion) != nil || !sameReaderJSON(&companion, rr) {
+	if decodeReaderJSON(e.Artifacts.JSON, &companion) != nil {
+		return bad("artifact_mismatch", "The archived reader record is invalid.")
+	}
+	wire := companion
+	if companion.ResolveComparison(e.Artifacts.read) != nil || !sameReaderJSON(&companion, rr) {
 		return bad("artifact_mismatch", "The archived reader.json differs from the receipt's checked reader record.")
+	}
+	if wire.ComparisonRef != nil {
+		display = wire
+		if diagnostic != nil {
+			display.ComparisonDiagnostic = diagnostic
+		}
 	}
 	if rr.Version != 1 {
 		return bad("unsupported_reader", "This receipt uses an unsupported reader format. Verify again with the current reader.")
@@ -243,26 +270,26 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	}{copyReader, e.Lock}))
 	// A render failure replaces its chart after fingerprinting. It cannot
 	// supply a chart, but its original failure explanation remains useful.
-	if rr.Fingerprint != want && (rr.Unavailable == nil || rr.Unavailable.Code != "reader_render") {
+	if rr.Fingerprint != want && (rr.Unavailable == nil || rr.Unavailable.Code != "reader_render") && (rr.ComparisonRef == nil || rr.FinalSHA256 != rr.FinalDigest()) {
 		return bad("snapshot_mismatch", "The checked reader fingerprint does not match its inputs, lock and complete contents.")
 	}
 	limitedComparison := func(code, message string) (string, string, string) {
 		if display.Comparison == nil {
 			// A damaged comparison's diagnostic stays visible beside the
 			// final model's own outcome.
-			if len(e.Artifacts.SVG) != 0 && !readerCompanionMatches(rr, e.Artifacts.SVG, diagnostic != nil) {
+			if len(e.Artifacts.SVG) != 0 && !readerCompanionMatches(&display, e.Artifacts.SVG, diagnostic != nil) {
 				return bad("artifact_mismatch", "The archived SVG differs from the native renderer's final outcome.")
 			}
 			return bad(code, strings.TrimSpace(message+" "+strings.Join(display.ComparisonNotes(), " ")))
 		}
-		svg, err := rr.SVG()
+		svg, err := display.SVG()
 		if err != nil {
 			return bad("reader_render", err.Error())
 		}
 		if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
 			return bad("artifact_mismatch", "The archived comparison SVG differs from the native renderer.")
 		}
-		return "chart", message + " " + strings.Join(rr.ComparisonNotes(), " ") + " " + comparisonPageSummary(rr.Comparison), svg
+		return "chart", message + " " + strings.Join(display.ComparisonNotes(), " ") + " " + comparisonPageSummary(display.Comparison), svg
 	}
 	if d := rr.Unavailable; d != nil {
 		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil && diagnostic == nil {
@@ -300,9 +327,12 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("snapshot_mismatch", "The reader has no matching completed model check in the receipt.")
 	}
 	if l := rr.Limitation; l != nil {
-		if (len(e.Artifacts.SVG) != 0 && rr.Comparison == nil && diagnostic == nil) || l.Code != "too_large" || l.Actual <= statechart.MaxStates || l.Limit != statechart.MaxStates ||
-			int64(l.Actual) != r.Design.DistinctStates || !sameReaderJSON(l.Source, source) {
+		if (len(e.Artifacts.SVG) != 0 && rr.Comparison == nil && diagnostic == nil) || l.Validate() != nil ||
+			int64(l.ConcreteCount()) != r.Design.DistinctStates || !sameReaderJSON(l.Source, source) {
 			return bad("snapshot_mismatch", "The reader limitation disagrees with the receipt's completed exploration or provenance.")
+		}
+		if l.Kind != "" {
+			return limitedComparison("too_large", l.Description())
 		}
 		return limitedComparison("too_large", fmt.Sprintf("TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. The view's mappings and hiding were not evaluated; no partial chart is shown.", l.Actual, l.Limit))
 	}
@@ -785,7 +815,7 @@ func (s *Server) restoreReaders(snap *Snapshot) (rejected bool) {
 			for _, p := range snap.Projects {
 				if p.Repo == r.Name && p.Dir == e.Dir {
 					sources = append(sources, projectSource{dir: e.Dir, manifest: e.Manifest, lock: e.Lock, key: p.Model,
-						files: e.Files, module: strings.TrimSuffix(path.Base(e.Manifest.Module), ".tla"), view: e.View, comparison: e.Comparison,
+						files: e.Files, module: strings.TrimSuffix(path.Base(e.Manifest.Module), ".tla"), view: e.View, comparison: e.Comparison, comparisonCompanions: e.ComparisonCompanions,
 						manifestBytes: e.ManifestBytes, lockBytes: e.LockBytes, reader: p.Reader})
 				}
 			}

@@ -263,6 +263,7 @@ func TestPreview639FailuresAndRepair(t *testing.T) {
 	// a request to shrink faithful bounds, and is bound to this particular option.
 	d := preview639Draft(t, 1, nil)
 	preview639Input(d, 0, 1)["model"].(map[string]any)["bounds"] = map[string]string{"Limit": "500"}
+	preview639Input(d, 0, 1)["model"].(map[string]any)["view"] = proposal944View(501)
 	ws := t.TempDir()
 	preview639Write(t, ws, d)
 	p := preview639Checked(t, ws, tc)

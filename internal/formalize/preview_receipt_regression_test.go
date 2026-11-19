@@ -23,6 +23,7 @@ func TestPreview639ExportedCandidateRulesAreLiteral(t *testing.T) {
 		model["statements"].([]any)[1].(map[string]any)["says"] = says
 		if i == 1 {
 			model["bounds"] = map[string]string{"Limit": "500"}
+			model["view"] = proposal944View(501)
 		}
 	}
 	ws := t.TempDir()
