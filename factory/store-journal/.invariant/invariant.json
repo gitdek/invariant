@@ -1,9 +1,0 @@
-{
-  "name": "store journal",
-  "module": ".invariant/specs/StoreJournal.tla",
-  "code": "storejournal",
-  "language": "go",
-  "parameters": [
-    "MaxLines"
-  ]
-}
