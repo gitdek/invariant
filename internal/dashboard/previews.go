@@ -2,7 +2,6 @@ package dashboard
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"html/template"
 	"path/filepath"
@@ -46,10 +45,7 @@ func (e previewEvidence) checked() (status, message, svg string) {
 	}
 	v := e.Option.Preview
 	if l := v.Model.Reader.Limitation; l != nil {
-		if l.Kind != "" {
-			return "too_large", fmt.Sprintf("Unratified alternative %s/%s; model-only evidence. %s", e.Fork, e.Option.ID, l.Description()), ""
-		}
-		return "too_large", fmt.Sprintf("Unratified alternative %s/%s; model-only evidence. TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. Mappings and hiding were not evaluated.", e.Fork, e.Option.ID, l.Actual, l.Limit), ""
+		return "too_large", readerLimitMessage(l), ""
 	}
 	svg, err := v.Model.Reader.Chart.SVG()
 	if err != nil {
@@ -61,13 +57,12 @@ func (e previewEvidence) checked() (status, message, svg string) {
 const previewHTML = `<!doctype html>
 <html lang="en"><head>` + evidenceHead + `<title>{{.Evidence.Fork}}/{{.Evidence.Option.ID}} — alternative evidence</title></head>
 <body><main>{{template "top" .View}}
-<div class="hero">{{template "hero" .View}}<p class="lede">{{.Evidence.Question}}</p><p class="lede"><b>{{.Evidence.Option.ID}}:</b> {{.Evidence.Option.Says}}</p><p class="lede">{{.Presentation.Message}} This is model-only evidence.</p>{{template "links" .View}}</div>
+<div class="hero">{{template "hero" .View}}<p class="lede">{{.Evidence.Question}}</p><p class="lede"><b>{{.Evidence.Option.ID}}:</b> {{.Evidence.Option.Says}}</p><p class="lede" data-reader-reason>{{.Presentation.Message}}</p>{{template "reader-details" .Details}}{{template "links" .View}}</div>
 <div class="chart">{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked state chart for alternative {{.Evidence.Fork}}/{{.Evidence.Option.ID}}"></picture>
 {{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{end}}{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked alternative and complete report for {{.Evidence.Fork}}/{{.Evidence.Option.ID}}">{{end}}</div>
 {{with .Evidence.Option.Preview}}{{if .Choices}}<section><h2>Previously authorized choices</h2><ul class="bounds">{{range $fork, $option := .Choices}}<li class="bound"><b>{{$fork}}</b> <span>= {{$option}}</span></li>{{end}}</ul></section>{{end}}
 {{with .Model}}<section><h2>Candidate rules</h2><p class="note">Not ratified: these are what this alternative would pin.</p>{{template "rules" $.View}}</section>
 <section><h2>{{if or (eq $.Presentation.Status "chart") (eq $.Presentation.Status "too_large")}}Checked bounds{{else}}Candidate bounds (unvalidated){{end}}</h2>{{template "bounds" $.View}}</section>{{end}}{{end}}
-<details><summary>Complete option inputs, receipt and reader evidence</summary><pre>{{.Record}}</pre></details>
 <p class="meta">Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
 <p class="foot">These candidate rules have not been ratified. This bounded model explanation adds no proof or code assurance and starts no build.</p>
 </main></body></html>` + evidenceParts
@@ -98,12 +93,15 @@ func makePreview(e previewEvidence) readerPage {
 	poster, still := e.posters(status)
 	p := ReaderPresentation{Status: status, Message: message, Format: previewFormat}
 	view := previewView(e)
+	evidence := readerHash(readerJSON(e))
+	details := readerDetails{Record: readerRecord(e.Option.Preview)}
 	key := readerHash(readerJSON(struct {
-		Evidence                       previewEvidence
+		EvidenceSHA256                 string
 		Status, Message, SVG, Template string
 		Poster, Still                  string `json:",omitempty"`
 		View                           evidenceView
-	}{e, status, message, svg, previewHTML, poster, still, view}))
+		Details                        string
+	}{evidence, status, message, svg, previewHTML, poster, still, view, details.fingerprint()}))
 	p.Fingerprint = key
 	base := "/reader/" + strings.TrimPrefix(key, "sha256:")
 	p.Page = base + ".html"
@@ -114,15 +112,14 @@ func makePreview(e previewEvidence) readerPage {
 	if poster != "" {
 		posters = &PosterLinks{Animated: base + ".poster.svg", Still: base + ".still.svg"}
 	}
-	record, _ := json.MarshalIndent(e.Option.Preview, "", "  ")
 	var b bytes.Buffer
 	_ = previewTemplate.Execute(&b, struct {
 		Evidence     previewEvidence
 		Presentation ReaderPresentation
 		Posters      *PosterLinks
-		Record       string
+		Details      readerDetails
 		View         evidenceView
-	}{e, p, posters, string(record), view})
+	}{e, p, posters, details, view})
 	return readerPage{repo: e.Repo, presentation: p, posters: posters, html: b.Bytes(), svg: []byte(svg), poster: []byte(poster), still: []byte(still)}
 }
 

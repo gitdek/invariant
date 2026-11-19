@@ -1103,15 +1103,52 @@
     const image = r.status !== "chart" ? ""
       : p.posters ? `<a href="${esc(r.page)}"><picture><source media="(prefers-reduced-motion: reduce)" srcset="${esc(p.posters.still)}"><img class="reader-poster" src="${esc(p.posters.animated)}" alt="Checked state chart for ${esc(p.name)}" loading="lazy"></picture></a>`
       : r.svg ? `<a href="${esc(r.page)}"><img class="reader-image" src="${esc(r.svg)}" alt="Checked reader chart and complete report for ${esc(p.name)}" loading="lazy"></a>` : "";
-    return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>
+    return `<div class="reader-evidence">${image}<p class="reader-note">${esc(r.message)}</p>${r.status !== "chart" ? readerDetails(r) : ""}
       <a href="${esc(r.page)}">Read model evidence</a>
       <p class="fp">Receipt commit <code>${esc(r.commit)}</code></p></div>`;
   }
 
   function comparisonDiagnostic(p) {
     const r = p.reader;
-    return r && r.message.includes("comparison_evidence")
-      ? `<p class="reader-note">${esc(p.name)} (${esc(p.dir)}): ${esc(r.message)}</p>` : "";
+    return r && (r.status !== "chart" || r.message.startsWith("Comparison unavailable:"))
+      ? `<p class="reader-note">${esc(p.name)} (${esc(p.dir)}): ${esc(r.message)}</p>${readerDetails(r)}` : "";
+  }
+
+  function readerDetails(r) {
+    return `<details data-reader-page="${esc(r.page)}"><summary>Complete sources and checked evidence</summary><p><a href="${esc(r.page)}">Read model evidence</a></p><div class="reader-record"></div></details>`;
+  }
+
+  // Cards read the same validated, immutable explanation as the script-free
+  // page. Copy only literal text, never markup or image links from evidence.
+  const readerPages = new Map();
+  function loadReaderDetails(root) {
+    const live = new Set([...document.querySelectorAll("details[data-reader-page]")].map((el) => el.dataset.readerPage));
+    for (const page of readerPages.keys()) if (!live.has(page)) readerPages.delete(page);
+    root.querySelectorAll("details[data-reader-page]").forEach((details) => {
+      const page = details.dataset.readerPage;
+      if (!/^\/reader\/[0-9a-f]{64}\.html(?:\?h=[0-9a-f]{16})?$/.test(page)) return;
+      if (!readerPages.has(page)) {
+        readerPages.set(page, fetch(page).then((r) => {
+          if (!r.ok) throw new Error("Evidence unavailable");
+          return r.text();
+        }).then((html) => {
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          return Array.from(doc.querySelectorAll("[data-reader-details]")).flatMap((fold) =>
+            Array.from(fold.children).filter((el) => el.tagName !== "SUMMARY").map((el) => ({pre: el.tagName === "PRE", text: el.textContent})));
+        }).catch(() => { readerPages.delete(page); return []; }));
+      }
+      readerPages.get(page).then((records) => {
+        if (!details.isConnected) return;
+        const target = details.querySelector(".reader-record");
+        target.replaceChildren(...records.map((record) => {
+          const el = document.createElement(record.pre ? "pre" : "p");
+          el.textContent = record.text;
+          el.style.whiteSpace = "pre-wrap";
+          el.style.overflowWrap = "anywhere";
+          return el;
+        }));
+      });
+    });
   }
 
   // Projects whose models are identical share a row, in the order they
@@ -1262,6 +1299,7 @@
         </div>
       </article>`;
     }).join("");
+    loadReaderDetails($("#projects"));
     document.querySelectorAll("#projects .raw-graph").forEach((el) => {
       const go = () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); };
       el.addEventListener("click", go);
@@ -1930,6 +1968,7 @@
     box.querySelectorAll(".need[data-issue]").forEach((el) => el.classList.toggle("shown", shown.has(el.dataset.issue)));
     box.querySelector("details.stalled")?.addEventListener("toggle", (e) => { stalledOpen = e.currentTarget.open; });
     wirePlanSources(box, disclosures, items);
+    loadReaderDetails(box);
     if (toOpen) openAt(box);
   }
   // actedCard is an issue acted on from /act, its Ratify all or the agent's
@@ -2663,6 +2702,7 @@
         <td class="ev">${p.receiptMissing ? "Receipt unavailable" : `${esc([p.assurance, sampledBeside(p) && "tested (sampled)", p.coverage?.length && coverageShares(p)].filter(Boolean).join(" · "))}${p.passed ? "" : ` · <span class="bad">failed</span>`}`}${p.reader ? ` · <a href="${esc(p.reader.page)}" title="${esc(p.reader.message)}">${p.reader.status === "chart" ? "Chart and evidence" : "Evidence"}</a>` : ""}${p.receiptMissing ? "" : ` · <button type="button" class="linkish raw-graph" data-model="${esc(p.model)}">Raw state graph</button>`}${comparisonDiagnostic(p)}</td><td class="count">${p.receiptMissing ? "—" : nf.format(p.states)}</td><td class="count">${p.receiptMissing ? "—" : p.statements.length}</td>
         <td class="count ${!p.receiptMissing && caught === p.bugs.length ? "ok" : ""}">${p.receiptMissing ? "—" : `${caught}/${p.bugs.length}<div class="ev">${esc(bugReplayLabel(p))}</div>`}</td><td>${p.receiptMissing ? "—" : who}</td></tr>`;
     }).join("")}</tbody></table>`;
+    loadReaderDetails(box);
     box.querySelectorAll(".raw-graph").forEach((el) => el.addEventListener("click", () => { selectModel(el.dataset.model); $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" }); }));
   }
   document.querySelectorAll(".viewtoggle button").forEach((b) => {

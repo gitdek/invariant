@@ -14,18 +14,17 @@ const savedDraftHTML = `<!doctype html>
 <body><main>{{template "top" .View}}
 <div class="hero">{{template "hero" .View}}<p class="lede">Complete saved draft. Unratified, model-only evidence: this record grants no code assurance and offers no commands.</p>{{template "links" .View}}</div>
 <section><h2>The saved reference</h2><p>{{.Reference.Repository}} · issue #{{.Reference.Issue}} · {{.Reference.Step}}</p>
-<p>Result commit: <code>{{.Reference.Commit}}</code><br>Exact payload: <code>{{.Reference.SHA256}}</code><br>Proposal: <code>{{.Reference.ProposalHash}}</code></p>
+<details><summary>Saved result identity</summary><p>Result commit: <code>{{.Reference.Commit}}</code><br>Exact payload: <code>{{.Reference.SHA256}}</code><br>Proposal: <code>{{.Reference.ProposalHash}}</code></p></details>
 <p><a href="{{.Locator}}">Permanent saved draft locator</a> · <a href="{{.Download}}" download="result.json">Download the exact complete result.json</a></p></section>
-{{if .Comparison}}<p class="lede">{{.Comparison.Message}}</p><p><a href="{{.Comparison.Page}}">Proposal chart and comparison evidence</a></p>{{end}}
+{{if .Comparison}}<p class="lede" data-reader-reason>{{.Comparison.Message}}</p>{{template "reader-details" .Details}}<p><a href="{{.Comparison.Page}}">Proposal chart and comparison evidence</a></p>{{end}}
 <div class="chart">{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked draft state chart"></picture>{{end}}
 {{if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Complete native SVG and report</a></p>{{end}}</div>
 {{if .Result.Proposal.Statements}}<section><h2>Candidate rules</h2>{{template "rules" .View}}</section><section><h2>Checked bounds</h2>{{template "bounds" .View}}</section>{{end}}
-{{if .Result.Report}}<section><h2>TLC outcomes and tool identities</h2><p>Model check: {{.Result.Report.Design.Outcome}}. {{.Result.Report.Design.DistinctStates}} distinct states; {{.Result.Report.Design.StatesGenerated}} generated states.</p><p>TLC: {{.Result.Report.Toolchain.TLC}}<br>Java image: <code>{{.Result.Report.Toolchain.JavaImage}}</code></p></section>{{end}}
 {{range .Questions}}<section><h2>{{.ID}}: {{.Question}}</h2><p>All original alternatives, unratified and model-only. Later answers do not edit these snapshots.</p>
-{{range .Options}}<h3>{{.ID}}: {{.Says}}</h3>{{if .Reader}}<p>{{.Reader.Message}}</p><p><a href="{{.Reader.Page}}">Read this option's complete evidence</a></p>{{end}}
+{{range .Options}}<h3>{{.ID}}: {{.Says}}</h3>{{if .Reader}}<p data-reader-reason>{{.Reader.Message}}</p>{{if ne .Reader.Status "chart"}}<details data-reader-details><summary>Complete option inputs, receipt and reader evidence</summary><pre>{{readerRecord .Preview}}</pre></details>{{end}}<p><a href="{{.Reader.Page}}">Read this option's complete evidence</a></p>{{end}}
 {{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked alternative state chart"></picture>{{end}}
 {{with .Preview}}{{if .Choices}}<h4>Previously authorized choices at this check</h4><ul class="bounds">{{range $fork, $option := .Choices}}<li class="bound"><b>{{$fork}}</b> <span>= {{$option}}</span></li>{{end}}</ul>{{end}}{{end}}{{end}}</section>{{end}}
-<section><h2>Complete saved result</h2><p>Original questions, sources and includes, candidate rules and bounds, TLC outcomes, pinned tool and source identities, captured baselines, comparisons and qualifications, and prior-choice context are retained below. Backend: {{.Result.Usage.Backend}}.</p><pre>{{.Record}}</pre></section>
+{{if not .Comparison}}<details><summary>Complete saved result</summary><p>Original questions, sources and includes, candidate rules and bounds, TLC outcomes, pinned tool and source identities, captured baselines, comparisons and qualifications, and prior-choice context are retained below. Backend: {{.Result.Usage.Backend}}.</p><pre>{{.Record}}</pre></details>{{end}}
 <p class="meta">Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
 <p class="foot">This is a bounded model explanation. Equal charts do not establish behavioral equivalence. The issue's current answers and ratification remain on its dashboard card.</p>
 </main></body></html>` + evidenceParts
@@ -42,6 +41,7 @@ type savedDraftView struct {
 	Posters      *PosterLinks
 	Questions    []Question
 	Record       string
+	Details      readerDetails
 	View         evidenceView
 }
 
@@ -55,6 +55,11 @@ func makeSavedDraft(ref factory.DraftReference, payload []byte, result *formaliz
 	view.Groups = rulesOf(result.Proposal.Statements, result.Report)
 	v := savedDraftView{Reference: ref, Locator: draftLocator(ref), Result: result, Comparison: comparison,
 		Questions: questions, Record: string(payload), View: view}
+	v.Details.Record = string(payload)
+	if r := result.Proposal.Reader; r != nil && r.Comparison != nil {
+		v.Details.Notes = append(comparisonSources(r.Comparison), r.Comparison.Qualifications()...)
+	}
+	v.Details.Notes = append(v.Details.Notes, "Result commit: "+ref.Commit, "Exact payload: "+ref.SHA256, "Proposal: "+ref.ProposalHash)
 	links := func(base string) {
 		p.Page = base + ".html"
 		v.Download = base + ".json"
@@ -76,8 +81,8 @@ func makeSavedDraft(ref factory.DraftReference, payload []byte, result *formaliz
 	}
 	p.Fingerprint = readerHash(readerJSON(struct {
 		Reference                         factory.DraftReference
-		Payload, HTML, SVG, Poster, Still []byte
-	}{ref, payload, b.Bytes(), native.svg, native.poster, native.still}))
+		Payload, HTML, SVG, Poster, Still string
+	}{ref, readerHash(payload), readerHash(b.Bytes()), readerHash(native.svg), readerHash(native.poster), readerHash(native.still)}))
 	links("/reader/" + strings.TrimPrefix(p.Fingerprint, "sha256:"))
 	b.Reset()
 	if err := savedDraftTemplate.Execute(&b, v); err != nil {

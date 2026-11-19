@@ -147,6 +147,10 @@ func decodeReaderJSON(b []byte, v any) error {
 func sameReaderJSON(a, b any) bool { return bytes.Equal(readerJSON(a), readerJSON(b)) }
 
 func (e readerEvidence) checked() (status, message, svg string) {
+	return e.check(nil)
+}
+
+func (e readerEvidence) check(comparison *readerComparisonPresentation) (status, message, svg string) {
 	bad := func(code, why string) (string, string, string) { return code, why, "" }
 	if e.Problem == "missing_archive" {
 		return bad("missing_artifacts", "The gate's receipt archive is missing or expired, or holds no receipt.json. Verify again to publish the complete evidence.")
@@ -186,6 +190,17 @@ func (e readerEvidence) checked() (status, message, svg string) {
 	if diagnostic != nil {
 		display.Comparison, display.ComparisonDiagnostic = nil, diagnostic
 	}
+	comparisonMessage := comparisonUnavailable(display.Comparison)
+	if diagnostic != nil {
+		comparisonMessage = "Comparison unavailable: retained evidence could not be validated."
+	}
+	if comparison != nil {
+		comparison.Message = comparisonMessage
+		comparison.Details = readerDetails{Notes: display.ComparisonNotes()}
+		if display.Comparison != nil {
+			comparison.Details.Notes = append(comparison.Details.Notes, comparisonSources(display.Comparison)...)
+		}
+	}
 	if len(e.Artifacts.JSON) == 0 || ((rr.Chart != nil || rr.Comparison != nil) && len(e.Artifacts.SVG) == 0) {
 		return bad("missing_artifacts", "The receipt archive is missing reader.json or reader.svg. Verify again to publish the complete evidence.")
 	}
@@ -201,6 +216,12 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		display = wire
 		if diagnostic != nil {
 			display.ComparisonDiagnostic = diagnostic
+		} else {
+			comparisonMessage = "Comparison unavailable: combined " + readerLimitCause(wire.ComparisonRef.Limitation) + "."
+			if comparison != nil {
+				comparison.Message = comparisonMessage
+				comparison.Details.Notes = append(comparison.Details.Notes, wire.ComparisonNotes()...)
+			}
 		}
 	}
 	if rr.Version != 1 {
@@ -280,7 +301,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 			if len(e.Artifacts.SVG) != 0 && !readerCompanionMatches(&display, e.Artifacts.SVG, diagnostic != nil) {
 				return bad("artifact_mismatch", "The archived SVG differs from the native renderer's final outcome.")
 			}
-			return bad(code, strings.TrimSpace(message+" "+strings.Join(display.ComparisonNotes(), " ")))
+			return bad(code, message)
 		}
 		svg, err := display.SVG()
 		if err != nil {
@@ -289,7 +310,16 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		if !bytes.Equal(e.Artifacts.SVG, []byte(svg)) {
 			return bad("artifact_mismatch", "The archived comparison SVG differs from the native renderer.")
 		}
-		return "chart", message + " " + strings.Join(display.ComparisonNotes(), " ") + " " + comparisonPageSummary(display.Comparison), svg
+		if comparisonMessage != "" {
+			return bad(code, message)
+		}
+		// The final outcome stays unavailable even when the independently
+		// retained proposal comparison can be drawn.
+		svg, err = display.Comparison.SVG()
+		if err != nil {
+			return bad("reader_render", err.Error())
+		}
+		return code, message, svg
 	}
 	if d := rr.Unavailable; d != nil {
 		if len(e.Artifacts.SVG) != 0 && rr.Comparison == nil && diagnostic == nil {
@@ -331,10 +361,7 @@ func (e readerEvidence) checked() (status, message, svg string) {
 			int64(l.ConcreteCount()) != r.Design.DistinctStates || !sameReaderJSON(l.Source, source) {
 			return bad("snapshot_mismatch", "The reader limitation disagrees with the receipt's completed exploration or provenance.")
 		}
-		if l.Kind != "" {
-			return limitedComparison("too_large", l.Description())
-		}
-		return limitedComparison("too_large", fmt.Sprintf("TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. The view's mappings and hiding were not evaluated; no partial chart is shown.", l.Actual, l.Limit))
+		return limitedComparison("too_large", readerLimitMessage(l))
 	}
 	c := rr.Chart
 	if !sameReaderJSON(c.Report.Rules, e.Lock.Statements) || !sameReaderJSON(c.Report.Source, source) ||
@@ -349,11 +376,14 @@ func (e readerEvidence) checked() (status, message, svg string) {
 		return bad("artifact_mismatch", "The archived SVG does not match the shared native renderer's complete checked result. Verify again with the current renderer.")
 	}
 	message = "Checked bounded model; the full report is included in the image. This adds no proof claim."
-	if len(display.ComparisonNotes()) > 0 {
-		message += " " + strings.Join(display.ComparisonNotes(), " ")
-	}
-	if display.Comparison != nil {
-		message += " " + comparisonPageSummary(display.Comparison)
+	if comparisonMessage != "" {
+		// Validate the original complete archive above, then draw only the
+		// independent final chart. Diagnostic panels are folded page text.
+		svg, err = c.SVG()
+		if err != nil {
+			return bad("reader_render", "Reader generation failed: "+err.Error())
+		}
+		message = comparisonMessage
 	}
 	return "chart", message, svg
 }
@@ -543,13 +573,13 @@ const readerIdentityTemplate = `<!doctype html>
 const readerHTML = `<!doctype html>
 <html lang="en"><head>` + evidenceHead + `<title>{{.Evidence.Manifest.Name}} — reader evidence</title></head>
 <body><main>{{template "top" .View}}
-<div class="hero">{{template "hero" .View}}<p class="lede">{{.Presentation.Message}}</p>{{template "links" .View}}</div>
+<div class="hero">{{template "hero" .View}}<p class="lede" data-reader-reason>{{.Presentation.Message}}</p>{{template "reader-details" .Details}}{{template "links" .View}}</div>
+{{if and .Comparison.Message (ne .Comparison.Message .Presentation.Message)}}<section><h2>Retained proposal comparison</h2><p data-reader-reason>{{.Comparison.Message}}</p>{{template "reader-details" .Comparison.Details}}</section>{{else if .Evidence.Report}}{{with .Evidence.Report.Reader}}{{if .Comparison}}<section><h2>Retained proposal comparison</h2><p class="note">Proposal sources and independently checked final sources are identified in the folded evidence.</p></section>{{end}}{{end}}{{end}}
 <div class="chart">{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked reader chart for {{.Evidence.Manifest.Name}}"></picture>
-<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open standalone SVG at full size</a></p><img src="{{.Presentation.SVG}}" alt="Checked reader chart and complete report for {{.Evidence.Manifest.Name}}">{{end}}</div>
+<p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open the retained proposal comparison at full size</a></p><img src="{{.Presentation.SVG}}" alt="Retained proposal comparison for {{.Evidence.Manifest.Name}}">{{end}}</div>
 <section><h2>Locked rules</h2><p class="note">Ratified, then pinned by hash: the code is checked against these, and nothing can change them without a new ratification.</p>{{template "rules" .View}}</section>
 <section><h2>Checked bounds</h2><p class="note">TLC explored every state the model reaches within these.</p>{{template "bounds" .View}}</section>
 {{if .View.Coverage}}<section><h2>Conformance coverage</h2><p class="note">Each check's distinct visited states at its ratified bounds. A full state sample alone establishes no exhaustive exploration, transition or attempt coverage, or proof.</p><ul>{{range .View.Coverage}}<li><code>{{.Source}}{{if .Target}} · {{.Target}}{{end}}{{if .Check}} · {{.Check}}{{end}}{{if .Invocation}} · {{.Invocation}}{{end}}</code>: <strong>{{.Qualification}}</strong> · {{.Detail}}</li>{{end}}</ul></section>{{end}}
-{{if .Record}}<details><summary>Complete receipt reader record</summary><pre>{{.Record}}</pre></details>{{end}}
 <p class="meta">Receipt commit: <code>{{.Presentation.Commit}}</code><br>Presentation: <code>{{.Presentation.Fingerprint}}</code><br>Format: {{.Presentation.Format}}</p>
 <p class="foot">This explanation describes the model at the receipt's bounds. It does not change the receipt's verification verdict or code assurance.</p>
 </main></body></html>` + evidenceParts
@@ -588,7 +618,8 @@ func (e readerEvidence) posters(status string) (string, string) {
 }
 
 func makeReader(e readerEvidence) readerPage {
-	status, message, svg := e.checked()
+	var comparison readerComparisonPresentation
+	status, message, svg := e.check(&comparison)
 	poster, still := e.posters(status)
 	if poster != "" {
 		message = strings.Replace(message, "the full report is included in the image", "the poster's light replays one real behavior from TLC's graph, and the evidence page holds the full report", 1)
@@ -609,19 +640,30 @@ func makeReader(e readerEvidence) readerPage {
 	if poster != "" {
 		posters = &PosterLinks{Animated: base + ".poster.svg", Still: base + ".still.svg"}
 	}
-	record := ""
+	details := comparison.Details
 	if e.Report != nil && e.Report.Reader != nil {
-		b, _ := json.MarshalIndent(e.Report.Reader, "", "  ")
-		record = string(b)
+		details.Record = readerRecord(e.Report.Reader)
+		label := "Retained final model identity: "
+		if status == "chart" {
+			label = "Independently checked final model: "
+		}
+		details.Notes = append(details.Notes, label+e.Report.Reader.Inputs.Model,
+			"Final view: "+e.Report.Reader.Inputs.View, "Receipt bounds: "+readerRecord(e.Lock.Bounds),
+			"Retained verification tools: "+readerRecord(e.Report.Toolchain), "Verification fingerprint: "+e.Report.Fingerprint)
+		if comparison.Message != "" && comparison.Message != message {
+			comparison.Details.Record = details.Record
+		}
 	}
+	details.Notes = append(details.Notes, "Receipt commit: "+e.Commit)
 	var b bytes.Buffer
 	_ = readerTemplate.Execute(&b, struct {
 		Evidence     readerEvidence
 		Presentation ReaderPresentation
 		Posters      *PosterLinks
-		Record       string
+		Details      readerDetails
+		Comparison   readerComparisonPresentation
 		View         evidenceView
-	}{e, p, posters, record, projectView(e)})
+	}{e, p, posters, details, comparison, projectView(e)})
 	// The page's own hash versions its URL, so a redesign reaches readers at
 	// once while the evidence keeps its identity (#786).
 	p.Page = base + ".html?h=" + strings.TrimPrefix(readerHash(b.Bytes()), "sha256:")[:16]

@@ -44,10 +44,11 @@ func (s *Server) proposalCacheWork() (uint64, uint64, uint64) {
 }
 
 func (c proposalKind[T]) inputKey(record []byte) string {
+	// Bind the exact detached bytes without parsing and copying a potentially
+	// large evidence record again for each in-memory lookup.
 	return readerHash(readerJSON(struct {
-		Kind, Format, Template string
-		Record                 json.RawMessage
-	}{c.directory, c.format, c.template, record}))
+		Kind, Format, Template, RecordSHA256 string
+	}{c.directory, c.format, c.template, readerHash(record)}))
 }
 
 // The caller holds proposals.mu for all builds and entry operations.

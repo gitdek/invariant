@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
-	"html"
 	"io"
 	"os"
 	"path"
@@ -111,8 +110,9 @@ func receipt723Healthy(t *testing.T, f reader631Fixture) {
 		t.Fatal("checking evidence mutated the retained report")
 	}
 	if f.Report.Reader.Comparison != nil {
+		page := makeReader(e)
 		if f.Report.Reader.Inputs.Model == f.Report.Reader.Comparison.CandidateIdentity.ModelSHA256 ||
-			!strings.Contains(message, "not the synthesized final model") {
+			!strings.Contains(readerFoldedEvidence(t, page.html, page.presentation.Message), "not the synthesized final model") {
 			t.Fatal("fixture lost the intentional proposal/final source distinction")
 		}
 	}
@@ -247,14 +247,14 @@ func receipt723Topology(t *testing.T, svg []byte, want *statechart.Result) {
 
 func receipt723Fallback(t *testing.T, s *Server, p reader631Presentation, f reader631Fixture, detail string) {
 	t.Helper()
-	if p.Status != "chart" || p.SVG == "" || !strings.Contains(p.Message, "comparison_evidence") {
+	if p.Status != "chart" || p.SVG == "" || !strings.HasPrefix(p.Message, "Comparison unavailable:") {
 		t.Fatalf("comparison-only failure must keep a checked final chart and its specific diagnostic: %+v", p)
 	}
 	svg := receipt723HTTP(t, s, p.SVG)
 	receipt723Topology(t, svg, f.Report.Reader.Chart)
 	page := receipt723HTTP(t, s, p.Page)
-	visible := comparison717SVGText(t, string(svg))
-	for name, text := range map[string]string{"card": p.Message, "page": html.UnescapeString(string(page)), "SVG": visible} {
+	fold := readerFoldedComparison(t, page)
+	for name, text := range map[string]string{"folded evidence": fold} {
 		if !strings.Contains(text, "comparison_evidence") || (detail != "" && !strings.Contains(text, detail)) {
 			t.Fatalf("%s lost comparison cause %q: %s", name, detail, text)
 		}
@@ -262,8 +262,11 @@ func receipt723Fallback(t *testing.T, s *Server, p reader631Presentation, f read
 			t.Fatalf("%s contains an unprintable diagnostic", name)
 		}
 	}
-	if !strings.Contains(visible, "Independently checked final-model chart") || !strings.Contains(visible, f.Report.Reader.Inputs.Model) {
+	if !strings.Contains(fold, "Independently checked final model") || !strings.Contains(fold, f.Report.Reader.Inputs.Model) {
 		t.Fatal("fallback did not identify the independently checked final sources")
+	}
+	if strings.Contains(comparison717SVGText(t, string(svg)), "comparison_evidence") {
+		t.Fatal("comparison diagnostic was drawn as an image")
 	}
 	if strings.Contains(strings.ToLower(string(page)), "<script") || !strings.Contains(string(page), p.SVG) {
 		t.Fatal("fallback evidence page lost its safe native image link")
@@ -333,7 +336,8 @@ func TestReceipt723ComparisonPresenceIsSymmetric(t *testing.T) {
 					t.Fatalf("valid comparison refused: %+v", p)
 				}
 				svg := receipt723HTTP(t, s, p.SVG)
-				if !bytes.Contains(svg, []byte(`data-comparison-side="candidate"`)) || !strings.Contains(p.Message, "not the synthesized final model") {
+				fold := readerFoldedEvidence(t, receipt723HTTP(t, s, p.Page), p.Message)
+				if !bytes.Contains(svg, []byte(`data-comparison-side="candidate"`)) || !strings.Contains(fold, "not the synthesized final model") {
 					t.Fatal("valid proposal/final source distinction lost")
 				}
 				receipt723Restart(t, s, p, f)
@@ -435,7 +439,7 @@ func TestReceipt723DamagedComparisonKeepsFinalTopology(t *testing.T) {
 			f.bind(t)
 			s, _, p := receipt723Load(t, f, edit)
 			receipt723Fallback(t, s, p, f, detail)
-			if strings.HasPrefix(mode, "wrong diagnostic") && !strings.Contains(strings.ToLower(p.Message), "receipt") {
+			if strings.HasPrefix(mode, "wrong diagnostic") && !strings.Contains(strings.ToLower(readerFoldedComparison(t, receipt723HTTP(t, s, p.Page))), "receipt") {
 				t.Fatal("the full diagnostic mismatch was not identified as a receipt discrepancy")
 			}
 			cold := receipt723Restart(t, s, p, f)
@@ -592,7 +596,7 @@ func TestReceipt723FinalLimitationsStaySpecific(t *testing.T) {
 				s, _, p := receipt723Load(t, f, nil)
 				for _, server := range []*Server{s, receipt723Restart(t, s, p, f)} {
 					reader631Diagnostic(t, server, p, outcome)
-					if !strings.Contains(p.Message, "comparison_evidence") {
+					if !strings.Contains(readerFoldedComparison(t, receipt723HTTP(t, server, p.Page)), "comparison_evidence") {
 						t.Fatalf("specific final outcome lost comparison diagnostic: %+v", p)
 					}
 					if outcome == "too_large" && (!strings.Contains(p.Message, "501") || !strings.Contains(p.Message, "500")) {
