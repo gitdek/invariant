@@ -164,10 +164,11 @@ type lockHistory struct {
 
 var errShallow = errors.New("the repository's history is shallow, so it may not hold the commits that recorded the lock's ratification; fetch its whole history, as with fetch-depth: 0")
 
+// lockHistory reads every version of the lock the history holds. A shallow
+// clone holds only some, which can show that a lock had migrated layout pins,
+// and never which commits recorded its ratification: the callers that need
+// those refuse one.
 func (h *history) lockHistory() (*lockHistory, error) {
-	if h.shallow {
-		return nil, errShallow
-	}
 	lh := &lockHistory{parents: map[string][]string{}, locks: map[string]*Lock{}}
 	if _, err := h.git("rev-parse", "-q", "--verify", "HEAD^{commit}"); err != nil {
 		// A repository with no commit yet holds no version of the lock.
@@ -275,7 +276,9 @@ func (lh *lockHistory) recorded(proposal string) []string {
 // Commits that changed the lock and kept its proposal, such as the one that
 // migrated its layout pins, record nothing. It returns none when the
 // history doesn't hold the proposal, as for a lock not committed yet, and
-// ErrNoHistory outside a git checkout.
+// ErrNoHistory outside a git checkout. In a shallow clone, the oldest commit
+// it holds may stand for one it doesn't, so a caller uses what it returns
+// only where the model there is laid out as the lock pins.
 func RatificationCommits(ctx context.Context, dir string, l Lock) ([]string, error) {
 	h, err := historyOf(ctx, dir)
 	if err != nil {
@@ -379,6 +382,9 @@ func (h *history) layoutsAt(l Lock, commit string) (map[string]string, error) {
 // agree, and returns them by name, with those commits. It's what a migration
 // records and what CI holds a migrated layout pin to.
 func (h *history) ratifiedLayouts(lh *lockHistory, l Lock) ([]string, map[string]string, error) {
+	if h.shallow {
+		return nil, nil, errShallow
+	}
 	commits := lh.recorded(ProposalHash(l.Bounds, l.Statements))
 	if len(commits) == 0 {
 		return nil, nil, fmt.Errorf("the repository's history doesn't hold the lock's proposal, so it can't say which commit recorded its ratification; commit the lock as it was ratified first")
@@ -448,8 +454,9 @@ func (p *Project) MigrateLayouts(ctx context.Context) (string, error) {
 // version of the lock with that proposal, on any branch the history holds,
 // may have had migrated layout pins the lock no longer has: only a new
 // ratification changes or removes a layout pin. A lock that pins no layout,
-// and never did with its proposal, passes. It reads the repository's whole
-// history, and fails when it can't.
+// and never did with its proposal, passes, so a repository that hasn't
+// migrated passes as before, however its CI checks it out. A migrated lock
+// needs the repository's whole history, and fails without it.
 func CheckLayouts(ctx context.Context, dir string, l Lock) error {
 	state := l.LayoutState()
 	if state == LayoutRatified {

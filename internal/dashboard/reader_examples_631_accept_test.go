@@ -37,16 +37,16 @@ type reader631Example struct {
 }
 
 var reader631Examples = []reader631Example{
-	{"02-twophase-commit", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "d298d4dadc458e1fd16fe8bc2d4f0f0a8298f992e721e41f7d9d1491cd3e44d4", 288, []string{"prepar", "commit", "abort"}},
-	{"02-twophase-commit-py", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "8bf7fa280fd859a6b743caf3b03ab567ba70db53d6908997490935cae525ba1c", 288, []string{"prepar", "commit", "abort"}},
-	{"02-twophase-commit-py-proved", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "a9be5389bac0e3291741906090940715355bb0e8e710b3d3029653a1551fcb30", 288, []string{"prepar", "commit", "abort"}},
-	{"02-twophase-commit-synthesized", "5f167400260ae56b36e8f1292723d8c76dcff4229144dddc75aa7fa62abeb429", "7102ecd5a85bf3473a8cf39fa7adbed476bbcd0e74c2f59979ff96a72c3d90ab", 288, []string{"prepar", "commit", "abort"}},
-	{"02-twophase-commit-ts", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "4c57ecddf194c5633a24637cf7677f90677a009abeb4b5d8e08ba1e9bd2fa5a4", 288, []string{"prepar", "commit", "abort"}},
-	{"03-log-buffer", "eec9fca8f823c89b871a040a08069a1f607fde111c4b9155fb350f717c218ccf", "2ae2616cd42333f92b6c9bdc2d0811c13708531d98594b2cf6d0d02026f2f2cf", 87, []string{"buffer", "ship", "retr"}},
-	{"03-log-buffer-py", "07599ab094b0779cef490c5aac4110992ebfa3711a3bfddef46e84605f6f08d6", "ef6c0ddb85a28bbb17c11e1c001120313db1e13f3f64b3eb7dc1b6463b15385f", 87, []string{"buffer", "ship", "retr"}},
-	{"03-log-buffer-ts", "07599ab094b0779cef490c5aac4110992ebfa3711a3bfddef46e84605f6f08d6", "141b6e609673544f1cf88d1ce163e20b1195ecabdbd05a039a9cf0974637ea6b", 87, []string{"buffer", "ship", "retr"}},
-	{"04-api-rate-limiter", "5b60ade0c8f175333b06c6c4fb78c058ac94f54a282d972a88764dc71567a69f", "408d92b403facaf216526e705a47d327cfd4366c40f87f1e0d0c5c8b4a8636ea", 19489, nil},
-	{"05-connection-pool", "d14e5bb60f69e554762314561a2f7b25343c243597da59fe381308d09a2a8b1b", "ea755ff7801120506ccb12a481cce1cd8aa9fff97ad38d68d1bd6e04c4f12f6a", 13, []string{"connection", "client", "free"}},
+	{"02-twophase-commit", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "b185f7e101da4e787ecfa805a4975c19b03a767fd71c2c19bf3fe20eb37bec1b", 288, []string{"prepar", "commit", "abort"}},
+	{"02-twophase-commit-py", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "a985b902ab452796493483e606a6b0fd535e5dcec1f0340b00419993a8aaa46e", 288, []string{"prepar", "commit", "abort"}},
+	{"02-twophase-commit-py-proved", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "773361bd5b73ee435903596db10e991e24fb14b272182bb2cc28aa84c4633838", 288, []string{"prepar", "commit", "abort"}},
+	{"02-twophase-commit-synthesized", "5f167400260ae56b36e8f1292723d8c76dcff4229144dddc75aa7fa62abeb429", "f3a583fae2a838c31ac00bdca175fe65bacb1005af9203acc9b9a5cd8fdf7078", 288, []string{"prepar", "commit", "abort"}},
+	{"02-twophase-commit-ts", "f4aee44c7457d9b3b00d2628eb391f125ed6f8094a87464beb81f4c2810f1cea", "53117fff9a1b040be2b233c98d96e547b822a3e4718ba45b92256acc73f6bce5", 288, []string{"prepar", "commit", "abort"}},
+	{"03-log-buffer", "eec9fca8f823c89b871a040a08069a1f607fde111c4b9155fb350f717c218ccf", "a75a6846ecf8baa6f02bb5e647154fb029514ddcd2de8bd998bfdbcdd7f2413d", 87, []string{"buffer", "ship", "retr"}},
+	{"03-log-buffer-py", "07599ab094b0779cef490c5aac4110992ebfa3711a3bfddef46e84605f6f08d6", "bb3c872a698270d254687d1f83c25af10abda251817fce7f4c90d63c2723fd69", 87, []string{"buffer", "ship", "retr"}},
+	{"03-log-buffer-ts", "07599ab094b0779cef490c5aac4110992ebfa3711a3bfddef46e84605f6f08d6", "7214b5f6bf9e449f4470a5da7afe80fb5efeaebfe17cf9f810ed758f458a01fe", 87, []string{"buffer", "ship", "retr"}},
+	{"04-api-rate-limiter", "5b60ade0c8f175333b06c6c4fb78c058ac94f54a282d972a88764dc71567a69f", "6668be68f690ab8ea48d554ea4d896eafc17f7d92b67e29e19eac5307ce8a449", 19489, nil},
+	{"05-connection-pool", "d14e5bb60f69e554762314561a2f7b25343c243597da59fe381308d09a2a8b1b", "104450d9eed0da0a6eba29882d6503af0f1a4b9b78a12297e57d47463496f1ca", 13, []string{"connection", "client", "free"}},
 }
 
 func TestReader631ExampleViews(t *testing.T) {

@@ -81,8 +81,8 @@ func TestALockHoldsOneKindOfLayoutPin814(t *testing.T) {
 // (#814). Each keeps its pins and its proposal, which its ratifying comment
 // or decision names, and each migrated layout pin is the one the model gives
 // at the commit that recorded the lock's ratification, as the ratification
-// check holds it to be. A lock ratified since pins its layout in its
-// proposal. The plumbing sandbox copies the repository without its history,
+// check holds it to be, and the one the model gives today, as the gate does.
+// A lock ratified since pins its layout in its proposal. The plumbing sandbox copies the repository without its history,
 // so it can't check this; CI's unit tests run with the whole history.
 func TestEveryLockHereKeepsItsProposalAndPinsItsRatifiedLayout814(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -112,6 +112,25 @@ func TestEveryLockHereKeepsItsProposalAndPinsItsRatifiedLayout814(t *testing.T) 
 		proposal := ProposalHash(p.Lock.Bounds, p.Lock.Statements)
 		if r := p.Lock.Ratified; r != nil && r.Proposal != proposal {
 			t.Errorf("%s: the lock holds proposal %s, and its comment ratified %s", manifest, proposal, r.Proposal)
+		}
+		// The model today is laid out as the lock pins it, so the gate
+		// passes its layout, as it passes its pins.
+		src, err := os.ReadFile(p.ModulePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		model, err := p.ReadModel(string(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		now, err := p.LayoutPins(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range p.Lock.Statements {
+			if s.LayoutPin() != "" && s.LayoutPin() != now[s.Name] {
+				t.Errorf("%s: %s is laid out as %s today, and its lock pins %s", manifest, s.Name, now[s.Name], s.LayoutPin())
+			}
 		}
 		switch state := p.Lock.LayoutState(); state {
 		case LayoutRatified:
@@ -389,20 +408,50 @@ func TestOnlyANewRatificationChangesAMigratedLayoutPin814(t *testing.T) {
 		}
 	})
 
+	// A shallow clone can't show which commits recorded a lock's
+	// ratification, so it can't check a migrated layout pin, or migrate
+	// one. A lock that pins no layout passes in one, as it always has, and
+	// one whose layout pins the history it holds shows were removed fails.
 	t.Run("a shallow clone", func(t *testing.T) {
-		r := migrated(t)
-		clone := filepath.Join(t.TempDir(), "clone")
-		out, err := exec.Command("git", "clone", "-q", "--depth", "1", "file://"+r.root, clone).CombinedOutput()
-		if err != nil {
-			t.Fatalf("git clone: %v\n%s", err, out)
+		shallow := func(t *testing.T, r *layoutRepo814, depth ...string) string {
+			clone := filepath.Join(t.TempDir(), "clone")
+			out, err := exec.Command("git", "clone", "-q", "--depth", append(depth, "1")[0], "file://"+r.root, clone).CombinedOutput()
+			if err != nil {
+				t.Fatalf("git clone: %v\n%s", err, out)
+			}
+			return filepath.Join(clone, "examples", "small")
 		}
-		dir := filepath.Join(clone, "examples", "small")
+		check := func(dir string) error {
+			p, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return CheckLayouts(context.Background(), dir, p.Lock)
+		}
+		dir := shallow(t, migrated(t))
+		if err := check(dir); err == nil || !strings.Contains(err.Error(), "shallow") {
+			t.Errorf("a migrated lock in a shallow clone: CheckLayouts = %v", err)
+		}
+		dir = shallow(t, newLayoutRepo814(t))
+		if err := check(dir); err != nil {
+			t.Errorf("a lock that pins no layout, in a shallow clone, is refused: %v", err)
+		}
 		p, err := Load(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := CheckLayouts(context.Background(), dir, p.Lock); err == nil || !strings.Contains(err.Error(), "shallow") {
-			t.Errorf("CheckLayouts in a shallow clone = %v", err)
+		if _, err := p.MigrateLayouts(context.Background()); err == nil || !strings.Contains(err.Error(), "shallow") {
+			t.Errorf("a migration in a shallow clone: %v", err)
+		}
+		r := migrated(t)
+		p = r.load()
+		for i := range p.Lock.Statements {
+			p.Lock.Statements[i].MigratedLayout = ""
+		}
+		r.writeLock(p.Lock)
+		r.commit("Drop the layout pins")
+		if err := check(shallow(t, r, "2")); err == nil || !strings.Contains(err.Error(), "gave the lock layout pins, and the lock has none now") {
+			t.Errorf("layout pins removed, in a shallow clone that holds the commit that gave them: %v", err)
 		}
 	})
 }
