@@ -988,6 +988,11 @@ func watchWithFactory(ctx context.Context, args []string, start func(context.Con
 	if err := checkRepositorySetup(ctx, gh, *repo, clone.Dir, "origin/"+*base); err != nil {
 		return fail(err)
 	}
+	// Projects go where the repository's committed contract reserves them,
+	// or its own checks would run over them (#937).
+	if err := checkWatchProjects(ctx, clone.Dir, "origin/"+*base, *projects); err != nil {
+		return fail(err)
+	}
 	// It runs whichever coding agent an issue or its project picks, among
 	// the ones it may run, so it doesn't start unless it can run each one it
 	// may be asked for: its own, and every one it may run that a project's

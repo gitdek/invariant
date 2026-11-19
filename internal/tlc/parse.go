@@ -38,6 +38,10 @@ type Result struct {
 	Loop     int
 	Stutters bool
 	ExitCode int
+	// Codes are TLC's own codes, tlc2.output.EC, for the messages Message
+	// gives, in the order TLC printed them, when Outcome is Failed. SANY's
+	// diagnostics have none, and a runner's own result has none at all.
+	Codes []int `json:",omitempty"`
 	// Printed is what the model printed with Print or PrintT: the text
 	// between TLC's own messages, one entry per run of lines.
 	Printed []string
@@ -120,6 +124,7 @@ func Parse(out string, exitCode int) Result {
 	}
 	var success, deadlock, temporal bool
 	var problems []string
+	var codes []int
 	var sany strings.Builder
 	var inSANY bool
 	end := 0
@@ -143,6 +148,7 @@ func Parse(out string, exitCode int) Result {
 				problems = append(problems, diagnostics)
 			}
 			problems = append(problems, strings.TrimSpace(body))
+			codes = append(codes, code)
 			inSANY = false
 			sany.Reset()
 		case codeSuccess:
@@ -192,6 +198,7 @@ func Parse(out string, exitCode int) Result {
 		default:
 			if !informational[code] {
 				problems = append(problems, strings.TrimSpace(body))
+				codes = append(codes, code)
 			}
 		}
 	}
@@ -207,6 +214,7 @@ func Parse(out string, exitCode int) Result {
 	default:
 		r.Outcome = Failed
 		r.Message = strings.Join(problems, "\n")
+		r.Codes = codes
 		if r.Message == "" {
 			r.Message = tail(out, 20)
 		}

@@ -193,12 +193,14 @@ type Factory struct {
 	// has asked. Each poll asks again, and a step that runs across polls
 	// keeps the answers it read. It guards mergeWait too: the drafts, at
 	// their heads, whose wait for GitHub to say it can merge them was
-	// logged. And seenMerges: the merged pull requests whose issue a step
-	// has read since the watcher started.
+	// logged. And drainWait: the issues a draining watcher has logged as
+	// waiting for the next watcher. And seenMerges: the merged pull
+	// requests whose issue a step has read since the watcher started.
 	mu         sync.Mutex
 	writers    map[string]bool
 	asked      map[string]bool
 	mergeWait  map[string]bool
+	drainWait  map[int]bool
 	seenMerges map[int]bool
 	poll       polling // guarded by mu, shared by polls and their finishing steps
 	running    running
@@ -1269,7 +1271,6 @@ func (f *Factory) formalize(ctx context.Context, t Thread, cause Command, answer
 		m := retainedDraft(t, Marker{Kind: KindStuck, ReplyTo: replyTo, Answers: answers, Proposal: previous})
 		return f.drafted(ctx, t, cause, base, m, stuckComment(problem, m), LabelHumanReview)
 	}
-	f.logf("#%d: formalizing", n)
 	f.doing(n, "formalizing")
 	req := f.request(t, answers, previous)
 	parent, _, err := f.plannedStep(ctx, t.Issue)
@@ -1652,6 +1653,9 @@ func (f *Factory) draft(ctx context.Context, n int, step, agent string, form For
 		return nil, err
 	}
 	defer release()
+	// The step starts only once it's admitted, so only then does the log say
+	// so; a draining watcher never admits it (#747).
+	f.logf("#%d: formalizing", n)
 	if err := f.recovers(ctx, n, "start a draft's agent run", f.canStartRun(drafting(RunNone), recovery.Solve)); err != nil {
 		return nil, err
 	}
@@ -2337,7 +2341,6 @@ var numbered = regexp.MustCompile(`^(\d+)-`)
 // says so instead of paying for another.
 func (f *Factory) build(ctx context.Context, t Thread, ratified Post) error {
 	n, m := t.Issue.Number, ratified.Marker
-	f.logf("#%d: building %s", n, m.Project)
 	f.doing(n, "building")
 	next := Marker{Kind: KindFailed, Answers: m.Answers, Proposal: m.Proposal, ProposalRef: m.ProposalRef, Project: m.Project, Branch: m.Branch, Hash: m.Hash,
 		Replaces: m.Replaces, From: m.From}
@@ -2575,6 +2578,7 @@ func (f *Factory) runBuild(ctx context.Context, t Thread, ratified Post, step st
 		return "", "", nil, nil, err
 	}
 	defer release()
+	f.logf("#%d: building %s", n, m.Project) // admitted (#747)
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
@@ -3460,6 +3464,22 @@ func (f *Factory) unwatched(ctx context.Context, t Thread, state Post, pr github
 	return f.say(ctx, n, unwatchedComment(pr, w, unread, next), LabelHumanReview)
 }
 
+// waitingForSuccessor logs that a draining watcher left issue n's agent
+// work for the next watcher, once for the issue rather than on every poll.
+// The step logged no start, since it was never admitted (#747).
+func (f *Factory) waitingForSuccessor(n int) {
+	f.mu.Lock()
+	if f.drainWait == nil {
+		f.drainWait = map[int]bool{}
+	}
+	said := f.drainWait[n]
+	f.drainWait[n] = true
+	f.mu.Unlock()
+	if !said {
+		f.logf("#%d: waiting for the next watcher, since this one is draining", n)
+	}
+}
+
 // waitingToMerge logs once, for each draft and head, that the factory waits
 // for GitHub to work out whether it can merge a watched draft before it
 // marks it ready (#369's review).
@@ -3616,7 +3636,9 @@ func (f *Factory) safeStep(ctx context.Context, n int) (err error) {
 	}
 	err = f.step(ctx, issue)
 	if errors.Is(err, errDraining) {
-		return nil // no run started; leave the request for the next watcher
+		// No run started; leave the request for the next watcher.
+		f.waitingForSuccessor(n)
+		return nil
 	}
 	if errors.Is(err, errIssueClosed) {
 		// The queued operation released its slot without starting a run.

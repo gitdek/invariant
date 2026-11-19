@@ -234,6 +234,7 @@ func (f *Factory) runPlanBuild(ctx context.Context, t Thread, ratified Post, ste
 		return "", "", nil, nil, err
 	}
 	defer release()
+	f.logf("#%d: building %s", n, m.Project) // admitted (#747)
 	if err := f.Repo.Fetch(ctx); err != nil {
 		return "", "", nil, nil, err
 	}
