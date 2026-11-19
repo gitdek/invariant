@@ -65,11 +65,19 @@ func TestProjection944CompleteRecordPublicationRecovery(t *testing.T) {
 			}}
 			complete := &savedDraftResult{Result: *res, Publication: &draftPublication{Agent: r.f.agentOf("", "")}}
 			completeBytes, err := json.Marshal(complete)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			commit, err := r.f.saveResult(t.Context(), complete, "complete checked draft", "")
-			if err != nil { t.Fatal(err) }
-			if err := r.f.Repo.Record(t.Context(), 944, "draft-issue", "checked draft"); err != nil { t.Fatal(err) }
-			if err := r.f.Repo.Finish(t.Context(), 944, "draft-issue", commit); err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.f.Repo.Record(t.Context(), 944, "draft-issue", "checked draft"); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.f.Repo.Finish(t.Context(), 944, "draft-issue", commit); err != nil {
+				t.Fatal(err)
+			}
 			r.gh.open(944, "gitdek", "Keep the complete saved evidence", "/invariant solve")
 			r.poll()
 			wantKind, wantLabel := KindProposal, LabelProposal
@@ -106,7 +114,9 @@ func TestProjection944CompleteRecordPublicationRecovery(t *testing.T) {
 			}
 			if kind == "limited_questions" {
 				var wire formalize.Result
-				if err := json.Unmarshal(files["result.json"], &wire); err != nil { t.Fatal(err) }
+				if err := json.Unmarshal(files["result.json"], &wire); err != nil {
+					t.Fatal(err)
+				}
 				for _, o := range wire.Proposal.Forks[0].Options {
 					ref := o.Preview.EvidenceRef
 					if ref == nil || ref.Actual != len(completeBytes) || ref.Limit != statechart.MaxEvidenceBytes || ref.Representation != "compact_json" {

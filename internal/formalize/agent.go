@@ -134,13 +134,13 @@ type Formalizer struct {
 
 // Result is how a formalization went.
 type Result struct {
-	CheckContext *CheckContext   `json:"check_context,omitempty"`
-	Proposal     *Proposal       `json:"proposal,omitempty"` // forks to ask, a reason the issue is unsupported, or a draft to ratify
-	Report       *verify.Report  `json:"report,omitempty"`   // the factory's own check of a draft to ratify
-	Problem      string          `json:"problem,omitempty"`  // why there's nothing to ask or ratify, when there isn't
-	Changes      *Changes        `json:"changes,omitempty"`  // what an amendment changes
-	Usage        synth.Usage     `json:"usage"`
-	CheckRuns    []synth.GateRun `json:"check_runs,omitempty"`
+	CheckContext    *CheckContext    `json:"check_context,omitempty"`
+	Proposal        *Proposal        `json:"proposal,omitempty"` // forks to ask, a reason the issue is unsupported, or a draft to ratify
+	Report          *verify.Report   `json:"report,omitempty"`   // the factory's own check of a draft to ratify
+	Problem         string           `json:"problem,omitempty"`  // why there's nothing to ask or ratify, when there isn't
+	Changes         *Changes         `json:"changes,omitempty"`  // what an amendment changes
+	Usage           synth.Usage      `json:"usage"`
+	CheckRuns       []synth.GateRun  `json:"check_runs,omitempty"`
 	BaselineSources *BaselineSources `json:"baseline_sources,omitempty"`
 }
 

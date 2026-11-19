@@ -35,8 +35,8 @@ type Preview struct {
 	Fingerprint string            `json:"fingerprint,omitempty"`
 	// Bounded question records share the candidate outcome already bound by
 	// the preview fingerprint. Resolution restores the original receipt.
-	ReceiptFromModel bool `json:"receipt_from_model,omitempty"`
-	EvidenceRef *PreviewReference `json:"evidence_ref,omitempty"`
+	ReceiptFromModel bool              `json:"receipt_from_model,omitempty"`
+	EvidenceRef      *PreviewReference `json:"evidence_ref,omitempty"`
 }
 
 // CheckContext is supplied by the caller before drafting. Revisions lists
@@ -382,7 +382,7 @@ func previewFingerprint(f Fork, o Option) (string, error) {
 		Option   string          `json:"option"`
 		Says     string          `json:"says"`
 		Preview  previewIdentity `json:"preview"`
-	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem}})
+	}{f.ID, f.Kind, f.Question, o.ID, o.Says, previewIdentity{v.Fork, v.Option, v.Choices, v.Model, receipt, v.Problem, v.ReceiptFromModel, v.EvidenceRef}})
 }
 
 // PreviewFingerprint is the fingerprint ValidatePreview holds an option's
@@ -403,6 +403,11 @@ type previewIdentity struct {
 	Model   *Proposal         `json:"model"`
 	Receipt json.RawMessage   `json:"receipt,omitempty"`
 	Problem string            `json:"problem,omitempty"`
+	// A bounded question record's transport fields. ValidatePreview refuses
+	// them before fingerprinting, so a resolved preview omits both and its
+	// fingerprint is unchanged.
+	ReceiptFromModel bool              `json:"receipt_from_model,omitempty"`
+	EvidenceRef      *PreviewReference `json:"evidence_ref,omitempty"`
 }
 
 // ValidatePreview validates just this option, so a damaged dashboard sibling

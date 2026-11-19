@@ -143,7 +143,9 @@ func TestProjection944WholeQuestionByteCeilings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fixture struct { Preview *Proposal `json:"preview"` }
+	var fixture struct {
+		Preview *Proposal `json:"preview"`
+	}
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
@@ -157,9 +159,13 @@ func TestProjection944WholeQuestionByteCeilings(t *testing.T) {
 		r.Reader.Inputs.Model = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(p.ModuleText)))
 		r.Reader.Fingerprint = receiptReaderFingerprint(r.Reader, project.Lock{Bounds: p.Bounds, Statements: p.Statements})
 		p.Reader.Fingerprint, err = p.readerFingerprint()
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		o.Preview.Fingerprint, err = f.PreviewFingerprint(*o)
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	encode := func(r *Result) ([]byte, error) {
 		b, e := json.MarshalIndent(r, "", "  ")
@@ -168,7 +174,9 @@ func TestProjection944WholeQuestionByteCeilings(t *testing.T) {
 	setSource(0, 0)
 	setSource(1, 0)
 	base, err := encode(result)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	padding := statechart.MaxEvidenceBytes - len(base)
 	setSource(0, padding/2)
 	for _, extra := range []int{0, 1} {
@@ -193,9 +201,13 @@ func TestProjection944WholeQuestionByteCeilings(t *testing.T) {
 			}
 			continue
 		}
-		if len(files) != 2 { t.Fatal("each option needs its complete fixed companion") }
+		if len(files) != 2 {
+			t.Fatal("each option needs its complete fixed companion")
+		}
 		var decoded Result
-		if err := json.Unmarshal(saved, &decoded); err != nil { t.Fatal(err) }
+		if err := json.Unmarshal(saved, &decoded); err != nil {
+			t.Fatal(err)
+		}
 		for _, o := range decoded.Proposal.Forks[0].Options {
 			ref := o.Preview.Model.Reader.CandidateRef
 			if ref == nil || ref.Limitation.Actual != statechart.MaxEvidenceBytes+1 || ref.Limitation.Representation != "formalization.json" || ref.Limitation.Side != "preview" {
@@ -210,6 +222,8 @@ func TestProjection944WholeQuestionByteCeilings(t *testing.T) {
 			t.Fatal("question recovery changed sources, option or receipt identities", err)
 		}
 		after, _ := encode(result)
-		if !bytes.Equal(original, after) { t.Fatal("saving mutated the complete question") }
+		if !bytes.Equal(original, after) {
+			t.Fatal("saving mutated the complete question")
+		}
 	}
 }
