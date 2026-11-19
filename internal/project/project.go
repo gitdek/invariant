@@ -91,13 +91,24 @@ type Ratification struct {
 }
 
 // ProposalHash identifies what a person ratifies: the bounds, and every
-// statement with its plain-language meaning and its pin. A ratifying comment
-// names it, and anyone can recompute it from the lock.
+// statement with its plain-language meaning, its pin and its layout pin. A
+// ratifying comment names it, and anyone can recompute it from the lock. A
+// layout pin added by migration to a lock ratified before layout pins is
+// left out, since no one ratified it: that lock keeps the proposal its
+// comment or decision names (#814).
 func ProposalHash(bounds map[string]string, statements []Statement) string {
+	var ratified []Statement
+	if statements != nil {
+		ratified = make([]Statement, len(statements))
+		for i, s := range statements {
+			s.MigratedLayout = ""
+			ratified[i] = s
+		}
+	}
 	b, _ := json.Marshal(struct {
 		Bounds     map[string]string `json:"bounds"`
 		Statements []Statement       `json:"statements"`
-	}{bounds, statements})
+	}{bounds, ratified})
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
@@ -129,12 +140,22 @@ var Model = map[string]bool{"Init": true, "Next": true}
 
 // Statement is one ratified formal statement.
 type Statement struct {
-	Name         string `json:"name"`
-	Kind         string `json:"kind"`
-	Says         string `json:"says"`                    // the plain-language meaning a person ratified
-	Expect       string `json:"expect,omitempty"`        // for a bug: the invariant or property it must violate
-	SHA256       string `json:"sha256"`                  // the pin: tla.PinHash of the statement
-	CodeBehavior string `json:"code_behavior,omitempty"` // bugs only: current or hypothetical; omission preserves legacy locks
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Says   string `json:"says"`             // the plain-language meaning a person ratified
+	Expect string `json:"expect,omitempty"` // for a bug: the invariant or property it must violate
+	SHA256 string `json:"sha256"`           // the pin: tla.PinHash of the statement
+	// Layout is the layout pin, tla.LayoutHash of the statement: where each
+	// token of it and of what it depends on is, which its pin leaves out
+	// and TLA+ reads a bulleted list by (#814). The proposal hashes it.
+	// MigratedLayout is the layout pin a lock ratified before layout pins
+	// gained by migration, from the model at the commit that recorded its
+	// ratification. The proposal leaves it out, and CI holds it to that
+	// commit. A lock holds one kind or the other for every statement, or
+	// neither, when it pins no layout yet; omission preserves legacy locks.
+	Layout         string `json:"layout,omitempty"`
+	MigratedLayout string `json:"migrated_layout,omitempty"`
+	CodeBehavior   string `json:"code_behavior,omitempty"` // bugs only: current or hypothetical; omission preserves legacy locks
 }
 
 // Project is a loaded project.
@@ -186,6 +207,9 @@ func (p *Project) validate() error {
 	}
 	if len(l.Bounds) == 0 {
 		return fmt.Errorf("%s: no bounds; TLC needs finite bounds to check", lockFile)
+	}
+	if err := validLayouts(l); err != nil {
+		return err
 	}
 	if err := validBounds(l.Bounds); err != nil {
 		return err
@@ -332,8 +356,13 @@ func (p *Project) Pinned(src string) (map[string]bool, error) {
 	return pinned, nil
 }
 
-// Pin records the current text of every ratified statement in the lock file.
-// Only a person runs this, when they ratify; it returns what changed.
+// Pin records the current text and layout of every ratified statement in
+// the lock file. Only a person runs this, when they ratify; it returns the
+// statements whose pin or layout pin changed. A lock that records a change
+// records every statement's layout pin with it, as a ratification does, in
+// place of any migrated one. A lock nothing changed in keeps its layout pins
+// as they are, or none: MigrateLayouts adds a lock's layout pins without a
+// new ratification (#814).
 func (p *Project) Pin() ([]string, error) {
 	src, err := os.ReadFile(p.ModulePath())
 	if err != nil {
@@ -343,22 +372,27 @@ func (p *Project) Pin() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	pinned := p.Lock.LayoutState() != LayoutUnpinned
+	pins, layouts := make([]string, len(p.Lock.Statements)), make([]string, len(p.Lock.Statements))
 	var changed []string
 	for i, s := range p.Lock.Statements {
-		h, err := model.PinHash(s.Name, Model)
-		if err != nil {
+		if pins[i], err = model.PinHash(s.Name, Model); err != nil {
 			return nil, err
 		}
-		if h != s.SHA256 {
-			p.Lock.Statements[i].SHA256 = h
+		if layouts[i], err = model.LayoutHash(s.Name, Model); err != nil {
+			return nil, err
+		}
+		if pins[i] != s.SHA256 || (pinned && layouts[i] != s.LayoutPin()) {
 			changed = append(changed, s.Name)
 		}
 	}
-	b, err := json.MarshalIndent(p.Lock, "", "  ")
-	if err != nil {
-		return nil, err
+	if len(changed) > 0 {
+		for i := range p.Lock.Statements {
+			s := &p.Lock.Statements[i]
+			s.SHA256, s.Layout, s.MigratedLayout = pins[i], layouts[i], ""
+		}
 	}
-	return changed, os.WriteFile(filepath.Join(p.Dir, lockFile), append(b, '\n'), 0o644)
+	return changed, p.writeLock()
 }
 
 func readJSON(path string, v any) error {

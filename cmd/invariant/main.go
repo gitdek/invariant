@@ -8,7 +8,8 @@
 //	invariant check-repository [HEAD]    run a repository's committed checks and native acceptance
 //	invariant check-macos [HEAD]         run the checks of a repository's parts that build on macOS, on macOS
 //	invariant ratification -repo R DIR   check a factory project's ratification on GitHub
-//	invariant pin DIR                    record the current statement text as ratified
+//	invariant pin DIR                    record the current statement text and layout as ratified
+//	invariant pin -layout DIR...         migrate a lock ratified before layout pins
 //	invariant trace FILE                 replay a counterexample trace
 //	invariant decisions ...              record decisions and ask what rests on them
 //	invariant mcp ...                    serve the gate, the check or the decision graph to an agent
@@ -78,7 +79,9 @@ Usage:
   invariant decisions COMMAND ...              record decisions and ask what rests on them
   invariant mcp [-decisions [-write]] ...      serve the gate, the check or the decision graph to a coding agent;
                                                invariant mcp -h lists its forms
-  invariant pin PROJECT                        record the statements' current text as ratified
+  invariant pin PROJECT                        record the statements' current text and layout as ratified
+  invariant pin -layout PROJECT...             give locks ratified before layout pins their layout pins,
+                                               from the commit that recorded each one's ratification
   invariant trace FILE                         replay a counterexample trace
   invariant dashboard -repo OWNER/NAME [-repo OWNER/NAME]... [-work DIR]... [-addr HOST:PORT]
                                                serve a live view of the factory and its evidence
@@ -195,6 +198,9 @@ func pinCmd(args []string) int {
 		fmt.Print(usage)
 		return 0
 	}
+	if len(args) > 0 && args[0] == "-layout" {
+		return pinLayoutCmd(context.Background(), args[1:])
+	}
 	if len(args) != 1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -204,16 +210,23 @@ func pinCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
+	pinned := p.Lock.LayoutState()
 	changed, err := p.Pin()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "invariant:", err)
 		return 2
 	}
-	if len(changed) == 0 {
-		fmt.Println("Every pin already matches the statements' text.")
-	} else {
+	switch {
+	case len(changed) > 0:
 		fmt.Printf("Pinned the current text of: %s.\n", strings.Join(changed, ", "))
+		if pinned != project.LayoutRatified {
+			fmt.Println("The lock now pins every statement's layout with its text, and its proposal covers both (#814).")
+		}
 		fmt.Println("Pinning records a ratification. The decision it ratifies is recorded with `invariant decisions decide`.")
+	case pinned == project.LayoutUnpinned:
+		fmt.Println("Every pin already matches the statements' text. The lock pins no layout yet: `invariant pin -layout " + args[0] + "` adds its layout pins from the model at the commit that recorded its ratification, which needs no new ratification (#814).")
+	default:
+		fmt.Println("Every pin and layout pin already matches the statements.")
 	}
 	// A lock ratified by hand holds only for the proposal its decision's
 	// ratify line names, so the person needs its hash (D-0208).
@@ -221,6 +234,38 @@ func pinCmd(args []string) int {
 		fmt.Println(pinHint(context.Background(), args[0], p.Lock.Decision, project.ProposalHash(p.Lock.Bounds, p.Lock.Statements)))
 	}
 	return 0
+}
+
+// pinLayoutCmd migrates the locks of projects ratified before layout pins
+// (#814): each gains the layout pin of every statement, from the model at
+// the commit that recorded its ratification, which changes no pin and no
+// proposal. A lock that already pins its layouts is left as it is.
+func pinLayoutCmd(ctx context.Context, dirs []string) int {
+	if len(dirs) == 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	code := 0
+	for _, dir := range dirs {
+		p, err := project.Load(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invariant: %s: %v\n", dir, err)
+			code = 2
+			continue
+		}
+		if state := p.Lock.LayoutState(); state != project.LayoutUnpinned {
+			fmt.Printf("%s: the lock already pins its statements' layouts (%s).\n", dir, state)
+			continue
+		}
+		commit, err := p.MigrateLayouts(ctx)
+		if err != nil {
+			fmt.Printf("❌ %s: %v\n", dir, err)
+			code = 1
+			continue
+		}
+		fmt.Printf("✅ %s: pinned the layout of %d statements, from the model at %s, which recorded the lock's ratification. Its pins and proposal are unchanged.\n", dir, len(p.Lock.Statements), commit)
+	}
+	return code
 }
 
 func traceCmd(args []string) int {
@@ -486,7 +531,9 @@ func mcpCmd(ctx context.Context, args []string) int {
 			if err != nil {
 				return "The gate couldn't assemble your project: " + err.Error(), true
 			}
-			r, err := verify.Run(ctx, proj, "", tc)
+			// The gate runs on a copy, so where a pinned statement's layout
+			// moved is named from the ratified project (#814).
+			r, err := verify.Run(ctx, proj, "", tc, verify.Options{Ratified: p.Dir})
 			if err != nil {
 				// The agent works on its own copy, not the gate's, and the
 				// build's record, which keeps this log, is public (#922).
@@ -1212,6 +1259,13 @@ func ratificationCmd(ctx context.Context, args []string) int {
 			code = 2
 			continue
 		}
+		// Only a new ratification changes a layout pin: a migrated one is
+		// held to the commits that recorded the lock's proposal (#814).
+		if err := project.CheckLayouts(ctx, dir, p.Lock); err != nil {
+			fmt.Printf("❌ %s: its layout pins: %v\n", dir, err)
+			code = 1
+			continue
+		}
 		r := p.Lock.Ratified
 		switch {
 		case r == nil:
@@ -1221,17 +1275,29 @@ func ratificationCmd(ctx context.Context, args []string) int {
 				code = 1
 				continue
 			}
-			fmt.Printf("✅ %s: ratified by hand by %s, as %s records (%s)\n", dir, hand.By, p.Lock.Decision, hand.Proposal)
+			fmt.Printf("✅ %s: ratified by hand by %s, as %s records (%s)%s\n", dir, hand.By, p.Lock.Decision, hand.Proposal, layoutNote(p.Lock))
 		default:
 			if err := settled(ctx, func() error { return factory.VerifyRatification(ctx, gh, *repo, p.Lock) }); err != nil {
 				fmt.Printf("❌ %s: %v\n", dir, err)
 				code = 1
 				continue
 			}
-			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)\n", dir, r.By, r.Issue, r.Comment)
+			fmt.Printf("✅ %s: ratified by @%s on #%d (%s)%s\n", dir, r.By, r.Issue, r.Comment, layoutNote(p.Lock))
 		}
 	}
 	return code
+}
+
+// layoutNote says how a lock the ratification check passed pins its
+// statements' layouts (#814).
+func layoutNote(l project.Lock) string {
+	switch l.LayoutState() {
+	case project.LayoutRatified:
+		return ", layout ratified"
+	case project.LayoutMigrated:
+		return ", layout migrated from the commit that recorded it"
+	}
+	return ", layout not pinned yet"
 }
 
 // ratificationWait is how long the ratification check waits before it asks

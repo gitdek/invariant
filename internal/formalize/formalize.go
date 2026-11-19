@@ -300,6 +300,11 @@ func (p *Proposal) PinAmending(amended []project.Statement) error {
 		}
 		return fmt.Errorf("%s.tla must begin with ---- MODULE %s ----", p.Module, p.Module)
 	}
+	// A statement's layout pin is the gate's to record, below, whatever a
+	// draft says of it (#814).
+	for i := range p.Statements {
+		p.Statements[i].Layout, p.Statements[i].MigratedLayout = "", ""
+	}
 	if err := project.Validate(p.Manifest(), project.Lock{Bounds: p.Bounds, Statements: p.Statements}); err != nil {
 		return err
 	}
@@ -310,12 +315,18 @@ func (p *Proposal) PinAmending(amended []project.Statement) error {
 	if err != nil {
 		return fmt.Errorf("%s.tla: %w", p.Module, err)
 	}
+	// A proposal pins each statement's layout with its text, so the layout
+	// a person sees is the layout they ratify.
 	for i, s := range p.Statements {
 		h, err := model.PinHash(s.Name, project.Model)
 		if err != nil {
 			return fmt.Errorf("statement %s: %w", s.Name, err)
 		}
-		p.Statements[i].SHA256 = h
+		layout, err := model.LayoutHash(s.Name, project.Model)
+		if err != nil {
+			return fmt.Errorf("statement %s: %w", s.Name, err)
+		}
+		p.Statements[i].SHA256, p.Statements[i].Layout = h, layout
 	}
 	carried := map[string]project.Statement{}
 	for _, s := range amended {
@@ -324,8 +335,18 @@ func (p *Proposal) PinAmending(amended []project.Statement) error {
 		}
 	}
 	for _, s := range p.Statements {
-		if s.Kind != project.Bug || s.CodeBehavior != "" || carried[s.Name] == s {
+		if s.Kind != project.Bug || s.CodeBehavior != "" || carriedAsIs(carried[s.Name], s) {
 			continue
+		}
+		// A bug the draft keeps word for word, whose layout alone moved,
+		// is changed too: the refusal says so, so a drafter puts its lines
+		// back rather than classifying it.
+		if was, ok := carried[s.Name]; ok && was.LayoutPin() != "" {
+			moved := s
+			moved.Layout = was.LayoutPin()
+			if carriedAsIs(was, moved) {
+				return fmt.Errorf("statement %s: an amendment must classify each bug it adds or changes with code_behavior current or hypothetical, and this draft moves a token of %s or of what it depends on, which changes it: keep its lines where the lock has them to carry it as it is (#814)", s.Name, s.Name)
+			}
 		}
 		if len(amended) > 0 {
 			return fmt.Errorf("statement %s: an amendment must classify each bug it adds or changes with code_behavior current or hypothetical", s.Name)
@@ -334,6 +355,18 @@ func (p *Proposal) PinAmending(amended []project.Statement) error {
 	}
 	p.Hash = project.ProposalHash(p.Bounds, p.Statements)
 	return nil
+}
+
+// carriedAsIs says whether a draft keeps a statement exactly as the lock it
+// amends has it: its name, kind, words, what it must break and its pin, and
+// its layout pin when the lock pins one, ratified or migrated. A draft
+// always pins the layout, so a lock that pins none yet can't differ by it.
+func carriedAsIs(lock, draft project.Statement) bool {
+	if lock.LayoutPin() != "" && lock.LayoutPin() != draft.Layout {
+		return false
+	}
+	lock.Layout, lock.MigratedLayout, draft.Layout, draft.MigratedLayout = "", "", "", ""
+	return lock == draft
 }
 
 // Manifest is the project's manifest. TypeScript lives in src and Python in

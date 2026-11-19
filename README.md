@@ -116,7 +116,7 @@ The factory owns both the model and the code, and each Go method's contract rest
 
 | Check | Tool | Fails when |
 | :-- | :-- | :-- |
-| Pins | Invariant | A ratified statement's text, or anything it depends on, has changed, or the model holds text [TLC would read differently](docs/gate.md#how-the-gate-reads-a-model) from the gate |
+| Pins | Invariant | A ratified statement's text, or anything it depends on, has changed, or [a token of it moved](docs/gate.md#layout-pins), since TLA+ reads a bulleted list by its columns, or the model holds text [TLC would read differently](docs/gate.md#how-the-gate-reads-a-model) from the gate |
 | Design | TLA+ · TLC | An invariant is violated, or the system can deadlock, within the ratified bounds |
 | Design at every size | TLAPS | A ratified invariant the project selects for TLAPS isn't proved of the model at every size, or its proof leans on something the gate refuses |
 | Reachability | TLA+ · TLC | A ratified witness can't be reached, so the invariants might hold only because nothing happens |
@@ -131,7 +131,7 @@ The factory owns both the model and the code, and each Go method's contract rest
 | Build | vet · tests | Anything is red. Runs in a sandbox with no network and no secrets. |
 | Build on macOS | go · a hosted Mac | A part the contract says [builds on macOS](docs/factory.md#parts-that-build-on-macos) doesn't build, vet or pass its tests and declared checks there, in the gate's second job. Linux skips its files, so the Linux job never claims it |
 | Scope | Invariant | A factory pull request changes anything outside its one project, or a plumbing one outside its plan and regression allowance, adds a dependency, uses cgo, edits CI config outside the [configured native exception](docs/factory.md#configured-trust-and-publication), or changes a ratified lock without its own issue's ratification |
-| Ratification | Invariant · GitHub | A project's lock or a plan isn't exactly the proposal a person with write access ratified on its issue, or, for a lock ratified by hand, the one a person's ratification in the journal names |
+| Ratification | Invariant · GitHub | A project's lock or a plan isn't exactly the proposal a person with write access ratified on its issue, or, for a lock ratified by hand, the one a person's ratification in the journal names, or a layout pin [migrated into a lock](docs/gate.md#pinning-another-repositorys-layouts) isn't the one the commit that recorded its ratification gives |
 
 Every pull request whose gate runs carries a receipt that CI generates from tool output. It lists the states explored and the bounds they cover, the functions verified, the statement hashes, and the tool versions. The factory never writes its own receipt.
 
@@ -233,7 +233,7 @@ The run prints a receipt. This is the real one for the [two-phase commit example
 
 | Check | Result | Evidence |
 | :-- | :-- | :-- |
-| Pinned statements | ✅ 6 of 6 match | ratified by @gitdek on [#65](https://github.com/gitdek/invariant/issues/65#issuecomment-5875563672), amending D-0027 |
+| Pinned statements | ✅ 6 of 6 match; 6 of 6 layouts match | ratified by @gitdek on [#65](https://github.com/gitdek/invariant/issues/65#issuecomment-5875563672), amending D-0027 |
 | Design · TLC | ✅ no violations, no deadlock | 288 distinct states (1,146 generated), depth 11 |
 | Reachability | ✅ 2 of 2 witnesses reached | `AllCommitted` in 10 steps, `AllAborted` in 3 steps |
 | Known bugs | ✅ 1 of 1 caught | early-commit: `TCConsistent` violated after 5 steps; not replayed: not classified |

@@ -15,6 +15,12 @@ type Options struct {
 	// TLCParallel is an optional lowering limit on automatic TLC concurrency.
 	// Zero selects automatically from Docker capacity; negatives are refused.
 	TLCParallel int
+	// Ratified is a directory that holds the project as it was ratified,
+	// for a gate run on a copy assembled elsewhere, such as a synthesis
+	// agent's. When a statement's layout moved, the gate reads the model
+	// there, and the commits in its history that recorded the lock's
+	// proposal, to name where (#814). It never changes the verdict.
+	Ratified string
 }
 
 func gateOptions(options []Options) (Options, error) {

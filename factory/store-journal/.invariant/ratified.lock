@@ -15,58 +15,67 @@
       "name": "Spec",
       "kind": "spec",
       "says": "Checkouts start with no lines, and the store's journal starts empty. Checkouts write lines, which the store journals, take each other's lines in through main, and can be abandoned; the store's project can be rebuilt from any checkout.",
-      "sha256": "sha256:560d1a79c0f75f36efd436587d23f8f3e5ddb5dddd20b745580ea80830ec8412"
+      "sha256": "sha256:560d1a79c0f75f36efd436587d23f8f3e5ddb5dddd20b745580ea80830ec8412",
+      "migrated_layout": "sha256:560d1a79c0f75f36efd436587d23f8f3e5ddb5dddd20b745580ea80830ec8412"
     },
     {
       "name": "TypeOK",
       "kind": "invariant",
       "says": "The store's journal and each checkout hold lines, each checkout has written a bounded number, and some checkouts may be abandoned.",
-      "sha256": "sha256:eec8c4db980918df444f384b8eb66399df907a87bb53e32e30caf2ab7a2a66ea"
+      "sha256": "sha256:eec8c4db980918df444f384b8eb66399df907a87bb53e32e30caf2ab7a2a66ea",
+      "migrated_layout": "sha256:5f0178f6289db085a5f9582e37c4a2124b6b46dbb6bc358a408d57b75f3161c8"
     },
     {
       "name": "StoreOnlyGrows",
       "kind": "invariant",
       "says": "The store's journal only grows: every line it ever held, it holds now.",
-      "sha256": "sha256:def95178da44767652fe3b2b4a769b933a1557c2be3dac12f713337fe777d7d1"
+      "sha256": "sha256:def95178da44767652fe3b2b4a769b933a1557c2be3dac12f713337fe777d7d1",
+      "migrated_layout": "sha256:def95178da44767652fe3b2b4a769b933a1557c2be3dac12f713337fe777d7d1"
     },
     {
       "name": "KeepsEveryLine",
       "kind": "invariant",
       "says": "The store keeps every line any checkout wrote, including the lines of branches that were never merged.",
-      "sha256": "sha256:aa875d3a022e4c467a570dc1479e2ad425dafaa4d04999b5cdf4d809ac54a185"
+      "sha256": "sha256:aa875d3a022e4c467a570dc1479e2ad425dafaa4d04999b5cdf4d809ac54a185",
+      "migrated_layout": "sha256:aa875d3a022e4c467a570dc1479e2ad425dafaa4d04999b5cdf4d809ac54a185"
     },
     {
       "name": "KeptAbandoned",
       "kind": "witness",
       "says": "The store can keep the lines of a branch that was abandoned.",
-      "sha256": "sha256:10dc5fd1a7353f6aee30081f39065bb5d682885ad6d11c8b7a70af17a5ad7ca3"
+      "sha256": "sha256:10dc5fd1a7353f6aee30081f39065bb5d682885ad6d11c8b7a70af17a5ad7ca3",
+      "migrated_layout": "sha256:10dc5fd1a7353f6aee30081f39065bb5d682885ad6d11c8b7a70af17a5ad7ca3"
     },
     {
       "name": "RebuiltFromOther",
       "kind": "witness",
       "says": "Both checkouts can write lines, and one can take in the other's, as a merge through main brings them.",
-      "sha256": "sha256:ab1cd6552970d766c786eb7a7c31bfff316fac09219211cca2a5a029d35b4524"
+      "sha256": "sha256:ab1cd6552970d766c786eb7a7c31bfff316fac09219211cca2a5a029d35b4524",
+      "migrated_layout": "sha256:a499f9613cede0510978a03ea32fddf75565c69cb970b5c72b3a02e68d5146c3"
     },
     {
       "name": "RebuildReplaces",
       "kind": "bug",
       "says": "A rebuild replaces the store's journal with what one checkout holds, dropping the lines only other branches have.",
       "expect": "StoreOnlyGrows",
-      "sha256": "sha256:4abab341797e49afe37bfe40258c1a65d8cb8b773fa89090d8ece359e5354ce3"
+      "sha256": "sha256:4abab341797e49afe37bfe40258c1a65d8cb8b773fa89090d8ece359e5354ce3",
+      "migrated_layout": "sha256:9e8ec730f2d7603b31e4b133386c672d769b2bd174be0bf1147ade27a8d0a4d7"
     },
     {
       "name": "AbandonDrops",
       "kind": "bug",
       "says": "Abandoning a branch drops its lines from the store.",
       "expect": "StoreOnlyGrows",
-      "sha256": "sha256:16224da10ce8eeeac83316ac6bfbe33067869a750a0e41a401a94b0910de180c"
+      "sha256": "sha256:16224da10ce8eeeac83316ac6bfbe33067869a750a0e41a401a94b0910de180c",
+      "migrated_layout": "sha256:c9650a763154bbe2c93bf84d835c4cf7212c68f0990923668996a2ac3c29e45b"
     },
     {
       "name": "WriteNotJournaled",
       "kind": "bug",
       "says": "A checkout writes a line the store never journals.",
       "expect": "KeepsEveryLine",
-      "sha256": "sha256:ecc2f0f813e172dd440523ae40ff8a598200d9c6935cb2bd338895abaa2335b3"
+      "sha256": "sha256:ecc2f0f813e172dd440523ae40ff8a598200d9c6935cb2bd338895abaa2335b3",
+      "migrated_layout": "sha256:6e2fd6f0d745ff284fd3203feaf45758a94986625b47165b33a1a2db7d908aa0"
     }
   ]
 }
