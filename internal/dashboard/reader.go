@@ -216,11 +216,18 @@ func (e readerEvidence) check(comparison *readerComparisonPresentation) (status,
 		return bad("artifact_mismatch", "The archived reader.json differs from the receipt's checked reader record.")
 	}
 	if wire.ComparisonRef != nil {
+		resolved := display.Comparison
 		display = wire
 		if diagnostic != nil {
 			display.ComparisonDiagnostic = diagnostic
 		} else {
-			comparisonMessage = "Comparison unavailable: combined " + readerLimitCause(wire.ComparisonRef.Limitation) + "."
+			// The receipt keeps its comparison by reference because the whole
+			// receipt overflowed. The comparison's own limited sides or
+			// overflow, when it has any, are why it isn't drawn.
+			comparisonMessage = comparisonUnavailable(resolved)
+			if comparisonMessage == "" {
+				comparisonMessage = "Comparison unavailable: combined " + readerLimitCause(wire.ComparisonRef.Limitation) + "."
+			}
 			if comparison != nil {
 				comparison.Message = comparisonMessage
 				comparison.Details.Notes = append(comparison.Details.Notes, wire.ComparisonNotes()...)
@@ -576,7 +583,7 @@ const readerIdentityTemplate = `<!doctype html>
 const readerHTML = `<!doctype html>
 <html lang="en"><head>` + evidenceHead + `<title>{{.Evidence.Manifest.Name}} — reader evidence</title></head>
 <body><main>{{template "top" .View}}
-<div class="hero">{{template "hero" .View}}<p class="lede" data-reader-reason>{{.Lede}}</p>{{template "reader-details" .Details}}{{template "links" .View}}</div>
+<div class="hero">{{template "hero" .View}}<p class="lede" data-reader-reason>{{.Lede}}</p>{{if or .Details.Notes .Details.Record}}{{template "reader-details" .Details}}{{end}}{{template "links" .View}}</div>
 {{if and .Comparison.Message (ne .Comparison.Message .Lede)}}<section><h2>Retained proposal comparison</h2><p data-reader-reason>{{.Comparison.Message}}</p>{{template "reader-details" .Comparison.Details}}</section>{{else if .Evidence.Report}}{{with .Evidence.Report.Reader}}{{if .Comparison}}<section><h2>Retained proposal comparison</h2><p class="note">Proposal sources and independently checked final sources are identified in the folded evidence.</p></section>{{end}}{{end}}{{end}}
 <div class="chart">{{if .Posters}}<picture><source media="(prefers-reduced-motion: reduce)" srcset="{{.Posters.Still}}"><img class="poster" src="{{.Posters.Animated}}" alt="Checked reader chart for {{.Evidence.Manifest.Name}}"></picture>
 <p><a href="{{.Presentation.SVG}}">Open the complete evidence image, with the full report</a></p>{{else if .Presentation.SVG}}<p><a href="{{.Presentation.SVG}}">Open the retained proposal comparison at full size</a></p><img src="{{.Presentation.SVG}}" alt="Retained proposal comparison for {{.Evidence.Manifest.Name}}">{{end}}</div>
@@ -669,6 +676,11 @@ func makeReader(e readerEvidence) readerPage {
 		// The comparison's own section folds the complete evidence too, so
 		// its proposal sources stay beside the independently checked final ones.
 		comparison.Details = details
+		if status == "chart" {
+			// Its reason sits right below the final chart's sentence, so the
+			// page folds that one complete record once, not twice.
+			details = readerDetails{}
+		}
 	}
 	var b bytes.Buffer
 	_ = readerTemplate.Execute(&b, struct {

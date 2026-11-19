@@ -2,10 +2,12 @@ package dashboard
 
 import (
 	"bytes"
+	"path"
 	"strings"
 	"testing"
 
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/receipt"
 	"github.com/gitdek/invariant/internal/statechart"
 )
 
@@ -240,6 +242,15 @@ func TestReader963ReceiptLeadsWithItsFinalModel(t *testing.T) {
 				t.Error("the comparison's reason and evidence must sit in its own section")
 			}
 			reader963Words(t, fold.words(true), "Independently checked final model", f.Report.Reader.Inputs.Model)
+			folds := 0
+			for _, d := range n.all("details") {
+				if _, ok := d.attrs["data-reader-details"]; ok {
+					folds++
+				}
+			}
+			if folds != 1 {
+				t.Errorf("the page folds its complete evidence %d times, want once", folds)
+			}
 			if c != nil {
 				reader963Words(t, fold.words(true), c.Baseline.Name, c.Candidate.Name, c.BaselineIdentity.ModelSHA256, c.CandidateIdentity.ViewSHA256, c.Fingerprint)
 			} else {
@@ -247,5 +258,60 @@ func TestReader963ReceiptLeadsWithItsFinalModel(t *testing.T) {
 			}
 			receipt723Topology(t, receipt723HTTP(t, s, p.SVG), f.Report.Reader.Chart)
 		})
+	}
+}
+
+// A receipt too large to hold its comparison inline keeps it by reference.
+// That storage isn't why the comparison can't be drawn when one of its own
+// sides is limited: the sentence names that side, then the comparison's own
+// combined overflow, as a proposal page does.
+func TestReader963ReferencedComparisonNamesItsLimitedSide(t *testing.T) {
+	baseline := receipt723Snapshot(reader631FixtureFor(t, 1, "Captured baseline"), "Baseline")
+	candidate := receipt723Snapshot(reader631FixtureFor(t, 501, "Captured candidate"), "Candidate")
+	comment := "\n\\* " + strings.Repeat("x", 31<<20) + "\n"
+	baseline.Model += comment
+	candidate.Model += comment
+	c, err := statechart.Compare(baseline, candidate)
+	if err != nil || c.Volume() == nil || c.Candidate.Limitation == nil || c.Baseline.Chart == nil {
+		t.Fatal("comparison must limit its candidate and overflow as a whole", err)
+	}
+	captured, companions, err := statechart.ComparisonFiles(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := dashboard944Fixture(t, 501, "Independent final")
+	f.Report.Reader.Comparison = c
+	f.bind(t)
+	dir := t.TempDir()
+	if err := receipt.Write(dir, f.Report); err != nil {
+		t.Fatal(err)
+	}
+	set, err := readReceiptZip(dashboard944Zip(t, dir))
+	if err != nil || set.reports["reader"] == nil || set.reports["reader"].Reader == nil {
+		t.Fatal("archive lost its reader", err)
+	}
+	files := map[string][]byte{}
+	for name, data := range f.Files {
+		if path.Dir(name) == path.Dir(f.Manifest.Module) && strings.HasSuffix(name, ".tla") {
+			files[path.Base(name)] = data
+		}
+	}
+	e := readerEvidence{Format: readerFormat, Repo: receipt723RepoName, Dir: f.Dir, Commit: receipt723Commit,
+		Manifest: f.Manifest, Lock: f.Lock, ManifestBytes: f.Files[".invariant/invariant.json"], LockBytes: f.Files[".invariant/ratified.lock"],
+		Files: files, View: f.Files[".invariant/view.json"], Comparison: captured, ComparisonCompanions: companions,
+		Report: set.reports["reader"], Artifacts: set.readers["reader"]}
+	if _, ok := e.Artifacts.Companions["reader-comparison.json"]; !ok {
+		t.Fatal("receipt must keep its comparison by reference")
+	}
+	p := makeReader(e).presentation
+	if p.Status != "chart" || p.SVG == "" {
+		t.Fatalf("final chart must draw beside its referenced comparison: %+v", p)
+	}
+	if len([]rune(p.Message)) > 420 || strings.Contains(p.Message, "sha256:") || strings.Contains(p.Message, "too_large") {
+		t.Errorf("reason is not a concise human-readable explanation: %q", p.Message)
+	}
+	reader963Words(t, p.Message, "Comparison unavailable", "candidate", "501", "earlier", "fresh", "combined", "baseline view checked")
+	if side, combined := strings.Index(p.Message, "candidate"), strings.Index(p.Message, "combined"); side < 0 || combined < side {
+		t.Errorf("the limited side must be named before the combined overflow: %q", p.Message)
 	}
 }
