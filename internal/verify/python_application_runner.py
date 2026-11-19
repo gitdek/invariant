@@ -1,22 +1,288 @@
 """Controlled startup and per-test observations for a prepared application."""
 
+import atexit
+import json
+import os
+import fcntl
+import select
+import signal
+import socket
+import stat
+import sys
+import time
+
+
+watchdog = sys.argv[1] == "--lifetime-watchdog"
+with open(sys.argv[2] if watchdog else sys.argv[1], encoding="utf-8") as stream:
+    request = json.load(stream)
+
+
+def lifetime_lease():
+    lease = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lifetime")
+    prefix = request["execution"].encode("ascii") + b" "
+    fd = os.open(lease, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("Python application lifetime lease is not a regular file")
+        value = os.read(fd, 256)
+        if not value.startswith(prefix) or not value[len(prefix):].strip().isdigit():
+            raise ValueError("Python application lifetime lease is invalid")
+        return value
+    finally:
+        os.close(fd)
+
+
+def watch_lifetime(configuration):
+    runner, launcher = configuration["runner"], configuration["launcher"]
+    control = socket.socket(fileno=configuration["control"])
+    peer = socket.socket(fileno=configuration["peer"])
+    control.settimeout(3)
+    peer.settimeout(0.5)
+    other = None
+    clean = False
+    try:
+        control.sendall(str(os.getpid()).encode("ascii"))
+        other = int(control.recv(64))
+        parent_events = None
+        if hasattr(select, "kqueue"):
+            # A PID probe alone still finds a dead parent until it is reaped.
+            parent_events = select.kqueue()
+            parent_events.control([select.kevent(launcher, filter=select.KQ_FILTER_PROC,
+                                                 flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                                 fflags=select.KQ_NOTE_EXIT)], 0, 0)
+        elif not sys.platform.startswith("linux"):
+            raise ValueError("Python application parent lifetime monitoring is unavailable")
+        previous = configuration["initial"].encode("ascii")
+        changed = heard = time.monotonic()
+        ready = finalizing = stopping = peer_stopping = False
+        while True:
+            if os.getppid() != runner:
+                break
+            now = time.monotonic()
+            if not stopping:
+                os.kill(launcher, 0)
+                if parent_events is not None and parent_events.control(None, 1, 0):
+                    raise ValueError("Python application runner's parent exited")
+                if sys.platform.startswith("linux"):
+                    with open("/proc/%d/stat" % runner) as stream:
+                        fields = stream.read().rsplit(") ", 1)[1].split()
+                    if int(fields[1]) != launcher:
+                        raise ValueError("Python application runner lost its parent")
+                    with open("/proc/%d/stat" % launcher) as stream:
+                        state = stream.read().rsplit(") ", 1)[1].split()[0]
+                    if state in ("Z", "X"):
+                        raise ValueError("Python application runner's parent exited")
+                value = lifetime_lease()
+                if value != previous:
+                    previous, changed = value, now
+                    if not ready:
+                        control.sendall(b"R")
+                        ready = True
+                if now - changed >= 3:
+                    raise ValueError("Python application session owner stopped renewing its lease")
+            if now - heard >= 3:
+                raise ValueError("Python application lifetime watchdog stopped responding")
+            readable = select.select([control, peer, 0], [], [], 0.1)[0]
+            if control in readable:
+                if control.recv(1) != b"F" or not ready or finalizing:
+                    raise ValueError("Python application lifetime control failed")
+                finalizing = True
+                control.sendall(b"D")
+            if 0 in readable:
+                # Only native pclose closes this pipe: Python's atexit and
+                # all interpreter finalization still have lifetime protection.
+                if os.read(0, 1) or not finalizing:
+                    raise ValueError("Python application lifetime shutdown failed")
+                if not stopping:
+                    stopping = True
+                    peer.sendall(b"S")
+            if peer in readable:
+                message = peer.recv(1024)
+                if not message or any(c not in b"HS" for c in message):
+                    raise ValueError("Python application lifetime watchdog failed")
+                heard = time.monotonic()
+                peer_stopping = peer_stopping or b"S" in message
+                if peer_stopping and not stopping:
+                    if not finalizing:
+                        raise ValueError("Python application lifetime watchdog stopped early")
+                    stopping = True
+                    peer.sendall(b"S")
+            if stopping and peer_stopping:
+                os.pwrite(configuration["held"], b"1", configuration["index"] + 1)
+                clean = True
+                break
+            if not stopping:
+                peer.sendall(b"H")
+            time.sleep(max(0, now + 0.1 - time.monotonic()))
+    except BaseException:
+        # Do not wait on application output pipes to stop a failed run.
+        pass
+    finally:
+        if not clean:
+            # Stop the runner before the peer, including simultaneous failures.
+            try:
+                if os.getppid() == runner:
+                    os.kill(runner, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # A stopped peer can retain the lock and pipes after runner death.
+            if other is not None:
+                try:
+                    os.kill(other, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        os._exit(0 if clean else 1)
+
+
+def protect_lifetime():
+    """Protect imports, execution and interpreter shutdown without the GIL.
+
+    Two independent watchdogs watch the changing lease and each other. Native
+    exit callbacks close their pipes and reap them after Python has finished
+    finalization. No Python callback can safely do that: even after atexit,
+    module cleanup can call application destructors that never return.
+    """
+    import ctypes
+    import shlex
+
+    held = os.open(os.path.join(os.path.dirname(request["output"]), "lifetime.lock"),
+                   os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(held).st_mode):
+        raise ValueError("Python application lifetime lock is not a regular file")
+    fcntl.flock(held, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    os.write(held, b"S00")
+    initial = lifetime_lease()
+    # Namespace init cannot be killed by a child. Keep it as a reaper for
+    # every invocation, including unittest and imports before the collector.
+    container = os.getpid() == 1
+    if container:
+        child = os.fork()
+        if child:
+            _, status = os.waitpid(child, 0)
+            os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
+    runner, launcher = os.getpid(), os.getppid()
+    if launcher <= 1 and not container:
+        raise ValueError("Python application runner has lost its parent")
+    controls = [socket.socketpair(), socket.socketpair()]
+    peers = socket.socketpair()
+    children = []
+    # Register libc's own pclose, never a ctypes callback into a finalized
+    # interpreter. The C++ exit ABI is available on both supported hosts.
+    native = ctypes.CDLL(None, use_errno=True)
+    native.popen.argtypes, native.popen.restype = [ctypes.c_char_p, ctypes.c_char_p], ctypes.c_void_p
+    native.pclose.argtypes, native.pclose.restype = [ctypes.c_void_p], ctypes.c_int
+    native.fileno.argtypes, native.fileno.restype = [ctypes.c_void_p], ctypes.c_int
+    native.__cxa_atexit.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    native.__cxa_atexit.restype = ctypes.c_int
+    native.__cxa_finalize.argtypes, native.__cxa_finalize.restype = [ctypes.c_void_p], None
+    registration = ctypes.c_byte()
+    token = ctypes.addressof(registration)
+
+    try:
+        for index in range(2):
+            ours, theirs = controls[index]
+            ours.settimeout(4)
+            configuration = dict(index=index, runner=runner, launcher=launcher, held=held,
+                                 control=theirs.fileno(), peer=peers[index].fileno(),
+                                 initial=initial.decode("ascii"))
+            # Only trusted watchdog arguments go through popen's shell. The
+            # application's argv never does, and paths are quoted literally.
+            args = [sys.executable, "-I", "-S", "-B", os.path.abspath(__file__),
+                    "--lifetime-watchdog", os.path.abspath(sys.argv[1]), json.dumps(configuration)]
+            inherited = [held, theirs.fileno(), peers[index].fileno()]
+            try:
+                for fd in inherited:
+                    os.set_inheritable(fd, True)
+                handle = native.popen(os.fsencode("exec " + shlex.join(args)), b"w")
+            finally:
+                for fd in inherited:
+                    os.set_inheritable(fd, False)
+            if not handle:
+                raise OSError(ctypes.get_errno(), "Python application lifetime watchdog failed to start")
+            if native.__cxa_atexit(native.pclose, handle, token) != 0:
+                native.pclose(handle)
+                raise ValueError("Python application lifetime cleanup could not be registered")
+            os.set_inheritable(native.fileno(handle), False)
+            children.append(int(ours.recv(64)))
+        for endpoint in peers:
+            endpoint.close()
+        for index, (ours, theirs) in enumerate(controls):
+            theirs.close()
+            ours.sendall(str(children[1 - index]).encode("ascii"))
+        for ours, _ in controls:
+            if ours.recv(1) != b"R":
+                raise ValueError("Python application lifetime watchdog failed to start")
+    except BaseException:
+        for child in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        native.__cxa_finalize(token)
+        raise
+
+    # Raw descriptors stay open through module cleanup, until native exit.
+    descriptors = [ours.detach() for ours, _ in controls]
+
+    def forked(registration=registration):
+        if not descriptors:
+            return
+        for fd in descriptors + [held]:
+            os.close(fd)
+        descriptors.clear()
+        # In the fork child pclose only closes its inherited pipe copies:
+        # the watchdog PIDs are not its children. Mark its callbacks as run.
+        native.__cxa_finalize(token)
+
+    os.register_at_fork(after_in_child=forked)
+
+    def finish():
+        # An application's fork child inherits exit handlers, but owns none
+        # of these watchdogs and must not stop its parent's protection.
+        if os.getpid() != runner:
+            return
+        sockets = []
+        try:
+            if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+                raise ValueError("Python application lifetime helpers cannot be reaped")
+            for child in children:
+                if os.waitpid(child, os.WNOHANG) != (0, 0):
+                    raise ValueError("Python application lifetime watchdog stopped early")
+            sockets = [socket.socket(fileno=fd) for fd in descriptors]
+            for ours in sockets:
+                ours.settimeout(4)
+                ours.sendall(b"F")
+            for ours in sockets:
+                if ours.recv(1) != b"D":
+                    raise ValueError("Python application lifetime watchdog failed during shutdown")
+        except BaseException:
+            # Python ignores exceptions raised by an atexit callback.
+            os._exit(1)
+        finally:
+            for ours in sockets:
+                ours.detach()
+
+    # Registered before application imports, hence after their exit handlers
+    # and non-daemon threads finish. This checks protection, but never stops it.
+    atexit.register(finish)
+
+
+if watchdog:
+    watch_lifetime(json.loads(sys.argv[3]))
+protect_lifetime()
+
+# The independent watchdog interpreters need none of the observation runtime.
 import ast
 import builtins
 from collections import Counter
 import hashlib
 import hmac
 import inspect
-import json
-import os
-import sys
 import traceback
 import types
 import unittest
 from importlib.machinery import PathFinder
 
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    request = json.load(stream)
 root = request["root"]
 trusted = list(sys.path) + [os.path.dirname(os.path.abspath(__file__))]
 application = [root, os.path.dirname(os.path.join(root, request["driver"]))]
