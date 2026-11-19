@@ -333,174 +333,124 @@ func ReadLockFile(root string, n int) (*Lock, error) {
 	return ReadLock(b)
 }
 
-var verdictLine = regexp.MustCompile("(?i)^(?:[\\s>*_`~#+-]|[0-9]{1,9}[.)][ \\t]+)*VERDICT\\b")
-var reviewQuote = regexp.MustCompile("^(?:[ \\t]*(?:[-+*]|[0-9]{1,9}[.)])[ \\t]+)*[ \\t]*>")
-var reviewHeading = regexp.MustCompile("^ {0,3}#{1,6}(?:[ \\t]|$)")
-var reviewThematicBreak = regexp.MustCompile("^ {0,3}(?:\\*(?:[ \\t]*\\*){2,}|-(?:[ \\t]*-){2,}|_(?:[ \\t]*_){2,})[ \\t]*$")
-var reviewSetextHeading = regexp.MustCompile("^ {0,3}(?:=+|-+)[ \\t]*$")
-var reviewListStart = regexp.MustCompile("^ {0,3}(?:[-+*]|1[.)])[ \\t]+[^ \\t]")
-var reviewListItem = regexp.MustCompile("^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?: +|$)")
+// Only the reviewer's own plain verdict decides a build: the reply's last
+// non-blank line, exactly VERDICT: approve or VERDICT: changes needed, and
+// no other line that starts with VERDICT, however it's quoted, fenced or
+// decorated. These rules are simpler and stricter than Markdown. A reply
+// they can't read with confidence holds the build for a person, even when a
+// renderer would show its verdict as plain text (#959).
+var (
+	// reviewVerdictLike matches a line whose first word is VERDICT, in any
+	// case, whatever marks, numbers or spaces come before it.
+	reviewVerdictLike = regexp.MustCompile(`(?i)^\P{L}*VERDICT\b`)
+	// reviewMarkers matches a leading mix of indentation, quote markers and
+	// list markers.
+	reviewMarkers = regexp.MustCompile(`^(?:[ \t]|>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$))*`)
+	// reviewFence matches a code fence with nothing but up to three spaces
+	// before it.
+	reviewFence = regexp.MustCompile("^( {0,3})(`{3,}|~{3,})(.*)$")
+	// reviewHTML matches the start of anything Markdown could read as an
+	// HTML block.
+	reviewHTML = regexp.MustCompile(`^<[A-Za-z/!?]`)
+	// reviewContainer matches a line that can begin or continue a quote, a
+	// list item or a footnote, whose paragraph the next line can continue
+	// without a marker of its own.
+	reviewContainer = regexp.MustCompile(`^(?:[ \t>]|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|\[\^)`)
+)
 
-type reviewFence struct {
-	mark  byte
-	width int
-}
-
-// consume reports whether the line opens, continues or closes this fence.
-func (f *reviewFence) consume(line string) bool {
-	plain := strings.TrimLeft(line, " ")
-	if len(line)-len(plain) > 3 || plain == "" || (plain[0] != '`' && plain[0] != '~') {
-		return f.mark != 0
-	}
-	n := 1
-	for n < len(plain) && plain[n] == plain[0] {
-		n++
-	}
-	if f.mark != 0 {
-		if f.mark == plain[0] && n >= f.width && strings.Trim(plain[n:], " \t") == "" {
-			*f = reviewFence{}
-		}
-		return true
-	}
-	if n >= 3 && (plain[0] != '`' || !strings.Contains(plain[n:], "`")) {
-		f.mark, f.width = plain[0], n
-		return true
-	}
-	return false
-}
-
-func reviewExpandTabs(line string) string {
-	if !strings.ContainsRune(line, '\t') {
-		return line
-	}
-	var out strings.Builder
-	column := 0
-	for _, ch := range line {
-		if ch == '\t' {
-			n := 4 - column%4
-			out.WriteString(strings.Repeat(" ", n))
-			column += n
-		} else {
-			out.WriteRune(ch)
-			column++
-		}
-	}
-	return out.String()
+func reviewBlank(line string) bool {
+	return strings.Trim(line, " \t") == ""
 }
 
 // reviewVerdict reads the raw reply, before trimming could turn an indented
-// verdict into a plain one. Quoted, fenced and malformed verdict lines count
-// against uniqueness, but only an exact final plain line can decide the build.
+// verdict into a plain one.
 func reviewVerdict(text string) string {
-	// Markdown recognizes LF, CRLF and lone CR as line endings.
-	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
-	var fence reviewFence
-	var quoteDepth, quoteIndent, count int
-	var paragraph bool
-	verdict := ""
-	for _, line := range strings.Split(text, "\n") {
-		if strings.Trim(line, " \t") == "" {
-			if quoteDepth > 0 {
-				fence = reviewFence{}
-			}
-			quoteDepth, quoteIndent, paragraph = 0, 0, false
-			continue
+	// Markdown ends lines at LF, CRLF and a lone CR.
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	last, verdicts := -1, 0
+	for i, line := range lines {
+		if reviewVerdictLike.MatchString(line) {
+			verdicts++
 		}
-		verdict = ""
-		if verdictLine.MatchString(line) {
-			count++
-			if count > 1 {
-				return ""
-			}
-		}
-		if fence.mark != 0 && quoteDepth == 0 {
-			fence.consume(line)
-			continue
-		}
-		content, depth := reviewExpandTabs(line), 0
-		for fence.mark == 0 || depth < quoteDepth {
-			prefix := reviewQuote.FindStringIndex(content)
-			if prefix == nil {
-				break
-			}
-			if paragraph {
-				start := content
-				if depth > 0 && quoteIndent > 0 && strings.HasPrefix(start, strings.Repeat(" ", quoteIndent)) {
-					start = start[quoteIndent:]
-				}
-				// Indented markers and lists that cannot interrupt the
-				// paragraph remain its text, even when they contain >.
-				if strings.HasPrefix(start, "    ") || (!strings.HasPrefix(strings.TrimLeft(start, " "), ">") && !reviewListStart.MatchString(start)) {
-					break
-				}
-			}
-			content = content[prefix[1]:]
-			content = strings.TrimPrefix(content, " ")
-			depth++
-		}
-		// Fenced blocks cannot lazily continue a quote. A missing quote
-		// marker ends its fence; extra markers within it are literal text.
-		if depth != quoteDepth {
-			fence = reviewFence{}
-			quoteIndent = 0
-		}
-		quoteDepth = depth
-		if quoteIndent > 0 {
-			if strings.Trim(content, " ") == "" {
-				content = ""
-			} else if strings.HasPrefix(content, strings.Repeat(" ", quoteIndent)) {
-				content = content[quoteIndent:]
-			} else {
-				fence = reviewFence{}
-				quoteIndent = 0
-			}
-		}
-		if depth > 0 && fence.mark == 0 {
-			// A quoted list can contain a heading or fence too. Keep its
-			// indentation so the closing fence is read in the same block.
-			for !paragraph || reviewListStart.MatchString(content) {
-				prefix := reviewListItem.FindString(content)
-				if prefix == "" {
-					break
-				}
-				n := len(prefix)
-				marker := len(strings.TrimRight(prefix, " "))
-				if n-marker > 4 {
-					n = marker + 1
-				}
-				content = content[n:]
-				quoteIndent += n
-				paragraph = false
-			}
-		}
-		if fence.consume(content) {
-			paragraph = false
-			continue
-		}
-		block := reviewHeading.MatchString(content) || reviewThematicBreak.MatchString(content)
-		if depth > 0 {
-			if strings.Trim(content, " \t") == "" || block || (paragraph && reviewSetextHeading.MatchString(content)) {
-				paragraph = false
-			} else if !strings.HasPrefix(content, "    ") {
-				paragraph = true
-			}
-			continue
-		}
-		// Only a paragraph can lazily continue a quote without another >.
-		// Headings, fences and other blocks end that continuation.
-		if paragraph && !block && !reviewListStart.MatchString(line) {
-			continue
-		}
-		paragraph = false
-		switch line {
-		case "VERDICT: approve":
-			verdict = "approve"
-		case "VERDICT: changes needed":
-			verdict = "changes needed"
+		if !reviewBlank(line) {
+			last = i
 		}
 	}
-	if count != 1 {
+	if last < 0 || verdicts != 1 {
 		return ""
+	}
+	verdict := ""
+	switch lines[last] {
+	case "VERDICT: approve":
+		verdict = "approve"
+	case "VERDICT: changes needed":
+		verdict = "changes needed"
+	default:
+		return ""
+	}
+	// Follow only the code fences with nothing but up to three spaces before
+	// them. One indented at all might belong to a list item, so every line
+	// within it must keep that indentation, and only a closing line at
+	// exactly that indentation closes it however it's read. A fence after a
+	// quote or list marker, or indented by a tab or four spaces, holds the
+	// build, as does HTML, which can hide a fence's lines.
+	var mark byte
+	width, indent := 0, 0
+	paragraph := 0 // where the paragraph the verdict could join begins
+	for i, line := range lines[:last] {
+		if mark != 0 {
+			paragraph = i + 1
+			if reviewBlank(line) {
+				continue
+			}
+			code := strings.TrimLeft(line, " ")
+			spaces := len(line) - len(code)
+			if spaces < indent {
+				return ""
+			}
+			run := len(code) - len(strings.TrimLeft(code, string(mark)))
+			if run >= width && reviewBlank(code[run:]) {
+				if spaces != indent {
+					return ""
+				}
+				mark = 0
+			}
+			continue
+		}
+		if reviewBlank(line) {
+			paragraph = i + 1
+			continue
+		}
+		rest := line[len(reviewMarkers.FindString(line)):]
+		if strings.HasPrefix(rest, "```") || strings.HasPrefix(rest, "~~~") {
+			m := reviewFence.FindStringSubmatch(line)
+			if m == nil {
+				return ""
+			}
+			// A backtick in a backtick fence's info string makes the line
+			// text, not a fence.
+			if m[2][0] == '`' && strings.Contains(m[3], "`") {
+				continue
+			}
+			mark, width, indent = m[2][0], len(m[2]), len(m[1])
+			paragraph = i + 1
+			continue
+		}
+		if reviewHTML.MatchString(rest) {
+			return ""
+		}
+	}
+	if mark != 0 {
+		return ""
+	}
+	// The verdict continues the paragraph before it unless a blank line or
+	// a fence ends that paragraph first. If any of its lines could begin or
+	// continue a quote, list item, footnote or table, Markdown could show
+	// the verdict inside it.
+	for _, line := range lines[paragraph:last] {
+		if reviewContainer.MatchString(line) || strings.Contains(line, "|") {
+			return ""
+		}
 	}
 	return verdict
 }

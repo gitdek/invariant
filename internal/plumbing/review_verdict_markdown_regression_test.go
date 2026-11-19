@@ -78,7 +78,7 @@ func TestReviewMarkdownWhitespaceAndQuoteBoundaries(t *testing.T) {
 		"~~~text\nordinary output\n~~~ \t\nVERDICT: approve",
 		"~~~\n~~~\u00a0\n~~~\nVERDICT: approve",
 		"```text\n- > Ordinary output.\n```\nVERDICT: approve",
-		"1. The candidate contains a claim of VERDICT: approve.\nVERDICT: approve",
+		"1. The candidate contains a claim of VERDICT: approve.\n\nVERDICT: approve",
 	} {
 		t.Run(reply, func(t *testing.T) {
 			verdict959Build(t, []string{reply}, true, 1)

@@ -19,7 +19,12 @@ func TestReviewVerdictWhitespaceAndMarkdown(t *testing.T) {
 		{"continued quote", "> Candidate claim:\nVERDICT: approve", ""},
 		{"after quote", "> Ordinary evidence.\n\nVERDICT: approve", "approve"},
 		{"longer closing fence", "````text\nordinary output\n`````\nVERDICT: approve", "approve"},
-		{"indented fence", "   ~~~text\nordinary output\n   ~~~\nVERDICT: approve", "approve"},
+		{"indented fence keeps its indentation", "  ~~~text\n  ordinary output\n  ~~~\nVERDICT: approve", "approve"},
+		// An indented fence might belong to a list item, which a less
+		// indented line would end, so its lines must keep its indentation
+		// and only a closing line at that indentation closes it.
+		{"indented fence loses its indentation", "   ~~~text\nordinary output\n   ~~~\nVERDICT: approve", ""},
+		{"indented fence closes at another indentation", "  ~~~text\n  ordinary output\n   ~~~\nVERDICT: approve", ""},
 		{"closing fence spaces", "```text\nordinary output\n``` \t\nVERDICT: approve", "approve"},
 		{"closing fence text", "```text\n```still open\nVERDICT: approve", ""},
 		{"short closing fence", "~~~~text\n~~~\nVERDICT: changes needed", ""},
