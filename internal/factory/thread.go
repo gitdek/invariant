@@ -270,6 +270,45 @@ func endMarker(body string) (Marker, bool) {
 	return DecodeMarker(body)
 }
 
+// Unreadable is why a comment that was one of the factory's posts can't be
+// read, and what a person does about it. The factory stops acting on its
+// issue and posts nothing, so no command is spent while the comment is
+// repaired (#790). The dashboard shows such an issue as stopped (#896).
+type Unreadable struct {
+	Why    string // what's wrong with the comment
+	Repair string // what a person does about it
+}
+
+func (u Unreadable) String() string { return u.Why + "; " + u.Repair }
+
+// ReadPost reads a comment as one of the factory's posts, as the factory
+// itself reads them, for the factory and the dashboard alike. own says the
+// factory's own login, known by its App, posted it: such a comment ends
+// with its marker, and one that was a post and ends any other way is
+// unreadable, as is one whose saved reference doesn't parse. Without a
+// known login, a comment is read by its markers alone, and a marker that
+// doesn't read is no post. ok is false for a comment that's no post.
+func ReadPost(body string, own bool) (m Marker, ok bool, bad *Unreadable) {
+	m, ok = DecodeMarker(body)
+	if own {
+		// Taken as no post, an earlier proposal would answer a pending
+		// ratification in its place, and a marker shown in its text could be
+		// read as its own. What's left of it says it was a post: the start of
+		// a marker, or the words every post begins with. A person can restore
+		// the comment, or delete it to fall back on purpose.
+		if m, ok = endMarker(body); !ok && (strings.Contains(body, markerStart) || strings.HasPrefix(body, header)) {
+			return Marker{}, false, &Unreadable{Why: "the factory's marker is cut short or damaged", Repair: "restore the comment, or delete it to fall back to the post before it"}
+		}
+	}
+	if !ok {
+		return Marker{}, false, nil
+	}
+	if m.referenceProblem != "" {
+		return Marker{}, false, &Unreadable{Why: "draft reference: malformed marker: " + m.referenceProblem, Repair: "restore the comment"}
+	}
+	return m, true, nil
+}
+
 // maxMarker is the most a marker may unzip to. Anyone can post one, so a
 // small one can't make the factory unzip a huge one.
 const maxMarker = 4 << 20

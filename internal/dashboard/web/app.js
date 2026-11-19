@@ -172,16 +172,16 @@
     if (ACT && changed("untaken", [scope, state?.repo])) untaken.paint();
     // The fleet is keyed on what it draws, never on a watcher's heartbeat or
     // lease, which change every minute (#845).
-    if (changed("fleet", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals, r.factory?.running, r.factory?.doing, r.gate?.status]), s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title, i.waiting?.kind, i.waiting?.failure])])) renderFleet(s);
+    if (changed("fleet", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals, r.factory?.running, r.factory?.doing, r.factory?.steps, r.factory?.waiting, r.gate?.status]), s.projects.map((p) => [p.repo, p.dir, p.name, p.states, p.passed, p.receiptMissing, p.language, p.model]), s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.project, i.title, i.waiting?.kind, i.waiting?.failure, i.byHand, i.plan, i.doing, i.waits])])) renderFleet(s);
     // The headline counts what needs a person, which a post from /act
     // changes at once without changing anything else it draws (#175).
     if (changed("now", [scope, s.now, s.nowBy, s.factory, s.main, s.receipts?.id, s.repos, s.issues.filter((i) => i.open && i.waiting).map((i) => [i.repo, i.number])])) renderNow(s);
-    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title, i.waiting?.kind, i.waiting?.failure]), s.factory.running, s.totals.merged])) orbit.update(s);
+    if (changed("orbit", [scope, s.issues.map((i) => [i.repo, i.number, i.stage, i.open, i.title, i.waiting?.kind, i.waiting?.failure, i.byHand, i.plan]), s.factory.running, s.totals.merged])) orbit.update(s);
     if (changed("assurance", [scope, (s.repos || []).map((r) => [r.name, r.short, r.totals])])) renderAssurance(s);
     if (changed("numbers", [scope, tilesOf(s)])) renderNumbers(s);
     if (changed("models", [scope, s.projects.map((p) => [p.repo, p.model, p.graph, p.states, p.receiptMissing])])) renderTabs(s);
     if (changed("lanes", [scope, lanesAll, s.issues])) renderLanes(s.issues.filter((i) => inScope(i.repo)));
-    if (changed("projects", [scope, pview, s.projects])) renderProjects(s);
+    if (changed("projects", [scope, pview, s.projects, (s.repos || []).map((r) => r.receipts?.sha)])) renderProjects(s);
     // The road and who builds what describe Invariant itself, so another
     // repository's view leaves them out (#773).
     const own = scope === "all" || scope === s.repo;
@@ -247,7 +247,10 @@
     // apart, as Needs you shows it apart.
     const waiting = s.issues.filter((i) => i.open && i.waiting && inScope(i.repo));
     const needs = waiting.filter((i) => !stalled(i)).length, old = waiting.length - needs;
-    const needsText = (needs === 1 ? "1 issue needs you" : needs ? `${needs} issues need you` : "") + (needs && old ? " · " : "") + (old ? `${old} stalled` : "");
+    // What has waited more than two days is said in words no one takes for
+    // a step that stalled, beside the steps the chips count (#948).
+    const oldText = !old ? "" : needs ? `${old} more for over two days` : `${old === 1 ? "1 issue has" : `${old} issues have`} needed you for over two days`;
+    const needsText = (needs === 1 ? "1 issue needs you" : needs ? `${needs} issues need you` : "") + (needs && old ? " · " : "") + oldText;
     const needsChip = waiting.length ? `<a class="chip people" href="#inbox"><i></i>${needsText}</a>` : "";
     if (n.stage === "idle") {
       chips.push(s.factory.running ? `<span class="chip factory pulse"><i></i>Watching for issues</span>` : `<span class="chip"><i></i>The watcher is off</span>`);
@@ -259,9 +262,11 @@
         : `<span class="chip holds"><i></i>0 bad merges in ${t.merged}</span>`);
     } else {
       // With several steps running, the chip counts them, and no one step's
-      // checks are shown (D-0113).
-      const many = n.running > 1;
-      const w = many ? ["factory pulse", `${n.running} steps running`]
+      // checks are shown (D-0113). A step whose Codex run waits for its turn
+      // isn't running yet, and is counted apart (#948).
+      const many = n.running + (n.waiting || 0) > 1;
+      const w = n.waiting ? [n.running ? "factory pulse" : "factory", `${n.running ? `${n.running} running, ` : ""}${n.waiting} waiting ${n.waiting === 1 ? "its" : "their"} turn`]
+        : many ? ["factory pulse", `${n.running} steps running`]
         : { people: ["people", "Waiting on a person"], ci: ["ci pulse", "CI's gate is running"], factory: ["factory pulse", "The factory is working"] }[n.waitingOn] || ["", n.stage];
       chips.push(`<span class="chip ${w[0]}"><i></i>${w[1]}</span>`);
       if (n.since) chips.push(`<span class="chip">for&nbsp;<span data-since="${esc(n.since)}"></span></span>`);
@@ -338,7 +343,20 @@
   // in the color of a failure: at Issue when no draft checked out, at Build
   // when the factory's own run failed or made no pull request, and at the
   // Gate when its pull request did.
+  // toneOf is the color an open issue is drawn in: a failure's where it
+  // needs a person after one, or the factory has stopped on it, and people's
+  // where it asks them. A plan's issue waits on a person when its open step
+  // does, in people's color: the step is the one drawn as it stands.
+  const toneOf = (is) => {
+    if (is.plan && !is.plan.done) return is.plan.stage === "review" || is.plan.waiting ? "people" : "";
+    if (is.stage === "review" || is.waiting?.kind === "stopped") return "bug";
+    return is.stage === "asking" || is.stage === "ratifying" ? "people" : "";
+  };
+  // A plan's issue sits where its open step is, which it waits on, and one
+  // the factory has stopped on sits at its stage (#948, #896).
   const stoppedAt = (is) => {
+    if (is.plan?.stage && !is.plan.done) return stoppedAt({ stage: is.plan.stage, waiting: is.plan.waiting ? { kind: is.plan.waiting, failure: is.plan.failure } : null });
+    if (is.waiting?.kind === "stopped") return is.stage === "review" ? "building" : is.stage;
     if (is.stage !== "review") return is.stage;
     if (is.waiting?.kind === "stuck") return "queued";
     return ["stopped", "limit", "gate"].includes(is.waiting?.failure) ? "building" : "gate";
@@ -407,7 +425,7 @@
       $("#moons").innerHTML = merged.map((is, i) => {
         const r = 40 + i * 13, per = 22 + i * 9, start = (i * 137 + (REDUCED ? 0 : turned(per))) % 360;
         const spin = REDUCED ? "" : `<animateTransform attributeName="transform" type="rotate" from="${start.toFixed(1)}" to="${(start + 360).toFixed(1)}" dur="${per}s" repeatCount="indefinite"/>`;
-        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start.toFixed(1)})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}</title></circle></g>`;
+        return `<g class="${quiet(is.repo)}" ${tag(is.repo)} transform="rotate(${start.toFixed(1)})"><circle class="moonring" r="${r}"/>${spin}<circle class="moon" cx="${r}" cy="0" r="3.2"><title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: merged ${esc(ref(is.repo, is.pr))}${is.byHand ? ", finished by hand" : ""}</title></circle></g>`;
       }).join("");
       // Open issues sit at their stage.
       const open = mine.filter((i) => i.open);
@@ -425,7 +443,7 @@
         return { is, k, nth, angle: stationAngle(idx) + nth * 0.2 };
       });
       dots.innerHTML = want.map(({ is, k, nth }) => {
-        const bug = is.stage === "review";
+        const bug = toneOf(is) === "bug";
         // Issues that share a station sit a label's width apart, and their
         // labels take turns: one up and to the right, the next centered
         // beneath its dot, so none covers its neighbor. At the Gate a label
@@ -1024,7 +1042,7 @@
       const chips = [
         is.language ? `<span class="chip">${esc(langName[is.language] || is.language)}</span>` : "",
         is.amends ? `<span class="chip">amends ${esc(is.amends)}</span>` : "",
-        stageChip[is.stage] || "",
+        laneChip(is, stageChip),
       ].join("");
       return `<article class="lane${quiet(is.repo)}" ${tag(is.repo)}>
         <div class="lane-head"><span class="no">${esc(ref(is.repo, is.number))}</span><span class="title">${esc(is.title)}</span><span class="chips">${chips}</span></div>
@@ -1045,6 +1063,34 @@
       io.observe(box);
     }
   }
+
+  // laneChip is what a lane says of its issue: what the factory is doing
+  // with it, while a step runs on it, before it has posted anything; what a
+  // plan's issue waits on, its open step; that the factory has stopped on
+  // it; or that a person finished what the factory built (#948, #896).
+  // Otherwise it's its stage.
+  function laneChip(is, stageChip) {
+    if (is.stage === "merged" && is.byHand) return `<span class="chip holds"><i></i>merged, finished by hand</span>`;
+    if (!is.open) return stageChip[is.stage] || "";
+    if (is.waiting?.kind === "stopped") return `<span class="chip bug"><i></i>stopped: a person repairs it</span>`;
+    if (is.plan) return `<span class="chip ${planTone(is.plan)}"><i></i>${esc(planWords(is))}</span>`;
+    if (is.waits) return `<span class="chip factory"><i></i>waiting for Codex's turn</span>`;
+    if (is.doing && DOING[is.doing] && !["merged", "gate", "review", "asking", "ratifying"].includes(is.stage)) return `<span class="chip factory pulse"><i></i>${DOING[is.doing]}</span>`;
+    return stageChip[is.stage] || "";
+  }
+  const DOING = { formalizing: "drafting", answering: "drafting again", building: "building", "waiting for checks": "waiting for checks", ratifying: "committing the ratification" };
+  // planWords says where a plan of issues stands, on its own issue: its
+  // open step and that step's state, which is what it waits on.
+  function planWords(is) {
+    const p = is.plan;
+    if (p.done) return "plan done: every issue merged";
+    if (!p.issue) return "plan ratified: no step opened yet";
+    const of = `step ${p.step}${p.steps ? ` of ${p.steps}` : ""}, ${ref(is.repo, p.issue)}`;
+    const state = p.waiting === "stopped" ? "is stopped" : p.stage === "review" || p.waiting ? "needs a person"
+      : { queued: "is queued", asking: "is asking", ratifying: "awaits ratification", building: "is building", gate: "waits for CI's gate", merged: "merged", closed: "closed without a merge" }[p.stage] || "";
+    return state ? `${of}, ${state}` : of;
+  }
+  const planTone = (p) => (p.done ? "holds" : p.stage === "review" || p.waiting ? "people" : "factory");
 
   // ---------- projects ----------
   // A proposal's reader evidence: its checked chart, its note and a link to
@@ -1173,8 +1219,13 @@
   const ICON_ZOOM = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
 
   function renderProjects(s) {
-    const r = s.receipts;
-    $("#receipts").innerHTML = r ? `Receipts from CI's gate on <code>${esc(r.sha.slice(0, 7))}</code>` : "";
+    // Each repository's receipts come from CI's gate on its own main, so the
+    // label names that commit of each repository in view (#948).
+    const from = (s.repos || []).filter((r) => r.receipts && inScope(r.name));
+    const each = from.map((r) => `${esc(r.short)}'s <code>${esc(r.receipts.sha.slice(0, 7))}</code>`);
+    $("#receipts").innerHTML = !from.length ? ""
+      : from.length === 1 ? `Receipts from CI's gate on <code>${esc(from[0].receipts.sha.slice(0, 7))}</code>`
+      : `Receipts from CI's gate on ${each.slice(0, -1).join(", ")} and ${each[each.length - 1]}`;
     const ps = s.projects.filter((p) => inScope(p.repo)).sort((a, b) => (a.repo === s.repo ? 0 : 1) - (b.repo === s.repo ? 0 : 1) || (a.repo || "").localeCompare(b.repo || "") || (a.dir || "").localeCompare(b.dir || ""));
     if (pview === "table") return renderTable(s, ps);
     $("#projects").className = "models";
@@ -2114,6 +2165,17 @@
   const said = (w) => (w.statements || []).length
     ? `<details class="stmts"><summary>Read what they say</summary><ul>${w.statements.map((st) => `<li><span class="k">${esc(st.kind)}</span><span><b>${esc(st.name)}</b>${esc(st.says)}${behaviorText(st, w)}</span></li>`).join("")}</ul></details>`
     : "";
+  // stoppedText says that the factory has stopped on an issue, at which of
+  // its comments, why, and what a person does about it. It acts on nothing
+  // there until then, so no command is offered: one posted now would wait
+  // (#896).
+  function stoppedText(w) {
+    const st = w.stopped || {};
+    const comment = st.url ? `<a href="${esc(st.url)}" target="_blank" rel="noopener">its comment</a>` : "its comment";
+    return `<p class="ask"><b>The factory has stopped on this issue.</b> It can't read ${comment} posted <span data-ago="${esc(st.at)}"></span>: ${esc(st.why)}. Until that's repaired it acts on nothing here, and posts nothing, so a command posted now would wait.</p>`
+      + (w.savedDraft?.problem ? `<p class="reader-note">${esc(w.savedDraft.problem)}</p>` : "")
+      + `<p class="ask">To go on: ${esc(st.repair)}.</p>`;
+  }
   const savedDraftLink = (w) => w.savedDraft && !w.savedDraft.problem
     ? `<p class="reader-note"><a href="${esc(w.savedDraft.locator)}">Complete saved draft and exact result.json</a></p>` : "";
   function needCard(is) {
@@ -2128,7 +2190,10 @@
     // A labeled command shows what it does beside what it copies.
     const cmd = (c, primary, label) => `<button class="cmd${primary ? " primary" : ""}" type="button" data-cmd="${esc(c)}" data-gh="${esc(gh(c))}" title="Click to copy. Shift-click copies it as a gh command.">${label ? `${esc(label)} · ` : ""}${esc(c)}<span class="cp">copy</span></button>`;
     let body = "", cls = "";
-    if (w.savedDraft?.problem) {
+    if (w.kind === "stopped") {
+      cls = "failed";
+      body = `${stoppedText(w)}<div class="cmds">${open}</div>`;
+    } else if (w.savedDraft?.problem) {
       body = `<p class="reader-note">${esc(w.savedDraft.problem)}</p><div class="cmds">${takes(w, "revise") ? cmd("/invariant revise") : ""}${open}</div>`;
     } else if (w.kind === "forks") {
       body = (w.forks || []).map((q) => `<p class="ask"><b>${esc(q.id)}</b>${esc(q.question)}</p><div class="opts">${(q.options || []).map((o) => {
@@ -2225,7 +2290,10 @@
     const post = (label, body, primary) => `<button class="cmd act${primary ? " primary" : ""}" type="button" data-act-key="${esc(key)}" data-act-body="${esc(body)}"${a.busy ? " disabled" : ""}>${esc(label)}</button>`;
     const ask = (label, body, primary) => `<button class="cmd act${primary ? " primary" : ""}" type="button" data-act-key="${esc(key)}" data-act-confirm="${esc(body)}"${a.busy ? " disabled" : ""}>${esc(label)}</button>`;
     let body = "", cls = "", actions = "";
-    if (w.savedDraft?.problem) {
+    if (w.kind === "stopped") {
+      cls = "failed";
+      body = stoppedText(w);
+    } else if (w.savedDraft?.problem) {
       body = `<p class="reader-note">${esc(w.savedDraft.problem)}</p>`;
       actions = takes(w, "revise") ? ask("Draft again", "/invariant revise") : "";
     } else if (w.kind === "forks") {
@@ -2510,6 +2578,15 @@
       $("#states").scrollIntoView({ behavior: REDUCED ? "auto" : "smooth" });
     }));
   }
+  // issueWords says what an open issue is at, in a comet's or a dot's
+  // tooltip: what the lane's chip says.
+  function issueWords(is) {
+    if (is.waiting?.kind === "stopped") return "the factory has stopped on it";
+    if (is.plan) return planWords(is);
+    if (is.waits) return "waiting for Codex's turn";
+    if (is.doing && DOING[is.doing] && is.stage === "queued") return DOING[is.doing];
+    return is.stage;
+  }
   function spin(from, dur) {
     if (REDUCED) return "";
     const at = from + turned(dur);
@@ -2522,7 +2599,11 @@
     const open = issues.filter((i) => i.open), merged = issues.filter((i) => i.stage === "merged");
     const n = projects.length, inner = 50, outer = R - 40;
     const orbitR = (i) => (n <= 1 ? (inner + outer) / 2 : inner + ((outer - inner) * i) / (n - 1));
-    const working = r.factory?.running && r.factory?.doing;
+    // A watcher whose every step waits for Codex's turn isn't working yet
+    // (#948).
+    const turns = r.factory?.waiting || [];
+    const working = r.factory?.running && r.factory?.doing && (r.factory.steps || [{ issue: r.factory.issue }]).some((st) => !turns.includes(st.issue));
+    const waitingTurn = r.factory?.running && !working && turns.length > 0;
     const ciRunning = r.gate && r.gate.status !== "completed";
     let g = `<defs>
       <radialGradient id="corona${k}"><stop offset="0" style="stop-color:var(--ink);stop-opacity:.55"/><stop offset=".35" style="stop-color:var(--ink);stop-opacity:.12"/><stop offset="1" style="stop-color:var(--ink);stop-opacity:0"/></radialGradient>
@@ -2542,7 +2623,7 @@
       const orr = orbitR(i), pr = 4 + 2.4 * Math.log10(Math.max(10, p.states));
       const start = (i * 137.5 + k * 40) % 360, period = 46 + i * 23;
       const moons = merged.filter((m) => m.project === p.dir);
-      const moonSvg = moons.map((m, j) => `<g>${spin(j * 120, 7 + j * 3)}<circle class="moon2" cx="${pr + 7 + j * 3}" cy="0" r="2"><title>${esc(ref(m.repo, m.number))} ${esc(m.title)}</title></circle></g>`).join("");
+      const moonSvg = moons.map((m, j) => `<g>${spin(j * 120, 7 + j * 3)}<circle class="moon2" cx="${pr + 7 + j * 3}" cy="0" r="2"><title>${esc(ref(m.repo, m.number))} ${esc(m.title)}${m.byHand ? ": merged, finished by hand" : ""}</title></circle></g>`).join("");
       const tip = `${cap(p.name)} · ${p.dir}\n` + (p.receiptMissing ? "Receipt unavailable" : `${nf.format(p.states)} states · ${p.assurance}\n${p.bugs.filter((b) => b.caught).length}/${p.bugs.length} planted bugs caught`);
       g += `<g transform="translate(${c} ${c})"><g transform="rotate(${start})">${spin(start, period)}<g class="planet" data-model="${esc(p.model)}" transform="translate(${orr} 0)"><title>${esc(tip)}</title>
         <circle class="${p.receiptMissing ? "orbitline" : p.passed ? "holds" : "fails"}" r="${pr + 4}"/><circle class="body ${langClass(p.language)}" r="${pr}"/>${moonSvg}</g></g></g>`;
@@ -2551,10 +2632,10 @@
     open.forEach((is, j) => {
       const a = (STAGE_ANGLE[stoppedAt(is)] ?? -90) + j * 9, t = (a * Math.PI) / 180;
       const x = c + R * Math.cos(t), y = c + R * Math.sin(t);
-      const cls = is.stage === "review" ? "bug" : is.stage === "asking" || is.stage === "ratifying" ? "people" : "";
+      const cls = toneOf(is);
       const tailA = ((a - 28) * Math.PI) / 180;
       g += `<path d="M${c + R * Math.cos(tailA)} ${c + R * Math.sin(tailA)} A${R} ${R} 0 0 1 ${x} ${y}" fill="none" stroke="url(#tail${k})" stroke-width="3" stroke-linecap="round" opacity=".75"/>
-        <circle class="comet-head ${cls}" cx="${x}" cy="${y}" r="6">${REDUCED ? "" : `<animate attributeName="r" values="5;7.5;5" dur="1.8s" repeatCount="indefinite"/>`}<title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: ${esc(is.stage)}</title></circle>
+        <circle class="comet-head ${cls}" cx="${x}" cy="${y}" r="6">${REDUCED ? "" : `<animate attributeName="r" values="5;7.5;5" dur="1.8s" repeatCount="indefinite"/>`}<title>${esc(ref(is.repo, is.number))} ${esc(is.title)}: ${esc(issueWords(is))}</title></circle>
         <text class="comet-label" x="${x + (x > c ? 10 : -10)}" y="${y - 10}" text-anchor="${x > c ? "start" : "end"}">#${esc(is.number)}</text>`;
     });
     // A shooting star crosses the system while the factory works in it.
@@ -2564,7 +2645,7 @@
     const legend = projects.length
       ? projects.slice().reverse().map((p) => `<span data-model="${esc(p.model)}" title="${esc(p.dir)}"><i class="${langClass(p.language)}"></i>${esc(cap(p.name))}</span>`).join("")
       : `<span>No models yet. The first model it checks will orbit here.</span>`;
-    const state = r.factory?.running ? `<span class="chip factory pulse state"><i></i>${working ? "working" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
+    const state = r.factory?.running ? `<span class="chip factory${waitingTurn ? "" : " pulse"} state"><i></i>${working ? "working" : waitingTurn ? "waiting its turn" : "watching"}</span>` : `<span class="chip state"><i></i>factory off</span>`;
     return `<article class="system${quiet(r.name)}" ${tag(r.name)}>
       <header><h3>${esc(r.short)}</h3><span class="meta">${esc(established(r.totals))} · ${open.length} open · ${r.totals.merged} merged</span>${state}</header>
       <svg class="map" viewBox="0 0 400 400" role="img" aria-label="${esc(r.short)}: ${esc(established(r.totals))}, ${open.length} open issues">${g}</svg>
@@ -2776,13 +2857,16 @@
     });
   }
 
+  // holderWords names the step whose run holds Codex's turn: "#944's build".
+  const holderWords = (h) => `${ref(h.repo, h.issue)}'s ${h.doing === "formalizing" || h.doing === "answering" ? "draft" : "build"}`;
   // renderCard shows a step on its card.
   function renderCard(c) {
     const { el, l } = c;
     el.classList.toggle("ended", !!l.ended);
+    el.classList.toggle("waiting", !!l.waits && !l.ended);
     if (!l.ended) el.classList.remove("open");
     const word = $(".live-word", el), fold = $(".fold", el);
-    if (word) word.textContent = l.ended ? "Finished" : "Live";
+    if (word) word.textContent = l.ended ? "Finished" : l.waits ? "Waiting" : "Live";
     if (fold) {
       const open = el.classList.contains("open");
       fold.hidden = !l.ended;
@@ -2797,6 +2881,9 @@
     // What the agent is doing now, or how its run ended.
     let now;
     if (l.ended) now = `This step ended <span data-ago="${esc(l.ended)}"></span>${l.agent ? `. The agent ${esc(l.agent)}` : ""}.`;
+    // A Codex run that waits for its turn hasn't started, and says what it
+    // waits for, and on whom, when the page can tell (#948).
+    else if (l.waits) now = `<b>Waiting for Codex's turn</b>${l.heldBy ? `, which ${esc(holderWords(l.heldBy))} holds` : ""}. Its time starts when its turn comes · waiting <span data-since="${esc(l.waits)}"></span>`;
     else if (l.agent) now = `<b>The agent ${esc(l.agent)}.</b> The factory is checking its work.`;
     else {
       // How long it's been at it: this stretch of thinking, or the tool
@@ -2885,8 +2972,11 @@
   // toward it; without one, a hand sweeps the ring once a minute.
   function tickCard(c, landing) {
     const l = c.l;
+    // A run that waits for its turn has no clock yet (#948).
+    if (l.waits && !l.ended) return;
     const end = l.ended ? T(l.ended) : Date.now();
-    const elapsed = Math.max(0, (end - T(l.since)) / 1000);
+    // A Codex run's time starts with its turn, as its time limit does.
+    const elapsed = Math.max(0, (end - (T(l.turn) || T(l.since))) / 1000);
     const C = 2 * Math.PI * 52;
     const dial = $(".dial", c.el), key = `${c.key}|${l.limit || 0}|${!!l.ended}`;
     if (dial.dataset.key !== key) {
@@ -2920,7 +3010,7 @@
     const l = c.l, box = c.strip;
     const W = Math.max(280, box.clientWidth), H = 100, top = 16, bottom = 70;
     const marks = l.marks || [];
-    const t0 = T(l.since) || (marks[0] ? T(marks[0].at) : end);
+    const t0 = T(l.turn) || T(l.since) || (marks[0] ? T(marks[0].at) : end);
     const span = Math.max(60000, end - t0);
     // The strip is drawn again only when it would look different: something
     // new on it, another width, or enough time gone that it moves a pixel. A

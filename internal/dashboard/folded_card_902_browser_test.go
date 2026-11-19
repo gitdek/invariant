@@ -119,7 +119,8 @@ const foldedCardBrowserCheck = `
     assert(!text(document.querySelector("#inbox")).includes("Nothing new needs you"), "the page says nothing new needs a person");
     // The headline counts them the same way.
     const chip = text(document.querySelector(".chip.people"));
-    assert(chip === "2 issues need you · 2 stalled", "the headline counts: " + chip);
+    // What waited over two days is said in words no one takes for a step that stalled (#948).
+    assert(chip === "2 issues need you · 2 more for over two days", "the headline counts: " + chip);
     // Past the gate, the retry doesn't speak of a gate still to pass.
     assert(retry(1).startsWith("Merge #1001 · /invariant retry"), "card 1's retry says: " + retry(1));
     assert(retry(4).startsWith("Have a person merge #1004 · /invariant retry"), "card 4's retry says: " + retry(4));
