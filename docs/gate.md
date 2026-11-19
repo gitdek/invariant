@@ -1,6 +1,6 @@
 # The gate
 
-What the gate's receipt claims about the code, and how a project proves a model's invariant at every size. [The README](../README.md#the-gate) lists every check the gate runs, and [the Python page](python.md) covers existing Python applications.
+What the gate's receipt claims about the code, how a part that builds on macOS is checked, and how a project proves a model's invariant at every size. [The README](../README.md#the-gate) lists every check the gate runs, and [the Python page](python.md) covers existing Python applications.
 
 ## What a receipt claims
 
@@ -11,6 +11,10 @@ Markdown receipts and the dashboard derive these claims from evidence even when 
 Python application receipts retain the first collector failure in an execution's optional `harness_error`, with full normalized context in `diagnostics` ([#801's ratified plan](../.invariant/plans/issue-801.json)). Caught errors, exception chains, poisoned operations and terminating cleanup preserve that first cause. The affected conformance result and an actually executed run one size larger carry it too. **What failed** names the target, check and invocation for ordinary and larger executions and shows the first cause; it does not derive the cause from the last lines of a traceback. The full execution record retains the tracebacks. All application names and diagnostics render as literal text in both explicit-component and legacy receipts.
 
 These diagnostics authorize no observations and do not enter execution fingerprints. Failed or incomplete observation streams retain no accepted prefix, while successful independent executions keep their evidence. Collector errors cannot become application refusals: [D-0279](../decisions/journal/D-0279.jsonl)'s exact declared-refusal and named-action checks still apply, and undeclared application exceptions still fail. The watchdog deadlines and stopped-before-sealing diagnostics from [D-0356](../decisions/journal/D-0356.jsonl) remain. [The Python execution reference](python.md#existing-python-application-foundation) describes the execution API and observation trust boundary.
+
+## Parts that build on macOS
+
+A receipt is about a modeled project. A repository's own parts are checked by `check-repository`, in Linux containers, and Linux skips the files only macOS builds, such as cgo with Objective-C. So a part whose contract declares `macos` is never reported as checked from there: `check-repository` says it didn't check that part on macOS, and can't tell whether the macOS job did. The gate's second job, `invariant/gate-macos`, builds, vets and tests the part on a hosted macOS runner, runs its other declared checks, such as a self-test that needs no permission, and says which macOS, image and Go it ran with. [Parts that build on macOS](factory.md#parts-that-build-on-macos) gives the contract's lines, the job, and how a repository adds it ([#929](https://github.com/gitdek/invariant/issues/929)).
 
 ## Current bug replay
 

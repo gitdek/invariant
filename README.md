@@ -127,6 +127,7 @@ The factory owns both the model and the code, and each Go method's contract rest
 | Every step tried | Invariant · TLC | A driver, or a Go explorer that records its attempts, never tried a step in a state it reached, except where only the environment's bounds rule it out |
 | Code | Gobra · Nagini | A function doesn't verify against its contract, an index or integer operation could fail, or a Python core holds arithmetic the pinned Nagini models apart from Python, which the gate refuses before Nagini runs |
 | Build | vet · tests | Anything is red. Runs in a sandbox with no network and no secrets. |
+| Build on macOS | go · a hosted Mac | A part the contract says [builds on macOS](docs/factory.md#parts-that-build-on-macos) doesn't build, vet or pass its tests and declared checks there, in the gate's second job. Linux skips its files, so the Linux job never claims it |
 | Scope | Invariant | A factory pull request changes anything outside its one project, or a plumbing one outside its plan and regression allowance, adds a dependency, uses cgo, edits CI config outside the [configured native exception](docs/factory.md#configured-trust-and-publication), or changes a ratified lock without its own issue's ratification |
 | Ratification | Invariant · GitHub | A project's lock or a plan isn't exactly the proposal a person with write access ratified on its issue, or, for a lock ratified by hand, the one a person's ratification in the journal names, or a layout pin [migrated into a lock](docs/gate.md#pinning-another-repositorys-layouts) isn't the one the commit that recorded its ratification gives |
 
@@ -273,6 +274,8 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
 
    Run `invariant check-repository -base BASE [HEAD]` for PR checks, adding `-issue N -repo OWNER/NAME` for any factory issue branch. Scope first distinguishes an in-bounds modeled change, which runs ordinary part checks, from plumbing, which also requires its ratified native plan. Omit `-base` for all-part checks at HEAD. A missing committed contract preserves modeled-only operation; invalid configuration and failed checks fail CI. Existing configured gates need a [manual upgrade](docs/factory.md#repository-checks-in-ci): generate the pinned template in a separate directory, review and merge its checks with custom steps, then commit it to the base branch.
 
+   A Go part that builds only on macOS, such as cgo with Objective-C, declares `macos` checks in the contract: build, vet, test, and others such as a self-test that needs no permission. Init then writes the gate's second job, `invariant/gate-macos`, which runs them on a hosted macOS runner, and step 3 requires it too. [Parts that build on macOS](docs/factory.md#parts-that-build-on-macos) shows the lines, and how to keep such a part testable.
+
 3. **Require the gate, and allow merge commits.** GitHub then refuses any merge the gate didn't pass, yours included. `app_id` 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:
 
    ```bash
@@ -281,6 +284,8 @@ The factory runs on your machine. It polls GitHub through `gh`, runs its agents 
    EOF
    gh api -X PATCH repos/OWNER/NAME -F allow_merge_commit=true
    ```
+
+   With a part that builds on macOS, init prints the call with `invariant/gate-macos` among the checks too, to be made once that job is on `main`.
 
 4. **Run the factory:**
 
