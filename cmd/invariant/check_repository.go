@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -284,6 +285,41 @@ func checkRepositorySetup(ctx context.Context, gh setup.GitHub, repo, checkout, 
 		return err
 	}
 	return setup.CheckRepository(ctx, repositorySetupGitHub{gh, commit}, repo, strings.TrimPrefix(base, "origin/"), err == nil)
+}
+
+// checkWatchProjects refuses a watcher whose -projects names another
+// directory than the one its repository's contract, committed on the base,
+// reserves for modeled projects, the default included when it names none.
+// The repository's own checks skip only the contract's directory, so they'd
+// run over projects put anywhere else (#937). A path that cleans to the
+// contract's agrees with it. A repository with no contract runs as it did.
+func checkWatchProjects(ctx context.Context, checkout, base, projects string) error {
+	commit, err := repositoryCommit(ctx, checkout, base)
+	if err != nil {
+		return err
+	}
+	snapshot, err := repository.Load(ctx, checkout, commit)
+	if errors.Is(err, repository.ErrMissing) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	contract := snapshot.Config()
+	reserved, asked := contract.Projects(), path.Clean(projects)
+	if asked == reserved {
+		return nil
+	}
+	branch := strings.TrimPrefix(base, "origin/")
+	reserves := fmt.Sprintf("declares %q as its projects directory", reserved)
+	if contract.ProjectsDirectory == "" {
+		reserves = fmt.Sprintf("names no projects directory, so it reserves %q", reserved)
+	}
+	fix := "pass -projects " + shellQuoteProjects(reserved)
+	if repository.ValidateProjectsDirectory(asked) == nil {
+		fix += fmt.Sprintf(", or commit \"projects_directory\": %q to %s on %s", asked, repository.Path, branch)
+	}
+	return fmt.Errorf("-projects is %q, but %s on %s %s. The repository's own checks skip only that directory, so they'd run over projects anywhere else. To make them agree, %s", projects, repository.Path, branch, reserves, fix)
 }
 
 // Read the workflow at the same commit as the contract while retaining the
