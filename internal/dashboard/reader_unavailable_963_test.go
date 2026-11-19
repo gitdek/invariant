@@ -191,3 +191,61 @@ func TestReader963SharedGoldens(t *testing.T) {
 		}
 	}
 }
+
+// When a receipt's final model draws but its retained comparison can't, the
+// page still leads with the final model's own outcome. The comparison's
+// reason is the card's message, and on the page it sits in the comparison's
+// own section, with complete closed evidence naming the final model too.
+func TestReader963ReceiptLeadsWithItsFinalModel(t *testing.T) {
+	for _, mode := range []string{"limited", "damaged"} {
+		t.Run(mode, func(t *testing.T) {
+			f := receipt723Fixture(t)
+			var c *statechart.Comparison
+			if mode == "limited" {
+				f = reader631FixtureFor(t, 3, "Independent final")
+				c = reader963Comparison(t, reader963Limited(t, "historical"), reader631FixtureFor(t, 3, "Candidate"))
+				f.Files[f.Manifest.Module] = append(f.Files[f.Manifest.Module], []byte("\\* independent final source\n")...)
+				f.Report.Reader.Comparison, f.Files[".invariant/comparison.json"] = c, reader631JSON(t, c)
+				f.bind(t)
+			} else {
+				f.Files[".invariant/comparison.json"] = []byte(`{"version":`)
+			}
+			s, _, p := receipt723Load(t, f, nil)
+			if p.Status != "chart" || p.SVG == "" || !strings.HasPrefix(p.Message, "Comparison unavailable:") {
+				t.Fatalf("fixture must draw its final chart beside an unavailable comparison: %+v", p)
+			}
+			n := reader963GET(t, s, p.Page)
+			var lede string
+			for _, div := range n.all("div") {
+				if div.attrs["class"] != "hero" {
+					continue
+				}
+				for _, para := range div.all("p") {
+					if _, ok := para.attrs["data-reader-reason"]; ok {
+						lede = reader963Space(para.words(true))
+					}
+				}
+			}
+			if !strings.HasPrefix(lede, "Checked bounded model;") || !strings.Contains(lede, "This adds no proof claim.") {
+				t.Errorf("the page's lead sentence must describe the final model: %q", lede)
+			}
+			fold := reader963Fold(t, n, p.Message)
+			inSection := false
+			for at := fold.parent; at != nil; at = at.parent {
+				if at.tag == "section" && len(at.all("h2")) > 0 && reader963Space(at.all("h2")[0].words(true)) == "Retained proposal comparison" {
+					inSection = true
+				}
+			}
+			if !inSection {
+				t.Error("the comparison's reason and evidence must sit in its own section")
+			}
+			reader963Words(t, fold.words(true), "Independently checked final model", f.Report.Reader.Inputs.Model)
+			if c != nil {
+				reader963Words(t, fold.words(true), c.Baseline.Name, c.Candidate.Name, c.BaselineIdentity.ModelSHA256, c.CandidateIdentity.ViewSHA256, c.Fingerprint)
+			} else {
+				reader963Words(t, fold.words(true), "comparison_evidence", "unexpected EOF")
+			}
+			receipt723Topology(t, receipt723HTTP(t, s, p.SVG), f.Report.Reader.Chart)
+		})
+	}
+}
