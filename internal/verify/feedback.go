@@ -30,6 +30,10 @@ func Feedback(r *Report) string {
 		case !p.Match:
 			section("Pinned statement "+p.Name, "Its text, or the text of a definition it depends on, changed. "+
 				"It's ratified, so you may not edit it: restore it exactly as it was.")
+		case p.LayoutMoved():
+			section("Layout of pinned statement "+p.Name, "Its text is the ratified text, and a token of it, or of a definition it depends on, moved: "+LayoutMoveText(p)+". "+
+				"TLA+ reads a bulleted list of /\\ or \\/ by the columns its items start in, so where each token sits is ratified too. "+
+				"Put every line back exactly where it was.")
 		}
 	}
 	d := r.Design
@@ -176,8 +180,11 @@ func Failed(r *Report) []string {
 		out = append(out, "ratification")
 	}
 	for _, p := range r.Pins {
-		if !p.Match {
+		switch {
+		case !p.Match:
 			out = append(out, "pin "+p.Name)
+		case p.LayoutMoved():
+			out = append(out, "layout "+p.Name)
 		}
 	}
 	if !r.Design.Passed {
@@ -236,4 +243,14 @@ func traceText(trace []tlc.State) string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// LayoutMoveText says where a statement's layout moved: the definition and
+// the first line that moved, when the gate could read the model as it was
+// ratified, or else that it couldn't.
+func LayoutMoveText(p Pin) string {
+	if p.Layout != nil && p.Layout.Moved != nil {
+		return "the first line that moved is in " + p.Layout.Moved.String()
+	}
+	return "the gate couldn't read the model as it was ratified to say which line, as in a clone without the repository's history"
 }

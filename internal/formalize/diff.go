@@ -27,8 +27,8 @@ type Definition struct {
 }
 
 // Change is one statement's fate: added, changed, removed or unchanged.
-// Changed means its meaning, its kind or its pin (its TLA+, or anything it
-// depends on) changed.
+// Changed means its meaning, its kind, its pin (its TLA+, or anything it
+// depends on) or its layout pin (where a token of either is) changed.
 type Change struct {
 	Name    string             `json:"name"`
 	How     string             `json:"how"`
@@ -44,7 +44,7 @@ type Change struct {
 // OwnTextSame says whether a changed statement's own definition, and what
 // it says, stayed the same, so it changed only through what it depends on.
 func (c Change) OwnTextSame() bool {
-	return c.Old != nil && c.New != nil && tla.Canonical(c.OldText) == tla.Canonical(c.NewText) &&
+	return c.Old != nil && c.New != nil && tla.Layout(c.OldText) == tla.Layout(c.NewText) &&
 		c.Old.Says == c.New.Says && c.Old.Kind == c.New.Kind && c.Old.Expect == c.New.Expect && c.Old.CodeBehavior == c.New.CodeBehavior
 }
 
@@ -90,7 +90,7 @@ func Diff(c *Current, p *Proposal) *Changes {
 			ch.Old = &o
 			ch.OldText = before.text(s.Name)
 			ch.How = Unchanged
-			if o.SHA256 != s.SHA256 || o.Says != s.Says || o.Kind != s.Kind || o.Expect != s.Expect || o.CodeBehavior != s.CodeBehavior {
+			if o.SHA256 != s.SHA256 || o.Says != s.Says || o.Kind != s.Kind || o.Expect != s.Expect || o.CodeBehavior != s.CodeBehavior || movedLayout(before, o, s) {
 				ch.How = Changed
 				ch.Through = changedUnder(before, after, s.Name)
 			}
@@ -128,8 +128,21 @@ func Diff(c *Current, p *Proposal) *Changes {
 	return out
 }
 
+// movedLayout says whether an amendment moves a token of a statement, or
+// of what it depends on, without changing its text (#814): its layout pin
+// differs from the one its lock pins or, for a lock that pins none yet,
+// from the layout the model being amended gives it.
+func movedLayout(before definitionsOf, old, draft project.Statement) bool {
+	was := old.LayoutPin()
+	if was == "" && before.model != nil {
+		was, _ = before.model.LayoutHash(old.Name, project.Model)
+	}
+	return was != "" && draft.Layout != "" && was != draft.Layout
+}
+
 // changedUnder lists the definitions a statement depends on, in either
-// version, whose text differs between the versions.
+// version, whose text differs between the versions, as written: in its
+// tokens or where they are.
 func changedUnder(before, after definitionsOf, name string) []string {
 	names := map[string]bool{}
 	for _, version := range []definitionsOf{before, after} {
@@ -145,7 +158,7 @@ func changedUnder(before, after definitionsOf, name string) []string {
 	}
 	var out []string
 	for _, n := range sortedNames(names) {
-		if tla.Canonical(before.text(n)) != tla.Canonical(after.text(n)) {
+		if tla.Layout(before.text(n)) != tla.Layout(after.text(n)) {
 			out = append(out, n)
 		}
 	}

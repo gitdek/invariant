@@ -20,107 +20,124 @@
       "name": "Spec",
       "kind": "spec",
       "says": "The system starts in Init, and every step is a Next step.",
-      "sha256": "sha256:873345f5b720f08aff6fee7320b9effc04fd740b1686cad148ba3c1e983d740b"
+      "sha256": "sha256:873345f5b720f08aff6fee7320b9effc04fd740b1686cad148ba3c1e983d740b",
+      "migrated_layout": "sha256:873345f5b720f08aff6fee7320b9effc04fd740b1686cad148ba3c1e983d740b"
     },
     {
       "name": "TypeOK",
       "kind": "invariant",
       "says": "Each API's bucket always holds between zero and its capacity in tokens, and every call is tracked with when it was made and when it went out or was refused.",
-      "sha256": "sha256:c913279019f92371b57d65a83237f12544cb5b5e93b5d6ee726e96a61f49fbe8"
+      "sha256": "sha256:c913279019f92371b57d65a83237f12544cb5b5e93b5d6ee726e96a61f49fbe8",
+      "migrated_layout": "sha256:baceb06ed9b2a955015acbbb22e6fcb4174db2eb316d85a1fe4f39e38c2e326b"
     },
     {
       "name": "WithinRate",
       "kind": "invariant",
       "says": "Over any stretch of time, an API never receives more calls than its bucket's capacity plus one per refill period in that stretch.",
-      "sha256": "sha256:56bbce074ebf9c76267bec029136cd99c56bdc0510261b8058141c9278b1749d"
+      "sha256": "sha256:56bbce074ebf9c76267bec029136cd99c56bdc0510261b8058141c9278b1749d",
+      "migrated_layout": "sha256:cdef92d5675cb488f3e6f656de09a542b2d699d92b89bef9889f9e5b65a1e571"
     },
     {
       "name": "FirstInFirstOut",
       "kind": "invariant",
       "says": "Calls to an API wait and go out in exactly the order they were made.",
-      "sha256": "sha256:3f05224aaae0a31804339be1d1f51f0c65a3e2fb2c41ae21c6849032f730deaa"
+      "sha256": "sha256:3f05224aaae0a31804339be1d1f51f0c65a3e2fb2c41ae21c6849032f730deaa",
+      "migrated_layout": "sha256:5d8bf0a78c294aa860e949c3a8278bd689fdce3d2a4fb1b53a43e3e7f2290099"
     },
     {
       "name": "NoNeedlessWait",
       "kind": "invariant",
       "says": "A call only waits while its API's bucket has no tokens left.",
-      "sha256": "sha256:816d3735c06127b177168348d8ee6ea218400153136c7e32a2f929dbad40c8cf"
+      "sha256": "sha256:816d3735c06127b177168348d8ee6ea218400153136c7e32a2f929dbad40c8cf",
+      "migrated_layout": "sha256:738a17f85945b444476fce719741afc72744ade8db28c1181f3c708822a9306e"
     },
     {
       "name": "NoCallLost",
       "kind": "invariant",
       "says": "Every call that was made has gone out, is still waiting, or was refused.",
-      "sha256": "sha256:0c8d0ccf077c372bdaccb51edd8c531b3dbcf82dfa840c4c3470c15e5e6c48e7"
+      "sha256": "sha256:0c8d0ccf077c372bdaccb51edd8c531b3dbcf82dfa840c4c3470c15e5e6c48e7",
+      "migrated_layout": "sha256:caace98eba6b1796df58b01ceda6a15ae4eef7277d83f038b4303b7db5b85688"
     },
     {
       "name": "BoundedWait",
       "kind": "invariant",
       "says": "No more than MaxWaiting calls are ever waiting for the same API.",
-      "sha256": "sha256:d1d69cb98d0aead6feae3e009ae5b620c082820b46bb96d737236f52a04a3ed3"
+      "sha256": "sha256:d1d69cb98d0aead6feae3e009ae5b620c082820b46bb96d737236f52a04a3ed3",
+      "migrated_layout": "sha256:f22f415886f5d8b2d2d376b864dfe7e951e53c910cdf168bd8fcfe75c8f23f48"
     },
     {
       "name": "NoNeedlessRefusal",
       "kind": "invariant",
       "says": "A call is only refused when its API's bucket was empty and MaxWaiting calls were already waiting for that API.",
-      "sha256": "sha256:cbadff9e47ad59cfdc4881d37dac125658f6313273937c30cc6ab6632e025a5c"
+      "sha256": "sha256:cbadff9e47ad59cfdc4881d37dac125658f6313273937c30cc6ab6632e025a5c",
+      "migrated_layout": "sha256:622d0897768f0062a68e42f933ad95a846fc7e86ac1e5cd32f0de129fb8ca362"
     },
     {
       "name": "BurstGoesOut",
       "kind": "witness",
       "says": "A full bucket's worth of calls can go out immediately at the start.",
-      "sha256": "sha256:6fb0ea1097d9f2f01f204502eebf08dfd75eee6b8e65b84566f5129ce555c5b8"
+      "sha256": "sha256:6fb0ea1097d9f2f01f204502eebf08dfd75eee6b8e65b84566f5129ce555c5b8",
+      "migrated_layout": "sha256:6fb0ea1097d9f2f01f204502eebf08dfd75eee6b8e65b84566f5129ce555c5b8"
     },
     {
       "name": "CallWaits",
       "kind": "witness",
       "says": "A call can have to wait for a token.",
-      "sha256": "sha256:21ec83ab123fa8a4405bf176d04f166b7a0066c1ad7a3ae95085684d7343afdd"
+      "sha256": "sha256:21ec83ab123fa8a4405bf176d04f166b7a0066c1ad7a3ae95085684d7343afdd",
+      "migrated_layout": "sha256:21ec83ab123fa8a4405bf176d04f166b7a0066c1ad7a3ae95085684d7343afdd"
     },
     {
       "name": "WaitingCallGoesOut",
       "kind": "witness",
       "says": "A call that waited can go out once a token refills.",
-      "sha256": "sha256:3593f395de2afcb3355dcb94fcca23845e93675ebfff52e3dbb21ac1d764527c"
+      "sha256": "sha256:3593f395de2afcb3355dcb94fcca23845e93675ebfff52e3dbb21ac1d764527c",
+      "migrated_layout": "sha256:9d0e13ec88c0c08cb8e7fe36caa3494657af88ebcf1c28b72adf279f867ff570"
     },
     {
       "name": "BucketRefills",
       "kind": "witness",
       "says": "A bucket that was spent from can refill back to full.",
-      "sha256": "sha256:4cdd36e9b9cb5b508885950594d9a9e71c07b342628d61974b439f77c06cb3ec"
+      "sha256": "sha256:4cdd36e9b9cb5b508885950594d9a9e71c07b342628d61974b439f77c06cb3ec",
+      "migrated_layout": "sha256:4cdd36e9b9cb5b508885950594d9a9e71c07b342628d61974b439f77c06cb3ec"
     },
     {
       "name": "CallRefused",
       "kind": "witness",
       "says": "A call can be refused because too many calls are already waiting.",
-      "sha256": "sha256:51d6e515dd4ce110a48f7b2ff62b9d833bc52d166e9d0176925764dbe4689035"
+      "sha256": "sha256:51d6e515dd4ce110a48f7b2ff62b9d833bc52d166e9d0176925764dbe4689035",
+      "migrated_layout": "sha256:51d6e515dd4ce110a48f7b2ff62b9d833bc52d166e9d0176925764dbe4689035"
     },
     {
       "name": "SendWithoutToken",
       "kind": "bug",
       "says": "A call goes out even though its API's bucket is empty.",
       "expect": "WithinRate",
-      "sha256": "sha256:135ca5d517c000e30fe0d08422a32ba53d28c89866049f1275df1becafcc5440"
+      "sha256": "sha256:135ca5d517c000e30fe0d08422a32ba53d28c89866049f1275df1becafcc5440",
+      "migrated_layout": "sha256:f7b18b6c54e5a12da07fcafec9dd032dee99f4f4042ea5cfb212dd3697721091"
     },
     {
       "name": "JumpQueue",
       "kind": "bug",
       "says": "A refilled token goes to the newest waiting call instead of the oldest.",
       "expect": "FirstInFirstOut",
-      "sha256": "sha256:2dda7982ec48ad5bd9bab46b20fdebcce998ff9e00a2bcb42a418e135a850211"
+      "sha256": "sha256:2dda7982ec48ad5bd9bab46b20fdebcce998ff9e00a2bcb42a418e135a850211",
+      "migrated_layout": "sha256:dd45e03168e52308a58e6d1f9b03cac2b571e2d762d7ce00fbf9ee8a40ec6553"
     },
     {
       "name": "QueuePastLimit",
       "kind": "bug",
       "says": "A call is put in the queue even though MaxWaiting calls are already waiting.",
       "expect": "BoundedWait",
-      "sha256": "sha256:2c55c763550b344bacbf3e065dd3181459589ab52a2ce8727eaded248ec66c80"
+      "sha256": "sha256:2c55c763550b344bacbf3e065dd3181459589ab52a2ce8727eaded248ec66c80",
+      "migrated_layout": "sha256:f0dfc9e899e191ffba2b11d7bdb5931b233576da4c805c08c404035341dede4e"
     },
     {
       "name": "RefuseEarly",
       "kind": "bug",
       "says": "A call is refused while there is still room in its API's queue.",
       "expect": "NoNeedlessRefusal",
-      "sha256": "sha256:2d7c5a41e7eb7374dfd038e6bd29c8233473564cc352c64bb61285f189d3d887"
+      "sha256": "sha256:2d7c5a41e7eb7374dfd038e6bd29c8233473564cc352c64bb61285f189d3d887",
+      "migrated_layout": "sha256:8edbe615b26b296c8fbf9360a2888305100b07cc083280a82c14c0559b78544c"
     }
   ]
 }

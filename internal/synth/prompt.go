@@ -84,7 +84,7 @@ This is an amendment. The project's code is already in your workspace, and it im
 %s
 # What was ratified
 
-These statements are pinned by hash in `+"`.invariant/ratified.lock`"+`. Their definitions are already in `+"`%s`"+`. Don't change them, or anything they depend on. The gate hashes their text and fails if it changes. The lock, the manifest, the request%s are protected: the gate always uses the originals.
+These statements are pinned by hash in `+"`.invariant/ratified.lock`"+`. Their definitions are already in `+"`%s`"+`. Don't change them, or anything they depend on. The gate hashes their text, and where each of its tokens is, since TLA+ reads a bulleted list by its columns, and fails if either changes: keep every line of them exactly where it is. The lock, the manifest, the request%s are protected: the gate always uses the originals.
 
 %s
 %s
@@ -98,7 +98,7 @@ TLC checks everything with these constants: %s.
 
 # What the gate checks
 
-- **Pins:** the ratified definitions are unchanged.
+- **Pins:** the ratified definitions are unchanged, down to where each token is.
 - **Design:** TLC finds no invariant violation and no deadlock in any reachable state of `+"`Spec`"+`.
 - **Reachability:** every witness is reachable.
 - **Known bugs:** every bug action, added to Next, makes TLC find its expected violation.

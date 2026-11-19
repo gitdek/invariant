@@ -310,6 +310,11 @@ func runPythonApplication(ctx context.Context, p *project.Project, outDir string
 	if err != nil {
 		return nil, err
 	}
+	// The gate runs on the staged copy, outside the repository, so where a
+	// layout moved is named from the project's own history (#814).
+	if options.Ratified == "" {
+		options.Ratified = dir
+	}
 	r, err := gateSelected(ctx, p.Dir, outDir, tc, true, nil, false, options, budget)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
