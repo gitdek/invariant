@@ -37,6 +37,11 @@ const (
 	// golang:1.27-alpine (Go 1.27.1), multi-arch index digest.
 	GoImage = "golang@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414"
 
+	// GoVersion is the Go that GoImage holds, so the two move together. A
+	// repository's gate checks a part that builds on macOS with it, on a
+	// hosted macOS runner, where no image runs (#929).
+	GoVersion = "1.27.1"
+
 	// NodeImage runs TypeScript code, its tests and its conformance driver.
 	// node:24-alpine (Node 24.21, which runs .ts directly), multi-arch digest.
 	NodeImage = "node@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1"
