@@ -84,7 +84,7 @@ Each requirement serves one goal.
 ### 1 · Nothing merges that people didn't agree to
 
 - **1.1 Only writers direct the factory,** and no bot's comment directs it or ratifies anything. Built. `D-0014` `D-0036` `D-0041`
-- **1.2 Ratified statements are pinned** by hash, along with everything they depend on. Nothing the factory writes can change them, or change what TLC checks. Built. `D-0002` `D-0017` `D-0026`
+- **1.2 Ratified statements are pinned** by hash, along with everything they depend on, and so is where each of their tokens is, since TLA+ reads a bulleted list by its columns. Nothing the factory writes can change them, or change what TLC checks. Built. `D-0002` `D-0017` `D-0026` `D-0488`
 - **1.3 Ratification is exact.** A writer ratifies by commenting the proposal's hash on the issue, a stale hash ratifies nothing, and CI confirms the comment through GitHub's API. A lock ratified by hand holds only for the exact proposal a person's ratify line names in the journal. Built. `D-0034` `D-0208`
 - **1.4 The gate passes only when every check does:** pins, TLC, witnesses, known bugs, properties under fairness, agreement or conformance, every step tried, the check one size larger, proofs, the TLAPS proofs a manifest selects, the build, scope and ratification. Built. `D-0004` `D-0013` `D-0014` `D-0068` `D-0071` `D-0082` `D-0229`
 - **1.5 The factory merges only when three things hold:** the gate passed on the exact head, the pull request is in scope, and its lock is the ratified proposal. Built. `D-0033` `D-0047`

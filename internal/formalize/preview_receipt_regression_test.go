@@ -68,9 +68,14 @@ func TestPreview639ExportedCandidateRulesAreLiteral(t *testing.T) {
 		if len(rows) != len(report.Pins)+2 {
 			t.Fatalf("candidate wording changed the number of table rows: %q", table)
 		}
+		// The statement, its kind, its words, its pin and its layout pin
+		// (#814), between the row's edges.
+		if header := strings.Split(rows[0], "|"); len(header) != 7 {
+			t.Fatalf("the candidate-rule table's heading has %d cells: %q", len(header), rows[0])
+		}
 		for j, pin := range report.Pins {
 			cells := strings.Split(rows[j+2], "|")
-			if len(cells) != 6 {
+			if len(cells) != 7 {
 				t.Fatalf("candidate wording changed the number of table cells: %q", rows[j+2])
 			}
 			says := strings.TrimSuffix(strings.TrimPrefix(cells[3], " "), " ")

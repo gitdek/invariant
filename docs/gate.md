@@ -188,7 +188,37 @@ A pin is the hash of a ratified statement's text and of every definition it depe
 
 `TestSANYReadsAsTheReaderDoes812` holds each of these readings against the pinned TLC, in CI's integration shards: 14 modules both read the same way, 10 that TLC reads in a way a line-by-line reader would miss, and the arithmetic of `Naturals` and `Integers` side by side. An upgrade of TLC that changes one fails there before it can change what a pin covers.
 
-A pin doesn't cover layout yet. TLA+ reads a bulleted list of `/\` or `\/` by its indentation, so re-indenting a statement can change what it means and keep its pin ([#814](https://github.com/gitdek/invariant/issues/814)).
+### Layout pins
+
+TLA+ reads a bulleted list of `/\` or `\/` by the column each item starts in, so the same tokens laid out differently can mean different things. On the pinned TLC,
+
+```tla
+Inv ==
+    /\ FALSE => FALSE
+    /\ FALSE
+```
+
+is `(FALSE => FALSE) /\ FALSE`, which is false, and `Inv == /\ FALSE => FALSE /\ FALSE` is `FALSE => (FALSE /\ FALSE)`, which holds. A pin hashes their one canonical text, so a lock pins each statement's layout as well ([#814](https://github.com/gitdek/invariant/issues/814), [D-0488](../decisions/D-0488-pin-statement-layout.md)).
+
+- **A layout pin.** Beside each statement's `sha256`, a lock records the SHA-256 of the layout of every definition that pin covers, in the pin's order. A definition's layout is its text as written, with each comment blanked in place, the space at each line's end trimmed and the lines left blank dropped, so every token keeps its line, among the lines that hold one, and its column. Editing a comment, or adding one on a line of its own or after the code on a line, changes no layout pin. Moving a token does, and so does a comment written before a token on its line, since it moves the token. A definition written on one line, a space between its tokens, is laid out as its canonical text, so its layout pin is its pin.
+- **Ratified or migrated.** A statement's `layout` is ratified: the proposal hashes it with the rest of the statement, so the layout a person saw is the one that's pinned. The factory's drafts and `invariant pin` record it. A lock ratified before layout pins keeps its pins and its proposal, and gains a `migrated_layout` for each statement, which its proposal leaves out: the layout the model gave at the commit that recorded the lock's ratification, the one that wrote its proposal into the lock. A lock holds one kind for every statement, or none.
+- **The gate checks both pins.** A statement whose tokens are the ratified ones and one of which moved fails on its own, as its layout, apart from a statement whose text changed. Where the gate can read the model as it was ratified, from the commits in the repository's history that recorded the lock's proposal, or from the ratified project a synthesis agent's gate runs beside, it names the definition and the first line that moved, with that line now and as ratified. In a clone without that history, as CI's job for each project checks out, it says it can't name the line. The verdict comes from the lock alone.
+- **The ratification check** reads the repository's whole history and refuses a layout pin's change that doesn't come with a new ratification. A ratified layout pin is part of the proposal its comment or decision names. A migrated one must be the one the model gives at every commit that recorded the lock's proposal, on every branch the history holds, and a lock whose proposal had migrated layout pins anywhere in that history must still have them, so neither a merge that keeps an older lock nor a lock broken and restored can move or drop one. A shallow clone can't show that, so the check fails in one.
+- **A lock without layout pins** keeps verifying. The gate checks its pins as before, its receipt says its layout isn't pinned yet, and nothing fails.
+
+Every lock in this repository was migrated, from the commit that recorded its ratification, and `TestEveryLockHereKeepsItsProposalAndPinsItsRatifiedLayout814` holds each migrated layout pin to that commit. `TestLayoutPinsTellTheIssuesLayoutsApartIntegration` runs the two layouts above on the pinned TLC, in CI's integration shards, with a variant TLC checks state by state: the gate fails the joined layout against a lock ratified with the listed one, on its layout alone.
+
+#### Pinning another repository's layouts
+
+A repository whose locks were ratified before layout pins moves the gate its CI pins to a commit with them, then migrates each project's lock once, from a checkout with its whole history:
+
+```bash
+invariant pin -layout PROJECT...
+```
+
+For each project, it finds the commits that recorded its lock's proposal, computes each statement's layout pin from the model there, and writes it as `migrated_layout` beside the statement's pin. It refuses a lock whose model at those commits doesn't hold the statements as the lock pins them, and leaves one that already pins its layouts as it is. It changes no pin and no proposal, so every ratifying comment and decision still checks. Commit the locks in a pull request: the ratification check holds each migrated pin to the history, and the gate checks it against the model. A model whose layout moved since its ratification then fails the gate, as it should: restore the layout, or ratify the new one with `invariant pin` or an amendment.
+
+A gate from before layout pins reads a migrated lock as it read the lock before, and passes it. It reads a lock ratified with layout pins without them, so the proposal it computes isn't the ratified one, and its ratification check fails: move the gate a repository's CI pins before its factory drafts with layout pins. A watcher from before them drafts proposals without layout pins, whose ratifications pin no layout, so the watchers move to a build with them too.
 
 ## Model parse and semantic failures
 

@@ -207,9 +207,19 @@ func Markdown(r *verify.Report) string {
 	} else {
 		b.WriteString("\n<details>\n<summary>Ratified statements</summary>\n\n")
 	}
-	b.WriteString("| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n")
+	// A report from before layout pins has none to show, and keeps its
+	// table as it was (#814).
+	if layouts(r) {
+		b.WriteString("| Statement | Kind | Says | Pin | Layout |\n| :-- | :-- | :-- | :-- | :-- |\n")
+	} else {
+		b.WriteString("| Statement | Kind | Says | Pin |\n| :-- | :-- | :-- | :-- |\n")
+	}
 	for _, p := range r.Pins {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s %s |\n", render.literal(p.Name), render.text(p.Kind), render.text(p.Says), mark(p.Match), render.literal(short(p.Want)))
+		fmt.Fprintf(&b, "| %s | %s | %s | %s %s |", render.literal(p.Name), render.text(p.Kind), render.text(p.Says), mark(p.Match), render.literal(short(p.Want)))
+		if layouts(r) {
+			fmt.Fprintf(&b, " %s |", render.layout(p))
+		}
+		b.WriteByte('\n')
 	}
 	b.WriteString("\n</details>\n\n<details>\n<summary>Toolchain</summary>\n\n")
 	b.WriteString("| Tool | Pinned at |\n| :-- | :-- |\n")
@@ -494,11 +504,60 @@ func (render renderer) provenance(r *verify.Report) string {
 }
 
 func pinsOK(r *verify.Report) bool {
-	return count(r.Pins, func(p verify.Pin) bool { return p.Match }) == len(r.Pins)
+	return count(r.Pins, func(p verify.Pin) bool { return p.Match && p.LayoutHolds() }) == len(r.Pins)
 }
 
 func pinsResult(r *verify.Report) string {
-	return fmt.Sprintf("%d of %d match", count(r.Pins, func(p verify.Pin) bool { return p.Match }), len(r.Pins))
+	result := fmt.Sprintf("%d of %d match", count(r.Pins, func(p verify.Pin) bool { return p.Match }), len(r.Pins))
+	pinned := count(r.Pins, func(p verify.Pin) bool { return p.Layout != nil && p.Layout.Want != "" })
+	switch {
+	case !layouts(r):
+	case pinned == 0:
+		result += "; layout not pinned yet"
+	default:
+		result += fmt.Sprintf("; %d of %d layouts match", count(r.Pins, func(p verify.Pin) bool { return p.Layout != nil && p.Layout.Match }), pinned)
+	}
+	return result
+}
+
+// layouts says whether the report compares layout pins: whether it's from a
+// gate that has them (#814).
+func layouts(r *verify.Report) bool {
+	return count(r.Pins, func(p verify.Pin) bool { return p.Layout != nil }) > 0
+}
+
+// layoutMove says where a statement's layout first moved, with each line in
+// a code span as written.
+func (render renderer) layoutMove(p verify.Pin) string {
+	if p.Layout == nil || p.Layout.Moved == nil {
+		return render.text("the gate couldn't read the model as it was ratified to say which line moved, as in a clone without the repository's history")
+	}
+	mv := p.Layout.Moved
+	where := "the first line that moved is in the definition of " + render.literal(mv.Definition)
+	if mv.File != "" {
+		where += " in " + render.literal(mv.File)
+	}
+	switch {
+	case mv.Ratified == "":
+		return fmt.Sprintf("%s, at line %d: %s, a line the ratified layout doesn't have", where, mv.Line, render.literal(mv.Now))
+	case mv.Now == "":
+		return fmt.Sprintf("%s, which ends at line %d, where the ratified layout goes on with %s", where, mv.Line, render.literal(mv.Ratified))
+	}
+	return fmt.Sprintf("%s, at line %d: %s, where the ratified layout has %s", where, mv.Line, render.literal(mv.Now), render.literal(mv.Ratified))
+}
+
+// layout is a statement's layout pin as the statements table shows it.
+func (render renderer) layout(p verify.Pin) string {
+	switch l := p.Layout; {
+	case l == nil:
+		return "➖"
+	case l.Want == "":
+		return "➖ not pinned yet"
+	case l.Migrated:
+		return mark(l.Match) + " " + render.literal(short(l.Want)) + " migrated"
+	default:
+		return mark(l.Match) + " " + render.literal(short(l.Want))
+	}
 }
 
 func (render renderer) designResult(d verify.Design) string {
@@ -725,6 +784,8 @@ func (render renderer) failures(r *verify.Report) []string {
 			out = append(out, fmt.Sprintf("Pinned statement %s: %s", render.literal(p.Name), render.text(p.Error)))
 		case !p.Match:
 			out = append(out, fmt.Sprintf("Pinned statement %s changed: its text no longer matches what was ratified", render.literal(p.Name)))
+		case p.LayoutMoved():
+			out = append(out, fmt.Sprintf("Layout of pinned statement %s moved: its text is the ratified text, and %s", render.literal(p.Name), render.layoutMove(p)))
 		}
 	}
 	if !r.Design.Passed && r.Design.Message != "" {

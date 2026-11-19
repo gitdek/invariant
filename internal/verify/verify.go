@@ -118,7 +118,36 @@ type Pin struct {
 	Got   string `json:"got,omitempty"`
 	Match bool   `json:"match"`
 	Error string `json:"error,omitempty"`
+	// Layout compares the statement's layout pin with where its tokens,
+	// and those of everything it depends on, are today (#814). A report
+	// from before layout pins has none, and neither has a pin of a model
+	// the gate can't read.
+	Layout *LayoutPin `json:"layout,omitempty"`
 }
+
+// LayoutPin compares a statement's layout pin with its layout today. Want is
+// the lock's layout pin, ratified or, when Migrated, added by migration; it's
+// empty when the lock pins no layout yet, and then nothing is compared.
+// Moved says where the layout first moved, when the gate could read the
+// model as it was ratified.
+type LayoutPin struct {
+	Want     string    `json:"want,omitempty"`
+	Migrated bool      `json:"migrated,omitempty"`
+	Got      string    `json:"got"`
+	Match    bool      `json:"match"`
+	Moved    *tla.Move `json:"moved,omitempty"`
+}
+
+// LayoutHolds says whether the statement's layout is as its lock pins it:
+// it is, or the lock pins no layout yet, or the report is from before
+// layout pins.
+func (p Pin) LayoutHolds() bool {
+	return p.Layout == nil || p.Layout.Want == "" || p.Layout.Match
+}
+
+// LayoutMoved says whether the statement's tokens are the ratified ones and
+// one of them moved: a failure of its own, apart from a changed text.
+func (p Pin) LayoutMoved() bool { return p.Match && !p.LayoutHolds() }
 
 // Design is TLC's check of every ratified invariant within the bounds.
 type Design struct {
@@ -342,6 +371,7 @@ func gateSelected(ctx context.Context, dir, outDir string, tc toolchain.Toolchai
 		Agent: p.Manifest.Agent,
 	}
 	ratification(ctx, r, p.Dir, p.Lock)
+	nameMoves(ctx, r.Pins, src, includes, p.Dir, options.Ratified, p.Lock)
 	var stagingRoot string
 	switch lang.(type) {
 	case Go:
@@ -788,7 +818,7 @@ func (r *Report) CodeAssurance() string {
 func modelPassed(r *Report) bool {
 	ok := r.RatificationMatches()
 	for _, pin := range r.Pins {
-		ok = ok && pin.Match
+		ok = ok && pin.Match && pin.LayoutHolds()
 	}
 	for _, w := range r.Witnesses {
 		ok = ok && w.Reached
@@ -845,12 +875,21 @@ func agree(d Design, e Exploration) Agreement {
 // canonicalized on a detached copy; invocation arguments, observations and
 // diagnostics stay ordered.
 // It leaves out TLC resource history, timestamps, build output and test timings,
-// the whole version of the host's Go toolchain, where traces were written and the coding
-// agent that wrote the code, so a local run and a CI run of the same commit
-// have the same fingerprint.
+// the whole version of the host's Go toolchain, where traces were written, the coding
+// agent that wrote the code and where a moved layout moved, which the gate names
+// only where it can read the history, so a local run and a CI run of the same
+// commit have the same fingerprint.
 func Fingerprint(r Report) string {
 	r.TLCAttempts = nil
 	r.Reader = nil
+	r.Pins = append([]Pin(nil), r.Pins...)
+	for i := range r.Pins {
+		if l := r.Pins[i].Layout; l != nil {
+			portable := *l
+			portable.Moved = nil
+			r.Pins[i].Layout = &portable
+		}
+	}
 	if r.Application != nil {
 		r.Application = portablePythonApplication(r.Application)
 	}
@@ -881,9 +920,9 @@ func Fingerprint(r Report) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// checkPins compares each ratified statement's pin with the model's text. The
-// model is read the way TLC reads it, with the modules beside it, and one the
-// gate can't read that way matches no pin.
+// checkPins compares each ratified statement's pin and layout pin with the
+// model's text. The model is read the way TLC reads it, with the modules
+// beside it, and one the gate can't read that way matches no pin.
 func checkPins(src string, includes map[string]string, statements []project.Statement) []Pin {
 	pins := make([]Pin, 0, len(statements))
 	model, readErr := tla.Read(src, includes)
@@ -893,13 +932,76 @@ func checkPins(src string, includes map[string]string, statements []project.Stat
 			pin.Error = readErr.Error()
 		} else if h, err := model.PinHash(s.Name, project.Model); err != nil {
 			pin.Error = err.Error()
+		} else if layout, err := model.LayoutHash(s.Name, project.Model); err != nil {
+			pin.Error = err.Error()
 		} else {
 			pin.Got = h
 			pin.Match = pin.Got == pin.Want
+			pin.Layout = &LayoutPin{Want: s.LayoutPin(), Migrated: s.MigratedLayout != "", Got: layout}
+			pin.Layout.Match = pin.Layout.Want != "" && pin.Layout.Got == pin.Layout.Want
 		}
 		pins = append(pins, pin)
 	}
 	return pins
+}
+
+// nameMoves says where the layout of each statement whose tokens match and
+// whose layout moved first moved, when the gate can read the model as it
+// was ratified: at the commits that recorded the lock's proposal, in the
+// history of the repository dir is in or that of ratified, a directory the
+// caller names that holds the project as it was ratified, or in ratified's
+// model itself. A model names a statement's move only when it lays the
+// statement out exactly as the lock pins it, so a copy that isn't the
+// ratified one names nothing. The verdict never depends on it: the lock's
+// layout pin decides that.
+func nameMoves(ctx context.Context, pins []Pin, src string, includes map[string]string, dir, ratified string, lock project.Lock) {
+	moved := false
+	for _, pin := range pins {
+		moved = moved || pin.LayoutMoved()
+	}
+	if !moved {
+		return
+	}
+	now, err := tla.Read(src, includes)
+	if err != nil {
+		return
+	}
+	var candidates []*tla.Model
+	for _, d := range []string{dir, ratified} {
+		if d == "" {
+			continue
+		}
+		commits, _ := project.RatificationCommits(ctx, d, lock)
+		for _, c := range commits {
+			if m, err := project.ModelAt(ctx, d, c); err == nil {
+				candidates = append(candidates, m)
+			}
+		}
+	}
+	if ratified != "" {
+		if p, err := project.Load(ratified); err == nil {
+			if raw, err := os.ReadFile(p.ModulePath()); err == nil {
+				if m, err := p.ReadModel(string(raw)); err == nil {
+					candidates = append(candidates, m)
+				}
+			}
+		}
+	}
+	for i := range pins {
+		pin := &pins[i]
+		if !pin.LayoutMoved() {
+			continue
+		}
+		for _, m := range candidates {
+			if h, err := m.LayoutHash(pin.Name, project.Model); err != nil || h != pin.Layout.Want {
+				continue
+			}
+			if mv, err := now.FirstMove(m, pin.Name, project.Model); err == nil && mv != nil {
+				pin.Layout.Moved = mv
+				break
+			}
+		}
+	}
 }
 
 // modelSteps reads the named steps of the model's Next.
