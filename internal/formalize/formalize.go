@@ -338,6 +338,16 @@ func (p *Proposal) PinAmending(amended []project.Statement) error {
 		if s.Kind != project.Bug || s.CodeBehavior != "" || carriedAsIs(carried[s.Name], s) {
 			continue
 		}
+		// A bug the draft keeps word for word, whose layout alone moved,
+		// is changed too: the refusal says so, so a drafter puts its lines
+		// back rather than classifying it.
+		if was, ok := carried[s.Name]; ok && was.LayoutPin() != "" {
+			moved := s
+			moved.Layout = was.LayoutPin()
+			if carriedAsIs(was, moved) {
+				return fmt.Errorf("statement %s: an amendment must classify each bug it adds or changes with code_behavior current or hypothetical, and this draft moves a token of %s or of what it depends on, which changes it: keep its lines where the lock has them to carry it as it is (#814)", s.Name, s.Name)
+			}
+		}
 		if len(amended) > 0 {
 			return fmt.Errorf("statement %s: an amendment must classify each bug it adds or changes with code_behavior current or hypothetical", s.Name)
 		}

@@ -38,7 +38,7 @@ func Prompt(req Request, checks int) string {
 
 This issue changes an existing project, `+"`%s`"+`. Its captured ratification is already in the current directory and stays the baseline throughout this amendment. `+"`%s.tla`"+` holds its statements and its model, and `+"`proposal.json`"+` lists its statements as ratified (%s). Edit both files, and change only what the issue asks for:
 
-- Add, change or remove statements as the issue requires. Keep every other statement's text and meaning word for word. The factory compares your draft with the ratified lock and shows people exactly what changed, and it calls out every statement you remove or change.
+- Add, change or remove statements as the issue requires. Keep every other statement's text and meaning word for word, with its lines where they are: TLA+ reads a bulleted list by its columns, so a statement whose layout moves has changed. The factory compares your draft with the ratified lock and shows people exactly what changed, and it calls out every statement you remove or change.
 - Keep the module's name. Change the bounds, the model (`+"`Init`"+`, the actions and `+"`Next`"+`) and helper definitions as the change needs.
 - The ratified statements are decisions already made, so don't ask about them again. Ask only about what the issue leaves open.
 - If the issue isn't a change this project can take, set `+"`unsupported`"+` to one sentence saying why.

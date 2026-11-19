@@ -96,8 +96,9 @@ func TestAnAmendmentOfALockRatifiedBeforeLayoutPins814(t *testing.T) {
 				if got := changed857(c, p); !reflect.DeepEqual(got, []string{"PutWhenFull changed"}) {
 					t.Errorf("the amendment's changes are %v, want [PutWhenFull changed]", got)
 				}
-			case err == nil || !strings.Contains(err.Error(), "statement PutWhenFull: an amendment must classify each bug it adds or changes"):
-				t.Fatalf("an amendment that moves a token of the carried bug: %v; want it to classify the bug", err)
+			case err == nil || !strings.Contains(err.Error(), "statement PutWhenFull: an amendment must classify each bug it adds or changes") ||
+				!strings.Contains(err.Error(), "keep its lines where the lock has them to carry it as it is"):
+				t.Fatalf("an amendment that moves a token of the carried bug: %v; want it to classify the bug, or put its lines back", err)
 			}
 			classified := map[string]func(string) string{"BoundedBuffer.tla": moved["BoundedBuffer.tla"], "proposal.json": func(s string) string {
 				return strings.Replace(s, `"expect": "WithinCap"`, `"expect": "WithinCap", "code_behavior": "current"`, 1)
