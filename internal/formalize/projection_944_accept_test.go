@@ -218,12 +218,50 @@ func reader944MainHashes() map[string]map[string]string {
 
 func reader944PinnedBytes(t *testing.T, name string, g reader944Golden) {
 	t.Helper()
+	reader944PinnedAgainst(t, name, g, reader944MainHashes(), "main 950fefa6's output")
+}
+
+// reader944LayoutHashes is what production renders fresh since #814 gives a
+// draft's statements their layout pins (D-0488): main 950fefa6's output,
+// but for the outputs those pins reach, a chart's rules, its reader
+// fingerprint and a comparison's identities, which moved (D-0512). The saved
+// fixtures stay main 950fefa6's output.
+func reader944LayoutHashes() map[string]map[string]string {
+	h := reader944MainHashes()
+	for name, moved := range map[string]map[string]string{
+		"ordinary": {
+			"JSON":        "06b84315132a4c90abbb199f6aae80da1f04896a474b122d3d45a2f151cad0ab",
+			"SVG":         "7aa814e6a9019bf83bacfd17004065557885ae22e19bf08edae0bb26428495fd",
+			"Fingerprint": "b21cf6dd05d0f32f1007018ef6702b00e04e2fe9e93a3bed65afb7b877162621",
+		},
+		"preview": {
+			"JSON":        "cfbf767cf599440d223216f3cf49460dbd5d2c5561046689eca289e977acc6bd",
+			"SVG":         "fc2e5395b8c597c3329571557c4e60541814d4cb37a55975aca4c7b0a76c9170",
+			"Fingerprint": "207e5249791c5bb48daede5075bb568bd6e40dadd594e4da653a53a243fc86b0",
+		},
+		"comparison": {
+			"JSON":                  "355a1e9c25cba7cf7fbb815b0c5a10cb5bb290c3647495d2d3c65fe30305eadc",
+			"Markdown":              "2199f482fb4bc8743fa7aa1b1f1957eb27f84fb1632c57c2d4afe352c1421bdc",
+			"SVG":                   "ef205ec06a6c379fbea452fbf413b416061edc1e7a077e9c8061c5e22904d8ea",
+			"Fingerprint":           "975f0558443d1a238dda513dfb2c68974f9e50cb6b0696ed1187e7144c47584a",
+			"ComparisonFingerprint": "746c9b6de6717e51cf6ffada61600ef42188dd50cd9dcc995d500084cf695d57",
+		},
+	} {
+		for field, hash := range moved {
+			h[name][field] = hash
+		}
+	}
+	return h
+}
+
+func reader944PinnedAgainst(t *testing.T, name string, g reader944Golden, hashes map[string]map[string]string, what string) {
+	t.Helper()
 	values := map[string]string{"JSON": g.JSON, "Markdown": g.Markdown, "SVG": g.SVG,
 		"Animated": g.Animated, "Still": g.Still, "Fingerprint": g.Fingerprint,
 		"ComparisonFingerprint": g.ComparisonFingerprint}
-	for field, want := range reader944MainHashes()[name] {
+	for field, want := range hashes[name] {
 		if got := fmt.Sprintf("%x", sha256.Sum256([]byte(values[field]))); got != want {
-			t.Fatalf("%s.%s is not main 950fefa6's output: SHA-256 %s, want %s", name, field, got, want)
+			t.Fatalf("%s.%s is not %s: SHA-256 %s, want %s", name, field, what, got, want)
 		}
 	}
 }
@@ -335,7 +373,7 @@ func TestReader944LargeAdmissionKeepsSmallBytes(t *testing.T) {
 		// Compute/preview/comparison output that old decoded charts would hide.
 		reader944PinnedBytes(t, name, g)
 		reader944PinnedBytes(t, name, reader944Rendered(t, g))
-		reader944PinnedBytes(t, name, reader944Rendered(t, fresh[name]))
+		reader944PinnedAgainst(t, name, reader944Rendered(t, fresh[name]), reader944LayoutHashes(), "main 950fefa6's output with #814's layout pins")
 	}
 }
 
