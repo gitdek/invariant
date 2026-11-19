@@ -437,25 +437,15 @@ func (f *Factory) markPost(c github.Comment) (Post, bool, error) {
 	if f.Self != "" && c.User.Login != f.Self {
 		return Post{}, false, nil
 	}
-	m, ok := DecodeMarker(c.Body)
-	if f.Self != "" {
-		// The factory's own comment, known by its login, ends with its
-		// marker. One that ends any other way was cut or changed: in its
-		// marker, before its marker, or after it. Taken as no post, an
-		// earlier proposal would answer a pending ratification in its
-		// place, and a marker shown in its text could be read as its own.
-		// What's left of it says it was a post: the start of a marker, or
-		// the words every post begins with. A person can restore the
-		// comment, or delete it to fall back on purpose.
-		if m, ok = endMarker(c.Body); !ok && (strings.Contains(c.Body, markerStart) || strings.HasPrefix(c.Body, header)) {
-			return Post{}, false, fmt.Errorf("comment %d: the factory's marker is cut short or damaged; restore the comment, or delete it to fall back to the post before it", c.ID)
-		}
+	// The factory's own comment, known by its login, ends with its marker.
+	// One that ends any other way was cut or changed: in its marker, before
+	// its marker, or after it (ReadPost).
+	m, ok, bad := ReadPost(c.Body, f.Self != "")
+	if bad != nil {
+		return Post{}, false, fmt.Errorf("comment %d: %s", c.ID, bad)
 	}
 	if !ok {
 		return Post{}, false, nil
-	}
-	if m.referenceProblem != "" {
-		return Post{}, false, fmt.Errorf("comment %d: draft reference: malformed marker: %s; restore the comment", c.ID, m.referenceProblem)
 	}
 	return Post{Comment: c, Marker: m}, true, nil
 }

@@ -1023,6 +1023,16 @@ details.stalled > .need-repo + .need { margin-top: 8px; }
 .livestep.ended:not(.open) h2 { font-size: clamp(17px, 1.9vw, 21px); line-height: 1.3; }
 .livestep.ended:not(.open) .lede { margin-top: 4px; font-size: 14px; }
 .livestep.ended:not(.open)::before { display: none; }
+/* A run that waits for Codex's turn hasn't started, and neither has its
+   time limit: its card shows its heading and what it waits for, and no
+   clock until its turn comes (#948). */
+.livestep.waiting:not(.ended) { padding-block: 18px; }
+.livestep.waiting:not(.ended) > header { margin-bottom: 0; align-items: center; }
+.livestep.waiting:not(.ended) > :not(header) { display: none; }
+.livestep.waiting:not(.ended) h2 { font-size: clamp(17px, 1.9vw, 21px); line-height: 1.3; }
+.livestep.waiting:not(.ended) .lede { margin-top: 4px; font-size: 14px; }
+.livestep.waiting:not(.ended)::before { display: none; }
+.livestep.waiting:not(.ended) .livedot { background: var(--ink3); animation: none; }
 @media (max-width: 640px) {
   .livestep > header { flex-wrap: wrap; }
 }

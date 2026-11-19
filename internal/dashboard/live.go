@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -46,8 +47,23 @@ type Live struct {
 	Agent           string         `json:"agent,omitempty"`    // how the agent's run ended, once it has
 	By              string         `json:"by,omitempty"`       // the coding agent running the step, as the watcher names it (#153)
 	Ended           *time.Time     `json:"ended,omitempty"`    // when the step ended, once it has
+	// Waits is since when a Codex run has waited for its turn, which one
+	// run holds at a time on a machine (D-0138, D-0154), and HeldBy the step
+	// whose run holds it, when the page can tell. Turn is when its turn
+	// came, from which its time limit counts: its card's clock starts there
+	// (#948).
+	Waits  *time.Time `json:"waits,omitempty"`
+	HeldBy *Holder    `json:"heldBy,omitempty"`
+	Turn   *time.Time `json:"turn,omitempty"`
 
 	path string // the transcript supplying this view; never serialized
+}
+
+// Holder is a step whose Codex run holds the turn others wait for (#948).
+type Holder struct {
+	Repo  string `json:"repo"`
+	Issue int    `json:"issue"`
+	Doing string `json:"doing"`
 }
 
 // Mark is one tool call, or one stretch of thinking between tool calls.
@@ -100,6 +116,7 @@ type transcript struct {
 	files         map[string]*touched
 	touches       int
 	last          time.Time // the newest time an event carried
+	began         time.Time // when the agent's latest session began, by Codex's backend's stamp
 	now           string
 	// codex reads the transcript as Codex writes it. Both agents' pending
 	// tools are indexed by id; -1 means their mark was trimmed.
@@ -433,6 +450,9 @@ func (t *transcript) codexLine(b []byte) {
 		if e.Cwd != "" {
 			t.workspace(e.Cwd)
 		}
+		if began, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil {
+			t.began = began.UTC()
+		}
 	case "turn.started":
 		t.agent, t.now = "", "thinking"
 	case "item.started":
@@ -749,14 +769,30 @@ func (s *Server) refreshLive(now time.Time) error {
 		}
 		steps = append(steps, running...)
 	}
+	// A run that waits for Codex's turn names the step whose run holds it.
+	if holder := s.turnHolder(read); holder != nil {
+		for i := range steps {
+			if steps[i].Waits != nil && (steps[i].Repo != holder.Repo || steps[i].Issue != holder.Issue) {
+				steps[i].HeldBy = holder
+			}
+		}
+	}
 	// A transcript no card is read from anymore is forgotten.
 	for path := range s.live.reads {
 		if !read[path] {
 			delete(s.live.reads, path)
 		}
 	}
+	// Longest-running first, and the runs that wait for their turn after
+	// them, longest-waiting first, in about the order they take it.
 	sort.SliceStable(steps, func(i, j int) bool {
+		if (steps[i].Waits == nil) != (steps[j].Waits == nil) {
+			return steps[i].Waits == nil
+		}
 		a, b := steps[i].Since, steps[j].Since
+		if steps[i].Waits != nil {
+			a, b = steps[i].Waits, steps[j].Waits
+		}
 		return a != nil && (b == nil || a.Before(*b))
 	})
 	body, err := json.Marshal(map[string]any{"at": now.UTC(), "steps": steps})
@@ -808,6 +844,11 @@ func (s *Server) liveStep(repo string, st Status, step Step, work string, read m
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
+	}
+	if waits, ok := waitsForTurn(work, repo, step); ok {
+		v.Waits, v.Title, v.Last = &waits, waitTitle(step.Doing), nil
+	} else {
+		v.Turn = turnOf(path)
 	}
 	v.Runs, v.RunsKind = readRuns(dir, step.Doing)
 	for i := range v.Marks {
@@ -923,6 +964,7 @@ func (s *Server) finishedStep(repo string, step Step, work string, read map[stri
 	v.Title = liveTitle(step.Doing, true)
 	v.Run, v.path, v.Ended, v.Now = step.Run, path, &ended, ""
 	v.ThinkingPending = false
+	v.Turn, v.Waits, v.HeldBy = turnOf(path), nil, nil
 	if !step.Since.IsZero() {
 		since := step.Since
 		v.Since = &since
@@ -944,6 +986,121 @@ func (s *Server) finishedStep(repo string, step Step, work string, read map[stri
 		}
 	}
 	return v
+}
+
+// waitTitle is a card's heading while its step's run waits for its turn.
+func waitTitle(doing string) string {
+	return map[string]string{"building": "Waiting to build", "waiting for checks": "Waiting to build", "formalizing": "Waiting to draft", "answering": "Waiting to draft again"}[doing]
+}
+
+// waitsForTurn says since when a Codex step's run has waited for its turn,
+// which one Codex run holds at a time on a machine (D-0138, D-0154): its
+// transcript is there and still empty, since Codex's backend writes the
+// transcript's first line, stamped, only once the run's turn has come, and
+// the transcript was made just before the run began to wait (#948). That's
+// what watchers already record, so it needs nothing new of them. A run that
+// had a turn and waits for another, to try again or to review, isn't told
+// apart: its clock runs on then, as its time limit does.
+func waitsForTurn(work, repo string, step Step) (time.Time, bool) {
+	dir := stepDir(work, repo, step)
+	if step.Agent != "codex" || step.Ended != nil || dir == "" {
+		return time.Time{}, false
+	}
+	if prefix, _ := stepFiles(step.Doing); prefix == "" {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(filepath.Join(dir, "transcript.jsonl"))
+	if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+		return time.Time{}, false
+	}
+	return info.ModTime().UTC(), true
+}
+
+// turnOf is when a Codex run's turn came, from the stamp on the first line
+// its backend wrote to the transcript at path, or nil for a transcript that
+// doesn't start that way, as Claude Code's doesn't (#948).
+func turnOf(path string) *time.Time {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	line, err := bufio.NewReader(io.LimitReader(f, 64<<10)).ReadBytes('\n')
+	if err != nil {
+		return nil
+	}
+	var e struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+	}
+	if json.Unmarshal(line, &e) != nil || e.Type != "invariant.workspace" {
+		return nil
+	}
+	at, err := time.Parse(time.RFC3339Nano, e.Timestamp)
+	if err != nil {
+		return nil
+	}
+	at = at.UTC()
+	return &at
+}
+
+// turnHolder is the step whose Codex run holds the turn, as far as the
+// page can tell, among every running step of every watcher it reads: the
+// one whose agent, or whose build's review, is at work in the session that
+// began last. Only one Codex run holds the turn on a machine, so a session
+// that began later took it from any before it. It's nil when none is at
+// work, as for a moment between runs, or when the run holding it is one
+// the page doesn't read, as a run by hand.
+func (s *Server) turnHolder(read map[string]bool) *Holder {
+	var holder *Holder
+	var latest time.Time
+	seen := map[string]bool{}
+	for _, r := range s.Repos {
+		works := s.Works
+		if len(works) == 0 {
+			works = []string{s.Work}
+		}
+		for _, work := range works {
+			path := StatusPath(work, r.Name)
+			if len(s.Works) == 0 {
+				path = r.Status
+			}
+			st, err := ReadStatus(path)
+			if err != nil || !st.Running() {
+				continue
+			}
+			for _, step := range st.steps() {
+				dir := stepDir(work, r.Name, step)
+				if step.Agent != "codex" || step.Ended != nil || dir == "" || seen[dir] {
+					continue
+				}
+				seen[dir] = true
+				for _, name := range []string{"transcript.jsonl", "review-transcript.jsonl"} {
+					began, ok := s.atWork(filepath.Join(dir, name), read)
+					if ok && (holder == nil || began.After(latest)) {
+						holder, latest = &Holder{Repo: r.Name, Issue: step.Issue, Doing: step.Doing}, began
+					}
+				}
+			}
+		}
+	}
+	return holder
+}
+
+// atWork says whether the Codex session a transcript holds is at work: one
+// has begun, and hasn't ended, and when it began.
+func (s *Server) atWork(path string, read map[string]bool) (time.Time, bool) {
+	if _, err := os.Stat(path); err != nil {
+		return time.Time{}, false
+	}
+	if _, ok := s.readTranscript(path, "codex", read, false); !ok {
+		return time.Time{}, false
+	}
+	t := s.live.reads[path]
+	if t == nil || t.offset == 0 || t.agent != "" {
+		return time.Time{}, false
+	}
+	return t.began, true
 }
 
 // liveTitle is what a card's heading says its step does, or did, once it

@@ -53,6 +53,11 @@ type savedDraftEntry struct {
 type savedDraftResolution struct {
 	marker       factory.Marker
 	presentation SavedDraftPresentation
+	// stops says the factory, reading the same record, stops on its comment
+	// too (#896): GitHub answered, and the record the reference names is
+	// missing, changed or unfit. A read that failed for a moment, or the
+	// dashboard's own cache, says nothing of the factory.
+	stops bool
 }
 
 type savedLocator struct {
@@ -133,6 +138,7 @@ func (s *Server) resolveSavedComment(ctx context.Context, r *Repo, issue int, c 
 	var hydrated factory.Marker
 	var result *formalize.Result
 	var err error
+	stops := false
 	if entry != nil && s.savedFactory(r.Name, entry.evidence.Comment.User.Login) {
 		hydrated, result, err = m.ResolveDraft(ctx, r.Name, issue, entry.evidence.Run.read, entry.evidence.show)
 	} else if online {
@@ -164,6 +170,7 @@ func (s *Server) resolveSavedComment(ctx context.Context, r *Repo, issue int, c 
 				e.Payload = b
 				return b, err
 			})
+		stops = err != nil && !github.Transient(err)
 	} else {
 		err = fmt.Errorf("cached saved draft evidence is missing or damaged; retry after restoring the saved record")
 	}
@@ -181,7 +188,7 @@ func (s *Server) resolveSavedComment(ctx context.Context, r *Repo, issue int, c 
 		hydrated = m
 		hydrated.Proposal, hydrated.Forks = nil, nil
 	}
-	s.proposals.resolved[key] = savedDraftResolution{marker: hydrated, presentation: d}
+	s.proposals.resolved[key] = savedDraftResolution{marker: hydrated, presentation: d, stops: stops}
 }
 
 func (s *Server) readSavedDrafts(ctx context.Context, r *Repo) {
@@ -283,26 +290,41 @@ func (s *Server) savedLane(issue github.Issue, r *Repo, login string, now time.T
 	}
 	s.proposals.mu.Lock()
 	defer s.proposals.mu.Unlock()
-	var latest *SavedDraftPresentation
-	l := lane(issue, comments, login, now, func(c github.Comment, m factory.Marker) factory.Marker {
+	var latest, stopped *SavedDraftPresentation
+	var stoppedAt int64
+	l := lane(issue, comments, login, now, func(c github.Comment, m factory.Marker) (factory.Marker, *Stopped) {
 		if m.Kind != factory.KindNote {
 			latest = nil
 		}
 		if m.ProposalRef == nil {
-			return m
+			return m, nil
 		}
 		resolved, ok := s.proposals.resolved[savedCommentKey(r.Name, issue.Number, c)]
 		if !ok {
 			m.Proposal, m.Forks = nil, nil
-			return m
+			return m, nil
+		}
+		d := resolved.presentation
+		if resolved.stops {
+			// The factory can't read the record either, so it stops here
+			// and takes no command until the record is restored (#896).
+			if stopped == nil {
+				stopped, stoppedAt = &d, c.ID
+			}
+			return m, &Stopped{Why: "the saved draft it names can't be read", Repair: "restore the saved record, and the factory takes up the commands left pending"}
 		}
 		if m.Kind != factory.KindNote {
-			d := resolved.presentation
 			latest = &d
 		}
-		return resolved.marker
+		return resolved.marker, nil
 	})
-	if l.Waiting != nil && latest != nil {
+	switch {
+	case l.Waiting != nil && l.Waiting.Kind == KindStopped:
+		// A card stopped by a saved record keeps that record's diagnostic.
+		if l.Waiting.Stopped.Comment == stoppedAt {
+			l.Waiting.SavedDraft = stopped
+		}
+	case l.Waiting != nil && latest != nil:
 		l.Waiting.SavedDraft = latest
 	}
 	return l
