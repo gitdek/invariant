@@ -113,6 +113,9 @@ func runMacOSCheck(ctx context.Context, args []string, host string, out io.Write
 			cmd.Dir = filepath.Join(candidate, filepath.FromSlash(part.Directory))
 			cmd.Env = env
 			cmd.Stdout, cmd.Stderr = out, out
+			// A process the check leaves behind holding its output can't
+			// keep the job waiting past a minute after the check ends.
+			cmd.WaitDelay = time.Minute
 			started := time.Now()
 			err := cmd.Run()
 			took := time.Since(started).Round(time.Second / 10)

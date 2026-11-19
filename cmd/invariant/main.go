@@ -1446,7 +1446,7 @@ func initCmd(args []string) int {
 	// and both jobs are required.
 	onMac, require := "", "Require invariant/gate on main, and allow merge commits. GitHub then refuses any merge the gate didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own check counts. The factory merges with a merge commit:"
 	if len(macos) > 0 {
-		onMac = fmt.Sprintf(" Its %s job builds, vets and tests %s, which the contract says builds on macOS, on a hosted macOS runner: Linux skips the files only macOS builds.", setup.MacOSCheck, strings.Join(macos, ", "))
+		onMac = fmt.Sprintf(" Its %s job builds, vets and tests the parts the contract says build on macOS (%s) on a hosted macOS runner, since Linux skips the files only macOS builds.", setup.MacOSCheck, strings.Join(macos, ", "))
 		require = "Require invariant/gate and " + setup.MacOSCheck + " on main, and allow merge commits. GitHub then refuses any merge either job didn't pass, yours included. app_id 15368 is GitHub Actions, so only the workflow's own checks count. The factory merges with a merge commit once invariant/gate passes. Until " + setup.MacOSCheck + " has passed too, GitHub refuses that merge, and the factory leaves the pull request for a person:"
 	}
 	// The commands aren't indented, so the heredoc still ends when it's

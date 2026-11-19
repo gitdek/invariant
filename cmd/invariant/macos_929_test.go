@@ -68,7 +68,7 @@ func TestInitWritesTheMacOSJobForAMacOSPart929(t *testing.T) {
 		t.Errorf("init changed the retained contract: %v", err)
 	}
 	for _, said := range []string{
-		"Its invariant/gate-macos job builds, vets and tests go:., which the contract says builds on macOS, on a hosted macOS runner",
+		"Its invariant/gate-macos job builds, vets and tests the parts the contract says build on macOS (go:.) on a hosted macOS runner, since Linux skips the files only macOS builds.",
 		"Require invariant/gate and invariant/gate-macos on main",
 		"gh api -X PUT repos/acme/recorder/branches/main/protection --input - <<'EOF'\n" + setup.ProtectionWithMacOS + "\nEOF\n",
 		"GitHub refuses that merge, and the factory leaves the pull request for a person",
