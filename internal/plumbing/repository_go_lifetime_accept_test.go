@@ -46,7 +46,7 @@ func TestRepositoryGoSharedLifetime582(t *testing.T) {
 					t.Fatalf("real shared lifecycle failed: %v %s\n%s", err, problem, r.Summary())
 				}
 				var whole, phase time.Time
-				starts := 0
+				starts, opens := 0, 0
 				for _, o := range f.runner.observed {
 					if o.stage == "close" {
 						continue
@@ -57,7 +57,10 @@ func TestRepositoryGoSharedLifetime582(t *testing.T) {
 					if o.end.After(started.Add(SandboxTimeout + time.Second)) {
 						t.Fatalf("%s renewed/exceeded whole run: %v", o.stage, o.end)
 					}
-					if phase.IsZero() && (suite && o.stage == "suite" || !suite && o.stage == "open") {
+					if o.stage == "open" {
+						opens++
+					}
+					if phase.IsZero() && (!base && suite && o.stage == "suite" || o.stage == "open" && (!suite || base && opens == 2)) {
 						phase = o.end
 						if phase.After(o.at.Add(SandboxShardTimeout)) || phase.After(whole) || o.at.Add(SandboxShardTimeout).Sub(phase) > 2*time.Second {
 							t.Fatal("first suite/invocation startup did not start one ten-minute phase")
@@ -146,13 +149,16 @@ func TestRepositoryGoSharedLifetime582(t *testing.T) {
 		})
 	}
 	for _, base := range []bool{true, false} {
-		for _, stage := range []string{"select", "install", "open", "suite", "read", "discovery", "compile", "stage", "helper", "instrument", "prepare", "start", "wait", "close"} {
+		for _, stage := range []string{"select", "install", "open", "command", "build", "suite", "read", "discovery", "compile", "stage", "helper", "instrument", "prepare", "start", "wait", "close"} {
+			if base && (stage == "build" || stage == "suite") {
+				continue
+			}
 			t.Run(fmt.Sprintf("base=%t/cancel=%s", base, stage), func(t *testing.T) {
 				c := repositoryControl582()
 				if stage == "wait" {
 					c.source = repositorySource582(`t.Log("runtime entered 582");time.Sleep(20*time.Second)`, "")
 				}
-				f := newRepositoryFixture582(t, cache, []repositoryCase582{c}, stage == "suite", nil, nil)
+				f := newRepositoryFixture582(t, cache, []repositoryCase582{c}, stage == "command" || stage == "build" || stage == "suite", nil, nil)
 				f.candidateValue(7)
 				f.sandbox.Repository.Adapters["go"] = repositoryObservedAdapter582{runner: f.runner}
 				ctx, cancel := context.WithCancel(t.Context())

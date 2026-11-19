@@ -66,23 +66,39 @@ func TestAcceptanceRefusesUnusableSelectionsBeforePreparation(t *testing.T) {
 	}
 }
 
-func TestAcceptanceBaseSuiteInfrastructureFailureVetoesQualification(t *testing.T) {
-	for _, phase := range []string{"build", "test"} {
-		t.Run(phase, func(t *testing.T) {
+func TestAcceptanceCommandInfrastructureFailureVetoesQualification(t *testing.T) {
+	for _, tc := range []struct {
+		phase string
+		base  bool
+	}{{"format", true}, {"lint", true}, {"format", false}, {"lint", false}, {"build", false}, {"test", false}} {
+		mode := "candidate/"
+		if tc.base {
+			mode = "base/"
+		}
+		t.Run(mode+tc.phase, func(t *testing.T) {
 			f := newFixture515(t)
 			allFail515(f.runner)
 			f.runner.hook = func(_ context.Context, _ DependencyRequest, argv []string) ([]byte, error) {
-				if argv[1] == phase {
+				if argv[1] == tc.phase {
 					return []byte("exit status 1"), errors.New("cannot launch command")
 				}
 				return nil, nil
 			}
-			checked := base515(t, f, context.Background())
-			if checked.Problem == "" || len(f.runner.invocations) != 0 {
-				t.Fatal("suite infrastructure failure was treated as an ordinary exit")
+			var result Result
+			if tc.base {
+				checked := base515(t, f, context.Background())
+				if checked.Problem == "" {
+					t.Fatal("command infrastructure failure qualified the base")
+				}
+				result = checked.Run
+			} else {
+				result, _ = f.sandbox.Run(context.Background(), f.candidate, f.plan)
+			}
+			if result.Passed() || status484(t, result, "api", tc.phase) != "failed" || len(f.runner.invocations) != 0 {
+				t.Fatal("command infrastructure failure did not stop acceptance")
 			}
 			for _, test := range f.plan.Tests {
-				if r := result515(t, checked.Run, test); r.Status != "not_run" || !strings.Contains(r.Reason, "cannot launch") {
+				if r := result515(t, result, test); r.Status != "not_run" || !strings.Contains(r.Reason, "cannot launch") {
 					t.Fatalf("unfinished acceptance lost the launch reason: %+v", r)
 				}
 			}

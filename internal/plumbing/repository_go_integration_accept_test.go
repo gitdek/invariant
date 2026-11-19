@@ -471,19 +471,19 @@ func TestRepositoryGoIndependentEvidence582(t *testing.T) {
 	for i, want := range []struct{ status, reason string }{{"failed", "case zero"}, {"passed", "case one"}, {"failed", "other package"}, {"failed", "child module"}, {"failed", "other part"}} {
 		repositoryResult582(t, r, f.plan.Tests[i+1], want.status, want.reason)
 	}
-	if status484(t, r, "api", "build") != "failed" || status484(t, r, "api", "test") != "failed" {
-		t.Fatal("lost earlier real build/suite failures")
+	if status484(t, r, "api", "build") != "skipped" || status484(t, r, "api", "test") != "skipped" {
+		t.Fatal("planning ran broad build or suite commands")
 	}
 	repositoryRoundTrip582(t, r)
-	// An unrelated broken package fails the broad build and suite but cannot
-	// prevent either exact healthy selector from proving its own assertion.
+	// An unrelated broken package cannot prevent either exact healthy selector
+	// from proving its own assertion when planning omits the broad commands.
 	f = newRepositoryFixture582(t, cache, []repositoryCase582{
 		{"api", "nested", "TestReady", repositorySource582(`t.Fatal("first independent")`, "")},
 		{"web", "nested", "TestReady", repositorySource582(`t.Fatal("later independent")`, "")},
 	}, true, map[string]string{"api/unrelated/broken.go": "package unrelated\nvar Broken=Missing582\n"}, nil)
 	r, problem, err := f.run(t.Context(), true)
 	if err != nil || problem != "" {
-		t.Fatalf("unrelated build/suite failure broadcast to selectors: %v %s", err, problem)
+		t.Fatalf("unrelated broken package blocked selectors: %v %s", err, problem)
 	}
 	for i, test := range f.plan.Tests {
 		repositoryResult582(t, r, test, "failed", []string{"first independent", "later independent"}[i])
