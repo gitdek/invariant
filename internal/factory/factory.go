@@ -26,6 +26,7 @@ import (
 	"github.com/gitdek/invariant/internal/github"
 	"github.com/gitdek/invariant/internal/plumbing"
 	"github.com/gitdek/invariant/internal/project"
+	"github.com/gitdek/invariant/internal/regular"
 	"github.com/gitdek/invariant/internal/repository"
 	"github.com/gitdek/invariant/internal/scope"
 	"github.com/gitdek/invariant/internal/synth"
@@ -2741,6 +2742,25 @@ func (f *Factory) saveResult(ctx context.Context, v any, message, parent string)
 	if err != nil {
 		return "", err
 	}
+	if draft, ok := v.(*savedDraftResult); ok {
+		var files map[string][]byte
+		b, files, err = draft.Result.EvidenceFiles("result.json", func(result *formalize.Result) ([]byte, error) {
+			copy := *draft
+			copy.Result = *result
+			return json.Marshal(&copy)
+		})
+		if err != nil {
+			return "", err
+		}
+		for name, data := range files {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
+				return "", err
+			}
+		}
+	}
 	if err := os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644); err != nil {
 		return "", err
 	}
@@ -2761,7 +2781,13 @@ func (f *Factory) loadResult(ctx context.Context, commit string, v any) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, v)
+	if err := json.Unmarshal(b, v); err != nil {
+		return err
+	}
+	if draft, ok := v.(*savedDraftResult); ok {
+		return draft.Result.ResolveEvidence(func(name string) ([]byte, error) { return regular.ReadFile(dir, name) })
+	}
+	return nil
 }
 
 // publish takes a finished build to its post: it pushes the build's code,

@@ -16,6 +16,19 @@ import (
 	"testing"
 )
 
+func reader944PartitionView(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"version":1,"state":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":"s%d","when":{"eq":[{"var":"n"},"%d"]},"label":"Stage %d"}`, i, i, i)
+	}
+	b.WriteString(`,{"id":"rest","when":true,"label":"Stage 0"}],"step":[{"id":"all","when":true,"label":"Continue"}]}`)
+	return b.String()
+}
+
 // The wire contract adds Proposal.view (the exact view.json text),
 // Proposal.includes (sibling .tla filename -> exact source), and optional
 // Proposal.reader has version:1, fingerprint:"sha256:..." and exactly one of
@@ -245,7 +258,7 @@ func reader603Docker(args []string) int {
 	}
 	limit, _ := strconv.Atoi(match[1])
 	n := limit + 1
-	if n < 1 || n > 502 {
+	if n < 1 || n > 100001 {
 		return fail("unexpected fixture size")
 	}
 	record, _ := json.Marshal(map[string]string{"module": module, "config": string(config), "main": string(main), "include": string(helper), "dump": dump, "args": joined})
@@ -258,12 +271,24 @@ func reader603Docker(args []string) int {
 		b.WriteString("strict digraph DiskGraph {\nsubgraph cluster_graph {\n")
 		replay := module != "Reader603"
 		var idVar, rulesVar string
+		var replayIDs []int
 		if replay {
 			m := regexp.MustCompile(`(?m)^VARIABLES ([A-Za-z0-9_]+), ([A-Za-z0-9_]+)$`).FindStringSubmatch(string(src))
 			if len(m) != 3 {
 				return fail("missing rule replay variables")
 			}
 			idVar, rulesVar = m[1], m[2]
+			for _, match := range regexp.MustCompile(regexp.QuoteMeta(idVar)+` = "([0-9]+)"`).FindAllStringSubmatch(string(src), -1) {
+				id, _ := strconv.Atoi(match[1])
+				if id < 1 || id > n {
+					return fail("unknown replay identity")
+				}
+				replayIDs = append(replayIDs, id)
+			}
+			if len(replayIDs) == 0 {
+				return fail("missing replay snapshots")
+			}
+			n = len(replayIDs)
 			initial, steps = n, n
 			if !strings.Contains(string(src), "Safe |-> Safe") || !strings.Contains(string(src), "UNCHANGED") {
 				return fail("invariant replay does not evaluate Safe")
@@ -279,7 +304,7 @@ func reader603Docker(args []string) int {
 				style = ",style=filled"
 			}
 			if replay {
-				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", i, idVar, i+1, rulesVar)
+				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", replayIDs[i]-1, idVar, replayIDs[i], rulesVar)
 			}
 			fmt.Fprintf(&b, "%d [label=%s%s];\n", i+1, quote(label), style)
 		}
@@ -395,6 +420,7 @@ func TestReader603CheckToolCapacity(t *testing.T) {
 	ws := t.TempDir()
 	reader603Workspace(t, ws)
 	reader603Write(t, filepath.Join(ws, "proposal.json"), strings.Replace(reader603Draft, `"Limit":"2"`, `"Limit":"500"`, 1))
+	reader603Write(t, filepath.Join(ws, "view.json"), reader944PartitionView(501))
 	log := filepath.Join(t.TempDir(), "checks.jsonl")
 	tool := checkTool(ws, tc, 2, log, 571)
 	text, bad := tool.Call(t.Context(), json.RawMessage(`{}`))

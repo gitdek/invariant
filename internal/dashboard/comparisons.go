@@ -53,6 +53,9 @@ func (e comparisonEvidence) checked() (string, string, string) {
 		message += " " + comparisonPageSummary(p.Reader.Comparison) + " " + strings.Join(p.Reader.Comparison.Qualifications(), " ")
 		svg, err = p.Reader.Comparison.SVG()
 	} else if l := p.Reader.Limitation; l != nil {
+		if l.Kind != "" {
+			return "too_large", l.Description(), ""
+		}
 		return "too_large", fmt.Sprintf("TLC reached %d states at these bounds; chart capacity is %d. Mappings and hiding were not evaluated.", l.Actual, l.Limit), ""
 	} else {
 		svg, err = p.Reader.Chart.SVG()

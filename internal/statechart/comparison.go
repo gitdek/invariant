@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -70,8 +71,11 @@ type Delta struct {
 }
 
 type ComparisonUnavailable struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code         string             `json:"code"`
+	Message      string             `json:"message"`
+	Volume       *Limitation        `json:"volume,omitempty"`
+	BaselineRef  *EvidenceReference `json:"baseline_ref,omitempty"`
+	CandidateRef *EvidenceReference `json:"candidate_ref,omitempty"`
 }
 
 type Comparison struct {
@@ -90,6 +94,17 @@ type Comparison struct {
 	Unavailable       *ComparisonUnavailable `json:"unavailable,omitempty"`
 }
 
+func (c *Comparison) Volume() *Limitation {
+	if c.Unavailable == nil {
+		return nil
+	}
+	return c.Unavailable.Volume
+}
+
+func (c *Comparison) HasCompanions() bool {
+	return c.Unavailable != nil && (c.Unavailable.BaselineRef != nil || c.Unavailable.CandidateRef != nil)
+}
+
 func comparisonHash(b []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(b)) }
 func comparisonJSON(x any) []byte    { b, _ := json.Marshal(x); return b }
 func comparisonEqual(a, b any) bool  { return bytes.Equal(comparisonJSON(a), comparisonJSON(b)) }
@@ -105,6 +120,24 @@ func Compare(baseline, candidate ComparisonSnapshot) (*Comparison, error) {
 	if err != nil {
 		return nil, fmt.Errorf("comparison candidate: %w", err)
 	}
+	for i, s := range []*ComparisonSnapshot{&a, &b} {
+		if s.Chart == nil {
+			continue
+		}
+		chart := s.Chart
+		side := []string{"baseline", "candidate"}[i]
+		l, err := EvidenceLimit(s, chart.Report.Source, int(chart.Report.Counts["tlc_states"]), len(chart.States), side, chart.Markdown, chart.SVG,
+			func() (string, error) { return chart.Poster(PosterOptions{Title: s.Name, Animated: true}) }, func() (string, error) { return chart.Poster(PosterOptions{Title: s.Name}) })
+		if err != nil {
+			var render *RenderError
+			if !errors.As(err, &render) {
+				return nil, err
+			}
+		}
+		if l != nil {
+			s.Chart, s.Limitation = nil, l
+		}
+	}
 	c := &Comparison{Version: 1, Baseline: a, Candidate: b,
 		BaselineIdentity: a.Identity(), CandidateIdentity: b.Identity(),
 		ViewChanged: a.View != b.View, ModelChanged: a.Model != b.Model || !maps.Equal(a.Includes, b.Includes),
@@ -114,11 +147,33 @@ func Compare(baseline, candidate ComparisonSnapshot) (*Comparison, error) {
 	}
 	if a.Limitation != nil || b.Limitation != nil {
 		c.Unavailable = &ComparisonUnavailable{Code: "too_large", Message: "Comparison unavailable: at least one complete exploration exceeds 500 states. No empty or partial graph is substituted; mappings and hiding for that source were not evaluated."}
+		if a.Limitation != nil && a.Limitation.Kind != "" || b.Limitation != nil && b.Limitation.Kind != "" {
+			c.Unavailable.Message = "Comparison unavailable: a complete source exceeds a reader work, projection or evidence limit. No partial delta is substituted."
+		}
 	} else {
 		c.Visible = compareCharts(a.Chart, b.Chart, false)
 		c.BeforeHiding = compareCharts(a.Chart, b.Chart, true)
 	}
 	c.Fingerprint = comparisonHash(comparisonJSON(c))
+	chart := b.Chart
+	if chart == nil {
+		chart = a.Chart
+	}
+	if chart != nil {
+		l, err := EvidenceLimit(c, chart.Report.Source, int(chart.Report.Counts["tlc_states"]), len(chart.States), "comparison", c.Markdown, c.svg)
+		if err != nil {
+			var render *RenderError
+			if !errors.As(err, &render) {
+				return nil, err
+			}
+		}
+		if l != nil {
+			c.Visible, c.BeforeHiding = Delta{}, Delta{}
+			c.Unavailable = &ComparisonUnavailable{Code: "too_large", Volume: l, Message: "Comparison evidence exceeds its complete output budget. Independently checked sources are retained; no partial delta is shown. " + l.Description()}
+			c.Fingerprint = ""
+			c.Fingerprint = comparisonHash(comparisonJSON(c))
+		}
+	}
 	return c, nil
 }
 
@@ -143,6 +198,9 @@ func (c *Comparison) Validate() error {
 func (c *Comparison) Validated() (*Comparison, error) {
 	if c == nil {
 		return nil, fmt.Errorf("comparison is missing; check against the captured baseline again")
+	}
+	if c.HasCompanions() {
+		return nil, fmt.Errorf("comparison requires its fixed evidence companions")
 	}
 	want, err := Compare(c.Baseline, c.Candidate)
 	if err != nil {
@@ -228,13 +286,18 @@ func canonicalSnapshot(s ComparisonSnapshot) (ComparisonSnapshot, error) {
 		source = c.Report.Source
 	} else {
 		l := s.Limitation
-		if l.Code != "too_large" || l.Limit != MaxStates || l.Actual <= MaxStates {
+		if l.Validate() != nil {
 			return s, fmt.Errorf("invalid size limitation")
 		}
 		source = l.Source
 	}
 	if source.Module != s.Module || !maps.Equal(source.Config.Constants, s.Lock.Bounds) {
 		return s, fmt.Errorf("chart source module or bounds differ from captured lock")
+	}
+	if s.Limitation != nil {
+		if err := s.Limitation.ValidateSource(s.Module, s.Lock, 0); err != nil {
+			return s, err
+		}
 	}
 	return s, nil
 }
@@ -351,7 +414,7 @@ func (c *Comparison) reportLines() []string {
 			out = append(out, name+" = "+s.Lock.Bounds[name])
 		}
 		if s.Limitation != nil {
-			out = append(out, fmt.Sprintf("The chart is not drawn (too_large): TLC reached %d states, more than the %d states charts are drawn for. View mappings and hiding were not evaluated.", s.Limitation.Actual, s.Limitation.Limit))
+			out = append(out, s.Limitation.Description())
 		}
 	}
 	if c.Unavailable != nil {
@@ -489,7 +552,7 @@ func (c *Comparison) CompactMarkdown() string {
 		}
 		fmt.Fprintf(&b, "%s: %s\n\n%s", side, TableLiteral(s.Name), BoundsMarkdown(s.Lock.Bounds))
 		if l := s.Limitation; l != nil {
-			fmt.Fprintf(&b, "The chart is not drawn (too_large): TLC reached %d states, more than the %d states charts are drawn for. View mappings and hiding were not evaluated.\n\n", l.Actual, l.Limit)
+			b.WriteString(l.Description() + "\n\n")
 		}
 	}
 	if c.Candidate.Chart != nil {

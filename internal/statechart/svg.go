@@ -156,7 +156,7 @@ func validateSVG(c *Result) error {
 			initialMembers[id] = true
 		}
 	}
-	if len(owners) > MaxStates {
+	if len(owners) > MaxConcreteStates {
 		return bad("concrete membership exceeds supported capacity")
 	}
 	initial := map[string]bool{}
@@ -423,11 +423,18 @@ func (c *Comparison) SVG() (string, error) {
 	if err := c.Validate(); err != nil {
 		return "", err
 	}
+	return c.svg()
+}
+
+func (c *Comparison) svg() (string, error) {
 	report, err := TextSVG(c.reportLines())
 	if err != nil {
 		return "", err
 	}
 	parts := []string{report}
+	if c.Volume() != nil {
+		return report, nil
+	}
 	for i, s := range []ComparisonSnapshot{c.Candidate, c.Baseline} {
 		if s.Chart == nil {
 			continue

@@ -10,13 +10,6 @@ import (
 	"github.com/gitdek/invariant/internal/tlc"
 )
 
-type Limitation struct {
-	Code   string `json:"code"`
-	Actual int    `json:"actual"`
-	Limit  int    `json:"limit"`
-	Source Source `json:"source"`
-}
-
 // ReadError retains the completed graph's provenance when replay or view
 // evaluation fails, without returning a partial chart.
 type ReadError struct {
@@ -29,7 +22,15 @@ func (e *ReadError) Unwrap() error { return e.Err }
 
 // Read computes explanatory evidence from the same source snapshot and lock
 // as the model check. A limitation never carries a partial chart.
-func Read(ctx context.Context, runner GraphDumper, dir, module string, lock project.Lock, view []byte, states int64) (*Result, *Limitation, error) {
+func Read(ctx context.Context, runner GraphDumper, dir, module string, lock project.Lock, view []byte, states int64) (result *Result, limitation *Limitation, failure error) {
+	defer func() {
+		if cause := context.Cause(ctx); cause != nil {
+			result, limitation, failure = nil, nil, cause
+		}
+	}()
+	if err := context.Cause(ctx); err != nil {
+		return nil, nil, err
+	}
 	if _, err := parseView(ctx, view); err != nil {
 		return nil, nil, err
 	}
@@ -54,20 +55,27 @@ func Read(ctx context.Context, runner GraphDumper, dir, module string, lock proj
 		return nil, nil, &ReadError{Source: source, Err: fmt.Errorf("reader graph: reachable count differs from the model check")}
 	}
 	in := Input{Graph: *graph, Lock: lock}
-	if graph.StateCount <= MaxStates {
-		in.Invariants, err = EvaluateRules(ctx, runner, dir, *graph, lock)
-		if err != nil {
-			return nil, nil, &ReadError{Source: source, Err: err}
-		}
+	if _, err := validateGraph(ctx, *graph); err != nil {
+		return nil, nil, &ReadError{Source: source, Err: err}
 	}
-	chart, err := Compute(ctx, in, view)
+	invariants, err := validateLock(*graph, lock)
+	if err != nil {
+		return nil, nil, &ReadError{Source: source, Err: err}
+	}
+	err = workLimit(in, view, invariants)
+	if err == nil {
+		in.Invariants, err = EvaluateRules(ctx, runner, dir, *graph, lock)
+	}
+	var chart *Result
+	if err == nil {
+		chart, err = Compute(ctx, in, view)
+	}
 	if err != nil {
 		var refusal *Refusal
 		if !errors.As(err, &refusal) || refusal.Code != "too_large" {
 			return nil, nil, &ReadError{Source: source, Err: err}
 		}
-		return nil, &Limitation{Code: refusal.Code, Actual: refusal.Actual, Limit: refusal.Limit,
-			Source: source}, nil
+		return nil, refusal.Limitation, nil
 	}
 	return chart, nil, nil
 }

@@ -224,8 +224,8 @@ Starve == /\ n > 0 /\ n' = n - 1
 	if err := json.Unmarshal([]byte(reader603Draft), &draft); err != nil {
 		t.Fatal(err)
 	}
-	// This exercises a checked reader limitation, so the original fixture's
-	// invariant-only chart replay does not stand in for the additional rules.
+	// All concrete states are replayed; a genuine projected overflow still
+	// exercises the limitation and every additional model-check outcome.
 	draft.Bounds["Limit"] = "501"
 	draft.Statements = append(draft.Statements,
 		project.Statement{Name: "Seen", Kind: project.Witness, Says: "An advance is reachable."},
@@ -237,6 +237,7 @@ Starve == /\ n > 0 /\ n' = n - 1
 		project.Statement{Name: "FairAdvance", Kind: project.Fairness, Says: "Advances are weakly fair."},
 		project.Statement{Name: "FairReset", Kind: project.Fairness, Says: "Resets are strongly fair."})
 	preview639Write(t, ws, draft)
+	reader603Write(t, filepath.Join(ws, "view.json"), reader944PartitionView(502))
 	p, report := reader603Checked(t, ws, tc)
 	if p.Reader.Limitation == nil {
 		t.Fatal("receipt fixture must exercise a checked too_large limitation")
@@ -319,8 +320,16 @@ Starve == /\ n > 0 /\ n' = n - 1
 						if o.Preview.Fingerprint, err = f.PreviewFingerprint(o); err != nil {
 							t.Fatal(err)
 						}
-						if err := broken.Proposal.ValidatePreviewContext(*broken.CheckContext); err != nil {
-							t.Fatalf("fixture changed unrelated preview evidence: %v", err)
+						previewErr := broken.Proposal.ValidatePreviewContext(*broken.CheckContext)
+						if name == "limitation state count" {
+							// New dimension-aware limitations also bind their
+							// concrete count at the preview boundary. Resolution
+							// below must still refuse this receipt mutation.
+							if previewErr == nil {
+								t.Fatal("preview accepted a different concrete state count")
+							}
+						} else if previewErr != nil {
+							t.Fatalf("fixture changed unrelated preview evidence: %v", previewErr)
 						}
 					}
 					if err := resolve(&broken); err == nil {

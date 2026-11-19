@@ -20,15 +20,17 @@ import (
 // Reader explains the checked bounded model. Its identity and diagnostics
 // never participate in the gate's verdict or verification fingerprint.
 type Reader struct {
-	Preview              statechart.Preview     `json:"preview,omitzero"`
-	Version              int                    `json:"version"`
-	Fingerprint          string                 `json:"fingerprint"`
-	Inputs               ReaderInputs           `json:"inputs"`
-	Chart                *statechart.Result     `json:"chart,omitempty"`
-	Limitation           *statechart.Limitation `json:"limitation,omitempty"`
-	Unavailable          *ReaderDiagnostic      `json:"unavailable,omitempty"`
-	Comparison           *statechart.Comparison `json:"comparison,omitempty"`
-	ComparisonDiagnostic *ReaderDiagnostic      `json:"comparison_diagnostic,omitempty"`
+	Preview              statechart.Preview            `json:"preview,omitzero"`
+	Version              int                           `json:"version"`
+	Fingerprint          string                        `json:"fingerprint"`
+	Inputs               ReaderInputs                  `json:"inputs"`
+	Chart                *statechart.Result            `json:"chart,omitempty"`
+	Limitation           *statechart.Limitation        `json:"limitation,omitempty"`
+	Unavailable          *ReaderDiagnostic             `json:"unavailable,omitempty"`
+	Comparison           *statechart.Comparison        `json:"comparison,omitempty"`
+	ComparisonDiagnostic *ReaderDiagnostic             `json:"comparison_diagnostic,omitempty"`
+	ComparisonRef        *statechart.EvidenceReference `json:"comparison_ref,omitempty"`
+	FinalSHA256          string                        `json:"final_sha256,omitempty"`
 }
 
 type ReaderInputs struct {
@@ -56,12 +58,13 @@ type readerCompletionKey struct{}
 // The application gate calls the model gate before checking code. Keep its
 // snapshot alive and defer explanatory work until the entire gate finishes.
 type readerCompletion struct {
-	compute       func()
-	cleanup       func()
-	view          []byte
-	viewErr       error
-	comparison    []byte
-	comparisonErr error
+	compute         func()
+	cleanup         func()
+	view            []byte
+	viewErr         error
+	comparison      []byte
+	comparisonErr   error
+	comparisonFiles map[string][]byte
 }
 
 func completeReader(ctx context.Context, p *project.Project, gate func(context.Context) (*Report, error)) (*Report, error) {
@@ -70,6 +73,7 @@ func completeReader(ctx context.Context, p *project.Project, gate func(context.C
 	// into a regular copy. Reader input errors remain explanatory only.
 	c.view, c.viewErr = readReaderView(p.Dir)
 	c.comparison, c.comparisonErr = readReaderFile(p.Dir, ".invariant/comparison.json")
+	c.comparisonFiles = captureComparisonFiles(p.Dir)
 	defer func() {
 		if c.cleanup != nil {
 			c.cleanup()
@@ -91,12 +95,21 @@ func snapshotReader(p *project.Project, dir string, model []byte, completion *re
 		Inputs: ReaderInputs{Module: p.ModuleName(), Model: readerHash(model), Includes: map[string]string{}}}}
 	var comparison []byte
 	var comparisonErr error
+	var comparisonFiles map[string][]byte
 	if completion != nil {
 		comparison, comparisonErr = completion.comparison, completion.comparisonErr
+		comparisonFiles = completion.comparisonFiles
 	} else {
 		comparison, comparisonErr = readReaderFile(p.Dir, ".invariant/comparison.json")
+		comparisonFiles = captureComparisonFiles(p.Dir)
 	}
-	s.reader.captureComparison(comparison, comparisonErr, p.Lock)
+	s.reader.Comparison, s.reader.ComparisonDiagnostic = CapturedComparison(comparison, comparisonErr, p.Lock, func(name string) ([]byte, error) {
+		b, ok := comparisonFiles[name]
+		if !ok {
+			return nil, fmt.Errorf("missing or unsafe %s companion", name)
+		}
+		return b, nil
+	})
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		s.reader.Unavailable = &ReaderDiagnostic{Code: "reader_inputs", Message: err.Error()}
@@ -187,6 +200,10 @@ func (s readerSnapshot) compute(ctx context.Context, runner tlc.Runner, design D
 			var refusal *statechart.Refusal
 			if errors.As(err, &refusal) {
 				code = refusal.Code
+			}
+			var render *statechart.RenderError
+			if errors.As(err, &render) {
+				code = "reader_render"
 			}
 			r.Unavailable = &ReaderDiagnostic{Code: code, Message: err.Error()}
 			var readErr *statechart.ReadError

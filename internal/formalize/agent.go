@@ -141,6 +141,7 @@ type Result struct {
 	Changes      *Changes        `json:"changes,omitempty"`  // what an amendment changes
 	Usage        synth.Usage     `json:"usage"`
 	CheckRuns    []synth.GateRun `json:"check_runs,omitempty"`
+	BaselineSources *BaselineSources `json:"baseline_sources,omitempty"`
 }
 
 // Formalize runs the agent on a request. Its transcript and draft land in
@@ -301,7 +302,7 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			r.Problem = err.Error()
 		}
 	}
-	for _, name := range []string{"reader.json", "comparison.json", "reader.svg"} {
+	for _, name := range []string{"reader.json", "comparison.json", "reader.svg", "reader-baseline.json", "reader-candidate.json", "reader-comparison.json"} {
 		if err := os.Remove(filepath.Join(out, name)); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
@@ -322,8 +323,24 @@ func (f Formalizer) Formalize(ctx context.Context, req Request, out string) (*Re
 			return nil, err
 		}
 	}
-	b, _ := json.MarshalIndent(r, "", "  ")
-	os.WriteFile(filepath.Join(out, "formalization.json"), append(b, '\n'), 0o644)
+	b, files, err := r.EvidenceFiles("formalization.json", func(result *Result) ([]byte, error) {
+		b, e := json.MarshalIndent(result, "", "  ")
+		return append(b, '\n'), e
+	})
+	if err != nil {
+		return nil, err
+	}
+	for name, data := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(out, name)), 0755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(out, name), data, 0644); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(out, "formalization.json"), b, 0644); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 

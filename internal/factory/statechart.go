@@ -46,7 +46,11 @@ func readerCommentWithEvidence(p *formalize.Proposal, evidence string) string {
 	b.WriteString("\n**Reader chart**\n\n")
 	b.WriteString(statechart.BoundsMarkdown(p.Bounds))
 	if l := p.Reader.Limitation; l != nil {
-		fmt.Fprintf(&b, "The chart is not drawn: TLC reached %d states at these bounds, more than the %d states charts are drawn for. Model checks passed; the view is well-formed, but its mappings and hiding were not evaluated (too_large).\n", l.Actual, l.Limit)
+		if l.Kind != "" {
+			b.WriteString(l.Description() + "\n")
+		} else {
+			fmt.Fprintf(&b, "The chart is not drawn: TLC reached %d states at these bounds, more than the %d states charts are drawn for. Model checks passed; the view is well-formed, but its mappings and hiding were not evaluated (too_large).\n", l.Actual, l.Limit)
+		}
 		return b.String()
 	}
 	if evidence != "" {

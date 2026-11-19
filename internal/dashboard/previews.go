@@ -46,6 +46,9 @@ func (e previewEvidence) checked() (status, message, svg string) {
 	}
 	v := e.Option.Preview
 	if l := v.Model.Reader.Limitation; l != nil {
+		if l.Kind != "" {
+			return "too_large", fmt.Sprintf("Unratified alternative %s/%s; model-only evidence. %s", e.Fork, e.Option.ID, l.Description()), ""
+		}
 		return "too_large", fmt.Sprintf("Unratified alternative %s/%s; model-only evidence. TLC reached %d states at the checked bounds, more than the %d states charts are drawn for. Mappings and hiding were not evaluated.", e.Fork, e.Option.ID, l.Actual, l.Limit), ""
 	}
 	svg, err := v.Model.Reader.Chart.SVG()

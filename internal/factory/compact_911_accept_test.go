@@ -61,6 +61,7 @@ func compact911Check(t *testing.T, tc toolchain.Toolchain, mode string, authorit
 	case "limited":
 		include = compact911Noise()
 		reader603Write(t, filepath.Join(ws, "proposal.json"), strings.Replace(reader603Draft, `"Limit":"2"`, `"Limit":"500"`, 1))
+		reader603Write(t, filepath.Join(ws, "view.json"), reader944PartitionView(501))
 	case "statement":
 		var d map[string]any
 		if err := json.Unmarshal([]byte(reader603Draft), &d); err != nil {
@@ -246,7 +247,7 @@ func compact911Decision(t *testing.T, body string, p *formalize.Proposal) {
 		compact911Topology(t, body, p.Reader.Chart)
 	}
 	if l := p.Reader.Limitation; l != nil {
-		compact911Contains(t, body, "too_large", fmt.Sprint(l.Actual), fmt.Sprint(l.Limit), "not evaluated")
+		compact911Contains(t, body, "too_large", fmt.Sprint(l.Actual), fmt.Sprint(l.Limit), "checked")
 	}
 	if c := p.Reader.Comparison; c != nil {
 		compact911Contains(t, body, c.Baseline.Name)
@@ -962,7 +963,7 @@ func compact911Docker(args []string) int {
 	}
 	limit, _ := strconv.Atoi(match[1])
 	n := limit + 1
-	if n < 1 || n > 502 {
+	if n < 1 || n > 100001 {
 		return fail("unexpected fixture size")
 	}
 	record, _ := json.Marshal(map[string]string{"module": module, "config": string(config), "main": string(main), "include": string(helper), "dump": dump, "args": joined})
@@ -975,12 +976,24 @@ func compact911Docker(args []string) int {
 		b.WriteString("strict digraph DiskGraph {\nsubgraph cluster_graph {\n")
 		replay := module != "Reader603"
 		var idVar, rulesVar string
+		var replayIDs []int
 		if replay {
 			m := regexp.MustCompile(`(?m)^VARIABLES ([A-Za-z0-9_]+), ([A-Za-z0-9_]+)$`).FindStringSubmatch(string(src))
 			if len(m) != 3 {
 				return fail("missing rule replay variables")
 			}
 			idVar, rulesVar = m[1], m[2]
+			for _, match := range regexp.MustCompile(regexp.QuoteMeta(idVar)+` = "([0-9]+)"`).FindAllStringSubmatch(string(src), -1) {
+				id, _ := strconv.Atoi(match[1])
+				if id < 1 || id > n {
+					return fail("unknown replay identity")
+				}
+				replayIDs = append(replayIDs, id)
+			}
+			if len(replayIDs) == 0 {
+				return fail("missing replay snapshots")
+			}
+			n = len(replayIDs)
 			initial, steps = n, n
 			if !strings.Contains(string(src), "Safe |-> Safe") || !strings.Contains(string(src), "UNCHANGED") {
 				return fail("invariant replay does not evaluate Safe")
@@ -996,7 +1009,7 @@ func compact911Docker(args []string) int {
 				style = ",style=filled"
 			}
 			if replay {
-				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", i, idVar, i+1, rulesVar)
+				label = fmt.Sprintf("/\\ n = %d\n/\\ %s = \"%d\"\n/\\ %s = [Safe |-> TRUE]", replayIDs[i]-1+0, idVar, replayIDs[i], rulesVar)
 			}
 			fmt.Fprintf(&b, "%d [label=%s%s];\n", i+1, quote(label), style)
 		}

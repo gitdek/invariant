@@ -1,0 +1,6 @@
+{
+  "base_revision": "950fefa6",
+  "command": "INVARIANT_CAPTURE_MAIN_944=950fefa6 go test ./internal/formalize -run '^TestReader944CaptureMain$' -count=1",
+  "inputs": "reader603Workspace with unchanged complete-protocol reader603Tools; ordinary Limit=2; comparison Limit=3 with Working renamed Revised and Request{Previous:ordinary}; preview639Draft(t,1,nil), F1/A, Limit=1; exact source, view, includes, locks and receipts are in the evidence files",
+  "pins": "TestReader944LargeAdmissionKeepsSmallBytes in immutable projection_944_accept_test.go"
+}

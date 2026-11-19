@@ -58,7 +58,11 @@ func readerMarkdown(r *verify.Reader) string {
 		fmt.Fprintf(&b, "No reader chart is available (%s): %s\n", tlcCheckLiteral(d.Code), statechart.TableLiteral(d.Message))
 	} else if l := r.Limitation; l != nil {
 		b.WriteString(statechart.BoundsMarkdown(l.Source.Config.Constants))
-		fmt.Fprintf(&b, "The chart is not drawn (too_large): TLC reached %d states, more than the %d states charts are drawn for. The view is well-formed, but its mappings and hiding were not evaluated. This adds no proof claim.\n", l.Actual, l.Limit)
+		if l.Kind != "" {
+			b.WriteString(l.Description() + " This adds no proof claim.\n")
+		} else {
+			fmt.Fprintf(&b, "The chart is not drawn (too_large): TLC reached %d states, more than the %d states charts are drawn for. The view is well-formed, but its mappings and hiding were not evaluated. This adds no proof claim.\n", l.Actual, l.Limit)
+		}
 	} else if r.Chart != nil {
 		b.WriteString(statechart.BoundsMarkdown(r.Chart.Report.Source.Config.Constants))
 		b.WriteString(r.Chart.Markdown())
