@@ -14,21 +14,28 @@ func readerNumber(n int) string {
 }
 
 func readerLimitCause(l *statechart.Limitation) string {
+	size, view := readerLimitParts(l)
+	return size + "; " + view
+}
+
+// readerLimitParts is a limitation's measured size against its ceiling, and
+// whether the view was checked, as two clauses.
+func readerLimitParts(l *statechart.Limitation) (string, string) {
 	actual, limit := readerNumber(l.Actual), readerNumber(l.Limit)
 	switch l.Kind {
 	case "":
-		return fmt.Sprintf("%s concrete states exceed the earlier %s-state ceiling; view not evaluated, fresh check needed for projected states", actual, limit)
+		return fmt.Sprintf("%s concrete states exceed the earlier %s-state ceiling", actual, limit), "view not evaluated, fresh check needed for projected states"
 	case "projected_states":
-		return fmt.Sprintf("%s concrete states yield %s projected states, above the %s-state ceiling; view checked", readerNumber(l.ConcreteStates), actual, limit)
+		return fmt.Sprintf("%s concrete states yield %s projected states, above the %s-state ceiling", readerNumber(l.ConcreteStates), actual, limit), "view checked"
 	case "concrete_states":
-		return fmt.Sprintf("%s concrete states exceed the %s-state projection ceiling; view not evaluated", actual, limit)
+		return fmt.Sprintf("%s concrete states exceed the %s-state projection ceiling", actual, limit), "view not evaluated"
 	default:
 		view := "view not evaluated"
 		if l.ViewChecked != nil && *l.ViewChecked {
 			view = "view checked"
 		}
 		representation := strings.ReplaceAll(l.Representation, "_", " ")
-		return fmt.Sprintf("%s evidence has %s %s, above the %s %s ceiling; %s", representation, actual, l.Unit, limit, l.Unit, view)
+		return fmt.Sprintf("%s evidence has %s %s, above the %s %s ceiling", representation, actual, l.Unit, limit, l.Unit), view
 	}
 }
 
@@ -38,21 +45,30 @@ func readerLimitMessage(l *statechart.Limitation) string {
 
 // A comparison's text panels are evidence, not a drawable comparison. Both
 // complete sides and the combined representation must fit before showing it.
+// Every limited side is named, then any combined overflow. The combined
+// measure checks only the views of sides that fit, so beside a limited side
+// it says whose view that was.
 func comparisonUnavailable(c *statechart.Comparison) string {
 	if c == nil || c.Unavailable == nil {
 		return ""
 	}
-	if l := c.Volume(); l != nil {
-		return "Comparison unavailable: combined " + readerLimitCause(l) + "."
-	}
-	var causes []string
+	var causes, fitting []string
 	for _, side := range []struct {
 		name       string
 		limitation *statechart.Limitation
 	}{{"baseline", c.Baseline.Limitation}, {"candidate", c.Candidate.Limitation}} {
 		if side.limitation != nil {
 			causes = append(causes, side.name+" "+readerLimitCause(side.limitation))
+		} else {
+			fitting = append(fitting, side.name)
 		}
+	}
+	if l := c.Volume(); l != nil {
+		size, view := readerLimitParts(l)
+		if len(fitting) == 1 {
+			view = fitting[0] + " " + view
+		}
+		causes = append(causes, "combined "+size+"; "+view)
 	}
 	return "Comparison unavailable: " + strings.Join(causes, "; ") + "."
 }

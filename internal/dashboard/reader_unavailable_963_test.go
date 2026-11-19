@@ -2,8 +2,10 @@ package dashboard
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
+	"github.com/gitdek/invariant/internal/project"
 	"github.com/gitdek/invariant/internal/statechart"
 )
 
@@ -34,6 +36,40 @@ func TestReader963RemainingVolumeSidesAndRecovery(t *testing.T) {
 				reader963Unavailable(t, cold, got)
 			})
 		}
+	}
+}
+
+// A limited side keeps its own reason when the combined evidence overflows
+// too. Naming only the combined measure, which checked the fitting side's
+// view alone, would hide a side whose view was never evaluated.
+func TestReader963LimitedSideBesideCombinedVolume(t *testing.T) {
+	a, b := reader963Limited(t, "historical"), reader631FixtureFor(t, 3, "After")
+	candidateName := "Proposal " + project.ProposalHash(b.Lock.Bounds, b.Lock.Statements) + " with view " + reader631Hash(b.Files[".invariant/view.json"])[:19]
+	as, bs := receipt723Snapshot(a, "Baseline "+reader963Hostile), receipt723Snapshot(b, candidateName)
+	as.Model += "\n\\* " + strings.Repeat("x", 31<<20) + "\n"
+	bs.Model += "\n\\* " + strings.Repeat("y", 31<<20) + "\n"
+	c, err := statechart.Compare(as, bs)
+	if err != nil || c.Volume() == nil || c.Baseline.Limitation == nil || c.Candidate.Chart == nil {
+		t.Fatalf("fixture must limit the baseline and overflow the combined evidence: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// TestReader963CombinedComparisonVolume already reads this page's shape
+	// over HTTP; parsing its 62 MiB fold again would only repeat that cost.
+	page := makeComparison(comparisonEvidence{Format: comparisonFormat, Repo: "owner/volume", Issue: 963, Proposal: comparison717Proposal(t, c)})
+	r := page.presentation
+	if r.Status != "too_large" || len(page.svg) != 0 || page.posters != nil {
+		t.Fatalf("unavailable comparison advertised a chart or image: %+v", r)
+	}
+	if len([]rune(r.Message)) > 420 || strings.Contains(r.Message, "sha256:") || strings.Contains(r.Message, "too_large") {
+		t.Errorf("reason is not a concise human-readable explanation: %q", r.Message)
+	}
+	l := c.Volume()
+	reader963Words(t, r.Message, "baseline", "501", "earlier", "not evaluated", "fresh", "combined", "json",
+		strings.TrimSuffix(counted(int64(l.Actual), "unit"), " units"), "62,914,560", "candidate view checked")
+	if side, combined := strings.Index(r.Message, "baseline"), strings.Index(r.Message, "combined"); side < 0 || combined < side {
+		t.Errorf("the limited side must be named before the combined overflow: %q", r.Message)
 	}
 }
 
