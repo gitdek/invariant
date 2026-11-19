@@ -27,6 +27,7 @@ func TestReviewVerdictWhitespaceAndMarkdown(t *testing.T) {
 		{"indented fence closes at another indentation", "  ~~~text\n  ordinary output\n   ~~~\nVERDICT: approve", ""},
 		{"closing fence spaces", "```text\nordinary output\n``` \t\nVERDICT: approve", "approve"},
 		{"closing fence text", "```text\n```still open\nVERDICT: approve", ""},
+		{"backtick in a backtick fence's info string", "```a`b\nVERDICT: approve", "approve"},
 		{"short closing fence", "~~~~text\n~~~\nVERDICT: changes needed", ""},
 		{"wrong closing fence", "```text\n~~~\nVERDICT: changes needed", ""},
 		{"blank inside fence", "```text\n\nVERDICT: changes needed", ""},

@@ -96,6 +96,7 @@ func TestReviewVerdictUncertainMarkdownHolds(t *testing.T) {
 		"    ```\n```\n",
 		"- item\n  ~~~\n~~~\n",
 		"```text\n  ```\n```\n",
+		"```a`b\n```\n",
 		"  ```\n   ```\n  ```\n",
 		"Evidence:\n2. ```\n   ```\n\n",
 		"<!--\n```\n-->\n```\n\n",
